@@ -127,6 +127,8 @@ data DState = DState
   , dsErrorNotes :: !(Map.Map Int Text)
     -- ^ A line prefixed to an error raised at a synthesized expression,
     -- saying which directive it was synthesized from.
+  , dsMatchSites :: !(Map.Map Text MatchSite)
+    -- ^ The clauses of each pattern match, by its receiver's name.
   , dsStreamElems :: !(Map.Map EVar TypeU)
     -- ^ For each command whose body reaches `@collect`, the batch type
     -- it writes to standard output. Such a command returns `()` at the
@@ -1991,11 +1993,13 @@ desugarIrrefPat p rhs = do
   case leaves of
     [] -> do
       throwaway <- freshIrrefVar sp
+      recordSite True sp [throwaway] [(sp, [(sp, Just (siteIrref p))])]
       return [(throwaway, rhs)]
     _ -> case asBareVar rhs of
-      Just recv -> materializeIrrefLeaves sp recv leaves
-      Nothing -> do
+      Just recv | not (hasTuple p) -> materializeIrrefLeaves sp recv leaves
+      _ -> do
         tmp <- freshIrrefVar sp
+        recordSite True sp [tmp] [(sp, [(sp, Just (siteIrref p))])]
         body <- materializeIrrefLeaves sp tmp leaves
         return ((tmp, rhs) : body)
 
@@ -2020,6 +2024,7 @@ desugarIrrefLamParam usedNames p = do
   validateIrrefPat p
   let sp = spanOf p
   v <- freshIrrefLamParam sp
+  recordSite True sp [v] [(sp, [(sp, Just (siteIrref p))])]
   let leaves = walkIrrefPat p SelectorEnd
       usedLeaves = filter (\(n, _) -> Set.member n usedNames) leaves
   bindings <- materializeIrrefLeaves sp v usedLeaves
@@ -2117,8 +2122,9 @@ validateIrrefPat p =
 -- lambda over fresh formals whose body is a nested IfE cascade: the first
 -- clause whose per-argument tests all pass wins. Literal patterns become
 -- Eq's '==' tests (like the '? x == 0' guards); structural patterns reuse
--- the irrefutable-pattern Selector projections. The final clause is the
--- unconditional else and must be a valid catch-all (see checkRefutCoverage).
+-- the irrefutable-pattern Selector projections. Coverage and redundancy are
+-- decided after typing ('Morloc.Frontend.PatternCheck'), from the clauses
+-- each match records here.
 
 -- | Convert a `|`-clause argument expression into a refutable pattern,
 -- enforcing the pattern subset. Literals are permitted (unlike
@@ -2310,28 +2316,6 @@ refutPatBoundNames (Loc _  (CRPatTup ps))      = concatMap refutPatBoundNames ps
 refutPatBoundNames (Loc _  (CRPatRec kps))     = concatMap (refutPatBoundNames . snd) kps
 refutPatBoundNames (Loc _  (CRPatList ps))     = concatMap refutPatBoundNames ps
 
--- | The boolean value of a single bare-literal Bool pattern, if it is one.
-refutPatBoolLit :: Loc CstRefutPat -> Maybe Bool
-refutPatBoolLit (Loc _ (CRPatLit (Loc _ (CLogE b)))) = Just b
-refutPatBoolLit _ = Nothing
-
--- | Does a refutable pattern contain a literal anywhere? A clause with no
--- literals is irrefutable and always matches (a valid catch-all).
-refutPatHasLit :: Loc CstRefutPat -> Bool
-refutPatHasLit (Loc _ (CRPatLit _))   = True
--- A constructor pattern is refutable. Reporting otherwise would make
--- 'checkRefutCoverage' read the last clause as an unconditional catch-all,
--- and 'assembleCascade' then DROPS that clause's test -- so an unmatched
--- input would silently take the final arm.
-refutPatHasLit (Loc _ (CRPatCon _ _)) = True
--- A list pattern is refutable through its length, for the same reason.
-refutPatHasLit (Loc _ (CRPatList _))  = True
-refutPatHasLit (Loc _ (CRPatVar _))   = False
-refutPatHasLit (Loc _ CRPatWild)      = False
-refutPatHasLit (Loc _ (CRPatAs _ p))  = refutPatHasLit p
-refutPatHasLit (Loc _ (CRPatTup ps))  = any refutPatHasLit ps
-refutPatHasLit (Loc _ (CRPatRec kps)) = any (refutPatHasLit . snd) kps
-
 -- | Reject a single clause that binds the same name twice (across its
 -- several argument patterns), e.g. @f | x x = ...@.
 validateRefutClause :: [Loc CstRefutPat] -> D ()
@@ -2434,102 +2418,6 @@ buildRefutClauseFrom formals pats bsp body' = do
     _  -> freshExprSpan bsp (LetE allBinds body')
   return (cond, clauseBody)
 
--- | Reject a non-exhaustive clause set. The final clause is the
--- unconditional else, so it must be a genuine catch-all: either
--- irrefutable, or -- for a single Bool argument -- the clauses together
--- cover {True, False}.
-checkRefutCoverage :: Span -> EVar -> [[Loc CstRefutPat]] -> D ()
-checkRefutCoverage sp name clausePatLists = do
-  declared <- State.gets dsDataCtors
-  case () of
-    _ | lastIrrefutable -> return ()
-      | boolExhaustive clausePatLists -> return ()
-      | Just dup <- repeatedCtor -> dfail (startPos sp)
-          ("`|` patterns for '" ++ T.unpack (unEVar name)
-           ++ "' match '" ++ T.unpack dup
-           ++ "' more than once; the later clause is unreachable")
-      -- A set proven incomplete is rejected, naming what is missing.
-      --
-      -- When the constructor list is not visible -- the type was declared
-      -- in another module -- the set is allowed through and
-      -- 'assembleCascade' guards it at runtime. Demanding a catch-all
-      -- there would defeat the feature: the catch-all silently absorbs the
-      -- constructor the check exists to find.
-      --
-      -- Literals are the exception. Their domain is unbounded, so no
-      -- clause set over them can ever be complete and a catch-all is
-      -- genuinely required; saying so at compile time is more useful than
-      -- a runtime failure on the first unlisted value.
-      | otherwise -> case ctorCoverage declared of
-          Just missing
-            | not (null missing) -> dfail (startPos sp)
-                ("`|` patterns for '" ++ T.unpack (unEVar name)
-                 ++ "' are not exhaustive; missing "
-                 ++ T.unpack (T.intercalate ", " missing))
-          Nothing
-            | any (any refutPatIsLit) clausePatLists -> dfail (startPos sp)
-                ("`|` patterns for '" ++ T.unpack (unEVar name)
-                 ++ "' are not exhaustive; a literal or list pattern cannot"
-                 ++ " cover its type, so add a final catch-all clause (a"
-                 ++ " variable or '_')")
-          _ -> return ()
-  where
-    lastIrrefutable = case clausePatLists of
-      [] -> False
-      _  -> not (any refutPatHasLit (last clausePatLists))
-
-    singlePat [p] = Just p
-    singlePat _   = Nothing
-
-    -- A constructor matched by more than one clause. Coverage alone cannot
-    -- catch this: a set that repeats one constructor and still names all of
-    -- them covers the type, but the second clause can never be reached, and
-    -- an unreachable clause is always a mistake.
-    repeatedCtor = do
-      pats <- mapM singlePat clausePatLists
-      let cs = mapMaybe refutPatCoveringCtor pats
-      case [c | (c, n) <- countOccurrences cs, n > (1 :: Int)] of
-        (c : _) -> Just c
-        [] -> Nothing
-
-    countOccurrences cs = Map.toList (Map.fromListWith (+) [(c, 1) | c <- cs])
-
-    -- Which declared constructors this clause set fails to name.
-    --
-    -- @Just []@ means the set is complete. @Nothing@ means the question
-    -- does not apply (the clauses are not all constructor patterns, or the
-    -- type was declared in another module and its constructor list is not
-    -- visible here) and nothing is claimed either way -- the runtime guard
-    -- that 'assembleCascade' installs is what makes that safe.
-    ctorCoverage declared = do
-      pats <- mapM singlePat clausePatLists
-      -- Only covering clauses count. A clause that refines a constructor
-      -- (@Circle 0.0@) neither closes it nor disqualifies the set: it is
-      -- an extra case ahead of the general one, so it is passed over
-      -- rather than aborting the analysis.
-      let cs = mapMaybe refutPatCoveringCtor pats
-      if null cs
-        then Nothing
-        else case [ map fst arms | (_, arms) <- Map.toList declared
-                                 , any ((`elem` cs) . fst) arms ] of
-          [ns] -> Just [n | n <- ns, n `notElem` cs]
-          _ -> Nothing
-
--- | Does this pattern test a literal anywhere inside it?
---
--- Distinct from 'refutPatHasLit', which also counts a constructor pattern:
--- here the question is specifically whether the clause set ranges over an
--- unbounded domain, which a constructor never does. A list pattern does:
--- no set of lengths covers every list.
-refutPatIsLit :: Loc CstRefutPat -> Bool
-refutPatIsLit (Loc _ (CRPatLit _))   = True
-refutPatIsLit (Loc _ (CRPatCon _ ps)) = any refutPatIsLit ps
-refutPatIsLit (Loc _ (CRPatAs _ p))  = refutPatIsLit p
-refutPatIsLit (Loc _ (CRPatTup ps))  = any refutPatIsLit ps
-refutPatIsLit (Loc _ (CRPatRec kps)) = any (refutPatIsLit . snd) kps
-refutPatIsLit (Loc _ (CRPatList _))  = True
-refutPatIsLit _                      = False
-
 -- | Reject a constructor pattern whose field count differs from the
 -- declaration. A constructor's arity is fixed by its `data` clause, so a
 -- mismatch cannot be a partial application the way it could be for an
@@ -2546,27 +2434,6 @@ checkCtorArity sp name given = do
               ++ " but the pattern gives " ++ show given
     _ -> return ()
 
--- | The constructor a pattern COVERS, if any.
---
--- A constructor pattern covers its constructor only when it accepts every
--- value carrying that tag, which means each of its fields must be matched
--- irrefutably. @Circle r@ and @Circle _@ cover Circle; @Circle 0.0@ does
--- not, because a Circle holding anything else falls past it.
---
--- Both users of this need that distinction and would be wrong without it.
--- Coverage would call @Circle 0.0 | Dot@ exhaustive over Shape, and
--- 'assembleCascade' DROPS the last clause's test, so a non-degenerate
--- Circle would silently take the Dot branch. Redundancy would reject
--- @Circle 0.0@ followed by @Circle r@, which is the ordinary way to write
--- a special case before the general one.
-refutPatCoveringCtor :: Loc CstRefutPat -> Maybe Text
-refutPatCoveringCtor (Loc _ (CRPatCon (EV n) ps))
-  | all refutPatIrrefutable ps = Just n
-  | otherwise = Nothing
--- `c@Red` still covers Red; the binding does not change which values match.
-refutPatCoveringCtor (Loc _ (CRPatAs _ p)) = refutPatCoveringCtor p
-refutPatCoveringCtor _ = Nothing
-
 -- | True when a pattern accepts every value of its type, binding only.
 refutPatIrrefutable :: Loc CstRefutPat -> Bool
 refutPatIrrefutable (Loc _ (CRPatVar _))    = True
@@ -2578,28 +2445,61 @@ refutPatIrrefutable (Loc _ (CRPatLit _))    = False
 refutPatIrrefutable (Loc _ (CRPatCon _ _))  = False
 refutPatIrrefutable (Loc _ (CRPatList _))   = False
 
--- | True when every clause is a single Bool-literal argument and the
--- clauses cover both True and False.
-boolExhaustive :: [[Loc CstRefutPat]] -> Bool
-boolExhaustive clausePatLists =
-  case mapM singlePat clausePatLists >>= mapM refutPatBoolLit of
-    Just bs -> elem True bs && elem False bs
-    Nothing -> False
-  where
-    singlePat [p] = Just p
-    singlePat _   = Nothing
+-- | Record a match for 'Morloc.Frontend.PatternCheck', under the name of
+-- its first receiver: one pattern per receiver in each clause.
+-- A literal the record cannot name leaves the match unrecorded; the
+-- match's cascade then still throws on a value no clause matches.
+recordSite :: Bool -> Span -> [EVar] -> [(Span, [(Span, Maybe SitePat)])] -> D ()
+recordSite _ _ [] _ = return ()
+recordSite total sp (EV v : _) rows = case mapM (mapM (mapM id) . snd) rows of
+  Nothing -> return ()
+  Just pats -> do
+    i <- freshIdSpan sp
+    is <- mapM (freshIdSpan . fst) rows
+    cols <- mapM (mapM (\(psp, pat) -> (,) <$> freshIdSpan psp <*> pure pat)) pats
+    State.modify' $ \st ->
+      st {dsMatchSites = Map.insert v (MatchSite i (zip is cols) total) (dsMatchSites st)}
 
--- | Fold clauses into a right-nested IfE cascade.
---
--- When the last clause is a genuine catch-all its test is dropped and its
--- body becomes the base, which is both correct and the shape every
--- existing match compiles to. Otherwise the last clause keeps its test and
--- the base is a throw: an input matching nothing is a bug in the clause
--- set, and failing loudly is the only sound thing to do with it.
---
--- Keeping the test is what lets 'checkRefutCoverage' stay silent when it
--- cannot see a type's constructors. Dropping it unconditionally would mean
--- an unmatched value silently took the last arm.
+clauseSpan :: ([Loc CstRefutPat], Loc CstExpr) -> Span
+clauseSpan (Loc sp _ : _, _) = sp
+clauseSpan ([], Loc sp _) = sp
+
+siteRefut :: Loc CstRefutPat -> Maybe SitePat
+siteRefut (Loc _ pat) = case pat of
+  CRPatVar _ -> Just SitePatWild
+  CRPatWild -> Just SitePatWild
+  CRPatLit lit -> SitePatLit <$> siteLit lit
+  CRPatCon (EV n) ps -> SitePatCon n <$> mapM siteRefut ps
+  CRPatAs _ p -> siteRefut p
+  CRPatTup ps -> SitePatTuple <$> mapM siteRefut ps
+  CRPatRec kps -> SitePatRecord <$> mapM (\(k, p) -> (,) k <$> siteRefut p) kps
+  CRPatList ps -> SitePatList <$> mapM siteRefut ps
+  where
+    siteLit (Loc _ e) = case e of
+      CIntE n -> Just (SiteInt n)
+      CRealE x -> Just (SiteReal x)
+      CLogE b -> Just (SiteBool b)
+      CStrE t -> Just (SiteStr t)
+      _ -> Nothing
+
+siteIrref :: Loc CstIrrefPat -> SitePat
+siteIrref (Loc _ pat) = case pat of
+  CIPatVar _ -> SitePatWild
+  CIPatWild -> SitePatWild
+  CIPatAs _ p -> siteIrref p
+  CIPatTup ps -> SitePatTuple (map siteIrref ps)
+  CIPatRec kps -> SitePatRecord [(k, siteIrref p) | (k, p) <- kps]
+
+hasTuple :: Loc CstIrrefPat -> Bool
+hasTuple (Loc _ pat) = case pat of
+  CIPatTup _ -> True
+  CIPatAs _ p -> hasTuple p
+  CIPatRec kps -> any (hasTuple . snd) kps
+  _ -> False
+
+-- | Fold clauses into a right-nested IfE cascade. A last clause that matches
+-- every value drops its test; otherwise the cascade ends in a throw, which a
+-- clause set proven exhaustive never reaches.
 assembleCascade :: Span -> [[Loc CstRefutPat]] -> [(ExprI, ExprI)] -> D ExprI
 assembleCascade sp clausePats built
   | lastIsCatchAll = go (init built) (snd (last built))
@@ -2636,7 +2536,7 @@ desugarMatch sp scrutinee clauses = do
   formal <- freshIrrefLamParam sp
   scrutinee' <- desugarExpr scrutinee
   built <- mapM (buildRefutClause [formal]) clausePats
-  checkRefutCoverage sp (EV "match") (map fst clausePats)
+  recordSite True sp [formal] [(clauseSpan c, [(spanOf q, siteRefut q) | q <- ps]) | c@(ps, _) <- clausePats]
   cascade <- assembleCascade sp (map fst clausePats) built
   freshExprSpan sp (LetE [(formal, scrutinee')] cascade)
   where
@@ -2657,7 +2557,7 @@ desugarRefutClauses sp name clauses = do
   mapM_ (validateRefutClause . fst) clausePats
   formals <- mapM (const (freshIrrefLamParam sp)) [1 .. arity]
   built <- mapM (buildRefutClause formals) clausePats
-  checkRefutCoverage sp name (map fst clausePats)
+  recordSite True sp formals [(clauseSpan c, [(spanOf q, siteRefut q) | q <- ps]) | c@(ps, _) <- clausePats]
   cascade <- assembleCascade sp (map fst clausePats) built
   freshExprSpan sp (LamE formals cascade)
   where
@@ -2766,6 +2666,7 @@ desugarDo sp (CstDoBind p e : rest) = do
       -- same shape: test, bind the payload, or throw.
       validateRefutClause [rp]
       formal <- freshIrrefLamParam sp
+      recordSite False sp [formal] [(spanOf rp, [(spanOf rp, siteRefut rp)])]
       e' <- desugarExpr e
       forceE <- freshExprSpan sp (EvalE e')
       restE <- desugarDo sp rest

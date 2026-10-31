@@ -127,6 +127,7 @@ copyState oldIdx newIdx = do
       , stateNativeRecEntries = stateNativeRecEntries s
       , stateRecursionTargets = stateRecursionTargets s
       , stateWhereOwner = stateWhereOwner s
+      , stateMatchSites = stateMatchSites s
       , stateConstantOrigin = updateMap (stateConstantOrigin s)
       , stateHoldCache = stateHoldCache s
       , stateUndeterminedSites = stateUndeterminedSites s

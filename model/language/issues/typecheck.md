@@ -104,14 +104,6 @@ literal and record gaps. Reproduced on 0.109.0 unless marked.
   subtype path solves it to `<> Unit`. With the signature `pick2 :: Bool ->
   (Int -> <e> ()) -> <e> ()` it typechecks. Open: instantiate an
   existential branch to a suspension with a fresh row before joining.
-- **A complete set of nested patterns is rejected as not exhaustive.**
-  [reproduced, 2026-10-17, 9f24abe4] Violates PAT-3.
-  `data L = Nil | Cons Str L`;
-  `f xs = match xs | (Cons x (Cons y rest)) = 2 | (Cons x Nil) = 1 | Nil = 0`
-  fails "`|` patterns for 'match' are not exhaustive; missing Cons" though
-  the clauses cover every value; writing `(Cons x _)` for the second clause
-  builds. The check is `checkRefutCoverage`
-  (library/Morloc/Frontend/Desugar.hs); cause not traced.
 - **A class variable that only a constraint mentions.** [reproduced,
   2026-10-18, 0.109.0] Violates POLY-6 and DIAG-2. In `f :: C a => Int ->
   Str`, nothing at any call can fix `a`, but the signature is accepted and
@@ -140,10 +132,6 @@ literal and record gaps. Reproduced on 0.109.0 unless marked.
   a signature whose constraint names a variable that its type does not
   mention (and that no other constraint ties to one it does) is rejected at
   the signature, naming the variable.
-- **A tuple pattern of smaller arity matches a larger tuple.** [reproduced,
-  2026-10-21] Violates PAT-1. `part :: (Int, Int, Int) -> Int;
-  part = \(a, b) -> a + b` builds; `part [1,2,3]` prints 3. Repro:
-  /work/plans/model-audit-2026-10-21/repro/A/pat/rt.loc.
 - **A newtype over a `type` alias reports a phantom instance.** [reproduced,
   2026-10-21] `type Meters = Int; newtype Wrapped = Meters` fails "Cannot
   declare instance on transparent alias 'Meters'" though no instance is
@@ -155,10 +143,6 @@ literal and record gaps. Reproduced on 0.109.0 unless marked.
   "Module 'main' does not export ... [nope]" (an export of an undefined
   name, worded backwards) carry no location (DIAG-2; /work/plans/model-audit-2026-10-21/repro/A/op/o8.loc,
   /work/plans/model-audit-2026-10-21/repro/A/mod/m2).
-- **A clause after a catch-all is accepted.** [reproduced, 2026-10-21]
-  Violates SUM-3. `data A = Foo | Bar; f | Foo = 1 | _ = 2 | Bar = 3`
-  builds; `f Bar` prints 2. A repeated constructor clause is rejected; only
-  clauses shadowed by `_` are missed. Repro: /work/plans/model-audit-2026-10-21/repro/C/sum/dead.loc.
 - **Internal names in record and constructor errors.** [reproduced,
   2026-10-21] `g p = .c p` on `record P {a, b}` fails "expected: a []
   [(c, b)] ... Error in NamU with conflicting open keysets ... hint: 'P' is

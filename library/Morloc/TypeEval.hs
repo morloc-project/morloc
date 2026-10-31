@@ -34,6 +34,7 @@ module Morloc.TypeEval
   , whnf
   , dataHead
   , dataCtors
+  , dataCtorsAt
   , dataIsEnum
   , enumCtors
   ) where
@@ -899,6 +900,24 @@ dataHead scope (Whnf t) = case t of
   VarU v -> (\cs -> (v, [], cs)) <$> dataCtorsOfName scope v
   AppU (VarU v) ts -> (\cs -> (v, ts, cs)) <$> dataCtorsOfName scope v
   _ -> Nothing
+
+-- | The constructor table of the `data` type at the head, its fields with the
+-- type's parameters set to the arguments it is applied to.
+dataCtorsAt :: Scope -> Whnf -> Maybe [(MT.Text, [TypeU])]
+dataCtorsAt scope (Whnf t) = do
+  (v, args) <- case t of
+    VarU v -> Just (v, [])
+    AppU (VarU v) ts -> Just (v, ts)
+    _ -> Nothing
+  entries <- Map.lookup v scope
+  (params, cs) <-
+    listToMaybe
+      [ ([p | Left (p, _) <- ps], cs)
+      | (ps, body, _, _, TypedefEnum) <- entries
+      , Just cs <- [dataBodyCtors body]
+      ]
+  let inst = parsubAll (zip params args)
+  return [(c, map inst fs) | (c, fs) <- cs]
 
 -- | The constructor table of the `data` type at the head.
 dataCtors :: Scope -> Whnf -> Maybe [(MT.Text, [TypeU])]

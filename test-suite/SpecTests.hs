@@ -1894,7 +1894,230 @@ patTests :: TestTree
 patTests =
   testGroup
     "PAT"
-    [ accept
+    [ reject
+        "spec-pat-1-1"
+        [r|
+        module main (part)
+        add :: Int -> Int -> Int
+        part :: (Int, Int, Int) -> Int
+        part = \(a, b) -> add a b
+        |]
+    , reject
+        "spec-pat-1-2"
+        [r|
+        module main (f)
+        f :: (Int, Int, Int) -> Int
+        f t = let (a, b) = t in a
+        |]
+    , reject
+        "spec-pat-1-4"
+        [r|
+        module main (part)
+        part :: (Int, Int, Int) -> Int -> Int
+        part (a, b) c = a
+        |]
+    , reject
+        "spec-pat-1-5"
+        [r|
+        module main (part)
+        part :: Int -> (Int, Int, Int) -> Int
+        part = \c (a, b) -> a
+        |]
+    , reject
+        "spec-pat-1-6"
+        [r|
+        module main (f, g)
+        first2 t = match t | (a, b) = a
+        f :: (Int, Int) -> Int
+        f t = first2 t
+        g :: (Int, Int, Int) -> Int
+        g t = first2 t
+        |]
+    , reject
+        "spec-pat-1-7"
+        [r|
+        module main (g, f)
+        first2 t = match t | (a, b) = a
+        f :: (Int, Int) -> Int
+        f t = first2 t
+        g :: (Int, Int, Int) -> Int
+        g t = first2 t
+        |]
+    , reject
+        "spec-pat-1-8"
+        [r|
+        module main (f)
+        effect IO
+        data R = Ok Int | Err Str
+        get :: Int -> <IO> (R, Int, Int)
+        f :: Int -> <IO> Int
+        f x = do
+          (Ok y, z) <- get x
+          z
+        |]
+    , reject
+        "spec-pat-1-9"
+        [r|
+        module main (f)
+        f :: (Int, Int, Int) -> Int
+        f t = let (_, _) = t in 1
+        |]
+    , rejectNaming
+        "spec-pat-1-10"
+        ["z"]
+        []
+        [r|
+        module main (f)
+        record R where
+          p :: Int
+        f :: R -> Int
+        f = \{z = x} -> 1
+        |]
+    , accept
+        "spec-pat-1-11"
+        [r|
+        module main (f)
+        f :: Int -> Int
+        f x = let h = \(a, b) -> a in x
+        |]
+    , accept
+        "spec-pat-1-3"
+        [r|
+        module main (f)
+        add :: Int -> Int -> Int
+        f :: (Int, (Int, Int)) -> Int
+        f (a, (b, c)) = add a (add b c)
+        |]
+    , accept
+        "spec-pat-3-1"
+        [r|
+        module main (f)
+        data L = Nil | Cons Str L
+        f :: L -> Int
+        f xs = match xs
+          | (Cons x (Cons y rest)) = 2
+          | (Cons x Nil) = 1
+          | Nil = 0
+        |]
+    , rejectNaming
+        "spec-pat-3-2"
+        ["Cons", "Nil"]
+        []
+        [r|
+        module main (f)
+        data L = Nil | Cons Str L
+        f :: L -> Int
+        f xs = match xs
+          | (Cons x (Cons y rest)) = 2
+          | Nil = 0
+        |]
+    , reject
+        "spec-pat-3-3"
+        [r|
+        module main (f)
+        f :: Int -> Int
+        f | 0 = 1
+          | 1 = 2
+        |]
+    , accept
+        "spec-pat-3-4"
+        [r|
+        module main (f)
+        data B = Y | N
+        f :: (B, B) -> Int
+        f | (Y, _) = 1
+          | (_, Y) = 2
+          | (N, N) = 3
+        |]
+    , rejectNaming
+        "spec-pat-3-5"
+        ["Y"]
+        []
+        [r|
+        module main (f)
+        data B = Y | N
+        f :: (B, B) -> Int
+        f | (N, _) = 1
+          | (Y, N) = 2
+        |]
+    , rejectNaming
+        "spec-pat-3-6"
+        ["Blue"]
+        ["Red", "Green"]
+        [r|
+        module main (f)
+        data Color = Red | Green | Blue
+        f :: Color -> Int
+        f | Red = 0
+          | Green = 1
+        |]
+    , rejectNaming
+        "spec-pat-3-7"
+        ["Dot"]
+        []
+        [r|
+        module main (f)
+        data Shape = Circle Real | Rect Real Real | Dot
+        f :: Shape -> Real
+        f | (Circle r) = r
+          | (Rect w h) = w
+        |]
+    , rejectNaming
+        "spec-pat-3-8"
+        ["Circle"]
+        []
+        [r|
+        module main (f)
+        class Eq a where
+          (==) :: a -> a -> Bool
+        instance Eq Real
+        data Shape = Circle Real | Dot
+        f :: Shape -> Str
+        f | (Circle 0.0) = "degenerate"
+          | Dot = "dot"
+        |]
+    , reject
+        "spec-pat-3-9"
+        [r|
+        module main (f)
+        f :: Int -> Int
+        f | 0 ? True = 1
+              : 2
+        |]
+    , acceptWarning
+        "spec-pat-8-1"
+        "unreachable"
+        [r|
+        module main (f)
+        data A = Foo | Bar
+        f :: A -> Int
+        f | Foo = 1
+          | _ = 2
+          | Bar = 3
+        |]
+    , acceptWarning
+        "spec-pat-8-2"
+        "unreachable"
+        [r|
+        module main (f)
+        data A = Foo | Bar
+        f :: A -> Int
+        f x = match x
+          | Foo = 1
+          | Bar = 2
+          | Foo = 3
+        |]
+    , acceptWarning
+        "spec-pat-8-3"
+        "unreachable"
+        [r|
+        module main (f)
+        data Color = Red | Green | Blue
+        f :: Color -> Int
+        f | x = 0
+          | Green = 1
+        |]
+    , accept
         "spec-pat-7-1"
         [r|
         module main (f, g, h)
@@ -2414,6 +2637,19 @@ rejectAtLine name line code =
       Right _ -> assertFailure "expected rejection"
       Left (SourcedError i _) -> fmap srcLocLine (DM.lookup i (stateSourceMap st)) @?= Just line
       Left e -> assertFailure ("expected a located error, got " <> show e)
+
+-- | Acceptance with a warning that contains @needle@.
+acceptWarning :: String -> MT.Text -> MT.Text -> TestTree
+acceptWarning name needle code =
+  testCase name $ do
+    config <- emptyConfig
+    ((x, msgs), _) <-
+      MM.runMorlocMonad Nothing 0 config defaultValue (typecheckFrontend Nothing (Code code))
+    case x of
+      Left e -> assertFailure $ "expected acceptance, got: " <> show e
+      Right _ ->
+        assertBool ("no warning mentions " <> MT.unpack needle <> ": " <> show msgs)
+          (any (MT.isInfixOf needle) msgs)
 
 runFront :: MT.Text -> IO (Either MorlocError [AnnoS (Indexed TypeU) Many Int])
 runFront code = fst <$> runFrontWithState code

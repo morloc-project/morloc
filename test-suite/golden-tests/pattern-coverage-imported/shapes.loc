@@ -1,0 +1,3 @@
+module shapes (Shape)
+
+data Shape = Circle Real | Rect Real Real | Dot

@@ -113,8 +113,6 @@ parseTests = testGroup "parse/desugar"
       assertBool "expected Right" (isRight (parseMod validDef))
   , testCase "Bool clauses covering {True,False} need no catch-all" $
       assertBool "expected Right" (isRight (parseMod boolExhaustive))
-  , testCase "non-exhaustive literals without a catch-all are rejected" $
-      assertBool "expected Left" (isLeft (parseMod nonExhaustive))
   , testCase "clauses of differing arity are rejected" $
       assertBool "expected Left" (isLeft (parseMod arityMismatch))
   , testCase "a clause binding the same name twice is rejected" $
@@ -160,8 +158,6 @@ guardInteractionTests = testGroup "with `?`-guards"
       assertBool "expected Right" (isRight (parseMod destructureGuard))
   , testCase "several `?`-clauses may share one `|`-clause" $
       assertBool "expected Right" (isRight (parseMod multiGuard))
-  , testCase "a guard does not make a refutable pattern exhaustive" $
-      assertBool "expected Left" (isLeft (parseMod refutableGuardedLast))
   ]
   where
     guardedClause = T.unlines
@@ -289,16 +285,6 @@ constructorPatternTests = testGroup "constructor patterns"
         \f | q.Red = 0\n\
         \  | _ = 1\n"
 
-  , -- Trap 2/3: this must be rejected. If it is accepted, `f Blue` silently
-    -- returns the Green arm, because the last clause's test is discarded.
-    testCase "an incomplete clause set is rejected" $
-      assertBool "Blue is unmatched" . isLeft $ parseMod
-        "module main (f)\n\
-        \data Color = Red | Green | Blue\n\
-        \f :: Color -> Int\n\
-        \f | Red = 0\n\
-        \  | Green = 1\n"
-
   , testCase "an incomplete clause set with a catch-all is accepted" $
       assertBool "wildcard covers the rest" . isRight $ parseMod
         "module main (f)\n\
@@ -306,36 +292,6 @@ constructorPatternTests = testGroup "constructor patterns"
         \f :: Color -> Int\n\
         \f | Red = 0\n\
         \  | _ = 1\n"
-
-  , testCase "a repeated constructor clause is rejected" $
-      assertBool "Red matched twice" . isLeft $ parseMod
-        "module main (f)\n\
-        \data Color = Red | Green | Blue\n\
-        \f :: Color -> Int\n\
-        \f | Red = 0\n\
-        \  | Red = 1\n\
-        \  | Green = 2\n\
-        \  | Blue = 3\n"
-
-  , testCase "a clause after a catch-all is rejected" $
-      assertBool "Blue is unreachable" . isLeft $ parseMod
-        "module main (f)\n\
-        \data Color = Red | Green | Blue\n\
-        \f :: Color -> Int\n\
-        \f | Red = 0\n\
-        \  | c = 1\n\
-        \  | Blue = 2\n"
-
-  , -- Trap 1: a lowercase head binds, an UPPER head tests. If the UPPER
-    -- case fell through to CRPatVar, this would be a complete definition
-    -- and the second clause would be unreachable rather than rejected.
-    testCase "a lowercase binder is not a constructor test" $
-      assertBool "x binds and shadows the rest" . isLeft $ parseMod
-        "module main (f)\n\
-        \data Color = Red | Green | Blue\n\
-        \f :: Color -> Int\n\
-        \f | x = 0\n\
-        \  | Green = 1\n"
 
   , testCase "constructor patterns nest inside a tuple" $
       assertBool "pair of constructors" . isRight $ parseMod
@@ -419,14 +375,6 @@ payloadPatternTests = testGroup "constructor patterns with payloads"
         \  | (Rect w h) = w\n\
         \  | Dot = 0.0\n"
 
-  , testCase "an incomplete payload clause set is rejected" $
-      assertBool "Dot unmatched" . isLeft $ parseMod
-        "module main (f)\n\
-        \data Shape = Circle Real | Rect Real Real | Dot\n\
-        \f :: Shape -> Real\n\
-        \f | (Circle r) = r\n\
-        \  | (Rect w h) = w\n"
-
   , testCase "a payload pattern of the wrong arity is rejected" $
       assertBool "Circle takes one field" . isLeft $ parseMod
         "module main (f)\n\
@@ -434,19 +382,6 @@ payloadPatternTests = testGroup "constructor patterns with payloads"
         \f :: Shape -> Real\n\
         \f | (Circle r s) = r\n\
         \  | Dot = 0.0\n"
-
-  , -- A constructor whose fields are matched rather than bound does not
-    -- close that constructor: a Circle holding any other radius falls
-    -- past it. Getting this wrong is silent, because 'assembleCascade'
-    -- drops the final clause's test -- the Dot branch would simply
-    -- swallow every non-degenerate Circle.
-    testCase "a refutable payload field does not close its constructor" $
-      assertBool "Circle 0.0 does not cover Circle" . isLeft $ parseMod
-        "module main (f)\n\
-        \data Shape = Circle Real | Dot\n\
-        \f :: Shape -> Str\n\
-        \f | (Circle 0.0) = \"degenerate\"\n\
-        \  | Dot = \"dot\"\n"
 
   , -- The mirror: repeating a constructor with DIFFERENT field patterns is
     -- the ordinary way to write a special case ahead of the general one,

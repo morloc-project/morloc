@@ -25,6 +25,7 @@ module Morloc.Monad
   , writeMorlocReturn
   , printWarnings
   , makeMorlocError
+  , warnAt
   , sourceAt
   , runCommand
   , runCommandWith
@@ -247,6 +248,16 @@ writeMorlocReturn ((result, msgs), st) = do
       MT.hPutStrLn stderr (render $ makeMorlocError st err')
       return False
     Right _ -> return True
+
+-- | A warning, rendered at the source position of an expression index.
+warnAt :: Int -> MDoc -> MorlocMonad ()
+warnAt i msg = do
+  st <- get
+  tell
+    [ render $ case Map.lookup i (stateSourceMap st) of
+        Just loc -> pretty loc <> ": warning:" <> line <> msg <> snippet st loc
+        Nothing -> "warning:" <+> msg
+    ]
 
 makeMorlocError :: MorlocState -> MorlocError -> MDoc
 makeMorlocError st (SourcedError i msg0) =

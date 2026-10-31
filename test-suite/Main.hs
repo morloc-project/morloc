@@ -22,6 +22,7 @@ import PatternChainTests (patternChainTests)
 import ArgsBoundTests (argsBoundTests)
 import LangRegistryCostTests (langRegistryCostTests)
 import PropertyTests (propertyTests)
+import UsefulnessTests (usefulnessTests)
 import RecSolverTests (recSolverTests)
 import NatDecideTests (natDecideTests)
 import RefutablePatternTests (refutablePatternTests)
@@ -56,6 +57,7 @@ unitTests =
   , numericLiteralAliasTests
   , pendingNumLitTests
   , propertyTests
+  , usefulnessTests
   , whereTests
   , orderInvarianceTests
   , signatureContractTests

@@ -21,13 +21,13 @@ may not share a constructor name, and two constructors of one type may not
 differ only in letter case. Constructors are exported and imported with
 their type, and a qualified import qualifies them.
 
-### SUM-3 A match over a `data` type is exhaustive and has no dead clause
+### SUM-3 A match over a `data` type is exhaustive
 Intent: proposed
-Code: deviates (issues/typecheck.md)
+Code: conforms 2026-10-31
 
-A `|`-clause set or `match` that misses a constructor, or that has a clause
-no value can reach, is a compile error. A catch-all `_` satisfies
-exhaustiveness.
+A `|`-clause set or `match` that misses a constructor is a compile error
+(PAT-3); a clause no value can reach is a warning (PAT-8). A catch-all `_`
+satisfies exhaustiveness.
 
 ### SUM-4 A type cycle must pass through a `data` type
 Intent: proposed

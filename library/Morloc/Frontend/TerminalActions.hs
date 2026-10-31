@@ -128,6 +128,7 @@ mkDState idx srcMap = Desugar.DState
   , Desugar.dsNamespaces = Set.empty
   , Desugar.dsDataCtors = Map.empty
   , Desugar.dsStreamElems = Map.empty
+  , Desugar.dsMatchSites = Map.empty
   , Desugar.dsReplayPlans = Map.empty
   , Desugar.dsCompanions = Map.empty
   , Desugar.dsParseSlots = Map.empty

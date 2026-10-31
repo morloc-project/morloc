@@ -269,6 +269,9 @@ data MorlocState = MorlocState
   -- | The term that owns each where-bound term (both by term identity, the
   -- inner key of 'stateSignatures').
   , stateWhereOwner :: Map Int Int
+  -- | The clauses of each pattern match, by the name its receiver is bound
+  -- to ('Morloc.Frontend.PatternCheck')
+  , stateMatchSites :: Map Text MatchSite
   -- | The constant each expression is a copy of, by index
   -- ('Restructure.markConstants'): copies of one constant are bound once per
   -- command ('Share').
@@ -1117,6 +1120,7 @@ instance Defaultable MorlocState where
       , stateNativeRecEntries = Map.empty
       , stateRecursionTargets = Map.empty
       , stateWhereOwner = Map.empty
+      , stateMatchSites = Map.empty
       , stateConstantOrigin = Map.empty
       , stateHoldCache = Map.empty
       , stateUndeterminedSites = Map.empty

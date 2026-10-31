@@ -54,6 +54,7 @@ import Morloc.Frontend.AutoRequire (autoRequire)
 import qualified Morloc.Frontend.AST as AST
 import Morloc.Frontend.Restructure (restructure)
 import Morloc.Frontend.Link (checkRsize)
+import Morloc.Frontend.PatternCheck (checkPatterns)
 import Morloc.Frontend.Treeify (treeify, Validation (..))
 import Morloc.Frontend.Share (shareBindings)
 import Morloc.Frontend.Specialize (specialize)
@@ -85,6 +86,7 @@ typecheckFrontend path code = do
   owners <- MM.gets stateWhereOwner
   sites <- MM.gets stateDefinitionSite
   mapM_ (F.checkRecursion specNames (`Map.lookup` idmap) owners sites) (es <> specTrees)
+  checkPatterns (es <> specTrees)
   MM.modify' (\s -> s {stateExportTypes = Map.fromList [(i, t) | AnnoS (Idx i t) _ _ <- es]})
   return es
 

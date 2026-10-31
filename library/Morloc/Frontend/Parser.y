@@ -1147,11 +1147,12 @@ data PState = PState
   , psStreamElems :: !(Map.Map EVar TypeU) -- @collect batch type per command
   , psOwnModule :: !Bool -- the program's own module, not one of an installed package
   , psInRep :: !Bool -- inside a newtype's representation
+  , psMatchSites :: !(Map.Map Text MatchSite)
   }
   deriving (Show)
 
 emptyPState :: PState
-emptyPState = PState 1 Map.empty Nothing defaultValue Map.empty [] Map.empty Nothing Map.empty [] [] [] Map.empty True False
+emptyPState = PState 1 Map.empty Nothing defaultValue Map.empty [] Map.empty Nothing Map.empty [] [] [] Map.empty True False Map.empty
 
 type P a = State.StateT PState (Either ParseError) a
 
@@ -1404,6 +1405,7 @@ toDState ps = DState
   , dsNamespaces = Set.empty
   , dsDataCtors = Map.empty
   , dsStreamElems = psStreamElems ps
+  , dsMatchSites = psMatchSites ps
   , dsReplayPlans = Map.empty
   , dsCompanions = Map.empty
   , dsParseSlots = Map.empty
@@ -1419,6 +1421,7 @@ fromDState ps ds = ps
   , psModuleDoc = dsModuleDoc ds
   , psModuleEpilogues = dsModuleEpilogues ds
   , psStreamElems = dsStreamElems ds
+  , psMatchSites = dsMatchSites ds
   }
 
 -- | Run parse + desugar

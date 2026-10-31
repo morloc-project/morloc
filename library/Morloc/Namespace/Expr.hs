@@ -55,6 +55,9 @@ module Morloc.Namespace.Expr
   , E (..)
   , Lit (..)
   , RealLit (..)
+  , MatchSite (..)
+  , SitePat (..)
+  , SiteLit (..)
   , isFiniteRealLit
   , showRealLit
   , Import (..)
@@ -912,6 +915,34 @@ data Lit
   | MUni
   | MNull
   deriving (Ord, Eq, Show)
+
+-- | A pattern match: where it is written, and each clause's position with
+-- one pattern per receiver, each at its own position.
+data MatchSite = MatchSite
+  { siteIndex :: Int
+  , siteRows :: [(Int, [(Int, SitePat)])]
+  , siteTotal :: Bool
+  -- ^ whether every value must be matched; a refutable `<-` bind throws
+  -- on a value it does not match
+  }
+  deriving (Show, Eq)
+
+-- | A pattern as written: variables are 'SitePatWild'.
+data SitePat
+  = SitePatWild
+  | SitePatLit SiteLit
+  | SitePatCon Text [SitePat]
+  | SitePatTuple [SitePat]
+  | SitePatRecord [(Key, SitePat)]
+  | SitePatList [SitePat]
+  deriving (Show, Eq, Ord)
+
+data SiteLit
+  = SiteInt Integer
+  | SiteReal RealLit
+  | SiteStr Text
+  | SiteBool Bool
+  deriving (Show, Eq, Ord)
 
 -- | Real (IEEE 754) literal. Finite values carry a 'Scientific' to preserve
 -- arbitrary precision until codegen, where they are bounds-checked against

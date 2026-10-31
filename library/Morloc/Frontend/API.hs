@@ -188,6 +188,7 @@ parse f (Code code) = do
           { stateSourceMap = psSourceMap s <> stateSourceMap st
           , stateTermDocs = psTermDocs s <> stateTermDocs st
           , stateStreamElems = psStreamElems s <> stateStreamElems st
+          , stateMatchSites = psMatchSites s <> stateMatchSites st
           })
         -- emit any docstring warnings accumulated during desugar
         case psWarnings s of
