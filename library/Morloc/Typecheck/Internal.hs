@@ -16,6 +16,7 @@ variable generation, and type quantification\/unquantification.
 module Morloc.Typecheck.Internal
   ( (+>)
   , (++>)
+  , slotSpacing
 
     -- * accessing state
   , newvar
@@ -697,9 +698,10 @@ instance GammaIndexLike TVar where
   index v = ExistG v ([], Open) ([], Open)
 
 -- | Slot spacing between consecutive entries added by (+>).
--- Leaves room for solveExistWith to insert entries in between.
+-- Leaves room for solveExistWith to insert entries in between, and for
+-- nested articulations to subdivide that room again.
 slotSpacing :: Int
-slotSpacing = 256
+slotSpacing = 2 ^ (32 :: Int)
 
 -- | Prepend an entry to the context (newest position).
 (+>) :: (GammaIndexLike a) => Gamma -> a -> Gamma
@@ -1180,6 +1182,34 @@ isNamOrExist _        = False
 
 -- | type 1 is more polymorphic than type 2 (Dunfield Figure 9)
 subtype :: Scope -> TypeU -> TypeU -> Gamma -> Either MDoc Gamma
+-- A solved existential that carries slots or keys stands for its solution.
+-- Its own slots and keys are checked against the solution's first, so that
+-- a copy made before the solve keeps its constraints. Bare existentials
+-- keep their own rules, which also refine a solution to a more specific
+-- alias.
+subtype scope t1 t2 g
+  | Just (comps, t1') <- solvedStructure t1 = comps g >>= subtype scope t1' t2
+  | Just (comps, t2') <- solvedStructure t2 = comps g >>= subtype scope t1 t2'
+  where
+    solvedStructure (ExistU v (ps, _) (rs, _))
+      | not (null ps && null rs), isJust (lookupU v g) =
+          let sol = apply g (ExistU v ([], Open) ([], Open))
+           in Just (componentsAgainst ps rs sol, sol)
+    solvedStructure _ = Nothing
+    componentsAgainst ps rs sol g0 = do
+      let (solPs, solRs) = case sol of
+            ExistU _ (ps', _) (rs', _) -> (ps', rs')
+            AppU _ ps' -> (ps', [])
+            NamU _ _ _ rs' -> ([], rs')
+            _ -> ([], [])
+      g1 <- foldM (\gx (p, q) -> subtype scope (apply gx p) (apply gx q) gx) g0 (zip ps solPs)
+      foldM
+        (\gx (k, p) -> case (lookup k solRs, sol) of
+            (Just q, _) -> subtype scope (apply gx p) (apply gx q) gx
+            (Nothing, NamU {}) -> missingField sol (ExistU (TV "_") ([], Open) (rs, Open)) k
+            (Nothing, _) -> return gx)
+        g1
+        rs
 -- A closed anonymous record meeting a NamU record or a record-key
 -- existential (from construction / a `.field` accessor) is the same record
 -- in a different representation. Normalize it to the NamU form so the
@@ -1406,6 +1436,14 @@ subtype scope t1@(ExistU _ _ _) t2@(AppU (VarU v) _) g1
   , Just t2' <- TE.reduceType scope t2 =
       subtype scope t1 t2' g1
 subtype scope t1@(ExistU v1 (ps1, pc1) rs@([], _)) t2@(AppU _ ps2) g1
+  -- slots closed to keys come only from tuple getters and setters
+  | not (null ps1)
+  , snd rs == Closed
+  , NotTuple <- classifyTupleShape scope t2 =
+      subtypeError t1 t2 $ case t2 of
+        AppU (VarU (TV "List")) _ ->
+          "an index selector requires a tuple or record, got a list. Use 'head' or '!!' for list access."
+        _ -> "an index selector requires a tuple or record"
   -- if the existential is closed and the parameter length is not equal, die
   | pc1 == Closed && length ps1 /= length ps2 =
       subtypeError t1 t2 "InstantiateL - Expected equal number of type parameters"
@@ -1885,10 +1923,12 @@ instantiate scope (FunU as b) (ExistU v ([], _) _) g1 = do
 instantiate scope ta@(ExistU _ _ (_ : _, _)) (ExistU v ps@([], _) ([], _)) g1
   | rs <- accumulatedRecords v g1, not (null rs) =
       instantiate scope ta (ExistU v ps (rs, Open)) g1
+  | Just t <- lookupU v g1 = subtype scope ta t g1
   | otherwise = solveExist v ta g1 >>= maybe (return g1) return
 instantiate scope (ExistU v ps@([], _) ([], _)) tb@(ExistU _ _ (_ : _, _)) g1
   | rs <- accumulatedRecords v g1, not (null rs) =
       instantiate scope (ExistU v ps (rs, Open)) tb g1
+  | Just t <- lookupU v g1 = subtype scope t tb g1
   | otherwise = solveExist v tb g1 >>= maybe (return g1) return
 
 --
@@ -1926,6 +1966,13 @@ instantiate scope (ExistU v1 (ps1, pc1) (rs1_expr, rc1)) (ExistU v2 (ps2, pc2) (
         | otherwise = (rs1_expr, rs2_expr)
       ta = ExistU v1 (ps1, pc1) (rs1, rc1)
       tb = ExistU v2 (ps2, pc2) (rs2, rc2)
+  let tupleShaped ps rs rc = not (null ps) && rc == Closed && null rs
+      recordShaped ps pc rs = pc == Closed && null ps && not (null rs)
+      conflict (psA, pcA, rsA, rcA) (psB, pcB, rsB, rcB) =
+        (tupleShaped psA rsA rcA && not (null rsB)) || (recordShaped psA pcA rsA && not (null psB))
+          || (tupleShaped psB rsB rcB && not (null rsA)) || (recordShaped psB pcB rsB && not (null psA))
+  when (conflict (ps1, pc1, rs1, rc1) (ps2, pc2, rs2, rc2)) $
+    subtypeError ta tb "A value is used both as a tuple and as a record"
   -- check and expand open parameters
   (ps1', _) <- case (pc1, pc2, compare (length ps1) (length ps2)) of
     (_, _, EQ) -> Right (ps1, ps2)
@@ -1940,15 +1987,9 @@ instantiate scope (ExistU v1 (ps1, pc1) (rs1_expr, rc1)) (ExistU v2 (ps2, pc2) (
   let keyset2 = Set.fromList (map fst rs2)
 
   -- check and expand open records
-  (g2, rs1', _) <- case (rc1, rc2, Set.isSubsetOf keyset1 keyset2, Set.isSubsetOf keyset2 keyset1) of
-    (Closed, Closed, False, _) -> subtypeError ta tb "Right closed existential contains keys missing in left closed existential"
-    (Closed, Closed, _, False) -> subtypeError ta tb "Right closed existential contains keys missing in left closed existential"
-    (Closed, Open, a, False) ->
-      subtypeError ta tb $
-        "Right existential contains keys missing in left closed existential " <> pretty a
-    (Open, Closed, False, b) ->
-      subtypeError ta tb $
-        "Left existential contains keys missing in right closed existential " <> pretty b
+  (g2, rs1', _) <- case (Set.toList (keyset2 Set.\\ keyset1), Set.toList (keyset1 Set.\\ keyset2)) of
+    (k : _, _) | rc1 == Closed -> missingField ta tb k
+    (_, k : _) | rc2 == Closed -> missingField ta tb k
     _ -> extendRec scope g1 rs1 rs2
 
   g3 <- foldM (\g (t1, t2) -> subtype scope t1 t2 g) g2 (zip ps1 ps2)
@@ -1968,8 +2009,43 @@ instantiate scope (ExistU v1 (ps1, pc1) (rs1_expr, rc1)) (ExistU v2 (ps2, pc2) (
   -- record whose key order is pattern-driven (rs2 ++ literal-extras),
   -- and the materialized value would write fields in the wrong
   -- positions.
-  let taExpanded = ExistU v1 (ps1', pc1) (rs1', rc1)
-  let tbExpanded = ExistU v2 (ps1', pc1) (rs1', rc1)
+  let closedIfEither c c' = if c == Closed || c' == Closed then Closed else Open
+      pcM = closedIfEither pc1 pc2
+      rcM = closedIfEither rc1 rc2
+      -- The newer existential is solved to the older. When the merge adds
+      -- slots, keys or closedness the older lacks, the older is articulated
+      -- first: solved to a fresh existential carrying the merged structure,
+      -- with fresh components older than itself. The structure then lives in
+      -- solutions, which every copy of either existential reaches through
+      -- 'apply', rather than in one side's expression.
+      -- A closed side's keys are a record value's field order, its layout.
+      rsM
+        | rc1 /= Closed && rc2 == Closed =
+            [(k, t) | (k, _) <- rs2, Just t <- [lookup k rs1']] <> [r | r@(k, _) <- rs1', k `notElem` map fst rs2]
+        | otherwise = rs1'
+      mergeInto o (psO, pcO) (rsO, rcO) n g
+        | length psO == length ps1'
+        , Set.fromList (map fst rsO) == Set.fromList (map fst rsM)
+        , pcO == pcM
+        , rcO == rcM =
+            solveExist n (ExistU o (ps1', pcM) (rsM, rcM)) g >>= maybe (return g) return
+        | otherwise = do
+            let prefix = if any isStructuralSlot ps1' || pcM == Closed && rcM == Closed then "_pattern_merge_" else "merge_"
+                (gA, w) = tvarname g prefix
+                (gB, cvs) = statefulMap (\gx _ -> tvarname gx prefix) gA ps1'
+                (gC, dvs) = statefulMap (\gx _ -> tvarname gx "merge_key_") gB rsM
+                bare x = ExistU x ([], Open) ([], Open)
+                cs = map bare cvs
+                ds = [(k, bare d) | ((k, _), d) <- zip rsM dvs]
+                wT = ExistU w (cs, pcM) (ds, rcM)
+                fresh = ExistG w (cs, pcM) (ds, rcM) : map index cvs ++ map index dvs
+            when (any (\x -> occursIn o x || occursIn n x) (map (apply g) (ps1' <> map snd rsM))) $
+              subtypeError ta tb "Infinite type: a value would contain itself"
+            gD <- solveExistWith o wT fresh gC
+              >>= maybe (Left $ "Cannot articulate an existential missing from the context:" <+> pretty o) return
+            gE <- foldM (\gx (t, c) -> subtype scope (apply gx t) c gx) gD (zip ps1' cs)
+            gF <- foldM (\gx ((_, t), (_, d)) -> subtype scope (apply gx t) d gx) gE (zip rsM ds)
+            solveExist n (apply gF wT) gF >>= maybe (return gF) return
 
   -- Check gammaSolved first: if either is already solved, skip access2
   case (Map.lookup v1 (gammaSolved g4), Map.lookup v2 (gammaSolved g4)) of
@@ -1977,11 +2053,11 @@ instantiate scope (ExistU v1 (ps1, pc1) (rs1_expr, rc1)) (ExistU v2 (ps2, pc2) (
     (Just t1, _)       -> subtype scope t1 tb g4
     (_, Just t2)       -> subtype scope ta t2 g4
     _ -> case access2 v1 v2 g4 of
-      -- InstLReach: v1 is newer than v2, solve v1 = tbExpanded
-      Just _ -> solveExist v1 tbExpanded g4 >>= maybe (return g4) return
+      -- InstLReach: v1 is newer than v2
+      Just _ -> mergeInto v2 (ps2, pc2) (rs2, rc2) v1 g4
       Nothing -> case access2 v2 v1 g4 of
-        -- InstRReach: v2 is newer than v1, solve v2 = taExpanded
-        Just _ -> solveExist v2 taExpanded g4 >>= maybe (return g4) return
+        -- InstRReach: v2 is newer than v1
+        Just _ -> mergeInto v1 (ps1, pc1) (rs1, rc1) v2 g4
         Nothing -> return g4
 
 --  g1[Ea],>Eb,Eb |- [Eb/x]B <=: Ea -| g2,>Eb,g3
@@ -2029,16 +2105,15 @@ instantiateRecord scope namedOnLeft ta@(NamU _ _ _ rs1) tb@(ExistU v _ (rs2@(_ :
       keyset2 = Set.fromList $ map fst rs2
   _ <- case rc of
     -- if the existential keys are closed, the the ta and tb keys must be identical
-    Closed ->
-      if keyset1 == keyset2
-        then return ()
-        else subtypeError ta tb "Error in NamU with conflicting closed keysets"
-    -- if the existential keys are open, then all existential keys muts be in
+    Closed -> case (Set.toList (keyset2 Set.\\ keyset1), Set.toList (keyset1 Set.\\ keyset2)) of
+      ([], []) -> return ()
+      (k : _, _) -> missingField lhs rhs k
+      (_, k : _) -> subtypeError lhs rhs $ "The record has a field" <+> squotes (pretty k) <+> "the value lacks"
+    -- if the existential keys are open, then all existential keys must be in
     -- ta, but not vice versa
-    Open ->
-      if Set.isSubsetOf keyset2 keyset1
-        then return ()
-        else subtypeError ta tb "Error in NamU with conflicting open keysets"
+    Open -> case Set.toList (keyset2 Set.\\ keyset1) of
+      [] -> return ()
+      (k : _) -> missingField lhs rhs k
 
   g2 <-
     foldM
@@ -2060,11 +2135,12 @@ instantiateRecord scope namedOnLeft ta@(NamU _ _ _ rs1) tb@(ExistU v _ (rs2@(_ :
     foldM
       (\g' (k, vt) -> case lookup k rs1 of
                         Just tat -> fieldSub tat vt g'
-                        Nothing -> Right g')
+                        Nothing -> missingField lhs rhs k)
       g2
       extraRecs
   solveExist v ta g3 >>= maybe (subtypeError ta tb "Error in NamU with existential keys") return
   where
+    (lhs, rhs) = if namedOnLeft then (ta, tb) else (tb, ta)
     -- a named field against the existential's field, in the relation's
     -- own direction
     fieldSub nt et
@@ -2126,10 +2202,13 @@ propagateExistGRecords scope v t g = case t of
     foldM
       (\g' (k, vt) -> case lookup k taRecs of
                         Just tat -> subtype scope tat vt g'
-                        Nothing -> Right g')
+                        Nothing -> missingField t (ExistU v ([], Open) ([], Open)) k)
       g
       (accumulatedRecords v g)
   _ -> Right g
+
+missingField :: TypeU -> TypeU -> Key -> Either MDoc a
+missingField ta tb k = subtypeError ta tb $ "The record has no field" <+> squotes (pretty k)
 
 -- | Positional (tuple) counterpart of 'accumulatedRecords': the field-slot
 -- constraint lists attached to a bare existential @v@ through solved
@@ -2274,54 +2353,54 @@ solve v t
   | occursIn v t =
       Left $ "Infinite recursion, cannot substitute" <+> pretty v <+> "into type" <+> pretty t
   | otherwise = Right (SolvedG v t)
-  where
-    occursIn :: TVar -> TypeU -> Bool
-    occursIn v' (VarU v'') = v' == v''
-    occursIn _ (NatVarU _) = False
-    occursIn _ (IntVarU _) = False
-    occursIn v' (ExistU v'' (ps, _) (rs, _)) = v' == v'' || any (occursIn v') ps || any (occursIn v' . snd) rs
-    occursIn v' (ForallU _ t') = occursIn v' t'
-    occursIn v' (FunU ts t') = any (occursIn v') ts || occursIn v' t'
-    occursIn v' (AppU t' ts) = occursIn v' t' || any (occursIn v') ts
-    occursIn v' (NamU _ _ ps rs) = any (occursIn v') ps || any (occursIn v' . snd) rs
-    occursIn v' (EffectU _ t') = occursIn v' t'
-    occursIn v' (OptionalU t') = occursIn v' t'
-    occursIn _ (NatLitU _) = False
-    occursIn v' (NatAddU a b) = occursIn v' a || occursIn v' b
-    occursIn v' (NatMulU a b) = occursIn v' a || occursIn v' b
-    occursIn v' (NatSubU a b) = occursIn v' a || occursIn v' b
-    occursIn v' (NatDivU a b) = occursIn v' a || occursIn v' b
-    occursIn _ NatVoidU = False
-    occursIn _ (StrVarU _) = False
-    occursIn _ (StrLitU _) = False
-    occursIn v' (StrConcatU a b) = occursIn v' a || occursIn v' b
-    occursIn _ StrVoidU = False
-    occursIn _ (RecVarU _) = False
-    occursIn _ RecEmptyU = False
-    occursIn v' (RecExtendU _ a b) = occursIn v' a || occursIn v' b
-    occursIn v' (RecUnionU a b) = occursIn v' a || occursIn v' b
-    occursIn v' (RecDiffU a _) = occursIn v' a
-    occursIn v' (RecIntersectU a b) = occursIn v' a || occursIn v' b
-    occursIn v' (RecRestrictU a b) = occursIn v' a || occursIn v' b
-    occursIn v' (RecDiffListU a b) = occursIn v' a || occursIn v' b
-    occursIn _ RecVoidU = False
-    occursIn _ (ListVarU _) = False
-    occursIn v' (ListLitU es) = any (occursIn v') es
-    occursIn v' (ListAppU a b) = occursIn v' a || occursIn v' b
-    occursIn _ ListVoidU = False
-    occursIn _ (SetVarU _) = False
-    occursIn _ SetEmptyU = False
-    occursIn v' (SetLitU es) = any (occursIn v') es
-    occursIn v' (SetUnionU a b) = occursIn v' a || occursIn v' b
-    occursIn v' (SetInterU a b) = occursIn v' a || occursIn v' b
-    occursIn v' (SetDiffU a b) = occursIn v' a || occursIn v' b
-    occursIn _ SetVoidU = False
-    occursIn v' (KeysU r) = occursIn v' r
-    occursIn v' (ListToSetU l) = occursIn v' l
-    occursIn v' (SizeU c) = occursIn v' c
-    occursIn v' (ProjectFieldU r f) = occursIn v' r || occursIn v' f
-    occursIn v' (RecSingletonU k vt) = occursIn v' k || occursIn v' vt
-    occursIn v' (LabeledU _ t') = occursIn v' t'
+
+occursIn :: TVar -> TypeU -> Bool
+occursIn v' (VarU v'') = v' == v''
+occursIn _ (NatVarU _) = False
+occursIn _ (IntVarU _) = False
+occursIn v' (ExistU v'' (ps, _) (rs, _)) = v' == v'' || any (occursIn v') ps || any (occursIn v' . snd) rs
+occursIn v' (ForallU _ t') = occursIn v' t'
+occursIn v' (FunU ts t') = any (occursIn v') ts || occursIn v' t'
+occursIn v' (AppU t' ts) = occursIn v' t' || any (occursIn v') ts
+occursIn v' (NamU _ _ ps rs) = any (occursIn v') ps || any (occursIn v' . snd) rs
+occursIn v' (EffectU _ t') = occursIn v' t'
+occursIn v' (OptionalU t') = occursIn v' t'
+occursIn _ (NatLitU _) = False
+occursIn v' (NatAddU a b) = occursIn v' a || occursIn v' b
+occursIn v' (NatMulU a b) = occursIn v' a || occursIn v' b
+occursIn v' (NatSubU a b) = occursIn v' a || occursIn v' b
+occursIn v' (NatDivU a b) = occursIn v' a || occursIn v' b
+occursIn _ NatVoidU = False
+occursIn _ (StrVarU _) = False
+occursIn _ (StrLitU _) = False
+occursIn v' (StrConcatU a b) = occursIn v' a || occursIn v' b
+occursIn _ StrVoidU = False
+occursIn _ (RecVarU _) = False
+occursIn _ RecEmptyU = False
+occursIn v' (RecExtendU _ a b) = occursIn v' a || occursIn v' b
+occursIn v' (RecUnionU a b) = occursIn v' a || occursIn v' b
+occursIn v' (RecDiffU a _) = occursIn v' a
+occursIn v' (RecIntersectU a b) = occursIn v' a || occursIn v' b
+occursIn v' (RecRestrictU a b) = occursIn v' a || occursIn v' b
+occursIn v' (RecDiffListU a b) = occursIn v' a || occursIn v' b
+occursIn _ RecVoidU = False
+occursIn _ (ListVarU _) = False
+occursIn v' (ListLitU es) = any (occursIn v') es
+occursIn v' (ListAppU a b) = occursIn v' a || occursIn v' b
+occursIn _ ListVoidU = False
+occursIn _ (SetVarU _) = False
+occursIn _ SetEmptyU = False
+occursIn v' (SetLitU es) = any (occursIn v') es
+occursIn v' (SetUnionU a b) = occursIn v' a || occursIn v' b
+occursIn v' (SetInterU a b) = occursIn v' a || occursIn v' b
+occursIn v' (SetDiffU a b) = occursIn v' a || occursIn v' b
+occursIn _ SetVoidU = False
+occursIn v' (KeysU r) = occursIn v' r
+occursIn v' (ListToSetU l) = occursIn v' l
+occursIn v' (SizeU c) = occursIn v' c
+occursIn v' (ProjectFieldU r f) = occursIn v' r || occursIn v' f
+occursIn v' (RecSingletonU k vt) = occursIn v' k || occursIn v' vt
+occursIn v' (LabeledU _ t') = occursIn v' t'
 
 -- | Record a solved variable in the gamma map cache. When the solution is
 -- a structural alias @ExistU rv (ps, _) _@ whose slots came from a tuple
@@ -2394,28 +2473,52 @@ solveExist v t g = case Map.lookup v (gammaExist g) of
       }
 
 -- | Solve an ExistG and insert additional entries between the solved
--- position and older entries. O(log N + K) where K = length extras.
+-- position and the next older entry. O(log N + K) where K = length extras,
+-- plus O(B) for a band of B entries when the band is respread.
 -- The first element of extras gets the highest sub-slot (= newest).
 -- Returns Right Nothing if ExistG not found. Left on solve error.
+--
+-- The extras are spread over the free slots below the entry, so that an
+-- extra can itself be solved with extras later. When the free slots run
+-- out, every entry of the band -- the slots from the entry's owning
+-- multiple of 'slotSpacing' down to, but excluding, the next multiple --
+-- is spread evenly over the band again. A band boundary is the only slot
+-- 'gammaTrimAfter' and 'gammaSlot' ever hold, so moving entries within a
+-- band changes no saved slot.
 solveExistWith :: TVar -> TypeU -> [GammaIndex] -> Gamma -> Either MDoc (Maybe Gamma)
 solveExistWith v t extras g = case Map.lookup v (gammaExist g) of
   Nothing -> Right Nothing
   Just slot -> do
     solved <- solve v t
-    let g1 = cacheSolved v t $ g
-          { gammaContext = IntMap.insert slot solved (gammaContext g)
-          , gammaExist = Map.delete v (gammaExist g)
-          }
-        -- Insert extras at slots below the solved entry
-        insertExtra (g', subSlot) x =
-          ( g' { gammaContext = IntMap.insert subSlot x (gammaContext g')
-               , gammaExist = case x of
-                   ExistG ev _ _ -> Map.insert ev subSlot (gammaExist g')
-                   _ -> gammaExist g'
-               }
-          , subSlot - 1
-          )
-    return . Just $ fst $ foldl' insertExtra (g1, slot - 1) extras
+    let top = slotSpacing * ((slot + slotSpacing - 1) `div` slotSpacing)
+        bottom = top - slotSpacing
+        inBand s = s > bottom && s < top
+        older = maybe bottom (max bottom . fst) (IntMap.lookupLT slot (gammaContext g))
+        step = (slot - older) `div` (length extras + 1)
+        g1 = cacheSolved v t $ g {gammaExist = Map.delete v (gammaExist g)}
+    if step >= 1
+      then return . Just $ placeEntries g1 ((slot, solved) : zip [slot - step, slot - 2 * step ..] extras)
+      else do
+        let band = IntMap.toDescList . fst . IntMap.split top . snd $ IntMap.split bottom (gammaContext g)
+            ordered
+              | inBand slot = concat [if s == slot then solved : extras else [e] | (s, e) <- band]
+              | otherwise = extras <> map snd band
+            bandStep = slotSpacing `div` (length ordered + 1)
+        when (bandStep < 1) $
+          Left $ "Too many type variables to infer at once while articulating" <+> pretty v
+        let cleared = g1
+              { gammaContext = foldl' (flip IntMap.delete) (gammaContext g1) (map fst band)
+              , gammaExist = foldl' (flip Map.delete) (gammaExist g1) [ev | (_, ExistG ev _ _) <- band]
+              }
+            g2 = if inBand slot then cleared else placeEntries cleared [(slot, solved)]
+        return . Just $ placeEntries g2 (zip [top - bandStep, top - 2 * bandStep ..] ordered)
+  where
+    placeEntries = foldl' $ \g' (s, x) ->
+      g' { gammaContext = IntMap.insert s x (gammaContext g')
+         , gammaExist = case x of
+             ExistG ev _ _ -> Map.insert ev s (gammaExist g')
+             _ -> gammaExist g'
+         }
 
 -- | Look up a solved existential type variable. O(log N) via gammaSolved.
 lookupU :: TVar -> Gamma -> Maybe TypeU
@@ -2455,11 +2558,12 @@ gammaContextList :: Gamma -> [GammaIndex]
 gammaContextList g = map snd (IntMap.toDescList (gammaContext g))
 
 -- | Trim context back to the state it had at a given slot counter value.
--- Removes all entries with slot >= the given threshold.
+-- Removes every entry added since: those at or above the threshold, and
+-- the band just below it, which holds only the extras of the entry at the
+-- threshold (see 'solveExistWith').
 gammaTrimAfter :: Int -> Gamma -> Gamma
 gammaTrimAfter slotThreshold g =
-  let kept = fst (IntMap.split slotThreshold (gammaContext g))
-      removedSlots = IntMap.filterWithKey (\s _ -> s >= slotThreshold) (gammaContext g)
+  let (kept, removedSlots) = IntMap.partitionWithKey (\s _ -> s <= slotThreshold - slotSpacing) (gammaContext g)
       removedSolvedKeys = [v | (_, SolvedG v _) <- IntMap.toList removedSlots]
       removedExistKeys = [v | (_, ExistG v _ _) <- IntMap.toList removedSlots]
       solvedMap' = foldl' (flip Map.delete) (gammaSolved g) removedSolvedKeys

@@ -45,6 +45,8 @@ specTests =
     , localOption (mkTimeout 2000000) bindTests
     , localOption (mkTimeout 2000000) hostTests
     , localOption (mkTimeout 2000000) patTests
+    , localOption (mkTimeout 2000000) recTests
+    , localOption (mkTimeout 2000000) collTests
     , localOption (mkTimeout 2000000) lexTests
     , localOption (mkTimeout 2000000) sigTests
     , localOption (mkTimeout 2000000) baseTests
@@ -2116,6 +2118,43 @@ patTests =
           where
           x = 1
         |]
+    , rejectUser
+        "spec-pat-1-25"
+        [r|
+        module main (f)
+        f t = let (a, b) = t in .2 t
+        |]
+    , rejectNaming
+        "spec-pat-1-26"
+        ["tuple", "record"]
+        []
+        [r|
+        module main (f)
+        f t = (.0 t, .x t)
+        |]
+    , rejectNaming
+        "spec-pat-1-27"
+        ["tuple", "record"]
+        []
+        [r|
+        module main (f)
+        f t = (.x t, .0 t)
+        |]
+    , rejectUser
+        "spec-pat-1-28"
+        [r|
+        module main (g)
+        record R = R {x :: Int}
+        f t = (.x t, .0 t)
+        g :: R -> (Int, Int)
+        g r = f r
+        |]
+    , accept
+        "spec-pat-1-29"
+        [r|
+        module main (f)
+        f t = let (a, b) = t in .1 t
+        |]
     , accept
         "spec-pat-1-17"
         [r|
@@ -2427,6 +2466,198 @@ patTests =
         module main (g)
         g :: IFile [Int] -> [Int]
         g h = .[0:2] h
+        |]
+    ]
+
+recTests :: TestTree
+recTests =
+  testGroup
+    "REC"
+    [ rejectNaming
+        "spec-rec-5-2"
+        ["y"]
+        []
+        [r|
+        module main (g)
+        record R = R {x :: Int, z :: Str}
+        f t = (.x t, .y t)
+        g :: R -> (Int, Str)
+        g r = f r
+        |]
+    , rejectNaming
+        "spec-rec-5-3"
+        ["y"]
+        []
+        [r|
+        module main (g)
+        record I = I {x :: Int}
+        record O = O {a :: I}
+        f t = (.a.x t, .a.y t)
+        g :: O -> (Int, Int)
+        g o = f o
+        |]
+    , accept
+        "spec-rec-5-4"
+        [r|
+        module main (g)
+        record R = R {x :: Int, z :: Str}
+        f t = (.x t, .z t)
+        g :: R -> (Int, Str)
+        g r = f r
+        |]
+    , accept
+        "spec-rec-5-5"
+        [r|
+        module main (g)
+        record P a = P {v :: a, w :: Int}
+        f t = .v t
+        g :: P Str -> Str
+        g p = f p
+        |]
+    , rejectNaming
+        "spec-rec-5-6"
+        ["Str", "Int"]
+        []
+        [r|
+        module main (g)
+        f t = (.x t, .y t)
+        record R = R {x :: Int, y :: Str}
+        g :: R -> (Str, Int)
+        g r = f r
+        |]
+    , rejectNaming
+        "spec-rec-5-8"
+        ["y"]
+        []
+        [r|
+        module main (g)
+        record R = R {x :: Int}
+        f t = .y t
+        g :: Int -> Int
+        g n = f {x = n}
+        |]
+    , accept
+        "spec-rec-5-7"
+        [r|
+        module main (g)
+        record R = R {k0 :: Int, k1 :: Int, k2 :: Int, k3 :: Int, k4 :: Int, k5 :: Int, k6 :: Int, k7 :: Int, k8 :: Int, k9 :: Int, k10 :: Int, k11 :: Int, k12 :: Int, k13 :: Int, k14 :: Int, k15 :: Int}
+        f t = [.k0 t, .k1 t, .k2 t, .k3 t, .k4 t, .k5 t, .k6 t, .k7 t, .k8 t, .k9 t, .k10 t, .k11 t, .k12 t, .k13 t, .k14 t, .k15 t]
+        g :: R -> [Int]
+        g r = f r
+        |]
+    ]
+
+collTests :: TestTree
+collTests =
+  testGroup
+    "COLL"
+    [ rejectNaming
+        "spec-coll-7-1"
+        ["arity"]
+        []
+        [r|
+        module main (g)
+        f t = .2 t
+        g :: (Int, Str) -> Int
+        g p = f p
+        |]
+    , rejectUser
+        "spec-coll-7-2"
+        [r|
+        module main (g)
+        f t = .0 t
+        g :: (Int, Str) -> Str
+        g p = f p
+        |]
+    , accept
+        "spec-coll-7-3"
+        [r|
+        module main (g)
+        f t = .0 t
+        g :: (Int, Str) -> Int
+        g p = f p
+        |]
+    , rejectNaming
+        "spec-coll-7-4"
+        ["Infinite"]
+        []
+        [r|
+        module main (f)
+        f t = [.0 t, t]
+        |]
+    , rejectUser
+        "spec-coll-7-5"
+        [r|
+        module main (f)
+        f t = (.0 t, t 1)
+        |]
+    , rejectUser
+        "spec-coll-7-6"
+        [r|
+        module main (g)
+        h t = (.0 = "a") t
+        g :: (Int, Int) -> (Int, Int)
+        g p = h p
+        |]
+    , accept
+        "spec-coll-7-7"
+        [r|
+        module main (g)
+        h t = .1 ((.0 = 5) t)
+        g :: (Int, Str) -> Str
+        g p = h p
+        |]
+    , accept
+        "spec-coll-7-8"
+        [r|
+        module main (f)
+        type Pair a = (a, a)
+        f :: Pair Int -> Int
+        f p = .0 p
+        |]
+    , rejectUser
+        "spec-coll-7-9"
+        [r|
+        module main (g)
+        f t = (.0 t, .1 t)
+        g :: (Int, Str) -> (Str, Int)
+        g p = f p
+        |]
+    , accept
+        "spec-coll-7-10"
+        [r|
+        module main (g)
+        f t = [.0 t, .1 t, .2 t, .3 t, .4 t, .5 t, .6 t, .7 t, .8 t, .9 t, .10 t, .11 t, .12 t, .13 t, .14 t, .15 t]
+        g :: (Int, Int, Int, Int, Int, Int, Int, Int, Int, Int, Int, Int, Int, Int, Int, Int) -> [Int]
+        g p = f p
+        |]
+    , rejectNaming
+        "spec-coll-7-11"
+        ["tuple"]
+        []
+        [r|
+        module main (g)
+        f t = .0 t
+        g :: [Int] -> Int
+        g p = f p
+        |]
+    , rejectNaming
+        "spec-coll-7-12"
+        ["arity"]
+        []
+        [r|
+        module main (g)
+        f t = .3 t
+        g :: Int
+        g = f (1, 2, 3)
+        |]
+    , rejectUser
+        "spec-coll-7-13"
+        [r|
+        module main (g)
+        h t = (.0 = "a") t
+        g :: (Int, Int) -> (Str, Int)
+        g p = h p
         |]
     ]
 

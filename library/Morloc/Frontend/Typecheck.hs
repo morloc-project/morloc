@@ -975,6 +975,7 @@ synthE _ g0 (AppS (AnnoS fgidx fcidx (ExeS (PatCall (PatternStruct s)))) [e0]) =
           f1 = AnnoS (Idx fgidx ft) fcidx (ExeS (PatCall (PatternStruct s)))
       return (g2, apply g2 retType, AppS f1 [e0Syn])
     _ -> do
+      rejectListSelectorTarget fgidx s rcvResolved
       (g1, datType) <- selectorType gsyn s
       retType <- return $ case selectorGetter datType s of
         [] -> error "Illegal empty selection"
@@ -2695,7 +2696,7 @@ missingInstanceHint scope inferred expected
 
     hasExistHead :: TypeU -> Bool
     hasExistHead (AppU (ExistU _ _ _) _) = True
-    hasExistHead (ExistU _ _ _)          = True
+    hasExistHead (ExistU _ ([], _) ([], _)) = True
     hasExistHead _                       = False
 
 -- | The Nat arguments of a type (@Matrix 2 4 Int@ gives @[2, 4]@), taken

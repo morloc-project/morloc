@@ -439,11 +439,55 @@ assertSubtypeBad msg gs a b = testCase msg $ do
     Left _ -> return ()
     Right _ -> assertFailure $ "Expected subtype rejection for " <> show a <> " <: " <> show b
 
+-- | Every unsolved existential the index names is the entry at its slot,
+-- and every cached solution is an entry of the context.
+assertSubtypeIndexed :: String -> [GammaIndex] -> TypeU -> TypeU -> TestTree
+assertSubtypeIndexed msg gs a b = testCase msg $
+  case MTI.subtype Map.empty a b (listToGamma gs) of
+    Left e -> assertFailure (show e)
+    Right g -> do
+      mapM_
+        (\(v, s) -> case IntMap.lookup s (gammaContext g) of
+            Just (ExistG v' _ _) | v' == v -> return ()
+            other -> assertFailure $ show v <> " is indexed at a slot holding " <> show other)
+        (Map.toList (gammaExist g))
+      let solvedInContext = Set.fromList [v | SolvedG v _ <- IntMap.elems (gammaContext g)]
+      mapM_
+        (\v -> assertBool (show v <> " is solved but its entry is gone") (Set.member v solvedInContext))
+        (Map.keys (gammaSolved g))
+
+-- | A Gamma holding the given entries at the given slots.
+slotGamma :: [(Int, GammaIndex)] -> Gamma
+slotGamma entries =
+  (listToGamma [])
+    { gammaSlot = MTI.slotSpacing * (1 + maximum (0 : map ((`div` MTI.slotSpacing) . fst) entries))
+    , gammaContext = IntMap.fromList entries
+    , gammaExist = Map.fromList [(v, s) | (s, ExistG v _ _) <- entries]
+    }
+
+-- | Articulating an existential whose free slots are used up keeps every
+-- entry indexed and in order, with the new entries just older than it.
+assertArticulatedInOrder :: String -> [(Int, GammaIndex)] -> TVar -> [TVar] -> TestTree
+assertArticulatedInOrder msg entries v older = testCase msg $
+  case MTI.subtype Map.empty (ExistU v ([], Open) ([], Open)) (FunU [VarU (TV "A")] (VarU (TV "B"))) (slotGamma entries) of
+    Left e -> assertFailure (show e)
+    Right g -> do
+      mapM_
+        (\(x, s) -> case IntMap.lookup s (gammaContext g) of
+            Just (ExistG x' _ _) | x' == x -> return ()
+            other -> assertFailure $ show x <> " is indexed at a slot holding " <> show other)
+        (Map.toList (gammaExist g))
+      let names = [case e of ExistG x _ _ -> x; SolvedG x _ -> x; _ -> TV "?" | e <- IntMap.elems (gammaContext g)]
+          below = takeWhile (/= v) names
+      assertEqual "entry count" (length entries + 2) (IntMap.size (gammaContext g))
+      assertEqual "older entries keep their order" older (filter (`elem` older) below)
+      assertBool "new entries are just older than the articulated entry" $
+        all (`notElem` older) (take 2 (reverse below))
+
 -- | Convert a list of GammaIndex (newest first) to a Gamma with IntMap.
--- Uses slot spacing of 256 to match production code.
 listToGamma :: [GammaIndex] -> Gamma
 listToGamma gs =
-  let spacing = 256
+  let spacing = MTI.slotSpacing
       n = length gs
       -- Newest entry gets highest slot
       indexed = zip [spacing * (n - 1), spacing * (n - 2) .. 0] gs
@@ -591,6 +635,44 @@ subtypeTests =
       "Test subtype within context"
       [ -- basic general cases
         assertSubtypeGamma "G -| A <: A |- G" [] a a []
+      , assertSubtypeIndexed
+          "articulating a nested function type keeps every existential at its own slot"
+          [eag]
+          ea
+          (fun [fun [a, b], a, b])
+      , assertArticulatedInOrder
+          "articulating at a band top with no free slots respreads the band"
+          [ (MTI.slotSpacing, ExistG (TV "x1") ([], Open) ([], Open))
+          , (MTI.slotSpacing - 1, ExistG (TV "y1") ([], Open) ([], Open))
+          , (MTI.slotSpacing - 2, ExistG (TV "y2") ([], Open) ([], Open))
+          , (0, ExistG (TV "x2") ([], Open) ([], Open))
+          ]
+          (TV "x1")
+          [TV "x2", TV "y2", TV "y1"]
+      , assertArticulatedInOrder
+          "articulating inside a band with no free slots respreads the band"
+          [ (MTI.slotSpacing, ExistG (TV "x0") ([], Open) ([], Open))
+          , (MTI.slotSpacing - 1, ExistG (TV "x1") ([], Open) ([], Open))
+          , (MTI.slotSpacing - 2, ExistG (TV "y1") ([], Open) ([], Open))
+          , (0, ExistG (TV "x2") ([], Open) ([], Open))
+          ]
+          (TV "x1")
+          [TV "x2", TV "y1"]
+      , testCase "a trim at a saved slot drops the extras of entries added after it" $ do
+          let g0 = listToGamma [eag]
+              saved = gammaSlot g0
+              g1 = g0 MTI.+> ExistG (TV "z") ([], Open) ([], Open)
+          case MTI.subtype Map.empty (exist "z") (fun [a, b]) g1 of
+            Left e -> assertFailure (show e)
+            Right g2 -> do
+              let g3 = MTI.gammaTrimAfter saved g2
+              assertEqual "unsolved entries" [TV "x1"] (Map.keys (gammaExist g3))
+              assertEqual "context entries" 1 (IntMap.size (gammaContext g3))
+      , assertSubtypeIndexed
+          "articulating a doubly nested function type keeps every existential at its own slot"
+          [eag]
+          ea
+          (fun [fun [fun [a, b], a, b], fun [a, b], a, b])
       , assertSubtypeGamma "<a>, <b> -| <a> <: <b> |- <a>:<b>, <b>" [eag, ebg] ea eb [solvedA eb, ebg]
       , assertSubtypeGamma "<a>, <b> -| <b> <: <a> |- <a>:<b>, <b>" [eag, ebg] ea eb [solvedA eb, ebg]
       , assertSubtypeGamma "G -| (A -> B) <: (A -> B) |- G" [] (fun [a, b]) (fun [a, b]) []
