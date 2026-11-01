@@ -25,6 +25,42 @@ Changed
    longer share it, and a body may not claim it equals another length
  * A label on an unsigned type (`n@U64`) is known to be non-negative, so
    `width :: n@U64 -> Int` may pass `n` where a dimension is expected
+ * A dotless import (`import m`) names only an installed module; import a
+   local module with a leading dot (`import .m`). When no module is
+   installed and a local file has the name, the build fails suggesting both
+   fixes rather than downloading a registry package of that name
+ * A match that misses a value is an error naming what it misses; a clause
+   that can never run is a warning
+ * A tuple or record pattern must fit its value, also where the value's
+   type is inferred: a tuple of exactly the pattern's width, a record with
+   its keys. `\(a, b)` applied to a triple is an error
+ * A binding whose computation needs its own value (`a = b + 1; b = a + 1`)
+   is an error; a value in the `where` block of a recursive function is
+   accepted
+ * Several implementations of one term are rejected only where they
+   provably differ
+ * `\'` and `\"` are valid escapes in every string literal
+
+Syntax and typing fixes
+ * A block opened mid-line ends before a `,`, `;`, `:`, `|` or `where` that
+   belongs to the enclosing construct: `(do f x, 1)`,
+   `t x = do f x where ...`
+ * String literals: escapes after an interpolation hole are decoded, every
+   multiline literal is dedented, and a brace inside a nested string or
+   record in a hole no longer ends the hole
+ * A getter on a value whose type is inferred keeps every field and tuple
+   slot it reads: a caller passing a record without one is rejected, naming
+   the field, instead of failing at run time
+ * Fix crashes on cyclic value bindings and on comparing a lambda
+   implementation with an alias
+ * An `@rsize` that leaves no argument for the last call group is rejected
+   at the source declaration
+
+Diagnostics
+ * User errors that have only a source position, parse errors among them,
+   are no longer reported as compiler bugs
+ * A duplicate constructor in a file with no `module` header is reported as
+   one
 
 0.111.1 [2026-10-27]
 --------------------
