@@ -48,11 +48,13 @@ data ParseError = ParseError
   , peMsg :: !String
   , peExpected :: ![String]
   , peSourceLines :: ![Text]
+  , peSyntax :: !Bool
+  -- ^ the parser rejected a token the source holds, not one layout inserted
   }
   deriving (Show)
 
 showParseError :: String -> ParseError -> String
-showParseError filename (ParseError pos msg expected srcLines) =
+showParseError filename (ParseError pos msg expected srcLines _) =
   let ln = posLine pos
       col = posCol pos
       header = filename ++ ":" ++ show ln ++ ":" ++ show col ++ ": " ++ msg
@@ -151,7 +153,7 @@ type D a = State.StateT DState (Either ParseError) a
 dfail :: Pos -> String -> D a
 dfail pos msg = do
   srcLines <- State.gets dsSourceLines
-  State.lift (Left (ParseError pos msg [] srcLines))
+  State.lift (Left (ParseError pos msg [] srcLines False))
 
 dwarn :: [Text] -> D ()
 dwarn [] = return ()

@@ -14,6 +14,9 @@ class/instance bodies, do-blocks).
 -}
 module Morloc.Frontend.Lexer
   ( lexMorloc
+  , lexMorlocUnlaid
+  , lexMorlocUnlaidFrom
+  , insertLayoutWith
   , LexError (..)
   , showLexError
   ) where
@@ -40,11 +43,21 @@ group annotation tokens (for command group support in export lists).
 -}
 lexMorloc :: String -> Text -> Either LexError ([Located], Map.Map Pos [Text], [Located])
 lexMorloc filename input = do
-  rawTokens <- lexRaw filename (T.unpack input) (startPos filename)
+  (filtered, docMap, groupToks) <- lexMorlocUnlaid filename input
+  return (insertLayout filtered, docMap, groupToks)
+
+-- | As 'lexMorloc', before layout: the tokens 'insertLayoutWith' lays out.
+lexMorlocUnlaid :: String -> Text -> Either LexError ([Located], Map.Map Pos [Text], [Located])
+lexMorlocUnlaid filename = lexMorlocUnlaidFrom (startPos filename) filename
+
+-- | As 'lexMorlocUnlaid', with the first character at the given position.
+lexMorlocUnlaidFrom :: Pos -> String -> Text -> Either LexError ([Located], Map.Map Pos [Text], [Located])
+lexMorlocUnlaidFrom start filename input = do
+  rawTokens <- lexRaw filename (T.unpack input) start
   let rawTokens' = distinguishGetterDots rawTokens
   _ <- rejectChainAfterGroupAccessor rawTokens'
   let (docMap, groupToks, filtered) = extractDocstrings rawTokens'
-  return (insertLayout filtered, docMap, groupToks)
+  return (filtered, docMap, groupToks)
 
 -- | Reject the sequence `.(...).<chain>` -- a group accessor with a
 -- trailing chained getter. The CST's @CABGroup@ intentionally has no
@@ -992,8 +1005,14 @@ isLayoutKeyword TokLet = True
 isLayoutKeyword _ = False
 
 insertLayout :: [Located] -> [Located]
-insertLayout [] = []
-insertLayout toks = beginTopLevel toks
+insertLayout = insertLayoutWith Map.empty
+
+-- | Layout that also closes, before the token at each position, up to that
+-- many implicit blocks innermost on the stack, never the module body: the
+-- blocks that token cannot continue (LEX-4).
+insertLayoutWith :: Map.Map Pos Int -> [Located] -> [Located]
+insertLayoutWith _ [] = []
+insertLayoutWith forced toks = beginTopLevel toks
   where
     -- Handle the top-level layout. The top-level body (after module header
     -- or at the start for implicit main) gets a layout context.
@@ -1090,6 +1109,7 @@ insertLayout toks = beginTopLevel toks
     emitFirstToken :: [LayoutContext] -> Located -> [Located] -> [Located]
     emitFirstToken ctxs tok rest
       | locToken tok == TokEOF = closingBraces ctxs [tok]
+      | Just _ <- Map.lookup (locPos tok) forced = processToken ctxs tok rest
       | otherwise = emitToken ctxs tok rest
 
     -- Main processing loop
@@ -1097,9 +1117,21 @@ insertLayout toks = beginTopLevel toks
     process ctxs [] = closingBraces ctxs []
     process ctxs (t : rest) = processToken ctxs t rest
 
-    -- Process a single token with the current context stack
     processToken :: [LayoutContext] -> Located -> [Located] -> [Located]
-    processToken ctxs tok rest
+    processToken ctxs tok rest = case Map.lookup (locPos tok) forced of
+      Just k -> closeForced k ctxs
+      Nothing -> processToken' ctxs tok rest
+      where
+        closeForced n (c : cs@(_ : _))
+          | n > 0, implicit c = Located (locPos tok) TokVRBrace "" : closeForced (n - 1) cs
+        closeForced _ cs = processToken' cs tok rest
+        implicit (IndentCtx _) = True
+        implicit (LetCtx _) = True
+        implicit _ = False
+
+    -- Process a single token with the current context stack
+    processToken' :: [LayoutContext] -> Located -> [Located] -> [Located]
+    processToken' ctxs tok rest
       -- EOF: close all contexts
       | locToken tok == TokEOF = closingBraces ctxs [tok]
       -- Closing bracket: force-close any layout block (do/let) opened

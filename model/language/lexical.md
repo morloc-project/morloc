@@ -30,14 +30,19 @@ literal words `True False Null Inf NaN` cannot be used as names.
 
 ### LEX-4 Blocks are delimited by indentation or by explicit braces
 Intent: ruled 2026-10-14
-Tests: spec-lex-4-1, spec-lex-4-2
-Code: deviates (issues/syntax.md)
+Tests: spec-lex-4-1, spec-lex-4-2, spec-lex-4-3, spec-lex-4-4, spec-lex-4-5, spec-lex-4-6
+Code: conforms 2026-11-01
 
 The bindings after `where`, `let` and `do` form a block delimited by
 indentation, or by `{` and `}` with `;` separators when `{` directly follows
 the keyword. After `do`, a `{` followed by a lowercase name and `=` begins a
 record literal, the first statement of an indented block, since no
-statement begins with `name =`.
+statement begins with `name =`. An indented block also ends before the
+first token that cannot continue it, other than the module body's: in
+`(do f x, 1)` the `,`, in `? c = do f x : g x` the `:`, in
+`do { y <- do f x; y }` the `;`, in `t x = do f x where ...` the `where`. A
+program that parses without ending a block this way means what its
+indentation says. An annotation `do f x :: T` annotates the last statement.
 
 ### LEX-5 Whitespace around `@` and `-` changes the token
 Intent: proposed

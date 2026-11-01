@@ -2671,6 +2671,76 @@ lexTests =
         d x = do { y = x; y }
         |]
     , accept
+        "spec-lex-4-3"
+        [r|
+        module main (a, b, c, d, e, f, g, h)
+        effect IO
+        record R where
+          on :: Bool
+          n :: Int
+        source Py from "f.py" ("bump")
+        bump :: Int -> <IO> Int
+        a :: Int -> (<IO> Int, Int)
+        a x = (do bump x, 1)
+        b :: Bool -> <IO> Int
+        b t = ? t = do bump 0 : do bump 1
+        c :: Int -> <IO> Int
+        c x = do { k <- bump x; r <- do bump k; r }
+        d :: Int -> <IO> Int
+        d x = do bump y where y = x
+        e :: Int -> (<IO> R, Int)
+        e x = (do {on = True, n = x}, 1)
+        f :: Int -> <IO> Int
+        f y = let a = do bump y in a
+        g :: Bool -> Bool -> <IO> Int
+        g s t = ? s = do bump 0 ? t = bump 1 : bump 2
+        data T = A | B
+        h :: T -> <IO> Int
+        h | A = do bump 0 | B = bump 1
+        |]
+    , accept
+        "spec-lex-4-4"
+        [r|
+        module main (a, b)
+        effect IO
+        record R where
+          on :: Bool
+          n :: Int
+        source Py from "f.py" ("bump")
+        bump :: Int -> <IO> Int
+        effect Err
+        bumpE :: Int -> <IO, Err> Int
+        a :: Int -> <IO, Err> Int
+        a x = (do bumpE x :: <IO, Err> Int)
+        b :: Bool -> Int -> <IO> Int
+        b t x = do
+          ? t = do bump x
+          : bump 0
+        |]
+    , accept
+        "spec-lex-4-6"
+        [r|
+        effect IO
+        source Py from "f.py" ("bump")
+        bump :: Int -> <IO> Int
+        (do bump 1, 2)
+        |]
+    , rejectNaming
+        "spec-lex-4-5"
+        ["unexpected", "further"]
+        []
+        [r|
+        module main (a)
+        effect IO
+        record R where
+          on :: Bool
+          n :: Int
+        source Py from "f.py" ("bump")
+        bump :: Int -> <IO> Int
+        a :: Int -> (<IO> Int, Int)
+        a x = (do bump x, , 1)
+        |]
+    , accept
         "spec-src-2-1"
         [r|
         module main (f)

@@ -16,7 +16,7 @@ import qualified Data.Scientific as DS
 import Data.List (sortBy, foldl')
 import qualified Control.Monad.State.Strict as State
 import Morloc.Frontend.Token
-import Morloc.Frontend.Lexer (LexError (..), lexMorloc, showLexError)
+import Morloc.Frontend.Lexer (LexError (..), insertLayoutWith, lexMorloc, lexMorlocUnlaid, lexMorlocUnlaidFrom, showLexError)
 import Morloc.Frontend.CST
 import qualified Morloc.Frontend.CST as CST
 import Morloc.Frontend.Desugar (DState(..), D, ParseError(..), showParseError, desugarProgram, desugarExpr)
@@ -1213,7 +1213,7 @@ parseKindE tok = case getName tok of
     srcLines <- State.gets psSourceLines
     State.lift (Left (ParseError (locPos tok)
       ("unknown kind " ++ show other
-        ++ "; expected one of Type, Nat, Str, Rec, List, Set") [] srcLines))
+        ++ "; expected one of Type, Nat, Str, Rec, List, Set") [] srcLines False))
 
 -- Build a Constraint, recognising primitive heads (Member / Subset /
 -- Disjoint) and routing typeclass-shaped constraints to the existing
@@ -1264,6 +1264,10 @@ applyType f x = AppU f [x]
 -- Error handling
 --------------------------------------------------------------------
 
+-- | A token the layout pass inserted.
+isVirtual :: Token -> Bool
+isVirtual t = t == TokVLBrace || t == TokVRBrace || t == TokVSemi
+
 parseError :: ([Located], [String]) -> P a
 parseError ([], expected) = do
   srcLines <- State.gets psSourceLines
@@ -1271,10 +1275,10 @@ parseError ([], expected) = do
   let endLine = max 1 (length srcLines)
       endCol = 1 + maybe 0 T.length (lastMaybe srcLines)
       lastMaybe xs = if null xs then Nothing else Just (last xs)
-  State.lift (Left (ParseError (Pos endLine endCol (maybe "" id path)) "unexpected end of input" expected srcLines))
+  State.lift (Left (ParseError (Pos endLine endCol (maybe "" id path)) "unexpected end of input" expected srcLines False))
 parseError (Located pos tok _ : _, expected) = do
   srcLines <- State.gets psSourceLines
-  State.lift (Left (ParseError pos ("unexpected " ++ showToken tok) expected srcLines))
+  State.lift (Left (ParseError pos ("unexpected " ++ showToken tok) expected srcLines (not (isVirtual tok))))
 
 -- Reject infix precedence outside [0,9]. Caret on the INTEGER token.
 checkFixityPrecedence :: Located -> P ()
@@ -1284,7 +1288,7 @@ checkFixityPrecedence tok =
         then do
           srcLines <- State.gets psSourceLines
           State.lift (Left (ParseError (locPos tok)
-            ("infix precedence must be in [0,9], got " ++ show n) [] srcLines))
+            ("infix precedence must be in [0,9], got " ++ show n) [] srcLines False))
         else return ()
 
 -- Build an effect-row 'EffectSet' from parsed items: any number of
@@ -1310,6 +1314,7 @@ mkEffectRow ltok items =
                     "an effect row may contain at most one effect variable"
                     []
                     srcLines
+                    False
                 )
             )
 
@@ -1324,7 +1329,7 @@ checkRecordKeys = go Set.empty
       | Set.member k seen = do
           srcLines <- State.gets psSourceLines
           State.lift (Left (ParseError (CST.startPos e)
-            ("duplicate field in record literal: " ++ T.unpack (unKey k)) [] srcLines))
+            ("duplicate field in record literal: " ++ T.unpack (unKey k)) [] srcLines False))
       | otherwise = go (Set.insert k seen) rest
 
 -- Reject duplicate field names in a record / object declaration, in either
@@ -1338,7 +1343,7 @@ checkRecordTypeKeys _ = go Set.empty
       | Set.member k seen = do
           srcLines <- State.gets psSourceLines
           State.lift (Left (ParseError (locPos tok)
-            ("duplicate field in record type declaration: " ++ T.unpack (unKey k)) [] srcLines))
+            ("duplicate field in record type declaration: " ++ T.unpack (unKey k)) [] srcLines False))
       | otherwise = go (Set.insert k seen) rest
 
 repClose :: P ()
@@ -1356,7 +1361,7 @@ nestedLabel tok t = do
       srcLines <- State.gets psSourceLines
       let msg = "the label '" ++ T.unpack (getName tok) ++ "@' binds nothing here: a label names a whole"
              ++ " argument of a signature, or a header field of a newtype's representation"
-      State.lift (Left (ParseError (locPos tok) msg [] srcLines))
+      State.lift (Left (ParseError (locPos tok) msg [] srcLines False))
 
 -- Reject `{x :: T}` inside type-level record literals. The literal form
 -- binds fields with `=` (mirroring morloc's term-level `{x = 3}` record
@@ -1369,7 +1374,7 @@ recLiteralColonColonError nameTok = do
   let msg = "type-level record literals use `=` to bind fields, not `::`\n"
          ++ "  try: {" ++ T.unpack (getName nameTok) ++ " = <type>, ...}\n"
          ++ "  `::` is for declarations (e.g. `x :: Int`, `record R where { x :: Int }`)"
-  State.lift (Left (ParseError (locPos nameTok) msg [] srcLines))
+  State.lift (Left (ParseError (locPos nameTok) msg [] srcLines False))
 
 -- Reject an effect declaration whose name is not an uppercase
 -- identifier. An effect name is lexed exactly like a type or class
@@ -1384,7 +1389,7 @@ effectNameError nameTok = do
       msg = "Illegal effect name '" ++ nmS ++ "'\n"
          ++ "  The first character must be uppercase\n"
          ++ "  try: `effect " ++ cap ++ "` (or `escapable effect " ++ cap ++ "`)"
-  State.lift (Left (ParseError (locPos nameTok) msg [] srcLines))
+  State.lift (Left (ParseError (locPos nameTok) msg [] srcLines False))
 
 --------------------------------------------------------------------
 -- Desugar bridge
@@ -1427,6 +1432,24 @@ fromDState ps ds = ps
   , psStreamElems = dsStreamElems ds
   , psMatchSites = dsMatchSites ds
   }
+
+-- | Parse tokens laid out to close an implicit block before a token that
+-- cannot continue it (LEX-4). On a syntax error at a token of the source,
+-- the tokens are laid out again with one more block closed before it, until
+-- the parse succeeds or closing another block there changes nothing; the
+-- error is then the last attempt's.
+parseClosing :: ([Located] -> Either ParseError a) -> [Located] -> Either ParseError a
+parseClosing run unlaid = go Map.empty (insertLayoutWith Map.empty unlaid)
+  where
+    go forced laid = case run laid of
+      Right x -> Right x
+      Left e
+        | peSyntax e
+        , forced' <- Map.insertWith (+) (pePos e) 1 forced
+        , laid' <- insertLayoutWith forced' unlaid
+        , laid' /= laid ->
+            go forced' laid'
+        | otherwise -> Left e
 
 -- | Run parse + desugar
 parseAndDesugar :: PState -> [Located] -> Either ParseError ([ExprI], PState)
@@ -1522,8 +1545,54 @@ readProgram _moduleName modulePath sourceCode pstate dag = do
               finalState = s2 { psExpIndex = i3 + 1 }
               dag'' = Map.insert (MV "main") (modI, []) dag'
           return (dag'', finalState)
-        Left _ ->
-          Left (pePos origErr, showParseError filename' origErr)
+        Left _ -> closingBlocks filename' origErr
+
+    -- LEX-4: a block also ends before a token that cannot continue it. Only
+    -- a program that no strategy above parses is laid out again, so every
+    -- program that parses without closing a block parses as before. A
+    -- program that still fails is reported as before, with where parsing
+    -- fails once its blocks end when that is further on.
+    closingBlocks filename' origErr =
+      case (lexMorlocUnlaid filename' sourceCode, lexMorlocUnlaidFrom (Pos 0 1 filename') filename' ("module main (*)\n" <> sourceCode)) of
+        (Right (unlaid, docMap', groupToks'), Right (wunlaid, wdocMap, wgroupToks)) ->
+          let ps = pstate { psModulePath = modulePath, psDocMap = docMap', psSourceLines = T.lines sourceCode }
+              psW = ps { psDocMap = wdocMap }
+              plain laid = (\r -> (r, laid, groupToks')) <$> parseAndDesugar ps laid
+              -- the header holds line 0 while it is laid out, so that every
+              -- position of the source is its own; it is then read as line 1,
+              -- as in the wrapped strategy above
+              wrapped laid0 =
+                let laid = map onHeaderLine laid0
+                    tried l = (\r -> (r, l, wgroupToks)) <$> parseAndDesugar psW l
+                in case tried laid of
+                  Right x -> Right x
+                  Left e1 -> case tried <$> patchForTrailingExpr laid of
+                    Just (Right x) -> Right x
+                    Just (Left e2) | pePos e2 > pePos e1 -> Left e2
+                    _ -> Left e1
+          in case parseClosing plain unlaid of
+            Right ((result, finalState), laid, groups) -> Right (withModules laid groups result, finalState)
+            Left err1 -> case parseClosing wrapped wunlaid of
+              Right ((result, finalState), laid, groups) -> Right (withModules laid groups result, finalState)
+              Left err2 -> report (if pePos err2 > pePos err1 then err2 else err1)
+        _ -> report origErr
+      where
+        report err
+          | pePos err > pePos origErr =
+              Left
+                ( pePos origErr
+                , showParseError filename' origErr
+                    <> "\n\nWhere an indented block ends before a token that cannot continue it,"
+                    <> " parsing gets further, and fails here:\n"
+                    <> showParseError filename' err
+                )
+          | otherwise = Left (pePos origErr, showParseError filename' origErr)
+        onHeaderLine t
+          | posLine (locPos t) == 0 = t {locPos = (locPos t) {posLine = 1}}
+          | otherwise = t
+
+    withModules laid groupToks' result =
+      attachGroupAnnotations laid groupToks' (foldl addModule dag result)
 
     addModule d e@(ExprI _ (ModE n es)) =
       let imports = [(importModuleName i', i') | (ExprI _ (ImpE i')) <- es]
