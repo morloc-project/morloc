@@ -83,7 +83,7 @@ the build.
 ### SRC-8 A program refuses to run a sourced file that changed after its build
 Intent: ruled 2026-11-01
 Code: conforms 2026-11-01
-Tests: spec-src-8-1, spec-src-8-2
+Tests: spec-src-8-1, spec-src-8-2, spec-src-8-3
 
 A pool of a language that loads its sources when it starts (Python, R)
 records in the manifest each file it sources, by absolute path, with a
@@ -94,3 +94,10 @@ file and saying to rebuild. A result is then never computed, or cached,
 from code other than what was built. A compiled language's sources are
 fixed into its build and are not checked. Files that a sourced file loads
 in turn are not covered (../runtime/issues/cache.md).
+
+An installed program records the copies of its package's files mirrored
+into its install root, which are what it runs, so editing the package does
+not stop it. Its manifest also records how to repeat its build. After
+`morloc install --force`, every installed program whose recorded files no
+longer match is rebuilt that way; the install fails if one cannot be
+rebuilt. `--no-rebuild` names those programs instead.

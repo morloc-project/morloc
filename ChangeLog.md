@@ -18,8 +18,9 @@ New features
 Changed
  * A program refuses to run when a Python or R file it sources has changed
    or gone since it was built, naming the file; rebuild it with `morloc
-   make`. This includes the files of an installed module reinstalled after
-   the build
+   make`
+ * `morloc install --force` rebuilds the installed programs whose sourced
+   files the install changed; `--no-rebuild` lists them instead
  * A label inside a type other than a whole signature argument or a newtype
    header is an error; it was silently ignored
  * The length of a run-time value, or a label whose argument is not a

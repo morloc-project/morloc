@@ -74,6 +74,7 @@ module Morloc.Namespace.State
 
     -- * System
   , SysCommand (..)
+  , RebuildRecipe (..)
   , PoolToolchain (..)
   , Script (..)
 
@@ -241,6 +242,9 @@ data MorlocState = MorlocState
   -- Set to @--name@ if given, else the source-file basename. @Nothing@ falls
   -- back to the outfile/module name (this is how eval reuses its @--save@ name).
   , stateWrapperSpecs :: Maybe [WrapperSpec]
+  , stateRebuild :: Maybe RebuildRecipe
+    -- ^ How to repeat this build, recorded in an installed program's manifest
+    -- so a reinstall that changes its sources can rebuild it
   -- ^ Exact set of launcher wrappers to emit. @Nothing@ = default (a single
   -- CLI wrapper named after the program); @Just []@ = emit none (@--no-cli@
   -- with no other output flags).
@@ -1044,6 +1048,16 @@ data Socket = Socket
   }
   deriving (Show)
 
+-- | A @morloc@ invocation that repeats a build: run with @rebuildArgs@ in
+-- @rebuildCwd@, with @MORLOC_LANG_PARAMS@ set to @rebuildLangParamsEnv@ (unset
+-- when 'Nothing').
+data RebuildRecipe = RebuildRecipe
+  { rebuildCwd :: FilePath
+  , rebuildArgs :: [String]
+  , rebuildLangParamsEnv :: Maybe String
+  }
+  deriving (Show, Eq)
+
 data SysCommand
   = SysRun Code
   | -- | Delete every file matching a path whose last component may hold @*@
@@ -1118,6 +1132,7 @@ instance Defaultable MorlocState where
       , stateStagingDir = Nothing
       , stateProgramKey = Nothing
       , stateWrapperSpecs = Nothing
+      , stateRebuild = Nothing
       , stateBuildParentDir = Nothing
       , stateClassDefs = Map.empty
       , stateEffects = Map.empty

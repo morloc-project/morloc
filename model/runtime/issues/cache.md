@@ -14,6 +14,17 @@ There is no cache spec yet; these are gaps until one is written.
   the run when that file is missing; but if the recorded path is not the
   first match of the search (a build run from another directory), the pool
   can load a file that was never hashed.
+- **An installed program built from outside its package directory cannot
+  find its own sourced files.** [reproduced 2026-11-01 for the run from the
+  parent; read for the run elsewhere] `morloc make
+  --install -f prog/main.loc` run from prog's parent names a sourced
+  `prog/own.py` by the dotted path `prog.own`, relative to the working
+  directory, but mirrors the package into `exe/prog/` as `exe/prog/own.py`.
+  The pool looks for `exe/prog/prog/own.py`, misses, and falls through to
+  `./prog/own.py`: run from the parent it loads the project file rather than
+  the installed copy (and SRC-8 checks the copy), and run from anywhere else
+  it fails to import. Built from inside `prog/`, the paths agree
+  (golden spec-src-8-3).
 - **A stream handle argument is keyed by its path, not its file.** [read]
   cache.rs ~730 folds the path bytes of an `IFile`/`IStream` argument into
   the key, so a file rewritten in place at the same path returns the

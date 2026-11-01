@@ -26,7 +26,6 @@ module Morloc.ProgramBuilder.Build
 
 import Control.Exception (IOException, try)
 import Control.Monad.Except (catchError, throwError)
-import Data.List (tails)
 import qualified Data.Map as Map
 import qualified Data.Set as Set
 import qualified Morloc.Config as MC
@@ -37,12 +36,13 @@ import qualified Morloc.Build.CargoLock as CL
 import Morloc.CodeGenerator.SystemConfig (strictToolchainError)
 import Morloc.Namespace.Prim
 import Morloc.Namespace.State
+import Morloc.ProgramBuilder.Install (matchGlob)
 import Morloc.ProgramBuilder.Paths (buildDirName, buildMarker)
 import qualified Morloc.System as MS
 import qualified System.Directory as SD
 import System.Environment (getEnvironment, getExecutablePath, lookupEnv)
 import System.Exit (ExitCode (..))
-import System.FilePath (takeDirectory, takeFileName, (</>))
+import System.FilePath (takeDirectory, takeFileName)
 import System.IO.Error (ioeGetFileName)
 import System.Process (CreateProcess (env), callProcess, createProcess, getCurrentPid, proc, waitForProcess)
 
@@ -426,18 +426,10 @@ removeMatching pattern = do
   exists <- liftIO $ SD.doesDirectoryExist dir
   when exists $ do
     names <- liftIO $ SD.listDirectory dir
-    forM_ (filter (globMatch namePat) names) $ \name -> do
+    forM_ (filter (matchGlob namePat) names) $ \name -> do
       let path = dir </> name
       result <- liftIO $ try (SD.removeFile path) :: MorlocMonad (Either IOException ())
       case result of
         Right () -> return ()
         Left e ->
           MM.throwFailed $ "Cannot remove" <+> pretty path <> ":" <+> pretty (show e)
-
--- | Match a file name against a pattern in which @*@ matches any run of
--- characters and every other character matches itself.
-globMatch :: String -> String -> Bool
-globMatch [] name = null name
-globMatch ('*' : pat) name = any (globMatch pat) (tails name)
-globMatch (c : pat) (x : name) = c == x && globMatch pat name
-globMatch _ [] = False

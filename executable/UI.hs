@@ -272,6 +272,7 @@ data InstallCommand = InstallCommand
   , installConfig :: String
   , installVanilla :: Bool
   , installVerbose :: Int
+  , installNoRebuild :: Bool
   , installModuleStrings :: [String]
   }
 
@@ -285,6 +286,7 @@ makeInstallParser =
     <*> optConfig
     <*> optVanilla
     <*> optVerbose
+    <*> optNoRebuild
     <*> optModuleStrings
 
 installSubcommand :: Mod CommandFields CliCommand
@@ -474,6 +476,13 @@ optNoTypecheck =
   switch
     ( long "no-typecheck"
         <> help "Skip typechecking during install"
+    )
+
+optNoRebuild :: Parser Bool
+optNoRebuild =
+  switch
+    ( long "no-rebuild"
+        <> help "With --force, list the installed programs whose sourced files changed instead of rebuilding them"
     )
 
 optInstallBuild :: Parser Bool

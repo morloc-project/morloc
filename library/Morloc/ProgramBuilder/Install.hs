@@ -14,6 +14,7 @@ module Morloc.ProgramBuilder.Install
   , copyAllFiltered
   , cleanIgnoredFiles
   , resolveIncludePatterns
+  , matchGlob
   ) where
 
 import Control.Exception (throwIO)

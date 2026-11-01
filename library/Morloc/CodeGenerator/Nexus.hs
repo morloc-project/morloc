@@ -32,6 +32,8 @@ import qualified Data.Map as Map
 import qualified Data.Scientific as DS
 import Data.Set (Set)
 import qualified Data.List as List
+import qualified System.Directory as SD
+import System.FilePath (addTrailingPathSeparator)
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as MT
@@ -2834,6 +2836,8 @@ data ManifestInputs = ManifestInputs
   , miNoShm               :: !Bool
   , miTmpdir              :: !(Maybe Path)
   , miSourceHashes        :: !(Map.Map Lang [(FilePath, Word64)])
+  , miRebuild             :: !(Maybe RebuildRecipe)
+    -- ^ How to repeat an installed program's build
     -- ^ Per pool language that loads its sources at run time, each sourced
     -- file's absolute path and content hash (SRC-8).
   , miBuildParams         :: !Text
@@ -2902,6 +2906,15 @@ buildManifest ManifestInputs{..} =
         , ("time", jsonInt miBuildTime)
         , ("morloc_version", jsonStr (MT.pack Morloc.Version.versionStr))
         , ("build_params", jsonStr miBuildParams)
+        , ("rebuild", maybe "null" rebuildJson miRebuild)
+        ]
+
+    rebuildJson :: RebuildRecipe -> Text
+    rebuildJson r =
+      jsonObj
+        [ ("cwd", jsonStr (MT.pack (rebuildCwd r)))
+        , ("args", jsonStrArr (map MT.pack (rebuildArgs r)))
+        , ("lang_params_env", maybe "null" (jsonStr . MT.pack) (rebuildLangParamsEnv r))
         ]
 
     poolJson :: (Lang, Socket) -> Text
@@ -3353,13 +3366,23 @@ generate cs rASTs helperRASTs = do
   tmpdir <- MM.gets stateTmpdir
   buildParams <- MM.gets (BP.renderSalt . stateLangParams)
   allSources <- MM.gets (concat . GMap.elems . stateSources)
+  -- An installed program runs the copies of its project's files mirrored into
+  -- its install root, so those are the files it records.
+  isInstall <- MM.gets stateInstall
+  projectRoot <- MM.gets stateProjectRoot >>= liftIO . SD.makeAbsolute . fromMaybe "."
+  let installedCopy path
+        | isInstall
+        , Just rel <- stripPrefix (addTrailingPathSeparator projectRoot) path =
+            buildRoot </> rel
+        | otherwise = path
   sourceHashes <- fmap Map.fromList . CM.forM daemonSets $ \(lang, _) ->
     if LR.registryIsCompiled registry (ML.langName lang)
       then return (lang, [])
       else do
         let paths = Set.toAscList (Set.fromList [p | src <- allSources, srcLang src == lang, Just p <- [srcPath src]])
         hs <- liftIO (PoolHash.computeSourceHashes paths)
-        return (lang, hs)
+        return (lang, map (first installedCopy) hs)
+  rebuild <- MM.gets stateRebuild
   runLog <- renderRunLogTemplate
   debugTrace <- MM.gets stateDebugTrace
   -- Capability strings advertise optional codegen features baked into
@@ -3418,6 +3441,7 @@ generate cs rASTs helperRASTs = do
             , miNoShm               = noShm
             , miTmpdir              = tmpdir
             , miSourceHashes        = sourceHashes
+            , miRebuild             = rebuild
             , miBuildParams         = buildParams
             , miRunLog              = runLog
             , miPackerInstances     = packerInstances
