@@ -3,8 +3,9 @@
 -- arm's sink and run on a fresh run of the command, with no saved output.
 -- `partial` has an arm that streams nothing: an action there cannot compose
 -- into every way the command can end, so it runs on the saved output.
+-- `pair` destructures its parameter, which must not hide its `@collect`.
 
-module main (branchy, partial)
+module main (branchy, partial, pair)
 
 import root-cpp
 
@@ -48,3 +49,8 @@ branchy s =
 --' @render -a/--all=joinAll
 partial :: Bool -> <IO> ()
 partial b = ? b = @collect produce : nothing
+
+--' Stream from a destructured parameter
+--' @render -a/--all=joinAll
+pair :: (Int, Int) -> <IO> ()
+pair (n, _) = @collect (produceUpTo n)

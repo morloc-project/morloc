@@ -1980,6 +1980,126 @@ patTests =
         f :: Int -> Int
         f x = let h = \(a, b) -> a in x
         |]
+    , rejectNaming
+        "spec-pat-1-12"
+        ["tuple", "2", "elements"]
+        []
+        [r|
+        module main (f)
+        f t = let (a, b) = t in let (c, d, e) = t in a
+        |]
+    , rejectNaming
+        "spec-pat-1-13"
+        ["tuple", "2", "elements"]
+        []
+        [r|
+        module main (g)
+        f t = let (a, b) = t in .2 t
+        g :: (Int, Int, Int) -> Int
+        g = f
+        |]
+    , rejectNaming
+        "spec-pat-1-14"
+        ["tuple", "Int"]
+        []
+        [r|
+        module main (f)
+        f :: Int -> Int
+        f x = let (_, _) = x in 1
+        |]
+    , rejectNaming
+        "spec-pat-1-15"
+        ["tuple", "2", "elements"]
+        []
+        [r|
+        module main (g)
+        g :: (Int, Int, Int) -> Int
+        g = \(_, _) -> 1
+        |]
+    , rejectNaming
+        "spec-pat-1-16"
+        ["field", "z"]
+        []
+        [r|
+        module main (f)
+        record R where
+          p :: Int
+        f :: R -> Int
+        f {z = _} = 1
+        |]
+    , rejectNaming
+        "spec-pat-1-19"
+        ["record", "tuple"]
+        []
+        [r|
+        module main (f)
+        f t = let (_, _) = t in let ({x = _}) = t in 1
+        |]
+    , rejectNaming
+        "spec-pat-1-20"
+        ["field", "y"]
+        []
+        [r|
+        module main (f)
+        f :: {x = Int} -> Int
+        f {y = _} = 1
+        |]
+    , accept
+        "spec-pat-1-21"
+        [r|
+        module main (f)
+        f :: {x = Int, y = Str} -> Int
+        f {x = a} = a
+        |]
+    , rejectAtLine
+        "spec-pat-1-22"
+        5
+        [r|
+        module main (f)
+        f :: (Int, (Int, Int, Int)) -> Int
+        f = \( c
+             , (a, b)) -> c
+        |]
+    , rejectNaming
+        "spec-pat-1-23"
+        ["field", "y"]
+        []
+        [r|
+        module main (f)
+        f :: {x = Int} -> Int
+        f r = match r | {y = _} = 1
+        |]
+    , rejectNaming
+        "spec-pat-1-24"
+        ["tuple", "2", "elements"]
+        []
+        [r|
+        module main (f)
+        f :: (Int, Int, Int) -> Int
+        f (_, _) = x
+          where
+          x = 1
+        |]
+    , accept
+        "spec-pat-1-17"
+        [r|
+        module main (f, g)
+        fst2 (a, b) = a
+        f :: (Int, Str) -> Int
+        f = fst2
+        g :: (Str, Int) -> Str
+        g = fst2
+        |]
+    , accept
+        "spec-pat-1-18"
+        [r|
+        module main (f)
+        record R where
+          p :: Int
+          q :: Str
+        f :: R -> Int
+        f {p = x} = x
+        |]
     , accept
         "spec-pat-1-3"
         [r|

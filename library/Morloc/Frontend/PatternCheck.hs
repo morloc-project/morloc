@@ -13,7 +13,13 @@ by that name, its patterns are checked against the receiver's type, and its
 clauses are checked for coverage and reachability with
 'Morloc.Data.Usefulness' (PAT-1, PAT-3, SUM-3).
 -}
-module Morloc.Frontend.PatternCheck (checkPatterns) where
+module Morloc.Frontend.PatternCheck
+  ( checkPatterns
+  , receiverShape
+  , rowFields
+  , tupleWidthError
+  , missingKeyError
+  ) where
 
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
@@ -106,15 +112,23 @@ checkSite scope ts (MatchSite i rows total)
               return [ri | (k, (ri, _)) <- zip [0 :: Int ..] matrix, k `elem` dead]
   where
     problem :: Int -> Problem -> MorlocMonad ()
-    problem at (TupleWidth given wanted) =
-      MM.throwSourcedError at $
-        "This tuple pattern has" <+> pretty given
-          <+> "elements, but the value it matches is a tuple of" <+> pretty wanted
-    problem at (MissingKey k) =
-      MM.throwSourcedError at $
-        "This record pattern names the field" <+> squotes (pretty (unKey k))
-          <> ", which the value it matches does not have"
+    problem at (TupleWidth given wanted) = tupleWidthError at given (pretty wanted)
+    problem at (MissingKey k) = missingKeyError at k
     problem _ Unknown = return ()
+
+-- | PAT-1: a tuple pattern of this width on a tuple of another.
+tupleWidthError :: Int -> Int -> MDoc -> MorlocMonad a
+tupleWidthError at given wanted =
+  MM.throwSourcedError at $
+    "This tuple pattern has" <+> pretty given
+      <+> "elements, but the value it matches is a tuple of" <+> wanted
+
+-- | PAT-1: a record pattern naming a field its value does not have.
+missingKeyError :: Int -> Key -> MorlocMonad a
+missingKeyError at k =
+  MM.throwSourcedError at $
+    "This record pattern names the field" <+> squotes (pretty (unKey k))
+      <> ", which the value it matches does not have"
 
 unreachable :: MDoc
 unreachable = "This clause is unreachable: the clauses above it match every value it matches"
@@ -141,6 +155,19 @@ signature = U.Signature headArity headCoverage
 toPat :: Scope -> TypeU -> SitePat -> Either Problem (U.Pat Head)
 toPat scope t0 = toPat' scope (either (const t0) id (TE.evaluateType scope t0))
 
+-- | The outermost form of the type of a value a pattern destructures.
+receiverShape :: Scope -> TypeU -> TypeU
+receiverShape scope t0 = TE.unWhnf (TE.whnf scope (either (const t0) id (TE.evaluateType scope t0)))
+
+-- | The fields of a record type, and whether it can have no others.
+rowFields :: TypeU -> Maybe ([(Key, TypeU)], Bool)
+rowFields (NamU _ _ _ fs) = Just (fs, True)
+rowFields (LitU (LRec fs)) = Just ([(Key k, t) | (k, t) <- fs], True)
+rowFields (RecExtendU k t rest) = Just $ case rowFields rest of
+  Just (fs, closed) -> ((Key k, t) : fs, closed)
+  Nothing -> ([(Key k, t)], False)
+rowFields _ = Nothing
+
 toPat' :: Scope -> TypeU -> SitePat -> Either Problem (U.Pat Head)
 toPat' scope t p = case p of
   SitePatWild -> Right U.Wild
@@ -157,13 +184,14 @@ toPat' scope t p = case p of
       | Just fs <- lookup c cs, length fs == length ps ->
           U.Con (HCon c [(n, length xs) | (n, xs) <- cs]) <$> combine (zipWith (toPat scope) fs ps)
     _ -> Left Unknown
-  SitePatRecord kps -> case shape of
-    NamU _ _ _ fs -> case [k | (k, _) <- kps, k `notElem` map fst fs] of
-      (k : _) -> Left (MissingKey k)
-      [] ->
+  SitePatRecord kps -> case rowFields shape of
+    Just (fs, closed) -> case [k | (k, _) <- kps, k `notElem` map fst fs] of
+      (k : _) | closed -> Left (MissingKey k)
+      [] | closed ->
         U.Con (HRecord (map fst fs))
           <$> combine [maybe (Right U.Wild) (toPat scope ft) (lookup k kps) | (k, ft) <- fs]
-    _ -> Left Unknown
+      _ -> Left Unknown
+    Nothing -> Left Unknown
   SitePatList ps -> case shape of
     AppU (VarU v) [a]
       | v == BT.list -> U.Con (HList (length ps)) <$> combine (map (toPat scope a) ps)

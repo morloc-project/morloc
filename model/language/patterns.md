@@ -6,14 +6,17 @@ Destructuring, `match`, guards, pattern chains, exhaustiveness. Prefix: PAT.
 
 ### PAT-1 Irrefutable patterns match every well-typed receiver
 Intent: proposed
-Tests: spec-pat-1-1, spec-pat-1-2, spec-pat-1-3, spec-pat-1-4, spec-pat-1-5, spec-pat-1-6, spec-pat-1-7, spec-pat-1-8, spec-pat-1-9, spec-pat-1-10, spec-pat-1-11
-Code: conforms 2026-10-31
+Tests: spec-pat-1-1, spec-pat-1-2, spec-pat-1-3, spec-pat-1-4, spec-pat-1-5, spec-pat-1-6, spec-pat-1-7, spec-pat-1-8, spec-pat-1-9, spec-pat-1-10, spec-pat-1-11, spec-pat-1-12, spec-pat-1-13, spec-pat-1-14, spec-pat-1-15, spec-pat-1-16, spec-pat-1-17, spec-pat-1-18, spec-pat-1-19, spec-pat-1-20, spec-pat-1-21, spec-pat-1-22, spec-pat-1-23, spec-pat-1-24
+Code: deviates (issues/typecheck.md: a getter's tuple width is lost on a value of unsolved type)
 
 The forms are a name, `_`, a tuple of full arity, a record `{k = p, ...}`,
 an as-pattern (BIND-5), and any nesting of these. A record pattern needs the
 receiver to have the named keys and ignores the rest. They appear as lambda
 parameters, definition parameters, `let` left-hand sides and `do` binds; a
-record pattern after `let` or `do` is parenthesized.
+record pattern after `let` or `do` is parenthesized. A pattern that binds
+nothing still constrains its receiver. Where the receiver's type is not yet
+known, every pattern and getter on it must agree on what it is: a tuple of
+one width, or a record.
 
 ### PAT-2 Clauses are tried in order and the first match wins
 Intent: proposed

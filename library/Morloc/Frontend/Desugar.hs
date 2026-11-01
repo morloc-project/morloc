@@ -1996,22 +1996,31 @@ desugarIrrefPat :: Loc CstIrrefPat -> ExprI -> D [(EVar, ExprI)]
 -- Bare variable pattern: bind rhs directly. No temp, no aliasing, so
 -- downstream codegen sees the same shape as pre-pattern let/do-bind.
 desugarIrrefPat (Loc _ (CIPatVar v)) rhs = return [(v, rhs)]
-desugarIrrefPat p rhs = do
+desugarIrrefPat p rhs0 = do
   validateIrrefPat p
   let leaves = walkIrrefPat p SelectorEnd
       sp = spanOf p
-  case leaves of
-    [] -> do
-      throwaway <- freshIrrefVar sp
-      recordSite True sp [throwaway] [(sp, [(sp, Just (siteIrref p))])]
-      return [(throwaway, rhs)]
-    _ -> case asBareVar rhs of
-      Just recv | not (hasTuple p) -> materializeIrrefLeaves sp recv leaves
-      _ -> do
-        tmp <- freshIrrefVar sp
-        recordSite True sp [tmp] [(sp, [(sp, Just (siteIrref p))])]
-        body <- materializeIrrefLeaves sp tmp leaves
-        return ((tmp, rhs) : body)
+  (recv, bound) <- case asBareVar rhs0 of
+    Just v | not (null leaves), not (hasTuple p) -> return (v, [])
+    _ -> do
+      tmp <- freshIrrefVar sp
+      return (tmp, [(tmp, rhs0)])
+  shaped <- shapeBinding p recv
+  body <- materializeIrrefLeaves sp recv leaves
+  return (bound <> shaped <> body)
+
+-- | A binding that holds a destructuring pattern's shape on its receiver
+-- (PAT-1). It is never used: it is there to be checked.
+shapeBinding :: Loc CstIrrefPat -> EVar -> D [(EVar, ExprI)]
+shapeBinding p recv = case irrefSkeleton p of
+  Nothing -> return []
+  Just sk -> do
+    let sp = spanOf p
+    skE <- sk
+    recvE <- freshExprSpan sp (VarE defaultValue recv)
+    checked <- freshIrrefVar sp
+    shapeE <- freshExprSpan sp (IntrinsicE IntrShape [skE, recvE])
+    return [(checked, shapeE)]
 
 -- | Desugar an irrefutable pattern into a fresh lambda parameter plus
 -- inner projection bindings. Returns (param-name, [(binder, projection)]).
@@ -2034,7 +2043,6 @@ desugarIrrefLamParam usedNames p = do
   validateIrrefPat p
   let sp = spanOf p
   v <- freshIrrefLamParam sp
-  recordSite True sp [v] [(sp, [(sp, Just (siteIrref p))])]
   let leaves = walkIrrefPat p SelectorEnd
       usedLeaves = filter (\(n, _) -> Set.member n usedNames) leaves
   bindings <- materializeIrrefLeaves sp v usedLeaves
@@ -2490,13 +2498,18 @@ siteRefut (Loc _ pat) = case pat of
       CStrE t -> Just (SiteStr t)
       _ -> Nothing
 
-siteIrref :: Loc CstIrrefPat -> SitePat
-siteIrref (Loc _ pat) = case pat of
-  CIPatVar _ -> SitePatWild
-  CIPatWild -> SitePatWild
-  CIPatAs _ p -> siteIrref p
-  CIPatTup ps -> SitePatTuple (map siteIrref ps)
-  CIPatRec kps -> SitePatRecord [(k, siteIrref p) | (k, p) <- kps]
+-- | The skeleton 'IntrShape' reads a pattern's shape from: a tuple, record
+-- or unit literal per position. Nothing for a pattern that destructures
+-- nothing.
+irrefSkeleton :: Loc CstIrrefPat -> Maybe (D ExprI)
+irrefSkeleton (Loc sp pat) = case pat of
+  CIPatVar _ -> Nothing
+  CIPatWild -> Nothing
+  CIPatAs _ p -> irrefSkeleton p
+  CIPatTup ps -> Just (mapM part ps >>= freshExprSpan sp . TupE)
+  CIPatRec kps -> Just (mapM (\(k, p) -> (,) k <$> part p) kps >>= freshExprSpan sp . NamE)
+  where
+    part p = fromMaybe (freshExprSpan (spanOf p) UniE) (irrefSkeleton p)
 
 hasTuple :: Loc CstIrrefPat -> Bool
 hasTuple (Loc _ pat) = case pat of
@@ -3193,7 +3206,9 @@ buildDefWithIrrefPats sp ps body wheres = do
   paramResults <- mapM (desugarIrrefLamParam usedNames) ps
   projections <-
     mapM (\(v, rhs) -> freshExprSpan sp (AssE v rhs [])) (concatMap snd paramResults)
-  lam <- mkLam sp (map fst paramResults) body
+  shapes <- concat <$> zipWithM shapeBinding ps (map fst paramResults)
+  shaped <- mkLet sp shapes body
+  lam <- mkLam sp (map fst paramResults) shaped
   return (lam, projections <> wheres)
 
 -- | Build a LamE from a list of irrefutable pattern parameters plus a
@@ -3205,8 +3220,8 @@ buildLamWithIrrefPats sp ps body = do
   let bodyFvs = freeVarsE body
   paramResults <- mapM (desugarIrrefLamParam bodyFvs) ps
   let paramNames = map fst paramResults
-      projBindings = concatMap snd paramResults
-  wrapped <- mkLet sp projBindings body
+  shapes <- concat <$> zipWithM shapeBinding ps paramNames
+  wrapped <- mkLet sp (shapes <> concatMap snd paramResults) body
   mkLam sp paramNames wrapped
 
 -- | The parameters of the lambdas a definition's body begins with. They are

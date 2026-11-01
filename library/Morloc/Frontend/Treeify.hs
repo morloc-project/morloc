@@ -622,6 +622,14 @@ collect namer0 (gi, v) = do
 collectAnnoS :: Namer -> ExprI -> MorlocMonad (Namer, AnnoS Int ManyPoly Int)
 collectAnnoS namer e@(ExprI gi _) = collectExprS namer e |>> second (AnnoS gi gi)
 
+-- | The shape a pattern skeleton written by Desugar stands for.
+skeletonShape :: ExprI -> Maybe PatShape
+skeletonShape (ExprI i e) = case e of
+  UniE -> Just ShapeAny
+  TupE xs -> Shape i . FormTuple <$> mapM skeletonShape xs
+  NamE rs -> Shape i . FormRecord <$> mapM (\(k, x) -> (,) k <$> skeletonShape x) rs
+  _ -> Nothing
+
 -- | Translate ExprI to ExprS tree
 collectExprS :: Namer -> ExprI -> MorlocMonad (Namer, ExprS Int ManyPoly Int)
 collectExprS namer0 (ExprI gi0 e0) = f namer0 e0
@@ -798,6 +806,11 @@ collectExprS namer0 (ExprI gi0 e0) = f namer0 e0
     f namer (EvalE e) = do
       (namer', e') <- collectAnnoS namer e
       return (namer', EvalS e')
+    f namer (IntrinsicE IntrShape es) = case es of
+      [sk, r] | Just sh <- skeletonShape sk -> do
+        (namer1, r') <- collectAnnoS namer r
+        return (namer1, ShapeS PreTyped sh r')
+      _ -> MM.throwCompilerBugAt gi0 "malformed shape intrinsic"
     f namer (IntrinsicE intr es) = do
       (namer', es') <- go namer [] es
       return (namer', IntrinsicS intr es')

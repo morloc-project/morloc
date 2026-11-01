@@ -1,4 +1,5 @@
 {-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE GADTs #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ViewPatterns #-}
 
@@ -56,6 +57,9 @@ module Morloc.Namespace.Expr
   , Expr (..)
   , ExprI (..)
   , E (..)
+  , PatShape (..)
+  , ShapeForm (..)
+  , PreTyped (..)
   , Lit (..)
   , RealLit (..)
   , MatchSite (..)
@@ -561,6 +565,9 @@ data Intrinsic
                     -- sink type `[a] -> ...` carries the stream element type,
                     -- which the `@with`/`@render` handler synthesis reads off
                     -- to type the flag handlers.
+  | IntrShape       -- ^ a destructuring pattern's shape on its receiver, as
+                    -- Desugar writes it: [skeleton, receiver]. Treeify turns
+                    -- it into 'ShapeS'.
   | IntrTmpfile     -- ^ @tmpfile :: <IO> Str@ -- create a fresh empty file in
                     -- the morloc tmpdir, register it for removal when the pool
                     -- call ends, and return its path. NOT user-facing;
@@ -660,6 +667,7 @@ intrinsicName IntrThrow = "throw"
 intrinsicName IntrTry = "try"
 intrinsicName IntrTell = "tell"
 intrinsicName IntrCollect = "collect"
+intrinsicName IntrShape = "shape"
 intrinsicName IntrTmpfile = "tmpfile"
 intrinsicName IntrCellNew = "cellnew"
 intrinsicName IntrCellGet = "cellget"
@@ -703,6 +711,7 @@ intrinsicIsIO IntrTmpfile = True
 -- @collect desugar-expands to @stdout/@write/@close (all IO); classify IO so a
 -- stray @collect that reached this check is still refused.
 intrinsicIsIO IntrCollect = True
+intrinsicIsIO IntrShape = False
 -- Synthesized post-typecheck (never user-written); IO by nature.
 intrinsicIsIO IntrIFileWalk = True
 intrinsicIsIO IntrConform = False
@@ -855,6 +864,7 @@ intrinsicArity IntrThrow = 1
 intrinsicArity IntrTry = 1
 intrinsicArity IntrTell = 0
 intrinsicArity IntrCollect = 1
+intrinsicArity IntrShape = 2
 intrinsicArity IntrTmpfile = 0
 intrinsicArity IntrCellNew = 1
 intrinsicArity IntrCellGet = 1
@@ -1101,6 +1111,28 @@ data ExprS g f c
   -- index keys the label's configuration in 'stateManifoldConfig'; it names
   -- no node, so no pass renumbers it.
   | LabelS Int (AnnoS g f c)
+  -- | A destructuring pattern's shape on the value it destructures (PAT-1);
+  -- the node's value is that value. Written by Treeify from 'IntrShape';
+  -- typed, then erased: only a pretyped tree can hold one.
+  | ShapeS !(PreTyped f) PatShape (AnnoS g f c)
+
+-- | The shape a destructuring pattern demands of its value: anything, or the
+-- form of the (sub)pattern at this index.
+data PatShape
+  = ShapeAny
+  | Shape Int ShapeForm
+  deriving (Show, Eq, Ord)
+
+-- | A tuple of exactly these components, or a record with at least these
+-- fields.
+data ShapeForm
+  = FormTuple [PatShape]
+  | FormRecord [(Key, PatShape)]
+  deriving (Show, Eq, Ord)
+
+-- | Evidence that a tree has not yet been through instance resolution.
+data PreTyped f where
+  PreTyped :: PreTyped ManyPoly
 
 data ManyPoly a = MonomorphicExpr (Maybe EType) [a] | PolymorphicExpr ClassName EVar EType [(EType, [a])]
   deriving (Show, Eq, Ord)
@@ -1259,6 +1291,7 @@ mapExprSM ::
 mapExprSM f (VarS v xs) = VarS v <$> traverse f xs
 mapExprSM f (AppS x xs) = AppS <$> f x <*> mapM f xs
 mapExprSM f (LamS vs x) = LamS vs <$> f x
+mapExprSM f (ShapeS w sh r) = ShapeS w sh <$> f r
 mapExprSM f (LstS xs) = LstS <$> mapM f xs
 mapExprSM f (TupS xs) = TupS <$> mapM f xs
 mapExprSM f (NamS rs) = NamS <$> mapM (secondM f) rs
@@ -1324,6 +1357,7 @@ mapExprSC f = mapExprS (\(AnnoS gi ci e) -> AnnoS gi (f ci) (mapExprSC f e))
 -- | Fold a monoid over every immediate child 'AnnoS' of an 'ExprS'.
 foldExprS :: (Foldable f, Monoid m) => (AnnoS g f c -> m) -> ExprS g f c -> m
 foldExprS f (VarS _ xs)       = foldMap f xs
+foldExprS f (ShapeS _ _ r)    = f r
 foldExprS f (AppS x xs)       = f x <> foldMap f xs
 foldExprS f (LamS _ x)        = f x
 foldExprS f (LstS xs)         = foldMap f xs
@@ -1528,6 +1562,7 @@ instance (Foldable f) => Pretty (AnnoS a f b) where
 
 instance (Foldable f) => Pretty (ExprS a f b) where
   pretty (AppS e es) = "(AppS" <+> list (map pretty (e : es)) <> ")"
+  pretty (ShapeS _ _ r) = "(ShapeS" <+> pretty r <> ")"
   pretty (VarS v res) = "(VarS" <+> pretty v <+> "=" <+> list (map pretty (toList res)) <> ")"
   pretty (LamS vs e) = "(LamS" <+> list (map pretty vs) <+> "->" <+> pretty e <> ")"
   pretty (LstS es) = "(LstS" <+> list (map pretty es) <> ")"

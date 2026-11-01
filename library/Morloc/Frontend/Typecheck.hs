@@ -23,6 +23,7 @@ import Morloc.Data.Doc
 import qualified Morloc.Data.Map as Map
 import qualified Data.Set as Set
 import Morloc.Frontend.Namespace
+import Morloc.Frontend.PatternCheck (missingKeyError, receiverShape, rowFields, tupleWidthError)
 import qualified Morloc.Monad as MM
 import qualified Morloc.TypeEval as TE
 import Morloc.Typecheck.Internal
@@ -206,6 +207,7 @@ typecheckWith expected = run
       let openRecords = openRecordLiterals e2
       (g2, e3) <- resolveInstances g1 e2
       let g3 = apply g2 g2
+      checkShapes g3 e1
 
       -- Decide the Nat and Int conditions left open now that existentials
       -- are solved: the deferred equations, each at the term where it
@@ -483,6 +485,10 @@ resolveTypes (AnnoS (Idx i t) ci e) =
 
 resolveInstances ::
   Gamma -> AnnoS (Indexed TypeU) ManyPoly Int -> MorlocMonad (Gamma, AnnoS (Indexed TypeU) Many Int)
+-- A shape is checked from the typed tree ('checkShapes'); the binding that
+-- holds one goes with it.
+resolveInstances g (AnnoS _ _ (LetS _ (AnnoS _ _ (ShapeS {})) body)) = resolveInstances g body
+resolveInstances g (AnnoS _ _ (ShapeS _ _ r)) = resolveInstances g r
 resolveInstances g (AnnoS gi@(Idx _ gt) ci e0) = do
   gscope <- MM.getGeneralScope
   (g', e1) <- f gscope g e0
@@ -587,6 +593,7 @@ resolveInstances g (AnnoS gi@(Idx _ gt) ci e0) = do
     f _ g0 (EvalS e) = resolveInstances g0 e |>> second EvalS
     f _ g0 (CoerceS c e) = resolveInstances g0 e |>> second (CoerceS c)
     f _ g0 (LabelS k e) = resolveInstances g0 e |>> second (LabelS k)
+    f _ _ (ShapeS {}) = MM.throwCompilerBug "a shape reached instance resolution inside its node"
     f _ g0 (IfS c t e) = do
       (g1, c') <- resolveInstances g0 c
       (g2, t') <- resolveInstances g1 t
@@ -1394,6 +1401,9 @@ synthE _ g (CoerceS coercion e) = do
 synthE _ g (LabelS k e) = do
   (g1, t1, e1) <- synthG g e
   return (g1, t1, LabelS k e1)
+synthE _ g (ShapeS w sh r) = do
+  (g1, t1, r1) <- synthG g r
+  return (g1, t1, ShapeS w sh r1)
 synthE i g (EvalS e) = do
   (g1, t1, e1) <- synthG g e
   (g1', t1') <- forcedView g1 t1
@@ -1761,6 +1771,7 @@ intrinsicType IntrIFileWalk = Nothing
 intrinsicType IntrConform = Nothing
 intrinsicType IntrCellSlots = Nothing
 intrinsicType IntrReduceList = Nothing
+intrinsicType IntrShape = Nothing
 
 -- | Synthesize types for a list of arguments
 synthArgs ::
@@ -2782,6 +2793,7 @@ collectDoEffects = go
       DoBlockS e -> go e
       CoerceS _ e -> go e
       LabelS _ e -> go e
+      ShapeS _ _ r -> go r
       IntrinsicS _ es -> unions (map go es)
       _ -> emptyEffectSet
 
@@ -2814,6 +2826,7 @@ inferExprEffects = go
       IfS c t e -> go c `effUnion` go t `effUnion` go e
       CoerceS _ e -> go e
       LabelS _ e -> go e
+      ShapeS _ _ r -> go r
       IntrinsicS _ es -> unions (map go es)
       DoBlockS _ -> emptyEffectSet
       LamS _ _ -> emptyEffectSet
@@ -2910,6 +2923,7 @@ uncoveredEvalIdxs uncovered = go
       IfS c t e -> go c ++ go t ++ go e
       CoerceS _ e -> go e
       LabelS _ e -> go e
+      ShapeS _ _ r -> go r
       IntrinsicS _ es -> concatMap go es
       _ -> []
 
@@ -3026,6 +3040,7 @@ tryEvalConst g (AppS (AnnoS _ _ (LamS vs (AnnoS _ _ body))) args)
     vals <- mapM (\(AnnoS _ _ e) -> tryEvalConst g e) args
     let g' = g { gammaIntVals = foldl (\m (v', val') -> Map.insert v' val' m) (gammaIntVals g) (zip vs vals) }
     tryEvalConst g' body
+tryEvalConst g (ShapeS _ _ (AnnoS _ _ e)) = tryEvalConst g e
 tryEvalConst _ _ = Nothing
 
 -- | Try to reduce an expression to an integer constant.
@@ -3190,6 +3205,7 @@ peakSExpr (DoBlockS _) = "DoBlockS"
 peakSExpr (EvalS _) = "EvalS"
 peakSExpr (CoerceS _ _) = "CoerceS"
 peakSExpr (LabelS _ _) = "LabelS"
+peakSExpr (ShapeS _ sh _) = "ShapeS" <+> viaShow sh
 peakSExpr (IfS _ _ _) = "IfS"
 peakSExpr (IntrinsicS intr _) = "@" <> pretty (intrinsicName intr)
 
@@ -3226,6 +3242,7 @@ validate trees instances = do
                   <> "; declare those effects in the signature instead")
         [(v, row) | (v, row) <- Map.toList (gammaEffSubs g1), Set.member v rigid]
       checkRigidNats i g1 [(j, t) | AnnoS (Idx j t) _ _ <- annoNodes e1]
+      checkShapes g1 e1
       closure <- superclassClosure givens
       heads <- instanceHeads
       mapM_
@@ -3235,6 +3252,68 @@ validate trees instances = do
         , any (mentionsRigid rigid) args
         , not (any (covers args) (Map.findWithDefault [] cls heads))
         ]
+
+-- | PAT-1: each destructuring pattern fits the value it destructures. A
+-- tuple pattern needs a tuple of its width, a record pattern a record with
+-- its fields. A value whose type is still unsolved must not already
+-- contradict the pattern, and the patterns on one unsolved value must agree.
+checkShapes :: Gamma -> AnnoS (Indexed TypeU) ManyPoly Int -> MorlocMonad ()
+checkShapes g e = do
+  scope <- MM.getGeneralScope
+  foldM_
+    (\seen (sh, t) -> fits scope seen sh (apply g t))
+    Map.empty
+    [(sh, t) | AnnoS _ _ (ShapeS _ sh (AnnoS (Idx _ t) _ _)) <- annoNodes e]
+  where
+    -- @seen@: the tuple width or record fields each unsolved value is
+    -- destructured with so far
+    fits :: Scope -> Map.Map TVar (Either Int [Key]) -> PatShape -> TypeU -> MorlocMonad (Map.Map TVar (Either Int [Key]))
+    fits _ seen ShapeAny _ = return seen
+    fits scope seen (Shape i form) t0 = case receiverShape scope t0 of
+      ForallU _ t -> fits scope seen (Shape i form) t
+      AppU (VarU v) ts
+        | FormTuple ss <- form
+        , v == BT.tuple (length ts) ->
+            if length ts == length ss
+              then foldM (\m (s', t') -> fits scope m s' t') seen (zip ss ts)
+              else tupleWidthError i (length ss) (pretty (length ts))
+      t | FormRecord kss <- form, Just (fs, closed) <- rowFields t -> fields closed fs kss seen
+      ExistU v (ps, pc) (rs, rc) -> do
+        seen' <- agree v
+        case form of
+          FormTuple ss
+            | not (null rs) || (pc == Closed && null ps) -> notA "a record"
+            | length ps > length ss || (pc == Closed && length ps /= length ss) ->
+                tupleWidthError i (length ss) ((if pc == Closed then "" else "at least ") <> pretty (length ps))
+            | otherwise -> foldM (\m (s', t') -> fits scope m s' t') seen' (zip ss ps)
+          FormRecord kss
+            | not (null ps) -> notA "a tuple"
+            | otherwise -> fields (rc == Closed) rs kss seen'
+      t -> MM.throwSourcedError i $
+        "This" <+> kind <+> "pattern destructures a value of type" <+> prettyTypeU t
+      where
+        fields closed fs kss m0 = case [k | (k, _) <- kss, k `notElem` map fst fs] of
+          (k : _) | closed -> missingKeyError i k
+          _ -> foldM (\m (k, s') -> maybe (return m) (fits scope m s') (lookup k fs)) m0 kss
+
+        agree v = case (Map.lookup v seen, form) of
+          (Just (Left n), FormTuple ss)
+            | n /= length ss -> tupleWidthError i (length ss) (pretty n)
+          (Just (Left _), FormRecord _) -> notA "a tuple"
+          (Just (Right _), FormTuple _) -> notA "a record"
+          (Just (Right ks), FormRecord kss) -> return (Map.insert v (Right (List.nub (ks <> map fst kss))) seen)
+          (_, FormTuple ss) -> return (Map.insert v (Left (length ss)) seen)
+          (_, FormRecord kss) -> return (Map.insert v (Right (map fst kss)) seen)
+
+        kind :: MDoc
+        kind = case form of
+          FormRecord _ -> "record"
+          FormTuple _ -> "tuple"
+
+        notA :: MDoc -> MorlocMonad a
+        notA what =
+          MM.throwSourcedError i $
+            "This" <+> kind <+> "pattern destructures a value that is also used as" <+> what
 
 -- | POLY-7: the body of a definition holds for every value of its
 -- signature's Nat variables at which the signature's own Nat positions are
