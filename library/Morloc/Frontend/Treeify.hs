@@ -773,7 +773,7 @@ collectExprS namer0 (ExprI gi0 e0) = f namer0 e0
           return (ExprI j (LetE rest body))
       (inner, body') <- collectAnnoS namer2 innerBody
       return (namer {namerRecursive = namerRecursive inner, namerIndex = namerIndex inner}, LetS v' e1' body')
-    f _ (LetE [] _) = error "Bug in collectExprS: empty let bindings"
+    f _ (LetE [] _) = MM.throwCompilerBugAt gi0 "a let with no bindings reached Treeify"
     f namer (AppE e es) = do
       (namer', e') <- collectAnnoS namer e
       (namer'', es') <- statefulMapM collectAnnoS namer' es

@@ -3271,9 +3271,9 @@ unitValuecheckTests =
            f x y = [x,y]
            f a b = [a,b]
       |]
-      , -- comparisons of simple and non-simple
-        valuecheckFail
-          "constrained values fail"
+      , -- the application may well equal the literal (REAL-5)
+        valuecheckPass
+          "a constant beside an application passes"
           [r|
          module foo (x)
            source Py ("sum")
@@ -3351,6 +3351,194 @@ unitValuecheckTests =
           [r|
          module foo (r)
            r = {a = 1, b = 2, a = 3}
+      |]
+      , valuecheckPass
+          "two parameters of a one-valued type agree"
+          [r|
+         module foo (f)
+           f :: () -> () -> ()
+           f x y = x
+           f x y = y
+      |]
+      , valuecheckPass
+          "equal values through differently named lets agree"
+          [r|
+         module foo (x)
+           x :: Int
+           x = let a = 1 in a
+           x = let b = 1 in b
+      |]
+      , valuecheckPass
+          "identical branches agree"
+          [r|
+         module foo (f)
+           f :: Bool -> Int
+           f x = ? x = 1 : 2
+           f y = ? y = 1 : 2
+      |]
+      , valuecheckPass
+          "lambdas of different arity are compared on their shared parameters"
+          [r|
+         module foo (f)
+           f :: Int -> Int -> Int
+           f = \x y -> x
+           f a = \b -> a
+      |]
+      , valuecheckFail
+          "lambdas of different arity that differ fail"
+          [r|
+         module foo (f)
+           f :: Int -> Int -> Int
+           f = \x y -> x
+           f a = \b -> b
+      |]
+      , valuecheckFail
+          "optional literals that differ fail"
+          [r|
+         module foo (x)
+           x :: ?Int
+           x = 1
+           x = 2
+      |]
+      , valuecheckFail
+          "null beside a value fails"
+          [r|
+         module foo (x)
+           x :: ?Int
+           x = null
+           x = 1
+      |]
+      , valuecheckFail
+          "a where-bound parameter is still a parameter"
+          [r|
+         module foo (f)
+           f :: Int -> Int -> Int
+           f a b = g
+             where
+               g = a
+           f c d = h
+             where
+               h = d
+      |]
+      , valuecheckPass
+          "arguments of a non-injective intrinsic may be reordered"
+          [r|
+         module foo (f)
+           f :: Int -> Int -> Bool
+           f x y = @eq x y
+           f a b = @eq b a
+      |]
+      , valuecheckPass
+          "the type of either parameter is the same"
+          [r|
+         module foo (f)
+           f :: Int -> Int -> Str
+           f x y = @typeof x
+           f x y = @typeof y
+      |]
+      , valuecheckPass
+          "an alias between two sources is not an ambiguity"
+          [r|
+         module foo (foo)
+           source Py from "m.py" ("f" as foo, "g" as bar)
+           foo :: Int -> Int
+           bar :: Int -> Int
+           foo = bar
+      |]
+      , valuecheckPass
+          "parameters of a one-valued data type agree"
+          [r|
+         module foo (f)
+           data U = U
+           f :: U -> U
+           f x = x
+           f y = U
+      |]
+      , valuecheckPass
+          "an integer literal at Real equals the real literal"
+          [r|
+         module foo (x)
+           x :: Real
+           x = 1
+           x = 1.0
+      |]
+      , valuecheckFail
+          "constructors with differing fields fail"
+          [r|
+         module foo (x)
+           data Opt = No | Yes Int
+           x :: Opt
+           x = Yes 1
+           x = Yes 2
+      |]
+      , valuecheckFail
+          "a parameter inside a constructor differs from a constant"
+          [r|
+         module foo (f)
+           data Box = Box Int
+           f :: Int -> Box
+           f n = Box n
+           f m = Box 2
+      |]
+      , valuecheckFail
+          "swapped parameters through a helper fail"
+          [r|
+         module foo (f)
+           pick :: Int -> Int -> Int
+           pick a b = h
+             where
+               h = a
+           f :: Int -> Int -> Int
+           f x y = pick x y
+           f x y = pick y x
+      |]
+      , valuecheckPass
+          "two spellings of one double agree"
+          [r|
+         module foo (x)
+           x :: Real
+           x = 0.1
+           x = 0.10000000000000001
+      |]
+      , valuecheckFail
+          "a parameter beside an optional constant fails"
+          [r|
+         module foo (f)
+           f :: ?Int -> ?Int
+           f x = x
+           f y = 5
+      |]
+      , valuecheckPass
+          "parameters of a one-valued constructor agree"
+          [r|
+         module foo (f)
+           type Nothing' = ()
+           data Box = Box Nothing'
+           f :: Box -> Box
+           f b = b
+           f c = Box ()
+      |]
+      , valuecheckFail
+          "a difference through an alias chain fails"
+          [r|
+         module foo (f)
+           bar :: Int -> Int -> Int
+           bar a b = a
+           baz :: Int -> Int -> Int
+           baz = bar
+           f :: Int -> Int -> Int
+           f x y = baz x y
+           f x y = y
+      |]
+      , valuecheckPass
+          "an alias and a lambda may implement one term"
+          [r|
+         module foo (foo)
+           bar :: Int -> Int
+           bar x = x
+           foo :: Int -> Int
+           foo = bar
+           foo x = x
       |]
       , valuecheckPass
           "distinct record fields are legal"

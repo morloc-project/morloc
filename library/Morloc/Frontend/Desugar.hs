@@ -176,6 +176,16 @@ freshIdSpan (Span start end) = do
 freshIdPos :: Pos -> D Int
 freshIdPos p = freshIdSpan (Span p p)
 
+-- | A let over these bindings; with none, the body itself.
+mkLet :: Span -> [(EVar, ExprI)] -> ExprI -> D ExprI
+mkLet _ [] body = return body
+mkLet sp bindings body = freshExprSpan sp (LetE bindings body)
+
+-- | A lambda over these parameters (BIND-4); with none, the body itself.
+mkLam :: Span -> [EVar] -> ExprI -> D ExprI
+mkLam _ [] body = return body
+mkLam sp vs body = freshExprSpan sp (LamE vs body)
+
 freshExprSpan :: Span -> Expr -> D ExprI
 freshExprSpan sp e = do
   i <- freshIdSpan sp
@@ -2413,9 +2423,7 @@ buildRefutClauseFrom formals pats bsp body' = do
   let allTests = concatMap fst contribs
       allBinds = concatMap snd contribs
   cond <- conjoinTests bsp allTests
-  clauseBody <- case allBinds of
-    [] -> return body'
-    _  -> freshExprSpan bsp (LetE allBinds body')
+  clauseBody <- mkLet bsp allBinds body'
   return (cond, clauseBody)
 
 -- | Reject a constructor pattern whose field count differs from the
@@ -2559,7 +2567,7 @@ desugarRefutClauses sp name clauses = do
   built <- mapM (buildRefutClause formals) clausePats
   recordSite True sp formals [(clauseSpan c, [(spanOf q, siteRefut q) | q <- ps]) | c@(ps, _) <- clausePats]
   cascade <- assembleCascade sp (map fst clausePats) built
-  freshExprSpan sp (LamE formals cascade)
+  mkLam sp formals cascade
   where
     checkArity [] = dfail (startPos sp) "empty `|` definition"
     checkArity (a : rest)
@@ -2695,9 +2703,7 @@ desugarDo sp (CstDoBind p e : rest) = do
       -- bang-hoisting pass keep walking -- it recognises a do-block by
       -- this shape, and an interposed IfE would strand a hoisted eval
       -- outside its binding.
-      inner <- case binds of
-        [] -> return restE
-        _  -> freshExprSpan sp (LetE binds restE)
+      inner <- mkLet sp binds restE
       mid <- freshExprSpan sp (LetE [(guardVar, guardE)] inner)
       freshExprSpan sp (LetE [(formal, forceE)] mid)
 desugarDo _sp (CstDoBare (Loc bsp (CForceE _)) : _) =
@@ -2905,7 +2911,7 @@ etaExpandIntrinsic sp intr args = do
           vars = [EV ("_intr_" <> T.pack (show idx) <> "_" <> T.pack (show j)) | j <- [0..remaining-1]]
       varExprs <- mapM (\v -> freshExprSpan sp (VarE defaultValue v)) vars
       intrExpr <- freshExprSpan sp (IntrinsicE intr (args ++ varExprs))
-      freshExprSpan sp (LamE vars intrExpr)
+      mkLam sp vars intrExpr
 
 -- | Late pass (after terminal-action synthesis): expand every @collect node
 -- to the default stdout-sink producer pattern:
@@ -3187,7 +3193,7 @@ buildDefWithIrrefPats sp ps body wheres = do
   paramResults <- mapM (desugarIrrefLamParam usedNames) ps
   projections <-
     mapM (\(v, rhs) -> freshExprSpan sp (AssE v rhs [])) (concatMap snd paramResults)
-  lam <- freshExprSpan sp (LamE (map fst paramResults) body)
+  lam <- mkLam sp (map fst paramResults) body
   return (lam, projections <> wheres)
 
 -- | Build a LamE from a list of irrefutable pattern parameters plus a
@@ -3200,10 +3206,8 @@ buildLamWithIrrefPats sp ps body = do
   paramResults <- mapM (desugarIrrefLamParam bodyFvs) ps
   let paramNames = map fst paramResults
       projBindings = concatMap snd paramResults
-  wrapped <- case projBindings of
-    [] -> return body
-    bs -> freshExprSpan sp (LetE bs body)
-  freshExprSpan sp (LamE paramNames wrapped)
+  wrapped <- mkLet sp projBindings body
+  mkLam sp paramNames wrapped
 
 -- | The parameters of the lambdas a definition's body begins with. They are
 -- the definition's parameters as much as those before the `=`.
@@ -3380,7 +3384,7 @@ derivedWireInstances sp v vs ders = concat <$> mapM one ders
       params <- mapM (const (freshIrrefLamParam sp)) [1 .. arity]
       refs <- mapM (freshExprSpan sp . VarE defaultValue) params
       body <- freshExprSpan sp (IntrinsicE intr refs)
-      lam <- freshExprSpan sp (LamE params body)
+      lam <- mkLam sp params body
       ass <- freshExprSpan sp (AssE (EV method) lam [])
       i <- freshExprSpan sp (IstE Derived (ClassName cls) [] [quantifyType (declHead v vs)] [ass])
       return [i]
@@ -4120,7 +4124,7 @@ finishReplay sp parentName pt long argSrcs lamVars (input, inputT) body = do
       refs = referencedPositions argSrcs
       params = [(lamVars !! (n - 1), argTys !! (n - 1)) | n <- refs] ++ [(input, inputT)]
   pinned <- foldr pin (return body) [(p, t) | (p, t) <- params, isConcreteType t]
-  lam <- freshExprSpan sp (LamE (map fst params) pinned)
+  lam <- mkLam sp (map fst params) pinned
   freshExprSpan sp (AssE (mangleReplayName parentName long) lam [])
   where
     pin (p, t) mBody = do

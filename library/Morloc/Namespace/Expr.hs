@@ -1030,6 +1030,8 @@ data E
   | EvalP (Indexed Type) E
   | CoerceP Coercion (Indexed Type) E
   | IntrinsicP (Indexed Type) Intrinsic [E]
+  -- | A `data` constructor applied to its fields.
+  | ConP (Indexed Type) Text [E]
   deriving (Ord, Eq, Show)
 
 -- | Coercion tag for implicit type conversions inserted by the typechecker.
@@ -1387,6 +1389,7 @@ instance Pretty E where
   pretty (EvalP _ e) = "!" <> pretty e
   pretty (CoerceP _ _ e) = "coerce(" <> pretty e <> ")"
   pretty (IntrinsicP _ intr args) = "@" <> pretty (intrinsicName intr) <+> hsep (map pretty args)
+  pretty (ConP _ c args) = hsep (pretty c : map pretty args)
 
 instance Pretty Source where
   pretty s =
