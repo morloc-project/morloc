@@ -16,9 +16,7 @@ Waiting on a ruling:
 - SRC-4 open: features-source.asc says backtick names are emitted verbatim,
   any two-argument infix operator, against SRC-1's name check.
 - CLI-4 open: cli-reference.asc:56 documents `@default <json>`;
-  cli-parameterization.asc:275 writes `@default dot` for a `data` argument.
-- STRM-3 open: runs-streaming.asc:13 types `IFile a` as the data in the file
-  while :43 opens an `IFile [Person]`.
+  cli-parameterization.asc:278 writes `@default dot` for a `data` argument.
 - ANN-6 open: runs-logging.asc:82 says `{lang}` is "the pool language"; its
   example shows `cpp` for a Python function, explained by caller-side timing.
 - EVAL-5, EVAL-6 open: features-where.asc:132-135 says a value used in a
@@ -42,9 +40,6 @@ Waiting on a ruling:
 
 Deferred, needs a new example:
 
-- features-functions.asc:111-125 teaches that `concatTo = fold (<>)` needs a
-  signature; it now typechecks unsigned (as `a -> b a -> a`, constraints
-  dropped from the printed type).
 - cli-intro.asc:343-350: the standalone `@epilogue` illustration uses
   `total :: Str -> Str -> Int` and `sift total needle ./notes/today.md`,
   which contradicts sift's real `total`.

@@ -16,7 +16,9 @@ Reproduced on 0.109.0 unless marked.
 - **`@check.path r` help.** [reproduced] Help says "path to a readable
   file"; a directory is accepted. Either the text or the check is wrong.
 - **`@stdin` not shown in help.** [reproduced] Gap in CLI-3: an `@stdin`
-  argument prints as a plain required positional in `-h` and `-hh`.
+  argument prints as a plain required positional in `-h` and `-hh`, and
+  its help says "format: path to a readable file" (reproduced
+  2026-10-31).
 - **`@stdin` on a list.** [reproduced] docs reports/0030: `@form list` with
   `@stdin` on `[Str]` is refused at build ("`@check.path` requires a `Str`
   argument; got wire schema `as`"). CLI-3 says an `@stdin` argument is a
@@ -41,10 +43,12 @@ Reproduced on 0.109.0 unless marked.
 - **A dotless import collides with a same-named local module.**
   [reproduced, 2026-10-21] Violates MOD-7. With a local `math.loc`,
   `import math (sqrt)` fails "Ambiguous import 'math' ... Found in system
-  ... Found locally: ./math.loc". Module.hs:416 `bareModulePaths` adds
+  ... Found locally: ./math.loc". Module.hs:415 `bareModulePaths` adds
   local paths whenever `stateAllowLocalModules` (default True,
-  Namespace/State.hs:1090); `findBareModule` (Module.hs:494-506) throws on
-  both. Repro: /work/plans/model-audit-2026-10-21/repro/A/mod/m7.
+  Namespace/State.hs); `findBareModule` (Module.hs:489-505) throws on
+  both. The user ruled 2026-10-29 that a dotless import is system-only;
+  the change and the migration of the goldens that rely on local bare
+  imports are pending. Repro: /work/plans/model-audit-2026-10-21/repro/A/mod/m7.
 - **Module rules with no item.** [read, 2026-10-21] Gaps in module-names.md.
   No item covers namespaced imports (`import m as n`, `n.f`, the `f.g`
   composition ambiguity in Lexer.hs:476-498) though `namespace-*` goldens
@@ -67,7 +71,7 @@ Reproduced on 0.109.0 unless marked.
 - **`@stdin` and a bare `@arg` above a function are dropped silently.**
   [reproduced, 2026-10-21] Against DIAG-4's common ground (every other
   misplaced argument directive is an error). CodeGenerator/Docstrings.hs:
-  313-330 `validateCommandLevelDirectives` lists no `stdin`; a value-less
+  303-320 `validateCommandLevelDirectives` lists no `stdin`; a value-less
   `@arg` sets no `docArg`. Repro: /work/plans/model-audit-2026-10-21/repro/G/diag/mis3.loc, dirarg.loc.
 - **More unlocated rejections.** [reproduced, 2026-10-21] DIAG-2: "Command
   group names collide with ungrouped command names: [math]"; "Source file

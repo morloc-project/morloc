@@ -4,8 +4,8 @@
   no item covers spawning a process group. `cargo test --workspace` on
   2026-10-10 failed
   `process::tests::the_sweeper_waits_for_a_group_to_end_then_sweeps_its_dead_run`
-  at morloc-nexus/src/process.rs:2125, the `.unwrap()` on
-  `Spawn::run`; five isolated reruns and one workspace rerun passed. The
+  at the `.unwrap()` on `Spawn::run` in its helper `start_group`
+  (morloc-nexus/src/process.rs:2132); five isolated reruns and one workspace rerun passed. The
   error value was not captured; cause unknown.
 - **Reader slot test fails under the gate.** [reproduced once] Against
   SLOT-9. The full gate on 2026-10-11 failed

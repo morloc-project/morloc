@@ -14,10 +14,10 @@
 - Stale text: `morloc-nexus --help` says launchers pass the wrapper (they
   pass the manifest); ProgramBuilder/Install.hs names
   `exe/<name>/manifest.json` (real: `exe/<name>/<name>-build/manifest.json`);
-  schema.rs:39 and data/morloc/morloc.h:164 call Int an array of limbs (one
-  limb is inline); schema.rs:981 promises 64-byte alignment for [Enum];
-  stream.rs:159 says the salt is per process (per registry); morloc.h:497-504
-  lacks metadata kind 0x08; kind 0x02 is defined and unused.
+  schema.rs:39 and data/morloc/morloc.h:161 call Int an array of limbs (one
+  limb is inline); stream.rs:153 says the salt is per process (per
+  registry); morloc.h:436-442 lacks metadata kind 0x08 (FOOTER_STATUS);
+  kind 0x02 is defined and unused.
 - [read] morloc-runtime/src/ipc.rs `send_and_receive`: public, uncalled,
   underflows `offset - 32`. Delete.
 - **morloc.h expression structs drift from Rust.** [read] The header's
@@ -31,7 +31,7 @@
   version. library/Morloc/Abi.hs:18-22 says provisioning compares
   `morloc_abi_version()` and `morloc-nexus --abi-version` against
   `abiVersion` and refuses a mismatch; nothing does. `abiVersion` is only
-  printed (executable/Subcommands.hs:734) and unit-tested
+  printed (executable/Subcommands.hs:748) and unit-tested
   (test-suite/AbiTests.hs). tooling/morloc-manager mim/src/provision.rs:8
   calls the gate deferred and relies on one release tag. A runtime built
   from another release's source loads silently. [reproduced] A program
@@ -42,7 +42,7 @@
   it was built for.
 - **Crate versions claim a lockstep they lack.** [read]
   morloc-runtime-types (0.87.0) and rustmorloc (0.95.0) say "Version
-  locked with morloc-runtime" (0.109.0); scripts/bump-version.sh:36 bumps
+  locked with morloc-runtime" (0.110.1); scripts/bump-version.sh:36 bumps
   only nexus, manifest and runtime.
 - **`mlcKind*` agreement with morloc.h untested on the Haskell side.**
   [read] library/Morloc/BaseTypes.hs:196 requires `mlcKind*` to equal
@@ -101,12 +101,15 @@
 
 - **`cargo clippy` fails on morloc-runtime.** [reproduced 2026-10-15]
   `clippy::not_unsafe_ptr_arg_deref` (deny by default) at
-  morloc-runtime/src/stream.rs:3990: a safe public function passes a raw
-  pointer it may dereference to `voidstar::flatten_portable_in_place`.
+  morloc-runtime/src/stream.rs `shared_write_subpacket` (3956): a safe
+  public function takes an `AbsPtr` (`*mut u8`) it passes on to
+  `voidstar::flatten_portable_in_place`.
   The crate's own lint denials (json.rs casts) go unchecked while this
   stops the run.
 - [reproduced] `morloc init -f` exits 0 when data/lang/cpp/cppmorloc.cpp
-  fails to compile, leaving the previous libcppmorloc.a installed.
+  fails to compile, leaving the previous libcppmorloc.a installed. Strict
+  conda mode now aborts; outside it the shim build is an `optionalStep`
+  that only warns (SystemConfig.hs:319-321).
 - [observed once] A `morloc make` run with the current compiler on PATH
   (`~/.local/bin/morloc`, built 2026-10-17) produced a Rust pool whose code
   only morloc 0.100.2 emits (`rustmorloc::FrameGuard`, removed in
@@ -121,15 +124,15 @@
   Against ART-2/ART-3. With a plain `q-build/` (no marker) or a symlink
   `r-build`, `morloc make -o q main.loc` fails "Refusing to overwrite
   '.../q-build': not a morloc build directory" and leaves
-  `q-build.tmp.<pid>/`. Build.hs:194 `liftIO $ swapIn ...` raises an
-  IOException (`ioError . userError`, :340) that the MorlocMonad
-  `catchError` (:196) does not catch, so `discardStagingDir` never runs;
+  `q-build.tmp.<pid>/`. Build.hs:197 `liftIO $ swapIn ...` raises an
+  IOException (`ioError . userError`, :344) that the MorlocMonad
+  `catchError` (:199) does not catch, so `discardStagingDir` never runs;
   any IO exception in `buildAll` escapes the same way. Repro: /work/plans/model-audit-2026-10-21/repro/I1/p1/.
 - **A failed owner record leaks an unsweepable run directory.** [read,
-  2026-10-21] process.rs make_tmpdir (1682-1710): if writing or renaming
-  `.owner.tmp` fails it returns Err after mkdtemp, leaving
-  `/tmp/morloc.XXXXXX`; the startup sweep skips directories without
-  `.owner` (process.rs:1760). Remove the directory on that path.
+  2026-10-21] morloc-nexus/src/process.rs make_tmpdir (1686-1713): if
+  writing or renaming `.owner.tmp` fails it returns Err after mkdtemp,
+  leaving `/tmp/morloc.XXXXXX`; the startup sweep skips directories without
+  `.owner` (process.rs:1764). Remove the directory on that path.
 - **Strings crossing two runtime-type copies.** [read, 2026-10-23]
   rustmorloc statically links its own copy of morloc-runtime-types beside
   the one in libmorloc.so. Strings and CSchema built by one copy and freed by

@@ -59,8 +59,10 @@
   2026-10-21] Violates NATIVE-3 (Python and R need no native definition).
   `record P = P { a :: Int, b :: Str }; lit n = inc { b = "z", a = n }`
   under root-py or root-r fails at make "No concrete py type for record
-  'P'"; getters and setters alone build; `record Py => P = "dict"` fixes it.
-  Cause: CodeGenerator/Infer.hs:869 (`namesRecord`) throws for every
+  'P'" when the program also uses a setter (`.(.a = 5) p`); getters and
+  setters alone build, and so does the literal with only getters
+  (reproduced 2026-10-31); `record Py => P = "dict"` fixes it.
+  Cause: CodeGenerator/Infer.hs:878 (`namesRecord`) throws for every
   language. This is also why the manual writes `record Py` lines
   (manual.md). Repro: /work/plans/model-audit-2026-10-21/repro/C/rec/set-py.loc, nolit-py.loc.
 - **Recursive records: SUM-4 contradicts ALIAS-7, and the code splits the

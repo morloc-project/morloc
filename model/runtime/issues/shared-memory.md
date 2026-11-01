@@ -2,8 +2,7 @@
 
 Changes here touch locks and ownership: model first.
 
-- Spec text behind the code: SLOT-8 says the generation changes on close (it changes at open and
-  release, stream.rs:2604, 1793); topology.md says only the nexus unlinks
+- Spec text behind the code: topology.md says only the nexus unlinks
   (code: the fork generation that made the primary volume, shm.rs:659-670);
   topology.md's temp-file route does not apply to tables, which always use
   shared memory.

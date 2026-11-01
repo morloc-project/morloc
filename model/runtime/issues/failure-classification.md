@@ -27,9 +27,9 @@ reference is not (PANIC-14).
   is still catchable.
 - **Requests queued at daemon shutdown are closed unanswered.** [read,
   2026-10-21] Violates DAEMON-6 (refusals answered 503). daemon_run pops
-  every queued job and `close`s it (daemon_ffi.rs:3666-3671); workers stop
-  popping once SHUTDOWN_REQUESTED is set (:3738). Only a popped request
-  gets "Daemon shutting down." (:2062).
+  every queued job and `close`s it (daemon_ffi.rs:3693-3698); workers stop
+  popping once SHUTDOWN_REQUESTED is set (:3756). Only a popped request
+  gets "Daemon shutting down." (:2066).
 - **Rules with no answer.** [read, 2026-10-21]
   - NET-5 bounds a reply wait to an unnamed callee at 30 s; the code waits
     forever (ipc_ffi.rs:713-720), as DAEMON-6 (no call deadline) requires.

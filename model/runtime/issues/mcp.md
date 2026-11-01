@@ -16,7 +16,7 @@ under data/rust/.
   refused the same way. Needs per-call stdout capture (plan step 7,
   /work/plans/interface-consistency-plan.md).
 - **The MCP server's stdio server runs in one-shot mode.** [read]
-  morloc-nexus/src/cli.rs:892 `mcp_args_to_config` leaves `daemon_flag`
+  morloc-nexus/src/cli.rs:910 `mcp_args_to_config` leaves `daemon_flag`
   false, so `stdio_server::start` (main.rs) runs with DAEMON_MODE off: a
   broken pipe on a stdio stream exits the server with 141
   (stdio_server.rs `pipe_closed_resp`) instead of failing one call, and
@@ -41,5 +41,5 @@ under data/rust/.
   server, the race guard on the nexus's own stdio (`reject_dev_stdio_path`,
   `is_stdin_device`, handle_scan.rs:260) still matches literal paths only.
 - **The daemon's HTTP parser truncates path and query at 255 bytes.**
-  [read, 2026-10-21] http_ffi.rs:209-214 copies into 256-byte arrays, so a
+  [read, 2026-10-21] http_ffi.rs:213-218 copies into 256-byte arrays, so a
   longer `/call/<cmd>` or `?render=` is routed by its prefix, not refused.

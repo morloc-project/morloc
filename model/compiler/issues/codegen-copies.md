@@ -69,10 +69,10 @@ records and user-mapped types copy deeply.
 - **C++ closure forms copy each capture several times.** [read; not
   reproduced 2026-10-19] Per
   capture not moved: a `MorlocClosure` 2 (binder and reify thunk), a pap 6
-  (pool.cpp ~1391-1392 copy `fn` and `reify` into the closure, then into
-  `apply1`), a staged form 8; each pap step copies every capture and the
-  applied argument 6-8 times (pool.cpp ~1371, ~1394-1395: named
-  by-value parameters). Reify reads through `const&` and needs no copy.
+  (data/lang/cpp/pool.cpp `mlc_pap` ~1397-1440 copies `fn` and `reify`
+  into the closure, then into `apply1`), a staged form 8; each pap step
+  copies every capture and the applied argument 6-8 times (named by-value
+  parameters). Reify reads through `const&` and needs no copy.
   copy-census-cpp does not reach these forms: they are built only for
   closures that cross (`crossingClosures`, Common.hs).
   Measured at the floor in every shape tried (spec-own-3-4's census and a
@@ -95,7 +95,7 @@ records and user-mapped types copy deeply.
   parameter taken by value is owned. No wrong take was found.
 - **A C++ optional mapped through a function is copied twice.** [read]
   `MapOptionalN` and the optional-map intrinsic render `auto src = ...;
-  T u = src.value();` (CppPrinter.hs ~269-275), copying the optional and
+  T u = src.value();` (Pools/CAbi/Members/CppPrinter.hs `IIfNotNull`, ~260-280), copying the optional and
   then its value; `const auto&` would copy neither.
 - **`map unpack` over a newtype with no native form copies every element.**
   [reproduced] The cast is erased in native code (NEWT-7), but the `map`

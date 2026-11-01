@@ -23,12 +23,10 @@ model/language/issues/typecheck.md.
 - **`morloc typecheck` drops class constraints from signed exports.**
   [reproduced, 2026-10-21] `f :: Integral a => a -> a` and `s ::
   Semigroup a => a -> a` print as `f :: a -> a`, `s :: a -> a`.
-- **Two erasures to `Type` disagree.** [read] Namespace/Type.hs `typeOf`
-  and `unresolvedType2type`: an existential becomes a record or `UnkT` in
-  one and an `error` in the other; `a -> (b -> c)` is flattened by
-  `typeOf` only (APP-1), yet
-  EffectBoundary and Rust.hs call `unresolvedType2type`; a row literal
-  becomes a record in one and a Rec placeholder in the other.
+  [reproduced 2026-11-01] With a user class that has one instance, `f ::
+  PairLike a => a -> a` prints as `f :: Int -> Int`. Repro:
+  /work/plans/error-clusters/repro/tuple-prefix-class.loc with the class
+  renamed `PairLike`.
 - **An unreduced field projection erases to a Nat placeholder.** [read]
   Namespace/Type.hs `typeOf` gives `NatVoidT` for an `OpU` of kind Type
   (`ProjectField r f`), so a sourced signature such as table's `getCol ::

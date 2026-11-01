@@ -102,8 +102,8 @@ same name sees what was taken.
   `tlG c = match c | (Link x rest) ? x > 0 = rest : c | _ = c` stays a
   manifold returning an owned `Chain`, and `dropG (k - 1) (tlG c)` copies
   the rest of the chain each step (3 steps over 1000 links: 2994 clones).
-  Open question: a result that borrows from an argument needs a by-reference
-  return convention, which no item states.
+  A result that borrows from an argument needs the by-reference return
+  convention OWN-8 proposes (open, unaudited).
 - **A function's local and remote-worker segments share one plan key.**
   [read, speculative impact] A C++ or Rust pool can hold two segments for
   one manifold id, the local one and its remote-worker twin

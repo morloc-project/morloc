@@ -16,7 +16,7 @@
 - **@render return type unchecked.** [reproduced] Violates CLI-8. A
   handler returning `Int` builds and fails after the command ran ("-f raw
   requires Str, [Str], Vector U8, or [Vector U8]"). `@mime` has the check
-  (CodeGenerator/Nexus.hs:318 `mediaSerialValid`); terminals (:3388) do not.
+  (CodeGenerator/Nexus.hs:325 `mediaSerialValid`); terminals (:3388) do not.
 - **@render ignores -f.** [reproduced] Contradicts CLI-5; CLI-9 open.
 - STRM-5 open; code merges accumulators in first-fold thread order
   (cell.rs:31).

@@ -1,9 +1,9 @@
 # Realization
 
-Defects in how the realizer (CodeGenerator/Realize.hs) prices a placement,
+Defects in how the realizer (CodeGenerator/Realize.hs) scores a placement,
 found reviewing /work/plans/realization-cost-model.md and since. The
-objective is COST-1 (crossings by loop level, then language preference,
-then size).
+objective is COST-1 (crossings by depth, then switches, then language
+preference, then size).
 
 - **A 4-tuple built in a do-block is refused at realization.** [reproduced,
   2026-10-28] Regression after 0.109.0, where the test passed. biolib's
@@ -38,8 +38,7 @@ then size).
   a named lambda (`pinNamedLambda`), each by its own rule. One predicate
   both consult would keep them from drifting apart.
 - **A function argument that LambdaEval inlines is placed for where it is
-  built, not where it runs.** [read, 2026-10-25] Most of the COST-11
-  differences above. A lambda argument is collapsed in its parent's
+  built, not where it runs.** [read, 2026-10-25] A lambda argument is collapsed in its parent's
   language, but `applyLambdas` (after collapse) substitutes an argument used
   at most once at its reference, where the scorer priced it; a closure that
   survives (used twice, forwarded to a recursion, put in a container) is
@@ -100,7 +99,7 @@ then size).
   check of `typecheck -v --realize` runs over every golden program
   (spec-cost-11-1).
 - **A bracket step through an instance is never placed in a pool.**
-  [read, 2026-10-21] Realize gives a PatCall no language (Realize.hs:521),
+  [read, 2026-10-21] Realize gives a PatCall only its ambient languages (Realize.hs:911),
   so a pure `f m = .[0] m` on a receiver that is not a list on the wire
   (a newtype over a tuple with a sourced `Indexable` instance) stays on the
   nexus, which refuses it ("needs its instance, which no language here can

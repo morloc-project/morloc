@@ -31,7 +31,7 @@ code. Found by the 2026-10-21 audit [read unless marked].
 - **FORK-9 does not cover once primitives in the binders.** cppmorloc.cpp
   `frame_init` uses `pthread_once(&frames_key_once_, ...)`; a child forked
   by user code while another thread is inside `frames_key_make` waits
-  forever at its first frame. The window is one `pthread_key_create`.
+  forever at its first frame (`arm_jobs_key_once_` is the same). The window is one `pthread_key_create`.
   FORK-11 covers only std stream/env locks.
 - **Runtime variables with no ruling on whether users set them.** [read]
   MORLOC_CHANNEL_DEPTH (default 4), MORLOC_ARROW_NO_BORROW (disables table
@@ -40,7 +40,7 @@ code. Found by the 2026-10-21 audit [read unless marked].
   and absent from environmental-variables.asc.
 - **arch-build-artifacts.asc:35-37** says a failed build leaves the
   previous build in place; false for ART-3's kill window and for a refused
-  rebuild (build-and-text.md). Build.hs:328's "Atomically replace" comment
+  rebuild (build-and-text.md). ProgramBuilder/Build.hs:333's "Atomically replace" comment
   is false for the same reason.
 - **More cited tests that miss their rule.** [read, 2026-10-21] NET-3:
   `the_header_names_every_kind_as_the_runtime_does` and
@@ -51,7 +51,7 @@ code. Found by the 2026-10-21 audit [read unless marked].
   frame cutting, not that a block outlives a running job. DAEMON-14: the
   tests miss the swallowed-infra case (failure-classification.md).
   `a_request_trickling_in_ends_at_its_deadline` (NET-2) is defined in both
-  net_limits.rs:92 and mcp.rs, so deleting one leaves the citation green.
+  morloc-runtime-types net_limits.rs:91 and mcp.rs, so deleting one leaves the citation green.
 - **README's model list is incomplete.** runtime/README.md lists 10 TLA
   models; items also cite RunSweep, DaemonShutdown, CrossingConn,
   ForkPool, PanicExit, SlotSeqlock, LocalSweep, QueueHandoff,

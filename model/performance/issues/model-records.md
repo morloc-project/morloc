@@ -33,5 +33,3 @@ Found by the 2026-10-21 audit; full notes in
 - **COPY-3 and COPY-6 prose is stale.** Rust per-step copies are 0 since
   f8736a0a (COPY-3 says "rs unchanged", "q = 2n"); the COPY-6 golden
   shows 0, not 198.
-- **stream-compression-pipeline.md misstates the depth default.** It says
-  4 (2 with fewer threads); the code is `frame_workers().clamp(2, 4)`.

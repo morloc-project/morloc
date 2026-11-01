@@ -46,28 +46,14 @@ literal and record gaps. Reproduced on 0.109.0 unless marked.
   fails "No instance found for Packable::pack / Are you missing a top-level
   type signature?" although one is present; `:: Vector 6 Real` on the list
   passes. Gap: SIG-4 open; the hint is wrong either way.
-- **Rigid Nat variables, run-time consequence.** [reproduced] Instance of
-  kinds-dimensions.md "Signature Nat variables are not rigid". Python
-  `outer` returns the flat outer product; `f :: Vector m Real -> Vector p
-  Real -> Vector (m * p) Real`, `g :: Vector n Real -> Vector k Real ->
-  Vector (n + k) Real; g = f` builds, and `./prog g '[1,2]' '[1,2,3]'`
-  prints 6 elements typed `Vector 5`. A concrete caller `h :: Vector 2 Real
-  -> Vector 3 Real -> Vector 5 Real; h = g` is rejected (6 ~ 5).
 - **Literal in a point-free section ignores a `Real` context.**
   [reproduced] Violates LIT-2. `divTwo :: [Real] -> [Real]; divTwo = map
   (2 /)` fails "expected: [Real] -> [Real], inferred: a Int -> a Int";
   `divTwo xs = map (\x -> 2 / x) xs`, `half x = x / 2`, `w :: Real; w = 1`
   and `[1, 0xff, 2.5] :: [Real]` all work.
-- **Manual table examples do not typecheck.** [reproduced] features-tables.asc
-  builds `census` with `setCol "pop" pops (asCol "state" states)`; the
-  installed `setCol` replaces a column (`Table n (l + Singleton f b + r) ->
-  ...`), so it fails "Rec is missing the field that pins a row variable:
-  pop". `addCol` appends. Every manual example using `setCol` to add a
-  column (census, withDensity, stacked.loc) is stale.
-- Not reproduced, manual stale: `cbind` of two tables sharing a column is
-  now rejected ("both sides have: state"); the Packable mismatch error no
-  longer prints compiler internals (types-custom-types.asc quotes the old
-  message).
+- Manual stale: the Packable mismatch error no longer prints compiler
+  internals, but types-custom-types.asc quotes the old message. [not
+  re-verified 2026-10-31]
 - **`@collect (psmap f (@next s))` leaves the element type unsolved.**
   [reproduced, 0.109.0] With `f :: Str -> Real`, `s :: IStream Str` and
   `import parallel-cpp`, `morloc make` fails "cannot serialize unknown type
@@ -128,10 +114,8 @@ literal and record gaps. Reproduced on 0.109.0 unless marked.
     message should say `a` is undetermined.
   - `count :: Named a => Int -> Int; count n = n + 0` (no method used)
     builds silently.
-  Gap: no item says when a constrained signature is ambiguous. Candidate:
-  a signature whose constraint names a variable that its type does not
-  mention (and that no other constraint ties to one it does) is rejected at
-  the signature, naming the variable.
+  CLS-18 (ruled 2026-10-29) makes this an error at the signature, naming
+  the variable; the code deviates. Re-reproduced 2026-10-31 (`count`).
 - **A newtype over a `type` alias reports a phantom instance.** [reproduced,
   2026-10-21] `type Meters = Int; newtype Wrapped = Meters` fails "Cannot
   declare instance on transparent alias 'Meters'" though no instance is

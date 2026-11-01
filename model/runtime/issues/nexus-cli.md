@@ -61,7 +61,7 @@
 - **Argument files are read by extension before their bytes.**
   [reproduced, 2026-10-21] Violates CLI-1. A MessagePack packet copied to
   `p.json` fails "serialization error: JSON parse error"; as `p.txt` it
-  works. cli.rs:2483 (`ends_with(".json")`) and :2502 (`.mpk`/`.msgpack`)
+  works. cli.rs:2254 (`ends_with(".json")`) and :2275 (`.mpk`/`.msgpack`)
   dispatch before the packet and magic checks. A missing `p.mp` gets "is
   not inline JSON ... set `source: file`" (old spelling); a missing
   `p.json` gets "not found". `@load` shares the loader (INTR-3): `@savej
@@ -72,7 +72,7 @@
   nothing.** [reproduced, 2026-10-21] Violates CLI-5. `nul x = Null`:
   `-f packet nul 1 | wc -c` is 0 (`-f mpk` writes `c0`; `--keep-null`
   restores it), so a downstream `-` reader cannot tell no value from a
-  broken pipe. Deliberate in morloc-nexus dispatch.rs:941-947, to avoid a
+  broken pipe. Deliberate in morloc-nexus dispatch.rs:1361-1365 and 1426-1430, to avoid a
   phantom packet after an `@stdout` stream. Either CLI-5 carves out
   streaming commands or the code narrows the condition. Repro:
   /work/plans/model-audit-2026-10-21/repro/G/out/o.loc.
@@ -88,9 +88,6 @@
   Needs the Arrow IPC bytes written in place of the reference.
 
 - **Output-path defects found reading dispatch.rs.** [read, 2026-10-29]
-  - `print_result_c`'s `-f voidstar` branch passes an empty `full_packet`
-    (a caller holding only a voidstar) to `print_morloc_data_packet` and
-    the hex dump; the `-f packet` branch guards the same case.
   - `run_pure_command` passes `is_arrow = false` whatever the return type,
     so a pool-free command returning a `Table` may print wrongly
     (speculative).
@@ -98,7 +95,7 @@
     `morloc_packet_size` sets, and the MessagePack output branch drops its
     errmsg on failure.
 - **Stream output can fail after writing part of a packet.** [read,
-  2026-10-29] voidstar.rs `normalize_data_packet_to_fd` lets a FILE+ARROW
+  2026-10-29] packet_ffi.rs `normalize_data_packet_to_fd` lets a FILE+ARROW
   or FILE+DATA packet onto the streaming path, whose payload readers refuse
   anything but MessagePack, after the header has been written to the fd.
   `estimate_payload_size` bounds a value by its one block's size; a value

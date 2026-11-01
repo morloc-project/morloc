@@ -17,7 +17,7 @@
 - [reproduced] A `match` whose branches differ in type (a value beside a
   `do` suspension) is reported as "Branches of guard/if have incompatible
   types" with "then-branch" and "else-branch", constructs the program does
-  not contain: `match` reaches Typecheck.hs:1476 through IfS. Repro: in a
+  not contain: `match` reaches Typecheck.hs:1393 through IfS. Repro: in a
   `do` block, `match r | (Err e) = Err e | (Ok xs) = do { f xs; Ok xs }`.
 - [reproduced] Violates DIAG-5. A call of a named, non-recursive morloc
   function is beta-reduced into its caller (LambdaEval `reduce`), so it has
@@ -68,8 +68,9 @@
   Repro: /work/plans/model-audit-2026-10-21/repro/G/diag/bin.loc, nomod.loc, cfg/.
 - **Wrong or internal wording.** [reproduced, 2026-10-21] `@render` on an
   argument is reported as `@with` (Frontend/Desugar.hs:1101-1110
-  `rejectWithHere`). `--' @literal` is not warned deprecated while
-  `literal: true` is. A duplicate definition (`f x = x` twice) reports
+  `rejectWithHere`). A bare `--' @literal` reads as false
+  (Desugar.hs `parseDocBool`, where other flags use `flagValue`), so it is
+  neither applied nor warned deprecated; `@literal true` is warned. A duplicate definition (`f x = x` twice) reports
   "Unification error: Error in value checker: Cannot check beyond source
   boundary". Repro: /work/plans/model-audit-2026-10-21/repro/G/diag/mis2.loc, lit*.loc, dupdef.loc.
 - **A literal `-0.0` loses its sign in the nexus.** [reproduced,
@@ -88,7 +89,7 @@
   `stateDebugCallee`) that each minting site updates partially; carrying
   the callee on the manifold node would close it.
 - [read] Violates DIAG-5 under `--debug` in Rust: `lcDebugWrap` is the
-  identity (CodeGenerator/Grammars/Translator/Rust.hs, `lcDebugWrap = \_ _
+  identity (CodeGenerator/Pools/CAbi/Members/Rust.hs, `lcDebugWrap = \_ _
   body -> return body`), so a Rust pool dumps no arguments; its frame
   labels use the debug lookup and push an empty name for every manifold.
 - [speculative] Under `--debug`, frames are drained only at the dispatcher

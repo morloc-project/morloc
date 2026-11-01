@@ -7,27 +7,27 @@
   "bit64" instead makes a U64 list literal `c(5L, bit64::as.integer64(..))`,
   whose `c` dispatches on its first argument and strips the class.
 - **Missing record keys accepted.** [read] Violates REC-2. R
-  (rmorloc.c:743-746, 1407-1410) skips a missing key: a number becomes 0,
+  (rmorloc.c:826-829, 1535-1538) skips a missing key: a number becomes 0,
   an optional becomes pointer 0 (volume 0) instead of null. (Python raises
   a KeyError.)
-- [read] morloc-runtime/src/mpack.rs:401-403: Int limbs copied unaligned;
-  json.rs:1537 reads them as `*const u64`.
-- [read] mpack.rs:388-400: a 0- or 8-byte `bin` Int stores a pointer that is
-  read back as the inline value.
-- [read] voidstar.rs:381-392: rebase turns an empty array's null into
-  `shift - 1`; empty arrays lose a canonical form.
+- [read] morloc-runtime/src/mpack.rs:413-414: Int limbs copied to an
+  unaligned cursor; json.rs:1462 reads them as `*const u64`.
+- [read] mpack.rs:398-416: an 8-byte `bin` Int stores size 1 and a relptr,
+  which readers take as the inline value.
+- [read] voidstar.rs `headers` (~486): a shared-memory rebase sets an empty
+  array's data to the window's low end instead of keeping null; empty
+  arrays have no canonical form.
 - **Python and R quiet signalling NaNs in `F32` scalars.** [read] Breaks
   WIRE-7. Both hold an `F32` scalar as a double: pymorloc.c's reader
   `PyFloat_FromDouble(*(float*)data)` and the R reader widen with a C cast,
   which sets the quiet bit on x86, and `morloc_f32_from_f64` narrows the
   same way. Vectors are bulk copies and keep the bits. Fix: move NaN
   payloads between widths by bits (f32 payload << 29) in both directions.
-- [read, unreachable] nested tables handled three ways (voidstar.rs:476,
-  1017, 1096); TAB-4 says tables may nest, the compiler rejects it.
-- [reproduced] dangling `^` back-reference through an alias:
-  /work/tests/sumtypes/03-procgen-bsp-dungeon/x10-load-recursive-nexus.
-- **Record alignment.** Gap in FMT-6: records align to 8 (schema.rs:263) but
-  pad width only to the largest field (:1117); the same fields as a tuple
+- [read, unreachable] nested tables handled three ways (the `SerialType::Table`
+  arms of voidstar.rs); TAB-4 says tables may nest, the compiler rejects it.
+- **Record alignment.** Gap in FMT-6: records align to 8
+  (morloc-runtime-types schema.rs:216 `alignment`) but pad width only to
+  the largest field (:1012); the same fields as a tuple
   align to the largest field. Open: unify (a wire change).
 - **Canonical bytes.** Gap: must equal values have equal bytes, padding
   included? Depends on shared-memory.md (SHM-6) and drives cache.md.
@@ -46,12 +46,12 @@
   the writer emits only "nan", "inf", "-inf".
 
 - **A numpy integer returned as `Int` is refused.** [reproduced, dev
-  6915296a+] Violates the docs' census example
+  6915296a+, again 2026-10-31] Violates the docs' census example
   (docs src/content/features-tables.asc, `summarize`, shown printing
   54585374). `summarize :: Table n {state = Str, pop = Int} -> Int;
   summarize t = fold (+) 0 (getCol "pop" t)` with root-py, table-py and
   vector-py fails for every input, JSON included: "Expected int for
-  MORLOC_INT, but got numpy.int64" (pymorloc.c py_size_step, the
+  MORLOC_INT, but got numpy.int64" (pymorloc.c:890 py_size_step, the
   `PyLong_Check` in the MORLOC_INT arm, unchanged since 139b83e1). Cause
   unknown: what changed is that the fold now yields a numpy scalar.
 - **Multi-limb `Int` overflow messages omit the value.** [reproduced,
@@ -61,7 +61,7 @@
   in 32-bit type". Single-limb messages name the value. Repro:
   /work/plans/model-audit-2026-10-21/repro/F/wire/w3.loc.
 - **Python reads a `Bool` byte through `*(bool*)`.** [read, 2026-10-21]
-  Violates WIRE-8. data/lang/py/pymorloc.c:1769 `PyBool_FromLong(*(bool*)
+  Violates WIRE-8. data/lang/py/pymorloc.c:1806 `PyBool_FromLong(*(bool*)
   data)` is undefined on a byte other than 0 or 1; R (rmorloc.c:1618), C++
   and Rust compare a `uint8_t`.
 - **Packet landing is checked by convention, not by type.** [read,

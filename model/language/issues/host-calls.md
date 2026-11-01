@@ -34,6 +34,9 @@
   [1, 2, 3]`, the list inlined at the call, and dropping `touch p`.
   `concatSources` written with a recursive `mapE_` fails the same way. The
   same program shape built before the compiler of 2026-10-19 17:27.
+  On 2026-10-31, with stream-py also installed, the program builds and
+  runs because every call is placed in Python; the Rust path was not
+  exercised.
 - **A call that stops at an `rsize` group boundary with more than one group
   left is called flat.** [read, 2026-10-27] Violates HOST-3. With `--' @rsize 
   1 1` on `f :: Int -> Int -> Int -> Int`, `let h = f 1 in h 2 3` calls the
@@ -43,4 +46,8 @@
   `lcSourcedResult` (`IntoFnValueN` with N = the arguments left, not the
   next group's size) all read the arguments left as one group. A wrapper
   applying the groups in turn needs the curried host type in the typed
-  pools.
+  pools. Not reproduced 2026-10-31 in Python: `let h = f 1 in h 2 x`,
+  `twice (f 1) x` with `twice g x = g 2 x + g 3 x`, and `f 1` passed to a
+  Python function calling it with two arguments all give the right value,
+  since each call is eta-expanded to `f(1)(b)(c)`; the flat path may be
+  reachable only through Rust `lcSourcedResult`.

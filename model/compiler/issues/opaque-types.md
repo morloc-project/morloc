@@ -47,8 +47,8 @@ serialize unless a `Packable` instance gives it a wire form.
   /work/plans/model-audit-2026-10-21/repro/B/t/n5/a.loc, b.loc.
 
 - **An opaque value bound in a do-block split across pools does not
-  build.** [reproduced, 2026-10-24, also before the boundary pricing of
-  e8aa73b0] With `type Box` / `type Cpp => Box = "Box"`, sourced
+  build.** [reproduced, 2026-10-24; again 2026-10-31 under the crossing
+  minimizer] With `type Box` / `type Cpp => Box = "Box"`, sourced
   `mk :: Int -> <IO> Box`, `grow :: Box -> Int -> <IO> Box`,
   `unbox :: Box -> Int` in C++ and `pyStep :: Int -> <IO> Int` in Python,
 
@@ -62,13 +62,10 @@ serialize unless a `Packable` instance gives it a wire form.
         v <- pyStep u
         unbox b2 + v
 
-  fails (`Could not resolve type for variable 'Box'`; with measured
-  crossing costs the placement changes and it reaches the internal
-  message of the entry above, `Cannot find constructor in VarF "Box"`): the realizer places
-  the statements after `b <-` in Python, so `b` must cross into the Python
-  pool and back, and it has no wire form. Nothing in the realizer refuses
-  a boundary that carries a free variable whose type cannot cross
+  fails with the internal message of the entry above, `Cannot find
+  constructor in VarF "Box"`, located at the export list: the realizer
+  places statements after `b <-` in Python, so `b` must cross into the
+  Python pool and back, and it has no wire form. Nothing in the realizer
+  refuses a boundary that carries a free variable whose type cannot cross
   (COST-11 asks for placements code generation can build; REAL-3).
-  Since references to a let-bound data value became free, nothing in the
-  cost discourages such a split either.
   Repro files: /work/plans/realization-cost-model/repro2.
