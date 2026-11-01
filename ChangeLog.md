@@ -1,5 +1,5 @@
-Unreleased
-----------
+0.112.0 [2026-11-01]
+--------------------
 
 New features
  * A command's input is checked against the dimensions its type states

@@ -63,26 +63,17 @@ on 0.109.0 unless marked.
   reaches the decoder. Seen with Python `List U8 = "bytes"`, now refused by
   NATIVE-7; R's `List U8 = "raw"` works only because rmorloc routes every
   U8 array to raw.
-- **A literal of a newtype over a Packable type is rejected.** [reproduced,
-  2026-10-18] `import root-py; import map-py; newtype Holder = Map Str Int`;
-  `[("a", 1)] :: Holder` fails "Cannot construct a value of 'Holder' from a
-  List literal in py ... declare 'instance Packable List Holder'", though
-  `pack ([("a", 1)] :: Map Str Int)` (with `deriving (Packable)`) builds the
-  same value. The literal code (library/Morloc/CodeGenerator/Express.hs,
-  `maybePackableWrap`) looks for an instance of the outer newtype only and
-  does not compose the one of the type it wraps. Gap: no item says how a
-  literal reaches a type through several representations.
 - **Comparison on `data` with fields.** [reproduced] Violates SUM-5.
   `data Shape = Circle Real | Rect Real Real | Dot`, `lt a b = a < b`,
   `eq a b = a == b`. Python is correct. R: `==` works, `<` fails at run
   time "comparison of these types is not implemented" (root/main.loc:28).
-  C++: `==` and `<` fail to build (root-cpp core.hpp:654, :659 "no match for
-  operator==/operator<=" on `Shape`). Enum-only `data Color = Red | Green |
+  C++: `==` and `<` fail to build (root-cpp core.hpp:682, :687, `morloc_le`
+  and `morloc_eq`: "no match for operator<=/operator==" on `Shape`). Enum-only `data Color = Red | Green |
   Blue` works in all three.
 - **Table column sum fails in Python.** [reproduced] Violates WIRE-1.
   Census table built with `addCol`; `summarize t = fold (+) 0 (getCol "pop"
   t)` fails for CSV, Parquet, inline JSON and stdin input: "Expected int for
-  MORLOC_INT, but got numpy.int64" (pymorloc.c:744, py_size_step). The
+  MORLOC_INT, but got numpy.int64" (pymorloc.c:890, py_size_step; still so on 0.110.1). The
   manual shows `54585374`.
 - **No rule forbids a sourced function mutating its argument.** [read] A
   gap in EVAL-7. In Python a morloc value read twice is one shared object,
@@ -97,7 +88,7 @@ on 0.109.0 unless marked.
   "pathlib.Path"`, Py `mk :: Str -> Path` returning `pathlib.Path(s)`, Cpp
   caller `u s = unpack (mk s)`: builds with no warning; running `u
   notes.txt` fails "Expected str or bytes for MORLOC_STRING, but got
-  PosixPath (pymorloc.c:892)". Repro: /work/plans/model-audit-2026-10-21/repro/B/t/n7/c2.loc.
+  PosixPath (pymorloc.c:929)". Repro: /work/plans/model-audit-2026-10-21/repro/B/t/n7/c2.loc.
 - **An unmapped record passed to a sourced C++ function does not compile.**
   [reproduced, 2026-10-21] Violates NATIVE-4; contradicts NATIVE-3.
   `record P where x :: Int; y :: Real`, no `record Cpp =>`, sourced
@@ -149,13 +140,9 @@ on 0.109.0 unless marked.
   `fromNull :: a -> ?a -> a` at `a = ?Int` with `state2 :: ?(?Int) -> Str`,
   `state2 (fromNull (Null :: ?Int) Null)` is present-with-inner-absent in
   C++ and Rust and absent in Python.
-- **NUM-3's text is stale.** [reproduced, 2026-10-21] NUM-3 (ruled
-  2026-10-04) says R holds `I64`/`U64` as doubles exact below 2^53; the
-  2026-10-16 ruling and the code use bit64 `integer64` (`cI64 5` has class
-  integer64; I64 9007199254740993 round-trips; U64 2^64-1 fails "does not
-  fit in R's integer64"). That ruling also makes `[U8]` an R `raw` and
-  truncates fractional doubles at integer slots; no item records either.
-  Needs NUM-3 rewritten from the newer ruling.
+- **R integer rules with no item.** [reproduced, 2026-10-21] The
+  2026-10-16 R integer ruling makes `[U8]` an R `raw` and truncates
+  fractional doubles at integer slots; no item records either.
 - **Number rules with no item.** [reproduced, 2026-10-21] Gaps in
   numbers.md.
   - Real division by zero: `1.0 / 0.0` is `inf` in cpp, r and rust, an
@@ -168,9 +155,10 @@ on 0.109.0 unless marked.
   - Map pair order: py and r keep insertion order, cpp sorts by key. Is
     order part of a map's value (COLL-5 covers repeated keys only)?
 - **R overflow message names the wrong R type for `Int`.** [reproduced,
-  2026-10-21] data/lang/r/rmorloc.c:1701-1704: a multi-limb `Int` arriving
-  in R fails "does not fit in R's numeric type (max 2^53 ...)"; `[[Int]]_R`
-  is R integer, as the single-limb branch (:1694-1697) says.
+  2026-10-21] data/lang/r/rmorloc.c:1759-1763 (array) and :1920-1924
+  (scalar): a multi-limb `Int` arriving in R fails "does not fit in R's
+  numeric type (max 2^53 ...)"; `[[Int]]_R` is R integer, as the
+  single-limb branches (:1767-1770, :1915) say.
 - **`@schema` and `@typeof` evaluate their argument.** [reproduced,
   2026-10-21] Violates INTR-4. `schemaBoom x = @schema (boom x)` with a
   raising Python `boom` fails "run failed / boom". features-intrinsics.asc:

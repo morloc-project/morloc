@@ -23,10 +23,10 @@
   runs, though root has no `Numeric Int`.
 
 - **Link-time superclass check ignores types.** [read] CLS-5.
-  `matchesSuperInstance` (Link.hs:694) passes when the superclass has an
+  `matchesSuperInstance` (Link.hs:790) passes when the superclass has an
   instance at any type. The precise check (`checkSuperclassInstance`,
-  Frontend/Typecheck.hs:3643) covers only instances in the root module
-  (Treeify.hs:512), so an imported module's `instance D T` without `C T` is
+  Frontend/Typecheck.hs:3459) covers only instances in the root module
+  (Treeify.hs:575 `rootInstances`), so an imported module's `instance D T` without `C T` is
   likely accepted. Not reproduced across modules.
 - **An instance on a legacy-form record is not found where its type was
   evaluated.** [read] Violates CLS-2. Instance filtering
@@ -53,19 +53,6 @@
   no known program miscompiles; the binding by term id remains in full
   expansion. Fix direction: after typechecking, re-resolve by type each
   method back-edge whose type differs from its definition's.
-- [reproduced] A valid program is rejected (POLY-6 message). An instance
-  for a parameterized type whose method body uses the same method at the
-  parameter type, `instance Eq a => Eq (W a) where (==) x y = .val x ==
-  .val y` with `record W a where val :: a`, fails with "The type of this
-  term is not determined: nothing in the program fixes 'a', 'a'" at the
-  instance body, even when every use is ground (`mkW [n] == mkW [n]`,
-  `mkW :: a -> W a`). Same with constructor-pattern clauses over `data
-  Wrap a = Wrap a` (`(==) | (Wrap x) (Wrap y) = x == y`).
-- [reproduced] With both a ground and an open-element use of that `Wrap`
-  instance in one module (`Wrap [n] == Wrap [n]`, `Wrap [] == Wrap []`),
-  the build fails with "Cannot resolve recursive call to ==`t...@..." from
-  CodeGenerator/Express.hs, with no source location: the inner `==` became
-  a back-edge, the shape of #160.
 - **Classes the compiler names still live in `root`.** [read] Violates
   CLS-15. `Functor` (`map`, found by name in
   library/Morloc/CodeGenerator/Instance.hs `findFunctorMap`) and `Integral`
@@ -94,6 +81,23 @@
   in g++ (`no match for operator==`, root-cpp core.hpp). No `Eq`/`Ord`
   constraint or instance context can be unmet. Repro:
   /work/plans/brittleness-2026-10-23/repros/lang/m/datacmp.
+- **Two newtypes over one type deriving `Eq`/`Ord` break comparison of
+  unpacked values.** [reproduced, 2026-11-01] Violates CLS-2 and CLS-16.
+  Under root-py this is rejected with "No matching implementation found
+  for '<=' at type I64 -> I64 -> Bool":
+  `newtype A = I64 deriving (Packable, Eq, Ord)`,
+  `newtype B = I64 deriving (Packable, Eq, Ord)`,
+  `g :: A -> A -> Bool; g d t = unpack t <= unpack d`,
+  `f :: I64 -> Bool; f x = g (pack x) (pack x)`. Both operands come from
+  `A`; declaring `B` alone breaks it, and `==` fails the same way under
+  `deriving (Eq)`. It builds when only one newtype derives `Ord`, when the
+  value goes through a function typed `A -> I64`, or with one operand
+  annotated (`unpack t :: I64`). It reaches constrained library functions:
+  stdlib `time`'s `pack (addSat (unpack t) (unpack d))` over `Instant` and
+  `Duration` fails inside root's `(>)`. Speculative cause: the derived
+  instances of `A` and `B` both stand at the representation `I64` beside
+  the catch-all `Ord a` (entry above), and the unannotated `unpack` result
+  leaves the choice among them open at realization.
 - **Instance selection matches through a coercion.** [read] Violates
   CLS-17. Typecheck.resolveInstances accepts a candidate when
   `tryCoerce` turns its method type into the use's
@@ -137,3 +141,18 @@
   representation of 'Vec a' is '[a]'"; `Vec n a` builds. The head seems to
   be compared before its Nat is filled (KIND-5).
 
+- **An instance context is not enforced at a use.** [reproduced,
+  2026-11-01, morloc typecheck] Violates CLS-5. Link.hs:428 matches
+  `IstE origin cls _ ts es` and drops the context; `Instance`
+  (Namespace/State.hs:442) has no field for it. With `instance Sz a => Sz
+  (W a)` and no `Sz Str`, `useIt s = sz (mkW s)` typechecks. Repro:
+  /work/plans/error-clusters/repro/instance-context-use.loc.
+- **The signature check ignores an instance context.** [reproduced,
+  2026-11-01] Violates CLS-5. `g :: W a -> Int; g w = sz w` (no `Sz a`)
+  typechecks: `covers` (Frontend/Typecheck.hs ~3521) accepts any head that
+  matches without reading its context. Repro:
+  /work/plans/error-clusters/repro/instance-context-signature.loc.
+- **`matchTypeU` binds only type variables and ignores effect rows.**
+  [read, 2026-11-01] `matchTypeU` (Frontend/Typecheck.hs ~3590), used by
+  `covers`, never binds a Nat variable, so a head such as `Eq (Vector n
+  a)` does not cover a use at `Vector 3 a`; and `<E> T` matches `<F> T`.

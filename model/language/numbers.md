@@ -21,12 +21,16 @@ Code: conforms 2026-10-21
 `I8`..`I64` and `U8`..`U64` hold the same values in every language that
 has a native type of that width. Where a language has none, NUM-3 applies.
 
-### NUM-3 R holds 64-bit integers as doubles
-Intent: ruled 2026-10-04
-Code: deviates (issues/values.md)
+### NUM-3 R holds 64-bit integers as `integer64`, without -2^63 or 2^63 and up
+Intent: ruled 2026-11-01
+Code: conforms 2026-11-01
 
-In R, `I64` and `U64` are doubles, exact below 2^53. This is R's limit and
-not a deviation.
+In R, `I64` and `U64` are bit64 `integer64`, a signed 64-bit integer that
+reserves -2^63 as its NA. So R's `I64` holds -2^63+1 .. 2^63-1, without the
+`I64` minimum, and R's `U64` holds 0 .. 2^63-1. A value outside these ranges
+fails as it crosses into R (NUM-4), and one computed in R is NA there and
+fails as it leaves. These are R's limits and not deviations: a program that
+needs those values runs the work in another language.
 
 ### NUM-4 A value that does not fit is an error at the boundary
 Intent: proposed
