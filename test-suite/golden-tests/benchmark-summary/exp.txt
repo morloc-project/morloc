@@ -5,7 +5,7 @@ BENCH slow triple py n=1
 BENCH deep triple cpp n=2
 16
 BENCH quick incr py n=1
-BENCH slow triple py n=1
+BENCH slow triple cpp n=1
 80
 BENCH rs quad rust n=2
 rs start=2 pass=2

@@ -38,13 +38,15 @@ for a signature, or (b) a gap, so that any term whose type is determined by
 its uses needs none?
 
 ### SIG-5 An exported term whose type keeps a class constraint
-Intent: open
+Intent: ruled 2026-10-29
 Code: unaudited
 
-An export whose type still has a class constraint cannot be given an
-instance. Is it (a) skipped with a warning, as today, or (b) a compile
-error? The same question applies to an export with a free type variable
-and no constraint.
+An export whose type has a free type variable, constrained or not, cannot
+be given an instance or a representation. It is left out of every generated
+interface (CLI, API, MCP) with a warning, and is not an error: POLY-6 and the
+second sentence of CLS-18 apply to uses inside the program, not to the
+export itself. A signature whose constrained variable occurs only in its
+constraints is an error whether or not it is exported (CLS-18).
 
 ### SIG-6 A module gives a term one signature
 Intent: ruled 2026-10-14

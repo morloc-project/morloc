@@ -2,7 +2,8 @@
 --'
 --' A Python source returns a function named `__mm_7`, the form of a
 --' generated manifold's name, and the same function under a plain name.
---' Both cross to R the same way; neither is taken for manifold 7.
+--' Sending either to R is refused at build (HOST-9); neither is taken for
+--' manifold 7.
 module main (viaPlain, viaLookalike)
 
 import root

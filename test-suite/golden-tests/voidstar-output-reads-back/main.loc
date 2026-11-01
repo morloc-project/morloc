@@ -1,0 +1,14 @@
+-- A value written with `-f voidstar` reads back as an argument at every
+-- size, including one large enough that the pool returns it by reference.
+module main (mkInts, lenInts)
+
+import root-py
+
+source Py from "s.py" ("mk")
+mk :: Int -> [Int]
+
+mkInts :: Int -> [Int]
+mkInts n = mk n
+
+lenInts :: [Int] -> Int
+lenInts xs = length xs

@@ -1,13 +1,5 @@
 # Host calls
 
-- **A function a host returns keeps its declared grouping only when an
-  effect forces an adapter.** [read] Gap in HOST-4. A source `mk :: Int ->
-  (Int -> (Int -> Int))` whose result is called with two arguments: with no
-  effect in the result, `needsAdapt` (CodeGenerator/EffectBoundary.hs) is
-  False and nothing regroups the call, so morloc calls the host's
-  one-argument function with two. With an effect in the tail the inbound
-  adapter splits at the declared grouping (`calledAs`). Not reproduced.
-
 - **A point-free reader built from a Rust function fails when a Python
   caller both collects it and writes it.** [reproduced] Violates WIRE-6.
   With bio-rust installed, `readE = mapReader gffEntries readGff3` (no
@@ -42,13 +34,20 @@
   [1, 2, 3]`, the list inlined at the call, and dropping `touch p`.
   `concatSources` written with a recursive `mapE_` fails the same way. The
   same program shape built before the compiler of 2026-10-19 17:27.
-- **An invalid `rsize` is accepted until the term is called.**
-  [reproduced, 2026-10-21] Violates HOST-3. `--' rsize: 2` on `shift ::
-  Real -> [Real] -> [Real]` builds when `shift` is never called;
-  Express.hs:561-581 checks at the call site, though the arity is known
-  from the signature. Repro: /work/plans/model-audit-2026-10-21/repro/F/host/h3b.loc.
-- **Two spellings of source directives.** [reproduced, 2026-10-21] HOST-3
-  and the manual write `--' rsize: 1`; goldens spec-host-7-1/8-1 write
-  `--' @rsize 1`, and the parse error suggests `@rsize 1`
-  (Desugar.hs:918). Both build; no item names the canonical form (same for
-  `name:`/`@name`).
+  On 2026-10-31, with stream-py also installed, the program builds and
+  runs because every call is placed in Python; the Rust path was not
+  exercised.
+- **A call that stops at an `rsize` group boundary with more than one group
+  left is called flat.** [read, 2026-10-27] Violates HOST-3. With `--' @rsize 
+  1 1` on `f :: Int -> Int -> Int -> Int`, `let h = f 1 in h 2 3` calls the
+  function the host returns once with both 2 and 3 (Python: TypeError);
+  the host returns a function taking one argument that returns another.
+  Provenance (HostProvenance `sourcedApp`), the call site and Rust
+  `lcSourcedResult` (`IntoFnValueN` with N = the arguments left, not the
+  next group's size) all read the arguments left as one group. A wrapper
+  applying the groups in turn needs the curried host type in the typed
+  pools. Not reproduced 2026-10-31 in Python: `let h = f 1 in h 2 x`,
+  `twice (f 1) x` with `twice g x = g 2 x + g 3 x`, and `f 1` passed to a
+  Python function calling it with two arguments all give the right value,
+  since each call is eta-expanded to `f(1)(b)(c)`; the flat path may be
+  reachable only through Rust `lcSourcedResult`.

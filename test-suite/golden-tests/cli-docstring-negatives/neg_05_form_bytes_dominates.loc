@@ -4,8 +4,8 @@ import root
 
 -- bytes accepts any input, so the second atom in a chain is unreachable.
 foo ::
-  --' source: file
-  --' form: bytes|packet
+  --' @source file
+  --' @form bytes|packet
   [U8] ->
   Int
 foo x = 0

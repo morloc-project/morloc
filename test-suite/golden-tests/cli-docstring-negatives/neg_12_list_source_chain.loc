@@ -4,9 +4,9 @@ import root
 
 -- list.source must be a single atom; OR-chains are not allowed.
 foo ::
-  --' source: file
-  --' form: list
-  --' list.source: file|inline
+  --' @source file
+  --' @form list
+  --' @list.source file|inline
   [Int] ->
   Int
 foo x = 0

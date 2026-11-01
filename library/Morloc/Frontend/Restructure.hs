@@ -24,6 +24,7 @@ import Data.Set (Set)
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as T
+import qualified Morloc.BaseTypes as BT
 import qualified Morloc.Data.DAG as DAG
 import Morloc.Data.Doc
 import qualified Morloc.Data.GMap as GMap
@@ -36,7 +37,9 @@ import qualified Morloc.TypeEval as TE
 import Morloc.Frontend.Rename (renameLocals)
 import Morloc.Frontend.TerminalActions (synthesizeTerminalActions)
 import Morloc.Frontend.TypeNames (isReservedTypeName, resolveTypeNames)
-import Morloc.Typecheck.Internal (expandStructuralAliases, expandTransparentAliases, isSubtypeOf2, mapTypeUChildren, structuralAliasHead, structuralAliasesIn, traverseTypeUChildren, typeUChildren)
+import Morloc.Typecheck.Internal (expandStructuralAliases, expandTransparentAliases, isSubtypeOf2, mapTypeUChildren, unlabelU, headerLabels, structuralAliasHead, structuralAliasesIn, traverseTypeUChildren, typeUChildren, typeUToNatExpr, natPositions, natPositionExpr)
+import qualified Morloc.Typecheck.NatDecide as ND
+import qualified Morloc.Typecheck.NatSolver as NS
 
 -- | Resolve type aliases, term aliases and import/exports
 restructure ::
@@ -99,7 +102,7 @@ markConstants e0@(ExprI _ (ModE _ es)) = do
     topLevel _ = return ()
 
     mark :: ExprI -> MorlocMonad ()
-    mark (ExprI k _) = MM.modify (\st -> st {stateConstantOrigin = Map.insert k k (stateConstantOrigin st)})
+    mark (ExprI k _) = MM.modify' (\st -> st {stateConstantOrigin = Map.insert k k (stateConstantOrigin st)})
 
     constant locals x = computes x && not (isLambda x) && not (effectful x) && Set.null (freeLocals locals x)
 
@@ -185,7 +188,7 @@ expandStructuralTypes d = do
   scope <- MM.getGeneralScope
   let expandEntry (ps, body, doc, terminal, kind) =
         (map (fmap (expandStructuralAliases scope)) ps, expandStructuralAliases scope body, doc, terminal, kind)
-  MM.modify $ \st -> st
+  MM.modify' $ \st -> st
     { stateGeneralTypedefs = Map.map (map expandEntry) (stateGeneralTypedefs st)
     , stateConcreteTypedefs = Map.map (Map.map (map expandEntry)) (stateConcreteTypedefs st)
     }
@@ -195,7 +198,8 @@ expandStructuralTypes d = do
     expandModule sc e = do
       e' <- AST.mapTypeInExprI (expandStructuralAliases sc) (writtenAliasDocs sc e)
       checkExpandable sc e'
-      return (expandClassSigs sc e')
+      let e'' = expandClassSigs sc e'
+      return e''
 
     -- DOC-3: a function, effect or optional alias carries its docstring
     -- where a signature names it, and the expansion drops the name.
@@ -557,7 +561,7 @@ resolveImports d0 =
                     exportCtorsWithTypes allSymbols resolved (resolveExplicitSymbols allSymbols ungroupedExports)
                   return $ AST.setExport (ExportMany resolvedUngrouped resolvedGroups) e
                 else
-                  MM.throwSystemError $
+                  MM.throwRejected $
                     "Module"
                       <+> squotes (pretty m)
                       <+> "does not export the following terms or types:"
@@ -746,7 +750,7 @@ resolveImports d0 =
     throwMissingImportError :: MVar -> MVar -> [Text] -> MorlocMonad a
     throwMissingImportError m1 m2 missing =
       let (methods, notExported) = partitionMissing missing
-       in MM.throwSystemError $ vsep (methodSection methods m1 m2 ++ notExportedSection notExported m1 m2)
+       in MM.throwRejected $ vsep (methodSection methods m1 m2 ++ notExportedSection notExported m1 m2)
 
     methodSection :: [(Text, ClassName)] -> MVar -> MVar -> [MDoc]
     methodSection [] _ _ = []
@@ -891,7 +895,7 @@ handleBinops d0 = do
       (Just v') ->
         if v == v'
           then return m
-          else MM.throwSystemError $ "Conflicting fixity definitions for" <+> pretty k
+          else MM.throwRejected $ "Conflicting fixity definitions for" <+> pretty k
 
     updateBinopExprs :: Map EVar (Associativity, Int) -> ExprI -> MorlocMonad ExprI
     updateBinopExprs m0 = f
@@ -1199,7 +1203,17 @@ declaration and one table serves every module.
 collectTypes :: DAG MVar [AliasedSymbol] ExprI -> MorlocMonad ()
 collectTypes fullDag = do
   let found = map (AST.findTypedefs . fst) (Map.elems fullDag)
-      general = Map.unionsWith mergeEntries (map fst found)
+      labeled = Map.unionsWith mergeEntries (map fst found)
+      -- A newtype's header labels (DIM-9) are kept apart from its
+      -- representation, which is an ordinary type.
+      general = Map.map (map (\(ps, b, d, term, k) -> (ps, unlabelU b, d, term, k))) labeled
+      headers =
+        Map.fromList
+          [ (v, hs)
+          | (v, (_, b, _, _, TypedefNewtype) : _) <- Map.toList labeled
+          , let hs = [(l, fields) | (l, fields, _) <- headerLabels b]
+          , not (null hs)
+          ]
       concrete =
         Map.map (completeRecords general) $
           Map.unionsWith (Map.unionWith mergeEntries) (map snd found)
@@ -1207,7 +1221,7 @@ collectTypes fullDag = do
   checkConflictingForms modules Nothing general
   checkReservedDeclarations general
   mapM_ (\(lang, sc) -> checkConflictingForms modules (Just lang) sc) (Map.toList concrete)
-  MM.modify $ \s -> s {stateGeneralTypedefs = general, stateConcreteTypedefs = concrete}
+  MM.modify' $ \s -> s {stateGeneralTypedefs = general, stateConcreteTypedefs = concrete, stateNewtypeHeaders = headers}
 
 -- | Two declarations of one type, or two forms of it in one language, that
 -- apply to the same parameters but say different things.
@@ -1232,7 +1246,7 @@ checkConflictingForms modules lang scope =
                   <> vsep ["Also declared at" <+> s | s <- sites]
                   <> line
                   <> "and here:"
-            [] -> MM.throwSystemError msg
+            [] -> MM.throwRejected msg
   where
     what = maybe "declarations" (\l -> pretty l <+> "forms") lang
     -- A general alias is declared once (ALIAS-9): it has no parameter
@@ -1270,7 +1284,7 @@ checkReservedDeclarations scope =
   case [v | (v@(TV n), _ : _ : _) <- Map.toList scope, isReservedTypeName n] of
     [] -> return ()
     vs ->
-      MM.throwSystemError $
+      MM.throwRejected $
         "The built-in type" <> (if length vs > 1 then "s" else "")
           <+> hsep (punctuate "," (map (squotes . pretty) vs))
           <+> "cannot be declared again with a different definition"
@@ -1286,6 +1300,9 @@ checkTypeInvariants dag = do
   -- per language. Per-language overrides belong to newtypes or primitives.
   checkAliasLanguageFormConflict dag gscope cscopes
 
+  -- NATIVE-7: in Python a list is a list whatever its elements.
+  checkPythonListForms dag
+
   -- Invariant 2: a `newtype` wire-parent chain must not contain a cycle.
   checkNewtypeCycles gscope
 
@@ -1298,12 +1315,19 @@ checkTypeInvariants dag = do
   -- Invariant 4: a transparent alias is applied to all of its parameters.
   checkAliasApplications dag gscope
 
+  -- KIND-5, KIND-2, KIND-4: every argument has its parameter's kind, a type
+  -- that classifies a value is Type-kinded, and no Nat is negative.
+  checkTypeApplications dag gscope
+
   -- NEWT-9: a type with a Packable instance has a representation, and the
   -- instance packs from it.
   checkPackableRepresentations dag gscope
 
   -- DERIV-5: a type does not both derive a class and implement it by hand.
   checkDerivedConflicts dag gscope
+
+  -- NATIVE-10: a Packable instance gives a language both methods or neither.
+  checkPackableSides dag cscopes
 
 -- | The head of every @Packable@ instance has a representation, and the
 -- instance's wire type is that representation at the head's arguments.
@@ -1314,15 +1338,10 @@ checkPackableRepresentations dag gscope =
   mapM_ check
     [ (i, stripForall w, stripForall n)
     | (_, (e, _)) <- Map.toList dag
-    , ExprI i (IstE _ (ClassName "Packable") _ [w, n] _) <- instancesIn e
+    , ExprI i (IstE _ (ClassName "Packable") _ [w, n] _) <- instanceExprs e
     ]
   where
-    instancesIn x@(ExprI _ (IstE {})) = [x]
-    instancesIn (ExprI _ (ModE _ es)) = concatMap instancesIn es
-    instancesIn _ = []
-
-    stripForall (ForallU _ t) = stripForall t
-    stripForall t = t
+    stripForall = stripForallU
 
     check :: (Int, TypeU, TypeU) -> MorlocMonad ()
     check (i, w, n) =
@@ -1357,6 +1376,59 @@ checkPackableRepresentations dag gscope =
     isRecordBody NamU {} = True
     isRecordBody _ = False
 
+-- | A Packable instance gives a language both @pack@ and @unpack@ or
+-- neither (NATIVE-10), where the type has a form of its own in that
+-- language: a value that language receives is built by @pack@ and one it
+-- sends is taken apart by @unpack@, so with only one of them a received value
+-- and a literal would differ. An instance is every declaration of it, in any
+-- module (CLS-2); a method written in Morloc serves every language. A
+-- derived or automatic method is the identity cast, which serves only where
+-- the type has no form of its own (NEWT-7), so it does not count here.
+checkPackableSides :: DAG MVar a ExprI -> Map.Map Lang Scope -> MorlocMonad ()
+checkPackableSides dag cscopes =
+  case [ (i, lang, h, method)
+       | (h, decls) <- Map.toList byHead
+       , lang <- nub [l | (_, ms) <- decls, (Just l, _) <- ms]
+       , ownForm lang h
+       , let given m = any (\(_, ms) -> any (\(l, m') -> m' == m && maybe True (== lang) l) ms) decls
+       , (method, missing) <- [("pack", "unpack"), ("unpack", "pack")]
+       , given method && not (given missing)
+       , i <- take 1 [i' | (i', ms) <- decls, (l, m') <- ms, m' == method, maybe True (== lang) l]
+       ] of
+    [] -> return ()
+    ((i, lang, h, method) : _) ->
+      MM.throwSourcedError i $
+        "This Packable instance gives" <+> pretty lang <+> "a" <+> squotes (pretty method)
+          <+> "for" <+> squotes (pretty h) <+> "but no"
+          <+> squotes (if method == ("pack" :: Text) then "unpack" else "pack") <> "."
+          <+> "A type with a" <+> pretty lang <+> "form of its own needs both there."
+  where
+    -- The methods each declaration gives, by head type: a sourced one in
+    -- its language, a Morloc one (Nothing) in all.
+    byHead :: Map.Map TVar [(Int, [(Maybe Lang, Text)])]
+    byHead = Map.fromListWith (++)
+      [ (extractKey (stripForallU n), [(i, concatMap methodsOf es)])
+      | (_, (e, _)) <- Map.toList dag
+      , ExprI i (IstE Declared (ClassName "Packable") _ [_, n] es) <- instanceExprs e
+      ]
+    methodsOf (ExprI _ (SrcE src))
+      | srcAlias src == EV "pack" = [(Just (srcLang src), "pack")]
+      | srcAlias src == EV "unpack" = [(Just (srcLang src), "unpack")]
+    methodsOf (ExprI _ (AssE (EV "pack") _ _)) = [(Nothing, "pack")]
+    methodsOf (ExprI _ (AssE (EV "unpack") _ _)) = [(Nothing, "unpack")]
+    methodsOf _ = []
+    ownForm lang h = maybe False (Map.member h) (Map.lookup lang cscopes)
+
+-- | The instance declarations in a module expression.
+instanceExprs :: ExprI -> [ExprI]
+instanceExprs x@(ExprI _ (IstE {})) = [x]
+instanceExprs (ExprI _ (ModE _ es)) = concatMap instanceExprs es
+instanceExprs _ = []
+
+stripForallU :: TypeU -> TypeU
+stripForallU (ForallU _ t) = stripForallU t
+stripForallU t = t
+
 -- | A @deriving@ clause and a hand-written instance of the same class for
 -- the same type conflict (DERIV-5). A newtype's automatic @unpack@ is not a
 -- clause: an explicit Packable instance beside it is an alternative.
@@ -1378,13 +1450,9 @@ checkDerivedConflicts dag gscope =
     instances =
       [ (i, origin, cls, stripForall (last ts), es)
       | (_, (e, _)) <- Map.toList dag
-      , ExprI i (IstE origin cls _ ts@(_ : _) es) <- instancesIn e
+      , ExprI i (IstE origin cls _ ts@(_ : _) es) <- instanceExprs e
       ]
-    instancesIn x@(ExprI _ (IstE {})) = [x]
-    instancesIn (ExprI _ (ModE _ es)) = concatMap instancesIn es
-    instancesIn _ = []
-    stripForall (ForallU _ t) = stripForall t
-    stripForall t = t
+    stripForall = stripForallU
     isPackDef (ExprI _ (AssE (EV "pack") _ _)) = True
     isPackDef _ = False
 
@@ -1418,7 +1486,7 @@ checkAliasLanguageFormConflict dag gscope cscopes =
                 let whereClause = case mMod of
                       Just m  -> line <> "Declared in module" <+> squotes (pretty (unMVar m)) <> "."
                       Nothing -> mempty
-                in MM.throwSystemError (header <> whereClause <> line <> advice)
+                in MM.throwRejected (header <> whereClause <> line <> advice)
   where
     -- Walk the per-module AST to find the per-language typedef
     -- declaration for (lang, v). Returns the declaration's AST index
@@ -1444,6 +1512,30 @@ checkAliasLanguageFormConflict dag gscope cscopes =
           | otherwise = []
         go (ExprI _ (ModE _ es)) = concatMap go es
         go _ = []
+
+-- | NATIVE-7: a Python form for a list (`type Py => (List U8) = "bytes" U8`)
+-- other than `list` is refused where it is declared. A list the program
+-- builds is always a Python list, so another form could not hold for it.
+checkPythonListForms :: DAG MVar a ExprI -> MorlocMonad ()
+checkPythonListForms dag =
+  case [(i, t) | (_, (e, _)) <- Map.toList dag, (i, t) <- listForms e] of
+    [] -> return ()
+    ((i, t) : _) ->
+      MM.throwSourcedError i $
+        "In Python a list is always a Python `list`, but this gives it the form"
+          <+> squotes (pretty t) <> "."
+          <> line
+          <> "Use `Vector n a` (a numpy array) for a compact buffer."
+  where
+    listForms (ExprI i (TypE (ExprTypeE (Just (lang, _)) v _ body _ _)))
+      | langName lang == "py" && v == TV "List" =
+          [(i, h) | Just h <- [formHead body], h /= "list"]
+    listForms (ExprI _ (ModE _ es)) = concatMap listForms es
+    listForms _ = []
+    formHead (VarU (TV h)) = Just h
+    formHead (AppU (VarU (TV h)) _) = Just h
+    formHead (ForallU _ t) = formHead t
+    formHead _ = Nothing
 
 -- | Enforce Invariant 2: the wire-parent edges between newtypes must form
 -- a DAG. A cycle (e.g. @newtype A = B; newtype B = A@) is rejected at the
@@ -1647,6 +1739,15 @@ refineKinds dag = do
       ExprI i (AssE v (promoteLabelKindsExpr e) (map promoteLabelKindsExpr es))
     promoteLabelKindsExpr (ExprI i (IstE o c ctx ts es)) =
       ExprI i (IstE o c ctx ts (map promoteLabelKindsExpr es))
+    promoteLabelKindsExpr (ExprI i (ClsE (Typeclass cs cls vs sigs))) =
+      ExprI i (ClsE (Typeclass cs cls vs [promoteSig s | s <- sigs]))
+      where
+        promoteSig (Signature v lng et) =
+          let kindedVars = labelDerivedKinds (enatLabels et) (etype et)
+           in Signature v lng et
+                { etype = promoteKindedVarsR kindedVars (etype et)
+                , econs = Set.map (AST.mapConstraint (promoteKindedVarsR kindedVars)) (econs et)
+                }
     promoteLabelKindsExpr e = e
 
     -- | Given the @enatLabels@ map (var -> arg index) and the function
@@ -1667,7 +1768,7 @@ refineKinds dag = do
 
         kindOfLabelInner :: TypeU -> Maybe Kind
         kindOfLabelInner (VarU (TV "Str")) = Just KindStr
-        kindOfLabelInner (VarU (TV "Int")) = Just KindNat
+        kindOfLabelInner (VarU (TV "Int")) = Just KindInt
         kindOfLabelInner (AppU (VarU (TV "List")) [_]) = Just (KindList KindStr)
         kindOfLabelInner _ = Nothing
 
@@ -1807,40 +1908,16 @@ refineKinds dag = do
         inferArgKind (LitU (LRec _))   = KindRec
         inferArgKind (LitU (LList _))  = KindList KindStr
         inferArgKind (LitU (LSet _))   = KindSet KindStr
+        inferArgKind (KVarU (_, KindInt)) = KindNat
         inferArgKind (KVarU (_, k))    = k
         inferArgKind (VoidU k)         = k
         inferArgKind (ListVarU _)      = KindList KindStr
         inferArgKind ListVoidU         = KindList KindStr
         inferArgKind (SetVarU _)       = KindSet KindStr
         inferArgKind SetVoidU          = KindSet KindStr
-        inferArgKind (OpU op _)        = opResultKind op
+        inferArgKind (OpU op _)        = opKind op
         inferArgKind _                 = KindType
 
-        -- Result kind of each type-level operator, used to classify
-        -- OpU-headed args in @bucketByKind@. Without this the surface
-        -- form @Table {x = Int}@ (which parses as OpU OpRecExtend ...)
-        -- would fall through to KindType and get dropped during the
-        -- gradual-arg fill.
-        opResultKind :: OpTag -> Kind
-        opResultKind OpNatAdd       = KindNat
-        opResultKind OpNatSub       = KindNat
-        opResultKind OpNatMul       = KindNat
-        opResultKind OpNatDiv       = KindNat
-        opResultKind OpStrConcat    = KindStr
-        opResultKind OpRecExtend    = KindRec
-        opResultKind OpRecUnion     = KindRec
-        opResultKind OpRecIntersect = KindRec
-        opResultKind OpRecRestrict  = KindRec
-        opResultKind OpRecDiffList  = KindRec
-        opResultKind OpRecSingleton = KindRec
-        opResultKind OpListApp      = KindList KindStr
-        opResultKind OpSetUnion     = KindSet KindStr
-        opResultKind OpSetInter     = KindSet KindStr
-        opResultKind OpSetDiff      = KindSet KindStr
-        opResultKind OpKeys         = KindSet KindStr
-        opResultKind OpListToSet    = KindSet KindStr
-        opResultKind OpSize         = KindNat
-        opResultKind OpProjectField = KindType
 
     -- | Recognise upper-case names of cross-kind builtins (Keys, Size,
     -- ListToSet) used as function-application heads in a type
@@ -1893,6 +1970,7 @@ refineKinds dag = do
         -- kinded; the key is Str-kinded) are dispatched recursively.
         goSlot :: Kind -> TypeU -> Map TVar Kind
         goSlot KindNat = goNat
+        goSlot KindInt = goNat
         goSlot KindStr = goStr
         goSlot KindRec = goRec
         goSlot KindType = go
@@ -2024,37 +2102,50 @@ refineKinds dag = do
       where
         go (VarU v) = case Map.lookup v kindedVars of
           Just KindNat -> NatVarU v
+          Just KindInt -> IntVarU v
           Just KindStr -> StrVarU v
           Just KindRec -> RecVarU v
           Just (KindList _) -> ListVarU v
           Just (KindSet _) -> SetVarU v
           _ -> VarU v
         go (NatVarU v) = case Map.lookup v kindedVars of
+          Just KindInt -> IntVarU v
           Just KindStr -> StrVarU v
           Just KindRec -> RecVarU v
           Just (KindList _) -> ListVarU v
           Just (KindSet _) -> SetVarU v
           _ -> NatVarU v
+        -- An Int keeps its kind where it fills a Nat slot (KIND-4).
+        go (IntVarU v) = case Map.lookup v kindedVars of
+          Just KindStr -> StrVarU v
+          Just KindRec -> RecVarU v
+          Just (KindList _) -> ListVarU v
+          Just (KindSet _) -> SetVarU v
+          _ -> IntVarU v
         go (StrVarU v) = case Map.lookup v kindedVars of
           Just KindNat -> NatVarU v
+          Just KindInt -> IntVarU v
           Just KindRec -> RecVarU v
           Just (KindList _) -> ListVarU v
           Just (KindSet _) -> SetVarU v
           _ -> StrVarU v
         go (RecVarU v) = case Map.lookup v kindedVars of
           Just KindNat -> NatVarU v
+          Just KindInt -> IntVarU v
           Just KindStr -> StrVarU v
           Just (KindList _) -> ListVarU v
           Just (KindSet _) -> SetVarU v
           _ -> RecVarU v
         go (ListVarU v) = case Map.lookup v kindedVars of
           Just KindNat -> NatVarU v
+          Just KindInt -> IntVarU v
           Just KindStr -> StrVarU v
           Just KindRec -> RecVarU v
           Just (KindSet _) -> SetVarU v
           _ -> ListVarU v
         go (SetVarU v) = case Map.lookup v kindedVars of
           Just KindNat -> NatVarU v
+          Just KindInt -> IntVarU v
           Just KindStr -> StrVarU v
           Just KindRec -> RecVarU v
           Just (KindList _) -> ListVarU v
@@ -2169,6 +2260,7 @@ rename sourceName localAlias = f
     f (EffectU effs t) = EffectU effs (f t)
     f (OptionalU t) = OptionalU (f t)
     f t@(NatVarU _) = t
+    f t@(IntVarU _) = t
     f t@(NatLitU _) = t
     f (NatAddU a b) = NatAddU (f a) (f b)
     f (NatMulU a b) = NatMulU (f a) (f b)
@@ -2204,7 +2296,7 @@ rename sourceName localAlias = f
     f (SizeU c) = SizeU (f c)
     f (ProjectFieldU r fld) = ProjectFieldU (f r) (f fld)
     f (RecSingletonU k v) = RecSingletonU (f k) (f v)
-    f (LabeledU n t) = LabeledU n (f t)
+    f (LabeledU n t) = LabeledU (if n == sourceName then localAlias else n) (f t)
 
 -- | Every type declaration in a module, with its index.
 typedefsIn :: ExprI -> [(Int, ExprTypeE)]
@@ -2336,7 +2428,7 @@ evidentKindWith aliasBody = go Set.empty
       LitU (LRec _) -> Just KindRec
       LitU (LList _) -> Just (KindList KindStr)
       LitU (LSet _) -> Just (KindSet KindStr)
-      OpU op args -> opKind seen op args
+      OpU op args -> operatorKind seen op args
       FunU _ _ -> Just KindType
       OptionalU _ -> Just KindType
       EffectU _ _ -> Just KindType
@@ -2348,7 +2440,7 @@ evidentKindWith aliasBody = go Set.empty
           | Just body <- aliasBody v -> go (Set.insert v seen) body
           | otherwise -> Just KindType
         [] -> Nothing
-    opKind seen op args
+    operatorKind seen op args
       | op `elem` [OpNatAdd, OpNatSub, OpNatMul, OpNatDiv] = arithmeticKindWith (go seen) op args
       | op == OpStrConcat = Just KindStr
       | op `elem` rowOps = Just KindRec
@@ -2370,7 +2462,7 @@ arithmeticKindWith kindOf op args
   | op == OpNatSub, [_, LitU (LList _)] <- args = Just KindRec
   | (k : _) <- [k | k@(KindList _) <- kinds] = Just k
   | (k : _) <- [k | k@(KindSet _) <- kinds] = Just k
-  | KindNat `elem` kinds = Just KindNat
+  | any fillsNat kinds = Just KindNat
   | otherwise = Nothing
   where
     kinds = [k | Just k <- map kindOf args]
@@ -2466,6 +2558,176 @@ checkAliasApplications dag scope = do
       , Just n <- [arity v]
       , n /= length args
       ]
+
+-- | KIND-5: an argument of any declared type whose kind is evident has its
+-- parameter's kind (aliases are 'checkAliasApplications'). KIND-2: a type
+-- that classifies a value (a signature, an annotation, and every argument
+-- or field of one that classifies a value) is Type-kinded and applied to
+-- every parameter; a ground row there is a record type. KIND-4: a ground
+-- Nat expression written anywhere is not negative.
+checkTypeApplications :: DAG MVar a ExprI -> Scope -> MorlocMonad ()
+checkTypeApplications dag scope = do
+  case wrongKind of
+    [] -> return ()
+    ((i, v, p, pk, a, ak) : _) ->
+      MM.throwSourcedError i $
+        squotes (pretty v) <+> "takes a parameter" <+> squotes (pretty p) <+> "of kind" <+> pretty pk
+          <> ", but is given" <+> squotes (pretty a) <> ", of kind" <+> pretty ak
+  case [(i, t, k) | (i, t) <- valueTypes, Just k <- [kindIn t], k /= KindType, not (isRecordType t)] of
+    [] -> return ()
+    ((i, t, k) : _) ->
+      MM.throwSourcedError i $
+        squotes (pretty t) <+> "has kind" <+> pretty k
+          <> ", but a type that classifies a value has kind Type"
+  case [(i, v, ns, length args) | (i, v, args) <- valueHeads <> bodyApplications, Just ns <- [arities v], length args `notElem` ns] of
+    [] -> return ()
+    ((i, v, ns, k) : _) ->
+      MM.throwSourcedError i $
+        squotes (pretty v) <+> "takes" <+> hsep (punctuate " or" (map pretty ns))
+          <+> "arguments, but is applied to" <+> pretty k
+  case [(i, e, n) | (_, (m, _)) <- Map.toList dag, (i, t) <- writtenTypes m, (e, n) <- negativeNats t] of
+    [] -> return ()
+    ((i, e, n) : _) ->
+      MM.throwSourcedError i $
+        "The Nat" <+> squotes (pretty e) <+> "reduces to" <+> pretty n <> ", but a Nat is never negative"
+  case [(i, e) | (_, (m, _)) <- Map.toList dag, (i, t) <- writtenTypes m, e <- badDivisors t] of
+    [] -> return ()
+    ((i, e) : _) ->
+      MM.throwSourcedError i $
+        "The Nat" <+> squotes (pretty e) <+> "divides by a number that is not positive"
+  case [(i, slots) | (_, (m, _)) <- Map.toList dag, (i, t) <- writtenTypes m, slots <- emptyDomain t] of
+    [] -> return ()
+    ((i, slots) : _) ->
+      MM.throwSourcedError i $
+        "No value of the Nat variables makes every Nat here non-negative:"
+          <+> hsep (punctuate "," (map (squotes . pretty) slots))
+  where
+    applied =
+      [ (i, v, args)
+      | (_, (m, _)) <- Map.toList dag
+      , (i, t) <- writtenTypes m
+      , (v, args) <- typeApplications t
+      ]
+    wrongKind =
+      [ (i, v, p, pk, a, ak)
+      | (i, v, args) <- applied
+      , Just entries <- [Map.lookup v scope]
+      , not (any (\(_, _, _, _, k) -> k == TypedefAlias) entries)
+      , (ps : _) <- [[ps | (ps, _, _, _, _) <- entries, length ps == length args]]
+      , (Left (p, pk), a) <- zip ps args
+      , not (isVariable a)
+      , Just ak <- [kindIn a]
+      , ak /= pk
+      , not (pk == KindType && ak == KindRec && isRecordType a)
+      ]
+    kindIn = evidentKindWith aliasBody . rewriteCrossKindBuiltins
+    aliasBody v = case Map.lookup v scope of
+      Just ((ps, b, _, _, TypedefAlias) : _) | all isLeft ps -> Just (rewriteCrossKindBuiltins b)
+      _ -> Nothing
+    isVariable t = case t of
+      VarU (TV n) -> isTypeVariableName n
+      KVarU _ -> True
+      _ -> False
+    arities v = case Map.lookup v scope of
+      Just entries@(_ : _) | not (any (\(_, _, _, _, k) -> k == TypedefAlias) entries) ->
+        Just [length ps | (ps, _, _, _, _) <- entries]
+      _ -> Nothing
+    -- The application at the head of a type, for the arity check.
+    headApplication t = case TE.flattenApp t of
+      AppU (VarU v) args -> [(v, args)]
+      VarU v@(TV n) | not (isTypeVariableName n) -> [(v, [])]
+      _ -> []
+    isRecordType t = case t of
+      LitU (LRec _) -> True
+      RecExtendU {} -> isNothing (kindOfU t)
+      _ -> case headApplication t of
+        [(v, _)] | Just ((_, b, _, _, TypedefAlias) : _) <- Map.lookup v scope -> isRecordType b
+        _ -> False
+    valueHeads = [(i, v', args') | (i, t) <- valueTypes, (v, args) <- headApplication t, (v', args') <- [throughAliases (64 :: Int) v args]]
+    -- The head an alias application stands for, for the arity check.
+    throughAliases 0 v args = (v, args)
+    throughAliases k v args = case Map.lookup v scope of
+      Just ((ps, b, _, _, TypedefAlias) : _)
+        | length ps == length args
+        , [(v', bargs)] <- headApplication b ->
+            throughAliases (k - 1) v' bargs
+      _ -> (v, args)
+    -- An applied type in a declaration's body; a bare one there may name a
+    -- constructor, as an alias of `List` does.
+    bodyApplications =
+      [ (i, v, args)
+      | (_, (m, _)) <- Map.toList dag
+      , ExprI i (TypE (ExprTypeE Nothing _ _ body _ _)) <- everyExpr m
+      , (v, args@(_ : _)) <- typeApplications body
+      ]
+    valueTypes =
+      [ (i, u)
+      | (_, (m, _)) <- Map.toList dag
+      , (i, t) <- signedTypes m
+      , u <- valuePositions t
+      ]
+    -- A type and every part of it that classifies a value.
+    valuePositions t = case t of
+      ForallU _ x -> valuePositions x
+      FunU ts r -> concatMap valuePositions (ts <> [r])
+      EffectU _ x -> valuePositions x
+      _ -> t : case t of
+        OptionalU x -> valuePositions x
+        NamU _ _ _ rs -> concatMap (valuePositions . snd) rs
+        LitU (LRec fs) -> concatMap (valuePositions . snd) fs
+        RecExtendU _ x rest | isRecordType t -> valuePositions x <> fieldPositions rest
+        _ -> case TE.flattenApp t of
+          AppU (VarU v@(TV n)) args
+            | Just entries <- Map.lookup v scope ->
+                case [ps | (ps, _, _, _, _) <- entries, length ps == length args] of
+                  (ps : _) -> concat [valuePositions a | (Left (_, KindType), a) <- zip ps args]
+                  [] -> []
+            | v == BT.list || (T.isPrefixOf "Tuple" n && v == BT.tuple (length args)) -> concatMap valuePositions args
+          _ -> []
+    fieldPositions r = case r of
+      RecExtendU _ x rest -> valuePositions x <> fieldPositions rest
+      _ -> []
+    signedTypes m =
+      [ (i, t)
+      | ExprI i e <- everyExpr m
+      , t <- case e of
+          SigE (Signature _ _ et) -> [etype et]
+          AnnE _ t' -> [t']
+          ClsE (Typeclass _ _ _ sigs) -> [etype et | Signature _ _ et <- sigs]
+          _ -> []
+      ]
+    everyExpr x@(ExprI _ e) = x : concatMap everyExpr children
+      where
+        children = case e of
+          ModE _ es -> es
+          AssE _ y ys -> y : ys
+          IstE _ _ _ _ ys -> ys
+          _ -> AST.exprIChildren e
+    -- KIND-4 holds of the whole expression that fills a Nat position; its
+    -- parts may be negative (KIND-3).
+    negativeNats t =
+      [ (slot, n)
+      | slot <- natPositions t
+      , Just e <- [natPositionExpr slot]
+      , Just n <- [NS.evalNat Map.empty e]
+      , n < 0
+      ]
+    badDivisors t =
+      [ d
+      | d@(OpU OpNatDiv [_, b]) <- concatMap universe (natPositions t)
+      , Just e <- [typeUToNatExpr b]
+      , Just k <- [NS.evalNat Map.empty e]
+      , k <= 0
+      ]
+    universe t = t : concatMap universe (typeUChildren t)
+    -- A signature is rejected only when no value of its Nat variables
+    -- makes every Nat position defined and non-negative; each use is
+    -- checked against the values it gives them (KIND-4).
+    emptyDomain t =
+      let slots = [(slot, e) | slot <- natPositions t, Just e <- [natPositionExpr slot], not (NS.isGround e)]
+       in case ND.decide Set.empty [ND.NatGe e (NS.NatLit 0) | (_, e) <- slots] of
+            ND.Refuted _ -> [map fst slots]
+            _ -> []
 
 -- | Give each parameter of a transparent alias the kind of the slots it
 -- fills in the alias's body: in @type Image h w = Tensor3 h w 3 U8@, @h@

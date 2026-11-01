@@ -1122,6 +1122,39 @@ if should_run "http-py"; then
 fi
 
 # ======================================================================
+# Dimension checks at the call boundary (DIM-3)
+# ======================================================================
+
+if should_run "http-dims"; then
+    echo "${BOLD}[http-dims] Daemon HTTP refuses arguments that break dimensions${RESET}"
+
+    DIMS_DIR=$(mktemp -d)
+    WORK_DIRS+=("$DIMS_DIR")
+    compile_program "dims.loc" "$DIMS_DIR"
+
+    HTTP_PORT=$(pick_port)
+    start_daemon "$DIMS_DIR" --http-port "$HTTP_PORT"
+    wait_for_http "$HTTP_PORT" 10
+
+    for cmd in dot same; do
+        code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:${HTTP_PORT}/call/$cmd" \
+            -H "Content-Type: application/json" -d '[[1,2],[3,4]]')
+        assert_test "POST /call/$cmd equal lengths -> 200" "200" "$code"
+
+        result=$(curl -s -X POST "http://127.0.0.1:${HTTP_PORT}/call/$cmd" \
+            -H "Content-Type: application/json" -d '[[1,2],[3]]')
+        code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:${HTTP_PORT}/call/$cmd" \
+            -H "Content-Type: application/json" -d '[[1,2],[3]]')
+        assert_test "POST /call/$cmd unequal lengths -> 400" "400" "$code"
+        assert_contains "POST /call/$cmd names the mismatch" \
+            "n is 2 from the length of argument 1, but the length of argument 2 is 1" "$result"
+    done
+
+    stop_daemon "$LAST_DAEMON_PID"
+    echo ""
+fi
+
+# ======================================================================
 # Test Group 3: HTTP with pure commands
 # ======================================================================
 

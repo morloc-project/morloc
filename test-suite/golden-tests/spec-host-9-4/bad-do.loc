@@ -1,0 +1,21 @@
+--' Make a Python adder in a nested do-block and use it in C++
+module main (doAway)
+
+import root-py
+import root-cpp
+import .helpers
+
+source Py from "f.py" ("py_make_adder" as mkPy)
+source Cpp from "f.hpp" ("cpp_make_adder" as mkCpp)
+
+--' Make an adder in Python
+mkPy :: Int -> <IO> (Int -> Int)
+--' Make an adder in C++
+mkCpp :: Int -> <IO> (Int -> Int)
+
+--' Use a Python adder made in a nested block in C++
+doAway :: Int -> <IO> Int
+doAway n = do
+  h <- do
+    mkPy n
+  cppSum (cppMap h [1, 2])

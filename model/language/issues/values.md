@@ -8,26 +8,72 @@ on 0.109.0 unless marked.
   source Py from "native.py" ("kind" as pathKind); pathKind :: Path -> Str`
   with `def kind(x): return type(x).__name__` builds without a warning;
   `./prog pathKind notes/report.txt` prints `"str"`.
-- **A literal of a newtype over a Packable type is rejected.** [reproduced,
-  2026-10-18] `import root-py; import map-py; newtype Holder = Map Str Int`;
-  `[("a", 1)] :: Holder` fails "Cannot construct a value of 'Holder' from a
-  List literal in py ... declare 'instance Packable List Holder'", though
-  `pack ([("a", 1)] :: Map Str Int)` (with `deriving (Packable)`) builds the
-  same value. The literal code (library/Morloc/CodeGenerator/Express.hs,
-  `maybePackableWrap`) looks for an instance of the outer newtype only and
-  does not compose the one of the type it wraps. Gap: no item says how a
-  literal reaches a type through several representations.
+- **A received newtype with no Packable instance ignores its form.**
+  [reproduced, 2026-10-28] Violates NEWT-4 and NATIVE-9. `newtype Frozen a =
+  [a]; type Py => (Frozen a) = "tuple" a` with no Packable instance builds; a
+  `Frozen Int` returned by a C++ function reaches Python as a list, while a
+  Frozen literal is refused for want of an instance. Repro:
+  /tmp/claude-1000/-work/b22ec8aa-199c-401c-8f03-0b140cbccdb1/scratchpad/n10/noinst2.loc.
+  NEWT-4 asks which forms a binding can build without an instance; nothing
+  records that today.
+- **C++ cannot send or receive a sum type whose arm holds a Packable.**
+  [reproduced, 2026-10-29] Violates NATIVE-9. `mk :: Int -> Try Str (Set
+  Int)` from Python into a C++ `size :: Try Str (Set Int) -> Int` does not
+  build: "the `data` type Try_7b5513 is used with two field types for its
+  constructor Ok: (std::set<int>) and (std::vector<int>)". The wire form of
+  the variant is given the native variant's name
+  (library/Morloc/CodeGenerator/Pools/CAbi/Members/Cpp.hs, `rawDoc` and
+  `collectCppVariants`), so the decoded and native forms collide. Writer
+  intrinsics avoid this by leaving such a value to the variant's own
+  marshaller, which unpacks only its outer type, so in C++ `@show`,
+  `@hash` or `@save` of a value holding such a sum type below its top
+  (`[Try Str (Set Int)]`, a record with a `Try Str (Set Int)` field) still
+  reaches the runtime in native form and fails "no marshaller for a value of
+  this C++ type". Python and R take it apart at every level.
+- **An R set of compound elements is not sorted.** [read, 2026-10-29]
+  Violates COLL-6. set-r sorts a set of scalars before it is sent, but
+  leaves a set of tuples or records in the order it was built, since R has
+  no ordering of them that matches C++ and Python, so `@hash` and `@eq` of
+  equal `Set (Int, Str)` values built in different orders can differ.
+- **A recursive record with a Packable field is rebuilt at its top level
+  only.** [read, 2026-10-28] Violates NATIVE-9. A back-reference
+  (`SerialRec`) counts as serializable, so `record Tree where tags :: Set
+  Int; kids :: [Tree]` received or read is rebuilt at its top level and its
+  `kids` are decoded straight into their type, with no packer for `tags`.
+- **A Python Vector built by library code has numpy's default dtype.**
+  [read, 2026-10-28] Violates NATIVE-7, which makes a `Vector n U8` uint8
+  however the program builds it. vector-py's `map`
+  (`morloc_vec_map`) and an explicit `pack` of a list (`morloc_unpackVector`)
+  call `np.asarray`, so a `Vector n U8` result is int64 and a `Vector n Int`
+  is int64 rather than object; the functions are never given the element
+  type, and such an array is writable where a literal or received one is
+  read-only (NATIVE-9 covers only those). Open question: pass such functions
+  the target schema, or narrow NATIVE-7 to literals.
+- **A C++ source returning a nested Vector does not build.** [reproduced,
+  2026-10-28] `makeN :: Int -> Vector n (Vector 2 Real)` sourced from C++
+  (`std::vector<std::vector<double>>`), with root-cpp, vector, vector-cpp:
+  `morloc make` stops with "Recursive type alias `Vector` has no concrete
+  C++ mapping" (library/Morloc/CodeGenerator/Pools/CAbi/Members/Cpp.hs,
+  leakError), though nothing is recursive. Repro:
+  /tmp/claude-1000/-work/b22ec8aa-199c-401c-8f03-0b140cbccdb1/scratchpad/n96/.
+- **A native form for an applied type is not passed to the decoder.**
+  [reproduced, 2026-10-28] Violates NATIVE-1. A schema hint is taken from
+  the head's general mapping, so a form declared for an applied type
+  (`type L => (T X) = "..." X` beside `type L => (T a) = "..." a`) never
+  reaches the decoder. Seen with Python `List U8 = "bytes"`, now refused by
+  NATIVE-7; R's `List U8 = "raw"` works only because rmorloc routes every
+  U8 array to raw.
 - **Comparison on `data` with fields.** [reproduced] Violates SUM-5.
   `data Shape = Circle Real | Rect Real Real | Dot`, `lt a b = a < b`,
   `eq a b = a == b`. Python is correct. R: `==` works, `<` fails at run
   time "comparison of these types is not implemented" (root/main.loc:28).
-  C++: `==` and `<` fail to build (root-cpp core.hpp:654, :659 "no match for
-  operator==/operator<=" on `Shape`). Enum-only `data Color = Red | Green |
+  C++: `==` and `<` fail to build (root-cpp core.hpp:682, :687, `morloc_le`
+  and `morloc_eq`: "no match for operator<=/operator==" on `Shape`). Enum-only `data Color = Red | Green |
   Blue` works in all three.
 - **Table column sum fails in Python.** [reproduced] Violates WIRE-1.
   Census table built with `addCol`; `summarize t = fold (+) 0 (getCol "pop"
   t)` fails for CSV, Parquet, inline JSON and stdin input: "Expected int for
-  MORLOC_INT, but got numpy.int64" (pymorloc.c:744, py_size_step). The
+  MORLOC_INT, but got numpy.int64" (pymorloc.c:890, py_size_step; still so on 0.110.1). The
   manual shows `54585374`.
 - **No rule forbids a sourced function mutating its argument.** [read] A
   gap in EVAL-7. In Python a morloc value read twice is one shared object,
@@ -37,19 +83,12 @@ on 0.109.0 unless marked.
   unobservable but says nothing about mutation; R copies on modify, C++ and
   Rust pass shared values as `const&`/`&`. Needs a ruling: forbid it
   (unchecked, as EVAL-7 is) or have the Python pool copy arguments.
-- **A `where` binding that names a parameter is rejected as cyclic.**
-  [reproduced, 2026-10-17, 9f24abe4] `f x = d where d = x` typechecks but
-  `morloc make` fails "Self-referential or cyclic binding: 'd`1467'";
-  `let d = x in d` builds. `hasGround` returns False for a bound variable
-  (library/Morloc/Frontend/Valuecheck.hs, `groundCheck`), so a binding whose
-  only definition is a parameter counts as ungrounded. Spec gap: no item
-  says what a binding may name, and `typecheck` and `make` disagree.
 - **NEWT-4, output side: an unsupported native form crashes at run time.**
   [reproduced, 2026-10-21] `newtype Path = Str; type Py => Path =
   "pathlib.Path"`, Py `mk :: Str -> Path` returning `pathlib.Path(s)`, Cpp
   caller `u s = unpack (mk s)`: builds with no warning; running `u
   notes.txt` fails "Expected str or bytes for MORLOC_STRING, but got
-  PosixPath (pymorloc.c:892)". Repro: /work/plans/model-audit-2026-10-21/repro/B/t/n7/c2.loc.
+  PosixPath (pymorloc.c:929)". Repro: /work/plans/model-audit-2026-10-21/repro/B/t/n7/c2.loc.
 - **An unmapped record passed to a sourced C++ function does not compile.**
   [reproduced, 2026-10-21] Violates NATIVE-4; contradicts NATIVE-3.
   `record P where x :: Int; y :: Real`, no `record Cpp =>`, sourced
@@ -89,13 +128,21 @@ on 0.109.0 unless marked.
   std::optional<int>&)` fails to compile: the pool passes
   `std::optional<std::optional<int>>`. Python and R collapse. Repro:
   /work/plans/model-audit-2026-10-21/repro/C/opt/n.loc. Related: tables-tensors.md `?(?Int)` column.
-- **NUM-3's text is stale.** [reproduced, 2026-10-21] NUM-3 (ruled
-  2026-10-04) says R holds `I64`/`U64` as doubles exact below 2^53; the
-  2026-10-16 ruling and the code use bit64 `integer64` (`cI64 5` has class
-  integer64; I64 9007199254740993 round-trips; U64 2^64-1 fails "does not
-  fit in R's integer64"). That ruling also makes `[U8]` an R `raw` and
-  truncates fractional doubles at integer slots; no item records either.
-  Needs NUM-3 rewritten from the newer ruling.
+  A collapse only in morloc's types was tried and reverted 2026-10-27.
+  Collapsing needs, together: every `OptionalU` construction collapsing,
+  `apply` and `subtype` included (else `find absent xs` at `[?Int]` is
+  typed `??Int` and rejected, and `dflt :: a -> ?a -> a` at `?Int` fails);
+  the structural walks (Infer `structuralCompound`) and `weaveTypeF` at
+  unequal depths; and an adapter at the native call boundary, since a C++
+  template or Rust generic instantiated at `a = ?T` returns
+  `optional<optional<T>>` (golden optional-cpp's natives take nested
+  optionals and need rewriting). Languages also disagree on a value:
+  `fromNull :: a -> ?a -> a` at `a = ?Int` with `state2 :: ?(?Int) -> Str`,
+  `state2 (fromNull (Null :: ?Int) Null)` is present-with-inner-absent in
+  C++ and Rust and absent in Python.
+- **R integer rules with no item.** [reproduced, 2026-10-21] The
+  2026-10-16 R integer ruling makes `[U8]` an R `raw` and truncates
+  fractional doubles at integer slots; no item records either.
 - **Number rules with no item.** [reproduced, 2026-10-21] Gaps in
   numbers.md.
   - Real division by zero: `1.0 / 0.0` is `inf` in cpp, r and rust, an
@@ -108,9 +155,10 @@ on 0.109.0 unless marked.
   - Map pair order: py and r keep insertion order, cpp sorts by key. Is
     order part of a map's value (COLL-5 covers repeated keys only)?
 - **R overflow message names the wrong R type for `Int`.** [reproduced,
-  2026-10-21] data/lang/r/rmorloc.c:1701-1704: a multi-limb `Int` arriving
-  in R fails "does not fit in R's numeric type (max 2^53 ...)"; `[[Int]]_R`
-  is R integer, as the single-limb branch (:1694-1697) says.
+  2026-10-21] data/lang/r/rmorloc.c:1759-1763 (array) and :1920-1924
+  (scalar): a multi-limb `Int` arriving in R fails "does not fit in R's
+  numeric type (max 2^53 ...)"; `[[Int]]_R` is R integer, as the
+  single-limb branches (:1767-1770, :1915) say.
 - **`@schema` and `@typeof` evaluate their argument.** [reproduced,
   2026-10-21] Violates INTR-4. `schemaBoom x = @schema (boom x)` with a
   raising Python `boom` fails "run failed / boom". features-intrinsics.asc:

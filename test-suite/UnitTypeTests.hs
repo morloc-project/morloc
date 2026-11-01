@@ -83,6 +83,8 @@ import qualified Morloc.Monad as MM
 import qualified Morloc.TypeEval as TE
 import qualified Morloc.Typecheck.Internal as MTI
 import qualified Morloc.Typecheck.NatSolver as NS
+import qualified Morloc.Typecheck.NatDecide as ND
+import qualified Data.Set as DSet
 import qualified System.Directory as SD
 import Text.RawString.QQ
 
@@ -108,6 +110,19 @@ runFront code = do
       defaultValue
       (typecheckFrontend Nothing (Code code) >>= mapM evaluateAnnoSTypes)
   return x
+
+-- | 'runFront' with the final state, to tell a rejection from a defect.
+runFrontState :: MT.Text -> IO (Either MorlocError [AnnoS (Indexed TypeU) Many Int], MorlocState)
+runFrontState code = do
+  config <- emptyConfig
+  ((x, _), st) <-
+    MM.runMorlocMonad
+      Nothing
+      0
+      config
+      defaultValue
+      (typecheckFrontend Nothing (Code code) >>= mapM evaluateAnnoSTypes)
+  return (x, st)
 
 -- | Like runFront but without type alias evaluation, so nat dimensions are preserved.
 runFrontRaw :: MT.Text -> IO (Either MorlocError [AnnoS (Indexed TypeU) Many Int])
@@ -291,6 +306,7 @@ renameExistentials = snd . f (0 :: Int, Map.empty)
       let (s', t') = f s t
        in (s', ForallU v t')
     f s t@(NatVarU _) = (s, t)
+    f s t@(IntVarU _) = (s, t)
     f s (FunU ts t) =
       let (s', ts') = statefulMap f s ts
           (s'', t') = f s' t
@@ -351,6 +367,7 @@ closeExistentials = f
     f (ExistU v (ts, _) (rs, _)) = ExistU v (map f ts, Closed) (map (second f) rs, Closed)
     f t@(VarU _) = t
     f t@(NatVarU _) = t
+    f t@(IntVarU _) = t
     f (ForallU v t) = ForallU v (f t)
     f (FunU ts t) = FunU (map f ts) (f t)
     f (AppU t ts) = AppU (f t) (map f ts)
@@ -422,11 +439,55 @@ assertSubtypeBad msg gs a b = testCase msg $ do
     Left _ -> return ()
     Right _ -> assertFailure $ "Expected subtype rejection for " <> show a <> " <: " <> show b
 
+-- | Every unsolved existential the index names is the entry at its slot,
+-- and every cached solution is an entry of the context.
+assertSubtypeIndexed :: String -> [GammaIndex] -> TypeU -> TypeU -> TestTree
+assertSubtypeIndexed msg gs a b = testCase msg $
+  case MTI.subtype Map.empty a b (listToGamma gs) of
+    Left e -> assertFailure (show e)
+    Right g -> do
+      mapM_
+        (\(v, s) -> case IntMap.lookup s (gammaContext g) of
+            Just (ExistG v' _ _) | v' == v -> return ()
+            other -> assertFailure $ show v <> " is indexed at a slot holding " <> show other)
+        (Map.toList (gammaExist g))
+      let solvedInContext = Set.fromList [v | SolvedG v _ <- IntMap.elems (gammaContext g)]
+      mapM_
+        (\v -> assertBool (show v <> " is solved but its entry is gone") (Set.member v solvedInContext))
+        (Map.keys (gammaSolved g))
+
+-- | A Gamma holding the given entries at the given slots.
+slotGamma :: [(Int, GammaIndex)] -> Gamma
+slotGamma entries =
+  (listToGamma [])
+    { gammaSlot = MTI.slotSpacing * (1 + maximum (0 : map ((`div` MTI.slotSpacing) . fst) entries))
+    , gammaContext = IntMap.fromList entries
+    , gammaExist = Map.fromList [(v, s) | (s, ExistG v _ _) <- entries]
+    }
+
+-- | Articulating an existential whose free slots are used up keeps every
+-- entry indexed and in order, with the new entries just older than it.
+assertArticulatedInOrder :: String -> [(Int, GammaIndex)] -> TVar -> [TVar] -> TestTree
+assertArticulatedInOrder msg entries v older = testCase msg $
+  case MTI.subtype Map.empty (ExistU v ([], Open) ([], Open)) (FunU [VarU (TV "A")] (VarU (TV "B"))) (slotGamma entries) of
+    Left e -> assertFailure (show e)
+    Right g -> do
+      mapM_
+        (\(x, s) -> case IntMap.lookup s (gammaContext g) of
+            Just (ExistG x' _ _) | x' == x -> return ()
+            other -> assertFailure $ show x <> " is indexed at a slot holding " <> show other)
+        (Map.toList (gammaExist g))
+      let names = [case e of ExistG x _ _ -> x; SolvedG x _ -> x; _ -> TV "?" | e <- IntMap.elems (gammaContext g)]
+          below = takeWhile (/= v) names
+      assertEqual "entry count" (length entries + 2) (IntMap.size (gammaContext g))
+      assertEqual "older entries keep their order" older (filter (`elem` older) below)
+      assertBool "new entries are just older than the articulated entry" $
+        all (`notElem` older) (take 2 (reverse below))
+
 -- | Convert a list of GammaIndex (newest first) to a Gamma with IntMap.
--- Uses slot spacing of 256 to match production code.
 listToGamma :: [GammaIndex] -> Gamma
 listToGamma gs =
-  let spacing = 256
+  let spacing = MTI.slotSpacing
       n = length gs
       -- Newest entry gets highest slot
       indexed = zip [spacing * (n - 1), spacing * (n - 2) .. 0] gs
@@ -448,6 +509,11 @@ listToGamma gs =
     , gammaUnfolded = Set.empty
     , gammaPendingNumLits = []
     , gammaRigid = Nothing
+    , gammaRigidNats = Set.empty
+    , gammaRigidRows = Set.empty
+    , gammaRigidDomain = []
+    , gammaLabelVars = Map.empty
+    , gammaObserved = Set.empty
     , gammaScoped = Map.empty
 
     , gammaPositionalReceivers = Set.empty
@@ -482,9 +548,10 @@ valuecheckPass msg code =
 expectError :: String -> MT.Text -> TestTree
 expectError msg code =
   testCase msg $ do
-    result <- runFront code
+    (result, st) <- runFrontState code
     case result of
       (Right _) -> assertFailure . MT.unpack $ "Expected failure"
+      (Left e) | MM.isDefect st e -> assertFailure $ "Expected a user error, got a compiler error: " <> show e
       (Left _) -> return ()
 
 -- Asserts the frontend pipeline (parse, restructure, typecheck, alias
@@ -568,6 +635,44 @@ subtypeTests =
       "Test subtype within context"
       [ -- basic general cases
         assertSubtypeGamma "G -| A <: A |- G" [] a a []
+      , assertSubtypeIndexed
+          "articulating a nested function type keeps every existential at its own slot"
+          [eag]
+          ea
+          (fun [fun [a, b], a, b])
+      , assertArticulatedInOrder
+          "articulating at a band top with no free slots respreads the band"
+          [ (MTI.slotSpacing, ExistG (TV "x1") ([], Open) ([], Open))
+          , (MTI.slotSpacing - 1, ExistG (TV "y1") ([], Open) ([], Open))
+          , (MTI.slotSpacing - 2, ExistG (TV "y2") ([], Open) ([], Open))
+          , (0, ExistG (TV "x2") ([], Open) ([], Open))
+          ]
+          (TV "x1")
+          [TV "x2", TV "y2", TV "y1"]
+      , assertArticulatedInOrder
+          "articulating inside a band with no free slots respreads the band"
+          [ (MTI.slotSpacing, ExistG (TV "x0") ([], Open) ([], Open))
+          , (MTI.slotSpacing - 1, ExistG (TV "x1") ([], Open) ([], Open))
+          , (MTI.slotSpacing - 2, ExistG (TV "y1") ([], Open) ([], Open))
+          , (0, ExistG (TV "x2") ([], Open) ([], Open))
+          ]
+          (TV "x1")
+          [TV "x2", TV "y1"]
+      , testCase "a trim at a saved slot drops the extras of entries added after it" $ do
+          let g0 = listToGamma [eag]
+              saved = gammaSlot g0
+              g1 = g0 MTI.+> ExistG (TV "z") ([], Open) ([], Open)
+          case MTI.subtype Map.empty (exist "z") (fun [a, b]) g1 of
+            Left e -> assertFailure (show e)
+            Right g2 -> do
+              let g3 = MTI.gammaTrimAfter saved g2
+              assertEqual "unsolved entries" [TV "x1"] (Map.keys (gammaExist g3))
+              assertEqual "context entries" 1 (IntMap.size (gammaContext g3))
+      , assertSubtypeIndexed
+          "articulating a doubly nested function type keeps every existential at its own slot"
+          [eag]
+          ea
+          (fun [fun [fun [a, b], a, b], fun [a, b], a, b])
       , assertSubtypeGamma "<a>, <b> -| <a> <: <b> |- <a>:<b>, <b>" [eag, ebg] ea eb [solvedA eb, ebg]
       , assertSubtypeGamma "<a>, <b> -| <b> <: <a> |- <a>:<b>, <b>" [eag, ebg] ea eb [solvedA eb, ebg]
       , assertSubtypeGamma "G -| (A -> B) <: (A -> B) |- G" [] (fun [a, b]) (fun [a, b]) []
@@ -869,7 +974,7 @@ typeAliasTests =
             runFront
               "module main (f)\nnewtype Foo = Int\ntype Py => Foo = \"int\"\ntype Py => Foo = \"float\"\nf :: Foo -> Foo\n"
           case result of
-            Left (SourcedError _ d) ->
+            Left (Rejected (AtNode _) d) ->
               assertBool (MT.unpack (render d)) (":3:1" `MT.isInfixOf` render d)
             Left e -> assertFailure $ "expected a sourced error, got " <> show e
             Right _ -> assertFailure "expected failure"
@@ -1786,8 +1891,8 @@ f x = g x
     g :: b -> [b]
     g y = pair y x
 |]
-      , expectPass
-          "a local signature's type variable is the enclosing signature's"
+      , expectError
+          "a local signature's type variable is its own, whatever its name (POLY-4)"
           [r|
 module main (f)
 pair :: a -> a -> [a]
@@ -2387,8 +2492,15 @@ unitTypeTests =
   localOption (mkTimeout 1000000) $ -- 1 second timeout
     testGroup
       "Typechecker unit tests"
+      -- instantiating a data type's parameters
+      [ testCase "parameters are set to their arguments at once" $
+          map (instantiateParams [(TV "a", VarU (TV "b")), (TV "b", int)]) [VarU (TV "a"), VarU (TV "b")]
+            @?= [VarU (TV "b"), int]
+      , testCase "a binder shadowing a parameter is respected" $
+          instantiateParams [(TV "a", int)] (ForallU (TV "a") (VarU (TV "a")))
+            @?= ForallU (TV "a") (VarU (TV "a"))
       -- comments
-      [ assertGeneralType "block comments (1)" "{- -} 42" int
+      , assertGeneralType "block comments (1)" "{- -} 42" int
       , assertGeneralType "block comments (2)" " {--} 42{-   foo -} " int
       , assertGeneralType "line comments (3)" "-- foo\n 42" int
       , -- reals versus integers
@@ -3241,9 +3353,9 @@ unitValuecheckTests =
            f x y = [x,y]
            f a b = [a,b]
       |]
-      , -- comparisons of simple and non-simple
-        valuecheckFail
-          "constrained values fail"
+      , -- the application may well equal the literal (REAL-5)
+        valuecheckPass
+          "a constant beside an application passes"
           [r|
          module foo (x)
            source Py ("sum")
@@ -3321,6 +3433,194 @@ unitValuecheckTests =
           [r|
          module foo (r)
            r = {a = 1, b = 2, a = 3}
+      |]
+      , valuecheckPass
+          "two parameters of a one-valued type agree"
+          [r|
+         module foo (f)
+           f :: () -> () -> ()
+           f x y = x
+           f x y = y
+      |]
+      , valuecheckPass
+          "equal values through differently named lets agree"
+          [r|
+         module foo (x)
+           x :: Int
+           x = let a = 1 in a
+           x = let b = 1 in b
+      |]
+      , valuecheckPass
+          "identical branches agree"
+          [r|
+         module foo (f)
+           f :: Bool -> Int
+           f x = ? x = 1 : 2
+           f y = ? y = 1 : 2
+      |]
+      , valuecheckPass
+          "lambdas of different arity are compared on their shared parameters"
+          [r|
+         module foo (f)
+           f :: Int -> Int -> Int
+           f = \x y -> x
+           f a = \b -> a
+      |]
+      , valuecheckFail
+          "lambdas of different arity that differ fail"
+          [r|
+         module foo (f)
+           f :: Int -> Int -> Int
+           f = \x y -> x
+           f a = \b -> b
+      |]
+      , valuecheckFail
+          "optional literals that differ fail"
+          [r|
+         module foo (x)
+           x :: ?Int
+           x = 1
+           x = 2
+      |]
+      , valuecheckFail
+          "null beside a value fails"
+          [r|
+         module foo (x)
+           x :: ?Int
+           x = null
+           x = 1
+      |]
+      , valuecheckFail
+          "a where-bound parameter is still a parameter"
+          [r|
+         module foo (f)
+           f :: Int -> Int -> Int
+           f a b = g
+             where
+               g = a
+           f c d = h
+             where
+               h = d
+      |]
+      , valuecheckPass
+          "arguments of a non-injective intrinsic may be reordered"
+          [r|
+         module foo (f)
+           f :: Int -> Int -> Bool
+           f x y = @eq x y
+           f a b = @eq b a
+      |]
+      , valuecheckPass
+          "the type of either parameter is the same"
+          [r|
+         module foo (f)
+           f :: Int -> Int -> Str
+           f x y = @typeof x
+           f x y = @typeof y
+      |]
+      , valuecheckPass
+          "an alias between two sources is not an ambiguity"
+          [r|
+         module foo (foo)
+           source Py from "m.py" ("f" as foo, "g" as bar)
+           foo :: Int -> Int
+           bar :: Int -> Int
+           foo = bar
+      |]
+      , valuecheckPass
+          "parameters of a one-valued data type agree"
+          [r|
+         module foo (f)
+           data U = U
+           f :: U -> U
+           f x = x
+           f y = U
+      |]
+      , valuecheckPass
+          "an integer literal at Real equals the real literal"
+          [r|
+         module foo (x)
+           x :: Real
+           x = 1
+           x = 1.0
+      |]
+      , valuecheckFail
+          "constructors with differing fields fail"
+          [r|
+         module foo (x)
+           data Opt = No | Yes Int
+           x :: Opt
+           x = Yes 1
+           x = Yes 2
+      |]
+      , valuecheckFail
+          "a parameter inside a constructor differs from a constant"
+          [r|
+         module foo (f)
+           data Box = Box Int
+           f :: Int -> Box
+           f n = Box n
+           f m = Box 2
+      |]
+      , valuecheckFail
+          "swapped parameters through a helper fail"
+          [r|
+         module foo (f)
+           pick :: Int -> Int -> Int
+           pick a b = h
+             where
+               h = a
+           f :: Int -> Int -> Int
+           f x y = pick x y
+           f x y = pick y x
+      |]
+      , valuecheckPass
+          "two spellings of one double agree"
+          [r|
+         module foo (x)
+           x :: Real
+           x = 0.1
+           x = 0.10000000000000001
+      |]
+      , valuecheckFail
+          "a parameter beside an optional constant fails"
+          [r|
+         module foo (f)
+           f :: ?Int -> ?Int
+           f x = x
+           f y = 5
+      |]
+      , valuecheckPass
+          "parameters of a one-valued constructor agree"
+          [r|
+         module foo (f)
+           type Nothing' = ()
+           data Box = Box Nothing'
+           f :: Box -> Box
+           f b = b
+           f c = Box ()
+      |]
+      , valuecheckFail
+          "a difference through an alias chain fails"
+          [r|
+         module foo (f)
+           bar :: Int -> Int -> Int
+           bar a b = a
+           baz :: Int -> Int -> Int
+           baz = bar
+           f :: Int -> Int -> Int
+           f x y = baz x y
+           f x y = y
+      |]
+      , valuecheckPass
+          "an alias and a lambda may implement one term"
+          [r|
+         module foo (foo)
+           bar :: Int -> Int
+           bar x = x
+           foo :: Int -> Int
+           foo = bar
+           foo x = x
       |]
       , valuecheckPass
           "distinct record fields are legal"
@@ -4917,7 +5217,30 @@ complexityRegressionTests =
         localOption (mkTimeout 20000000) $
           testCase "deep singly-used-parameter chain moves instead of cloning"
             (assertGenerates (singleUseChain 2000))
+      , -- The realizer's work is linear in a nest of higher-order calls: each
+        -- argument is scored once, and a lambda parameter bound to a
+        -- function value refers to that score.
+        localOption (mkTimeout 5000000) $
+          testCase "nested function arguments are scored once"
+            (assertGenerates (nestedComposeChain 25))
       ]
+
+-- | @(inc . inc . ... . inc) x@, @k@ compositions deep, with @(.)@ defined
+-- in morloc and @inc@ sourced in Python and C++ so the realizer has a
+-- choice at every call; every composition passes function values to a
+-- morloc head.
+nestedComposeChain :: Int -> MT.Text
+nestedComposeChain k =
+  "module main (run)\n"
+    <> "type Py => Int = \"int\"\n"
+    <> "type Cpp => Int = \"int\"\n"
+    <> "source Py from \"c.py\" (\"inc\")\n"
+    <> "source Cpp from \"c.hpp\" (\"inc\")\n"
+    <> "inc :: Int -> Int\n"
+    <> "(.) :: (b -> c) -> (a -> b) -> a -> c\n"
+    <> "(.) f g x = f (g x)\n"
+    <> "run :: Int -> Int\n"
+    <> "run x = (" <> MT.intercalate " . " (replicate k "inc") <> ") x\n"
 
 -- | @id . id . ... . id@ applied to an @Int@, @k@ compositions deep, with
 -- no tuple/destructuring anywhere. Used to catch a per-solve full scan of
@@ -6686,11 +7009,11 @@ natDimTests =
         case result of
           Right _ -> return ()
           Left e -> assertFailure $ "Expected success, got: " <> show e
-    , testCase "infer nat dimensions from list literal" $ do
+    , testCase "nat dimensions are checked against a list literal" $ do
         result <- runFrontRaw [r|
           module main (foo)
           newtype Matrix (m :: Nat) (n :: Nat) a = [[a]]
-          foo :: Matrix m n Int
+          foo :: Matrix 2 3 Int
           foo = [[1,2,3],[4,5,6]]
             |]
         case result of
@@ -6701,6 +7024,16 @@ natDimTests =
               _ -> assertFailure $ "Expected Matrix 2 3 Int, got: " <> show t
           Right _ -> assertFailure "Expected exactly one export"
           Left e -> assertFailure $ "Expected success, got: " <> show e
+    , testCase "a list literal is not every size (POLY-7)" $ do
+        result <- runFrontRaw [r|
+          module main (foo)
+          newtype Matrix (m :: Nat) (n :: Nat) a = [[a]]
+          foo :: Matrix m n Int -> Matrix m n Int
+          foo _ = [[1,2,3],[4,5,6]]
+            |]
+        case result of
+          Left _ -> return ()
+          Right _ -> assertFailure "Expected a rejection"
     ]
 
 gradualDesugarTests :: TestTree
@@ -6965,20 +7298,24 @@ natArithTests =
           Right subs -> assertEqual "" Map.empty subs
           other -> assertFailure $ "Expected success, got: " ++ show other
     , testCase "an open linear equation with large constants is decided: n + m ~ 400" $
-        assertEqual "" (Just True)
-          (NS.naturalSolution [(NS.NatAdd (NS.NatVar (TV "n")) (NS.NatVar (TV "m")), NS.NatLit 400)])
+        assertBool "" (holds (ND.decide DSet.empty [ND.NatEq (NS.NatAdd (NS.NatVar (TV "n")) (NS.NatVar (TV "m"))) (NS.NatLit 400)]))
     , testCase "a linear equation off the coefficients' lattice has no solution: 2n + 4m ~ 7" $
-        assertEqual "" (Just False)
-          (NS.naturalSolution [(NS.NatAdd (NS.NatMul (NS.NatLit 2) (NS.NatVar (TV "n"))) (NS.NatMul (NS.NatLit 4) (NS.NatVar (TV "m"))), NS.NatLit 7)])
+        assertBool "" (refuted (ND.decide DSet.empty [ND.NatEq (NS.NatAdd (NS.NatMul (NS.NatLit 2) (NS.NatVar (TV "n"))) (NS.NatMul (NS.NatLit 4) (NS.NatVar (TV "m")))) (NS.NatLit 7)]))
     , testCase "the coin problem below its bound: 3n + 5m ~ 7 has no solution" $
-        assertEqual "" (Just False)
-          (NS.naturalSolution [(NS.NatAdd (NS.NatMul (NS.NatLit 3) (NS.NatVar (TV "n"))) (NS.NatMul (NS.NatLit 5) (NS.NatVar (TV "m"))), NS.NatLit 7)])
+        assertBool "" (refuted (ND.decide DSet.empty [ND.NatEq (NS.NatAdd (NS.NatMul (NS.NatLit 3) (NS.NatVar (TV "n"))) (NS.NatMul (NS.NatLit 5) (NS.NatVar (TV "m")))) (NS.NatLit 7)]))
     , testCase "the coin problem with large coefficients is decided quickly: 1000n + 999m ~ 998001" $
-        assertEqual "" (Just True)
-          (NS.naturalSolution [(NS.NatAdd (NS.NatMul (NS.NatLit 1000) (NS.NatVar (TV "n"))) (NS.NatMul (NS.NatLit 999) (NS.NatVar (TV "m"))), NS.NatLit 998001)])
-    , testCase "a witness never passes through a negative difference: (3 - n) * (3 - n) ~ 16" $
+        assertBool "" (holds (ND.decide DSet.empty [ND.NatEq (NS.NatAdd (NS.NatMul (NS.NatLit 1000) (NS.NatVar (TV "n"))) (NS.NatMul (NS.NatLit 999) (NS.NatVar (TV "m")))) (NS.NatLit 998001)]))
+    , testCase "a large linear equation with a lower bound is decided: 1000n + 999m ~ 998001, m >= 1" $
+        assertBool "" (holds (ND.decide DSet.empty
+          [ ND.NatEq (NS.NatAdd (NS.NatMul (NS.NatLit 1000) (NS.NatVar (TV "n"))) (NS.NatMul (NS.NatLit 999) (NS.NatVar (TV "m")))) (NS.NatLit 998001)
+          , ND.NatGe (NS.NatSub (NS.NatVar (TV "m")) (NS.NatLit 1)) (NS.NatLit 0) ]))
+    , testCase "a part of a Nat may be negative: (3 - n) * (3 - n) ~ 16 at n = 7" $
         let d = NS.NatSub (NS.NatLit 3) (NS.NatVar (TV "n"))
-        in assertBool "" (NS.naturalSolution [(NS.NatMul d d, NS.NatLit 16)] /= Just True)
+        in assertBool "" (holds (ND.decide DSet.empty [ND.NatEq (NS.NatMul d d) (NS.NatLit 16)]))
+    , testCase "a witness keeps each side non-negative: n - 4 ~ -(m + 1)" $
+        let rhs = NS.NatSub (NS.NatLit 0) (NS.NatAdd (NS.NatVar (TV "m")) (NS.NatLit 1))
+            lhs = NS.NatSub (NS.NatVar (TV "n")) (NS.NatLit 4)
+        in assertBool "" (refuted (ND.decide DSet.empty [ND.NatEq lhs rhs, ND.NatGe lhs (NS.NatLit 0), ND.NatGe rhs (NS.NatLit 0)]))
     , testCase "a solved Nat is never negative: m + 1 ~ 0" $
         case NS.solveNat (NS.NatAdd (NS.NatVar (TV "m")) (NS.NatLit 1)) (NS.NatLit 0) of
           Left NS.Contradiction -> return ()
@@ -9956,7 +10293,7 @@ parseDocstringTests =
       , "count xs = size xs"
       ]
 
--- | Frontend validation of `--' with:` docstring atoms (terminal
+-- | Frontend validation of `--' @with` docstring atoms (terminal
 -- actions on CLI-exported commands). One positive sanity check plus
 -- coverage of the rejection paths in Frontend/Desugar.hs. Type-level
 -- shape is verified by the golden test-suite; here we only care that
@@ -10045,7 +10382,7 @@ withDocstringTests =
         stream = @collect produce
           |]
 
-        -- Sanity: a legal single-atom `with:` composes cleanly.
+        -- Sanity: a legal single-atom `@with` composes cleanly.
       , expectPass
           "single with: on effectful command with matching formatter"
           [r|
@@ -10053,12 +10390,12 @@ withDocstringTests =
         effect IO
         fmt :: Int -> <IO> ()
         fmt x = fmt x
-        --' with: -l/--lines=fmt
+        --' @with -l/--lines=fmt
         foo :: Int -> <IO> Int
         foo x = do x
           |]
 
-        -- Multiple `with:` lines with distinct short/long are legal.
+        -- Multiple `@with` lines with distinct short/long are legal.
       , expectPass
           "two with: lines with distinct short and long"
           [r|
@@ -10068,8 +10405,8 @@ withDocstringTests =
         fmt x = fmt x
         alt :: Int -> <IO> ()
         alt x = alt x
-        --' with: -l/--lines=fmt
-        --' with: -a/--alt=alt
+        --' @with -l/--lines=fmt
+        --' @with -a/--alt=alt
         foo :: Int -> <IO> Int
         foo x = do x
           |]
@@ -10084,7 +10421,7 @@ withDocstringTests =
         effect IO
         showInt :: Int -> Str
         showInt x = showInt x
-        --' with: -s/--show=showInt
+        --' @with -s/--show=showInt
         foo :: Int -> <IO> Int
         foo x = do x
           |]
@@ -10097,7 +10434,7 @@ withDocstringTests =
         module main (foo)
         showInt :: Int -> Str
         showInt x = showInt x
-        --' with: -s/--show=showInt
+        --' @with -s/--show=showInt
         foo :: Int -> Int
         foo x = x
           |]
@@ -10111,7 +10448,7 @@ withDocstringTests =
         module main (foo)
         drop :: Int -> ()
         drop x = ()
-        --' with: -d/--drop=drop
+        --' @with -d/--drop=drop
         foo :: Int -> Int
         foo x = x
           |]
@@ -10123,8 +10460,8 @@ withDocstringTests =
         module main (foo)
         fmt :: Int -> <IO> ()
         fmt x = fmt x
-        --' with: -l/--lines=fmt
-        --' with: -a/--lines=fmt
+        --' @with -l/--lines=fmt
+        --' @with -a/--lines=fmt
         foo :: Int -> <IO> Int
         foo x = do x
           |]
@@ -10136,8 +10473,8 @@ withDocstringTests =
         module main (foo)
         fmt :: Int -> <IO> ()
         fmt x = fmt x
-        --' with: -l/--lines=fmt
-        --' with: -l/--alt=fmt
+        --' @with -l/--lines=fmt
+        --' @with -l/--alt=fmt
         foo :: Int -> <IO> Int
         foo x = do x
           |]
@@ -10149,7 +10486,7 @@ withDocstringTests =
         module main (foo)
         fmt :: Int -> <IO> ()
         fmt x = fmt x
-        --' with: -l=fmt
+        --' @with -l=fmt
         foo :: Int -> <IO> Int
         foo x = do x
           |]
@@ -10161,7 +10498,7 @@ withDocstringTests =
         module main (foo)
         fmt :: Int -> <IO> ()
         fmt x = fmt x
-        --' with: --help=fmt
+        --' @with --help=fmt
         foo :: Int -> <IO> Int
         foo x = do x
           |]
@@ -10173,12 +10510,12 @@ withDocstringTests =
         module main (foo)
         fmt :: Int -> <IO> ()
         fmt x = fmt x
-        --' with: -h/--halt=fmt
+        --' @with -h/--halt=fmt
         foo :: Int -> <IO> Int
         foo x = do x
           |]
 
-        -- `with:` on argument-level docstring -> reject (command-only).
+        -- `@with` on argument-level docstring -> reject (command-only).
       , expectError
           "with: on argument-level docstring is rejected"
           [r|
@@ -10186,20 +10523,20 @@ withDocstringTests =
         fmt :: Int -> <IO> ()
         fmt x = fmt x
         foo ::
-          --' with: -l/--lines=fmt
+          --' @with -l/--lines=fmt
           Int ->
           <IO> Int
         foo x = x
           |]
 
-        -- `with:` on export without a signature -> reject.
+        -- `@with` on export without a signature -> reject.
       , expectError
           "with: on export without signature is rejected"
           [r|
         module main (foo)
         fmt :: Int -> <IO> ()
         fmt x = fmt x
-        --' with: -l/--lines=fmt
+        --' @with -l/--lines=fmt
         foo = 42
           |]
 
@@ -10210,7 +10547,7 @@ withDocstringTests =
         module main (foo)
         fmt :: Int -> <IO> ()
         fmt x = fmt x
-        --' with: -l/--lines fmt
+        --' @with -l/--lines fmt
         foo :: Int -> <IO> Int
         foo x = do x
           |]
@@ -10220,7 +10557,7 @@ withDocstringTests =
           "with: empty term name is rejected"
           [r|
         module main (foo)
-        --' with: -l/--lines=
+        --' @with -l/--lines=
         foo :: Int -> <IO> Int
         foo x = do x
           |]
@@ -10232,7 +10569,7 @@ withDocstringTests =
         module main (foo)
         fmt :: Int -> <IO> ()
         fmt x = fmt x
-        --' with: --Lines=fmt
+        --' @with --Lines=fmt
         foo :: Int -> <IO> Int
         foo x = do x
           |]
@@ -10244,12 +10581,12 @@ withDocstringTests =
         module main (foo)
         fmt :: Int -> <IO> ()
         fmt x = fmt x
-        --' with: -1/--lines=fmt
+        --' @with -1/--lines=fmt
         foo :: Int -> <IO> Int
         foo x = do x
           |]
 
-        -- `with:` long clashes with an argument-declared long. Both
+        -- `@with` long clashes with an argument-declared long. Both
         -- would land on the same clap Command; clap panics at build
         -- time. Frontend must reject first.
       , expectError
@@ -10258,9 +10595,9 @@ withDocstringTests =
         module main (foo)
         fmt :: Int -> <IO> ()
         fmt x = fmt x
-        --' with: --lines=fmt
+        --' @with --lines=fmt
         foo ::
-          --' arg: --lines
+          --' @arg --lines
           Int ->
           <IO> Int
         foo x = x
@@ -10273,15 +10610,15 @@ withDocstringTests =
         module main (foo)
         fmt :: Int -> <IO> ()
         fmt x = fmt x
-        --' with: -x/--lines=fmt
+        --' @with -x/--lines=fmt
         foo ::
-          --' arg: -x/--count
+          --' @arg -x/--count
           Int ->
           <IO> Int
         foo x = x
           |]
 
-        -- Two `with:` long flags that mangle to the same internal name
+        -- Two `@with` long flags that mangle to the same internal name
         -- (hyphen -> underscore collapse) must be caught, or the
         -- synthesized bindings would clash silently.
       , expectError
@@ -10290,8 +10627,8 @@ withDocstringTests =
         module main (foo)
         fmt :: Int -> <IO> ()
         fmt x = fmt x
-        --' with: --bar-baz=fmt
-        --' with: --bar_baz=fmt
+        --' @with --bar-baz=fmt
+        --' @with --bar_baz=fmt
         foo :: Int -> <IO> Int
         foo x = do x
           |]
@@ -10306,7 +10643,7 @@ withDocstringTests =
         fmt x = fmt x
         mlcp_foo_lines :: Int -> Int
         mlcp_foo_lines n = n
-        --' with: -l/--lines=fmt
+        --' @with -l/--lines=fmt
         foo :: Int -> <IO> Int
         foo x = do x
           |]
@@ -10387,8 +10724,8 @@ withDocstringTests =
           [r|
         module main (foo)
         foo ::
-          --' arg: --_hidden
-          --' default: 0
+          --' @arg --_hidden
+          --' @default 0
           Int ->
           Int
         foo x = x
@@ -11587,15 +11924,16 @@ sourceNameTests =
         matchNamePattern "a(::a)*" "a::" @?= Right False
     ]
 
--- | Like 'expectError', but a compiler bug ('SystemError') does not count:
+-- | Like 'expectError', and also refusing an environment failure:
 -- the program must be rejected as a user error.
 expectUserError :: String -> MT.Text -> TestTree
 expectUserError msg code =
   testCase msg $ do
-    result <- runFront code
+    (result, st) <- runFrontState code
     case result of
       (Right _) -> assertFailure "Expected failure"
-      (Left (SystemError e)) -> assertFailure $ "Expected a user error, got a compiler error: " <> show e
+      (Left e) | MM.isDefect st e -> assertFailure $ "Expected a user error, got a compiler error: " <> show e
+      (Left e@(EnvFailed _)) -> assertFailure $ "Expected a user error, got an environment failure: " <> show e
       (Left _) -> return ()
 
 -- | The general type of the single export, with aliases as inference left
@@ -11605,7 +11943,7 @@ rawGeneralType code = do
   result <- runFrontRaw code
   return $ case result of
     Right [x] -> Right (closeExistentials . MTI.cleanTypeName . renameExistentials . gtypeof $ x)
-    Right _ -> Left (SystemError "expected exactly one export")
+    Right _ -> Left (Fault Nothing "expected exactly one export")
     Left e -> Left e
 
 -- | A program written with a transparent alias and the same program with the
@@ -11930,3 +12268,9 @@ aliasTransparencyTests =
               |]
           ]
       ]
+
+holds, refuted :: ND.Decision -> Bool
+holds (ND.Holds _) = True
+holds _ = False
+refuted (ND.Refuted _) = True
+refuted _ = False

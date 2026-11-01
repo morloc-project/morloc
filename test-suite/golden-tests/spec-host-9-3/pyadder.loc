@@ -1,0 +1,7 @@
+--' The Python adder
+module pyadder (*)
+
+import root-py
+import .adder
+
+source Py from "f.py" ("py_make_adder" as mkAdder)

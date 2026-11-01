@@ -1,0 +1,26 @@
+-- Spec NATIVE-10: with both Packable methods in Python, a Frozen received from
+-- C++ and a Frozen literal are both tuples (NATIVE-9); C++, where Frozen has
+-- no form of its own, needs only unpack.
+module main (viaCpp, literal)
+
+import root-py
+import root-cpp
+
+newtype Frozen a = [a]
+type Py => (Frozen a) = "tuple" a
+
+instance Packable [a] (Frozen a) where
+  source Py from "frozen.py" ("freeze" as pack, "thaw" as unpack)
+  source Cpp from "frozen.hpp" ("thaw" as unpack)
+
+source Py from "frozen.py" ("kind")
+kind :: Frozen Int -> Str
+
+source Cpp from "frozen.hpp" ("mk")
+mk :: Int -> Frozen Int
+
+viaCpp :: Int -> Str
+viaCpp n = kind (mk n)
+
+literal :: Str
+literal = kind ([1, 1] :: Frozen Int)

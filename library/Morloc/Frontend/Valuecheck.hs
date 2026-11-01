@@ -3,33 +3,27 @@
 
 {- |
 Module      : Morloc.Frontend.Valuecheck
-Description : Detect contradictions between alternative implementations
+Description : Check recursive bindings and alternative implementations
 Copyright   : (c) Zebulun Arendsee, 2016-2026
 License     : Apache-2.0
 Maintainer  : z@morloc.io
 
-When a term has multiple implementations (e.g. a declaration and a source,
-or multiple sources), this module checks that they are not provably
-contradictory. For instance, two constant expressions that return different
-literal values for the same type are flagged as errors.
-
-Note: pure scope/binding-sanity checks (the same name appearing twice in
-the same syntactic scope) live earlier in the pipeline because the
-relevant syntactic shape is gone by the time the value-checker runs:
-
-  * duplicate fields in a record literal/type   -> Parser.y  checkRecordKeys
-  * duplicate where-bindings, where vs. param   -> Desugar.hs checkWhereScope
-
-Let-blocks are intentionally NOT checked here: morloc's let is non-recursive
-sequential, so `let { x = 1 ; x = 2 } in x` is the layout-free spelling of
-`let x = 1 in let x = 2 in x` and shadows to 2. Where-clauses are
-order-invariant, so duplicates there are real ambiguity errors.
+Two checks on typed trees: that no binding needs its own value (BIND-7), and
+that the alternative implementations of a term are not provably
+contradictory, such as two constants of one type with different values.
 -}
-module Morloc.Frontend.Valuecheck (valuecheck, checkPair) where
+module Morloc.Frontend.Valuecheck (valuecheck, checkPair, checkRecursion) where
 
+import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import qualified Data.Text as DT
+import Data.IORef (IORef, newIORef, readIORef, writeIORef)
+import Data.Scientific (toRealFloat)
+import qualified Morloc.BaseTypes as BT
+import qualified Morloc.TypeEval as TE
+import Morloc.CodeGenerator.Value (etaParts, isLambda)
 import Morloc.Data.Doc
+import Morloc.Frontend.Rename (displayName)
 import Morloc.Frontend.Namespace
 import qualified Morloc.Monad as MM
 
@@ -44,19 +38,13 @@ toE (AnnoS g _ (LamS vs e)) = LamP g vs (toE e)
 toE (AnnoS g _ (LstS es)) = LstP g (map toE es)
 toE (AnnoS g _ (TupS es)) = TupP g (map toE es)
 toE (AnnoS g _ (NamS rs)) = NamP g (map (second toE) rs)
--- For numeric literals carry the literal's own source index (si) rather
--- than the wrapping AnnoS index. When a top-level term body is inlined
--- via Treeify.termExprToAnnoS, the wrapping AnnoS holds the export
--- reference's index (gi0), so the literal's own position would otherwise
--- be lost. Using si here lets value-conflict diagnostics caret on the
--- literal that triggered the conflict, not on the export list.
+-- A literal carries its own source index: an inlined term's wrapping index
+-- is that of the reference to it.
 toE (AnnoS (Idx _ t) _ (RealS si x)) = LitP (Idx si t) (MNum x)
 toE (AnnoS (Idx _ t) _ (IntS si x)) = LitP (Idx si t) (MInt x)
 toE (AnnoS g _ (LogS x)) = LitP g (MLog x)
 toE (AnnoS g _ (StrS x)) = LitP g (MStr x)
--- A constructor is a closed literal; its name is the value the
--- value-checker can see.
-toE (AnnoS g _ (ConS _ n _ _)) = LitP g (MStr n)
+toE (AnnoS g _ (ConS _ n _ xs)) = ConP g n (map toE xs)
 toE (AnnoS g _ (ExeS (SrcCall s))) = SrcP g s
 toE (AnnoS g _ (ExeS (PatCall (PatternText s ss)))) =
   LitP g (MStr (s <> DT.concat ["#{}" <> s' | s' <- ss]))
@@ -91,6 +79,7 @@ indexOfE (DoBlockP (Idx i _) _) = i
 indexOfE (EvalP (Idx i _) _) = i
 indexOfE (CoerceP _ (Idx i _) _) = i
 indexOfE (IntrinsicP (Idx i _) _ _) = i
+indexOfE (ConP (Idx i _) _ _) = i
 
 typeOfE :: E -> Type
 typeOfE (BndP (Idx _ t) _) = t
@@ -110,70 +99,148 @@ typeOfE (DoBlockP (Idx _ t) _) = t
 typeOfE (EvalP (Idx _ t) _) = t
 typeOfE (CoerceP _ (Idx _ t) _) = t
 typeOfE (IntrinsicP (Idx _ t) _ _) = t
+typeOfE (ConP (Idx _ t) _ _) = t
 
--- Check the harmony of typed implementations.
---
--- A naive implementation of this functions (and mine is naive as heck) will run
--- in exponential time in some cases. This can be avoided with a touch of
--- memoization. But I will leave that as an exercise for my user (PR's accepted).
+-- | BIND-7. A 'CallS' back-edge closes the cycle of the open 'VarS'
+-- alternatives above it, up to the 'VarS' of its name; a call of a shared
+-- specialization is not a back-edge. On the way down, each member records
+-- the demand on it of the member enclosing it, as a function of the demand
+-- on that one.
+checkRecursion ::
+  Set.Set EVar -> (Int -> Maybe Int) -> Map.Map Int Int -> Map.Map Int Int -> AnnoS g Many Int -> MorlocMonad ()
+checkRecursion specs termOf owners sites = go [] id
+  where
+    go :: [Member g] -> (Demand -> Demand) -> AnnoS g Many Int -> MorlocMonad ()
+    go open here node@(AnnoS _ c e) = case e of
+      VarS v (Many alts) ->
+        mapM_ (\alt -> go (Member v (termOf c) alt here : open) id alt) alts
+      CallS v
+        | not (Set.member v specs)
+        , (inner, target : _) <- break ((== v) . memberName) open ->
+            checkCycle (target : reverse inner) here
+      _ -> mapM_ (\(step, child) -> go open (step . here) child) (children node)
+
+    -- the demand of each member on the next, and of the last on the first
+    checkCycle :: [Member g] -> (Demand -> Demand) -> MorlocMonad ()
+    checkCycle members final =
+      let ring = zip members (map memberIncoming (drop 1 members) <> [final])
+          rotations = take (length ring) (iterate rotate ring)
+          rotate xs = drop 1 xs <> take 1 xs
+       in case [m | r@((m, _) : _) <- rotations, needsItself m r] of
+            (Member w k (AnnoS _ i _) _ : _) ->
+              MM.throwSourcedError (fromMaybe i (k >>= (`Map.lookup` sites))) $
+                "The bindings" <+> hsep (punctuate " ->" (names <> take 1 names))
+                  <+> "form a cycle, and computing" <+> squotes (pretty (displayName w))
+                  <+> "needs the value of" <+> squotes (pretty (displayName w)) <+> "itself"
+              where
+                names = [squotes (pretty (displayName (memberName m))) | m <- members]
+            [] -> return ()
+
+    -- computing the first member, as a value, comes round to demand it,
+    -- unless a call on the way of a lambda holding it computes it anew
+    needsItself start = walk (Applied 0)
+      where
+        walk Unforced _ = False
+        walk _ [] = True
+        walk d ((m, next) : rest)
+          | runsBody d m && holds m = False
+          | otherwise = walk (next d) rest
+        holds (Member _ k _ _) = maybe False (`elem` ownerChain' start) k
+
+    runsBody d (Member _ _ alt0 _) = go' alt0
+      where
+        go' alt@(AnnoS _ _ x) = case x of
+          LamS vs _
+            | isLambda alt -> case d of
+                Called -> True
+                Applied n -> n >= length vs
+                Unforced -> False
+          LabelS _ y -> go' y
+          CoerceS _ y -> go' y
+          _ -> False
+
+    ownerChain' (Member _ k _ _) = maybe [] ownerChain k
+    ownerChain k = case Map.lookup k owners of
+      Just o | o /= k -> o : ownerChain o
+      _ -> []
+
+    children :: AnnoS g Many Int -> [(Demand -> Demand, AnnoS g Many Int)]
+    children n@(AnnoS _ _ x) = case x of
+      LamS vs b
+        | Just (f, pre) <- etaParts n ->
+            (etaHead (length pre) (length vs), f) : [(called, y) | y <- pre]
+        | otherwise -> [(enter (length vs), b)]
+      DoBlockS b -> [(force, b)]
+      AppS f xs -> (supply (length xs), f) : [(called, y) | y <- xs]
+      IfS cond t f -> [(evaluated, cond), (id, t), (id, f)]
+      LetS _ y z -> [(called, y), (id, z)]
+      LabelS _ y -> [(id, y)]
+      CoerceS _ y -> [(id, y)]
+      _ -> [(called, y) | y <- foldExprS (: []) x]
+
+-- | How far evaluating an expression goes into a part of it: not at all, to
+-- its value applied to some number of arguments (none: just its value), or
+-- applied to any number of them.
+data Demand = Unforced | Applied Int | Called
+  deriving (Eq)
+
+-- | The body of a lambda of @k@ parameters.
+enter :: Int -> Demand -> Demand
+enter k (Applied n)
+  | n >= k = Applied (n - k)
+  | otherwise = Unforced
+enter _ d = d
+
+-- | The head of an application of @k@ arguments.
+supply :: Int -> Demand -> Demand
+supply k (Applied n) = Applied (n + k)
+supply _ d = d
+
+-- | The head of an eta-expanded partial application holding @held@
+-- arguments, waiting for @waiting@ more.
+etaHead :: Int -> Int -> Demand -> Demand
+etaHead held waiting (Applied n)
+  | n >= waiting = Applied (held + n)
+  | otherwise = Applied held
+etaHead _ _ d = d
+
+-- | The body of a do-block, which runs only when it is forced.
+force :: Demand -> Demand
+force Called = Called
+force _ = Unforced
+
+evaluated :: Demand -> Demand
+evaluated Unforced = Unforced
+evaluated _ = Applied 0
+
+called :: Demand -> Demand
+called Unforced = Unforced
+called _ = Called
+
+-- | An open alternative of a term on the path to a back-edge, with the
+-- demand on it of the alternative that encloses it.
+data Member g = Member
+  { memberName :: EVar
+  , _memberTerm :: Maybe Int
+  , _memberAlt :: AnnoS g Many Int
+  , memberIncoming :: Demand -> Demand
+  }
+
+-- | Reject provably contradictory implementations. Exponential in the
+-- worst case; nothing is memoized.
 valuecheck :: AnnoS (Indexed Type) Many Int -> MorlocMonad (AnnoS (Indexed Type) Many Int)
 valuecheck e0 = do
-  specs <- MM.gets stateSpecNames
-  groundCheck specs e0
   check (toE e0)
   return e0
 
--- A term whose every alternative is just a back-edge to itself (or to other
--- such terms) has no concrete implementation. Treeify already detects these
--- recursive references and emits CallS, but lets them through to codegen
--- where they fail at runtime in the target language. Here we walk the tree
--- and reject any VarS whose alternatives all lack ground content. Walks
--- children first so the deepest culprit is reported.
---
--- Catches both `omega = omega` and mutual cycles like `a = b; b = a` when
--- none of the participants has a concrete source.
-groundCheck :: Set.Set EVar -> AnnoS (Indexed Type) Many Int -> MorlocMonad ()
-groundCheck specs (AnnoS _ _ (VarS v (Many es))) = do
-  mapM_ (groundCheck specs) es
-  if any (hasGround specs) es
-    then return ()
-    else case es of
-      (AnnoS (Idx i _) _ _ : _) ->
-        MM.throwSourcedError i $
-          "Self-referential or cyclic binding:" <+> squotes (pretty v)
-            <> "; the term is defined only by reference to itself"
-      [] -> return () -- typechecker would have rejected an alternative-less term
-groundCheck specs (AnnoS _ _ e) = mapM_ (groundCheck specs) (foldExprS (\a -> [a]) e)
-
--- True if the AnnoS contains any substantive content (not just BndS/CallS
--- references; a call of a shared specialization is its implementation).
--- VarS forwards to its alternatives.
-hasGround :: Set.Set EVar -> AnnoS (Indexed Type) Many Int -> Bool
-hasGround specs (AnnoS _ _ e) = case e of
-  BndS _ -> False
-  CallS v -> Set.member v specs
-  LetBndS _ -> False
-  VarS _ (Many es) -> any (hasGround specs) es
-  _ -> True
-
--- walk through a tree
--- find the sets of implementations in VarS expressions
--- compare all pairs of implementations
 check :: E -> MorlocMonad ()
 check (VarP (Idx i _) _ es) = do
-  -- Alternatives reach the same VarP via polymorphic resolution
-  -- (Typecheck.resolveInstances). When the call site's general type is
-  -- unbound (e.g. a top-level export `sum :: Integral a => [a] -> a`),
-  -- every matching instance survives into a single Many. Only one instance
-  -- is selected per runtime call site, so alternatives with distinct ground
-  -- types are never co-applicable and must not be value-equated.
+  -- alternatives of different types are instances, never both applied
   let typedPairs = [(a, b) | (a, b) <- pairwise es, typeOfE a == typeOfE b]
+  sequence_ [compareForeignFunctions i t s1 s2 | (SrcP (Idx _ t) s1, SrcP _ s2) <- typedPairs]
   mapM_ (uncurry (checkPair i)) typedPairs
-  -- recurse into each alternative so nested VarPs (e.g. non-export terms
-  -- referenced from the export, or where-bound terms) are also checked
   mapM_ check es
   where
-    -- find all unique pairs
     pairwise :: [a] -> [(a, a)]
     pairwise xs = [(xs !! i', xs !! j') | i' <- [0 .. length xs - 1], j' <- [0 .. length xs - 1], j' > i']
 check (AppP _ e es) = mapM_ check (e : es)
@@ -186,171 +253,144 @@ check (DoBlockP _ e) = check e
 check (EvalP _ e) = check e
 check (CoerceP _ _ e) = check e
 check (IntrinsicP _ _ es) = mapM_ check es
+check (ConP _ _ es) = mapM_ check es
 check _ = return ()
 
--- check for contradictions in one pair of expressions
+-- | REAL-5: two implementations of one term that provably differ. Only data
+-- can be told apart: literals, containers, records, constructors, and the
+-- parameters of lambdas compared with their parameters renamed alike. A name
+-- is compared through its own implementations; anything else, such as an
+-- application or a branch, is accepted under REAL-1, as is a comparison
+-- that has not been decided within 'comparisonBudget' steps.
 checkPair :: Int -> E -> E -> MorlocMonad ()
--- These pass
---   foo x y = (x, y)
---   foo a b = (a, b)
---
--- These do not except in the special case where a=b
---   foo x y = (x, y)
---   foo a b = (b, a)
---
--- This requires unified names (see LamS case)
-checkPair i e1@(BndP _ v1) e2@(BndP _ v2)
-  | v1 == v2 = return ()
-  | otherwise = valueError i e1 e2 "Non-equivalent variable patterns"
-checkPair _ e1@(VarP g v1 es1) (VarP _ v2 es2)
-  -- Same term, so es1 and es2 must be identical
-  | v1 == v2 = check e1
-  -- If the terms are different all the instances must still be the same and the
-  -- type will be the same, so we can simply combine them.
-  | otherwise = check (VarP g v1 (es1 <> es2))
--- evaluate all applications of lambdas
---  case #1 remove an empty lambda
-checkPair i (AppP _ (LamP _ [] e1) _) e2 = checkPair i e1 e2
---  case #2 remove an empty application
-checkPair i (AppP _ f@LamP {} []) e2 = checkPair i f e2
---  case #3 substitute on argument into the lambda
-checkPair i (AppP g1 (LamP g2 (v : vs) e1) (x : xs)) e2 =
-  let e1' = substituteExpr v x e1
-   in checkPair i (AppP g1 (LamP g2 vs e1') xs) e2
---  if there is an applied lambda on the other side, reverse
-checkPair i e1 e2@(AppP _ LamP {} _) = checkPair i e2 e1
--- No value checking is possible between applications
---
--- If the function applied is not the same in both terms, we can
--- say nothing without source analysis.
---
--- If the function applied is the same, we also need more information to make
--- any decisions. For example:
---
--- foo x y
--- foo y x
---
--- Here the applied function is the same, but the arguments are switched. But
--- whether this causes the terms to be non-equal depends on whether the function
--- commutes. For example, `add x y` == `add y x`.
---
--- In general, a function is free to map different inputs to the same
--- output. Without further information, we can conclude nothing. So all
--- applications must pass.
-checkPair _ AppP {} AppP {} = return ()
-checkPair i e1@AppP {} e2 = valueError i e1 e2 "Cannot check beyond source boundary"
-checkPair i e1 e2@AppP {} = valueError i e1 e2 "Cannot check beyond source boundary"
--- Not that SrcP is something sourced, not necessarily a function, it may be a
--- constant.
-checkPair i (SrcP (Idx _ t) src1) (SrcP _ src2) = compareForeignFunctions i t src1 src2
-checkPair i e1@(SrcP _ _) e2 = checkPair i e2 e1
-checkPair i e1 e2@SrcP {}
-  | isSimple e1 = valueError i e1 e2 "Cannot compare source value to non-source expression"
-  | otherwise = return ()
+checkPair i e10 e20 = do
+  scope <- MM.gets stateGeneralTypedefs
+  budget <- liftIO (newIORef comparisonBudget)
+  go budget scope Set.empty e10 e20
   where
-    -- For VarP, simplicity of ANY instance indicates an error
-    isSimple (VarP _ _ es) = any isSimple es
-    -- For other expressions, only simplicity of ALL elements is error
-    isSimple (LstP _ es) = all isSimple es
-    isSimple (TupP _ es) = all isSimple es
-    isSimple (NamP _ (map snd -> es)) = all isSimple es
-    isSimple BndP {} = True
-    isSimple LitP {} = True
-    isSimple AppP {} = False
-    isSimple LamP {} = False
-    isSimple SrcP {} = False
-    isSimple PatP {} = False
-    isSimple BracketIndexP {} = False
-    isSimple BracketSliceP {} = False
-    isSimple (IfP _ _ _ _) = False
-    isSimple (DoBlockP _ e) = isSimple e
-    isSimple (EvalP _ e) = isSimple e
-    isSimple (CoerceP _ _ e) = isSimple e
-    isSimple (IntrinsicP _ _ _) = False
+    -- @params@: the renamed lambda parameters, each standing for any value
+    go :: IORef Int -> Scope -> Set.Set EVar -> E -> E -> MorlocMonad ()
+    go budget scope params e1 e2 = do
+      left <- liftIO (readIORef budget)
+      when (left > 0) $ do
+        liftIO (writeIORef budget (left - 1))
+        step budget scope params e1 e2
 
--- reduce empty lambdas
---
--- -- initial
--- \x y -> (\a b -> bar b a) x y
--- \k j -> bar k j
---
--- -- unify terms
--- \m n -> (\a b -> bar b a) m n
--- \m n -> bar m n
---
--- -- apply if not in canonical form
--- \m n -> bar n m
--- \m n -> bar m n
---
--- -- compare calls
--- bar
--- bar -- same function is called, so their arguments must be the comparable
---
--- -- compare arguments, starting with first
--- n
--- m
-checkPair i (LamP _ vs1 s1) (LamP _ vs2 s2) = checkPair i s1' s2'
-  where
-    used =
-      Set.unions
-        [ freeTerms s1
-        , freeTerms s2
-        , Set.fromList (vs1 <> vs2)
-        ]
+    step budget scope params e1 e2 = case (e1, e2) of
+      (VarP _ _ es1, VarP _ _ es2) -> sequence_ [next a b | a <- es1, b <- es2, typeOfE a == typeOfE b]
+      (VarP _ _ es, _) -> sequence_ [next a e2 | a <- es, typeOfE a == typeOfE e2]
+      (_, VarP {}) -> next e2 e1
+      (AppP {}, _) | Just e1' <- betaStep e1 -> next e1' e2
+      (_, AppP {}) | Just e2' <- betaStep e2 -> next e1 e2'
+      (LamP g1 vs1 b1, LamP g2 vs2 b2) ->
+        let k = min (length vs1) (length vs2)
+            used = Set.unions [freeTerms b1, freeTerms b2, Set.fromList (vs1 <> vs2), params]
+            fresh = take k [v | j <- [(0 :: Int) ..], let v = EV (DT.pack ("x" <> show j)), Set.notMember v used]
+            rename vs body = foldr (\(v, r) acc -> substituteEVar v r acc) body (zip vs fresh)
+            rest g vs body = case drop k vs of
+              [] -> rename vs body
+              more -> LamP g more (rename vs body)
+         in go budget scope (Set.union params (Set.fromList fresh)) (rest g1 vs1 b1) (rest g2 vs2 b2)
+      (BndP (Idx _ t) v1, BndP _ v2)
+        | v1 /= v2 && isParam v1 && isParam v2 && manyValued t ->
+            reject "Non-equivalent variable patterns"
+      (BndP (Idx _ t) v, _)
+        | isParam v && isConstant e2 && manyValued t ->
+            reject "A parameter is compared with a constant"
+      (_, BndP {}) | isConstant e1 -> next e2 e1
+      (LitP (Idx _ t) x, LitP _ y)
+        | not (sameLiteral t x y) ->
+            reject $
+              "Cannot equate non-equal primitives (the two operands disagree):" <> line
+                <> "a:" <+> pretty x <> line
+                <> "b:" <+> pretty y
+      (LstP _ xs, LstP _ ys)
+        | length xs /= length ys -> reject "Containers of unequal length"
+        | otherwise -> sequence_ (zipWith next xs ys)
+      (TupP _ xs, TupP _ ys) -> sequence_ (zipWith next xs ys)
+      (NamP _ rs1, NamP _ rs2) -> sequence_ [next x y | (k, x) <- rs1, Just y <- [lookup k rs2]]
+      (ConP _ c1 xs, ConP _ c2 ys)
+        | c1 /= c2 -> reject "Different constructors"
+        | otherwise -> sequence_ (zipWith next xs ys)
+      -- a value made optional is null only if it was itself null
+      (CoerceP CoerceToOptional _ x, LitP _ MNull)
+        | isConstant x && not (isNull x) -> reject "A value is compared with null"
+      (LitP _ MNull, CoerceP CoerceToOptional _ _) -> next e2 e1
+      (CoerceP c1 _ x, CoerceP c2 _ y) | c1 == c2 -> next x y
+      (DoBlockP _ x, DoBlockP _ y) -> next x y
+      (EvalP _ x, EvalP _ y) -> next x y
+      -- `@show` is injective at one type, so its arguments are compared there
+      (IntrinsicP _ IntrShow [x], IntrinsicP _ IntrShow [y])
+        | typeOfE x == typeOfE y -> next x y
+      _ -> return ()
+      where
+        next = go budget scope params
+        reject = valueError i e1 e2
+        isParam v = Set.member v params
 
-    -- list of original variable names
-    newvars =
-      filter
-        (\v -> not $ Set.member v used)
-        [EV $ DT.pack ("x" <> show j) | j <- [(0 :: Int) ..]]
+        -- a type with more than one value, so two parameters of it may differ
+        manyValued t = not (oneValued Set.empty (type2typeu t))
 
-    s1' = foldr (\(v, r) s -> substituteEVar v r s) s1 (zip vs1 newvars)
-    s2' = foldr (\(v, r) s -> substituteEVar v r s) s2 (zip vs2 newvars)
-checkPair _ _ (LamP {}) = error "Illegal empty lambda"
-checkPair _ (LamP {}) _ = error "Illegal empty lambda"
--- check all container elements
---  * their sizes must agree
---  * their pairwise elements must agree
-checkPair i e1@(LstP _ xs) e2@(LstP _ ys)
-  | length xs /= length ys = valueError i e1 e2 "Containers of unequal length"
-  | otherwise = mapM_ (uncurry (checkPair i)) (zip xs ys)
-checkPair i (TupP _ xs) (TupP _ ys) =
-  mapM_ (uncurry (checkPair i)) (zip xs ys)
--- check records, no assumption of order
-checkPair _ (NamP _ []) (NamP _ _) = return ()
-checkPair i (NamP g1 ((k, x) : rs1)) (NamP g2 rs2) =
-  case lookup k rs2 of
-    (Just y) -> checkPair i x y >> checkPair i (NamP g1 rs1) (NamP g2 rs2)
-    Nothing -> error "Unreachable if typechecker has passed"
--- The same intrinsic over pairwise-equivalent arguments
-checkPair i e1@(IntrinsicP _ a xs) e2@(IntrinsicP _ b ys)
-  | a == b && length xs == length ys = mapM_ (uncurry (checkPair i)) (zip xs ys)
-  | otherwise = valueError i e1 e2 "Non-equivalent intrinsics"
--- Primitives must be equal
-checkPair i e1@(LitP _ x) e2@(LitP _ y)
-  | x == y = return ()
-  | otherwise =
-      valueError i e1 e2 $
-        "Cannot equate non-equal primitives (the two operands disagree):" <> line
-          <> "a:" <+> pretty x <> line
-          <> "b:" <+> pretty y
--- All other cases should fail.
---
--- Actually, all other cases should already have failed while typechecking.
---
--- It should not be possible to reach this case, should it?
-checkPair i e1 e2 = valueError i e1 e2 "Non-equivalent forms"
+        oneValued :: Set.Set TVar -> TypeU -> Bool
+        oneValued seen t0 = case TE.unWhnf (TE.whnf scope t0) of
+          VarU v | v == BT.unit -> True
+          AppU (VarU v) ts | v == BT.tuple (length ts) -> all (oneValued seen) ts
+          NamU _ _ _ fs -> all (oneValued seen . snd) fs
+          VarU v -> singleCtor seen v []
+          AppU (VarU v) ts -> singleCtor seen v ts
+          _ -> False
+        -- a data type of one constructor whose fields each have one value
+        singleCtor seen v ts
+          | Set.member v seen = False
+          | otherwise = case TE.dataCtorsOf scope v ts of
+              Just [(_, fs)] -> all (oneValued (Set.insert v seen)) fs
+              _ -> False
 
--- Compare two sourced declarations bound to the same morloc name at the
--- same specialized type.
---
--- We cannot inspect the foreign code to prove behavioural equivalence, but
--- we can refuse the unambiguous bug: two source declarations of the same
--- target language disagreeing on srcName/srcPath give the realizer no rule
--- to choose between them, so the result would silently depend on
--- declaration order. Different source languages are legitimate alternatives
--- (e.g. mempty from root-py and root-cpp) - the language-cost optimizer
--- picks per call site - so they pass through here unchanged.
+    -- a value fixed by the program, known without evaluating anything
+    isConstant (LitP {}) = True
+    isConstant (ConP _ _ xs) = all isConstant xs
+    isConstant (LstP _ xs) = all isConstant xs
+    isConstant (TupP _ xs) = all isConstant xs
+    isConstant (NamP _ rs) = all (isConstant . snd) rs
+    isConstant (CoerceP _ _ x) = isConstant x
+    isConstant _ = False
+
+    isNull (LitP _ MNull) = True
+    isNull (CoerceP _ _ x) = isNull x
+    isNull _ = False
+
+    -- numbers are equal when they are one value of their type
+    sameLiteral t a b = case (number a, number b) of
+      (Just x, Just y)
+        | t == VarT BT.f32 -> (toRealFloat x :: Float) == toRealFloat y
+        | isRealType t -> (toRealFloat x :: Double) == toRealFloat y
+        | otherwise -> x == y
+      _ -> a == b
+    number (MInt n) = Just (fromInteger n)
+    number (MNum (RealFinite x)) = Just x
+    number _ = Nothing
+    isRealType t = t == VarT BT.real || t == VarT BT.f64
+
+    -- one step of reducing an applied lambda
+    betaStep (AppP g (LamP gl (v : vs) body) (x : xs)) = Just (AppP g (LamP gl vs (substituteExpr v x body)) xs)
+    betaStep (AppP g (LamP _ [] body) xs@(_ : _)) = Just (AppP g body xs)
+    betaStep (AppP _ (LamP _ [] body) []) = Just body
+    betaStep (AppP _ f@LamP {} []) = Just f
+    -- a name with one implementation stands for it
+    betaStep (AppP g h xs) | Just f <- soleLambda h = Just (AppP g f xs)
+    betaStep _ = Nothing
+    soleLambda (VarP _ _ [f@LamP {}]) = Just f
+    soleLambda (VarP _ _ [h]) = soleLambda h
+    soleLambda _ = Nothing
+
+-- | The comparison steps one pair of implementations may take before it is
+-- accepted undecided.
+comparisonBudget :: Int
+comparisonBudget = 10000
+
+-- | Two sources of one name and type in one language leave the realizer no
+-- rule to choose between them; sources in different languages are
+-- alternatives.
 compareForeignFunctions :: Int -> Type -> Source -> Source -> MorlocMonad ()
 compareForeignFunctions i _ src1 src2
   | src1 == src2 = return ()
@@ -370,7 +410,6 @@ substituteEVar oldVar newVar e0
   | oldVar == newVar = e0
   | otherwise = f usedVars 0 e0
   where
-    -- list of free term variables
     usedVars = Set.union (freeTerms e0) (Set.fromList [oldVar, newVar])
 
     f :: Set.Set EVar -> Int -> E -> E
@@ -380,9 +419,10 @@ substituteEVar oldVar newVar e0
     f used idx (LamP g vs e) =
       let (used', idx', vs', e') = relabelLam used idx vs e
        in LamP g vs' (f used' idx' e')
-    f _ _ e@(VarP g v es)
+    f used idx (VarP g v es)
       | v == oldVar = VarP g newVar es
-      | otherwise = e
+      | otherwise = VarP g v (map (f used idx) es)
+    f used idx (ConP g c es) = ConP g c (map (f used idx) es)
     f used idx (AppP g e es) = AppP g (f used idx e) $ map (f used idx) es
     f used idx (LstP g es) = LstP g $ map (f used idx) es
     f used idx (TupP g es) = TupP g $ map (f used idx) es
@@ -435,6 +475,7 @@ freeTerms = f Set.empty
     f boundterms (EvalP _ e) = f boundterms e
     f boundterms (CoerceP _ _ e) = f boundterms e
     f boundterms (IntrinsicP _ _ es) = Set.unions . map (f boundterms) $ es
+    f boundterms (ConP _ _ es) = Set.unions . map (f boundterms) $ es
     f _ _ = Set.empty
 
 substituteExpr :: EVar -> E -> E -> E
@@ -443,9 +484,10 @@ substituteExpr oldVar replacementExpr = f
     f e@(BndP _ v)
       | v == oldVar = replacementExpr
       | otherwise = e
-    f e@(VarP _ v _)
+    f (VarP g v es)
       | v == oldVar = replacementExpr
-      | otherwise = e
+      | otherwise = VarP g v (map f es)
+    f (ConP g c es) = ConP g c (map f es)
     f e@(LamP g vs body)
       | oldVar `elem` vs = e -- stop if term is shadowed
       | otherwise = LamP g vs (f body)

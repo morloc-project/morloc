@@ -1,0 +1,6 @@
+{"grün":3,"名前":"blau"}
+{"grün":1,"名前":"rot"}
+{"grün":2,"名前":"rot"}
+{"grün":3,"名前":"rot"}
+{"grün":4,"名前":"grau"}
+["Hell","Mittelgroß"]

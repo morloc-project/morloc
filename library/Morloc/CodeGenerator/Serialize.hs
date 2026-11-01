@@ -18,6 +18,7 @@ module Morloc.CodeGenerator.Serialize
   ) where
 
 import Data.Text (Text)
+import qualified Data.Text as T
 import qualified Morloc.BaseTypes as BT
 import Morloc.CodeGenerator.Infer
 import Morloc.CodeGenerator.Namespace
@@ -238,7 +239,7 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
       t' <- inferType t
       LoopS t' ids <$> buildLoopBody m ids (\base -> nativeExpr m base >>= serializeS "loop base" m) body
     serialExpr _ (MonoLoopContinue {}) = error "morloc: MonoLoopContinue reached serialExpr outside MonoLoop extraction"
-    serialExpr _ (MonoExe _ _) = error "Can represent MonoSrc as SerialExpr"
+    serialExpr _ (MonoExe _ _) = error "Cannot represent MonoExe as a SerialExpr"
     serialExpr _ MonoPoolCall {} = error "MonoPoolCall does not map to a SerialExpr"
     serialExpr _ (MonoApp MonoManifold {} _) = error "Illegal?"
     serialExpr m e = nativeExpr m e >>= serializeS "serialE e" m
@@ -290,7 +291,7 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
         _ -> error "Unreachable?"
     serialArg _ MonoPoolCall {} = error "This step should be unreachable"
     serialArg _ (MonoExe _ _) = error "This step should be unreachable"
-    serialArg _ (MonoReturn _) = error "Return should not happen hear (really I should remove this term completely)"
+    serialArg _ (MonoReturn _) = error "A return cannot appear as a serialized argument"
     serialArg m e = SerialArgExpr <$> serialExpr m e
 
     nativeArg ::
@@ -491,7 +492,14 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
             VarF fv -> (fv, [])
             AppF (VarF fv) ts -> (fv, ts)
             _ -> error "MonoList head must resolve to VarF or AppF (VarF _)"
-      ListN headFV argTfs <$> mapM (nativeExpr m) es
+      lit <- ListN headFV argTfs <$> mapM (nativeExpr m) es
+      if langName lang /= "r" || Serial.containsFunF fullTf
+        then return lit
+        else do
+          ast <- Serial.makeSerialAST m lang fullTf
+          return $ case ast of
+            SerialList _ _ e | scalarElement e -> builtLiteral ast fullTf lit
+            _ -> lit
     nativeExpr m (MonoTuple v rs) =
       TupleN
         <$> inferVar v
@@ -503,7 +511,18 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
         <*> mapM (secondM (nativeExpr m . snd)) rs
     nativeExpr _ (MonoLog v x) = LogN <$> inferVar v <*> pure x
     nativeExpr _ (MonoReal v x) = RealN <$> inferVar v <*> pure x
-    nativeExpr _ (MonoInt v x) = IntN <$> inferVar v <*> pure x
+    nativeExpr m (MonoInt v@(Idx vIdx vTv) x)
+      | langName lang /= "r" = IntN <$> inferVar v <*> pure x
+      | otherwise = do
+          tf <- inferType (Idx vIdx (VarT vTv))
+          ast <- Serial.makeSerialAST m lang tf
+          -- an R double cannot hold every 64-bit integer, so the builder
+          -- reads the digits
+          let digits = StrN <$> inferVar (Idx vIdx BT.str) <*> pure (T.pack (show x))
+          case ast of
+            SerialInt64 _ -> builtLiteral ast tf <$> digits
+            SerialUInt64 _ -> builtLiteral ast tf <$> digits
+            _ -> IntN <$> inferVar v <*> pure x
     nativeExpr _ (MonoStr v x) = StrN <$> inferVar v <*> pure x
     -- The complete type comes from the declaration, not from the arm being
     -- built: a constructor names one arm, but the value's wire form
@@ -612,19 +631,16 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
           -- @try produces the Try itself, so it keeps the variant type and
           -- takes no result packer: whatever packing its body needed has
           -- already happened inside the body.
-          mPacker <- if intr == IntrTry
-                       then return Nothing
-                       else loadResultPacker m intr payloadTf
-          let rawInnerTf
-                | intr == IntrTry = innerTf
-                | otherwise = case mPacker of
-                    Just (_, wireTf) -> wireTf
-                    Nothing -> payloadTf
-              raw = IntrinsicN rawInnerTf intr msch es''
-          packed <- case mPacker of
-            Just (packerSrc, _) ->
-              return $ AppExeN payloadTf (SrcCallP Nothing packerSrc) [NativeArgExpr raw]
-            Nothing -> return raw
+          mAst <- if intr == IntrTry
+                    then return Nothing
+                    else resultSerialAst m intr payloadTf
+          mSlots <- if intr == IntrCellReduce
+                      then cellReduceSlots m payloadTf msch es''
+                      else return Nothing
+          let packed = case (mSlots, mAst, msch) of
+                (Just reduced, _, _) -> reduced
+                (_, Just ast, Just sch) -> WireToNativeN payloadTf ast intr sch es''
+                _ -> IntrinsicN (if intr == IntrTry then innerTf else payloadTf) intr msch es''
           -- Reuse @try rather than a bespoke wrap: converting a raised
           -- failure into an Ok/Err value is exactly what it does, and
           -- routing through it keeps one lowering (and one per-language
@@ -640,15 +656,39 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
       es' <- mapM (nativeExpr m) es
       es'' <- unpackDataArgIfNeeded m intr es'
       msch <- intrinsicSchema m intr tf es''
-      mPacker <- loadResultPacker m intr tf
-      let rawTf = case mPacker of
-            Just (_, wireTf) -> wireTf
-            Nothing -> tf
-          raw = IntrinsicN rawTf intr msch es''
-      case mPacker of
-        Just (packerSrc, _) ->
-          return $ AppExeN tf (SrcCallP Nothing packerSrc) [NativeArgExpr raw]
-        Nothing -> return raw
+      mAst <- resultSerialAst m intr tf
+      return $ case (mAst, msch) of
+        (Just ast, Just sch) -> WireToNativeN tf ast intr sch es''
+        _ -> IntrinsicN tf intr msch es''
+
+    -- An R literal takes the form the R decoder gives its type (NATIVE-9):
+    -- the runtime builder decides it from the schema, as the decoder does.
+    -- A list of scalars and an I64/U64 scalar go through it; R's own literal
+    -- syntax already gives the decoder's form for other scalars and for
+    -- lists of compound values (an R list), which spec-native-9-2 checks.
+    builtLiteral :: SerialAST -> TypeF -> NativeExpr -> NativeExpr
+    builtLiteral ast tf lit =
+      IntrinsicN tf IntrConform (Just (render (Serial.serialAstToMsgpackSchema ast))) [lit]
+
+    scalarElement :: SerialAST -> Bool
+    scalarElement e = case e of
+      SerialReal _ -> True
+      SerialFloat32 _ -> True
+      SerialFloat64 _ -> True
+      SerialInt _ -> True
+      SerialInt8 _ -> True
+      SerialInt16 _ -> True
+      SerialInt32 _ -> True
+      SerialInt64 _ -> True
+      SerialUInt _ -> True
+      SerialUInt8 _ -> True
+      SerialUInt16 _ -> True
+      SerialUInt32 _ -> True
+      SerialUInt64 _ -> True
+      SerialBool _ -> True
+      SerialString _ -> True
+      SerialEnum {} -> True
+      _ -> False
 
     -- For data-bearing runtime intrinsics (@save/@savej/@show/@hash),
     -- the runtime expects the value in *wire form*. The normal cross-pool
@@ -705,49 +745,61 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
     packDataArg m dataArg = do
       ast <- Serial.makeSerialAST m lang (typeFof dataArg)
       case ast of
-        SerialPack _ (packer, _) -> do
-          let unpackerSrc = typePackerReverse packer
-              unpackedType = typePackerUnpacked packer
-          return [AppExeN unpackedType (SrcCallP Nothing unpackerSrc) [NativeArgExpr dataArg]]
-        _ -> return [dataArg]
+        _ | Serial.isSerializable ast -> return [dataArg]
+          -- C++ marshals a sum type holding a packed field arm by arm, with
+          -- the sum type's own serializer, so only its outer type is taken
+          -- apart here.
+          | langName lang == "cpp" && packedVariant ast -> case ast of
+              SerialPack _ (packer, _) ->
+                return [AppExeN (typePackerUnpacked packer) (SrcCallP Nothing (typePackerReverse packer)) [NativeArgExpr dataArg]]
+              _ -> return [dataArg]
+          | otherwise -> return [NativeToWireN (Serial.serialAstToType ast) ast dataArg]
 
-    -- Symmetric to unpackDataArgIfNeeded: @load and @read return the wire
-    -- form of the user's type. When the user-facing inner type has a
-    -- Packable instance, expandDeserialize's SerialPack arm inserts the
-    -- packer; we mirror that here for the intrinsic result. Returns the
-    -- packer source + the wire-form type so the caller can both rebuild
-    -- the intrinsic's type with the wire form (so the runtime call uses
-    -- the wire-side template) and wrap the result with the packer.
-    loadResultPacker ::
-      Int -> Intrinsic -> TypeF -> MorlocMonad (Maybe (Source, TypeF))
-    loadResultPacker m intr resultTf
-      -- The cell readers are the same shape: the runtime holds the wire
-      -- form and hands it back, so a Packable accumulator needs its packer
-      -- on the way out just as @load's result does.
-      | intr `elem` [IntrLoad, IntrRead, IntrUnpack, IntrCellGet, IntrCellReduce] = do
+    packedVariant :: SerialAST -> Bool
+    packedVariant a@(SerialVariant {}) = not (Serial.isSerializable a)
+    packedVariant a = any packedVariant (Serial.serialKids a)
+
+    -- @load, @read, @unpack and @cellget return their value in its wire
+    -- form, as the runtime decodes it. Where a packer builds the native form
+    -- at any level, the serial AST is returned so the value is finished as a
+    -- received argument is.
+    resultSerialAst :: Int -> Intrinsic -> TypeF -> MorlocMonad (Maybe SerialAST)
+    resultSerialAst m intr resultTf
+      | intr `elem` [IntrLoad, IntrRead, IntrUnpack, IntrCellGet] = do
           ast <- Serial.makeSerialAST m lang resultTf
-          case ast of
-            SerialPack _ (packer, _) ->
-              return $ Just (typePackerForward packer, typePackerUnpacked packer)
-            _ -> return Nothing
+          return $ if Serial.isSerializable ast then Nothing else Just ast
       | otherwise = return Nothing
+
+    -- @cellreduce: the slots are read as one list, given their native form
+    -- as @cellget's value is, and folded by the user's combine, which so
+    -- sees only native values.
+    cellReduceSlots :: Int -> TypeF -> Maybe Text -> [NativeExpr] -> MorlocMonad (Maybe NativeExpr)
+    cellReduceSlots m accTf (Just sch) [combine, handle] = do
+      listFv <- inferConcreteVar lang (Idx m BT.list)
+      let listTf = AppF (VarF listFv) [accTf]
+      listAst <- Serial.makeSerialAST m lang listTf
+      let slots
+            | Serial.isSerializable listAst = IntrinsicN listTf IntrCellSlots (Just sch) [handle]
+            | otherwise = WireToNativeN listTf listAst IntrCellSlots sch [handle]
+      return . Just $ IntrinsicN accTf IntrReduceList Nothing [combine, slots]
+    cellReduceSlots _ _ _ _ = return Nothing
 
     -- Compute the msgpack schema string for runtime intrinsics
     intrinsicSchema :: Int -> Intrinsic -> TypeF -> [NativeExpr] -> MorlocMonad (Maybe Text)
     -- @save's data is the third positional arg (after the level and path).
     intrinsicSchema m IntrSave _ (_levelArg : _pathArg : dataArg : _) = do
       ast <- Serial.makeSerialAST m lang (typeFof dataArg)
-      return . Just . render $ Serial.serialAstToMsgpackSchema ast
+      Just <$> Serial.schemaOfHeld m lang ast
     -- @savej/@cellput's data is the second positional arg (after the
     -- path or handle).
     intrinsicSchema m intr _ (_pathArg : dataArg : _)
       | intr `elem` [IntrSaveJ, IntrCellPut] = do
           ast <- Serial.makeSerialAST m lang (typeFof dataArg)
-          return . Just . render $ Serial.serialAstToMsgpackSchema ast
+          Just <$> Serial.schemaOfHeld m lang ast
     intrinsicSchema m intr _ (dataArg:_)
       | intr `elem` [IntrHash, IntrShow, IntrSchema, IntrCellNew, IntrEq, IntrLe] = do
           ast <- Serial.makeSerialAST m lang (typeFof dataArg)
-          return . Just . render $ Serial.serialAstToMsgpackSchema ast
+          Just <$> Serial.schemaOfHeld m lang ast
     intrinsicSchema _ IntrTypeof _ (dataArg:_) =
       -- @typeof yields the user-facing type name as a compile-time constant
       -- string. The string is stored in the Intrinsic node's schema slot and
@@ -757,17 +809,21 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
       -- For @load, the result type is Try Str a; the schema is for a.
       let dataType = stripTryF tf
       ast <- Serial.makeSerialAST m lang dataType
-      return . Just . render $ Serial.serialAstToMsgpackSchema ast
+      Just <$> Serial.schemaOfHeld m lang ast
     intrinsicSchema m IntrRead tf _ = do
       -- For @read, the result type is Try Str a; the schema is for a.
       let dataType = stripTryF tf
       ast <- Serial.makeSerialAST m lang dataType
-      return . Just . render $ Serial.serialAstToMsgpackSchema ast
+      Just <$> Serial.schemaOfHeld m lang ast
     -- @unpack's result is the decoded value itself, which may be any type,
     -- a user Try included, so nothing is stripped.
     intrinsicSchema m IntrUnpack tf _ = do
       ast <- Serial.makeSerialAST m lang tf
-      return . Just . render $ Serial.serialAstToMsgpackSchema ast
+      Just <$> Serial.schemaOfHeld m lang ast
+    -- @conform gives a literal the form the decoder gives this type.
+    intrinsicSchema m IntrConform tf _ = do
+      ast <- Serial.makeSerialAST m lang tf
+      Just <$> Serial.schemaOfHeld m lang ast
     intrinsicSchema m IntrIFileWalk tf _ = do
       -- The schema describes the result type the walker materializes
       -- (the per-language wrapper deserializes the voidstar via
@@ -776,13 +832,13 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
       -- Either way, the result type carries the right shape.
       let dataType = stripTryF tf
       ast <- Serial.makeSerialAST m lang dataType
-      return . Just . render $ Serial.serialAstToMsgpackSchema ast
+      Just <$> Serial.schemaOfHeld m lang ast
     intrinsicSchema m IntrNext tf _ = do
       -- @next yields the sub-packet as `[a]`; the list type is serialised so
       -- the per-language from_voidstar call materialises it correctly.
       let dataType = stripTryF tf
       ast <- Serial.makeSerialAST m lang dataType
-      return . Just . render $ Serial.serialAstToMsgpackSchema ast
+      Just <$> Serial.schemaOfHeld m lang ast
     -- @replay reads the stream a sub-packet at a time, each as the list its
     -- storage schema describes.
     intrinsicSchema m IntrReplay _ (handleArg : _)
@@ -797,36 +853,32 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
     intrinsicSchema m IntrSpawn _ [_, fnArg]
       | FunF [ostreamT] _ <- typeFof fnArg = do
           ast <- Serial.makeSerialAST m lang ostreamT
-          return . Just . render $ Serial.serialAstToMsgpackSchema ast
+          Just <$> Serial.schemaOfHeld m lang ast
     intrinsicSchema m IntrStreamLayout tf _ = do
       -- @streamLayout yields `[(U64,U64,U64)]`; the list-of-triple type is
       -- serialised so the per-language from_voidstar call materialises it
       -- (an ordinary composite, as for @next).
       let dataType = stripTryF tf
       ast <- Serial.makeSerialAST m lang dataType
-      return . Just . render $ Serial.serialAstToMsgpackSchema ast
+      Just <$> Serial.schemaOfHeld m lang ast
     -- @write's data arg (at index 2, after level Int and handle) carries `[a]`;
     -- schema describes that list type so to_voidstar produces the right
     -- voidstar layout for the runtime's flatten_to_buffer.
     intrinsicSchema m IntrWrite _ (_levelArg : _handleArg : dataArg : _) = do
       ast <- Serial.makeSerialAST m lang (typeFof dataArg)
-      return . Just . render $ Serial.serialAstToMsgpackSchema ast
+      Just <$> Serial.schemaOfHeld m lang ast
     -- The accumulator's schema, from the result type. @cellnew and @cellput
     -- take theirs from their value argument, above; both name the same type,
     -- which is the point of parameterising the handle.
     intrinsicSchema m intr tf _
       | intr `elem` [IntrCellGet, IntrCellReduce] = do
           ast <- Serial.makeSerialAST m lang tf
-          return . Just . render $ Serial.serialAstToMsgpackSchema ast
-    -- @open on IFile reads its schema off disk; codegen routes through the
-    -- generic `_mlc_open(path, kind)` entry so we return Nothing. @open on
-    -- OStream/IStream needs the storage schema at open time (the typed
-    -- `_mlc_open_ostream`/`_mlc_open_istream` entries): OStream to write the
-    -- stream header, IStream to declare the schema for the stdin sentinel.
+          Just <$> Serial.schemaOfHeld m lang ast
+    -- @open names what the file stores: an OStream writes it into the
+    -- header, and an IFile or IStream checks the file against it.
     intrinsicSchema m IntrOpen tf _ = case unwrapHandleHead tf of
-      Just (v, a) | v == BT.ostreamVar || v == BT.istreamVar ->
-        Just <$> renderStorageSchema m v a
-      _ -> return Nothing
+      Just (v, a) -> Just <$> renderStorageSchema m v a
+      Nothing -> return Nothing
     intrinsicSchema m IntrAppend tf _ = case unwrapHandleHead tf of
       Just (v, a) -> Just <$> renderStorageSchema m v a
       Nothing     -> return Nothing
@@ -848,7 +900,7 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
     renderStorageSchema :: Int -> TVar -> TypeF -> MorlocMonad Text
     renderStorageSchema m v a = do
       ast <- Serial.makeSerialAST m lang (BT.handleStorageTypeF v a)
-      return . render $ Serial.serialAstToMsgpackSchema ast
+      Serial.schemaOfHeld m lang ast
 
     -- The payload of a Try's Ok arm, or the type unchanged when it is not
     -- one. Intrinsics that report failure as data wrap their result, but
@@ -887,9 +939,8 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
         go (FunF args ret) = FunT (map go args) (go ret)
         go (OptionalF t) = OptionalT (go t)
         go (NatLitF n) = NatLitT n
-        go NatVoidF = NatVoidT
+        go (VoidF k) = VoidT k
         go (StrLitF s) = StrLitT s
-        go StrVoidF = StrVoidT
 
     lowerCacheBody ::
       SerializationState ->
@@ -1046,7 +1097,8 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
     mergeTypes x _ = x
 
     serializeS :: MDoc -> Int -> NativeExpr -> MorlocMonad SerialExpr
-    serializeS _ m se =
+    serializeS _ m se = do
+      refuseHostFunction m se
       SerializeS <$> Serial.makeSerialAST m lang (typeFof se) <*> pure se
 
     inferState :: MonoExpr -> SerializationState
@@ -1220,10 +1272,12 @@ wireSerial lang sm0@(SerialManifold m0 _ _ _ _) = foldSerialManifoldM fm sm0 |>>
     wireNativeManifold (NativeManifold_ m _ form (req, e)) = do
       -- A closure captures values, never packets: a capture is part of the
       -- closure's wire form (reified with it, handed back to its body by the
-      -- home pool's dispatch), and only a native value has one. A body that
-      -- needs the packet, for a call into another pool, serializes the value
-      -- when it runs ('letWrap'), once per run.
-      let form0 = if isClosureForm form then afirst (const nativeCapture) form else form
+      -- home pool's dispatch), and only a native value has one. A recursion's
+      -- native entry is called with one value per argument ('RecCallP'
+      -- below). A body that needs the packet, for a call into another pool,
+      -- serializes the value when it runs ('letWrap'), once per run.
+      nativeEntry <- elem m . Map.elems <$> MM.gets stateNativeRecEntries
+      let form0 = if isClosureForm form || nativeEntry then afirst (const nativeCapture) form else form
           form' = afirst (specialize req) form0
           req' = Map.map fst (manifoldToMap form')
       e' <- letWrap m form' req e
@@ -1490,7 +1544,8 @@ wireSerial lang sm0@(SerialManifold m0 _ _ _ _) = foldSerialManifoldM fm sm0 |>>
         f (ManifoldPart xs ys) = Map.union (mapRequestFromXs xs) (mapRequestFromYs ys)
 
     serializeS :: MDoc -> Int -> TypeF -> NativeExpr -> MorlocMonad SerialExpr
-    serializeS _ m t se =
+    serializeS _ m t se = do
+      refuseHostFunction m se
       SerializeS <$> Serial.makeSerialAST m lang t <*> pure se
 
 data Request = SerialContent | NativeContent | NativeAndSerialContent
@@ -1535,6 +1590,36 @@ data SerializationState = Serialized | Unserialized
 endsInReturn :: MonoExpr -> Bool
 endsInReturn (MonoReturn _) = True
 endsInReturn (MonoLet _ _ e2) = endsInReturn e2
+endsInReturn (MonoDebugWrap _ _ e) = endsInReturn e
 -- A loop's value is the manifold's result: every base leaf breaks out with it.
 endsInReturn (MonoLoop {}) = True
 endsInReturn _ = False
+
+-- | A function made by host code has no wire form, and placement keeps it in
+-- its pool (HOST-9); serializing one here is a fault of the compiler.
+refuseHostFunction :: Int -> NativeExpr -> MorlocMonad ()
+refuseHostFunction m e = case e of
+  BndVarN _ i _ -> refuseHostVar m i
+  LetVarN _ i _ -> refuseHostVar m i
+  TupleN _ xs -> mapM_ (refuseHostFunction m) xs
+  ListN _ _ xs -> mapM_ (refuseHostFunction m) xs
+  RecordN _ _ _ rs -> mapM_ (refuseHostFunction m . snd) rs
+  VariantN _ _ _ xs -> mapM_ (refuseHostFunction m) xs
+  IfN _ _ a b -> refuseHostFunction m a >> refuseHostFunction m b
+  CoerceN _ _ x -> refuseHostFunction m x
+  EvalN _ x -> refuseHostFunction m x
+  NativeLetN _ _ x -> refuseHostFunction m x
+  SerialLetN _ _ x -> refuseHostFunction m x
+  ReturnN x -> refuseHostFunction m x
+  DoBlockN _ x -> refuseHostFunction m x
+  MapOptionalN _ _ _ x -> refuseHostFunction m x
+  IntrinsicN _ _ _ xs -> mapM_ (refuseHostFunction m) xs
+  NativeToWireN _ _ x -> refuseHostFunction m x
+  _ -> return ()
+
+refuseHostVar :: Int -> Int -> MorlocMonad ()
+refuseHostVar m i = do
+  hostArgs <- MM.gets stateHostFunctionArgs
+  CM.when (Set.member i hostArgs) $
+    MM.throwCompilerBugAt m
+      "a function made by host code would be serialized here; placement keeps such a function in its pool (HOST-9)"

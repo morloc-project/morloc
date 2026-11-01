@@ -52,6 +52,7 @@ pub mod cache;
 pub mod cell;
 pub mod intrinsics;
 pub mod voidstar;
+pub mod origin;
 pub mod json_ffi;
 pub mod packet_ffi;
 pub mod ipc_ffi;

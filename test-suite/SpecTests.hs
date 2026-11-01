@@ -23,6 +23,10 @@ import System.Process (readProcessWithExitCode)
 import Test.Tasty (TestTree, localOption, mkTimeout, testGroup)
 import Test.Tasty.HUnit
 import Text.RawString.QQ
+import qualified Data.Map.Strict as DM
+import qualified Data.Set as DS
+import Morloc.Typecheck.NatDecide (Condition (..), Decision (..), decide)
+import Morloc.Typecheck.NatSolver (NatExpr (..))
 
 specTests :: TestTree
 specTests =
@@ -35,7 +39,15 @@ specTests =
     , localOption (mkTimeout 2000000) derivTests
     , localOption (mkTimeout 2000000) instanceAnnotationTests
     , localOption (mkTimeout 5000000) dimTests
+    , localOption (mkTimeout 2000000) dim7Tests
+    , localOption (mkTimeout 2000000) cls16Tests
+    , localOption (mkTimeout 5000000) poly7Tests
+    , localOption (mkTimeout 2000000) bindTests
+    , localOption (mkTimeout 2000000) hostTests
     , localOption (mkTimeout 2000000) patTests
+    , localOption (mkTimeout 2000000) recTests
+    , localOption (mkTimeout 2000000) collTests
+    , localOption (mkTimeout 2000000) sumTests
     , localOption (mkTimeout 2000000) lexTests
     , localOption (mkTimeout 2000000) sigTests
     , localOption (mkTimeout 2000000) baseTests
@@ -103,11 +115,47 @@ modelCheck = testCase "model/check.sh passes" $ do
     ExitSuccess -> return ()
     ExitFailure _ -> assertFailure (out <> err)
 
+-- | The frontend on a program under test-suite/fixtures/modules, with that
+-- directory's library standing for the installed modules.
+runFixture :: Bool -> FilePath -> IO (Either MorlocError [AnnoS (Indexed TypeU) Many Int])
+runFixture autoInstall rel = do
+  root <- SD.makeAbsolute "test-suite/fixtures/modules"
+  config <- emptyConfig
+  let path = root <> "/" <> rel
+  code <- MT.pack <$> readFile path
+  ((x, _), _) <-
+    MM.runMorlocMonad Nothing 0 config {configLibrary = root <> "/library"} defaultValue
+      (MM.modify (\st -> st {stateAutoInstall = autoInstall}) >> typecheckFrontend (Just path) (Code code))
+  return x
+
+acceptFixture :: String -> FilePath -> TestTree
+acceptFixture name rel =
+  testCase name $
+    runFixture False rel >>= \case
+      Right _ -> return ()
+      Left e -> assertFailure $ "expected acceptance, got: " <> show e
+
+-- | A user rejection whose diagnostic contains @needle@, with or without
+-- the installation of missing modules.
+rejectFixture :: String -> Bool -> MT.Text -> FilePath -> TestTree
+rejectFixture name autoInstall needle rel =
+  testCase name $
+    runFixture autoInstall rel >>= \case
+      Right _ -> assertFailure "expected rejection"
+      Left (Rejected _ d) ->
+        assertBool ("diagnostic lacks " <> MT.unpack needle <> ": " <> MT.unpack (render d)) (needle `MT.isInfixOf` render d)
+      Left e -> assertFailure $ "expected a user error, got: " <> show e
+
 modTests :: TestTree
 modTests =
   testGroup
     "MOD"
-    [ accept
+    [ acceptFixture "spec-mod-6-1" "mod-6/main.loc"
+    , acceptFixture "spec-mod-7-1" "mod-7/system.loc"
+    , acceptFixture "spec-mod-7-2" "mod-7/local.loc"
+    , rejectFixture "spec-mod-7-3" False "import .mloc" "mod-7/missing.loc"
+    , rejectFixture "spec-mod-7-4" True "import .mloc" "mod-7/missing.loc"
+    , accept
         "spec-mod-14-1"
         [r|
         module lib (mkP)
@@ -831,6 +879,203 @@ kindTests =
         type V (n :: Nat) a = Vector n a
         f :: V Int -> Int
         |]
+    , reject
+        "spec-kind-2-1"
+        [r|
+        module main (f)
+        type R = Singleton "x" Int
+        f :: R -> Int
+        f x = 1
+        |]
+    , accept
+        "spec-kind-2-2"
+        [r|
+        module main (f)
+        type R = {x = Int}
+        f :: R -> Int
+        f x = 1
+        |]
+    , reject
+        "spec-kind-2-3"
+        [r|
+        module main (f)
+        newtype Vector (n :: Nat) a = List a
+        f :: Vector -> Int
+        f x = 1
+        |]
+    , accept
+        "spec-kind-2-4"
+        [r|
+        module main (f)
+        newtype Vector (n :: Nat) a = List a
+        f :: Vector Int -> Int
+        f x = 1
+        |]
+    , accept
+        "spec-kind-2-5"
+        [r|
+        module main (f)
+        type P a = {x = a}
+        f :: P Int -> Int
+        f x = 1
+        |]
+    , reject
+        "spec-kind-2-6"
+        [r|
+        module main (f)
+        newtype Vector (n :: Nat) a = List a
+        f :: [Vector] -> Int
+        f x = 1
+        |]
+    , reject
+        "spec-kind-2-7"
+        [r|
+        module main (f)
+        f :: {x = Singleton "y" Int} -> Int
+        f x = 1
+        |]
+    , reject
+        "spec-kind-2-8"
+        [r|
+        module main (f)
+        newtype Vector (n :: Nat) a = List a
+        type V = Vector
+        f :: V -> Int
+        f x = 1
+        |]
+    , reject
+        "spec-kind-2-9"
+        [r|
+        module main (f)
+        class Sh a where
+          sh :: a -> Singleton "x" Int
+        f :: Int -> Int
+        f x = 1
+        |]
+    , reject
+        "spec-kind-5-4"
+        [r|
+        module main (f)
+        newtype Tbl (n :: Nat) (r :: Rec) = Int
+        type X = Tbl Int
+        f :: X -> Int
+        f x = 1
+        |]
+    , reject
+        "spec-kind-5-1"
+        [r|
+        module main (f)
+        newtype Tbl (n :: Nat) (r :: Rec) = Int
+        f :: Tbl 3 4 -> Int
+        f x = 1
+        |]
+    , reject
+        "spec-kind-5-2"
+        [r|
+        module main (f)
+        newtype Tbl (n :: Nat) (r :: Rec) = Int
+        f :: Tbl Int -> Int
+        f x = 1
+        |]
+    , accept
+        "spec-kind-5-3"
+        [r|
+        module main (f)
+        newtype Tbl (n :: Nat) (r :: Rec) = Int
+        f :: Tbl 3 {x = Int} -> Int
+        f x = 1
+        |]
+    , reject
+        "spec-kind-4-1"
+        [r|
+        module main (g)
+        newtype Buffer (n :: Nat) a = List a
+        f :: Buffer (3 - 10) Int -> Int
+        g :: Int -> Int
+        g x = x
+        |]
+    , reject
+        "spec-tab-3-1"
+        [r|
+        module main (oops)
+        newtype Table (n :: Nat) (r :: Rec) = Int
+        getCol :: f@Str -> Table n r -> [ProjectField r f]
+        mk :: Table 2 {x = Int, y = Str}
+        oops = getCol "z" mk
+        |]
+    , accept
+        "spec-tab-3-2"
+        [r|
+        module main (ok)
+        newtype Table (n :: Nat) (r :: Rec) = Int
+        getCol :: f@Str -> Table n r -> [ProjectField r f]
+        mk :: Table 2 {x = Int, y = Str}
+        ok = getCol "x" mk
+        |]
+    , accept
+        "spec-kind-4-2"
+        [r|
+        module main (g)
+        newtype Buffer (n :: Nat) a = List a
+        f :: Buffer (10 - 3) Int -> Int
+        g :: Int -> Int
+        g x = x
+        |]
+    , accept
+        "spec-kind-4-3"
+        [r|
+        module main (ok, empty)
+        newtype Vector (n :: Nat) a = List a
+        roll :: w@Int -> Vector n Real -> Vector (n - w + 1) Real
+        src :: Vector 10 Real
+        ok = roll 3 src
+        empty = roll 11 src
+        |]
+    , reject
+        "spec-kind-4-4"
+        [r|
+        module main (bad)
+        newtype Vector (n :: Nat) a = List a
+        roll :: w@Int -> Vector n Real -> Vector (n - w + 1) Real
+        src :: Vector 10 Real
+        bad = roll 12 src
+        |]
+    , accept
+        "spec-kind-4-5"
+        [r|
+        module main (bad)
+        newtype Vector (n :: Nat) a = List a
+        roll :: w@Int -> Vector n Real -> Vector (n - w + 1) Real
+        src :: Vector 10 Real
+        bad = roll (-2) src
+        |]
+    , reject
+        "spec-kind-4-6"
+        [r|
+        module main (g)
+        newtype Vector (n :: Nat) a = List a
+        f :: Vector (n - (n + 1)) Int -> Int
+        g :: Int -> Int
+        g x = x
+        |]
+    , accept
+        "spec-kind-4-7"
+        [r|
+        module main (g)
+        newtype Buffer (n :: Nat) a = List a
+        f :: Buffer ((3 - 10) + 20) Int -> Int
+        g :: Int -> Int
+        g x = x
+        |]
+    , reject
+        "spec-kind-4-8"
+        [r|
+        module main (g)
+        newtype Buffer (n :: Nat) a = List a
+        f :: Buffer (7 / 0) Int -> Int
+        g :: Int -> Int
+        g x = x
+        |]
     ]
 
 dimTests :: TestTree
@@ -894,6 +1139,121 @@ dimTests =
         h :: Vector (m + 1) Int -> Int
         f :: Vector 1 Int -> Int
         f x = h x
+        |]
+    , accept
+        "spec-dim-9-1"
+        [r|
+        module main (f)
+        newtype Vector (n :: Nat) a = List a
+        newtype M (m :: Nat) (n :: Nat) a = ((m@Int, n@I64), Vector (m * n) a)
+        h :: M m k Int -> M k n Int -> Int
+        f :: M 2 3 Int -> M 3 1 Int -> Int
+        f x y = h x y
+        |]
+    , reject
+        "spec-dim-9-2"
+        [r|
+        module main (f)
+        newtype Vector (n :: Nat) a = List a
+        f :: (n@Int, Int) -> Vector n Int
+        |]
+    , reject
+        "spec-dim-9-3"
+        [r|
+        module main (f)
+        newtype Vector (n :: Nat) a = List a
+        newtype M (m :: Nat) a = ((k@Int, Int), Vector m a)
+        f :: M 2 Int -> Int
+        |]
+    , reject
+        "spec-dim-9-4"
+        [r|
+        module main (f)
+        newtype Vector (n :: Nat) a = List a
+        newtype M (m :: Nat) a = ((m@Real, Int), Vector m a)
+        f :: M 2 Int -> Int
+        |]
+    , reject
+        "spec-dim-9-5"
+        [r|
+        module main (f)
+        newtype Vector (n :: Nat) a = List a
+        newtype M (m :: Nat) a = ([m@Int], Vector m a)
+        f :: M 2 Int -> Int
+        |]
+    , reject
+        "spec-dim-9-7"
+        [r|
+        module main (f)
+        newtype Vector (n :: Nat) a = List a
+        newtype M (m :: Nat) a = ((m@Int, m@Int), Vector m a)
+        f :: M 2 Int -> Int
+        |]
+    , reject
+        "spec-dim-9-8"
+        [r|
+        module main (f)
+        newtype Vector (n :: Nat) a = List a
+        newtype M (m :: Nat) a = ({k = m@Int}, Vector m a)
+        f :: M 2 Int -> Int
+        |]
+    , rejectUser
+        "spec-dim-10-1"
+        [r|
+        module main (h)
+        newtype Vector (n :: Nat) a = List a
+        roll :: w@Int -> Vector n Int -> Vector (n - w + 1) Int
+        total :: Vector k Int -> Int
+        h w src = total (roll w src)
+        |]
+    , accept
+        "spec-dim-10-2"
+        [r|
+        module main (h)
+        newtype Vector (n :: Nat) a = List a
+        roll :: w@Int -> Vector n Int -> Vector (n - w + 1) Int
+        total :: Vector k Int -> Int
+        h :: w@Int -> Vector (m + w - 1) Int -> Int
+        h w src = total (roll w src)
+        |]
+    , rejectUser
+        "spec-dim-10-3"
+        [r|
+        module main (h)
+        newtype Vector (n :: Nat) a = List a
+        roll :: w@Int -> Vector n Int -> Vector (n - w + 1) Int
+        h w src = roll w src
+        |]
+    , reject
+        "spec-dim-10-4"
+        [r|
+        module main (f)
+        newtype Vector (n :: Nat) a = List a
+        mk :: Int -> Vector n Real
+        dot :: Vector n Real -> Vector n Real -> Real
+        f :: Int -> Real
+        f k = dot (mk k) (mk k)
+        |]
+    , accept
+        "spec-dim-10-5"
+        [r|
+        module main (f, g)
+        newtype Vector (n :: Nat) a = List a
+        keep :: Vector n Real -> Vector m Real
+        len :: Vector k Real -> Int
+        f :: Vector n Real -> Vector m Real
+        f v = keep (keep v)
+        g :: Vector n Real -> Int
+        g v = len (keep v)
+        |]
+    , reject
+        "spec-dim-10-6"
+        [r|
+        module main (f)
+        newtype Vector (n :: Nat) a = List a
+        keep :: Vector n Real -> Vector m Real
+        f :: Vector n Real -> Vector n Real
+        f v = keep v
         |]
     ]
 
@@ -1029,7 +1389,48 @@ newtTests :: TestTree
 newtTests =
   testGroup
     "NEWT"
-    [ accept
+    [ rejectUser
+        "spec-native-10-2"
+        [r|
+        module main (f)
+        class Packable a b where
+          pack :: a -> b
+          unpack :: b -> a
+        newtype Frozen a = [a]
+        type Py => (Frozen a) = "tuple" a
+        instance Packable [a] (Frozen a) where
+          source Py from "frozen.py" ("freeze" as pack)
+        f :: Frozen Int -> Int
+        |]
+    , rejectUser
+        "spec-native-10-3"
+        [r|
+        module main (f)
+        class Packable a b where
+          pack :: a -> b
+          unpack :: b -> a
+        newtype Frozen a = [a]
+        type Py => (Frozen a) = "tuple" a
+        instance Packable [a] (Frozen a) where
+          source Py from "frozen.py" ("thaw" as unpack)
+        f :: Frozen Int -> Int
+        |]
+    , accept
+        "spec-native-10-4"
+        [r|
+        module main (f)
+        class Packable a b where
+          pack :: a -> b
+          unpack :: b -> a
+        newtype Frozen a = [a]
+        type Py => (Frozen a) = "tuple" a
+        instance Packable [a] (Frozen a) where
+          source Py from "frozen.py" ("freeze" as pack)
+        instance Packable [a] (Frozen a) where
+          source Py from "frozen.py" ("thaw" as unpack)
+        f :: Frozen Int -> Int
+        |]
+    , accept
         "spec-newt-3-1"
         [r|
         module main (f)
@@ -1237,11 +1638,682 @@ ifaceTests =
         |]
     ]
 
+hostTests :: TestTree
+hostTests =
+  testGroup
+    "HOST"
+    [ rejectAtLine
+        "spec-host-3-1"
+        3
+        [r|
+        module main (g)
+        source Py from "c.py" where
+          --' @rsize 2
+          shift
+        shift :: Real -> [Real] -> [Real]
+        g :: Int -> Int
+        |]
+    , accept
+        "spec-host-3-2"
+        [r|
+        module main (g)
+        type Shifter = [Real] -> [Real]
+        source Py from "c.py" where
+          --' @rsize 1
+          shift
+        shift :: Real -> Shifter
+        g :: Int -> Int
+        |]
+    , reject
+        "spec-host-3-3"
+        [r|
+        module main (g)
+        effect IO
+        source Py from "c.py" where
+          --' @rsize 1
+          mk
+        mk :: Int -> <IO> (Int -> Int)
+        g :: Int -> Int
+        |]
+    , reject
+        "spec-host-3-4"
+        [r|
+        module main (g)
+        class Shift a where
+          shift :: a -> [a] -> [a]
+        instance Shift Real where
+          source Py from "c.py" where
+            --' @rsize 2
+            shift
+        g :: Int -> Int
+        |]
+    ]
+
+bindTests :: TestTree
+bindTests =
+  testGroup
+    "BIND"
+    [ accept
+        "spec-bind-2-1"
+        [r|
+        module main (f, g, h)
+        add :: Int -> Int -> Int
+        sub :: Int -> Int -> Int
+        isZero :: Int -> Bool
+        f :: Int -> Bool
+        f x = ev x
+          where
+            ev n = ? isZero n = True : od (sub n 1)
+            od n = ? isZero n = False : ev (sub n 1)
+        g :: Int -> Int
+        g x = d
+          where
+            d = x
+        h :: Int -> Int
+        h x = down x
+          where
+            down n = ? isZero n = 0 : add x (down (sub n 1))
+        |]
+    , rejectNaming
+        "spec-bind-7-1"
+        ["alpha", "beta"]
+        []
+        [r|
+        module main (f)
+        add :: Int -> Int -> Int
+        alpha = add beta 1
+        beta = add alpha 1
+        f :: Int
+        f = alpha
+        |]
+    , rejectNaming
+        "spec-bind-7-2"
+        ["alpha", "beta"]
+        []
+        [r|
+        module main (f)
+        add :: Int -> Int -> Int
+        f :: Int -> Int
+        f x = alpha
+          where
+            alpha = add beta 1
+            beta = add alpha 1
+        |]
+    , rejectNaming
+        "spec-bind-7-3"
+        ["ys"]
+        []
+        [r|
+        module main (f)
+        map :: (a -> b) -> [a] -> [b]
+        f :: [Int] -> [[Int]]
+        f xs = ys
+          where
+            ys = map go xs
+            go y = ys
+        |]
+    , rejectNaming
+        "spec-bind-7-4"
+        ["foo", "bar"]
+        []
+        [r|
+        module main (bar)
+        add :: Int -> Int -> Int
+        class Foo a where
+          foo :: a
+        instance Foo Int where
+          foo = add bar 1
+        bar :: Int
+        bar = foo
+        |]
+    , accept
+        "spec-bind-7-5"
+        [r|
+        module main (loop)
+        effect IO
+        act :: <IO> ()
+        loop :: <IO> ()
+        loop = do
+          act
+          loop
+        |]
+    , rejectNaming
+        "spec-bind-7-6"
+        ["alpha", "beta"]
+        []
+        [r|
+        module main (f)
+        source Py from "lib.py" ("alpha")
+        add :: Int -> Int -> Int
+        alpha :: Int
+        alpha = add beta 1
+        beta :: Int
+        beta = add alpha 1
+        f :: Int
+        f = alpha
+        |]
+    , accept
+        "spec-bind-7-7"
+        [r|
+        module main (guardedRec)
+        add :: Int -> Int -> Int
+        sub :: Int -> Int -> Int
+        isZero :: Int -> Bool
+        guardedRec :: Int -> Int
+        guardedRec n
+          ? isZero n = 0
+          : rest
+          where
+            rest = add n (guardedRec (sub n 1))
+        |]
+    , rejectNaming
+        "spec-bind-7-8"
+        ["vee", "aitch"]
+        []
+        [r|
+        module main (aitch)
+        add :: Int -> Int -> Int
+        isZero :: Int -> Bool
+        vee :: Int
+        vee = add 1 (aitch 3)
+        aitch :: Int -> Int
+        aitch n = ? isZero n = 0 : vee
+        |]
+    , rejectNaming
+        "spec-bind-7-9"
+        ["loop", "w"]
+        []
+        [r|
+        module main (loop)
+        escapable effect E
+        consume :: <E> () -> Int
+        put :: Int -> <E> ()
+        loop :: <E> ()
+        loop = do
+            put w
+            loop
+          where
+            w = consume loop
+        |]
+    , rejectNaming
+        "spec-bind-7-10"
+        ["f"]
+        []
+        [r|
+        module main (f)
+        mk :: (Int -> Int) -> Int -> Int
+        f :: Int -> Int
+        f = mk f
+        |]
+    , accept
+        "spec-bind-7-11"
+        [r|
+        module main (foo, wrap)
+        add :: Int -> Int -> Int
+        sub :: Int -> Int -> Int
+        isZero :: Int -> Bool
+        foo :: Int -> Int
+        foo = bar
+        bar :: Int -> Int
+        bar n = ? isZero n = 0 : add 1 (foo (sub n 1))
+        wrap :: Int -> Int
+        wrap = step
+          where
+            step n = ? isZero n = 0 : wrap (sub n 1)
+        |]
+    , accept
+        "spec-bind-7-12"
+        [r|
+        module main (countDown)
+        sub :: Int -> Int -> Int
+        isZero :: Int -> Bool
+        tick :: Int -> Int
+        countDown :: Int -> Int
+        countDown = (\k n -> ? isZero n = k : countDown (sub n 1)) (tick 1)
+        |]
+    , rejectNaming
+        "spec-bind-7-13"
+        ["vee"]
+        []
+        [r|
+        module main (vee)
+        add :: Int -> Int -> Int
+        f :: Int -> Int -> Int
+        f x = \y -> add vee y
+        vee :: Int
+        vee = f 1 2
+        |]
+    , accept
+        "spec-bind-7-14"
+        [r|
+        module main (step)
+        sub :: Int -> Int -> Int
+        isZero :: Int -> Bool
+        step :: Int -> Int -> Int
+        step k n = ? isZero n = k : h (sub n 1)
+        h :: Int -> Int
+        h = step 1
+        |]
+    , accept
+        "spec-bind-7-15"
+        [r|
+        module main (h)
+        source Py from "x.py" ("g")
+        g :: Int -> Int -> Int
+        g x y = h y
+        h :: Int -> Int
+        h = g 1
+        |]
+    , rejectAtLine
+        "spec-bind-7-17"
+        4
+        [r|
+        module main (f)
+        add :: Int -> Int -> Int
+        alpha = add beta 1
+        beta = add alpha 1
+        f :: Int
+        f = alpha
+        |]
+    , rejectNaming
+        "spec-bind-7-16"
+        ["vee"]
+        []
+        [r|
+        module main (step)
+        add :: Int -> Int -> Int
+        step :: Int -> Int -> Int
+        step k n = add vee (add k n)
+        vee :: Int
+        vee = step 1 2
+        |]
+    ]
+
 patTests :: TestTree
 patTests =
   testGroup
     "PAT"
-    [ accept
+    [ reject
+        "spec-pat-1-1"
+        [r|
+        module main (part)
+        add :: Int -> Int -> Int
+        part :: (Int, Int, Int) -> Int
+        part = \(a, b) -> add a b
+        |]
+    , reject
+        "spec-pat-1-2"
+        [r|
+        module main (f)
+        f :: (Int, Int, Int) -> Int
+        f t = let (a, b) = t in a
+        |]
+    , reject
+        "spec-pat-1-4"
+        [r|
+        module main (part)
+        part :: (Int, Int, Int) -> Int -> Int
+        part (a, b) c = a
+        |]
+    , reject
+        "spec-pat-1-5"
+        [r|
+        module main (part)
+        part :: Int -> (Int, Int, Int) -> Int
+        part = \c (a, b) -> a
+        |]
+    , reject
+        "spec-pat-1-6"
+        [r|
+        module main (f, g)
+        first2 t = match t | (a, b) = a
+        f :: (Int, Int) -> Int
+        f t = first2 t
+        g :: (Int, Int, Int) -> Int
+        g t = first2 t
+        |]
+    , reject
+        "spec-pat-1-7"
+        [r|
+        module main (g, f)
+        first2 t = match t | (a, b) = a
+        f :: (Int, Int) -> Int
+        f t = first2 t
+        g :: (Int, Int, Int) -> Int
+        g t = first2 t
+        |]
+    , reject
+        "spec-pat-1-8"
+        [r|
+        module main (f)
+        effect IO
+        data R = Ok Int | Err Str
+        get :: Int -> <IO> (R, Int, Int)
+        f :: Int -> <IO> Int
+        f x = do
+          (Ok y, z) <- get x
+          z
+        |]
+    , reject
+        "spec-pat-1-9"
+        [r|
+        module main (f)
+        f :: (Int, Int, Int) -> Int
+        f t = let (_, _) = t in 1
+        |]
+    , rejectNaming
+        "spec-pat-1-10"
+        ["z"]
+        []
+        [r|
+        module main (f)
+        record R where
+          p :: Int
+        f :: R -> Int
+        f = \{z = x} -> 1
+        |]
+    , accept
+        "spec-pat-1-11"
+        [r|
+        module main (f)
+        f :: Int -> Int
+        f x = let h = \(a, b) -> a in x
+        |]
+    , rejectNaming
+        "spec-pat-1-12"
+        ["tuple", "2", "elements"]
+        []
+        [r|
+        module main (f)
+        f t = let (a, b) = t in let (c, d, e) = t in a
+        |]
+    , rejectNaming
+        "spec-pat-1-13"
+        ["tuple", "2", "elements"]
+        []
+        [r|
+        module main (g)
+        f t = let (a, b) = t in .2 t
+        g :: (Int, Int, Int) -> Int
+        g = f
+        |]
+    , rejectNaming
+        "spec-pat-1-14"
+        ["tuple", "Int"]
+        []
+        [r|
+        module main (f)
+        f :: Int -> Int
+        f x = let (_, _) = x in 1
+        |]
+    , rejectNaming
+        "spec-pat-1-15"
+        ["tuple", "2", "elements"]
+        []
+        [r|
+        module main (g)
+        g :: (Int, Int, Int) -> Int
+        g = \(_, _) -> 1
+        |]
+    , rejectNaming
+        "spec-pat-1-16"
+        ["field", "z"]
+        []
+        [r|
+        module main (f)
+        record R where
+          p :: Int
+        f :: R -> Int
+        f {z = _} = 1
+        |]
+    , rejectNaming
+        "spec-pat-1-19"
+        ["record", "tuple"]
+        []
+        [r|
+        module main (f)
+        f t = let (_, _) = t in let ({x = _}) = t in 1
+        |]
+    , rejectNaming
+        "spec-pat-1-20"
+        ["field", "y"]
+        []
+        [r|
+        module main (f)
+        f :: {x = Int} -> Int
+        f {y = _} = 1
+        |]
+    , accept
+        "spec-pat-1-21"
+        [r|
+        module main (f)
+        f :: {x = Int, y = Str} -> Int
+        f {x = a} = a
+        |]
+    , rejectAtLine
+        "spec-pat-1-22"
+        5
+        [r|
+        module main (f)
+        f :: (Int, (Int, Int, Int)) -> Int
+        f = \( c
+             , (a, b)) -> c
+        |]
+    , rejectNaming
+        "spec-pat-1-23"
+        ["field", "y"]
+        []
+        [r|
+        module main (f)
+        f :: {x = Int} -> Int
+        f r = match r | {y = _} = 1
+        |]
+    , rejectNaming
+        "spec-pat-1-24"
+        ["tuple", "2", "elements"]
+        []
+        [r|
+        module main (f)
+        f :: (Int, Int, Int) -> Int
+        f (_, _) = x
+          where
+          x = 1
+        |]
+    , rejectUser
+        "spec-pat-1-25"
+        [r|
+        module main (f)
+        f t = let (a, b) = t in .2 t
+        |]
+    , rejectNaming
+        "spec-pat-1-26"
+        ["tuple", "record"]
+        []
+        [r|
+        module main (f)
+        f t = (.0 t, .x t)
+        |]
+    , rejectNaming
+        "spec-pat-1-27"
+        ["tuple", "record"]
+        []
+        [r|
+        module main (f)
+        f t = (.x t, .0 t)
+        |]
+    , rejectUser
+        "spec-pat-1-28"
+        [r|
+        module main (g)
+        record R = R {x :: Int}
+        f t = (.x t, .0 t)
+        g :: R -> (Int, Int)
+        g r = f r
+        |]
+    , accept
+        "spec-pat-1-29"
+        [r|
+        module main (f)
+        f t = let (a, b) = t in .1 t
+        |]
+    , accept
+        "spec-pat-1-17"
+        [r|
+        module main (f, g)
+        fst2 (a, b) = a
+        f :: (Int, Str) -> Int
+        f = fst2
+        g :: (Str, Int) -> Str
+        g = fst2
+        |]
+    , accept
+        "spec-pat-1-18"
+        [r|
+        module main (f)
+        record R where
+          p :: Int
+          q :: Str
+        f :: R -> Int
+        f {p = x} = x
+        |]
+    , accept
+        "spec-pat-1-3"
+        [r|
+        module main (f)
+        add :: Int -> Int -> Int
+        f :: (Int, (Int, Int)) -> Int
+        f (a, (b, c)) = add a (add b c)
+        |]
+    , accept
+        "spec-pat-3-1"
+        [r|
+        module main (f)
+        data L = Nil | Cons Str L
+        f :: L -> Int
+        f xs = match xs
+          | (Cons x (Cons y rest)) = 2
+          | (Cons x Nil) = 1
+          | Nil = 0
+        |]
+    , rejectNaming
+        "spec-pat-3-2"
+        ["Cons", "Nil"]
+        []
+        [r|
+        module main (f)
+        data L = Nil | Cons Str L
+        f :: L -> Int
+        f xs = match xs
+          | (Cons x (Cons y rest)) = 2
+          | Nil = 0
+        |]
+    , reject
+        "spec-pat-3-3"
+        [r|
+        module main (f)
+        f :: Int -> Int
+        f | 0 = 1
+          | 1 = 2
+        |]
+    , accept
+        "spec-pat-3-4"
+        [r|
+        module main (f)
+        data B = Y | N
+        f :: (B, B) -> Int
+        f | (Y, _) = 1
+          | (_, Y) = 2
+          | (N, N) = 3
+        |]
+    , rejectNaming
+        "spec-pat-3-5"
+        ["Y"]
+        []
+        [r|
+        module main (f)
+        data B = Y | N
+        f :: (B, B) -> Int
+        f | (N, _) = 1
+          | (Y, N) = 2
+        |]
+    , rejectNaming
+        "spec-pat-3-6"
+        ["Blue"]
+        ["Red", "Green"]
+        [r|
+        module main (f)
+        data Color = Red | Green | Blue
+        f :: Color -> Int
+        f | Red = 0
+          | Green = 1
+        |]
+    , rejectNaming
+        "spec-pat-3-7"
+        ["Dot"]
+        []
+        [r|
+        module main (f)
+        data Shape = Circle Real | Rect Real Real | Dot
+        f :: Shape -> Real
+        f | (Circle r) = r
+          | (Rect w h) = w
+        |]
+    , rejectNaming
+        "spec-pat-3-8"
+        ["Circle"]
+        []
+        [r|
+        module main (f)
+        class Eq a where
+          (==) :: a -> a -> Bool
+        instance Eq Real
+        data Shape = Circle Real | Dot
+        f :: Shape -> Str
+        f | (Circle 0.0) = "degenerate"
+          | Dot = "dot"
+        |]
+    , reject
+        "spec-pat-3-9"
+        [r|
+        module main (f)
+        f :: Int -> Int
+        f | 0 ? True = 1
+              : 2
+        |]
+    , acceptWarning
+        "spec-pat-8-1"
+        "unreachable"
+        [r|
+        module main (f)
+        data A = Foo | Bar
+        f :: A -> Int
+        f | Foo = 1
+          | _ = 2
+          | Bar = 3
+        |]
+    , acceptWarning
+        "spec-pat-8-2"
+        "unreachable"
+        [r|
+        module main (f)
+        data A = Foo | Bar
+        f :: A -> Int
+        f x = match x
+          | Foo = 1
+          | Bar = 2
+          | Foo = 3
+        |]
+    , acceptWarning
+        "spec-pat-8-3"
+        "unreachable"
+        [r|
+        module main (f)
+        data Color = Red | Green | Blue
+        f :: Color -> Int
+        f | x = 0
+          | Green = 1
+        |]
+    , accept
         "spec-pat-7-1"
         [r|
         module main (f, g, h)
@@ -1395,6 +2467,222 @@ patTests =
         module main (g)
         g :: IFile [Int] -> [Int]
         g h = .[0:2] h
+        |]
+    ]
+
+recTests :: TestTree
+recTests =
+  testGroup
+    "REC"
+    [ rejectNaming
+        "spec-rec-5-2"
+        ["y"]
+        []
+        [r|
+        module main (g)
+        record R = R {x :: Int, z :: Str}
+        f t = (.x t, .y t)
+        g :: R -> (Int, Str)
+        g r = f r
+        |]
+    , rejectNaming
+        "spec-rec-5-3"
+        ["y"]
+        []
+        [r|
+        module main (g)
+        record I = I {x :: Int}
+        record O = O {a :: I}
+        f t = (.a.x t, .a.y t)
+        g :: O -> (Int, Int)
+        g o = f o
+        |]
+    , accept
+        "spec-rec-5-4"
+        [r|
+        module main (g)
+        record R = R {x :: Int, z :: Str}
+        f t = (.x t, .z t)
+        g :: R -> (Int, Str)
+        g r = f r
+        |]
+    , accept
+        "spec-rec-5-5"
+        [r|
+        module main (g)
+        record P a = P {v :: a, w :: Int}
+        f t = .v t
+        g :: P Str -> Str
+        g p = f p
+        |]
+    , rejectNaming
+        "spec-rec-5-6"
+        ["Str", "Int"]
+        []
+        [r|
+        module main (g)
+        f t = (.x t, .y t)
+        record R = R {x :: Int, y :: Str}
+        g :: R -> (Str, Int)
+        g r = f r
+        |]
+    , rejectNaming
+        "spec-rec-5-8"
+        ["y"]
+        []
+        [r|
+        module main (g)
+        record R = R {x :: Int}
+        f t = .y t
+        g :: Int -> Int
+        g n = f {x = n}
+        |]
+    , accept
+        "spec-rec-5-7"
+        [r|
+        module main (g)
+        record R = R {k0 :: Int, k1 :: Int, k2 :: Int, k3 :: Int, k4 :: Int, k5 :: Int, k6 :: Int, k7 :: Int, k8 :: Int, k9 :: Int, k10 :: Int, k11 :: Int, k12 :: Int, k13 :: Int, k14 :: Int, k15 :: Int}
+        f t = [.k0 t, .k1 t, .k2 t, .k3 t, .k4 t, .k5 t, .k6 t, .k7 t, .k8 t, .k9 t, .k10 t, .k11 t, .k12 t, .k13 t, .k14 t, .k15 t]
+        g :: R -> [Int]
+        g r = f r
+        |]
+    ]
+
+collTests :: TestTree
+collTests =
+  testGroup
+    "COLL"
+    [ rejectNaming
+        "spec-coll-7-1"
+        ["arity"]
+        []
+        [r|
+        module main (g)
+        f t = .2 t
+        g :: (Int, Str) -> Int
+        g p = f p
+        |]
+    , rejectUser
+        "spec-coll-7-2"
+        [r|
+        module main (g)
+        f t = .0 t
+        g :: (Int, Str) -> Str
+        g p = f p
+        |]
+    , accept
+        "spec-coll-7-3"
+        [r|
+        module main (g)
+        f t = .0 t
+        g :: (Int, Str) -> Int
+        g p = f p
+        |]
+    , rejectNaming
+        "spec-coll-7-4"
+        ["Infinite"]
+        []
+        [r|
+        module main (f)
+        f t = [.0 t, t]
+        |]
+    , rejectUser
+        "spec-coll-7-5"
+        [r|
+        module main (f)
+        f t = (.0 t, t 1)
+        |]
+    , rejectUser
+        "spec-coll-7-6"
+        [r|
+        module main (g)
+        h t = (.0 = "a") t
+        g :: (Int, Int) -> (Int, Int)
+        g p = h p
+        |]
+    , accept
+        "spec-coll-7-7"
+        [r|
+        module main (g)
+        h t = .1 ((.0 = 5) t)
+        g :: (Int, Str) -> Str
+        g p = h p
+        |]
+    , accept
+        "spec-coll-7-8"
+        [r|
+        module main (f)
+        type Pair a = (a, a)
+        f :: Pair Int -> Int
+        f p = .0 p
+        |]
+    , rejectUser
+        "spec-coll-7-9"
+        [r|
+        module main (g)
+        f t = (.0 t, .1 t)
+        g :: (Int, Str) -> (Str, Int)
+        g p = f p
+        |]
+    , accept
+        "spec-coll-7-10"
+        [r|
+        module main (g)
+        f t = [.0 t, .1 t, .2 t, .3 t, .4 t, .5 t, .6 t, .7 t, .8 t, .9 t, .10 t, .11 t, .12 t, .13 t, .14 t, .15 t]
+        g :: (Int, Int, Int, Int, Int, Int, Int, Int, Int, Int, Int, Int, Int, Int, Int, Int) -> [Int]
+        g p = f p
+        |]
+    , rejectNaming
+        "spec-coll-7-11"
+        ["tuple"]
+        []
+        [r|
+        module main (g)
+        f t = .0 t
+        g :: [Int] -> Int
+        g p = f p
+        |]
+    , rejectNaming
+        "spec-coll-7-12"
+        ["arity"]
+        []
+        [r|
+        module main (g)
+        f t = .3 t
+        g :: Int
+        g = f (1, 2, 3)
+        |]
+    , rejectUser
+        "spec-coll-7-13"
+        [r|
+        module main (g)
+        h t = (.0 = "a") t
+        g :: (Int, Int) -> (Str, Int)
+        g p = h p
+        |]
+    ]
+
+sumTests :: TestTree
+sumTests =
+  testGroup
+    "SUM"
+    [ rejectNaming
+        "spec-sum-2-1"
+        ["Constructor", "X", "unique"]
+        []
+        [r|
+        data A = X
+        data B = X | Y
+        f :: B -> Int
+        f b = 1
+        |]
+    , accept
+        "spec-sum-2-2"
+        [r|
+        data A = X
+        data B = Z | Y
+        f :: B -> Int
+        f b = 1
         |]
     ]
 
@@ -1589,6 +2877,24 @@ lexTests =
   testGroup
     "LEX"
     [ accept
+        "spec-lit-5-2"
+        [r|
+        module main (a, b, c)
+        a :: Str
+        a = "it\'s \"quoted\""
+        b :: Str
+        b = '''it\'s'''
+        c :: Str
+        c = """say \"hi\" and \'bye\'"""
+        |]
+    , reject
+        "spec-lit-5-1"
+        [r|
+        module main (g)
+        g :: Str
+        g = "x""
+        |]
+    , accept
         "spec-lex-4-1"
         [r|
         module main (a, b, c, d, e)
@@ -1620,6 +2926,141 @@ lexTests =
         d :: Int -> <IO> Int
         d x = do { y = x; y }
         |]
+    , accept
+        "spec-lex-4-3"
+        [r|
+        module main (a, b, c, d, e, f, g, h)
+        effect IO
+        record R where
+          on :: Bool
+          n :: Int
+        source Py from "f.py" ("bump")
+        bump :: Int -> <IO> Int
+        a :: Int -> (<IO> Int, Int)
+        a x = (do bump x, 1)
+        b :: Bool -> <IO> Int
+        b t = ? t = do bump 0 : do bump 1
+        c :: Int -> <IO> Int
+        c x = do { k <- bump x; r <- do bump k; r }
+        d :: Int -> <IO> Int
+        d x = do bump y where y = x
+        e :: Int -> (<IO> R, Int)
+        e x = (do {on = True, n = x}, 1)
+        f :: Int -> <IO> Int
+        f y = let a = do bump y in a
+        g :: Bool -> Bool -> <IO> Int
+        g s t = ? s = do bump 0 ? t = bump 1 : bump 2
+        data T = A | B
+        h :: T -> <IO> Int
+        h | A = do bump 0 | B = bump 1
+        |]
+    , accept
+        "spec-lex-4-4"
+        [r|
+        module main (a, b)
+        effect IO
+        record R where
+          on :: Bool
+          n :: Int
+        source Py from "f.py" ("bump")
+        bump :: Int -> <IO> Int
+        effect Err
+        bumpE :: Int -> <IO, Err> Int
+        a :: Int -> <IO, Err> Int
+        a x = (do bumpE x :: <IO, Err> Int)
+        b :: Bool -> Int -> <IO> Int
+        b t x = do
+          ? t = do bump x
+          : bump 0
+        |]
+    , accept
+        "spec-lex-4-6"
+        [r|
+        effect IO
+        source Py from "f.py" ("bump")
+        bump :: Int -> <IO> Int
+        (do bump 1, 2)
+        |]
+    , rejectNaming
+        "spec-lex-4-5"
+        ["unexpected", "further"]
+        []
+        [r|
+        module main (a)
+        effect IO
+        record R where
+          on :: Bool
+          n :: Int
+        source Py from "f.py" ("bump")
+        bump :: Int -> <IO> Int
+        a :: Int -> (<IO> Int, Int)
+        a x = (do bump x, , 1)
+        |]
+    , accept
+        "spec-src-2-1"
+        [r|
+        module main (f)
+        source Py from "f.py" where
+          --' @name plus
+          add
+        add :: Int -> Int
+        f :: Int -> Int
+        f x = add x
+        |]
+    , reject
+        "spec-src-2-2"
+        [r|
+        module main (f)
+        source Py from "f.py"
+          ( "minus"
+          --' @name plus
+          , "minus" as add
+          )
+        add :: Int -> Int
+        minus :: Int -> Int
+        f :: Int -> Int
+        f x = add (minus x)
+        |]
+    , reject
+        "spec-src-2-3"
+        [r|
+        module main (f)
+        source Py from "f.py" where
+          --' @name plus
+          `and`
+        f :: Int -> Int
+        f x = x
+        |]
+    , accept
+        "spec-doc-1-2"
+        [r|
+        module main (f)
+        source Py from "f.py"
+          ( "h"
+          --' Add two
+          , "g"
+          )
+        g :: Int -> Int
+        h :: Int -> Int
+        f :: Int -> Int
+        f x = g (h x)
+        |]
+    , reject
+        "spec-doc-1-3"
+        [r|
+        module main (f)
+        source Py from "f.py"
+          ( "h"
+          --' Add two
+          ,
+          --' Add three
+          "g"
+          )
+        g :: Int -> Int
+        h :: Int -> Int
+        f :: Int -> Int
+        f x = g (h x)
+        |]
     ]
 
 -- | An alias applied to itself 28 times, whose expansion has 2^28 leaves.
@@ -1644,52 +3085,81 @@ accept name code =
       Right _ -> return ()
       Left e -> assertFailure $ "expected acceptance, got: " <> show e
 
--- Passes on any error. Its accept twin, which differs only in the rule's
--- subject, shows that the rule is what rejects it.
+-- Passes on any rejection of the program. Its accept twin, which differs only
+-- in the rule's subject, shows that the rule is what rejects it.
 reject :: String -> MT.Text -> TestTree
 reject name code =
   testCase name $
-    runFront code >>= \case
-      Right _ -> assertFailure "expected rejection"
-      Left _ -> return ()
+    runFrontWithState code >>= \case
+      (Right _, _) -> assertFailure "expected rejection"
+      (Left e, st) | MM.isDefect st e -> assertFailure $ "expected a user error, got a compiler error: " <> show e
+      (Left _, _) -> return ()
 
 -- | A rejection reported as the user's error, not as a compiler fault.
 rejectUser :: String -> MT.Text -> TestTree
 rejectUser name code =
   testCase name $
-    runFront code >>= \case
-      Right _ -> assertFailure "expected rejection"
-      Left (SystemError e) -> assertFailure $ "expected a user error, got a compiler error: " <> show e
-      Left _ -> return ()
+    runFrontWithState code >>= \case
+      (Right _, _) -> assertFailure "expected rejection"
+      (Left e, st) | MM.isDefect st e -> assertFailure $ "expected a user error, got a compiler error: " <> show e
+      (Left e@(EnvFailed _), _) -> assertFailure $ "expected a user error, got an environment failure: " <> show e
+      (Left _, _) -> return ()
 
 -- | A rejection whose diagnostic names each type in @named@ and none in
 -- @unnamed@, as whole words. Nothing else about its text is checked.
 rejectNaming :: String -> [MT.Text] -> [MT.Text] -> MT.Text -> TestTree
 rejectNaming name named unnamed code =
   testCase name $
-    runFront code >>= \case
-      Right _ -> assertFailure "expected rejection"
-      Left (SystemError e) -> assertFailure $ "expected a user error, got a compiler error: " <> show e
-      Left err -> do
+    runFrontWithState code >>= \case
+      (Right _, _) -> assertFailure "expected rejection"
+      (Left e, st) | MM.isDefect st e -> assertFailure $ "expected a user error, got a compiler error: " <> show e
+      (Left err, _) -> do
         let ws = MT.split (\c -> not (DC.isAlphaNum c || c == '_')) (diagnosticText err)
         mapM_ (\n -> assertBool ("diagnostic does not name " <> MT.unpack n) (n `elem` ws)) named
         mapM_ (\n -> assertBool ("diagnostic names " <> MT.unpack n) (n `notElem` ws)) unnamed
   where
-    diagnosticText (SourcedError _ d) = render d
-    diagnosticText (UnificationError _ _ _ d) = render d
-    diagnosticText (SystemError d) = render d
+    diagnosticText (Rejected _ d) = render d
+    diagnosticText (EnvFailed d) = render d
+    diagnosticText (Fault _ d) = render d
+
+-- | A rejection reported at the given line of the source (counting the
+-- empty line that opens a quasiquote as line 1).
+rejectAtLine :: String -> Int -> MT.Text -> TestTree
+rejectAtLine name line code =
+  testCase name $ do
+    (x, st) <- runFrontWithState code
+    case x of
+      Right _ -> assertFailure "expected rejection"
+      Left (Rejected (AtNode i) _) -> fmap srcLocLine (DM.lookup i (stateSourceMap st)) @?= Just line
+      Left e -> assertFailure ("expected a located error, got " <> show e)
+
+-- | Acceptance with a warning that contains @needle@.
+acceptWarning :: String -> MT.Text -> MT.Text -> TestTree
+acceptWarning name needle code =
+  testCase name $ do
+    config <- emptyConfig
+    ((x, msgs), _) <-
+      MM.runMorlocMonad Nothing 0 config defaultValue (typecheckFrontend Nothing (Code code))
+    case x of
+      Left e -> assertFailure $ "expected acceptance, got: " <> show e
+      Right _ ->
+        assertBool ("no warning mentions " <> MT.unpack needle <> ": " <> show msgs)
+          (any (MT.isInfixOf needle) msgs)
 
 runFront :: MT.Text -> IO (Either MorlocError [AnnoS (Indexed TypeU) Many Int])
-runFront code = do
+runFront code = fst <$> runFrontWithState code
+
+runFrontWithState :: MT.Text -> IO (Either MorlocError [AnnoS (Indexed TypeU) Many Int], MorlocState)
+runFrontWithState code = do
   config <- emptyConfig
-  ((x, _), _) <-
+  ((x, _), st) <-
     MM.runMorlocMonad
       Nothing
       0
       config
       defaultValue
       (typecheckFrontend Nothing (Code code) >>= mapM evaluateAnnoSTypes)
-  return x
+  return (x, st)
 
 emptyConfig :: IO Config
 emptyConfig = do
@@ -1706,3 +3176,488 @@ emptyConfig = do
       , configLangOverrides = mempty
       , configRegistry = Nothing
       }
+
+dim7Tests :: TestTree
+dim7Tests =
+  testGroup
+    "DIM-7"
+    [ accept
+        "spec-dim-7-4"
+        [r|
+        module main (f, g)
+        newtype Vector (n :: Nat) a = List a
+        h :: Vector m Int -> Int
+        sq :: Vector n Int -> Vector (n * n - 2 * n + 1) Int
+        pairs :: Vector n Int -> Vector (n * (n - 1) / 2) Int
+        f :: Vector n Int -> Int
+        f x = h (sq x)
+        g :: Vector n Int -> Int
+        g x = h (pairs x)
+        |]
+    , rejectNaming
+        "spec-dim-7-5"
+        ["solution"]
+        ["decide"]
+        [r|
+        module main (f)
+        newtype Vector (n :: Nat) a = List a
+        sq :: Vector (m * m) Int -> Int
+        f :: Vector n Int -> Int
+        f x = sq x
+        |]
+    , rejectNaming
+        "spec-dim-7-6"
+        ["solution"]
+        ["decide"]
+        [r|
+        module main (x)
+        newtype Vector (n :: Nat) a = List a
+        sq :: Vector (m * m) Int -> Vector (m - 3) Int
+        v :: Vector 4 Int
+        x = sq v
+        |]
+    , testCase "spec-dim-7-1" $
+        decide (DS.fromList [n]) [NatGe (NatSub (NatVar n) (NatLit 1)) (NatLit 0)]
+          @?= Refuted (DM.fromList [(n, 0)])
+    , testCase "spec-dim-7-2" $
+        case decide (DS.fromList [m, n]) [NatEq (NatMul (NatVar m) (NatVar n)) (NatMul (NatVar n) (NatVar m))] of
+          Holds _ -> return ()
+          d -> assertFailure (show d)
+    , testCase "spec-dim-7-3" $
+        decide (DS.fromList [n]) [NatEq (NatVar n) (NatAdd (NatVar m) (NatLit 1))]
+          @?= Refuted (DM.fromList [(n, 0)])
+    ]
+  where
+    n = TV "n"
+    m = TV "m"
+
+cls16Tests :: TestTree
+cls16Tests =
+  testGroup
+    "CLS-16"
+    [ testCase "spec-cls-16-1" $
+        ( mostSpecific [general, vec (NatLitU 3) int]
+        , mostSpecific [vec (NatLitU 3) int, general]
+        , mostSpecific [general, ForallU m (vec (KVarU (m, KindNat)) int)] )
+          @?= ([vec (NatLitU 3) int], [vec (NatLitU 3) int], [ForallU m (vec (KVarU (m, KindNat)) int)])
+    , testCase "spec-cls-16-2" $
+        ( length (mostSpecific [ForallU a (vec n (vec n (VarU a))), vec (NatLitU 3) (vec (NatLitU 4) int)])
+        , mostSpecific [ForallU a (vec n (vec n (VarU a))), vec (NatLitU 3) (vec (NatLitU 3) int)] )
+          @?= (2, [vec (NatLitU 3) (vec (NatLitU 3) int)])
+    , accept
+        "spec-cls-16-5"
+        [r|
+        module main (f)
+        class C a where
+          c1 :: a -> Str
+          c2 :: a -> Str
+        instance C (a, Str) where
+          c1 x = "b1"
+          c2 x = "b2"
+        f :: (Int, Str) -> Str
+        f x = c2 x
+        |]
+    , testCase "spec-cls-16-3" $
+        ( isSubtypeOf (ForallU a (ForallU b (pair (VarU a) (VarU b)))) (ForallU c (pair (VarU c) int))
+        , isSubtypeOf (ForallU c (pair (VarU c) int)) (ForallU a (ForallU b (pair (VarU a) (VarU b))))
+        , isSubtypeOf (vec n int) (vec (VarU a) int) )
+          @?= (True, False, False)
+    ]
+  where
+    a = TV "a"
+    b = TV "b"
+    c = TV "c"
+    m = TV "m"
+    n = NatVarU (TV "n")
+    int = VarU (TV "Int")
+    vec x y = AppU (VarU (TV "Vec")) [x, y]
+    pair x y = AppU (VarU (TV "T")) [x, y]
+    general = ForallU a (vec n (VarU a))
+
+poly7Tests :: TestTree
+poly7Tests =
+  testGroup
+    "POLY-7"
+    [ reject
+        "spec-poly-7-1"
+        [r|
+        module main (f)
+        newtype Vector (n :: Nat) a = List a
+        h :: Vector (m + 1) Int -> Int
+        f :: Vector n Int -> Int
+        f x = h x
+        |]
+    , accept
+        "spec-poly-7-2"
+        [r|
+        module main (f)
+        newtype Vector (n :: Nat) a = List a
+        h :: Vector (m + 1) Int -> Int
+        f :: Vector (n + 1) Int -> Int
+        f x = h x
+        |]
+    , reject
+        "spec-poly-7-3"
+        [r|
+        module main (f)
+        newtype Vector (n :: Nat) a = List a
+        h :: Vector (m + 1) Int -> Int
+        f :: Vector (n * n) Int -> Int
+        f x = h x
+        |]
+    , accept
+        "spec-poly-7-4"
+        [r|
+        module main (f)
+        newtype Vector (n :: Nat) a = List a
+        g :: Vector (m + 1) Int -> Vector m Int
+        f :: Vector n Int -> Vector (n - 1) Int
+        f x = g x
+        |]
+    , reject
+        "spec-poly-7-5"
+        [r|
+        module main (f)
+        newtype Vector (n :: Nat) a = List a
+        take3 :: Vector n Int -> Vector (n - 3) Int
+        len :: Vector k Int -> Int
+        f :: Vector n Int -> Int
+        f x = len (take3 x)
+        |]
+    , accept
+        "spec-poly-7-6"
+        [r|
+        module main (f)
+        newtype Vector (n :: Nat) a = List a
+        roll :: w@Int -> Vector n Real -> Vector (n - w + 1) Real
+        f :: w@Int -> Vector n Real -> Vector (n - w + 1) Real
+        f w v = roll w v
+        |]
+    , accept
+        "spec-poly-7-8"
+        [r|
+        module main (f)
+        newtype Vector (n :: Nat) a = List a
+        half :: Vector n Int -> Vector (n / 2) Int
+        len :: Vector k Int -> Int
+        f :: Vector n Int -> Vector (n / 2) Int
+        f x = half x
+        g :: Vector n Int -> Int
+        g x = len (half x)
+        append :: Vector a Int -> Vector b Int -> Vector (a + b) Int
+        h :: Vector n Int -> Int
+        h x = len (append (half x) x)
+        |]
+    , reject
+        "spec-kind-4-9"
+        [r|
+        module main (x)
+        newtype T1 (d :: Nat) a = List a
+        make :: n@Int -> d@Int -> T1 (n / d) Real
+        x = make 12 0
+        |]
+    , reject
+        "spec-kind-4-11"
+        [r|
+        module main (x)
+        newtype T1 (d :: Nat) a = List a
+        make :: n@Int -> d@Int -> T1 (n / d) Real
+        x k = make k 0
+        |]
+    , reject
+        "spec-kind-4-14"
+        [r|
+        module main (x)
+        newtype Vector (n :: Nat) a = List a
+        sq :: Vector (m * m) Int -> Vector (m - 3) Int
+        v :: Vector 4 Int
+        x = sq v
+        |]
+    , accept
+        "spec-kind-4-15"
+        [r|
+        module main (x)
+        newtype Vector (n :: Nat) a = List a
+        sq :: Vector (m * m) Int -> Vector (m - 1) Int
+        v :: Vector 4 Int
+        x = sq v
+        |]
+    , reject
+        "spec-kind-4-16"
+        [r|
+        module main (g)
+        newtype Vector (n :: Nat) a = List a
+        newtype Tbl (r :: Rec) = Int
+        cols1 :: Tbl r -> Vector (Size r - 1) Int
+        len :: Vector k Int -> Int
+        g :: Tbl r -> Int
+        g t = len (cols1 t)
+        |]
+    , accept
+        "spec-kind-4-17"
+        [r|
+        module main (g, h)
+        newtype Vector (n :: Nat) a = List a
+        newtype Tbl (r :: Rec) = Int
+        cols1 :: Tbl r -> Vector (Size r - 1) Int
+        grow :: Tbl r -> Vector (Size r + 1) Int
+        len :: Vector k Int -> Int
+        mk :: Tbl {x = Int, y = Str}
+        h = len (cols1 mk)
+        g :: Tbl r -> Int
+        g t = len (grow t)
+        |]
+    , accept
+        "spec-kind-4-18"
+        [r|
+        module main (prim, cols1, h)
+        newtype Vector (n :: Nat) a = List a
+        newtype Tbl (r :: Rec) = Int
+        prim :: Tbl r -> Vector (Size r - 1) Int
+        len :: Vector k Int -> Int
+        cols1 :: Tbl r -> Vector (Size r - 1) Int
+        cols1 t = prim t
+        h t = len (prim t)
+        |]
+    , accept
+        "spec-kind-4-19"
+        [r|
+        module main (cols1)
+        newtype Vector (n :: Nat) a = List a
+        newtype Tbl (r :: Rec) = Int
+        allCols :: Tbl r -> Vector (Size r) Int
+        dropOne :: Vector (n + 1) Int -> Vector n Int
+        cols1 :: Tbl r -> Vector (Size r - 1) Int
+        cols1 t = dropOne (allCols t)
+        |]
+    , reject
+        "spec-kind-4-10"
+        [r|
+        module main (x)
+        newtype T1 (d :: Nat) a = List a
+        offset :: k@Int -> T1 n Real -> T1 (n + k) Real
+        src :: T1 10 Real
+        x = offset (-11) src
+        |]
+    , accept
+        "spec-kind-4-12"
+        [r|
+        module main (x)
+        newtype T1 (d :: Nat) a = List a
+        offset :: k@Int -> T1 n Real -> T1 (n + k) Real
+        src :: T1 10 Real
+        x = offset (-4) src
+        |]
+    , reject
+        "spec-poly-7-9"
+        [r|
+        module main (f)
+        newtype Vector (n :: Nat) a = List a
+        mk :: n@Int -> Vector n Real
+        len :: Vector k Real -> Int
+        f :: k@Int -> Int
+        f k = len (mk k)
+        |]
+    , accept
+        "spec-poly-7-10"
+        [r|
+        module main (f)
+        newtype Vector (n :: Nat) a = List a
+        mk :: n@Int -> Vector n Real
+        len :: Vector k Real -> Int
+        f :: k@Int -> Vector k Real -> Int
+        f k v = len (mk k)
+        |]
+    , reject
+        "spec-poly-7-11"
+        [r|
+        module main (foo)
+        newtype T1 (d :: Nat) a = List a
+        bar :: T1 (n + 10) Real -> Int
+        foo :: h@Int -> T1 (h + 10) Real -> Int
+        foo h x = bar x
+        |]
+    , accept
+        "spec-poly-7-12"
+        [r|
+        module main (f, h)
+        newtype Vector (n :: Nat) a = List a
+        square :: n@Int -> Vector (n * n) Real
+        len :: Vector k Real -> Int
+        f :: n@Int -> Int
+        f n = len (square n)
+        outer :: Vector n Real -> Vector m Real -> Vector (n * m) Real
+        h :: k@Int -> Vector k Real -> Vector (k * k) Real
+        h k v = outer v v
+        |]
+    , accept
+        "spec-kind-1-1"
+        [r|
+        module main (f)
+        newtype Vector (n :: Nat) a = List a
+        class C a where
+          c :: a -> Str
+        instance C (Vector n a) where
+          c x = "v"
+        f :: k@Int -> Vector k Real -> Str
+        f k v = c v
+        |]
+    , accept
+        "spec-kind-1-2"
+        [r|
+        module main (y)
+        newtype Vector (n :: Nat) a = List a
+        class Mk a where
+          mk :: n@Int -> Vector (n + 5) a
+        instance Mk Real where
+          mk n = mk n
+        y = (mk (-3) :: Vector 2 Real)
+        |]
+    , rejectAtLine
+        "spec-poly-7-13"
+        9
+        [r|
+        module main (f)
+        newtype Vector (n :: Nat) a = List a
+        h :: Vector (m + 1) Int -> Int
+        f :: Vector n Int -> Int
+        f x = g x
+          where
+            g :: Vector k Int -> Int
+            g y = h y
+        |]
+    , rejectAtLine
+        "spec-poly-7-14"
+        6
+        [r|
+        module main (f)
+        newtype Vector (n :: Nat) a = List a
+        h :: Vector (m + 1) Int -> Int
+        f :: Vector n Int -> Int
+        f x = g x
+          where
+            g :: Vector (k + 1) Int -> Int
+            g y = h y
+        |]
+    , accept
+        "spec-poly-7-15"
+        [r|
+        module main (f)
+        newtype Vector (n :: Nat) a = List a
+        len :: Vector k Int -> Int
+        add :: Int -> Int -> Int
+        f :: Vector n Int -> Vector 3 Int -> Int
+        f x z = add (g x) (g z)
+          where
+            g :: Vector k Int -> Int
+            g y = len y
+        |]
+    , rejectAtLine
+        "spec-poly-7-16"
+        7
+        [r|
+        module main (f)
+        newtype Vector (n :: Nat) a = List a
+        take3 :: Vector n Int -> Vector (n - 3) Int
+        len :: Vector k Int -> Int
+        f :: Vector n Int -> Int
+        f x = len (take3 x)
+        |]
+    , accept
+        "spec-poly-4-1"
+        [r|
+        module main (f)
+        class Dbl a where
+          dbl :: a -> a
+        instance Dbl Int where
+          dbl x = x
+        f :: Int -> Int
+        f x = g x
+          where
+            g :: Dbl a => a -> a
+            g y = dbl y
+        |]
+    , accept
+        "spec-poly-4-2"
+        [r|
+        module main (f, h)
+        f :: Int -> Int
+        f x = g x
+          where
+            g :: a -> a
+            g y = y
+        h :: a -> Int
+        h x = k x
+          where
+            k :: a -> Int
+            k y = 1
+        |]
+    , reject
+        "spec-poly-4-4"
+        [r|
+        module main (f)
+        apply :: (Int -> <e> Int) -> Int -> <e> Int
+        f :: (Int -> <e> Int) -> Int -> <e> Int
+        f k x = g x
+          where
+            g :: Int -> <e> Int
+            g y = apply k y
+        |]
+    , rejectAtLine
+        "spec-poly-4-3"
+        9
+        [r|
+        module main (f)
+        newtype Vector (n :: Nat) a = List a
+        dot :: Vector m Int -> Vector m Int -> Int
+        f :: Vector n Int -> Vector n Int -> Int
+        f x z = g z
+          where
+            g :: Vector n Int -> Int
+            g y = dot x y
+        |]
+    , reject
+        "spec-poly-7-18"
+        [r|
+        module main (f)
+        newtype Vector (n :: Nat) a = List a
+        f :: k@Int -> Vector k Int -> Vector 3 Int
+        f k v = v
+        |]
+    , rejectAtLine
+        "spec-poly-7-19"
+        8
+        [r|
+        module main (f)
+        newtype Vector (n :: Nat) a = List a
+        len :: Vector m Int -> Int
+        f :: Vector n Int -> Int
+        f x = len x
+          where
+            g :: Vector (k - (k + 1)) Int -> Int
+            g y = len y
+        |]
+    , accept
+        "spec-poly-7-20"
+        [r|
+        module main (f, g)
+        newtype Vector (n :: Nat) a = List a
+        mk :: n@U64 -> Vector n Real
+        len :: Vector k Real -> Int
+        f :: k@U64 -> Int
+        f k = len (mk k)
+        mk8 :: n@U8 -> Vector n Real
+        g :: k@U8 -> Int
+        g k = len (mk8 k)
+        |]
+    , reject
+        "spec-poly-7-7"
+        [r|
+        module main (f)
+        newtype Vector (n :: Nat) a = List a
+        roll :: w@Int -> Vector n Real -> Vector (n - w + 1) Real
+        len :: Vector k Real -> Int
+        f :: w@Int -> Vector n Real -> Int
+        f w v = len (roll w v)
+        |]
+    ]

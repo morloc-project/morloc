@@ -1,0 +1,9 @@
+placement:
+  total [cpp]
+    totalOf [cpp]
+      mapEach [py] *
+        step [py]
+        upto [cpp] *
+
+20
+OK: built placement costs the least

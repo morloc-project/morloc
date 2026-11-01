@@ -14,7 +14,7 @@ exits with it only when a panic ended it.
 
 ### PANIC-1 A panic ends its process unless a catch scope holds it
 Status: implemented
-Checked by: a_panic_in_a_signal_handler_ends_the_process_whatever_scope_it_interrupts, the_pools_own_hook_ends_the_process_on_a_panic_outside_a_catch, the_pools_own_hook_lets_a_panic_in_a_host_scope_unwind, a_panic_outside_a_catch_scope_exits_with_the_internal_error_status, a_panic_inside_a_catch_scope_reaches_the_catch, a_panic_while_unwinding_exits_with_the_internal_error_status, a_libmorloc_panic_on_a_thread_outside_any_catch_scope_exits_with_the_internal_error_status, a_panic_in_a_forked_child_leaves_the_parents_run_alone, every_host_installs_the_panic_hook, tla:PanicExit, tla:PanicExit_hook_exits_in_scope.bug
+Checked by: a_panic_in_a_signal_handler_ends_the_process_whatever_scope_it_interrupts, the_pools_own_hook_ends_the_process_on_a_panic_outside_a_catch, the_pools_own_hook_lets_a_panic_in_a_host_scope_unwind, a_panic_outside_a_catch_scope_exits_with_the_internal_error_status, a_panic_inside_a_catch_scope_reaches_the_catch, a_panic_while_unwinding_exits_with_the_internal_error_status, a_libmorloc_panic_on_a_thread_outside_any_catch_scope_exits_with_the_internal_error_status, a_panic_in_a_forked_child_leaves_the_parents_run_alone, every_host_installs_the_panic_hook, golden:rust-panic-in-drop-while-unwinding, tla:PanicExit, tla:PanicExit_hook_exits_in_scope.bug
 
 Each copy of the Rust standard library installs one hook when it is first
 entered: the nexus at start, libmorloc when its host starts (the nexus,
@@ -98,7 +98,7 @@ rule for locks shared between processes.
 
 ### PANIC-5 A pool never answers a panic
 Status: implemented
-Checked by: golden:py-systemexit-ends-pool, golden:r-internal-error-ends-pool, golden:cpp-catch-cannot-hold-pool-death, a_libmorloc_panic_on_a_thread_outside_any_catch_scope_exits_with_the_internal_error_status, a_panic_holding_a_runtime_lock_inside_a_format_library_call_ends_the_process, tla:PanicExit_continue_after_catch.bug
+Checked by: golden:py-systemexit-ends-pool, golden:r-internal-error-ends-pool, a_libmorloc_panic_on_a_thread_outside_any_catch_scope_exits_with_the_internal_error_status, a_panic_holding_a_runtime_lock_inside_a_format_library_call_ends_the_process, tla:PanicExit_continue_after_catch.bug
 
 A panic in a pool's runtime code -- a Rust panic outside user code, a C++
 infrastructure error -- ends the pool by PANIC-1. It is never turned into
@@ -200,7 +200,7 @@ cache's object files.
 
 ### PANIC-13 A broken runtime invariant in the Rust pool ends the pool
 Status: implemented
-Checked by: loading_a_missing_file_fails_with_a_reason, loading_a_null_path_fails_with_a_reason, reading_malformed_json_fails_with_a_reason, reading_a_null_string_fails_with_a_reason, saving_to_a_null_path_fails_with_a_reason, a_runtime_value_failure_without_a_reason_ends_the_pool, a_runtime_handle_failure_without_a_reason_ends_the_pool, a_runtime_failure_with_a_reason_is_a_catchable_error, a_closed_pipe_passes_through_try, a_closed_pipe_fails_the_call_with_its_own_message, a_callee_failure_without_a_reason_ends_the_process_even_inside_a_catch_scope, a_callee_whose_pipe_closed_ends_the_callers_call_past_try, a_pipe_closed_packet_is_a_failure_that_says_so, golden:rust-thunk-capture, golden:stdio-pipe-closed, golden:cpp-catch-cannot-hold-closed-pipe
+Checked by: loading_a_missing_file_fails_with_a_reason, loading_a_null_path_fails_with_a_reason, reading_malformed_json_fails_with_a_reason, reading_a_null_string_fails_with_a_reason, saving_to_a_null_path_fails_with_a_reason, a_runtime_value_failure_without_a_reason_ends_the_pool, a_runtime_handle_failure_without_a_reason_ends_the_pool, a_runtime_failure_with_a_reason_is_a_catchable_error, a_closed_pipe_passes_through_try, a_closed_pipe_fails_the_call_with_its_own_message, a_callee_failure_without_a_reason_ends_the_process_even_inside_a_catch_scope, a_callee_whose_pipe_closed_ends_the_callers_call_past_try, a_pipe_closed_packet_is_a_failure_that_says_so, golden:rust-thunk-capture, golden:stdio-pipe-closed, golden:cpp-catch-cannot-hold-closed-pipe, golden:bad-table-cell-fails-the-call
 
 A check whose failing value can come from outside the runtime -- a client
 or peer packet, a file, a user value, handle or type mapping, bytes a user
@@ -218,13 +218,23 @@ caller raises again; and the nexus decides the exit status.
 
 ### PANIC-14 A failed check on data the runtime built ends the pool
 Status: implemented
-Checked by: a_region_outside_a_runtime_built_value_ends_the_pool, a_region_outside_an_input_value_is_a_catchable_error, a_fold_call_with_a_null_value_ends_the_process
+Checked by: a_region_outside_a_runtime_built_value_ends_the_pool, a_region_outside_an_input_value_is_a_catchable_error, a_fold_call_with_a_null_value_ends_the_process, a_reference_past_every_volume_made_is_not_lost_shared_memory, a_defect_reading_a_made_volume_that_cannot_be_mapped_ends_every_pool, a_failed_release_never_ends_the_pool, in_a_debug_build_a_wrong_length_in_a_pool_ends_the_pool, golden:spec-dim-3-3
 
 A structural check that fails on a value libmorloc or the Rust pool built
 from its own schema -- a value `@read` produced, a fold accumulator, a
-stream layout -- is a runtime defect and ends the pool, as does a fold
-call with a null argument or a slot index out of range. A stale fold
-handle stays a catchable error: a user's thread can outlive its call.
+stream layout, a value another pool passed by reference (ruled 2026-10-29),
+and in a debug build a value the program built whose array lengths break
+its schema (DIM-3 in the language spec: a value inline in a packet, or in a
+file FMT-3 marks as the program's) -- is a compiler or runtime defect and
+ends the pool, as does a fold call
+with a null argument or a slot index out of range. Failing to map the volume a
+by-reference value lies in is not a defect when that volume was made (a
+descriptor or address-space limit, a cleaner removing a file-backed
+volume): this process has lost shared memory, and SHM-17 applies. A
+reference into a volume never made is a defect. `@unpack` refuses bytes
+that claim to be a by-reference packet, as an error user code can catch:
+only a pool passes a value by reference. A stale fold handle
+stays a catchable error: a user's thread can outlive its call.
 
 ### PANIC-15 Every sourced Rust function's panic is the user's
 Status: implemented

@@ -3,15 +3,6 @@
 Programs that typecheck and fail later, rejections with no location, and
 literal and record gaps. Reproduced on 0.109.0 unless marked.
 
-- **Non-`Type` signature passes typecheck.** [reproduced] Violates KIND-2.
-  `import root-py; type R = Singleton "x" Int; f :: R -> Int; f x = 1`:
-  typecheck prints `f :: R -> Int`; make fails "cannot serialize type
-  Singleton "x" Int -- no per-language alias resolution for Singleton",
-  located at the export list.
-- **Bare `Vector` passes typecheck.** [reproduced] Violates KIND-5.
-  `import vector-py; a :: Vector -> Str; a t = "x"`: typecheck accepts;
-  make fails "cannot serialize parameterised pure morloc type: Vector" at
-  the export list.
 - **Unreduced Rec expression not equal to itself.** [reproduced] Violates
   TEQ-4. `newtype Frame (r :: Rec); select, mySelect :: l@[Str] -> Frame r
   -> Frame (Restrict r l); mySelect l t = select l t` fails "Cannot compare
@@ -39,14 +30,10 @@ literal and record gaps. Reproduced on 0.109.0 unless marked.
   (`f :: (Member "q" (Keys r)) => Frame r -> Int` at `Frame {x = Int}`),
   `Disjoint: shared element(s) 'x'`. An overlap through `+` is located.
 - **Rejections located at the export list.** [reproduced] Violates DIAG-2
-  (location of the construct): every make-time failure above, and an
-  exported `g :: Buffer (3 - 10) Int -> Int` ("A dimension may not be
-  negative"), and a list or record table column (`t :: Table 2 {xs =
+  (location of the construct): every make-time failure above, and a list
+  or record table column (`t :: Table 2 {xs =
   [Int]}`, accepted by typecheck, refused by make), point at
   `main.loc:1:14`. See model/compiler/issues/typecheck-output.md.
-- [reproduced] KIND-4 open: an unexported, unused
-  `f :: Buffer (3 - 10) Int -> Int` is accepted silently; exported or
-  called, it is rejected.
 - **Exported method error.** [reproduced] Violates MOD-2 and MOD-10 in
   spirit. A module whose export list is `(Pretty, exclaim, pretty)`, with
   `pretty` a method of `Pretty`: importing it fails "Module '.numops' does
@@ -59,28 +46,14 @@ literal and record gaps. Reproduced on 0.109.0 unless marked.
   fails "No instance found for Packable::pack / Are you missing a top-level
   type signature?" although one is present; `:: Vector 6 Real` on the list
   passes. Gap: SIG-4 open; the hint is wrong either way.
-- **Rigid Nat variables, run-time consequence.** [reproduced] Instance of
-  kinds-dimensions.md "Signature Nat variables are not rigid". Python
-  `outer` returns the flat outer product; `f :: Vector m Real -> Vector p
-  Real -> Vector (m * p) Real`, `g :: Vector n Real -> Vector k Real ->
-  Vector (n + k) Real; g = f` builds, and `./prog g '[1,2]' '[1,2,3]'`
-  prints 6 elements typed `Vector 5`. A concrete caller `h :: Vector 2 Real
-  -> Vector 3 Real -> Vector 5 Real; h = g` is rejected (6 ~ 5).
 - **Literal in a point-free section ignores a `Real` context.**
   [reproduced] Violates LIT-2. `divTwo :: [Real] -> [Real]; divTwo = map
   (2 /)` fails "expected: [Real] -> [Real], inferred: a Int -> a Int";
   `divTwo xs = map (\x -> 2 / x) xs`, `half x = x / 2`, `w :: Real; w = 1`
   and `[1, 0xff, 2.5] :: [Real]` all work.
-- **Manual table examples do not typecheck.** [reproduced] features-tables.asc
-  builds `census` with `setCol "pop" pops (asCol "state" states)`; the
-  installed `setCol` replaces a column (`Table n (l + Singleton f b + r) ->
-  ...`), so it fails "Rec is missing the field that pins a row variable:
-  pop". `addCol` appends. Every manual example using `setCol` to add a
-  column (census, withDensity, stacked.loc) is stale.
-- Not reproduced, manual stale: `cbind` of two tables sharing a column is
-  now rejected ("both sides have: state"); the Packable mismatch error no
-  longer prints compiler internals (types-custom-types.asc quotes the old
-  message).
+- Manual stale: the Packable mismatch error no longer prints compiler
+  internals, but types-custom-types.asc quotes the old message. [not
+  re-verified 2026-10-31]
 - **`@collect (psmap f (@next s))` leaves the element type unsolved.**
   [reproduced, 0.109.0] With `f :: Str -> Real`, `s :: IStream Str` and
   `import parallel-cpp`, `morloc make` fails "cannot serialize unknown type
@@ -117,14 +90,6 @@ literal and record gaps. Reproduced on 0.109.0 unless marked.
   subtype path solves it to `<> Unit`. With the signature `pick2 :: Bool ->
   (Int -> <e> ()) -> <e> ()` it typechecks. Open: instantiate an
   existential branch to a suspension with a fresh row before joining.
-- **A complete set of nested patterns is rejected as not exhaustive.**
-  [reproduced, 2026-10-17, 9f24abe4] Violates PAT-3.
-  `data L = Nil | Cons Str L`;
-  `f xs = match xs | (Cons x (Cons y rest)) = 2 | (Cons x Nil) = 1 | Nil = 0`
-  fails "`|` patterns for 'match' are not exhaustive; missing Cons" though
-  the clauses cover every value; writing `(Cons x _)` for the second clause
-  builds. The check is `checkRefutCoverage`
-  (library/Morloc/Frontend/Desugar.hs); cause not traced.
 - **A class variable that only a constraint mentions.** [reproduced,
   2026-10-18, 0.109.0] Violates POLY-6 and DIAG-2. In `f :: C a => Int ->
   Str`, nothing at any call can fix `a`, but the signature is accepted and
@@ -149,24 +114,8 @@ literal and record gaps. Reproduced on 0.109.0 unless marked.
     message should say `a` is undetermined.
   - `count :: Named a => Int -> Int; count n = n + 0` (no method used)
     builds silently.
-  Gap: no item says when a constrained signature is ambiguous. Candidate:
-  a signature whose constraint names a variable that its type does not
-  mention (and that no other constraint ties to one it does) is rejected at
-  the signature, naming the variable.
-- **A tuple pattern of smaller arity matches a larger tuple.** [reproduced,
-  2026-10-21] Violates PAT-1. `part :: (Int, Int, Int) -> Int;
-  part = \(a, b) -> a + b` builds; `part [1,2,3]` prints 3. Repro:
-  /work/plans/model-audit-2026-10-21/repro/A/pat/rt.loc.
-- **Mutually recursive `where` functions are accepted; value cycles crash
-  `make`.** [reproduced, 2026-10-21] Violates BIND-2. `f x = ev x where
-  ev n = ? n == 0 = True : od (n - 1); od n = ? n == 0 = False : ev (n - 1)`
-  builds and `f 4` prints `true` (/work/plans/model-audit-2026-10-21/repro/A/bind/b9.loc). `f x = a where a = b +
-  1; b = a + 1` passes typecheck and `make` dies "This step should be
-  unreachable" (CodeGenerator/Serialize.hs:308; /work/plans/model-audit-2026-10-21/repro/A/bind/b2.loc). A
-  top-level cycle `a = b + 1; b = a + 1; f = a` dies "Can represent MonoSrc
-  as SerialExpr" (Serialize.hs:241; /work/plans/model-audit-2026-10-21/repro/A/lex/x3.loc) instead of the cyclic
-  binding error. Either BIND-2 or the code must move for functions; value
-  cycles need a located rejection either way.
+  CLS-18 (ruled 2026-10-29) makes this an error at the signature, naming
+  the variable; the code deviates. Re-reproduced 2026-10-31 (`count`).
 - **A newtype over a `type` alias reports a phantom instance.** [reproduced,
   2026-10-21] `type Meters = Int; newtype Wrapped = Meters` fails "Cannot
   declare instance on transparent alias 'Meters'" though no instance is
@@ -178,10 +127,6 @@ literal and record gaps. Reproduced on 0.109.0 unless marked.
   "Module 'main' does not export ... [nope]" (an export of an undefined
   name, worded backwards) carry no location (DIAG-2; /work/plans/model-audit-2026-10-21/repro/A/op/o8.loc,
   /work/plans/model-audit-2026-10-21/repro/A/mod/m2).
-- **A clause after a catch-all is accepted.** [reproduced, 2026-10-21]
-  Violates SUM-3. `data A = Foo | Bar; f | Foo = 1 | _ = 2 | Bar = 3`
-  builds; `f Bar` prints 2. A repeated constructor clause is rejected; only
-  clauses shadowed by `_` are missed. Repro: /work/plans/model-audit-2026-10-21/repro/C/sum/dead.loc.
 - **Internal names in record and constructor errors.** [reproduced,
   2026-10-21] `g p = .c p` on `record P {a, b}` fails "expected: a []
   [(c, b)] ... Error in NamU with conflicting open keysets ... hint: 'P' is
@@ -189,20 +134,21 @@ literal and record gaps. Reproduced on 0.109.0 unless marked.
   (Bar n) = n` with no signature fails "'Foo' is not a constructor of
   *x`1560@1_x1" (SUM-6 (b) promises a request for a signature). Repro:
   /work/plans/model-audit-2026-10-21/repro/C/rec/getbad.loc, /work/plans/model-audit-2026-10-21/repro/C/sum/sum6.loc.
-- **A type variable in a local signature can never be instantiated.**
-  [reproduced, 2026-10-21] Violates POLY-1. `f :: Int -> Int; f x = g x
-  where { g :: a -> a; g y = y }` fails "expected: a, inferred: Int ...
-  Cannot compare types Int and a@q0" at `g x`. Without its signature `g` is
-  generalized and works. POLY-4 also names `let` signatures, which do not
-  parse ("unexpected '::'"). Repro: /work/plans/model-audit-2026-10-21/repro/D/poly4c, poly4d, poly5.
+- **A class obligation through a type alias is not covered.**
+  [reproduced, 2026-10-30, not bisected] With `type Model k v = [(k, v)]`,
+  `modelStep :: Ord k => ... ; ... without k xs <> [(k, v)] ...` fails
+  "This definition needs Semigroup (Model k Int) but its signature does
+  not declare it", though `[a]` has a Semigroup instance. Repro:
+  /work/tests/sumtypes/07-persistent-redblack/core/rbtree/main.loc:265.
+- **`let` signatures do not parse.** [reproduced, 2026-10-21] Gap in
+  POLY-4, which rules `where` signatures: `let g :: a -> a` fails
+  "unexpected '::'".
+  Repro: /work/plans/model-audit-2026-10-21/repro/D/poly4d.
 - **Literal defaulting exports a constrained generic at Int.**
-  [reproduced, 2026-10-21] Gap in SIG-5 and POLY-6. `f :: Integral a => a
-  -> a; f x = x + x` is skipped with a warning (SIG-5), but `f x = x + 1`
-  is exported at Int with no warning: `f 1.5` fails "expected integer for
-  Int", while `g y = f y` at Real gives 2.5. Candidates: (a) a constrained
-  export is skipped or rejected regardless of literals; (b) class
-  variables default (Integral -> Int, Numeric -> Real) and SIG-5/POLY-6
-  say so. Repro: /work/plans/model-audit-2026-10-21/repro/D/sig5b, sig5c.
+  [reproduced, 2026-10-21] Violates SIG-5 and CLS-18 (no defaulting).
+  `f :: Integral a => a -> a; f x = x + x` is skipped with a warning, but
+  `f x = x + 1` is exported at Int with no warning: `f 1.5` fails
+  "expected integer for Int", while `g y = f y` at Real gives 2.5. Repro: /work/plans/model-audit-2026-10-21/repro/D/sig5b, sig5c.
 - **SIG-4's premise is stale.** [reproduced, 2026-10-21] It says
   inference fails for a point-free use of class methods; `g = (+)` and
   `concatTo = fold (<>)` build and run unsigned. Only constructor matching
@@ -221,3 +167,30 @@ literal and record gaps. Reproduced on 0.109.0 unless marked.
   *a@q2": root's `(++) :: f m a -> f n a -> f (m+n) a` admits only sized
   containers, so plain lists have no `++`. Gap in collections.md: no item
   says how lists are appended.
+
+- **An application through a type variable that stands for a function is
+  rejected.** [reproduced, 2026-10-27] Awaits APP-4 (open): under its
+  candidate (a), with APP-1 (`a -> b -> c` and `a -> (b -> c)` are one
+  type), it is well typed. `first2 :: [Int -> Int -> c] -> Int -> c` and
+  `d3 :: Int -> Int -> Int -> Int`: `first2 [d3] x 7` is refused with
+  "Invalid function application of type: [Int -> Int -> a] -> Int -> a",
+  while `apply1 (first2 [d3] x) 7` builds and runs. With `c = Int -> Int`
+  the three-argument application is well typed.
+- **Silent drops left in existential merging.** [read, 2026-11-01] Gaps
+  under REC-5, COLL-7 and PAT-1, found reviewing 2617a9e4d; none reproduced
+  as a wrong result. In Typecheck/Internal.hs:
+  - the ExistU/ExistU `instantiate` rule returns its input unchanged when
+    neither existential is in the context (both `access2` probes fail), so
+    a merge with a cut or trimmed existential records nothing;
+  - the two rules for a bare existential against a record-bearing one
+    (above InstLAllR) solve the older bare existential to the newer one,
+    breaking context order; only the ExistU/ExistU rule articulates;
+  - `apply` on a solved ExistU drops the expression's own slots and keys
+    (the FIXME in `instance Applicable TypeU`); `subtype` now checks a
+    structured copy against its solution first, but other callers of
+    `apply` do not;
+  - `solveExist ... >>= maybe (return g) return` in the FunU, EffectU and
+    OptionalU articulation rules drops the constraint when the existential
+    is already solved;
+  - the comment on `accumulatedRecords`' short circuit says merges write
+    keys into the ExistG entry; no code does.

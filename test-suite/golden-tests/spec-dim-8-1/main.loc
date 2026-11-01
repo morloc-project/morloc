@@ -1,0 +1,48 @@
+-- A Nat is a length only where it reaches Vector (DIM-8): a phantom Nat on
+-- a list newtype is not checked against the input's length, a Vector's is,
+-- including 0, each nested level, a computed length, and a Vector behind
+-- an alias, a newtype, a list, a record field or Matrix's wire form.
+module main (bufLen, gridLen, vecLen0, nestedLen, poolSq, poolSqAlias, gastAlias, gastNew, gastList, gastRec, gastOuterVar, gastSq, gastMat)
+
+import root-py
+import vector-py
+import tensor-py
+
+newtype Buf (cap :: Nat) a = List a
+newtype Grid (r :: Nat) (c :: Nat) a = List (List a)
+type Mat (r :: Nat) (c :: Nat) a = Vector r (Vector c a)
+newtype NV (n :: Nat) a = Vector n a
+type Sq (n :: Nat) a = Vector (n * n) a
+
+record R where
+  xs :: Vector 2 Int
+
+source Py from "src.py" ("size" as bufLen, "size" as gridLen, "size" as vecLen0, "size" as nestedLen, "size" as poolSq, "size" as poolSqAlias)
+
+bufLen :: Buf 3 Int -> Int
+gridLen :: Grid 0 3 Int -> Int
+vecLen0 :: Vector 0 Int -> Int
+nestedLen :: Vector 2 (Vector 3 Int) -> Int
+poolSq :: Vector (2 * 2) Int -> Int
+poolSqAlias :: Sq 2 Int -> Int
+
+gastAlias :: Mat 2 3 Int -> Mat 2 3 Int
+gastAlias x = x
+
+gastNew :: NV 2 Int -> NV 2 Int
+gastNew x = x
+
+gastList :: [Vector 2 Int] -> [Vector 2 Int]
+gastList x = x
+
+gastRec :: R -> R
+gastRec x = x
+
+gastOuterVar :: Vector n (Vector 3 Int) -> Vector n (Vector 3 Int)
+gastOuterVar x = x
+
+gastSq :: Sq 2 Int -> Sq 2 Int
+gastSq x = x
+
+gastMat :: Matrix 2 3 Int -> Matrix 2 3 Int
+gastMat x = x

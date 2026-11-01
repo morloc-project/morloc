@@ -493,7 +493,7 @@ pub(crate) fn stdio_claim_slot(
 
 /// Element count of the process's @stdout OStream (its cumulative
 /// `element_count`), or 0 if no @stdout is open. Read by @tell so the
-/// offset-aware `with:`/`render:` synthesis can pass the per-batch element
+/// offset-aware `@with`/`@render` synthesis can pass the per-batch element
 /// offset to a handler. The count is already maintained for the stream
 /// footers, so this is a plain field read.
 pub fn stdout_element_count() -> u64 {
@@ -2876,7 +2876,7 @@ fn stdio_decode_packet(handle: i64, packet_abs: crate::shm::AbsPtr)
         ))?;
     use crate::ffi::parse_schema;
     use crate::ffi::free_schema;
-    use crate::packet_ffi::get_morloc_data_packet_value;
+    use crate::packet_ffi::get_morloc_data_packet_value_from;
     unsafe {
         let mut err: *mut std::os::raw::c_char = std::ptr::null_mut();
         let schema = parse_schema(c_schema.as_ptr(), &mut err);
@@ -2890,8 +2890,8 @@ fn stdio_decode_packet(handle: i64, packet_abs: crate::shm::AbsPtr)
             };
             return Err(MorlocError::Other(msg));
         }
-        let voidstar = get_morloc_data_packet_value(
-            packet_abs as *const u8, schema, &mut err,
+        let voidstar = get_morloc_data_packet_value_from(
+            packet_abs as *const u8, schema, &mut err, Some(crate::origin::Origin::Outside),
         );
         free_schema(schema);
         if voidstar.is_null() {
@@ -2912,7 +2912,7 @@ fn stdio_decode_packet(handle: i64, packet_abs: crate::shm::AbsPtr)
 /// through the nexus RPC channel (the pool does not own fd 0) and rejects
 /// IFile (a pipe is not seekable). The nexus only ever emits the
 /// `/dev/stdin` sentinel, but a user may type any alias, so recognize all.
-fn is_stdin_device(path: &str) -> bool {
+pub(crate) fn is_stdin_device(path: &str) -> bool {
     matches!(path, "/dev/stdin" | "/dev/fd/0" | "/proc/self/fd/0")
 }
 
@@ -3654,7 +3654,7 @@ fn flush_write_buffer(
         crate::write_behind::shift_records(dst, n as usize, (cap - n as usize) * w, data_used, elem)?;
     }
     debug_assert_portable(unsafe { std::slice::from_raw_parts(dst as *const u8, len) }, &local.value_schema)?;
-    let arr = landing.relocate(&array_schema(elem), 0)?;
+    let arr = landing.relocate(&array_schema(elem), 0, crate::origin::Origin::Program)?;
     channel_push(slot, arr)?;
     slot.write_buffer_index_count.set(0);
     slot.write_buffer_data_used.set(0);
@@ -3862,7 +3862,7 @@ fn append_one_element(
         }
         let landing = voidstar::Landing::new(oversize_len)?;
         fill(landing.as_mut_ptr())?;
-        let arr = landing.relocate(&array_schema(&local.elem_schema), 0)?;
+        let arr = landing.relocate(&array_schema(&local.elem_schema), 0, crate::origin::Origin::Program)?;
         return channel_push(slot, arr);
     }
 
@@ -4187,7 +4187,7 @@ pub fn shared_next_with(
             &SubpacketSrc::File { payload_base, payload_len, vol_idx_hint, .. } => {
                 // SLOT-25: checked as the copy into shared memory checks it.
                 let bytes = unsafe { std::slice::from_raw_parts(payload_base as *const u8, payload_len as usize) };
-                voidstar::check_in_place(bytes, &array_schema(&local.elem_schema), vol_idx_hint)?;
+                voidstar::check_in_place(bytes, &array_schema(&local.elem_schema), vol_idx_hint, crate::origin::Origin::Outside)?;
                 decode(
                     payload_base as *const u8,
                     voidstar::MorlocSpace { base: payload_base as *const u8, len: payload_len as usize },
@@ -4235,12 +4235,12 @@ fn claim_next_subpacket(
     if !header.is_data() {
         return Ok(None);
     }
-    let size = 32 + header.offset as u64 + header.length;
-    if cursor + size > end {
+    let size = header.length.checked_add(32 + header.offset as u64);
+    let Some(size) = size.filter(|&size| size <= end - cursor) else {
         return Err(MorlocError::Packet(format!(
             "stream handle {:#x}: a sub-packet runs past the end of the stream", handle,
         )));
-    }
+    };
     // SLOT-23: the cursor moves under the lock, so another reader claims
     // the next sub-packet.
     slot.cursor.set(cursor + size);
@@ -4500,7 +4500,7 @@ fn ahead_schedule(local: &mut ProcessLocalSlot, from: u64, end: u64) {
             for (k, (_, _, _, len, hint, _)) in inputs.iter().enumerate() {
                 if let Some((block, _)) = blocks[k] {
                     // SAFETY: as above; the block now holds its landed bytes.
-                    let ok = unsafe { voidstar::relocate_landed(block as AbsPtr, *len, &schema, *hint) }.is_ok();
+                    let ok = unsafe { voidstar::relocate_landed(block as AbsPtr, *len, &schema, *hint, crate::origin::Origin::Outside) }.is_ok();
                     blocks[k] = Some((block, ok));
                 }
             }
@@ -4677,7 +4677,7 @@ fn payload_into_shm(
     elem_schema: &Schema,
     vol_idx_hint: u16,
 ) -> Result<AbsPtr, MorlocError> {
-    voidstar::read_binary_with_hint(bytes, &array_schema(elem_schema), vol_idx_hint)
+    voidstar::read_binary_with_hint(bytes, &array_schema(elem_schema), vol_idx_hint, crate::origin::Origin::Outside)
 }
 
 /// Allocate and return a SHM `Array` of size 0, the EOF return value
@@ -6379,6 +6379,7 @@ fn compressed_payload_into_shm(
         &packet[payload_start..payload_end],
         &array_schema(elem_schema),
         vol_idx_hint,
+        crate::origin::Origin::Outside,
     )
 }
 
@@ -7273,13 +7274,6 @@ fn slice_bulk_pack_str(
     Ok(block)
 }
 
-/// Dispatch entry point used by the FFI shim in `intrinsics.rs`.
-///
-/// OSTREAM is intentionally NOT dispatched here -- the writer needs the
-/// element schema in hand at open time, which the typed entry point
-/// `mlc_open_ostream(schema_str, path)` provides. Routing OSTREAM
-/// through `mlc_open(path, kind)` would create a Nil-schema header on
-/// disk, breaking the receiving IStream/IFile reader's schema parse.
 pub fn open_dispatch(path: &str, kind: u8) -> Result<i64, MorlocError> {
     if served_stdio_path(path) {
         return Err(served_stdio_error(path));
@@ -7326,43 +7320,125 @@ pub fn open_dispatch(path: &str, kind: u8) -> Result<i64, MorlocError> {
     }
 }
 
-/// Dispatch entry for the typed `mlc_open_istream(schema_str, path)`.
-///
-/// A real file seeds its element schema from the on-disk stream header
-/// (the `schema_str` arg is consulted only for the stdin sentinel). The
-/// stdin sentinel routes to the nexus stdin channel via `open_stdio`,
-/// declaring the ascribed `[a]` schema so the nexus can guard the
-/// incoming stream against the opener's type.
+// FMT-9
 pub fn open_dispatch_istream(path: &str, schema_str: &str) -> Result<i64, MorlocError> {
+    if schema_str.is_empty() {
+        return Err(no_element_type("IStream", path));
+    }
     if served_stdio_path(path) {
         return Err(served_stdio_error(path));
     }
     if is_stdin_device(path) {
         return open_stdio(MLC_KIND_ISTREAM, STDIO_KIND_STDIN, schema_str);
     }
-    // A stream file is self-describing, so the reader decodes from the
-    // file's own schema and needs no argument. The ascribed type still
-    // matters: the pool walks the resulting voidstar with its
-    // compile-time schema, so a mismatch is a structural walk of a
-    // buffer that schema does not describe. Both strings are in hand
-    // here, so check once at open rather than producing garbage later.
     let handle = shared_open_istream(path)?;
-    if !schema_str.is_empty() {
-        let stored = shared_handle_schema_str(handle)?;
-        let requested =
-            morloc_runtime_types::schema::canonicalize_schema_str(schema_str);
-        if !morloc_runtime_types::schema::schema_strings_compatible(
-            &stored, &requested,
-        ) {
-            let _ = shared_close_handle(handle);
-            return Err(MorlocError::Other(format!(
-                "@open IStream: schema mismatch on '{}': \
-                 file has '{}', open requested '{}'",
-                path, stored, requested
-            )));
-        }
+    check_stored_schema(handle, "IStream", path, schema_str)
+}
+
+// FMT-9
+pub fn open_dispatch_ifile(path: &str, schema_str: &str) -> Result<i64, MorlocError> {
+    if schema_str.is_empty() {
+        return Err(no_element_type("IFile", path));
     }
-    Ok(handle)
+    let handle = open_dispatch(path, MLC_KIND_IFILE)?;
+    check_stored_schema(handle, "IFile", path, schema_str)
+}
+
+// FMT-9
+pub fn open_typed(path: &str, kind: u8, storage: &str) -> Result<i64, MorlocError> {
+    if kind == MLC_KIND_IFILE {
+        open_dispatch_ifile(path, storage)
+    } else if kind == MLC_KIND_ISTREAM {
+        open_dispatch_istream(path, storage)
+    } else {
+        open_dispatch(path, kind)
+    }
+}
+
+// FMT-9: the nexus holds an IFile by path; each reopen checks it again.
+pub fn check_ifile_path(path: &str, schema_str: &str) -> Result<(), MorlocError> {
+    if schema_str.is_empty() {
+        return Err(no_element_type("IFile", path));
+    }
+    if served_stdio_path(path) || is_stdin_device(path) {
+        return open_dispatch(path, MLC_KIND_IFILE).map(|_| ());
+    }
+    let stored = read_schema_from_file(path)
+        .map_err(|e| MorlocError::UserThrow(format!("@open IFile '{path}': {e}")))?;
+    if morloc_runtime_types::schema::schema_strings_compatible(&stored, schema_str) {
+        return Ok(());
+    }
+    Err(MorlocError::Other(format!(
+        "@open IFile: schema mismatch on '{path}': file has '{stored}', open requested '{}'",
+        morloc_runtime_types::schema::canonicalize_schema_str(schema_str)
+    )))
+}
+
+fn schemas_match_cached(stored: &str, requested: &str) -> bool {
+    thread_local! {
+        static SEEN: std::cell::RefCell<Vec<(String, String, bool)>> = const { std::cell::RefCell::new(Vec::new()) };
+    }
+    if stored == requested {
+        return true;
+    }
+    if let Some(hit) = SEEN.with(|s| s.borrow().iter().find(|(a, b, _)| a == stored && b == requested).map(|e| e.2)) {
+        return hit;
+    }
+    let ok = morloc_runtime_types::schema::schema_strings_compatible(stored, requested);
+    SEEN.with(|s| {
+        let mut s = s.borrow_mut();
+        if s.len() >= 16 {
+            s.clear();
+        }
+        s.push((stored.to_string(), requested.to_string(), ok));
+    });
+    ok
+}
+
+fn no_element_type(what: &str, path: &str) -> MorlocError {
+    MorlocError::Other(format!(
+        "@open {what} '{path}': no element type was given to check the file against"
+    ))
+}
+
+fn check_stored_schema(handle: i64, what: &str, path: &str, requested: &str) -> Result<i64, MorlocError> {
+    let stored = match shared_handle_schema_str(handle) {
+        Ok(s) => s,
+        Err(e) => {
+            let _ = shared_close_handle(handle);
+            return Err(e);
+        }
+    };
+    if morloc_runtime_types::schema::schema_strings_compatible(&stored, requested) {
+        return Ok(handle);
+    }
+    let _ = shared_close_handle(handle);
+    Err(MorlocError::Other(format!(
+        "@open {what}: schema mismatch on '{path}': file has '{stored}', open requested '{}'",
+        morloc_runtime_types::schema::canonicalize_schema_str(requested)
+    )))
+}
+
+// FMT-9
+pub fn check_handle_type(handle: i64, kind: u8, storage: &str) -> Result<(), MorlocError> {
+    let slot_kind = shared_handle_kind(handle)?;
+    let kind_ok = slot_kind == kind
+        || (slot_kind == MLC_KIND_CHANNEL && (kind == MLC_KIND_ISTREAM || kind == MLC_KIND_OSTREAM));
+    if !kind_ok {
+        return Err(MorlocError::Other(format!(
+            "a {} handle was passed where {} is expected",
+            handle_kind_name(slot_kind), handle_kind_name(kind),
+        )));
+    }
+    let stored = shared_handle_schema_str(handle)?;
+    if schemas_match_cached(&stored, storage) {
+        Ok(())
+    } else {
+        Err(MorlocError::Other(format!(
+            "a handle to '{stored}' was passed where '{}' is expected",
+            morloc_runtime_types::schema::canonicalize_schema_str(storage)
+        )))
+    }
 }
 
 // ── `morloc-nexus view` conversion helpers ────────────────────────────────
@@ -10842,13 +10918,13 @@ mod tests {
         let v = crate::json::read_json_with_schema(&rows, &schema).unwrap();
         let bytes = crate::voidstar::flatten_to_buffer(v, &schema).unwrap();
         shm::shfree(v).unwrap();
-        crate::voidstar::check_in_place(&bytes, &schema, 0).unwrap();
+        crate::voidstar::check_in_place(&bytes, &schema, 0, crate::origin::Origin::Outside).unwrap();
         let mut bad = bytes.clone();
         // the data pointer of element n - 3, a String header after the root
         let elem = std::mem::size_of::<shm_types_crate::Array>() + (n - 3) * std::mem::size_of::<shm_types_crate::Array>();
         let at = elem + std::mem::size_of::<usize>();
         bad[at..at + 8].copy_from_slice(&(bytes.len() as i64 + 64).to_le_bytes());
-        assert!(crate::voidstar::check_in_place(&bad, &schema, 0).is_err(), "a pointer past the payload passed the check");
+        assert!(crate::voidstar::check_in_place(&bad, &schema, 0, crate::origin::Origin::Outside).is_err(), "a pointer past the payload passed the check");
     }
 
     /// DATA_PACKET file: a single voidstar packet (no STREAM header,

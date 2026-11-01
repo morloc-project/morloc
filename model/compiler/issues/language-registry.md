@@ -14,8 +14,8 @@ Language.makeExecutableName's compiled list, Pool.memberFor). [read,
   runMorlocMonad must build the registry from embedded and plugin files,
   fail on a malformed file, and every consumer must read only it.
   Today `extendRegistry` (LangRegistry.hs:99) has no caller, so a plugin's
-  `preamble`, `run_command`, `is_compiled`, `allow_string_null`, `host`,
-  costs and `aliases` fall back to defaults (a plugin pool runs as
+  `preamble`, `run_command`, `is_compiled`, `allow_string_null`, `host`
+  and `aliases` fall back to defaults (a plugin pool runs as
   `<langname> <pool>`; `allow_string_null: false` gets no NUL check at the
   literal stage or the boundary); a malformed plugin lang.yaml is skipped
   silently (API.hs `scanLangDir`), so the user sees "unknown language";
@@ -23,9 +23,5 @@ Language.makeExecutableName's compiled list, Pool.memberFor). [read,
   descriptors are found by directory name in Treeify and Generic but by the
   yaml `name:` in discovery, so the two can disagree. No spec item, docs or
   test covers plugins.
-- **Dead registry fields and functions.** lang.yaml `cost:` is parsed
-  (lreCost) and never read: Realize prices from languages.yaml, and the two
-  disagree (py `cost: 3` vs 20). Also unused: registryLanguageCost,
-  registryPairwiseCost (Realize.hs reimplements it),
-  registryMakeExecutablePoolName, registryMakeSourcePoolName,
+- **Dead registry functions.** Unused: registryMakeExecutablePoolName, registryMakeSourcePoolName,
   registryMakeExtension, registrySerialType, Monad.readLang.

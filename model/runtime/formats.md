@@ -22,7 +22,10 @@ status 17.
 Status: draft
 Region zero-padded to a multiple of 32. Kinds 1 schema, 3 volume index,
 4 frame index, 5 subpacket index, 6 stream diag, 7 final footer, 8 footer
-status. (2 xxhash: defined, unused.)
+status, 9 program file (empty body: the file a file-reference packet names
+was written by this program, its cache or a value one pool hands another,
+so a reader takes it as a value the program built, PANIC-14). (2 xxhash:
+defined, unused.)
 
 ### FMT-4 A relative pointer is volume index (bits 62-48) and offset (47-0); -1 is null
 Status: draft
@@ -53,3 +56,12 @@ BYTES.
 Status: draft
 Tail = footer length u32 LE + bytes 07 07 f8 6d. Footer holds subpacket
 index, final marker, status (0 closed, 1 paused, 2 failed; 3 repaired is reserved).
+
+### FMT-9 A stream handle's schema names what its file stores
+Status: draft
+Tests: every_printed_schema_parses_and_reprints, golden spec-strm-1-1
+`F`, `O` or `I`, then a count (FMT-7) and that many bytes: the canonical,
+closed schema of the file's contents, `a` for `IFile a` and `[a]` for
+`IStream a` and `OStream a`. Every point that makes a handle from a path or
+a slot compares it with what the file or slot holds (STRM-1). A type that
+holds itself through a handle has no closed form and is refused at build.

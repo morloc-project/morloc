@@ -3,24 +3,24 @@ module main (foo)
 import root-py
 
 --' Algorithm configuration
---' metavar: ALG_CONFIG
---' unroll: true
---' arg: --alg-config
+--' @metavar ALG_CONFIG
+--' @unroll true
+--' @arg --alg-config
 record AlgConfig where
-  --' arg: -m
-  --' default: 0
+  --' @arg -m
+  --' @default 0
   m :: Int
 
-  --' arg: -n/--nosy
-  --' default: 0
+  --' @arg -n/--nosy
+  --' @default 0
   n :: Int
 
 record Py => AlgConfig = "dict"
 
---' name: foo
+--' @name foo
 foo ::
   AlgConfig ->
-  --' metavar: DATA
+  --' @metavar DATA
   [Int] ->
   Int
 

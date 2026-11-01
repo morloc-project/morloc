@@ -1,0 +1,45 @@
+-- A table argument whose cell does not parse as its column's type fails the
+-- call with the cell's location; the pool reading it does not end.
+module main (viaPy, viaCpp, viaR, viaRust)
+
+import root-py
+import root-cpp
+import root-r
+import root-rust
+import table-py
+import table-cpp
+import table-r
+import table-rust
+
+source Py from "src.py" ("same" as samePy)
+source Cpp from "src.hpp" ("same" as sameCpp)
+source R from "src.R" ("same" as sameR)
+source Rust from "src.rs" ("same" as sameRust)
+samePy :: a -> a
+sameCpp :: a -> a
+sameR :: a -> a
+sameRust :: a -> a
+
+--' A table, through a Python pool
+viaPy ::
+  --' @form table
+  Table n {x=Int, y=Str} -> Table n {x=Int, y=Str}
+viaPy t = samePy t
+
+--' A table, through a C++ pool
+viaCpp ::
+  --' @form table
+  Table n {x=Int, y=Str} -> Table n {x=Int, y=Str}
+viaCpp t = sameCpp t
+
+--' A table, through an R pool
+viaR ::
+  --' @form table
+  Table n {x=Int, y=Str} -> Table n {x=Int, y=Str}
+viaR t = sameR t
+
+--' A table, through a Rust pool
+viaRust ::
+  --' @form table
+  Table n {x=Int, y=Str} -> Table n {x=Int, y=Str}
+viaRust t = sameRust t

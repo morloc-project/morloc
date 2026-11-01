@@ -1,0 +1,18 @@
+-- Spec HOST-4: a sourced effectful function, partially applied, whose
+-- signature ends in a function-type alias, is called with all its arguments
+-- at once; C++.
+module main (total)
+import root-cpp
+
+type Sink a = [a] -> <IO> ()
+type Reader a = Str -> Sink a -> <IO> ()
+
+source Cpp from "f.hpp" ("feed", "put")
+feed :: Int -> Reader Int
+put :: [Int] -> <IO> ()
+
+run :: (Sink Int -> <IO> ()) -> <IO> ()
+run src = src put
+
+total :: Str -> <IO> ()
+total p = run (feed 1 p)

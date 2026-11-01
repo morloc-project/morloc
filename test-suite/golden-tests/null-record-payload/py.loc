@@ -1,0 +1,54 @@
+-- Null as the value of an optional field whose payload is a record or a
+-- data type (OPT-1), used both as an export and as an argument, where
+-- it is checked against the evaluated record type; Python realization.
+module main (pa, pl, hs, counts)
+import root-py
+
+source Py from "types.py"
+  ( "count_inner" as countInner
+  , "count_pinner" as countPInner
+  , "count_shape" as countShape
+  )
+countInner :: [Outer t c] -> Int
+countPInner :: [POuter] -> Int
+countShape :: [Holder] -> Int
+
+record Inner c where
+  ann :: c
+  x :: Int
+
+record Outer t c where
+  ann :: t
+  inner :: ?(Inner c)
+
+record PInner where
+  ann :: Str
+  x :: Int
+
+record POuter where
+  ann :: Str
+  inner :: ?PInner
+
+data Shape = Circle Real | Square Real
+
+record Holder where
+  name :: Str
+  shape :: ?Shape
+
+record Py => (Inner c) = "dict" c
+record Py => (Outer t c) = "dict" t c
+record Py => PInner = "dict"
+record Py => POuter = "dict"
+record Py => Holder = "dict"
+
+pa :: [Outer Str Str]
+pa = [{ann = "a", inner = {ann = "i", x = 1}}, {ann = "b", inner = Null}]
+
+pl :: [POuter]
+pl = [{ann = "a", inner = {ann = "i", x = 1}}, {ann = "b", inner = Null}, {ann = "c", inner = Null}]
+
+hs :: [Holder]
+hs = [{name = "a", shape = Circle 1.0}, {name = "b", shape = Null}]
+
+counts :: [Int]
+counts = [countInner pa, countPInner pl, countShape hs]

@@ -1,0 +1,7 @@
+--' The C++ adder
+module cppadder (*)
+
+import root-cpp
+import .adder
+
+source Cpp from "f.hpp" ("cpp_make_adder" as mkAdder)

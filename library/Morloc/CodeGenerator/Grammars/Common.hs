@@ -16,6 +16,7 @@ helpers, and the fold framework ('FoldRules', 'foldWithSerialManifoldM').
 -}
 module Morloc.CodeGenerator.Grammars.Common
   ( invertSerialManifold
+  , serialManifoldArgsBound
   , sealLoop
   , D (..)
   , renameNE
@@ -80,7 +81,7 @@ import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import GHC.Generics (Generic)
 import Morloc.CodeGenerator.Namespace
-import Morloc.CodeGenerator.Serial (serialAstToNativeType, serialAstToType, makeSerialAST, serialAstToMsgpackSchema)
+import Morloc.CodeGenerator.Serial (containsFunF, serialAstToNativeType, serialAstToType, makeSerialAST, serialAstToMsgpackSchema)
 import Morloc.Data.Doc
 import Morloc.Data.Text (Text)
 import qualified Morloc.Data.Text as MT
@@ -432,6 +433,8 @@ renameNE old new = go where
   go (IfN t c th el) = IfN t (go c) (go th) (go el)
   go (IntrinsicN t intr msch nes) = IntrinsicN t intr msch (map go nes)
   go (MapOptionalN t wt src ne) = MapOptionalN t wt src (go ne)
+  go (WireToNativeN t s intr sch nes) = WireToNativeN t s intr sch (map go nes)
+  go (NativeToWireN t s ne) = NativeToWireN t s (go ne)
   go (LoopN t starts body) = LoopN t (map (\(i, e) -> (ri i, go e)) starts) (trimap go (renameSE old new) go body)
   goA (NativeArgManifold nm) = NativeArgManifold (renameNM old new nm)
   goA (NativeArgExpr ne) = NativeArgExpr (go ne)
@@ -491,9 +494,188 @@ renameDeps old new = map f where
   f (i, Left se) = (ri i, Left (renameSE old new se))
   f (i, Right ne) = (ri i, Right (renameNE old new ne))
 
+-- | Tag every serial variable that names one of its manifold's arguments as
+-- 'BndVarS'. A foreign call's body, and a trivial let renamed to an
+-- argument, refer to the argument as a 'LetVarS'; translators key on
+-- 'BndVarS' to copy an argument packet that is returned (see 'lcDupPacket').
+-- A serial let ('SerialLetS', 'SerialLetN', 'LoopSLet') of the same index
+-- hides the argument in its body.
+serialManifoldArgsBound :: SerialManifold -> SerialManifold
+serialManifoldArgsBound (SerialManifold m lang form headForm body) =
+  SerialManifold m lang form headForm (argsBoundS (formArgSet form) body)
+
+nativeManifoldArgsBound :: NativeManifold -> NativeManifold
+nativeManifoldArgsBound (NativeManifold m lang form body) =
+  NativeManifold m lang form (argsBoundN (formArgSet form) body)
+
+formArgSet :: ManifoldForm a b -> Set.Set Int
+formArgSet = Set.fromList . abilist const const
+
+argsBoundS :: Set.Set Int -> SerialExpr -> SerialExpr
+argsBoundS a e0 = case e0 of
+  ManS sm -> ManS (serialManifoldArgsBound sm)
+  AppPoolS t p sargs -> AppPoolS t p (map argS sargs)
+  AppRecS t m es -> AppRecS t m (map (argsBoundS a) es)
+  AppForeignRecS t m sock es -> AppForeignRecS t m sock (map (argsBoundS a) es)
+  CacheBodyS t resSa lbl m cargs body -> CacheBodyS t resSa lbl m cargs (argsBoundS a body)
+  DebugWrapS t m cargs body -> DebugWrapS t m cargs (argsBoundS a body)
+  ReturnS e -> ReturnS (argsBoundS a e)
+  SerialLetS i e1 e2 -> SerialLetS i (argsBoundS a e1) (argsBoundS (Set.delete i a) e2)
+  NativeLetS i ne e -> NativeLetS i (argsBoundN a ne) (argsBoundS a e)
+  LetVarS t i
+    | Set.member i a -> BndVarS t i
+    | otherwise -> e0
+  BndVarS _ _ -> e0
+  SerializeS sa ne -> SerializeS sa (argsBoundN a ne)
+  LoopS t ids body -> LoopS t ids (argsBoundLoop a argsBoundS body)
+  where
+    argS (SerialArgManifold sm) = SerialArgManifold (serialManifoldArgsBound sm)
+    argS (SerialArgExpr e) = SerialArgExpr (argsBoundS a e)
+
+argsBoundN :: Set.Set Int -> NativeExpr -> NativeExpr
+argsBoundN a e0 = case e0 of
+  AppExeN t exe xs -> AppExeN t exe (map argN xs)
+  ManN nm -> ManN (nativeManifoldArgsBound nm)
+  ReturnN e -> ReturnN (go e)
+  SerialLetN i se e -> SerialLetN i (argsBoundS a se) (argsBoundN (Set.delete i a) e)
+  NativeLetN i e1 e2 -> NativeLetN i (go e1) (go e2)
+  LetVarN {} -> e0
+  BndVarN {} -> e0
+  DeserializeN t sa se -> DeserializeN t sa (argsBoundS a se)
+  ExeN {} -> e0
+  ListN v t es -> ListN v t (map go es)
+  TupleN v es -> TupleN v (map go es)
+  RecordN o v ps rs -> RecordN o v ps (map (second go) rs)
+  LogN {} -> e0
+  RealN {} -> e0
+  IntN {} -> e0
+  StrN {} -> e0
+  EnumN {} -> e0
+  VariantN t n i es -> VariantN t n i (map go es)
+  NullN {} -> e0
+  DoBlockN t e -> DoBlockN t (go e)
+  EvalN t e -> EvalN t (go e)
+  CoerceN c t e -> CoerceN c t (go e)
+  IfN t c x y -> IfN t (go c) (go x) (go y)
+  IntrinsicN t intr msch es -> IntrinsicN t intr msch (map go es)
+  MapOptionalN t wt src e -> MapOptionalN t wt src (go e)
+  WireToNativeN t s intr sch es -> WireToNativeN t s intr sch (map go es)
+  NativeToWireN t s e -> NativeToWireN t s (go e)
+  LoopN t starts body -> LoopN t (map (second go) starts) (argsBoundLoop a argsBoundN body)
+  where
+    go = argsBoundN a
+    argN (NativeArgManifold nm) = NativeArgManifold (nativeManifoldArgsBound nm)
+    argN (NativeArgExpr e) = NativeArgExpr (go e)
+
+-- | How a variable is bound where a wrap names it: as a packet, as a native
+-- value, or both (a context argument passed in both forms).
+data Bound = BoundSerial | BoundNative | BoundBoth
+
+-- | Give each argument a debug or cache wrap names the form it is bound in
+-- at the wrap. A wrap is lowered where its manifold's body ends up, and a
+-- manifold written in place in its caller's body names variables the
+-- caller bound, in the caller's forms. A debug argument bound nowhere in
+-- reach, or holding a function, which has no wire form, is left out of the
+-- dump.
+wrapArgForms :: SerialManifold -> SerialManifold
+wrapArgForms = goSM Map.empty
+  where
+    goSM env (SerialManifold m lang form hf body) =
+      SerialManifold m lang form hf (goS (formEnv bindSerial form env) body)
+    goNM env (NativeManifold m lang form body) =
+      NativeManifold m lang form (goN (formEnv (const BoundNative) form env) body)
+
+    formEnv :: (b -> Bound) -> ManifoldForm (Or TypeS TypeF) b -> Map.Map Int Bound -> Map.Map Int Bound
+    formEnv bound form env =
+      Map.union (Map.fromList (abilist (\i c -> (i, ctx c)) (\i b -> (i, bound b)) form)) env
+    ctx (L _) = BoundSerial
+    ctx (R _) = BoundNative
+    ctx (LR _ _) = BoundBoth
+    bindSerial _ = BoundSerial
+
+    goS env e0 = case e0 of
+      ManS sm -> ManS (goSM env sm)
+      AppPoolS t p sargs -> AppPoolS t p (map (argS env) sargs)
+      AppRecS t m es -> AppRecS t m (map (goS env) es)
+      AppForeignRecS t m sock es -> AppForeignRecS t m sock (map (goS env) es)
+      CacheBodyS t resSa lbl m cargs body -> CacheBodyS t resSa lbl m (map (cacheArg env) cargs) (goS env body)
+      DebugWrapS t m cargs body -> DebugWrapS t m (mapMaybe (debugArg env) cargs) (goS env body)
+      ReturnS e -> ReturnS (goS env e)
+      SerialLetS i e1 e2 -> SerialLetS i (goS env e1) (goS (Map.insert i BoundSerial env) e2)
+      NativeLetS i ne e -> NativeLetS i (goN env ne) (goS (Map.insert i BoundNative env) e)
+      LetVarS {} -> e0
+      BndVarS {} -> e0
+      SerializeS sa ne -> SerializeS sa (goN env ne)
+      LoopS t ids body -> LoopS t ids (goLoop (natives ids env) goS body)
+
+    goN env e0 = case e0 of
+      AppExeN t exe xs -> AppExeN t exe (map (argN env) xs)
+      ManN nm -> ManN (goNM env nm)
+      ReturnN e -> ReturnN (goN env e)
+      SerialLetN i se e -> SerialLetN i (goS env se) (goN (Map.insert i BoundSerial env) e)
+      NativeLetN i e1 e2 -> NativeLetN i (goN env e1) (goN (Map.insert i BoundNative env) e2)
+      DeserializeN t sa se -> DeserializeN t sa (goS env se)
+      ListN v t es -> ListN v t (map (goN env) es)
+      TupleN v es -> TupleN v (map (goN env) es)
+      RecordN o v ps rs -> RecordN o v ps (map (second (goN env)) rs)
+      VariantN t n i es -> VariantN t n i (map (goN env) es)
+      DoBlockN t e -> DoBlockN t (goN env e)
+      EvalN t e -> EvalN t (goN env e)
+      CoerceN c t e -> CoerceN c t (goN env e)
+      IfN t c x y -> IfN t (goN env c) (goN env x) (goN env y)
+      IntrinsicN t intr msch es -> IntrinsicN t intr msch (map (goN env) es)
+      MapOptionalN t wt src e -> MapOptionalN t wt src (goN env e)
+      WireToNativeN t s intr sch es -> WireToNativeN t s intr sch (map (goN env) es)
+      NativeToWireN t s e -> NativeToWireN t s (goN env e)
+      LoopN t starts body -> LoopN t (map (second (goN env)) starts) (goLoop (natives (map fst starts) env) goN body)
+      _ -> e0
+
+    goLoop :: Map.Map Int Bound -> (Map.Map Int Bound -> b -> b) -> LoopBody NativeExpr SerialExpr b -> LoopBody NativeExpr SerialExpr b
+    goLoop env base body = case body of
+      LoopIf c x y -> LoopIf (goN env c) (goLoop env base x) (goLoop env base y)
+      LoopNLet i ne rest -> LoopNLet i (goN env ne) (goLoop (Map.insert i BoundNative env) base rest)
+      LoopSLet i se rest -> LoopSLet i (goS env se) (goLoop (Map.insert i BoundSerial env) base rest)
+      LoopBase x -> LoopBase (base env x)
+      LoopContinue nes -> LoopContinue (map (goN env) nes)
+
+    natives ids env = foldr (\i -> Map.insert i BoundNative) env ids
+
+    argS env (SerialArgManifold sm) = SerialArgManifold (goSM env sm)
+    argS env (SerialArgExpr e) = SerialArgExpr (goS env e)
+    argN env (NativeArgManifold nm) = NativeArgManifold (goNM env nm)
+    argN env (NativeArgExpr e) = NativeArgExpr (goN env e)
+
+    -- the argument in the form it is bound in, where it is bound
+    rebind env (Arg i tm, sa) = case (Map.lookup i env, tm) of
+      (Just BoundNative, Serial tf) -> Just (Arg i (Native tf), sa)
+      (Just BoundSerial, Native tf) -> Just (Arg i (Serial tf), sa)
+      (Just _, _) -> Just (Arg i tm, sa)
+      (Nothing, _) -> Nothing
+
+    debugArg env a@(Arg _ tm, _) = case tm of
+      Serial tf | containsFunF tf -> Nothing
+      Native tf | containsFunF tf -> Nothing
+      Serial _ -> rebind env a
+      Native _ -> rebind env a
+      _ -> Nothing
+
+    cacheArg env a = fromMaybe a (rebind env a)
+
+argsBoundLoop ::
+  Set.Set Int ->
+  (Set.Set Int -> b -> b) ->
+  LoopBody NativeExpr SerialExpr b ->
+  LoopBody NativeExpr SerialExpr b
+argsBoundLoop a base body = case body of
+  LoopIf c x y -> LoopIf (argsBoundN a c) (argsBoundLoop a base x) (argsBoundLoop a base y)
+  LoopNLet i ne rest -> LoopNLet i (argsBoundN a ne) (argsBoundLoop a base rest)
+  LoopSLet i se rest -> LoopSLet i (argsBoundS a se) (argsBoundLoop (Set.delete i a) base rest)
+  LoopBase x -> LoopBase (base a x)
+  LoopContinue nes -> LoopContinue (map (argsBoundN a) nes)
+
 invertSerialManifold :: SerialManifold -> SerialManifold
 invertSerialManifold sm0 =
-  runIndex (maxIndex sm0) (unD <$> foldSerialManifoldM fm sm0)
+  wrapArgForms (serialManifoldArgsBound (runIndex (maxIndex sm0) (unD <$> foldSerialManifoldM fm sm0)))
   where
     fm =
       FoldManifoldM
@@ -628,6 +810,10 @@ invertSerialManifold sm0 =
       atomize (IntrinsicN t intr msch (map unD nes)) (concatMap getDeps nes)
     invertNativeExprM (MapOptionalN_ t wt src (D ne lets)) =
       atomize (MapOptionalN t wt src ne) lets
+    invertNativeExprM (WireToNativeN_ t s intr sch nes) =
+      atomize (WireToNativeN t s intr sch (map unD nes)) (concatMap getDeps nes)
+    invertNativeExprM (NativeToWireN_ t s (D ne lets)) =
+      atomize (NativeToWireN t s ne) lets
     -- A native loop is sealed like a serial one (see 'LoopS_'): per-iteration
     -- work stays inside its leaves. Its initializers run once, before the
     -- loop, so their dependencies go outward.
@@ -729,9 +915,8 @@ collectRecords e0@(SerialManifold i0 _ _ _ _) =
     seekRecs _ (VarF _) = []
     seekRecs m (OptionalF t) = seekRecs m t
     seekRecs _ (NatLitF _) = []
-    seekRecs _ NatVoidF = []
+    seekRecs _ (VoidF _) = []
     seekRecs _ (StrLitF _) = []
-    seekRecs _ StrVoidF = []
     -- A back-reference contributes nothing new: the record it names
     -- is already visited at the NamF site that introduced the cycle.
     seekRecs _ (RecF _) = []
@@ -989,6 +1174,8 @@ allSerialASTs = runIdentity . surroundFoldSerialManifoldM defaultValue fw
         , opFoldWithNativeExprM = \_ folded ->
             return $ case folded of
               DeserializeN_ _ s child -> s : child
+              WireToNativeN_ _ s _ _ children -> s : concat children
+              NativeToWireN_ _ s child -> s : child
               _ -> foldlNE (<>) mempty folded
         }
 

@@ -1,0 +1,12 @@
+--' Cache a call given a function Python made
+module main (cachedAway)
+
+import root-py
+import root-cpp
+import .helpers
+
+--' Apply a Python adder by a cached call
+cachedAway :: Int -> <IO> Int
+cachedAway n = do
+  h <- mkPy n
+  kept@pyApply h 1

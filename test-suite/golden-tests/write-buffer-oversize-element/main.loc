@@ -57,7 +57,7 @@ testFirstSubpacket path = do
 testTotalCount :: Str -> <IO> Int
 testTotalCount path = do
   writeMixed path
-  Ok f <- @open path :: <IO> (Try Str (IFile Int))
+  Ok f <- @open path :: <IO> (Try Str (IFile [Int]))
   Ok _tailv1 <- @flen f
   _tailv1
 

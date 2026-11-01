@@ -1,7 +1,7 @@
 module main (foo)
 
-import foo
-import foopy (pzipWith, pmul, padd)
+import .foo
+import .foopy (pzipWith, pmul, padd)
 
 add3 x y z = padd x (padd y z)
 

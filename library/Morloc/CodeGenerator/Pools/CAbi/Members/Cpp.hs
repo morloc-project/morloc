@@ -63,7 +63,7 @@ import qualified Morloc.Build.Params as BP
 import qualified Morloc.DataFiles as DF
 import qualified Morloc.LangRegistry as LR
 import Morloc.CodeGenerator.Namespace
-import Morloc.CodeGenerator.ValueArgs (appValueArgs, valueArgsF)
+import Morloc.CodeGenerator.ValueArgs (appValueArgs, appMacroArgs, macroArgsF, valueArgsF)
 import Morloc.CodeGenerator.Ownership (LetMode (..), LetPlan (..), OwnCaps (..), PoolPlan (..), byValueIndices, changedSlots, emptyPoolPlan, letMode, letPlan, nativeLets, planPool)
 import Morloc.CodeGenerator.OwnershipCheck (checkManifold)
 import System.Environment (lookupEnv)
@@ -75,6 +75,7 @@ import Morloc.CodeGenerator.Serial
   , containsEffectT
   , serialAstToMsgpackSchema
   , shallowType
+  , isSerializable
   )
 import Morloc.Data.Doc
 import qualified Morloc.Data.GMap as GMap
@@ -213,9 +214,10 @@ instance {-# OVERLAPPABLE #-} (HasTypeF e) => HasCppType e where
       -- occurrence's arguments when the user gave it one (`MyBox<$1>`), and
       -- the name itself otherwise -- a generated type is monomorphic per
       -- instantiation and spells nothing of its arguments.
-      dataTypeName x ps
+      dataTypeName gv x ps
         | T.any (== '$') x = do
-            let (typeTs, kindCount) = partitionKindArgsF ps
+            gscope <- CMS.gets translatorGScope
+            let (typeTs, kindCount) = macroArgsF gscope gv ps
             ts' <- mapM f typeTs
             return . pretty $ expandMacro x (map render ts') kindCount
         | otherwise = return (pretty (nativeTypeName x))
@@ -224,10 +226,10 @@ instance {-# OVERLAPPABLE #-} (HasTypeF e) => HasCppType e where
       -- An enum lowers to its concrete name; the `enum class X : uint8_t`
       -- behind it is generated for this pool or supplied by the user
       -- through a `data Cpp => X = "..."` mapping.
-      f (EnumF (FV _ (CV x)) ps _) = dataTypeName x ps
+      f (EnumF (FV gv (CV x)) ps _) = dataTypeName gv x ps
       -- A variant lowers to its concrete name; the type carrying the arms
       -- is generated for this pool or supplied by `data Cpp => X = "..."`.
-      f (VariantF (FV _ (CV x)) ps _) = dataTypeName x ps
+      f (VariantF (FV gv (CV x)) ps _) = dataTypeName gv x ps
       -- Kindless or polymorphic-row `Table` lowers to a VarF tagged with
       -- the general type variable @BT.table@. The wire schema marker is
       -- @T@ on the encoder side; here on the C++ side it must lower to
@@ -261,9 +263,8 @@ instance {-# OVERLAPPABLE #-} (HasTypeF e) => HasCppType e where
         ts' <- mapM f ts
         return $ "std::function<" <> t' <> tupled ts' <> ">"
       f (NatLitF _) = return mempty
-      f NatVoidF = return mempty
+      f (VoidF _) = return mempty
       f (StrLitF _) = return mempty
-      f StrVoidF = return mempty
       -- Leak guard on the parameterized form (mirror of the VarF
       -- guard above). An unmapped recursive alias appears as
       -- @AppF (VarF (FV gv (CV gv))) [...]@ where the head's CV is
@@ -273,7 +274,8 @@ instance {-# OVERLAPPABLE #-} (HasTypeF e) => HasCppType e where
         legit <- cscopeMatches gv cvText
         if legit
           then do
-            let (typeTs, kindCount) = partitionKindArgsF ts
+            gscope <- CMS.gets translatorGScope
+            let (typeTs, kindCount) = macroArgsF gscope gv ts
             ts' <- mapM f typeTs
             return . pretty $ expandMacro cvText (map render ts') kindCount
           else do
@@ -281,11 +283,12 @@ instance {-# OVERLAPPABLE #-} (HasTypeF e) => HasCppType e where
             if Set.member gv declaredApp then return (pretty (nativeTypeName cvText)) else leakError gvText
       f (AppF t ts) = do
         -- $N in the CV template indexes TYPE args only; kind-kinded
-        -- args (NatLitF, NatVoidF, StrLitF, StrVoidF) are structural
+        -- args (NatLitF, StrLitF, VoidF) are structural
         -- metadata and skipped. The skipped count is threaded to
         -- expandMacro for error-message context only.
         t' <- f t
-        let (typeTs, kindCount) = partitionKindArgsF ts
+        gscope <- CMS.gets translatorGScope
+        let (typeTs, kindCount) = appMacroArgs gscope t ts
         ts' <- mapM f typeTs
         return . pretty $ expandMacro (render t') (map render ts') kindCount
       f t@(NamF _ (FV gc (CV "struct")) _ rs) = do
@@ -298,8 +301,9 @@ instance {-# OVERLAPPABLE #-} (HasTypeF e) => HasCppType e where
           Nothing -> error $ "Record missing from recmap: " <> show t <> " from map: " <> show recmap
       -- A table's wire shape ('serialAstToType' of its serial form).
       f (NamF NamTable _ _ _) = return "mlc::ArrowTable"
-      f (NamF _ (FV _ (CV s)) ps _) = do
-        let (typeTs, kindCount) = partitionKindArgsF ps
+      f (NamF _ (FV gv (CV s)) ps _) = do
+        gscope <- CMS.gets translatorGScope
+        let (typeTs, kindCount) = macroArgsF gscope gv ps
         ps' <- mapM f typeTs
         return $ renderTemplatedType s ps' kindCount
       -- Autogenerated struct case (cv == "struct") is not supported
@@ -560,11 +564,11 @@ translate srcs es = do
         }
       pool = planPool cppCaps es
       (code, stEnd) = CMS.runState (makeCppCode labels srcs' es universalScopeMap closureTable stageTable nativeEntries) translatorState
-  mapM_ (MM.throwSystemError . ("C++ pool:" <+>) . pretty) (translatorErrors stEnd)
+  mapM_ (MM.throwRejected . ("C++ pool:" <+>) . pretty) (translatorErrors stEnd)
   when checkOn $
     case concatMap (checkOne pool) (translatorLowered stEnd) of
       [] -> return ()
-      vs -> MM.throwSystemError ("C++ pool: ownership check failed (OWN-1):" <+> vsep (map pretty vs))
+      vs -> MM.throwCompilerBug ("C++ pool: ownership check failed (OWN-1):" <+> vsep (map pretty vs))
 
   maker <- makeTheMaker cxxFlags includeDirs
 
@@ -793,7 +797,7 @@ makeTheMaker flags includes = do
         SysRun . Code . render $
           [idoc|${CXX:-g++} -O2 -o #{outfile} #{src} #{hostSrc} #{hsep flags'} #{hsep incs}|]
 
-  return [cmd]
+  return [SysRequireToolchain CppPoolToolchain, cmd]
 
 -- | Forward declarations. Every manifold of the pool is declared, plus the
 -- native entry of any recursive manifold: a nested manifold is otherwise
@@ -1068,6 +1072,7 @@ cppLowerConfig (ClosureGen reifyThunks stageTable papplyHeads) =
     { lcSrcName = \src -> pretty (srcName src)
     , lcOperator = infixOperator
     , lcApplySrcGroup = \f as -> f <+> tupled as
+    , lcSourcedResult = \_ _ _ x -> x
     , lcSourcedArg = \_ _ _ x -> x
     , lcConstArg = cppConstArg
     , lcOwnership = \_ -> return Owned
@@ -1397,7 +1402,7 @@ PROPAGATE_ERROR(errmsg)|]
           SerialClosure ins out -> cppClosureProxyLambda tup ins out
           _ -> error "lcReflectClosureParsed: expected SerialClosure"
     -- A variant's generated marshaller converts its own closures.
-    , lcDivertNestedClosure = not . null . serialClosuresOutsideVariants
+    , lcDivertNestedClosure = cppDivertsClosure
     , lcMakeFunction = \callIndex mname args manifoldType priorLines body headForm isClosure -> do
         state <- CMS.get
         let alreadyDone = case headForm of
@@ -1588,17 +1593,44 @@ PROPAGATE_ERROR(errmsg)|]
               return (if moves then "std::move(" <> argNamer a <> ")" else argNamer a)
         capture a = return (argNamer a)
 
-    -- For serialization, records become tuples (that's what _put_value/to_voidstar expects)
-    -- Serialize/raw-deserialize types use the WIRE form: a closure nested in an
-    -- aggregate travels as its reified wire tuple, so the closure slot is typed
-    -- as that tuple ('cppClosureWireLeaf'), not the native std::function.
+    -- The wire-side type of a value being taken apart for sending or rebuilt
+    -- after receiving: a record that is taken apart or rebuilt (it holds a
+    -- packed or closure field, at any depth) is a tuple of its fields, which
+    -- _put_value/to_voidstar and the rebuild read by position; anything else
+    -- is its wire type, where a closure travels as its reified wire tuple
+    -- ('cppClosureWireLeaf').
     serializeTypeOf :: SerialAST -> CppTranslator (Maybe IType)
-    serializeTypeOf (SerialObject _ _ _ rs) = Just . toIType <$> recordToCppTuple (map snd rs)
-    serializeTypeOf s = Just . toIType <$> cppTypeOf (wireSerialAstToType cppClosureWireLeaf s)
+    serializeTypeOf = rawTypeOf
 
     rawTypeOf :: SerialAST -> CppTranslator (Maybe IType)
-    rawTypeOf (SerialObject _ _ _ rs) = Just . toIType <$> recordToCppTuple (map snd rs)
-    rawTypeOf s = Just . toIType <$> cppTypeOf (wireSerialAstToType cppClosureWireLeaf s)
+    rawTypeOf s = Just . toIType <$> rawDoc s
+
+    rawDoc :: SerialAST -> CppTranslator MDoc
+    rawDoc s | cppIsLeaf s = cppTypeOf (wireSerialAstToType cppClosureWireLeaf s)
+    rawDoc (SerialObject _ _ _ rs) = do
+      ds <- mapM (rawDoc . snd) rs
+      return $ "std::tuple" <> encloseSep "<" ">" "," ds
+    rawDoc (SerialPack _ (_, s)) = rawDoc s
+    rawDoc (SerialList v d e) = do
+      inner <- rawDoc e
+      cppTypeOf (AppF (VarF v) (maybe [] pure d ++ [rendered inner]))
+    rawDoc (SerialTuple v es) = do
+      inners <- mapM rawDoc es
+      cppTypeOf (AppF (VarF v) (map rendered inners))
+    rawDoc (SerialOptional _ e) = do
+      inner <- rawDoc e
+      cppTypeOf (OptionalF (rendered inner))
+    rawDoc s = cppTypeOf (wireSerialAstToType cppClosureWireLeaf s)
+
+    -- Decoded straight into its type, as wireToNative leaves it.
+    cppIsLeaf :: SerialAST -> Bool
+    cppIsLeaf s = isSerializable s && not (cppDivertsClosure s)
+
+    cppDivertsClosure :: SerialAST -> Bool
+    cppDivertsClosure = not . null . serialClosuresOutsideVariants
+
+    rendered :: MDoc -> TypeF
+    rendered d = VarF (FV (TV "raw") (CV (render d)))
 
     -- | Escape a log-template string for embedding in a C++ double-quoted
     -- literal. Reuses the canonical 'Morloc.Data.Doc.escapeStringLit'
@@ -1966,8 +1998,7 @@ deserialize varname0 typestr0 s0 = do
       return (schemaVar, map CP.printStmt stmts ++ [final])
 
 -- The C++ concrete type of a defunctionalized closure's wire tuple:
--- @(home_language, manifold_id, captured_packets)@. MUST match '_mlc_reify' in
--- pool.cpp and the t3sjaau1 schema.
+-- @(home_language, manifold_id, captured_packets)@, as in 'Serial.closureWireSchema'.
 cppClosureWireTupleName :: Text
 cppClosureWireTupleName = "std::tuple<std::string, int64_t, std::vector<std::vector<uint8_t>>>"
 
@@ -2091,11 +2122,6 @@ typeMToF (Native t) = t
 typeMToF (Serial t) = t
 typeMToF (Function ins out) = FunF (map typeMToF ins) (typeMToF out)
 typeMToF Passthrough = error "unreachable: a passthrough value is never a native argument"
-
-recordToCppTuple :: [SerialAST] -> CppTranslator MDoc
-recordToCppTuple ts = do
-  tsDocs <- mapM (cppTypeOf . wireSerialAstToType cppClosureWireLeaf) ts
-  return $ "std::tuple" <> encloseSep "<" ">" "," tsDocs
 
 translateSegment :: ClosureGen -> SerialManifold -> CppTranslator MDoc
 translateSegment closureGen m0@(SerialManifold root _ _ _ _) = do
@@ -2655,13 +2681,13 @@ generateSourcedSerializers univeralScopeMap es0 = do
     -- `std::shared_ptr<container_t>` (no template args) and the generated
     -- deserializer would fail to compile.
     showDefType self ps (NamT _ (TV v) args _) =
-      let (typeArgs, kindCount) = partitionKindArgsT args
+      let (typeArgs, kindCount) = partitionKindArgs kindOfT args
           argDocs = [showDefType self ps a | a <- typeArgs]
       in renderTemplatedType v argDocs kindCount
     showDefType _ _ (NatLitT _) = mempty
-    showDefType _ _ NatVoidT = mempty
+    showDefType _ _ (VoidT _) = mempty
     showDefType self ps (AppT (VarT (TV v)) ts) =
-      let (typeTs, kindCount) = partitionKindArgsT ts
+      let (typeTs, kindCount) = partitionKindArgs kindOfT ts
       in pretty $ expandMacro v (map (render . showDefType self ps) typeTs) kindCount
     showDefType _ _ (AppT _ _) = error "AppT is only OK with VarT, for now"
     showDefType _ _ (EffectT _ _) = error "Cannot serialize suspensions"
@@ -2671,7 +2697,6 @@ generateSourcedSerializers univeralScopeMap es0 = do
     showDefType _ _ (NatDivT _ _) = mempty
     showDefType _ _ (StrLitT _) = mempty
     showDefType _ _ (StrConcatT _ _) = mempty
-    showDefType _ _ StrVoidT = mempty
     showDefType self ps (OptionalT t)
       | isRecursiveRef self t =
           "std::shared_ptr<" <> showDefType self ps t <> ">"
@@ -2745,7 +2770,7 @@ cppModuleIncludeDirs reg = fmap catMaybes . mapM dirOf . filter isCpp
   where
     isCpp s = LR.poolOf reg (srcLang s) == cppLang
 
-    dirOf (Source _ _ (Just p) _ _ _ _ _ _ _) =
+    dirOf Source {srcPath = Just p} =
       case (MS.takeDirectory p, MS.dropExtensions (MS.takeFileName p)) of
         -- A bare header name resolves through the same search path the
         -- compiled sources use.
@@ -2776,7 +2801,7 @@ gccVersionFlag i
   | otherwise = "-std=c++" <> MT.show' i
 
 flagAndPath :: LR.LangRegistry -> Source -> MorlocMonad (Source, [String], Maybe Path)
-flagAndPath reg src@(Source _ srcL (Just p) _ _ _ _ _ _ _) | LR.poolOf reg srcL == cppLang =
+flagAndPath reg src@Source {srcLang = srcL, srcPath = Just p} | LR.poolOf reg srcL == cppLang =
   case (MS.takeDirectory p, MS.dropExtensions (MS.takeFileName p), MS.takeExtensions p) of
     (".", base, "") -> do
       header <- lookupHeader base
@@ -2787,7 +2812,7 @@ flagAndPath reg src@(Source _ srcL (Just p) _ _ _ _ _ _ _) | LR.poolOf reg srcL 
       absDir <- liftIO $ MS.canonicalizePath dir
       absPath <- liftIO $ MS.canonicalizePath p
       exists <- liftIO $ MS.doesFileExist absPath
-      unless exists . MM.throwSystemError $
+      unless exists . MM.throwRejected $
         "Source file not found:" <+> pretty absPath
       incPath <- poolRelative absPath
       return (src {srcPath = Just incPath}, libFlags, Just absDir)
@@ -2815,7 +2840,7 @@ flagAndPath reg src@(Source _ srcL (Just p) _ _ _ _ _ _ _) | LR.poolOf reg srcL 
       existingPaths <- liftIO . fmap catMaybes . mapM getFile $ allPaths
       case existingPaths of
         (x : _) -> liftIO $ MS.canonicalizePath x
-        [] -> MM.throwSystemError $ "Header file " <> pretty base <> ".* not found"
+        [] -> MM.throwRejected $ "Header file " <> pretty base <> ".* not found"
 
     lookupLib :: String -> MorlocMonad [String]
     lookupLib base = do
@@ -2839,8 +2864,8 @@ flagAndPath reg src@(Source _ srcL (Just p) _ _ _ _ _ _ _) | LR.poolOf reg srcL 
           let rpathFlags = ["-Wl,-rpath," <> MS.shellQuote libdir | libdir /= moduleLibDir]
           return $ rpathFlags <> ["-L" <> MS.shellQuote libdir, "-l" <> libnamebase]
         [] -> return []
-flagAndPath reg src@(Source _ srcL Nothing _ _ _ _ _ _ _) | LR.poolOf reg srcL == cppLang = return (src, [], Nothing)
-flagAndPath _ _ = MM.throwSystemError $ "flagAndPath should only be called for C++ functions"
+flagAndPath reg src@Source {srcLang = srcL, srcPath = Nothing} | LR.poolOf reg srcL == cppLang = return (src, [], Nothing)
+flagAndPath _ _ = MM.throwCompilerBug $ "flagAndPath should only be called for C++ functions"
 
 getFile :: Path -> IO (Maybe Path)
 getFile x = do

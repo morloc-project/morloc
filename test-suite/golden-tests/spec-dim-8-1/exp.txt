@@ -1,0 +1,32 @@
+--- phantom Nat, any length ---
+2
+--- two phantom Nats, any shape ---
+1
+--- Vector 0 given 0 ---
+0
+--- Vector 0 given 1 ---
+Error: failed to parse argument #0: Array length mismatch: expected 0, got 1
+--- nested, right shape ---
+2
+--- nested, short inner ---
+Error: failed to parse argument #0: Array length mismatch: expected 3, got 2
+--- pool, computed length, short ---
+Error: failed to parse argument #0: Array length mismatch: expected 4, got 3
+--- pool, alias with computed length, short ---
+Error: failed to parse argument #0: Array length mismatch: expected 4, got 3
+--- nexus, alias, right shape ---
+[[1,2,3],[4,5,6]]
+--- nexus, alias, short inner ---
+Error: failed to parse argument #0: Array length mismatch: expected 3, got 1
+--- nexus, newtype of Vector, long ---
+Error: failed to parse argument #0: Array length mismatch: expected 2, got 3
+--- nexus, list of Vector, long element ---
+Error: failed to parse argument #0: Array length mismatch: expected 2, got 3
+--- nexus, record field, long ---
+Error: failed to parse argument #0: Array length mismatch: expected 2, got 3
+--- nexus, variable outer, short inner ---
+Error: failed to parse argument #0: Array length mismatch: expected 3, got 2
+--- nexus, alias with computed length, short ---
+Error: failed to parse argument #0: Array length mismatch: expected 4, got 3
+--- nexus, Matrix data long ---
+Error: failed to parse argument #0: Array length mismatch: expected 6, got 7

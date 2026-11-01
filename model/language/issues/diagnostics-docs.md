@@ -17,7 +17,7 @@
 - [reproduced] A `match` whose branches differ in type (a value beside a
   `do` suspension) is reported as "Branches of guard/if have incompatible
   types" with "then-branch" and "else-branch", constructs the program does
-  not contain: `match` reaches Typecheck.hs:1476 through IfS. Repro: in a
+  not contain: `match` reaches Typecheck.hs:1393 through IfS. Repro: in a
   `do` block, `match r | (Err e) = Err e | (Ok xs) = do { f xs; Ok xs }`.
 - [reproduced] Violates DIAG-5. A call of a named, non-recursive morloc
   function is beta-reduced into its caller (LambdaEval `reduce`), so it has
@@ -41,6 +41,16 @@
   to infer concrete universal type for lang cpp for type Foo ... missing a
   language-specific type definition", naming no term. Repro:
   /work/plans/model-audit-2026-10-21/repro/F/real/r3.loc.
+  [reproduced, 2026-10-25] When the type has no mapping in any language
+  (`Int` with no `type Py => Int`), the error points at the module's export
+  list (`module main (f)`, column of `f`) rather than at a call; which node
+  is blamed changes with the placement chosen.
+- **A record literal in a generic slot gets wrong advice.** [reproduced,
+  2026-10-28] Anonymous records are ruled unsupported, but `import root-py;
+  lenn :: [a] -> Int; na x = lenn [{ann = "a", x = inc x}]` is refused
+  with "No concrete py type for 'Record'... or import a module that
+  provides one (e.g. root-py)", naming a module already imported
+  (Express.hs record fallback; C++ names root-cpp the same way).
 - **An R pool load failure is printed twice.** [reproduced, 2026-10-21]
   A sourced R file assigning `.__morloc` prints "failed to load pool
   sources: cannot change value of locked binding" bare and again after
@@ -58,8 +68,9 @@
   Repro: /work/plans/model-audit-2026-10-21/repro/G/diag/bin.loc, nomod.loc, cfg/.
 - **Wrong or internal wording.** [reproduced, 2026-10-21] `@render` on an
   argument is reported as `@with` (Frontend/Desugar.hs:1101-1110
-  `rejectWithHere`). `--' @literal` is not warned deprecated while
-  `literal: true` is. A duplicate definition (`f x = x` twice) reports
+  `rejectWithHere`). A bare `--' @literal` reads as false
+  (Desugar.hs `parseDocBool`, where other flags use `flagValue`), so it is
+  neither applied nor warned deprecated; `@literal true` is warned. A duplicate definition (`f x = x` twice) reports
   "Unification error: Error in value checker: Cannot check beyond source
   boundary". Repro: /work/plans/model-audit-2026-10-21/repro/G/diag/mis2.loc, lit*.loc, dupdef.loc.
 - **A literal `-0.0` loses its sign in the nexus.** [reproduced,
@@ -78,7 +89,7 @@
   `stateDebugCallee`) that each minting site updates partially; carrying
   the callee on the manifold node would close it.
 - [read] Violates DIAG-5 under `--debug` in Rust: `lcDebugWrap` is the
-  identity (CodeGenerator/Grammars/Translator/Rust.hs, `lcDebugWrap = \_ _
+  identity (CodeGenerator/Pools/CAbi/Members/Rust.hs, `lcDebugWrap = \_ _
   body -> return body`), so a Rust pool dumps no arguments; its frame
   labels use the debug lookup and push an empty name for every manifold.
 - [speculative] Under `--debug`, frames are drained only at the dispatcher
@@ -93,3 +104,34 @@
   mismatch.** [reproduced, 2026-10-23] `newtype Bag = [a]` reports
   `expected: [a] inferred: [a] Cannot compare types a and a@q0` instead of
   naming the unbound `a`.
+- **`SystemError` is documented as a compiler bug but carries user errors.**
+  [read, 2026-10-24] The constructor's comment (Namespace/State.hs,
+  `MorlocError`) says "Internal compiler error (bug)", yet every error with
+  a source position but no node index uses it: a syntax error, a malformed
+  docstring directive (Frontend/API.hs `readProgram`), an unresolved
+  concrete type. Its message prints plainly (no bug label; that is
+  `throwCompilerBug`), so users are not misled, but tests cannot tell a
+  user error at a position from a compiler bug (SpecTests `rejectUser`).
+- **Docstrings inside a function-type alias are dropped.** [reproduced,
+  2026-10-25] Violates DOC-3. In the stdlib `stream` module, `type Reader a
+  = --' Input file / --' @check.path r / Str -> ...` (and `Writer`) attach
+  their argument docstrings to a type inside an alias body, which no reader
+  looks up, so the `@check.path` never reaches a signature that writes
+  `Reader`. Building `stream` itself warns that these docstrings document
+  nothing (stream/main.loc:58 and :64); importers are not warned. Same
+  class as the COST-13 point on directives inside structural aliases.
+- **A where-local or instance-body definition's docstring replaces a
+  top-level term's.** [read, 2026-10-25] Violates DOC-1. Local
+  definitions go through desugarTopLevel, so captureDeclDocs files their
+  docstring in dsTermDocs under the bare name (Desugar.hs captureDeclDocs,
+  `Map.insert`), overwriting a documented top-level term of the same name;
+  help and `@with` lookups for that term then show the local docstring.
+  Needs a repro.
+- **A term with no implementation is reported as a compiler bug.**
+  [reproduced, 2026-10-25] Violates DIAG-2. `morloc typecheck --realize`
+  on a module whose exported terms have signatures but no implementation
+  (golden-tests/infix-polyglot/ops/main.loc, scoping-13/foo/main.loc,
+  type-alias-transitive/types/main.loc) prints "Compiler bug, broken index
+  7 with attached error: No implementation found for '<*>'": the error is
+  raised at a node with no source location, so the user error is labelled a
+  compiler bug.

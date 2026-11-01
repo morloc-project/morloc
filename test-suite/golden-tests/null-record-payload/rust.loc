@@ -1,0 +1,61 @@
+-- Null as the value of an optional field whose payload is a record
+-- type (OPT-1), used both as an export and as an argument, where
+-- it is checked against the evaluated record type; Rust realization.
+module main (pa, pl, counts, nested)
+import root-rust
+
+source Rust from "types.rs"
+  ( "count_inner" as countInner
+  , "count_pinner" as countPInner
+  , "count_nested" as countNested
+  , "nest_state" as nestState
+  )
+countInner :: [Outer t c] -> Int
+countPInner :: [POuter] -> Int
+countNested :: [PNested] -> Int
+nestState :: ?(?Int) -> Str
+
+
+record Inner c where
+  ann :: c
+  x :: Int
+
+record Outer t c where
+  ann :: t
+  inner :: ?(Inner c)
+
+record PInner where
+  ann :: Str
+  x :: Int
+
+record POuter where
+  ann :: Str
+  inner :: ?PInner
+
+-- A Null in a ?(?T) slot is absent. The natives take the nested form this
+-- language gives ?(?T) (OPT-2, model/language/issues/values.md).
+record PNested where
+  ann :: Str
+  inner :: ?(?PInner)
+
+record Rust => (Inner c) = "Inner<$1>" c
+record Rust => (Outer t c) = "Outer<$1,$2>" t c
+record Rust => PInner = "PInner"
+record Rust => POuter = "POuter"
+record Rust => PNested = "PNested"
+
+pa :: [Outer Str Str]
+pa = [{ann = "a", inner = {ann = "i", x = 1}}, {ann = "b", inner = Null}]
+
+pl :: [POuter]
+pl = [{ann = "a", inner = {ann = "i", x = 1}}, {ann = "b", inner = Null}, {ann = "c", inner = Null}]
+
+counts :: [Int]
+counts = [countInner pa, countPInner pl]
+
+nested :: (Int, Str, Str)
+nested =
+  ( countNested [{ann = "a", inner = Null}, {ann = "b", inner = {ann = "i", x = 1}}]
+  , nestState Null
+  , nestState 3
+  )

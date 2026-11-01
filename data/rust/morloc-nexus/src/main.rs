@@ -8,6 +8,7 @@
 compile_error!("morloc needs panic = \"unwind\" (model/runtime/panic.md PANIC-8)");
 mod cli;
 mod convert;
+mod dims;
 mod dispatch;
 mod file;
 mod help;
@@ -19,6 +20,7 @@ mod phase2;
 mod process;
 mod runlog;
 mod schemas;
+mod sources;
 mod serve_help;
 mod parse_arg;
 mod sigrm;
@@ -461,6 +463,14 @@ fn main() {
     }
     if let Some(n) = config.debug_recursion_cap {
         crate::process::set_startup_env("MORLOC_DEBUG_RECURSION_CAP", n.to_string());
+    }
+    // A debug build checks the values the program builds, in the nexus and
+    // in every pool it starts; a release build does not, whatever it
+    // inherits.
+    if manifest.capabilities.iter().any(|c| c == "code_checks") {
+        crate::process::set_startup_env("MORLOC_CODE_CHECKS", "1");
+    } else {
+        crate::process::remove_startup_env("MORLOC_CODE_CHECKS");
     }
 
     // Resolve the per-run identity now so pools inherit a fully-published
@@ -1228,7 +1238,7 @@ fn run_call_packet(config: &dispatch::NexusConfig, tmpdir: &str) {
         let s = unsafe { std::ffi::CStr::from_ptr(run_err) }.to_string_lossy().into_owned();
         unsafe { libc::free(run_err as *mut c_void) };
         eprintln!("Error: run failed: {}", s);
-        process::report_dead_pools(false);
+        process::report_dead_pools(crate::dispatch::reply_is_peer_died(unsafe { std::slice::from_raw_parts(result_packet, 32) }));
         process::clean_exit(1);
     }
 

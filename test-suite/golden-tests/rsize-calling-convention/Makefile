@@ -12,11 +12,11 @@ all:
 	grep -c 'lib.scale(.*) (' nexus-build/pools/py/pool.py >> obs.txt
 	grep -c 'lib.shift(.*, .*)' nexus-build/pools/py/pool.py >> obs.txt
 	grep -c 'lib.native_name_add' nexus-build/pools/py/pool.py >> obs.txt
-	morloc make -o bad bad-zero.loc 2> obs.zero.err && echo UNEXPECTED_SUCCESS >> obs.txt || echo zero_rejected >> obs.txt
-	morloc make -o bad bad-negative.loc 2> obs.negative.err && echo UNEXPECTED_SUCCESS >> obs.txt || echo negative_rejected >> obs.txt
-	morloc make -o bad bad-noninteger.loc 2> obs.noninteger.err && echo UNEXPECTED_SUCCESS >> obs.txt || echo noninteger_rejected >> obs.txt
-	morloc make -o bad bad-toolarge.loc 2> obs.toolarge.err && echo UNEXPECTED_SUCCESS >> obs.txt || echo toolarge_rejected >> obs.txt
-	morloc make -o bad bad-exact.loc 2> obs.exact.err && echo UNEXPECTED_SUCCESS >> obs.txt || echo exact_rejected >> obs.txt
+	morloc make -o bad bad-zero.loc 2> obs.zero.err && echo UNEXPECTED_SUCCESS >> obs.txt || (grep -q 'Compiler bug' obs.zero.err && echo FAULT >> obs.txt || echo zero_rejected >> obs.txt)
+	morloc make -o bad bad-negative.loc 2> obs.negative.err && echo UNEXPECTED_SUCCESS >> obs.txt || (grep -q 'Compiler bug' obs.negative.err && echo FAULT >> obs.txt || echo negative_rejected >> obs.txt)
+	morloc make -o bad bad-noninteger.loc 2> obs.noninteger.err && echo UNEXPECTED_SUCCESS >> obs.txt || (grep -q 'Compiler bug' obs.noninteger.err && echo FAULT >> obs.txt || echo noninteger_rejected >> obs.txt)
+	morloc make -o bad bad-toolarge.loc 2> obs.toolarge.err && echo UNEXPECTED_SUCCESS >> obs.txt || (grep -q 'Compiler bug' obs.toolarge.err && echo FAULT >> obs.txt || echo toolarge_rejected >> obs.txt)
+	morloc make -o bad bad-exact.loc 2> obs.exact.err && echo UNEXPECTED_SUCCESS >> obs.txt || (grep -q 'Compiler bug' obs.exact.err && echo FAULT >> obs.txt || echo exact_rejected >> obs.txt)
 
 clean:
 	rm -rf nexus bad __pycache__

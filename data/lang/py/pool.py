@@ -27,10 +27,6 @@ global_state = dict()
 def mlc_closure_codec(tuple_schema, arg_codecs, res_codec):
     return ("__mlc_closure__", tuple_schema, arg_codecs, res_codec)
 
-# The schema of every closure's wire tuple (home, manifold id, captured
-# packets); must equal the one Morloc.CodeGenerator.Serial emits.
-_MLC_CLOSURE_SCHEMA = "t3sjaau1"
-
 # AUTO include preamble start
 # <<<BREAK>>>
 # AUTO include preamble end
@@ -324,7 +320,7 @@ def _mlc_call_released(sock, mid, packets, own, res_codec):
             morloc.release_packet_shm(p)
     try:
         if res_codec is None:
-            return morloc.get_value(res, _MLC_CLOSURE_SCHEMA)
+            return morloc.get_value(res, mlc_closure_schema)
         return mlc_decode(res, res_codec)
     finally:
         morloc.release_packet_shm(res)
@@ -355,6 +351,8 @@ def mlc_reflect_from_tuple(tup, arg_codecs, res_codec):
     # decodes the result. Used when the closure is nested in an aggregate
     # whose enclosing get_value has already parsed the tuple.
     home_lang, mid, captured = tup
+    # A [U8] decodes as a list (NATIVE-7); foreign_call takes packets as bytes.
+    captured = [bytes(p) for p in captured]
     sock = os.path.join(global_state["tmpdir"], "pipe-" + home_lang)
     def _call(*args):
         own = [mlc_encode(a, s) for a, s in zip(args, arg_codecs)]

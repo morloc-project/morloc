@@ -106,8 +106,16 @@ morloc_mlc_load                      <- function(...){ .Call("morloc_mlc_load", 
 morloc_mlc_hash                      <- function(...){ .Call("morloc_mlc_hash",                      ...) }
 morloc_mlc_compare                   <- function(...){ .Call("morloc_mlc_compare",                   ...) }
 morloc_mlc_read                      <- function(...){ .Call("morloc_mlc_read",                      ...) }
-morloc_mlc_unpack                    <- function(schema, packet){ morloc_get_value(as.raw(packet), schema) }
-morloc_mlc_open                      <- function(...){ .Call("morloc_mlc_open",                      ...) }
+morloc_mlc_conform                   <- function(...){ .Call("morloc_mlc_conform",                   ...) }
+morloc_mlc_unpack                    <- function(schema, packet){
+  packet <- as.raw(packet)
+  # PANIC-14: only a pool passes a value by reference; byte 14 is the source.
+  if (length(packet) >= 32 && as.integer(packet[14]) == 2L) {
+    stop("@unpack: the bytes are a reference into shared memory, not a value")
+  }
+  morloc_get_value(packet, schema)
+}
+morloc_mlc_open_ifile                <- function(...){ .Call("morloc_mlc_open_ifile",                ...) }
 morloc_mlc_close                     <- function(...){ .Call("morloc_mlc_close",                     ...) }
 morloc_mlc_tmpfile                   <- function(...){ .Call("morloc_mlc_tmpfile",                   ...) }
 morloc_mlc_unlink_tmp                <- function(...){ .Call("morloc_mlc_unlink_tmp",                ...) }
@@ -137,17 +145,18 @@ morloc_mlc_flush                     <- function(...){ .Call("morloc_mlc_flush",
 morloc_mlc_open_channel              <- function(...){ .Call("morloc_mlc_open_channel",              ...) }
 morloc_mlc_settle                    <- function(...){ .Call("morloc_mlc_settle",                    ...) }
 morloc_mlc_spawn                     <- function(...){ .Call("morloc_mlc_spawn",                     ...) }
-# Merge every fold accumulator with the handler's `combine`, then release
-# the cell. The count is never zero -- an untouched cell answers with its
-# seed -- so this always has a value to return.
-morloc_mlc_cell_reduce <- function(schema, combine, handle) {
+# Every accumulator of a cell, in its wire form; with morloc_mlc_reduce_list
+# it runs @cellreduce.
+morloc_mlc_cell_slots <- function(schema, handle) {
   on.exit(try(morloc_mlc_cell_free(handle), silent = TRUE), add = TRUE)
   n <- morloc_mlc_cell_count(handle)
-  acc <- morloc_mlc_cell_slot(handle, 0, schema)
-  for (i in seq_len(n - 1)) {
-    acc <- combine(acc, morloc_mlc_cell_slot(handle, i, schema))
-  }
-  acc
+  if (n < 1) stop("@fold: the accumulator holds nothing to merge")
+  lapply(seq_len(n) - 1, function(i) morloc_mlc_cell_slot(handle, i, schema))
+}
+
+# A non-empty list folded with `combine`.
+morloc_mlc_reduce_list <- function(combine, xs) {
+  Reduce(combine, xs)
 }
 
 # @replay: call `fn` on every frame (sub-packet) of the stream, in order,
@@ -291,10 +300,6 @@ global_state <- new.env(parent = emptyenv())
 MLC_MANIFOLD_PREFIX <- ".__mm_"
 MLC_HOME_LANG <- "r"
 
-# The schema of every closure's wire tuple (home, manifold id, captured
-# packets); must equal the one Morloc.CodeGenerator.Serial emits.
-MLC_CLOSURE_SCHEMA <- "t3sjaau1"
-
 mlc_is_closure_codec <- function(codec) inherits(codec, "mlc_closure_codec")
 
 # Serialize a native value by its codec: a closure is reified first.
@@ -376,7 +381,7 @@ mlc_call_released <- function(sock, mid, packets, own, res_codec) {
   })
   res <- morloc_foreign_call(sock, as.integer(mid), packets)
   if (is.null(res_codec)) {
-    morloc_get_value(res, MLC_CLOSURE_SCHEMA)
+    morloc_get_value(res, mlc_closure_schema)
   } else {
     mlc_decode(res, res_codec)
   }

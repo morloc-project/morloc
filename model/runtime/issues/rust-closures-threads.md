@@ -13,7 +13,7 @@ the same call under `map` is the call's failure, catchable by `@try`.
 `@throw` and foreign failures are not affected (they unwind without the
 hook; spec-host-7-1 `tryThrow`, `tryForeign`).
 
-- morloc-runtime-types/src/panic.rs:152 `decide`: scope 0 means Exit; only
+- morloc-runtime-types/src/panic.rs:165 `decide`: scope 0 means Exit; only
   `dispatch_guard` (rustmorloc lib.rs) opens a host scope, on the pool thread.
 - Candidate: the `IntoCallbackN` adapter (or the manifold entry) opens
   `SCOPE_HOST` when the thread has no scope, so the panic unwinds to the

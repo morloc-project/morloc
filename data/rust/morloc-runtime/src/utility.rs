@@ -467,7 +467,7 @@ pub(crate) unsafe fn write_binary_fd(
         Ok(()) => 0,
         Err(e) => {
             set_errmsg(errmsg, &e);
-            if matches!(e, MorlocError::PipeClosed) { morloc_runtime_types::MLC_RESULT_PIPE_CLOSED } else { -1 }
+            if matches!(e, MorlocError::PipeClosed) { crate::ipc_ffi::note_pipe_closed() } else { -1 }
         }
     }
 }

@@ -11,16 +11,16 @@ type Pat = [Pat]
 
 depth ::
   --' a tree
-  --' arg: --tree
-  --' default: {"Node": [1, "Leaf", {"Node": [2, "Leaf", "Leaf"]}]}
+  --' @arg --tree
+  --' @default {"Node": [1, "Leaf", {"Node": [2, "Leaf", "Leaf"]}]}
   Tree ->
   Tree
 depth t = t
 
 pats ::
   --' patterns
-  --' arg: --pat
-  --' default: [[], [[]]]
+  --' @arg --pat
+  --' @default [[], [[]]]
   Pat ->
   Pat
 pats p = p

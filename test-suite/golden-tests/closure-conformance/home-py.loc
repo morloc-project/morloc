@@ -21,6 +21,6 @@ source Py from "hosts.py"
 
 -- a curried host: `mk(k)` returns a callable, so the call is `mk(k)(x)`
 source Py from "hosts.py" where
-  --' name: home_mk
+  --' @name home_mk
   --' @rsize 1
   mkHome

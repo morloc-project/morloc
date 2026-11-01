@@ -1,5 +1,4 @@
 //! CLI argument handling and voidstar utility functions.
-//! Replaces cli.c.
 
 // A value crossing this module is user data: a narrowing or sign change
 // goes through a checked conversion or a named helper, never `as`.
@@ -16,12 +15,7 @@ use morloc_runtime_types::width;
 use crate::shm;
 
 /// Extensions that mark an argument as path-shaped for the
-/// "looks-like-a-path" early-failure check (in addition to the
-/// `/` separator). A superset of the extensions
-/// [`load_morloc_data_file`] dispatches on by name (`.json`,
-/// `.mpk`, `.msgpack`, `.csv`, `.tsv`); `.arrow` and `.parquet`
-/// are recognized as paths here even though that loader detects
-/// them by magic bytes instead of extension.
+/// "looks-like-a-path" early-failure check, in addition to `/`.
 pub const DATA_FILE_EXTENSIONS: &[&str] = &[
     ".json", ".mpk", ".msgpack", ".csv", ".tsv", ".arrow", ".parquet",
 ];
@@ -55,13 +49,8 @@ fn arg_looks_like_file_path(arg: &str) -> bool {
     })
 }
 
-/// Process-wide first-wins guard for stdin. Each invocation of a
-/// nexus command may consume stdin at most once -- a second attempt
-/// errors clearly instead of silently reading zero bytes after the
-/// first reader drained it.
-///
-/// A CLI run parses its arguments once per process; a served call has no
-/// standard input.
+/// Process-wide first-wins guard for stdin: a second claim errors
+/// instead of reading zero bytes after the first reader drained it.
 static STDIN_CLAIMED: AtomicBool = AtomicBool::new(false);
 
 #[cfg(test)]
@@ -69,9 +58,7 @@ pub fn reset_stdin_claim() {
     STDIN_CLAIMED.store(false, Ordering::Relaxed);
 }
 
-/// Try to claim stdin for the current argument. Returns `Ok(())` on
-/// first claim, `Err(...)` if another argument has already consumed
-/// stdin in this dispatch.
+/// Claim stdin for the current argument; errors if already claimed.
 fn claim_stdin() -> Result<(), MorlocError> {
     claim_stdin_when(crate::stream::serving())
 }
@@ -106,16 +93,11 @@ unsafe fn wrap_errmsg_with(err: *mut c_char, ctx: &str) -> MorlocError {
 }
 
 /// Wrap a C errmsg with `ctx` and write the result to `errmsg`.
-/// One-liner over `set_errmsg` + `wrap_errmsg_with` for the common
-/// "tag this error with where it came from" pattern.
 unsafe fn wrap_and_set_errmsg(err: *mut c_char, ctx: &str, errmsg: *mut *mut c_char) {
     set_errmsg(errmsg, &wrap_errmsg_with(err, ctx));
 }
 
-/// How a CLI argument should be sourced. The classification is the
-/// single source of truth for "is this stdin, a file, or inline" --
-/// every entry point that reads a CLI argument routes through
-/// [`classify_arg_source`] so the rules stay in one place.
+/// How a CLI argument is sourced; see [`classify_arg_source`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArgSource {
     /// `-` or `/dev/stdin`. The caller still needs to call
@@ -123,33 +105,23 @@ pub enum ArgSource {
     /// only labels the source.
     Stdin,
     /// The token names a file to be opened. Content type is decided
-    /// by [`load_morloc_data_file`] (extension + magic-byte sniff).
-    /// Reached when the token doesn't parse as inline JSON but does
-    /// name an existing path on disk.
+    /// by `load_morloc_data_file` (extension + magic-byte sniff).
     File,
     /// The bytes are inline content (literal JSON for the target
-    /// schema). Reached when the token has a JSON-literal shape
-    /// (`"`/`{`/`[`/digit/`-digit` prefix, or the bare keywords
-    /// `null`/`true`/`false`).
+    /// schema).
     Inline,
 }
 
 /// Classified CLI argument: the source kind plus a C-string pointer
 /// into (a possibly offset position within) the original token. The
-/// pointer is safe to pass to `fopen` / `read_json_with_schema` and is
-/// guaranteed to be NUL-terminated because we only advance into the
-/// original NUL-terminated string -- never past it.
+/// pointer is NUL-terminated.
 pub struct Classified {
     pub kind: ArgSource,
     pub effective: *const c_char,
 }
 
 /// True iff the (trimmed) token has the prefix of a JSON literal, or
-/// is one of the three bare keywords. Used by the new classifier to
-/// preempt the filesystem check so a file literally named `null`,
-/// `42`, etc. doesn't shadow the JSON keyword. Strings (which start
-/// with `"`), objects (`{`), arrays (`[`), numbers (digit, or
-/// `-digit`), and the keywords are all recognized here.
+/// is one of the bare keywords `null`, `true`, `false`.
 fn is_json_literal_shape(s: &str) -> bool {
     let t = s.trim_start();
     let mut it = t.chars();
@@ -171,7 +143,7 @@ fn is_json_literal_shape(s: &str) -> bool {
 ///      doesn't shadow the JSON keyword.
 ///   3. `file_exists(token)` (File).
 ///   4. Path-shaped but missing -> `Err("file '...' not found")`.
-///   5. Anything else -> error pointing the user at `source: file` in
+///   5. Anything else -> error pointing the user at `@source file` in
 ///      the argument's docstring.
 pub unsafe fn classify_arg_source(arg: *const c_char) -> Result<Classified, MorlocError> {
     use crate::utility::file_exists;
@@ -201,16 +173,14 @@ pub unsafe fn classify_arg_source(arg: *const c_char) -> Result<Classified, Morl
     Err(MorlocError::Other(format!(
         "argument '{}' is not inline JSON (would have to start with \", {{, [, a digit, \
          -digit, or be the bare keyword null/true/false) and is not an existing file path. \
-         If the argument is always a path, set `source: file` in its docstring; if it is \
-         always a literal, set `source: inline`.",
+         If the argument is always a path, set `@source file` in its docstring; if it is \
+         always a literal, set `@source inline`.",
         arg_str
     )))
 }
 
 // ── argument_t lifecycle ───────────────────────────────────────────────────
 
-// argument_t is defined in eval.h (C). We use it opaquely via libc pointers.
-// The struct: { value: *mut c_char, fields: *mut *mut c_char, default_fields: *mut *mut c_char, size: usize }
 #[repr(C)]
 pub struct ArgumentT {
     pub value: *mut c_char,
@@ -332,10 +302,7 @@ pub(crate) unsafe fn peek_packet_header_via_pread(
     packet::PacketHeader::from_bytes(&header_bytes).ok()
 }
 
-/// C ABI shim over `peek_packet_header_via_pread`. Returns 1 iff `path`
-/// is a `PACKET_TYPE_STREAM` file, 0 otherwise. Language runtimes call
-/// this from their FILE+DATA unwrap branches to choose between the
-/// legacy data-indirection path and the stream-ingest loop.
+/// 1 iff `path` is a `PACKET_TYPE_STREAM` file, else 0.
 pub(crate) unsafe fn file_is_stream_packet(path: *const c_char) -> i32 {
     match peek_packet_header_via_pread(path) {
         Some(header) if header.is_stream() => 1,
@@ -345,8 +312,7 @@ pub(crate) unsafe fn file_is_stream_packet(path: *const c_char) -> i32 {
 
 /// Wire `try_load_stream_packet_file` into an entry point: on stream
 /// hit return the packet; on non-stream fall through; on error stamp
-/// `errmsg` and return null. Deduplicates the three CLI entry-point
-/// insertions.
+/// `errmsg` and return null.
 macro_rules! stream_fast_path_or_fallthrough {
     ($path:expr, $schema:expr, $errmsg:expr) => {
         match try_load_stream_packet_file($path, $schema) {
@@ -407,9 +373,7 @@ pub(crate) unsafe fn try_table_file_packet(
         }
         ArgSource::File => classified.effective,
         // A pipe cannot be handed on by name, and cannot be rewound once
-        // read, so it is spooled to a file the nexus removes at exit. The
-        // path outlives the call because the packet, or the loader that
-        // falls through to it, holds only a pointer.
+        // read, so it is spooled to a file removed at exit.
         ArgSource::Stdin => {
             claim_stdin()?;
             let path = std::ffi::CString::new(spool_to_temp(&mut std::io::stdin().lock(), "stdin")?)
@@ -427,7 +391,7 @@ pub(crate) unsafe fn try_table_file_packet(
     }
     let packet = crate::packet_ffi::make_table_file_packet(effective, schema);
     if packet.is_null() {
-        return Err(MorlocError::Packet("could not build the table argument packet".into()));
+        return Err(MorlocError::Other("could not build the table argument packet".into()));
     }
     Ok(TableArg::ByName(packet))
 }
@@ -470,7 +434,7 @@ fn check_table_head(path: &str, rs: &crate::schema::Schema) -> Result<(), Morloc
 
 /// Read a `@form table` argument of a list-of-records type (CLI-13): a
 /// headed delimited table, Arrow IPC, Parquet, or a morloc packet of the
-/// declared type. Takes ownership of `data`.
+/// declared type.
 unsafe fn try_table_rows(
     data: *mut u8,
     data_size: usize,
@@ -566,10 +530,9 @@ pub fn remove_spooled_inputs() {
 // ── try_load_stream_packet_file ───────────────────────────────────────────
 
 /// Nexus-side fast path for stream-packet CLI file arguments. Dispatches
-/// on the receiver schema: `Array` → FILE+DATA indirection (pool iterates
-/// chunk-by-chunk), `IStream` → pre-opened `TAG_HANDLE` field, other →
-/// targeted error. Returns `Ok(None)` when the file is not a stream so
-/// callers can fall through to the legacy loader chain.
+/// on the receiver schema: `Array` -> FILE+DATA indirection (pool iterates
+/// chunk-by-chunk), `IStream` -> pre-opened `TAG_HANDLE` field, other ->
+/// targeted error. `Ok(None)` when the file is not a stream.
 pub(crate) unsafe fn try_load_stream_packet_file(
     path: *const c_char,
     schema: *const CSchema,
@@ -604,7 +567,6 @@ pub(crate) unsafe fn try_load_stream_packet_file(
             Ok(Some(pkt))
         }
         SerialType::IStream => {
-            // Open the file now; embed the slot id as TAG_HANDLE.
             let handle = crate::stream::shared_open_istream(&path_str)?;
             let field_ptr = match shm::shcalloc(1, sh::STREAM_HANDLE_FIELD_SIZE) {
                 Ok(p) => p as *mut u8,
@@ -638,7 +600,6 @@ pub(crate) unsafe fn try_load_stream_packet_file(
         // on, and the pool opens it for random access.
         SerialType::IFile => Ok(None),
         other @ (SerialType::Nil | SerialType::Bool | SerialType::Sint8 | SerialType::Sint16 | SerialType::Sint32 | SerialType::Sint64 | SerialType::Uint8 | SerialType::Uint16 | SerialType::Uint32 | SerialType::Uint64 | SerialType::Float32 | SerialType::Float64 | SerialType::String | SerialType::Tuple | SerialType::Map | SerialType::Optional | SerialType::Int | SerialType::Table | SerialType::Recur | SerialType::OStream | SerialType::Variant | SerialType::Enum) => {
-            // Look up the file's schema string for a targeted error.
             let file_schema = crate::stream::read_schema_from_file(&path_str)
                 .unwrap_or_else(|_| "<unknown>".to_string());
             Err(MorlocError::Other(format!(
@@ -651,42 +612,20 @@ pub(crate) unsafe fn try_load_stream_packet_file(
     }
 }
 
-// ── Layer 2/3: try_load_voidstar_packet_via_mmap ──────────────────────────
+// -- try_load_voidstar_packet_via_mmap --
 
-/// Layer 2/3 fast path. For inputs that are regular files containing a
-/// large uncompressed MESG+VOIDSTAR morloc packet, allocate SHM for the
-/// payload, `pread` the payload directly into the SHM region (skipping
-/// the wasted libc::malloc + read + memcpy round-trip the legacy path
-/// does), and rewrite the embedded relptrs in place so they resolve in
-/// the consumer's VOLUMES table.
+/// A large uncompressed MESG+VOIDSTAR packet file, read straight into
+/// shared memory and relocated there. A producer's volume-index hint
+/// (`METADATA_TYPE_VOL_INDEX`) is cancelled by the relocation delta.
 ///
-/// Cross-process correctness: the returned pointer lives in real
-/// `/dev/shm` (or the file-backed fallback). A peer process that
-/// receives a relptr into this payload can `shm_open` the segment via
-/// the relptr's encoded volume index -- the foundation Layer 1 added.
-///
-/// Layer 3 interaction: if the on-disk packet carries
-/// `METADATA_TYPE_VOL_INDEX` (a producer hint), the relptrs in the
-/// payload have that hint already baked into their high bits; the
-/// relptr walk uses a delta of `dest_rel - encode_relptr(hint, 0)` so
-/// the hint bits cancel and the consumer's slot/offset is added in
-/// the same single pass. Hint = 0 collapses to the legacy
-/// "buffer-relative -> SHM-relative" add walk.
-///
-/// Returns:
-/// * `Ok(Some(ptr))` -- fast path took, `ptr` is the payload in SHM
-/// * `Ok(None)`     -- file isn't eligible (too small, not a packet,
-///                     wrong format, open/fstat failed). Caller should
-///                     fall back to the read+process path.
-/// * `Err(e)`        -- the file IS eligible but allocation or the
-///                     in-place relptr walk failed.
+/// `Ok(None)` when the file is not eligible (small, not such a packet);
+/// `Err` when it is and reading it failed.
 pub(crate) unsafe fn try_load_voidstar_packet_via_mmap(
     path: *const c_char,
     schema: *const CSchema,
 ) -> Result<Option<*mut u8>, MorlocError> {
-    // Below this size the existing libc::malloc + read + shmalloc +
-    // memcpy path is fast enough that the SHM-direct path's syscalls
-    // don't amortize. 1 MiB is the crossover on commodity SSDs.
+    // Below this size the plain read path is faster than the
+    // SHM-direct path's extra syscalls.
     const FAST_PATH_THRESHOLD: usize = 1024 * 1024;
 
     if path.is_null() {
@@ -747,8 +686,6 @@ pub(crate) unsafe fn try_load_voidstar_packet_via_mmap(
         return Ok(None);
     }
     if compression != 0 {
-        // Compressed payloads need a separate decompressed buffer; the
-        // legacy path handles them.
         libc::close(fd);
         return Ok(None);
     }
@@ -760,38 +697,24 @@ pub(crate) unsafe fn try_load_voidstar_packet_via_mmap(
         return Ok(None);
     }
 
-    // Pull the metadata block out so we can check for a vol_idx hint
-    // AND validate the packet's stored schema against the caller's
-    // requested schema without a full mmap. Falls back to hint = 0
-    // (legacy Layer 2) if metadata is absent, malformed, or doesn't
-    // include the block. Schema mismatch surfaces as UserThrow (via
-    // libmorloc's errmsg convention -- see check_packet_schema_matches).
-    let vol_idx_hint: u16 = if metadata_size > 0 {
-        let mut meta = vec![0u8; metadata_size];
-        let nm = libc::pread(
-            fd,
-            meta.as_mut_ptr() as *mut libc::c_void,
-            metadata_size,
-            32,
-        );
+    let mut meta = vec![0u8; metadata_size];
+    if metadata_size > 0 {
+        let nm = libc::pread(fd, meta.as_mut_ptr() as *mut libc::c_void, metadata_size, 32);
         if usize::try_from(nm).ok() != Some(metadata_size) {
             libc::close(fd);
             return Ok(None);
         }
-        let path_str = CStr::from_ptr(path).to_string_lossy();
-        if let Err(e) = check_packet_schema_matches(&meta, schema, &path_str) {
-            libc::close(fd);
-            return Err(e);
-        }
-        let mut full = Vec::with_capacity(32 + metadata_size);
-        full.extend_from_slice(&header_bytes);
-        full.extend_from_slice(&meta);
-        packet::read_vol_index_from_meta(&full).ok().flatten().unwrap_or(0)
-    } else {
-        0
-    };
+    }
+    let path_str = CStr::from_ptr(path).to_string_lossy();
+    if let Err(e) = check_packet_schema_matches(&meta, schema, &path_str) {
+        libc::close(fd);
+        return Err(e);
+    }
+    let mut full = Vec::with_capacity(32 + metadata_size);
+    full.extend_from_slice(&header_bytes);
+    full.extend_from_slice(&meta);
+    let vol_idx_hint = packet::read_vol_index_from_meta(&full).ok().flatten().unwrap_or(0);
 
-    // Land the file's payload region straight in SHM, then relocate it.
     let landing = match crate::voidstar::Landing::new(payload_size) {
         Ok(l) => l,
         Err(e) => {
@@ -802,7 +725,7 @@ pub(crate) unsafe fn try_load_voidstar_packet_via_mmap(
     let read = pread_exact(fd, landing.as_mut_ptr(), payload_size, payload_offset);
     libc::close(fd);
     read?;
-    Ok(Some(landing.relocate(&CSchema::to_rust(schema), vol_idx_hint)?))
+    Ok(Some(landing.relocate(&CSchema::to_rust(schema), vol_idx_hint, crate::origin::Origin::Outside)?))
 }
 
 /// Read exactly `len` bytes of `fd` at `offset` into `dst`.
@@ -813,7 +736,6 @@ pub(crate) unsafe fn try_load_voidstar_packet_via_mmap(
 unsafe fn pread_exact(fd: libc::c_int, dst: *mut u8, len: usize, offset: usize) -> Result<(), MorlocError> {
     use std::os::unix::fs::FileExt;
     use std::os::unix::io::FromRawFd;
-    // Borrow the descriptor as a File without taking ownership of it.
     let file = std::mem::ManuallyDrop::new(std::fs::File::from_raw_fd(fd));
     let buf = std::slice::from_raw_parts_mut(dst, len);
     file.read_exact_at(buf, width::u64_from_usize(offset)).map_err(|e| match e.kind() {
@@ -826,28 +748,13 @@ unsafe fn pread_exact(fd: libc::c_int, dst: *mut u8, len: usize, offset: usize) 
 
 // ── try_load_compressed_voidstar_via_shm ──────────────────────────────────
 
-/// Compressed analogue of [`try_load_voidstar_packet_via_mmap`]. For
-/// files containing a large MESG+VOIDSTAR packet whose payload is a
-/// single zstd frame carrying `pledgedSrcSize` in its header, allocates
-/// SHM at the *decompressed* size and stream-decompresses straight into
-/// the SHM region -- skipping the legacy chain's libc::malloc read
-/// buffer, the growing-Vec decoder output, the `Vec`-rebuild inside
-/// `decompress_packet`, and the malloc->SHM memcpy in
-/// `read_voidstar_binary_with_hint`. Peak resident set is one X of the
-/// decompressed payload (the SHM region) plus the BufReader window and
-/// libzstd's internal buffers.
-///
-/// Returns `Ok(None)` -- triggering the caller's fall-through to the
-/// legacy path -- when any of the eligibility checks fail (wrong magic,
-/// not MESG+VOIDSTAR, not zstd-compressed, frame missing
-/// `pledgedSrcSize`, file too small, fstat/pread failures).
+/// Compressed analogue of [`try_load_voidstar_packet_via_mmap`]: a
+/// large zstd MESG+VOIDSTAR packet file decompressed straight into shared
+/// memory, frame by frame. `Ok(None)` when the file is not eligible.
 pub(crate) unsafe fn try_load_compressed_voidstar_via_shm(
     path: *const c_char,
     schema: *const CSchema,
 ) -> Result<Option<*mut u8>, MorlocError> {
-    // Same crossover as the uncompressed fast path: below this size the
-    // legacy buffered chain is competitive and the syscall overhead of
-    // the streaming path is not amortized.
     const FAST_PATH_THRESHOLD: usize = 1024 * 1024;
 
     if path.is_null() {
@@ -859,8 +766,6 @@ pub(crate) unsafe fn try_load_compressed_voidstar_via_shm(
         return Ok(None);
     }
 
-    // Guards from here on must close `fd` on every return until ownership
-    // is handed to the File::from_raw_fd wrapper later.
     let mut sb: libc::stat = std::mem::zeroed();
     if libc::fstat(fd, &mut sb) != 0 {
         libc::close(fd);
@@ -920,9 +825,6 @@ pub(crate) unsafe fn try_load_compressed_voidstar_via_shm(
         return Ok(None);
     }
 
-    // Read the entire metadata block in one pread so we can parse out
-    // the frame index and the vol_idx hint without making multiple
-    // round-trips to the page cache.
     let metadata_bytes: Vec<u8> = if metadata_size > 0 {
         let mut meta = vec![0u8; metadata_size];
         let nm = libc::pread(
@@ -939,22 +841,15 @@ pub(crate) unsafe fn try_load_compressed_voidstar_via_shm(
     } else {
         Vec::new()
     };
-    // `read_*_from_meta` expects a full packet (header + metadata); we
-    // splice the header bytes we already read with the metadata bytes
-    // we just pulled.
+    // `read_*_from_meta` expects header and metadata bytes together.
     let mut full_header_and_meta = Vec::with_capacity(32 + metadata_size);
     full_header_and_meta.extend_from_slice(&header_bytes);
     full_header_and_meta.extend_from_slice(&metadata_bytes);
 
-    // Validate the packet's stored schema against the caller's
-    // requested schema before committing to the (expensive)
-    // decompression + rebase path.
-    if metadata_size > 0 {
-        let path_str = CStr::from_ptr(path).to_string_lossy();
-        if let Err(e) = check_packet_schema_matches(&metadata_bytes, schema, &path_str) {
-            libc::close(fd);
-            return Err(e);
-        }
+    let path_str = CStr::from_ptr(path).to_string_lossy();
+    if let Err(e) = check_packet_schema_matches(&metadata_bytes, schema, &path_str) {
+        libc::close(fd);
+        return Err(e);
     }
 
     let vol_idx_hint: u16 = packet::read_vol_index_from_meta(&full_header_and_meta)
@@ -962,9 +857,8 @@ pub(crate) unsafe fn try_load_compressed_voidstar_via_shm(
         .flatten()
         .unwrap_or(0);
 
-    // The frame index is mandatory under the multi-frame format. A
-    // compressed packet without one is not the new format -- skip and
-    // let the legacy path raise the hard error.
+    // A compressed packet without a frame index is refused by the
+    // general loader.
     let frames = match packet::read_frame_index_from_meta(&full_header_and_meta) {
         Ok(Some(f)) if !f.is_empty() => f,
         _ => {
@@ -973,10 +867,6 @@ pub(crate) unsafe fn try_load_compressed_voidstar_via_shm(
         }
     };
 
-    // From here we will return Err on failure rather than Ok(None) --
-    // we've committed to the fast path and the file is genuinely
-    // eligible; a downstream failure is a real error, not "try the
-    // legacy path".
 
     let (total_uncompressed, total_compressed) = match packet::frame_totals(&frames) {
         Ok(t) => t,
@@ -1001,13 +891,6 @@ pub(crate) unsafe fn try_load_compressed_voidstar_via_shm(
         frames.len()
     );
 
-    // Read the compressed payload region into a userspace buffer
-    // BEFORE shmalloc'ing the SHM destination. The decompress step
-    // needs both alive at once, but separating allocation in time
-    // lowers the worst-case allocator footprint by ~compressed-size
-    // (we never hold both `compressed_buf` and the unstarted
-    // `shmalloc(total_uncompressed)` reservation simultaneously
-    // during the slow shmalloc fault-in phase).
     let t_decomp = std::time::Instant::now();
     let mut compressed_buf = vec![0u8; payload_size];
     let read = pread_exact(fd, compressed_buf.as_mut_ptr(), payload_size, payload_offset);
@@ -1021,9 +904,6 @@ pub(crate) unsafe fn try_load_compressed_voidstar_via_shm(
         t0.elapsed()
     );
 
-    // Decompress all frames in parallel into disjoint slices of the
-    // SHM destination. Workers each own a non-overlapping subrange by
-    // construction; no inter-worker synchronization on dest.
     let dst_slice = std::slice::from_raw_parts_mut(landing.as_mut_ptr(), total_uncompressed);
     crate::compression::parallel_decompress_frames(&frames, &compressed_buf, dst_slice)?;
     drop(compressed_buf);
@@ -1037,7 +917,7 @@ pub(crate) unsafe fn try_load_compressed_voidstar_via_shm(
     );
 
     let t_relptr = std::time::Instant::now();
-    let dest = landing.relocate(&CSchema::to_rust(schema), vol_idx_hint)?;
+    let dest = landing.relocate(&CSchema::to_rust(schema), vol_idx_hint, crate::origin::Origin::Outside)?;
     crate::morloc_trace!("[fastpath] relocation took {:.2?}", t_relptr.elapsed());
     crate::morloc_trace!("[fastpath] total ingest: {:.2?}", t0.elapsed());
 
@@ -1046,22 +926,9 @@ pub(crate) unsafe fn try_load_compressed_voidstar_via_shm(
 
 // ── try_decompress_voidstar_bytes_to_shm ──────────────────────────────────
 
-/// In-memory analogue of [`try_load_compressed_voidstar_via_shm`]. For
-/// callers (stdin ingest, `--call-packet`, `try_packet_strict`) that
-/// have already pulled the compressed bytes off the wire, this lands a
-/// MESG+VOIDSTAR+ZSTD payload directly into a fresh SHM allocation
-/// without the legacy chain's `Vec`+libc::malloc round-trip.
-///
-/// Reads from `data` (borrowed, not owned -- caller still owns the
-/// buffer on every return path). On `Ok(Some(_))` the SHM region holds
-/// the decompressed, relptr-adjusted voidstar; the caller should free
-/// its compressed buffer.
-///
-/// Returns `Ok(None)` -- triggering fall-through to the legacy path --
-/// when the header is not MESG+VOIDSTAR+ZSTD or otherwise ineligible.
-/// When `pledgedSrcSize` is absent the helper still wins versus the
-/// legacy chain by skipping the libc::malloc round-trip (decompress
-/// into a Vec, then `shmalloc + memcpy`, drop the Vec immediately).
+/// In-memory analogue of [`try_load_compressed_voidstar_via_shm`], for
+/// bytes already read. `data` stays the caller's. `Ok(None)` when the
+/// bytes are not a MESG+VOIDSTAR+ZSTD packet with a frame index.
 unsafe fn try_decompress_voidstar_bytes_to_shm(
     data: *const u8,
     data_size: usize,
@@ -1111,31 +978,17 @@ unsafe fn try_decompress_voidstar_bytes_to_shm(
         .flatten()
         .unwrap_or(0);
 
-    // Frame index is mandatory under the multi-frame format. Without
-    // one we have no way to know per-frame sizes; bail to the legacy
-    // path (which will raise a hard error -- old single-frame packets
-    // are no longer readable under the cutover).
     let frames = match packet::read_frame_index_from_meta(full_meta) {
         Ok(Some(f)) if !f.is_empty() => f,
         _ => return Ok(None),
     };
-    let landed = crate::voidstar::land_compressed_frames(&frames, compressed, &CSchema::to_rust(schema), hint)?;
+    let landed = crate::voidstar::land_compressed_frames(&frames, compressed, &CSchema::to_rust(schema), hint, crate::origin::Origin::Outside)?;
     Ok(Some(landed as *mut c_void))
 }
 
 // ── read_voidstar_binary ───────────────────────────────────────────────────
 
-/// Legacy C ABI: reads a VOIDSTAR payload assuming the producer encoded
-/// relptrs with vol_idx = 0 (no Layer-3 hint). Forwards to
-/// `read_voidstar_binary_with_hint` with hint = 0. Kept for ABI
-/// stability with C callers that don't know about the Layer-3 metadata.
-///
-/// **Callers reading a payload extracted from a morloc packet should
-/// prefer `read_voidstar_binary_with_hint` and pass the vol_idx hint
-/// recovered from `METADATA_TYPE_VOL_INDEX`** -- otherwise relptrs
-/// produced by the Layer-3 emitter (`stream_packet_to_fd` for
-/// uncompressed RPTR+VOIDSTAR) will carry stale vol_idx bits that this
-/// reader cannot cancel.
+/// [`read_voidstar_binary_with_hint`] with no volume-index hint.
 pub(crate) unsafe fn read_voidstar_binary(
     blob: *const u8,
     blob_size: usize,
@@ -1145,14 +998,8 @@ pub(crate) unsafe fn read_voidstar_binary(
     read_voidstar_binary_with_hint(blob, blob_size, schema, 0, errmsg)
 }
 
-/// Read a VOIDSTAR payload into SHM, accounting for an optional Layer-3
-/// `vol_idx_hint` baked into the producer's relptr high bits.
-///
-/// Delta computation matches the fast-path mmap loader's:
-///     delta = abs2rel(dest) - encode_relptr(hint, 0)
-/// so for `hint = 0` this reduces to the legacy "buffer-relative ->
-/// SHM-relative" add walk, and for `hint > 0` the hint bits cancel
-/// against the consumer's slot in a single pass.
+/// A VOIDSTAR payload copied into shared memory and relocated; the
+/// producer's volume-index hint is cancelled by the relocation delta.
 pub(crate) unsafe fn read_voidstar_binary_with_hint(
     blob: *const u8,
     blob_size: usize,
@@ -1162,7 +1009,7 @@ pub(crate) unsafe fn read_voidstar_binary_with_hint(
 ) -> *mut c_void {
     clear_errmsg(errmsg);
     let blob = std::slice::from_raw_parts(blob, blob_size);
-    match crate::voidstar::read_binary_with_hint(blob, &CSchema::to_rust(schema), vol_idx_hint) {
+    match crate::voidstar::read_binary_with_hint(blob, &CSchema::to_rust(schema), vol_idx_hint, crate::origin::Origin::Outside) {
         Ok(base) => base as *mut c_void,
         Err(e) => {
             set_errmsg(errmsg, &e);
@@ -1172,19 +1019,9 @@ pub(crate) unsafe fn read_voidstar_binary_with_hint(
 }
 
 // ── Form decoders ──────────────────────────────────────────────────────────
-//
-// Each decoder takes the pre-resolved bytes (the source layer has already
-// produced them from argv / file / stdin) and emits a voidstar value
-// matching the schema. All decoders take ownership of `data` like
-// `load_morloc_data_file` does: the function is responsible for freeing it
-// on every path.
 
 /// Strict morloc-packet decode. If `data` does not begin with the packet
-/// magic (4 bytes), return null with an explanatory error. Otherwise
-/// delegate to `load_morloc_data_file`, which already handles every
-/// packet variant (MESG/RPTR, compressed/uncompressed).
-///
-/// Takes ownership of `data` and frees it on every return path.
+/// magic, return null with an explanatory error.
 pub(crate) unsafe fn try_packet_strict(
     data: *mut u8,
     data_size: usize,
@@ -1402,24 +1239,9 @@ fn split_whitespace_rows(
 }
 
 /// Parse the input bytes as a headerless delimited table whose row
-/// schema is `row_schema` (either a Tuple or a record / Map). Uses
-/// `arrow_csv::ReaderBuilder` (the same parser the Arrow Table path
-/// uses) with every column typed as `Utf8` so the parser only handles
-/// delimiting and quoting; per-slot type formatting is done after the
-/// fact via `format_field_as_json`, and `assemble_row_json` wraps each
-/// row as either a JSON array (tuple) or a JSON object (record) using
-/// `row_schema.keys`.
+/// schema is `row_schema` (either a Tuple or a record / Map).
 ///
-/// `form: list` is **headerless by convention**: rows are raw
-/// tuples, not table records, so there is no meaningful place for a
-/// column-name row. If a user wants a full-featured table with
-/// column names, they should declare the argument as `Table` (which
-/// runs through the Arrow Table path and honors headers). Keeping
-/// this rule static (no per-arg `--csv-header` toggle) avoids a
-/// second knob that would double the surface area of an already
-/// weakly-typed loader.
-///
-/// Returns the per-row JSON strings on success.
+/// `@form list` is headerless; a table with column names is a `Table`.
 fn parse_delimited_rows(
     bytes: &[u8],
     delimiter: u8,
@@ -1496,8 +1318,6 @@ fn parse_delimited_rows(
 /// List form (default per-element config): UTF-8 validate the input,
 /// split on `\r?\n`, format each line as an element-level JSON value,
 /// and feed the resulting JSON array through `read_json_with_schema`.
-/// See `try_list_with_config` for the underlying implementation that
-/// honors `list.source:` / `list.check.*:` overrides.
 pub(crate) unsafe fn try_list(
     data: *mut u8,
     data_size: usize,
@@ -1507,8 +1327,8 @@ pub(crate) unsafe fn try_list(
     try_list_with_config(data, data_size, schema, &ListConfig::default(), errmsg)
 }
 
-/// Implementation of `form: list` with the per-element configuration
-/// (`list.source:` / `list.form:` / `list.check.*:`) plumbed in. For
+/// Implementation of `@form list` with the per-element configuration
+/// (`@list.source` / `@list.form` / `@list.check.*`) plumbed in. For
 /// `Str` elements the line content is JSON-escaped; for everything
 /// else the line is treated as JSON for that element type (bare
 /// numbers, booleans, or JSON-shaped composite values).
@@ -1523,8 +1343,6 @@ pub(crate) unsafe fn try_list(
 /// If that fails, the lines are reparsed via TAB, comma, and finally
 /// whitespace; whichever yields rows whose rebuilt JSON parses cleanly
 /// wins.
-///
-/// Takes ownership of `data` and frees it on every return path.
 unsafe fn try_list_with_config(
     data: *mut u8,
     data_size: usize,
@@ -1536,10 +1354,6 @@ unsafe fn try_list_with_config(
 
     use crate::json_ffi::read_json_with_schema;
 
-    // RAII guard: `data` is owned by this function (per the contract);
-    // every return path frees it via the drop. Subsequent `&[u8]` /
-    // `&str` borrows of `data` are valid for as long as the guard
-    // lives, which is until the function returns.
     struct LibcBuf(*mut u8);
     impl Drop for LibcBuf {
         fn drop(&mut self) {
@@ -1577,10 +1391,7 @@ unsafe fn try_list_with_config(
     // inline source). For Auto/File per-element sources, each line is
     // a path/inline-value reference that has already been resolved to
     // a JSON-encoded element, so a row-table interpretation of the
-    // raw text would be misleading. Both tuples and records (Map)
-    // are valid row shapes; they share the same on-wire positional
-    // representation and `assemble_row_json` picks the appropriate
-    // JSON form per the element schema.
+    // raw text would be misleading.
     let tabular_row_eligible =
         matches!(elem_serial, SerialType::Tuple | SerialType::Map);
     let tuple_fallback_available =
@@ -1617,8 +1428,6 @@ unsafe fn try_list_with_config(
         .map(|s| s.strip_suffix('\r').unwrap_or(s))
         .collect();
 
-    // Per-line checks. The only check kind in v1 is `path:<perm>`, so
-    // the check applies to the raw line content as a path.
     if !list_cfg.checks.is_empty() {
         for (line_no, line) in lines.iter().enumerate() {
             for check in &list_cfg.checks {
@@ -1637,17 +1446,11 @@ unsafe fn try_list_with_config(
         }
     }
 
-    // Per-element source resolution. When `list.source` is Auto or
-    // File, each line is treated as an argv token: Auto runs the same
-    // classifier the top-level `auto` source uses; File forces the line
-    // to be a path. Each line's resulting voidstar is round-tripped
-    // through JSON so the existing outer-array path can collect them
-    // uniformly.
     // When the element type is `au1` (Vec<UInt8>), each line whose bytes
     // are not JSON-shaped is treated as the raw element bytes: the line
     // `hello` becomes `[104,101,108,108,111]`. The schema unambiguously
     // identifies this case; the user doesn't need to write a separate
-    // `list.form: bytes`.
+    // `@list.form bytes`.
     let is_au1_element = elem_serial == SerialType::Array
         && !rs.parameters[0].parameters.is_empty()
         && rs.parameters[0].parameters[0].serial_type == SerialType::Uint8;
@@ -1686,13 +1489,6 @@ unsafe fn try_list_with_config(
                 }
             };
             let mut line_err: *mut c_char = ptr::null_mut();
-            // Per-line dispatch is driven by `list_cfg.form`. For the
-            // default `Auto`, we route the line as an argv through the
-            // classify-or-force-File pipeline (existing behavior). For
-            // an explicit bytes-family form, the line is treated as a
-            // path (compile-time validation guarantees
-            // `list_cfg.source == File` here): open the file, read its
-            // bytes, and dispatch through the matching decoder.
             let voidstar = match list_cfg.form {
                 ListElemForm::Auto => match list_cfg.source {
                     ListElemSource::File => parse_cli_data_argument_classified(
@@ -1798,20 +1594,13 @@ unsafe fn try_list_with_config(
     if err.is_null() {
         return result as *mut c_void;
     }
-    // JSON pass failed.
     if !tuple_fallback_available {
         *errmsg = err;
         return ptr::null_mut();
     }
 
-    // Pass 2-4 (delimited table via arrow-csv + whitespace split):
-    // drop the prior error and retry the lines as a headerless
-    // delimited table. Try TAB, comma, and whitespace in order; the
-    // first delimiter whose rows pass through `read_json_with_schema`
-    // wins. arrow-csv handles quoting/escaping for TAB and comma;
-    // whitespace uses `split_whitespace` per line (no quoting; runs of
-    // non-newline whitespace collapse to a single delimiter, but empty
-    // cells cannot be expressed -- that's a documented limitation).
+    // Retry the lines as a headerless table split by TAB, comma, then
+    // whitespace; the first split whose rows parse wins.
     libc::free(err as *mut c_void);
 
     let row_schema = &rs.parameters[0];
@@ -1866,9 +1655,7 @@ unsafe fn try_list_with_config(
             "form: list: no delimiter (tab, comma, whitespace) matched the expected row schema".into(),
         )
     });
-    // Very common user mistake: the first line is a column-name
-    // header. `form: list` is headerless by convention (see
-    // `parse_delimited_rows`); detect the shape and append a hint.
+    // A first line of column names is a common mistake; add a hint.
     let hinted = augment_with_header_hint(final_err, &lines, row_schema);
     set_errmsg(errmsg, &hinted);
     ptr::null_mut()
@@ -1909,8 +1696,6 @@ fn augment_with_header_hint(
     } else {
         return err;
     };
-    // Heuristic: at least one cell is a plain identifier (letters
-    // only) opposite an expected numeric column.
     let looks_like_header = cells
         .iter()
         .zip(row_schema.parameters.iter())
@@ -1926,7 +1711,7 @@ fn augment_with_header_hint(
     }
     MorlocError::Other(format!(
         "{}\n  hint: the first row (`{}`) looks like a column-name \
-         header. `form: list` is headerless -- remove the header row, \
+         header. `@form list` is headerless -- remove the header row, \
          or read the file with `@form table`, which binds columns by name.",
         err, first,
     ))
@@ -1947,10 +1732,8 @@ fn is_numeric_serial(t: &crate::schema::SerialType) -> bool {
     )
 }
 
-/// True iff the element type is a numeric scalar eligible for
-/// `form: bytes` / `form: bytes-only`. `Schema::is_fixed_width` also
-/// admits `Nil` (width 0) and `Tuple` of fixed-width leaves; we want
-/// strictly the numeric scalars in v1.
+/// True iff the element type is a fixed-width scalar (Bool or a sized
+/// number) eligible for `@form bytes` / `@form bytes-only`.
 fn is_fixed_width_scalar(elem: &crate::schema::SerialType) -> bool {
     use crate::schema::SerialType::*;
     matches!(elem,
@@ -1972,13 +1755,11 @@ fn fixed_width_scalar_name(elem: &crate::schema::SerialType) -> &'static str {
     }
 }
 
-/// Raw-bytes form (`form: bytes-only`): copy `data` into a freshly-
+/// Raw-bytes form (`@form bytes-only`): copy `data` into a freshly-
 /// allocated array voidstar. The schema must be `a<scalar>` where
 /// `<scalar>` is a fixed-width scalar (Bool, sized Int/UInt, sized
 /// Float). The total byte count must be a multiple of the element
 /// width. For `[Bool]`, every byte must be 0 or 1.
-///
-/// Takes ownership of `data` and frees it on every return path.
 unsafe fn try_bytes_only(
     data: *mut u8,
     data_size: usize,
@@ -2065,12 +1846,10 @@ unsafe fn try_bytes_only(
     base as *mut c_void
 }
 
-/// Hybrid bytes form (`form: bytes`): sniff packet magic; if present,
+/// Hybrid bytes form (`@form bytes`): sniff packet magic; if present,
 /// decode as a packet. Otherwise fall back to `try_bytes_only`. This is
 /// the friendly default for binary file input; the user's
 /// `bytes-only` opts out of the sniff.
-///
-/// Takes ownership of `data` and frees it on every return path.
 unsafe fn try_bytes_hybrid(
     data: *mut u8,
     data_size: usize,
@@ -2089,22 +1868,8 @@ unsafe fn try_bytes_hybrid(
 
 // ── Schema-check helper for packet loads ──────────────────────────────────
 
-/// Compare the schema string embedded in a morloc packet's metadata
-/// block to the caller's requested schema. Returns `Ok(())` on match
-/// or when there's nothing to compare against (missing metadata entry,
-/// null requested schema). Returns `Err(MorlocError::UserThrow(_))`
-/// on mismatch so `@catch` can intercept.
-///
-/// Without this check, `load_morloc_data_file`'s format-specific
-/// decoders would silently reinterpret payload bytes under the wrong
-/// schema (e.g. reading a Str-packet's Array header as an Int64),
-/// producing garbage instead of a catchable failure.
-///
-/// Comparison is byte-for-byte on the canonical `schema_to_string`
-/// form. Both sides go through the same renderer, which no longer
-/// emits language-specific `<hint>` prefixes (hints are pool-local
-/// codegen state, not wire data), so cross-language save/load pairs
-/// compare equal for identical wire types.
+/// The packet's stored schema, compared structurally with the one it is
+/// read as. A packet with no stored schema is refused.
 unsafe fn check_packet_schema_matches(
     meta_bytes: &[u8],
     requested_schema: *const CSchema,
@@ -2124,14 +1889,15 @@ unsafe fn check_packet_schema_matches(
             }
         });
 
-    let stored = match stored {
-        Some(s) => s,
-        None => return Ok(()), // no schema entry to compare against
-    };
-
     if requested_schema.is_null() {
         return Ok(());
     }
+    let Some(stored) = stored else {
+        return Err(MorlocError::Packet(format!(
+            "the packet{} carries no schema, so it cannot be checked against the type it is read as",
+            if path_hint.is_empty() { String::new() } else { format!(" in '{}'", path_hint) },
+        )));
+    };
 
     let requested_rs = CSchema::to_rust(requested_schema);
     let requested = schema_to_string(&requested_rs);
@@ -2151,8 +1917,6 @@ unsafe fn check_packet_schema_matches(
 }
 
 // ── load_morloc_data_file ──────────────────────────────────────────────────
-// This function is complex and calls many C functions (read_json_with_schema,
-// unpack_with_schema). Keep delegating to C for now via extern declarations.
 
 /// Resolve the (already SHM-allocated) Arrow JSON read into a raw abs pointer
 /// usable as the result of `load_morloc_data_file`. On error returns null and
@@ -2226,26 +1990,9 @@ unsafe fn reason_or_unreadable(err: *mut c_char, path: *const c_char) -> MorlocE
     }
 }
 
-/// The single entry point that loads a morloc data file's bytes into
-/// SHM. Every caller that wants to *use* on-disk bytes as a morloc
-/// value (CLI argument parsing, @load intrinsic, bundle reader,
-/// --call-packet input) funnels through here. The function:
-///
-///  1. Decompresses the bytes if they are a compressed morloc packet
-///     (the only function that does so; all other callers should be
-///     funneling through this one rather than duplicating the step).
-///  2. Dispatches on extension / content magic and produces either
-///     an SHM-resident voidstar or a parsed JSON/MSGPACK/Arrow result.
-///
-/// Sites that read packet bytes for *forwarding* (cache.rs returning
-/// cached blobs to a downstream packet builder, slurm_ffi shipping arg
-/// packets to a remote worker) do not go through this function because
-/// they do not unpack -- they pass the bytes through, compressed body
-/// and all. `put_cache_packet` compresses whenever a cache compression
-/// level is set, so a forwarded argument can reach a pool with a zstd
-/// body and a voidstar format tag. Consumers therefore check the
-/// compression field before reading a payload where it lies, rather
-/// than trusting the format tag alone.
+/// Load a morloc data file's bytes as a value of `schema`: a compressed
+/// packet is decompressed, then the format is chosen by extension or
+/// content magic.
 pub(crate) unsafe fn load_morloc_data_file(
     path: *const c_char,
     mut data: *mut u8,
@@ -2263,13 +2010,9 @@ pub(crate) unsafe fn load_morloc_data_file(
         return ptr::null_mut();
     }
 
-    // SHM-direct path for compressed MESG+VOIDSTAR packets. When the
-    // bytes carry a header marking them as MESG+VOIDSTAR+ZSTD we can
-    // decompress straight into a fresh SHM allocation and return early,
-    // skipping the legacy chain's Vec + libc::malloc + memcpy round-trip
-    // entirely. The helper is a no-op (returns Ok(None)) for anything
-    // else, so other compressed formats (JSON/msgpack/Arrow) still flow
-    // through the generic decompression below.
+    // A compressed MESG+VOIDSTAR packet decompresses straight into shared
+    // memory; other compressed formats go through the general
+    // decompression below.
     // Callers that resolved bytes without a path (e.g. `try_packet_strict`
     // on a per-line list element) pass a null `path` pointer; they get no
     // extension-based dispatch below.
@@ -2282,9 +2025,6 @@ pub(crate) unsafe fn load_morloc_data_file(
     if !data.is_null() && data_size >= 32 {
         match try_decompress_voidstar_bytes_to_shm(data, data_size, schema, &path_str) {
             Ok(Some(voidstar)) => {
-                // Free the compressed input now that the decompressed
-                // payload lives in SHM. This drops peak resident set to
-                // 1X before the caller hands the voidstar to the pool.
                 libc::free(data as *mut c_void);
                 return voidstar;
             }
@@ -2297,15 +2037,6 @@ pub(crate) unsafe fn load_morloc_data_file(
         }
     }
 
-    // Decompress in place if the buffer is a compressed morloc packet.
-    // This is the single choke point: every caller that hands a buffer
-    // to load_morloc_data_file gets decompression for free, so we do
-    // not duplicate the decompress logic at each call site.
-    //
-    // `data` may be swapped for a fresh libc allocation containing the
-    // decompressed bytes; the function's contract that the caller has
-    // transferred ownership of `data` is preserved -- we libc::free the
-    // original and adopt the new buffer for the rest of the call.
     if !data.is_null() && data_size > 0 {
         let raw_slice = std::slice::from_raw_parts(data, data_size);
         match crate::compression::decompress_packet_if_needed(raw_slice) {
@@ -2335,7 +2066,7 @@ pub(crate) unsafe fn load_morloc_data_file(
     // Primitive parsing rule for `Str` (and `?Str`). When the schema
     // reduces to the bare string primitive and the bytes don't start
     // with a JSON-string opening quote, treat the bytes as the literal
-    // Str value. Without this, `source: file` on a Str arg would fail
+    // Str value. Without this, `@source file` on a Str arg would fail
     // because file contents like `hello world` aren't JSON-shaped.
     if !schema.is_null() && data_size > 0 {
         use crate::schema::SerialType;
@@ -2438,9 +2169,6 @@ pub(crate) unsafe fn load_morloc_data_file(
             let bytes = std::slice::from_raw_parts(data, data_size);
             if let Ok(s) = std::str::from_utf8(bytes) {
                 let trimmed = s.trim();
-                // `\-inf` is the shell-safe spelling of `-inf` (the
-                // leading backslash bypasses clap's flag-cluster
-                // interpretation of the bare `-i`/`-n`/`-f`).
                 let stripped = trimmed.strip_prefix('\\').unwrap_or(trimmed);
                 let inner: Option<&str> = match stripped {
                     "inf" => Some("inf"),
@@ -2483,18 +2211,12 @@ pub(crate) unsafe fn load_morloc_data_file(
         }
     }
 
-    // Detect arrow-table targets: the JSON / Arrow-IPC paths produce an
-    // ArrowShm directly. Other formats (Parquet, CSV) are still deferred.
     let arrow_target = !schema.is_null() && {
         let rs = CSchema::to_rust(schema);
         crate::arrow_ffi::is_arrow_table_schema(&rs)
     };
 
-    // Arrow IPC file format is detected purely by content magic, no extension
-    // sniffing. The IPC reader handles both file (ARROW1 magic) and stream
-    // formats; only the file form is distinguishable up front, so we match
-    // the magic here and let the reader fall through to stream form for
-    // headerless content if requested elsewhere.
+    // Arrow IPC files are detected by magic bytes, not extension.
     if arrow_target && data_size >= 8 {
         let head = std::slice::from_raw_parts(data, 8);
         let full = std::slice::from_raw_parts(data, data_size);
@@ -2574,8 +2296,7 @@ pub(crate) unsafe fn load_morloc_data_file(
                 }
                 // Only a self-contained payload can come from a file. A
                 // shared-memory reference (RPTR) or a file reference names
-                // memory of the process that wrote the packet; every
-                // on-disk writer rewrites those to MESG first.
+                // memory of the process that wrote the packet.
                 let source = { header.command.data.source };
                 if source != packet::PACKET_SOURCE_MESG {
                     libc::free(data as *mut c_void);
@@ -2587,26 +2308,27 @@ pub(crate) unsafe fn load_morloc_data_file(
                     return ptr::null_mut();
                 }
                 let offset = { header.offset } as usize;
-                let length = width::usize_from_u64(header.length);
-                // Compare the packet's stored schema descriptor to the
-                // caller's requested schema. Mismatch is user-attributable
-                // (loading the wrong type from a file) so surface as
-                // UserThrow via errmsg; @catch intercepts.
-                if offset > 0 {
-                    let meta_slice = std::slice::from_raw_parts(data.add(32), offset);
-                    if let Err(e) = check_packet_schema_matches(meta_slice, schema, &path_str) {
-                        libc::free(data as *mut c_void);
-                        set_errmsg(errmsg, &e);
-                        return ptr::null_mut();
-                    }
+                let length = { header.length };
+                let end = usize::try_from(length).ok().and_then(|n| n.checked_add(32 + offset));
+                if end.map_or(true, |end| end > data_size) {
+                    libc::free(data as *mut c_void);
+                    set_errmsg(errmsg, &MorlocError::Packet(format!(
+                        "the packet in '{}' claims {} bytes of metadata and {} of payload, but the file holds {}",
+                        path_str, offset, length, data_size
+                    )));
+                    return ptr::null_mut();
+                }
+                let length = length as usize;
+                let meta_slice = std::slice::from_raw_parts(data.add(32), offset);
+                if let Err(e) = check_packet_schema_matches(meta_slice, schema, &path_str) {
+                    libc::free(data as *mut c_void);
+                    set_errmsg(errmsg, &e);
+                    return ptr::null_mut();
                 }
                 let payload = data.add(32 + offset);
                 let format = { header.command.data.format };
 
                 if format == packet::PACKET_FORMAT_VOIDSTAR {
-                    // Pull the Layer-3 vol_idx hint out of the metadata
-                    // block if present; the legacy reader otherwise
-                    // miscounts the producer's high bits.
                     let packet_slice = std::slice::from_raw_parts(data, data_size);
                     let hint = packet::read_vol_index_from_meta(packet_slice)
                         .ok().flatten().unwrap_or(0);
@@ -2751,7 +2473,7 @@ unsafe fn open_stdin_stream() -> *mut libc::FILE {
 }
 
 /// Body of [`parse_cli_data_argument_singular`] for callers that already
-/// know the source classification (e.g. the `form: list` per-line
+/// know the source classification (e.g. the `@form list` per-line
 /// dispatcher, which forces `File` mode without going through the auto
 /// classifier).
 unsafe fn parse_cli_data_argument_classified(
@@ -2783,10 +2505,6 @@ unsafe fn parse_cli_data_argument_classified(
             }
         }
         ArgSource::File => {
-            // Layer 2 fast path: if the file is a regular file holding
-            // a large MESG+VOIDSTAR morloc packet, pread its payload
-            // straight into a fresh SHM allocation and skip the
-            // libc::malloc + read + shmalloc + memcpy chain.
             match try_load_voidstar_packet_via_mmap(effective, schema) {
                 Ok(Some(payload_ptr)) => return payload_ptr,
                 Ok(None) => { /* fall through */ }
@@ -2795,11 +2513,6 @@ unsafe fn parse_cli_data_argument_classified(
                     return ptr::null_mut();
                 }
             }
-            // Compressed-VOIDSTAR fast path: same shape as the
-            // uncompressed mmap fast path but stream-decompresses the
-            // file's zstd frame directly into SHM. Holds the file in
-            // a BufReader and the SHM destination only; no Vec or
-            // libc::malloc round-trip for the decompressed payload.
             match try_load_compressed_voidstar_via_shm(effective, schema) {
                 Ok(Some(payload_ptr)) => return payload_ptr,
                 Ok(None) => { /* fall through to read path */ }
@@ -2882,10 +2595,6 @@ unsafe fn parse_cli_data_argument_classified(
 ///   - Anything else (JSON arrays, mpack, voidstar binary packets,
 ///     morloc binary, arrow, etc.) is treated as a complete record:
 ///     it is loaded in full and every slot is reported `Some`.
-///
-/// Field pointers for complete-format bundles alias into the loaded
-/// record's SHM allocation -- both blocks stay alive in the eval arena
-/// until the dispatch scope drops, so the alias is safe.
 unsafe fn load_bundle_partial(
     arg: *mut c_char,
     schema: *const CSchema,
@@ -2923,8 +2632,6 @@ unsafe fn load_bundle_partial(
         ArgSource::Inline => None,
     };
 
-    // Take a peek at the leading non-whitespace byte WITHOUT keeping
-    // a live borrow of file_bytes (we want to move it below).
     let first: Option<u8> = {
         let slice: &[u8] = match (inline_bytes, file_bytes.as_deref()) {
             (Some(b), _) => b,
@@ -2935,8 +2642,6 @@ unsafe fn load_bundle_partial(
     };
 
     if first == Some(b'{') {
-        // JSON object form: partial-load. Re-derive the slice in a
-        // new scope; this borrow is independent of the one above.
         let slice: &[u8] = match (inline_bytes, file_bytes.as_deref()) {
             (Some(b), _) => b,
             (None, Some(b)) => b,
@@ -2951,10 +2656,6 @@ unsafe fn load_bundle_partial(
     // Complete-form bundle. For inline arguments we hand off to
     // singular unchanged (its inline-JSON branch handles JSON arrays
     // and primitives without needing the bytes we already peeked at).
-    // For files and stdin the bytes are already in `file_bytes` and
-    // re-reading is either wasteful (file) or impossible (stdin
-    // already consumed); we feed them to `load_morloc_data_file`
-    // directly, which dispatches on path extension or content magic.
     let mut err: *mut c_char = ptr::null_mut();
     let full: *mut u8 = if let Some(bytes) = file_bytes {
         let n = bytes.len();
@@ -2963,11 +2664,6 @@ unsafe fn load_bundle_partial(
             return Err(MorlocError::Other("malloc failed for bundle bytes".into()));
         }
         ptr::copy_nonoverlapping(bytes.as_ptr(), buf, n);
-        // `load_morloc_data_file` takes ownership of `buf` -- it
-        // frees on every path. The path string only affects
-        // extension-based format hints; for stdin we pass the
-        // original "-" / "/dev/stdin", which has no extension and
-        // falls through to magic-byte detection.
         let result = load_morloc_data_file(arg, buf, n, schema, &mut err);
         result as *mut u8
     } else {
@@ -3036,8 +2732,7 @@ pub(crate) unsafe fn cli_token_to_json(
 }
 
 /// Per-field schemas of a record being read field by field. A field that
-/// back-references the record gets a self-contained copy, owned here and
-/// freed with the set; every other field borrows the record's own child.
+/// back-references the record is given a self-contained copy.
 struct FieldSchemas {
     ptrs: Vec<*const CSchema>,
     owned: Vec<*mut CSchema>,
@@ -3190,11 +2885,7 @@ unsafe fn parse_cli_data_argument_unrolled(
         }
     }
 
-    // Source 3: manifest per-field defaults (always JSON literals in
-    // the manifest). Eager: parse them upfront so the merge step is a
-    // pure picker. Cheap -- defaults are tiny. A bad default raises a
-    // hard error pointing at the field, so manifest-data shape bugs
-    // surface here rather than as silent zeros.
+    // Source 3: manifest per-field defaults (JSON literals).
     let mut default_field_ptrs: Vec<Option<shm::AbsPtr>> = vec![None; n];
     for i in 0..n {
         let default_field = *default_fields.add(i);
@@ -3219,10 +2910,7 @@ unsafe fn parse_cli_data_argument_unrolled(
     }
 
     // Merge into dest with precedence user > bundle > default >
-    // Optional-RELNULL > error. memcpy of fs.width bytes copies the
-    // field header (and any inline value); relptrs inside the header
-    // continue to reference the source's SHM block, which stays
-    // tracked by the eval arena for the rest of the dispatch.
+    // Optional-RELNULL > error.
     for i in 0..n {
         let elem_dest = dest.add(rs.offsets[i]);
         let fs = &rs.parameters[i];
@@ -3250,13 +2938,7 @@ unsafe fn parse_cli_data_argument_unrolled(
 // ── parse_cli_data_argument_list ─────────────────────────────────────────────
 
 /// Assemble a single list-typed packet from N CLI arguments. Used by
-/// the nexus when a manifest arg is marked `many: true`. Each input
-/// `argument_t` carries one CLI token (or whitespace-quoted literal,
-/// already JSON-wrapped for `literal: true` cases). Per-element source
-/// resolution goes through the same `parse_cli_data_argument_singular`
-/// path as scalars, so every supported wire format (inline JSON, file
-/// JSON, mpack file, morloc voidstar binary file, RPTR packet file,
-/// stdin) is accepted for every element with no JSON-conversion cost.
+/// the nexus when a manifest arg is marked `@many`.
 ///
 /// The resulting packet wraps a morloc list whose element schema is
 /// `list_schema->parameters[0]`.
@@ -3293,11 +2975,6 @@ pub(crate) unsafe fn parse_cli_data_argument_list(
     let ew = elem_rs.width;
     let hdr = std::mem::size_of::<shm::Array>();
 
-    // Allocate header at `dest` (or fresh shmalloc) and a separate
-    // shmalloc'd block for the element data area. Matches the
-    // dest-Some branch of `json.rs::json_to_voidstar_inner` for the
-    // SerialType::Array case so the dispatch / arena bookkeeping is
-    // identical for many-args and JSON-array-parsed args.
     if dest.is_null() {
         match shm::shmalloc(hdr) {
             Ok(p) => dest = p,
@@ -3328,12 +3005,6 @@ pub(crate) unsafe fn parse_cli_data_argument_list(
         }
     };
 
-    // Parse each element into its slot in the data area. Mirrors
-    // `parse_cli_data_argument_unrolled`'s per-field loop: shcalloc a
-    // scratch buffer of the element width, parse into it, then
-    // memcpy the parsed bytes into the destination slot. Relptrs in
-    // the element header continue to reference SHM blocks owned by
-    // the eval arena and stay alive for the rest of dispatch.
     for i in 0..n {
         let arg_t = *args.add(i);
         if arg_t.is_null() {
@@ -3368,7 +3039,6 @@ pub(crate) unsafe fn parse_cli_data_argument_list(
         ptr::copy_nonoverlapping(loaded, slot, ew);
     }
 
-    // Write the Array header (size, data relptr) at `dest`.
     let arr = shm::Array { size: n, data: data_rel };
     ptr::copy_nonoverlapping(
         &arr as *const shm::Array as *const u8,
@@ -3381,14 +3051,6 @@ pub(crate) unsafe fn parse_cli_data_argument_list(
 
 // ── Shape-aware dispatch ───────────────────────────────────────────────────
 
-/// Read all bytes for a CLI argument, honoring the source classifier.
-/// For File / Stdin sources, opens the file (or stdin) and reads to a
-/// libc-malloc'd buffer. For Inline source, copies the argv string's
-/// bytes into a libc-malloc'd buffer. Returns the buffer plus the
-/// resolved source kind so callers can fast-fail forms whose semantics
-/// require a specific source (e.g. `form: list` insists on
-/// File/Stdin). The caller is responsible for freeing the returned
-/// buffer.
 /// Open a NUL-terminated path, read the whole file into a libc-malloc
 /// buffer, and return it. On failure returns a short reason (already
 /// formatted but without any caller-specific prefix). The buffer must
@@ -3465,7 +3127,6 @@ unsafe fn read_argv_bytes(
             fd
         }
         ArgSource::Inline => {
-            // Inline: the argv string itself is the byte payload.
             let arg_bytes = CStr::from_ptr(effective).to_bytes();
             let buf = libc::malloc(arg_bytes.len().max(1)) as *mut u8;
             if buf.is_null() {
@@ -3493,9 +3154,7 @@ unsafe fn read_argv_bytes(
     Some((data, data_size, classified.kind))
 }
 
-/// Wrap a freshly-decoded voidstar in a morloc data packet. Mirrors the
-/// tail of `parse_cli_data_argument`. Also used by `daemon_ffi` to
-/// packetize an in-process eval result for `-f packet` output.
+/// Wrap a freshly-decoded voidstar in a morloc data packet.
 pub(crate) unsafe fn wrap_voidstar_as_packet(
     voidstar: *mut c_void,
     schema: *const CSchema,
@@ -3542,9 +3201,9 @@ unsafe fn packet_of(
     }
 }
 
-/// Per-element source vocabulary for `form: list`. Plumbed through
+/// Per-element source vocabulary for `@form list`. Plumbed through
 /// the shaped FFI as a JSON string so the runtime can switch on
-/// `list.source:` without growing the FFI signature.
+/// `@list.source` without growing the FFI signature.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ListElemSource {
@@ -3634,11 +3293,6 @@ unsafe fn dispatch_shape_core(
     list_cfg: &ListConfig,
     errmsg: *mut *mut c_char,
 ) -> *mut c_void {
-    // `form: auto` delegates to the existing classified pipeline,
-    // which handles inline JSON literals (NUL-terminated argv strings
-    // fed to `read_json_with_schema`), file reads, and stdin -- no
-    // need to round-trip through `load_morloc_data_file` on a
-    // libc-malloc'd buffer.
     if form_code == 0 {
         let classified = match source_code {
             1 => Classified { kind: ArgSource::Inline, effective: arg_value },
@@ -3695,15 +3349,8 @@ unsafe fn dispatch_shape_core(
         return ptr::null_mut();
     }
 
-    // `form: list` + inline argv: route through the JSON path when
-    // the argv looks like a JSON array (`[...]`). No overlap with
-    // realistic filenames: files whose first byte is `[` are not
-    // production-realistic. A user hitting the weird edge case can
-    // spell the file source explicitly with `source: file` or `-`.
-    //
-    // Non-JSON inline input on `form: list` (a bare token like
-    // `foo`, missing the `[` prefix) still errors, since there's no
-    // sensible way to parse a scalar token into a list.
+    // `@form list` with an inline argv reads it as a JSON array; any other
+    // inline token cannot be a list.
     if form_code == 3 && source_kind == ArgSource::Inline {
         let first_byte = if data.is_null() || data_size == 0 {
             0
@@ -3755,9 +3402,6 @@ unsafe fn dispatch_shape_core(
             }
             return voidstar as *mut c_void;
         }
-        // Not JSON-shaped -- error with a clearer message than the
-        // previous "requires file/stdin" wording. Inline non-`[`
-        // input can't yield a list.
         if !data.is_null() {
             libc::free(data as *mut c_void);
         }
@@ -3944,9 +3588,6 @@ pub(crate) unsafe fn parse_cli_data_argument(
     clear_errmsg(errmsg);
     let mut err: *mut c_char = ptr::null_mut();
 
-    // Stream-packet fast path (singular args only): a MORLOC_STREAM_PACKET
-    // file short-circuits the voidstar-then-wrap chain below and returns
-    // a purpose-built packet directly.
     let mut table_spool: Option<Classified> = None;
     if (*arg).fields.is_null() && !(*arg).value.is_null() {
         if let Ok(classified) = classify_arg_source((*arg).value) {
@@ -4109,7 +3750,9 @@ pub(crate) unsafe fn make_call_packet(
     mid: u32,
     args: &[morloc_manifest::call_args::CallArg],
     arg_schema_strs: *mut *mut c_char, // NULL-terminated
-) -> Result<*mut u8, String> {
+    dims: Option<&morloc_runtime_types::dims::Dims>,
+) -> Result<*mut u8, morloc_runtime_types::dims::DimsError> {
+    use morloc_runtime_types::dims::DimsError;
     let mut err: *mut c_char = ptr::null_mut();
     let take = |err: &mut *mut c_char| {
         let msg = CStr::from_ptr(*err).to_string_lossy().into_owned();
@@ -4119,29 +3762,94 @@ pub(crate) unsafe fn make_call_packet(
     };
     let mut schemas: Vec<*mut CSchema> = Vec::with_capacity(args.len());
     let mut packets: Vec<*const u8> = Vec::with_capacity(args.len());
-    let result = (|| {
+    let result = (|| -> Result<*mut u8, DimsError> {
         for (i, arg) in args.iter().enumerate() {
             let s = *arg_schema_strs.add(i);
             if s.is_null() {
-                return Err(format!("argument {} has no schema", i + 1));
+                return Err(DimsError::Input(format!("argument {} has no schema", i + 1)));
             }
             let schema = crate::ffi::parse_schema(s, &mut err);
             if !err.is_null() {
-                return Err(take(&mut err));
+                return Err(DimsError::Input(take(&mut err)));
             }
             schemas.push(schema);
-            let packet = call_arg_packet(arg, schema).map_err(|e| format!("argument {}: {}", i + 1, e))?;
+            let packet = call_arg_packet(arg, schema).map_err(|e| DimsError::Input(format!("argument {}: {}", i + 1, e)))?;
             packets.push(packet as *const u8);
+        }
+        if let Some(d) = dims {
+            let mut values: Vec<*const u8> = vec![ptr::null(); packets.len()];
+            for i in d.args() {
+                if i < packets.len() && values[i].is_null() {
+                    let v = crate::packet_ffi::get_morloc_data_packet_value(packets[i], schemas[i], &mut err);
+                    if !err.is_null() {
+                        return Err(DimsError::Input(format!("argument {}: {}", i + 1, take(&mut err))));
+                    }
+                    values[i] = v;
+                }
+            }
+            let cs: Vec<*const CSchema> = schemas.iter().map(|s| *s as *const CSchema).collect();
+            check_dims(d, &values, &cs)?;
         }
         let call = crate::packet_ffi::make_morloc_local_call_packet(mid, packets.as_ptr(), packets.len(), &mut err);
         if !err.is_null() {
-            return Err(take(&mut err));
+            return Err(DimsError::Input(take(&mut err)));
         }
         Ok(call)
     })();
     for p in &packets { libc::free(*p as *mut c_void); }
     for s in &schemas { CSchema::free(*s); }
     result
+}
+
+/// Check a command's dimension relations (DIM-3) on its decoded
+/// arguments; `values[i]` is null for an argument they do not read.
+pub(crate) unsafe fn check_dims(
+    d: &morloc_runtime_types::dims::Dims,
+    values: &[*const u8],
+    schemas: &[*const CSchema],
+) -> Result<(), morloc_runtime_types::dims::DimsError> {
+    let mut rs: Vec<Option<crate::schema::Schema>> = (0..values.len()).map(|_| None).collect();
+    for i in d.args() {
+        match (values.get(i), schemas.get(i)) {
+            (Some(v), Some(s)) if !v.is_null() && !s.is_null() => {
+                if rs[i].is_none() {
+                    rs[i] = Some(CSchema::to_rust(*s));
+                }
+            }
+            _ => {
+                return Err(morloc_runtime_types::dims::DimsError::Internal(format!(
+                    "internal error: argument {} was not decoded",
+                    i + 1
+                )))
+            }
+        }
+    }
+    let vals: Vec<Option<(*const u8, &crate::schema::Schema)>> =
+        rs.iter().zip(values.iter()).map(|(s, v)| s.as_ref().map(|s| (*v, s))).collect();
+    let label = |i: usize, _: Option<&str>| (format!("argument {}", i + 1), String::new());
+    let resolve = |rel: crate::shm::RelPtr| crate::shm::rel2abs(rel).map(|p| p as *const u8).map_err(|e| e.to_string());
+    d.check(&vals, &label, &resolve)
+}
+
+/// The command's `dims` constraint, if it has one.
+pub(crate) unsafe fn dims_of(
+    cmd: &crate::manifest_ffi::ManifestCommand,
+) -> Result<Option<morloc_runtime_types::dims::Dims>, String> {
+    let name = if cmd.name.is_null() { String::new() } else { CStr::from_ptr(cmd.name).to_string_lossy().into_owned() };
+    for i in 0..cmd.n_constraints {
+        let c = &*cmd.constraints.add(i);
+        if c.ctype.is_null() || CStr::from_ptr(c.ctype).to_bytes() != b"dims" {
+            continue;
+        }
+        let bad = || format!("malformed dims constraint in command '{}'", name);
+        if c.value_json.is_null() {
+            return Err(bad());
+        }
+        let v: serde_json::Value =
+            serde_json::from_slice(CStr::from_ptr(c.value_json).to_bytes()).map_err(|_| bad())?;
+        return morloc_runtime_types::dims::Dims::parse(&v, &name).map(Some);
+    }
+    Ok(None)
 }
 
 #[cfg(test)]
@@ -4264,6 +3972,52 @@ mod tests {
             libc::free(err as *mut c_void);
             assert!(msg.contains("shared-memory reference"), "{msg}");
             crate::cschema::CSchema::free(cschema);
+        }
+    }
+
+    unsafe fn load_bytes(bytes: &[u8], schema: &str) -> Result<*mut c_void, String> {
+        let rs = crate::schema::parse_schema(schema).unwrap();
+        let cs = crate::cschema::CSchema::from_rust(&rs);
+        let data = libc::malloc(bytes.len().max(1)) as *mut u8;
+        ptr::copy_nonoverlapping(bytes.as_ptr(), data, bytes.len());
+        let path = std::ffi::CString::new("x.pkt").unwrap();
+        let mut err: *mut c_char = ptr::null_mut();
+        let got = load_morloc_data_file(path.as_ptr(), data, bytes.len(), cs, &mut err);
+        crate::cschema::CSchema::free(cs);
+        if got.is_null() {
+            assert!(!err.is_null());
+            let msg = CStr::from_ptr(err).to_string_lossy().into_owned();
+            libc::free(err as *mut c_void);
+            Err(msg)
+        } else {
+            Ok(got)
+        }
+    }
+
+    /// A packet file is checked against the type it is read as, so one
+    /// without a schema cannot be read.
+    #[test]
+    fn a_packet_file_without_a_schema_is_refused() {
+        let _shm = crate::init_test_shm();
+        let header = packet::PacketHeader::data_mesg(packet::PACKET_FORMAT_VOIDSTAR, 8);
+        let mut bytes = header.to_bytes().to_vec();
+        bytes.extend_from_slice(&5i64.to_le_bytes());
+        let msg = unsafe { load_bytes(&bytes, "i8") }.unwrap_err();
+        assert!(msg.contains("carries no schema"), "{msg}");
+    }
+
+    /// A header that claims more bytes than the file holds is refused
+    /// before anything past the file is read.
+    #[test]
+    fn a_packet_file_shorter_than_its_header_claims_is_refused() {
+        let _shm = crate::init_test_shm();
+        for (offset, length) in [(0u32, 1u64 << 40), (1u32 << 30, 8), (8, u64::MAX - 16)] {
+            let mut header = packet::PacketHeader::data_mesg(packet::PACKET_FORMAT_VOIDSTAR, length);
+            header.offset = offset;
+            let mut bytes = header.to_bytes().to_vec();
+            bytes.extend_from_slice(&[0u8; 16]);
+            let msg = unsafe { load_bytes(&bytes, "i8") }.unwrap_err();
+            assert!(msg.contains("the file holds"), "{offset} {length}: {msg}");
         }
     }
 

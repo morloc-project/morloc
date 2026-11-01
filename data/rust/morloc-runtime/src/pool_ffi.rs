@@ -429,6 +429,10 @@ unsafe fn serve_one(client_fd: i32, queue: &JobQueue, config: &PoolConfig, kept:
             crate::error::set_errmsg(&mut errmsg, &crate::error::MorlocError::Ipc(why.into()));
             ptr::null_mut()
         }
+        Err(ReadFailure::Alloc) => {
+            crate::error::set_errmsg(&mut errmsg, &crate::error::MorlocError::Ipc("malloc failure".into()));
+            ptr::null_mut()
+        }
         Err(ReadFailure::Packet(e)) => {
             errmsg = e;
             ptr::null_mut()

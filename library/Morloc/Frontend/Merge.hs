@@ -88,18 +88,18 @@ mergeTypeUs :: TypeU -> TypeU -> MorlocMonad TypeU
 mergeTypeUs t1 t2
   | equivalent t1 t2 = return t1
   | otherwise =
-      MM.throwSystemError $
+      MM.throwRejected $
         "Incompatible general types:" <+> parens (pretty t1) <+> "vs" <+> parens (pretty t2)
 
 throwConflictingInstancesError :: MDoc -> Instance -> Instance -> MorlocMonad a
 throwConflictingInstancesError msg inst1 inst2
   | inst1 == inst2 =
-      MM.throwSystemError $
+      MM.throwRejected $
         "Found conflict between overlapping instances for class"
           <+> squotes (pretty (className inst1))
           <> ":" <+> msg
   | otherwise =
-      MM.throwSystemError $
+      MM.throwRejected $
         "Found conflict between overlapping instances for classes"
           <+> squotes (pretty (className inst1))
           <+> "and"
@@ -128,7 +128,7 @@ mergeIndexedInstances = mergeFirstIndexM mergeTypeclasses
 
 throwSignatureUnificationError :: SignatureSet -> SignatureSet -> MorlocMonad a
 throwSignatureUnificationError s1 s2 =
-  MM.throwSystemError $
+  MM.throwRejected $
     "Cannot unify signatures for the polymorphic signature sets below:"
       <> "\n  s1:" <+> pretty s1
       <> "\n  s2:" <+> pretty s2

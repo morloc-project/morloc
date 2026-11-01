@@ -1,11 +1,11 @@
 -- Single-export program for the nexus CLI grammar test.
 -- Exercises: unrolled record group with --minimum/--tag, a
 -- positional Map arg with form: list, and a terminal action
--- (`--' with:`) that redirects the composed output through
+-- (`--' @with`) that redirects the composed output through
 -- `shout`. The `-y` path also exercises the internal
 -- (`mlcp_echoMap_shout`) command's inheritance of the parent's
 -- per-arg docstrings; without inheritance the internal command
--- would load the file positional under `form: auto` and produce
+-- would load the file positional under `@form auto` and produce
 -- a schema mismatch at dispatch.
 
 module single (echoMap)
@@ -14,14 +14,14 @@ import map-py (Map)
 import set-py (Set)
 
 --' Filter options
---' unroll: true
+--' @unroll true
 record Opts where
-  --' arg: --minimum
-  --' default: 10
+  --' @arg --minimum
+  --' @default 10
   minval :: Int
 
-  --' arg: --tag
-  --' default: "x"
+  --' @arg --tag
+  --' @default "x"
   tag :: Str
 
 --' Uppercase the string. Used as a terminal action so `-y` triggers
@@ -30,10 +30,10 @@ shout :: Str -> Str
 
 --' Return the tag concatenated with the count of entries in the map
 --' whose value is at least minval.
---' with: -y/--shout=shout
+--' @with -y/--shout=shout
 echoMap :: Opts ->
   --' Entries to filter
-  --' form: list
+  --' @form list
   Map Str Int -> Str
 
 source Py from "helpers.py" ("echoMap", "shout")

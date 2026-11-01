@@ -87,14 +87,14 @@ analyzeComposition :: Str -> SeqStats
 --'
 --' Computes GC content and complexity statistics using R.
 --'
---' name: analyze
+--' @name analyze
 analyzeSequence ::
   --' Sample sequence ID (1-5)
-  --' arg: --sample
-  --' metavar: ID
-  --' default: 1
+  --' @arg --sample
+  --' @metavar ID
+  --' @default 1
   Int ->
-  --' return: Sequence statistics
+  --' @return Sequence statistics
   SeqStats
 analyzeSequence sampleId = analyzeComposition (.nucleotides seq) where
   seq = getSampleSequence sampleId
@@ -103,19 +103,19 @@ analyzeSequence sampleId = analyzeComposition (.nucleotides seq) where
 --'
 --' Finds all k-mers of specified length in the sequence.
 --'
---' name: motifs
+--' @name motifs
 findMotifs ::
   --' Sample sequence ID
-  --' arg: --sample
-  --' metavar: ID
-  --' default: 1
+  --' @arg --sample
+  --' @metavar ID
+  --' @default 1
   Int ->
   --' K-mer length
-  --' arg: -k/--kmer-length
-  --' metavar: K
-  --' default: 3
+  --' @arg -k/--kmer-length
+  --' @metavar K
+  --' @default 3
   Int ->
-  --' return: List of k-mers
+  --' @return List of k-mers
   [Str]
 findMotifs sampleId k = findKmers (.nucleotides seq) k where
   seq = getSampleSequence sampleId
@@ -124,19 +124,19 @@ findMotifs sampleId k = findKmers (.nucleotides seq) k where
 --'
 --' Performs Smith-Waterman local alignment on two sample sequences.
 --'
---' name: align
+--' @name align
 alignSequences ::
   --' First sequence ID
-  --' arg: --seq1
-  --' metavar: ID1
-  --' default: 1
+  --' @arg --seq1
+  --' @metavar ID1
+  --' @default 1
   Int ->
   --' Second sequence ID
-  --' arg: --seq2
-  --' metavar: ID2
-  --' default: 2
+  --' @arg --seq2
+  --' @metavar ID2
+  --' @default 2
   Int ->
-  --' return: Alignment result
+  --' @return Alignment result
   Alignment
 alignSequences id1 id2 = alignSmithWaterman (.nucleotides seq1) (.nucleotides seq2) where
   seq1 = getSampleSequence id1
@@ -146,12 +146,12 @@ alignSequences id1 id2 = alignSmithWaterman (.nucleotides seq1) (.nucleotides se
 --'
 --' Computes the GC content percentage of a sequence.
 --'
---' name: gcContent
+--' @name gcContent
 gcContent ::
   --' Sample sequence ID
-  --' metavar: ID
+  --' @metavar ID
   Int ->
-  --' return: GC content (0-1)
+  --' @return GC content (0-1)
   Real
 gcContent sampleId = calculateGC (.nucleotides seq) where
   seq = getSampleSequence sampleId

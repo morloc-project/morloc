@@ -6,13 +6,17 @@ Destructuring, `match`, guards, pattern chains, exhaustiveness. Prefix: PAT.
 
 ### PAT-1 Irrefutable patterns match every well-typed receiver
 Intent: proposed
-Code: deviates (issues/typecheck.md)
+Tests: spec-pat-1-1, spec-pat-1-2, spec-pat-1-3, spec-pat-1-4, spec-pat-1-5, spec-pat-1-6, spec-pat-1-7, spec-pat-1-8, spec-pat-1-9, spec-pat-1-10, spec-pat-1-11, spec-pat-1-12, spec-pat-1-13, spec-pat-1-14, spec-pat-1-15, spec-pat-1-16, spec-pat-1-17, spec-pat-1-18, spec-pat-1-19, spec-pat-1-20, spec-pat-1-21, spec-pat-1-22, spec-pat-1-23, spec-pat-1-24, spec-pat-1-25, spec-pat-1-26, spec-pat-1-27, spec-pat-1-28, spec-pat-1-29
+Code: conforms 2026-11-01
 
 The forms are a name, `_`, a tuple of full arity, a record `{k = p, ...}`,
 an as-pattern (BIND-5), and any nesting of these. A record pattern needs the
 receiver to have the named keys and ignores the rest. They appear as lambda
 parameters, definition parameters, `let` left-hand sides and `do` binds; a
-record pattern after `let` or `do` is parenthesized.
+record pattern after `let` or `do` is parenthesized. A pattern that binds
+nothing still constrains its receiver. Where the receiver's type is not yet
+known, every pattern and getter on it must agree on what it is: a tuple of
+one width, or a record.
 
 ### PAT-2 Clauses are tried in order and the first match wins
 Intent: proposed
@@ -26,11 +30,23 @@ begin a clause, so a `|` always continues the innermost list.
 
 ### PAT-3 A clause list is exhaustive
 Intent: proposed
-Code: deviates (issues/typecheck.md)
+Tests: spec-pat-3-1, spec-pat-3-2, spec-pat-3-3, spec-pat-3-4, spec-pat-3-5, spec-pat-3-6, spec-pat-3-7, spec-pat-3-8, spec-pat-3-9
+Code: conforms 2026-10-31
 
-The last clause is irrefutable, or the clauses cover every value of the
-matched type: both `Bool` literals, or every constructor of a sum type.
-Anything else is a compile error at the definition or the `match`.
+Every value of the matched type is matched by some clause: a tuple or record
+is covered when its fields are, a `data` type when each constructor is with
+its fields, `Bool` by both literals, and no set of other literals or of list
+lengths covers its type. The type may be declared in any module. Anything
+else is a compile error at the definition or the `match`, naming values no
+clause matches.
+
+### PAT-8 A clause that matches nothing new is reported
+Intent: ruled 2026-10-29
+Tests: spec-pat-8-1, spec-pat-8-2, spec-pat-8-3
+Code: conforms 2026-10-31
+
+A clause every value of which the clauses before it already match is a
+warning at the clause: it can never run.
 
 ### PAT-4 Literal patterns on reals
 Intent: open

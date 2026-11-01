@@ -1,0 +1,4 @@
+module (*)
+
+innerValue :: Int
+innerValue = 2

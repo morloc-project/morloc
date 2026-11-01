@@ -1,0 +1,4 @@
+module (*)
+
+localValue :: Int
+localValue = 1

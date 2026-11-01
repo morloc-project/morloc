@@ -1,0 +1,5 @@
+mk <- function(i) c(i, i + 10L)
+zeroAcc <- function() list()
+addBatch <- function(a, b) unique(c(a, as.list(b)))
+mergeAcc <- function(a, b) unique(c(a, b))
+showAcc <- function(a) paste(sort(unlist(a)), collapse = " ")

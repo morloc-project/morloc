@@ -20,4 +20,4 @@ def bumpLib(i):
     return i + 3
 
 def applyGrouped(f, x):
-    return f(x)(x)
+    return f(x, x)

@@ -16,7 +16,7 @@ import qualified Data.Scientific as DS
 import Data.List (sortBy, foldl')
 import qualified Control.Monad.State.Strict as State
 import Morloc.Frontend.Token
-import Morloc.Frontend.Lexer (lexMorloc, showLexError)
+import Morloc.Frontend.Lexer (LexError (..), insertLayoutWith, lexMorloc, lexMorlocUnlaid, lexMorlocUnlaidFrom, showLexError)
 import Morloc.Frontend.CST
 import qualified Morloc.Frontend.CST as CST
 import Morloc.Frontend.Desugar (DState(..), D, ParseError(..), showParseError, desugarProgram, desugarExpr)
@@ -156,7 +156,7 @@ import qualified Morloc.BaseTypes as BT
 -- Program
 --------------------------------------------------------------------
 
-program :: { ([Loc CstExpr], Bool) }
+program :: { ([Loc CstDecl], Bool) }
   : modules EOF             { ($1, False) }
   | top_body EOF            { ($1, True) }
 
@@ -167,42 +167,42 @@ type_eof :: { TypeU }
 expr_eof :: { Loc CstExpr }
   : expr EOF                { $1 }
 
-modules :: { [Loc CstExpr] }
+modules :: { [Loc CstDecl] }
   : module                   { [$1] }
   | modules module           { $1 ++ [$2] }
 
-module :: { Loc CstExpr }
+module :: { Loc CstDecl }
   : 'module' module_name '(' exports ')' top_body
       { at $1 (CModE (Just $2) $4 $6) }
   | 'module' '(' exports ')' top_body
       { at $1 (CModE Nothing $3 $5) }
 
-top_body :: { [Loc CstExpr] }
+top_body :: { [Loc CstDecl] }
   : VLBRACE top_decls VRBRACE   { $2 }
   | VLBRACE VRBRACE              { [] }
   | '{' top_decls_explicit '}'   { $2 }
   | '{' '}'                      { [] }
 
-top_decls :: { [Loc CstExpr] }
+top_decls :: { [Loc CstDecl] }
   : top_decl                     { $1 }
   | top_decls VSEMI top_decl     { $1 ++ $3 }
 
-top_decls_explicit :: { [Loc CstExpr] }
+top_decls_explicit :: { [Loc CstDecl] }
   : top_decl                           { $1 }
   | top_decls_explicit ';' top_decl    { $1 ++ $3 }
 
-top_decl :: { [Loc CstExpr] }
+top_decl :: { [Loc CstDecl] }
   : import_decl       { [$1] }
   | typedef_decl      { [$1] }
   | typeclass_decl    { [$1] }
   | effect_decl       { $1 }
   | instance_decl     { $1 }
   | fixity_decl       { [$1] }
-  | source_decl       { $1 }
-  | '%inline' source_decl { map (\(Loc sp e) -> Loc sp (CInlineE (Loc sp e))) $2 }
+  | source_decl       { $1 False }
+  | '%inline' source_decl { $2 True }
   | sig_or_ass        { $1 }
 
-sig_or_ass :: { [Loc CstExpr] }
+sig_or_ass :: { [Loc CstDecl] }
   : evar_or_op '::' sig_type
       { [at $1 (CSigE (toEVar $1) $3)] }
   | evar_or_op atom_exprs '=' expr opt_where_decls
@@ -293,7 +293,7 @@ symbol :: { Located }
 -- Imports
 --------------------------------------------------------------------
 
-import_decl :: { Loc CstExpr }
+import_decl :: { Loc CstDecl }
   : 'import' import_module_name opt_import_list
       { at $1 (CImpE (Import (MV $2) $3 [] Nothing)) }
   | 'import' import_module_name 'as' LOWER opt_import_list
@@ -333,7 +333,7 @@ import_item :: { AliasedSymbol }
 -- Type definitions
 --------------------------------------------------------------------
 
-typedef_decl :: { Loc CstExpr }
+typedef_decl :: { Loc CstDecl }
   : 'type' UPPER '=>' typedef_term '=' concrete_rhs
       { at $1 (CTypE (CstTypeAlias (Just $2) $4 $6)) }
   | 'type' LOWER '=>' typedef_term '=' concrete_rhs
@@ -346,10 +346,10 @@ typedef_decl :: { Loc CstExpr }
       { at $1 (CTypE (CstTypeAlias Nothing (TV (getName $3), $4) ($7, False))) }
   | 'type' '(' UPPER typedef_params ')'
       { at $1 (CTypE (CstTypeAliasForward (TV (getName $3), $4))) }
-  | 'newtype' UPPER typedef_params '=' type opt_deriving
-      { at $1 (CTypE (CstNewtype (TV (getName $2), $3) $5 $6)) }
-  | 'newtype' '(' UPPER typedef_params ')' '=' type opt_deriving
-      { at $1 (CTypE (CstNewtype (TV (getName $3), $4) $7 $8)) }
+  | 'newtype' UPPER typedef_params '=' rep_open type opt_deriving
+      {% repClose >> return (at $1 (CTypE (CstNewtype (TV (getName $2), $3) $6 $7))) }
+  | 'newtype' '(' UPPER typedef_params ')' '=' rep_open type opt_deriving
+      {% repClose >> return (at $1 (CTypE (CstNewtype (TV (getName $3), $4) $8 $9))) }
   -- @newtype X@ / @newtype (X a)@ with no RHS is a built-in primitive
   -- declaration: nominal, opaque, owns its per-language forms. Reuses
   -- 'CstTypeAliasForward' since the desugar is identical
@@ -402,6 +402,11 @@ nam_constructor :: { (Text, Bool, [TypeU]) }
 -- Each constructor carries the `=` or `|` that introduces it: a docstring
 -- written above a constructor sits above that token, which is where the
 -- lexer attaches it.
+-- Labels in a newtype's representation are kept (DIM-9); anywhere else
+-- inside a type they are an error.
+rep_open :: { () }
+  : {- empty -}                       {% State.modify (\st -> st { psInRep = True }) }
+
 -- The classes a declaration derives (DERIV-1).
 opt_deriving :: { [(Located, Text)] }
   : {- empty -}                       { [] }
@@ -519,7 +524,7 @@ non_string_atom :: { TypeU }
 -- Typeclasses
 --------------------------------------------------------------------
 
-typeclass_decl :: { Loc CstExpr }
+typeclass_decl :: { Loc CstDecl }
   : 'class' class_head 'where' VLBRACE sig_list VRBRACE
       { at $1 (CClsE $2 $5) }
   | 'class' class_head
@@ -533,7 +538,7 @@ typeclass_decl :: { Loc CstExpr }
 -- Multiple effects may be declared on one line, comma-separated:
 -- `effect IO, Err` desugars to `effect IO` followed by `effect Err`.
 -- The `escapable` prefix applies to every name in the list.
-effect_decl :: { [Loc CstExpr] }
+effect_decl :: { [Loc CstDecl] }
   : 'effect' effect_name_list
       { map (\n -> at $1 (CEffE (getName n) False)) $2 }
   | 'escapable' 'effect' effect_name_list
@@ -567,13 +572,13 @@ sig_list :: { [CstSigItem] }
 
 signature :: { CstSigItem }
   : evar_or_op '::' sig_type
-      { CstSigItem (toEVar $1) $3 }
+      { CstSigItem (locPos $1) (toEVar $1) $3 }
 
 --------------------------------------------------------------------
 -- Instances
 --------------------------------------------------------------------
 
-instance_decl :: { [Loc CstExpr] }
+instance_decl :: { [Loc CstDecl] }
   : 'instance' instance_context instance_heads 'where' VLBRACE instance_items VRBRACE
       { [at $1 (CIstE $2 cn ts (concat $6)) | (cn, ts) <- $3] }
   | 'instance' instance_context instance_heads
@@ -592,20 +597,20 @@ instance_heads :: { [(ClassName, [TypeU])] }
   : UPPER types1                              { [(ClassName (getName $1), $2)] }
   | instance_heads ',' UPPER types1           { $1 ++ [(ClassName (getName $3), $4)] }
 
-instance_items :: { [[Loc CstExpr]] }
+instance_items :: { [[Loc CstDecl]] }
   : instance_item                        { [$1] }
   | instance_items VSEMI instance_item   { $1 ++ [$3] }
 
-instance_item :: { [Loc CstExpr] }
-  : source_decl             { $1 }
-  | '%inline' source_decl   { map (\(Loc sp e) -> Loc sp (CInlineE (Loc sp e))) $2 }
+instance_item :: { [Loc CstDecl] }
+  : source_decl             { $1 False }
+  | '%inline' source_decl   { $2 True }
   | sig_or_ass              { $1 }
 
 --------------------------------------------------------------------
 -- Fixity declarations
 --------------------------------------------------------------------
 
-fixity_decl :: { Loc CstExpr }
+fixity_decl :: { Loc CstDecl }
   : 'infixl' INTEGER operator_names
       {% checkFixityPrecedence $2 >> return (at $1 (CFixE InfixL (fromInteger (getInt $2)) $3)) }
   | 'infixr' INTEGER operator_names
@@ -630,56 +635,59 @@ operator_ref :: { EVar }
 -- Source declarations
 --------------------------------------------------------------------
 
-source_decl :: { [Loc CstExpr] }
+-- Applied to whether the declaration is marked `%inline`.
+source_decl :: { Bool -> [Loc CstDecl] }
   : 'source' lang_token opt_from '(' source_items ')'
-      { [at $1 (CSrcOldE $2 $3 $5)] }
+      { \inl -> [at $1 (CSrcOldE $2 $3 (map (inlineItem inl) (leadItem (locPos $4) $5)))] }
   | 'source' lang_token opt_from 'where' VLBRACE source_new_items VRBRACE
-      { [at $1 (CSrcNewE $2 $3 $6)] }
+      { \inl -> [at $1 (CSrcNewE $2 $3 (map (inlineItem inl) $6))] }
 
 opt_from :: { Maybe Text }
   : {- empty -}                    { Nothing }
   | 'from' STRING                  { Just (getString $2) }
 
-source_items :: { [(Bool, Text, Maybe Text)] }
+source_items :: { [CstSrcItem] }
   : source_item                          { [$1] }
-  | source_items ',' source_item         { $1 ++ [$3] }
+  | source_items ',' source_item         { $1 ++ leadItem (locPos $2) [$3] }
 
-source_item :: { (Bool, Text, Maybe Text) }
-  : STRING                              { (False, getString $1, Nothing) }
-  | STRING 'as' LOWER                   { (False, getString $1, Just (getName $3)) }
-  | STRING 'as' UPPER                   { (False, getString $1, Just (getName $3)) }
-  | STRING 'as' source_op               { (False, getString $1, Just $3) }
-  | source_op                           { (False, $1, Nothing) }
-  | source_op 'as' source_op            { (False, $1, Just $3) }
-  | source_op 'as' LOWER               { (False, $1, Just (getName $3)) }
-  | source_op 'as' UPPER               { (False, $1, Just (getName $3)) }
+-- An item's docstrings are filed above its first token or above the
+-- separator before it.
+source_item :: { CstSrcItem }
+  : STRING                              { listItem (locPos $1) False (getString $1) Nothing }
+  | STRING 'as' LOWER                   { listItem (locPos $1) False (getString $1) (Just (getName $3)) }
+  | STRING 'as' UPPER                   { listItem (locPos $1) False (getString $1) (Just (getName $3)) }
+  | STRING 'as' source_op               { listItem (locPos $1) False (getString $1) (Just (snd $3)) }
+  | source_op                           { listItem (fst $1) False (snd $1) Nothing }
+  | source_op 'as' source_op            { listItem (fst $1) False (snd $1) (Just (snd $3)) }
+  | source_op 'as' LOWER               { listItem (fst $1) False (snd $1) (Just (getName $3)) }
+  | source_op 'as' UPPER               { listItem (fst $1) False (snd $1) (Just (getName $3)) }
   -- Backtick-quoted foreign name: `text` forces the sourced binding to
   -- be treated as an infix operator whose emitted string is <text>.
   -- The alias is required (there is no useful "morloc-side name" for a
   -- keyword like `and`, so the user must supply e.g. `and` as (&&)).
-  | BACKTICK 'as' source_op             { (True, getBacktick $1, Just $3) }
-  | BACKTICK 'as' LOWER                 { (True, getBacktick $1, Just (getName $3)) }
-  | BACKTICK 'as' UPPER                 { (True, getBacktick $1, Just (getName $3)) }
+  | BACKTICK 'as' source_op             { listItem (locPos $1) True (getBacktick $1) (Just (snd $3)) }
+  | BACKTICK 'as' LOWER                 { listItem (locPos $1) True (getBacktick $1) (Just (getName $3)) }
+  | BACKTICK 'as' UPPER                 { listItem (locPos $1) True (getBacktick $1) (Just (getName $3)) }
 
-source_op :: { Text }
-  : '(' operator_name ')'              { getOp $2 }
-  | '(' '-' ')'                        { "-" }
-  | '(' '.' ')'                        { "." }
+source_op :: { (Pos, Text) }
+  : '(' operator_name ')'              { (locPos $1, getOp $2) }
+  | '(' '-' ')'                        { (locPos $1, "-") }
+  | '(' '.' ')'                        { (locPos $1, ".") }
 
-source_new_items :: { [(Bool, Bool, Text, Located)] }
+source_new_items :: { [CstSrcItem] }
   : source_new_item                          { [$1] }
   | source_new_items VSEMI source_new_item   { $1 ++ [$3] }
 
-source_new_item :: { (Bool, Bool, Text, Located) }
-  : '%inline' source_new_term         { let (b, n, t) = $2 in (True, b, n, t) }
-  | source_new_term                   { let (b, n, t) = $1 in (False, b, n, t) }
+source_new_item :: { CstSrcItem }
+  : '%inline' source_new_term         { let (b, n, p) = $2 in CstSrcItem [locPos $1] p True b n Nothing }
+  | source_new_term                   { let (b, n, p) = $1 in CstSrcItem [] p False b n Nothing }
 
-source_new_term :: { (Bool, Text, Located) }
-  : LOWER                             { (False, getName $1, $1) }
-  | '(' operator_name ')'            { (False, getOp $2, $2) }
-  | '(' '-' ')'                      { (False, "-", $2) }
-  | '(' '.' ')'                      { (False, ".", $2) }
-  | BACKTICK                          { (True, getBacktick $1, $1) }
+source_new_term :: { (Bool, Text, Pos) }
+  : LOWER                             { (False, getName $1, locPos $1) }
+  | '(' operator_name ')'            { (False, getOp $2, locPos $1) }
+  | '(' '-' ')'                      { (False, "-", locPos $1) }
+  | '(' '.' ')'                      { (False, ".", locPos $1) }
+  | BACKTICK                          { (True, getBacktick $1, locPos $1) }
 
 --------------------------------------------------------------------
 -- Expressions
@@ -942,19 +950,15 @@ interp_body :: { ([Loc CstExpr], [Text]) }
 --------------------------------------------------------------------
 
 type :: { TypeU }
-  : arrow_rest               { fst $1 }
+  : arrow_rest               { $1 }
 
--- An arrow chain is one parameter list; a parenthesized arrow after it stays
--- nested. Morloc does not distinguish the two, but a source's signature says
--- with it how the source calls a function it is passed.
+-- An arrow chain is one parameter list, parenthesized or not (HOST-4).
 fun_type :: { TypeU }
   : non_fun_type '->' arrow_rest   { mkArrow $1 $3 }
 
--- a type, and whether it is an unparenthesized arrow (after an arrow, one
--- continues the chain)
-arrow_rest :: { (TypeU, Bool) }
-  : fun_type                 { ($1, True) }
-  | non_fun_type             { ($1, False) }
+arrow_rest :: { TypeU }
+  : fun_type                 { $1 }
+  | non_fun_type             { $1 }
 
 non_fun_type :: { TypeU }
   : '<' effect_row '>' add_type  {% mkEffectRow $1 $2 >>= \es -> return (mkEffectU es $4) }
@@ -994,7 +998,7 @@ atom_type :: { TypeU }
   -- out the ambiguity.
   | '[' tick_list1 ']'        { ListLitU $2 }
   | UPPER                     { VarU (TV (getName $1)) }
-  | LOWER '@' non_fun_type   { $3 }
+  | LOWER '@' non_fun_type   {% nestedLabel $1 $3 }
   | LOWER                     { VarU (TV (getName $1)) }
   | STRING                    { StrLitU (getString $1) }
   | INTEGER                   { NatLitU (getInt $1) }
@@ -1093,26 +1097,28 @@ operator_name :: { Located }
   | '>'                       { $1 }
   | '/'                       { $1 }
 
+-- An operator name stands where its opening parenthesis does, which is
+-- where a docstring above it is filed.
 evar_or_op :: { Located }
   : LOWER                     { $1 }
-  | '(' operator_name ')'     { $2 }
-  | '(' '-' ')'               { $2 }
-  | '(' '.' ')'               { $2 }
+  | '(' operator_name ')'     { $2 { locPos = locPos $1 } }
+  | '(' '-' ')'               { $2 { locPos = locPos $1 } }
+  | '(' '.' ')'               { $2 { locPos = locPos $1 } }
 
-opt_where_decls :: { [Loc CstExpr] }
+opt_where_decls :: { [Loc CstDecl] }
   : {- empty -}                               { [] }
   | 'where' VLBRACE where_items VRBRACE       { $3 }
   | 'where' '{' where_items_explicit '}'      { $3 }
 
-where_items :: { [Loc CstExpr] }
+where_items :: { [Loc CstDecl] }
   : where_item                      { $1 }
   | where_items VSEMI where_item    { $1 ++ $3 }
 
-where_items_explicit :: { [Loc CstExpr] }
+where_items_explicit :: { [Loc CstDecl] }
   : where_item                             { $1 }
   | where_items_explicit ';' where_item    { $1 ++ $3 }
 
-where_item :: { [Loc CstExpr] }
+where_item :: { [Loc CstDecl] }
   : sig_or_ass                { $1 }
 
 -- Zero-or-more atom_expr for function-def / declaration parameter lists.
@@ -1140,11 +1146,14 @@ data PState = PState
   , psModuleDoc   :: ![Text] -- module-level description
   , psModuleEpilogues :: ![[Text]] -- epilogue blocks
   , psStreamElems :: !(Map.Map EVar TypeU) -- @collect batch type per command
+  , psOwnModule :: !Bool -- the program's own module, not one of an installed package
+  , psInRep :: !Bool -- inside a newtype's representation
+  , psMatchSites :: !(Map.Map Text MatchSite)
   }
   deriving (Show)
 
 emptyPState :: PState
-emptyPState = PState 1 Map.empty Nothing defaultValue Map.empty [] Map.empty Nothing Map.empty [] [] [] Map.empty
+emptyPState = PState 1 Map.empty Nothing defaultValue Map.empty [] Map.empty Nothing Map.empty [] [] [] Map.empty True False Map.empty
 
 type P a = State.StateT PState (Either ParseError) a
 
@@ -1205,7 +1214,7 @@ parseKindE tok = case getName tok of
     srcLines <- State.gets psSourceLines
     State.lift (Left (ParseError (locPos tok)
       ("unknown kind " ++ show other
-        ++ "; expected one of Type, Nat, Str, Rec, List, Set") [] srcLines))
+        ++ "; expected one of Type, Nat, Str, Rec, List, Set") [] srcLines False))
 
 -- Build a Constraint, recognising primitive heads (Member / Subset /
 -- Disjoint) and routing typeclass-shaped constraints to the existing
@@ -1217,6 +1226,16 @@ mkConstraint "Member" [a, s] = CMember a s
 mkConstraint "Subset" [a, b] = CSubset a b
 mkConstraint "Disjoint" [a, b] = CDisjoint a b
 mkConstraint name ts = Constraint (ClassName name) ts
+
+listItem :: Pos -> Bool -> Text -> Maybe Text -> CstSrcItem
+listItem p isBacktick name alias = CstSrcItem [] p False isBacktick name alias
+
+inlineItem :: Bool -> CstSrcItem -> CstSrcItem
+inlineItem inl x = x {srcItemInline = inl || srcItemInline x}
+
+leadItem :: Pos -> [CstSrcItem] -> [CstSrcItem]
+leadItem p (x : rest) = x {srcItemLeadPos = p : srcItemLeadPos x} : rest
+leadItem _ [] = []
 
 getOp :: Located -> Text
 getOp (Located _ (TokOperator t) _) = t
@@ -1249,13 +1268,21 @@ applyType f x = AppU f [x]
 -- Error handling
 --------------------------------------------------------------------
 
+-- | A token the layout pass inserted.
+isVirtual :: Token -> Bool
+isVirtual t = t == TokVLBrace || t == TokVRBrace || t == TokVSemi
+
 parseError :: ([Located], [String]) -> P a
 parseError ([], expected) = do
   srcLines <- State.gets psSourceLines
-  State.lift (Left (ParseError (Pos 0 0 "") "unexpected end of input" expected srcLines))
+  path <- State.gets psModulePath
+  let endLine = max 1 (length srcLines)
+      endCol = 1 + maybe 0 T.length (lastMaybe srcLines)
+      lastMaybe xs = if null xs then Nothing else Just (last xs)
+  State.lift (Left (ParseError (Pos endLine endCol (maybe "" id path)) "unexpected end of input" expected srcLines False))
 parseError (Located pos tok _ : _, expected) = do
   srcLines <- State.gets psSourceLines
-  State.lift (Left (ParseError pos ("unexpected " ++ showToken tok) expected srcLines))
+  State.lift (Left (ParseError pos ("unexpected " ++ showToken tok) expected srcLines (not (isVirtual tok))))
 
 -- Reject infix precedence outside [0,9]. Caret on the INTEGER token.
 checkFixityPrecedence :: Located -> P ()
@@ -1265,7 +1292,7 @@ checkFixityPrecedence tok =
         then do
           srcLines <- State.gets psSourceLines
           State.lift (Left (ParseError (locPos tok)
-            ("infix precedence must be in [0,9], got " ++ show n) [] srcLines))
+            ("infix precedence must be in [0,9], got " ++ show n) [] srcLines False))
         else return ()
 
 -- Build an effect-row 'EffectSet' from parsed items: any number of
@@ -1291,6 +1318,7 @@ mkEffectRow ltok items =
                     "an effect row may contain at most one effect variable"
                     []
                     srcLines
+                    False
                 )
             )
 
@@ -1305,7 +1333,7 @@ checkRecordKeys = go Set.empty
       | Set.member k seen = do
           srcLines <- State.gets psSourceLines
           State.lift (Left (ParseError (CST.startPos e)
-            ("duplicate field in record literal: " ++ T.unpack (unKey k)) [] srcLines))
+            ("duplicate field in record literal: " ++ T.unpack (unKey k)) [] srcLines False))
       | otherwise = go (Set.insert k seen) rest
 
 -- Reject duplicate field names in a record / object declaration, in either
@@ -1319,8 +1347,25 @@ checkRecordTypeKeys _ = go Set.empty
       | Set.member k seen = do
           srcLines <- State.gets psSourceLines
           State.lift (Left (ParseError (locPos tok)
-            ("duplicate field in record type declaration: " ++ T.unpack (unKey k)) [] srcLines))
+            ("duplicate field in record type declaration: " ++ T.unpack (unKey k)) [] srcLines False))
       | otherwise = go (Set.insert k seen) rest
+
+repClose :: P ()
+repClose = State.modify (\st -> st { psInRep = False })
+
+-- | A label inside a type: in a newtype's representation it names the
+-- parameter that integer holds (DIM-9); elsewhere only a whole signature
+-- argument may carry one (POLY-3).
+nestedLabel :: Located -> TypeU -> P TypeU
+nestedLabel tok t = do
+  inRep <- State.gets psInRep
+  if inRep
+    then return (LabeledU (TV (getName tok)) t)
+    else do
+      srcLines <- State.gets psSourceLines
+      let msg = "the label '" ++ T.unpack (getName tok) ++ "@' binds nothing here: a label names a whole"
+             ++ " argument of a signature, or a header field of a newtype's representation"
+      State.lift (Left (ParseError (locPos tok) msg [] srcLines False))
 
 -- Reject `{x :: T}` inside type-level record literals. The literal form
 -- binds fields with `=` (mirroring morloc's term-level `{x = 3}` record
@@ -1333,7 +1378,7 @@ recLiteralColonColonError nameTok = do
   let msg = "type-level record literals use `=` to bind fields, not `::`\n"
          ++ "  try: {" ++ T.unpack (getName nameTok) ++ " = <type>, ...}\n"
          ++ "  `::` is for declarations (e.g. `x :: Int`, `record R where { x :: Int }`)"
-  State.lift (Left (ParseError (locPos nameTok) msg [] srcLines))
+  State.lift (Left (ParseError (locPos nameTok) msg [] srcLines False))
 
 -- Reject an effect declaration whose name is not an uppercase
 -- identifier. An effect name is lexed exactly like a type or class
@@ -1348,7 +1393,7 @@ effectNameError nameTok = do
       msg = "Illegal effect name '" ++ nmS ++ "'\n"
          ++ "  The first character must be uppercase\n"
          ++ "  try: `effect " ++ cap ++ "` (or `escapable effect " ++ cap ++ "`)"
-  State.lift (Left (ParseError (locPos nameTok) msg [] srcLines))
+  State.lift (Left (ParseError (locPos nameTok) msg [] srcLines False))
 
 --------------------------------------------------------------------
 -- Desugar bridge
@@ -1359,11 +1404,13 @@ toDState ps = DState
   { dsExpIndex = psExpIndex ps
   , dsSourceMap = psSourceMap ps
   , dsDocMap = psDocMap ps
+  , dsDocsRead = Set.empty
   , dsModulePath = psModulePath ps
   , dsModuleConfig = psModuleConfig ps
   , dsSourceLines = psSourceLines ps
   , dsLangMap = psLangMap ps
   , dsProjectRoot = psProjectRoot ps
+  , dsOwnModule = psOwnModule ps
   , dsTermDocs = psTermDocs ps
   , dsWarnings = psWarnings ps
   , dsModuleDoc = psModuleDoc ps
@@ -1371,6 +1418,7 @@ toDState ps = DState
   , dsNamespaces = Set.empty
   , dsDataCtors = Map.empty
   , dsStreamElems = psStreamElems ps
+  , dsMatchSites = psMatchSites ps
   , dsReplayPlans = Map.empty
   , dsCompanions = Map.empty
   , dsParseSlots = Map.empty
@@ -1386,7 +1434,26 @@ fromDState ps ds = ps
   , psModuleDoc = dsModuleDoc ds
   , psModuleEpilogues = dsModuleEpilogues ds
   , psStreamElems = dsStreamElems ds
+  , psMatchSites = dsMatchSites ds
   }
+
+-- | Parse tokens laid out to close an implicit block before a token that
+-- cannot continue it (LEX-4). On a syntax error at a token of the source,
+-- the tokens are laid out again with one more block closed before it, until
+-- the parse succeeds or closing another block there changes nothing; the
+-- error is then the last attempt's.
+parseClosing :: ([Located] -> Either ParseError a) -> [Located] -> Either ParseError a
+parseClosing run unlaid = go Map.empty (insertLayoutWith Map.empty unlaid)
+  where
+    go forced laid = case run laid of
+      Right x -> Right x
+      Left e
+        | peSyntax e
+        , forced' <- Map.insertWith (+) (pePos e) 1 forced
+        , laid' <- insertLayoutWith forced' unlaid
+        , laid' /= laid ->
+            go forced' laid'
+        | otherwise -> Left e
 
 -- | Run parse + desugar
 parseAndDesugar :: PState -> [Located] -> Either ParseError ([ExprI], PState)
@@ -1422,11 +1489,11 @@ readProgram ::
   Text ->
   PState ->
   DAG MVar Import ExprI ->
-  Either String (DAG MVar Import ExprI, PState)
+  Either (Pos, String) (DAG MVar Import ExprI, PState)
 readProgram _moduleName modulePath sourceCode pstate dag = do
   let filename = maybe "<expr>" id modulePath
   (tokens, docMap, groupToks) <- case lexMorloc filename sourceCode of
-    Left err -> Left (showLexError err)
+    Left err@(LexError pos _) -> Left (pos, showLexError err)
     Right r -> Right r
   let srcLines = T.lines sourceCode
       pstate' = pstate { psModulePath = modulePath, psDocMap = docMap, psSourceLines = srcLines }
@@ -1440,8 +1507,15 @@ readProgram _moduleName modulePath sourceCode pstate dag = do
       -- Strategy 2: wrap in module, patch trailing expr as __expr__ assignment.
       let wrappedCode = "module main (*)\n" <> sourceCode
       in case lexMorloc filename wrappedCode of
-        Right (wrappedTokens, wrappedDocMap, wrappedGroupToks) ->
-          let pstate'' = pstate' { psDocMap = wrappedDocMap, psSourceLines = T.lines wrappedCode }
+        Right (wrappedTokens0, wrappedDocMap0, wrappedGroupToks0) ->
+          -- positions are moved back up the added header line, so that
+          -- they name lines of the file as written
+          let up pos = pos { posLine = max 1 (posLine pos - 1) }
+              upTok t = t { locPos = up (locPos t) }
+              wrappedTokens = map upTok wrappedTokens0
+              wrappedGroupToks = map upTok wrappedGroupToks0
+              wrappedDocMap = Map.mapKeys up wrappedDocMap0
+              pstate'' = pstate' { psDocMap = wrappedDocMap }
           in case parseAndDesugar pstate'' wrappedTokens of
             Right (result, finalState) ->
               let dag' = foldl addModule dag result
@@ -1475,8 +1549,54 @@ readProgram _moduleName modulePath sourceCode pstate dag = do
               finalState = s2 { psExpIndex = i3 + 1 }
               dag'' = Map.insert (MV "main") (modI, []) dag'
           return (dag'', finalState)
-        Left _ ->
-          Left (showParseError filename' origErr)
+        Left _ -> closingBlocks filename' origErr
+
+    -- LEX-4: a block also ends before a token that cannot continue it. Only
+    -- a program that no strategy above parses is laid out again, so every
+    -- program that parses without closing a block parses as before. A
+    -- program that still fails is reported as before, with where parsing
+    -- fails once its blocks end when that is further on.
+    closingBlocks filename' origErr =
+      case (lexMorlocUnlaid filename' sourceCode, lexMorlocUnlaidFrom (Pos 0 1 filename') filename' ("module main (*)\n" <> sourceCode)) of
+        (Right (unlaid, docMap', groupToks'), Right (wunlaid, wdocMap, wgroupToks)) ->
+          let ps = pstate { psModulePath = modulePath, psDocMap = docMap', psSourceLines = T.lines sourceCode }
+              psW = ps { psDocMap = wdocMap }
+              plain laid = (\r -> (r, laid, groupToks')) <$> parseAndDesugar ps laid
+              -- the header holds line 0 while it is laid out, so that every
+              -- position of the source is its own; it is then read as line 1,
+              -- as in the wrapped strategy above
+              wrapped laid0 =
+                let laid = map onHeaderLine laid0
+                    tried l = (\r -> (r, l, wgroupToks)) <$> parseAndDesugar psW l
+                in case tried laid of
+                  Right x -> Right x
+                  Left e1 -> case tried <$> patchForTrailingExpr laid of
+                    Just (Right x) -> Right x
+                    Just (Left e2) | pePos e2 > pePos e1 -> Left e2
+                    _ -> Left e1
+          in case parseClosing plain unlaid of
+            Right ((result, finalState), laid, groups) -> Right (withModules laid groups result, finalState)
+            Left err1 -> case parseClosing wrapped wunlaid of
+              Right ((result, finalState), laid, groups) -> Right (withModules laid groups result, finalState)
+              Left err2 -> report (if pePos err2 > pePos err1 then err2 else err1)
+        _ -> report origErr
+      where
+        report err
+          | pePos err > pePos origErr =
+              Left
+                ( pePos origErr
+                , showParseError filename' origErr
+                    <> "\n\nWhere an indented block ends before a token that cannot continue it,"
+                    <> " parsing gets further, and fails here:\n"
+                    <> showParseError filename' err
+                )
+          | otherwise = Left (pePos origErr, showParseError filename' origErr)
+        onHeaderLine t
+          | posLine (locPos t) == 0 = t {locPos = (locPos t) {posLine = 1}}
+          | otherwise = t
+
+    withModules laid groupToks' result =
+      attachGroupAnnotations laid groupToks' (foldl addModule dag result)
 
     addModule d e@(ExprI _ (ModE n es)) =
       let imports = [(importModuleName i', i') | (ExprI _ (ImpE i')) <- es]
@@ -1625,11 +1745,11 @@ findExportSymbolPositions = findModule
     scanExports depth (_ : rest) = scanExports depth rest
     scanExports _ [] = []
 
--- | An arrow from a parameter to what follows it: an unparenthesized arrow
--- continues the parameter list, a parenthesized one is the result.
-mkArrow :: TypeU -> (TypeU, Bool) -> TypeU
-mkArrow a (FunU args ret, True) = FunU (a : args) ret
-mkArrow a (t, _) = FunU [a] t
+-- | An arrow from a parameter to what follows it: @a -> (b -> c)@ is
+-- @a -> b -> c@.
+mkArrow :: TypeU -> TypeU -> TypeU
+mkArrow a (FunU args@(_ : _) ret) = FunU (a : args) ret
+mkArrow a t = FunU [a] t
 
 buildMembership :: [(T.Text, [T.Text], Pos)] -> [(T.Text, Pos)] -> Map.Map T.Text T.Text
 buildMembership groupHeaders exportSyms = Map.fromList

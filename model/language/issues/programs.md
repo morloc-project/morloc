@@ -16,7 +16,9 @@ Reproduced on 0.109.0 unless marked.
 - **`@check.path r` help.** [reproduced] Help says "path to a readable
   file"; a directory is accepted. Either the text or the check is wrong.
 - **`@stdin` not shown in help.** [reproduced] Gap in CLI-3: an `@stdin`
-  argument prints as a plain required positional in `-h` and `-hh`.
+  argument prints as a plain required positional in `-h` and `-hh`, and
+  its help says "format: path to a readable file" (reproduced
+  2026-10-31).
 - **`@stdin` on a list.** [reproduced] docs reports/0030: `@form list` with
   `@stdin` on `[Str]` is refused at build ("`@check.path` requires a `Str`
   argument; got wire schema `as`"). CLI-3 says an `@stdin` argument is a
@@ -38,13 +40,6 @@ Reproduced on 0.109.0 unless marked.
   Spec gap: no item says whether trailing blank docstring lines belong to
   the description. `--' Search notes` / `--'` / `--' @epilogue` on a module
   gives `--json-help` `program.description` `["Search notes", ""]`.
-- **A dotless import collides with a same-named local module.**
-  [reproduced, 2026-10-21] Violates MOD-7. With a local `math.loc`,
-  `import math (sqrt)` fails "Ambiguous import 'math' ... Found in system
-  ... Found locally: ./math.loc". Module.hs:416 `bareModulePaths` adds
-  local paths whenever `stateAllowLocalModules` (default True,
-  Namespace/State.hs:1090); `findBareModule` (Module.hs:494-506) throws on
-  both. Repro: /work/plans/model-audit-2026-10-21/repro/A/mod/m7.
 - **Module rules with no item.** [read, 2026-10-21] Gaps in module-names.md.
   No item covers namespaced imports (`import m as n`, `n.f`, the `f.g`
   composition ambiguity in Lexer.hs:476-498) though `namespace-*` goldens
@@ -57,10 +52,6 @@ Reproduced on 0.109.0 unless marked.
   MCP tools and the CLI each find a command by name alone (IFACE-1). This
   is CMD-4 (a) widened to the whole program; the other answer, names
   scoped by group, needs the serving interfaces to carry the group.
-- **`@stdin` is accepted on `?Str`.** [reproduced, 2026-10-21] Violates
-  CLI-3. It builds; the value can never be null (`f null` -> "check.path:
-  r requires path 'null' to exist"); omitted it is `"/dev/stdin"`. CLI-3
-  should also state the omitted value. Repro: /work/plans/model-audit-2026-10-21/repro/G/args/s3.loc.
 - **CLI-2 errors are not at the docstring line.** [reproduced, 2026-10-21]
   `@form list|table`, `@form auto`, `@source auto`, `@check.path r|w` are
   reported at the type line; `@form table`/`@form bytes`/`@stdin` on `Int`
@@ -71,7 +62,7 @@ Reproduced on 0.109.0 unless marked.
 - **`@stdin` and a bare `@arg` above a function are dropped silently.**
   [reproduced, 2026-10-21] Against DIAG-4's common ground (every other
   misplaced argument directive is an error). CodeGenerator/Docstrings.hs:
-  313-330 `validateCommandLevelDirectives` lists no `stdin`; a value-less
+  303-320 `validateCommandLevelDirectives` lists no `stdin`; a value-less
   `@arg` sets no `docArg`. Repro: /work/plans/model-audit-2026-10-21/repro/G/diag/mis3.loc, dirarg.loc.
 - **More unlocated rejections.** [reproduced, 2026-10-21] DIAG-2: "Command
   group names collide with ungrouped command names: [math]"; "Source file
@@ -106,3 +97,8 @@ Reproduced on 0.109.0 unless marked.
   reached under two names is loaded as two modules; importing the entry
   file is now rejected as a cycle, but no other identity question is
   settled.
+- **Example programs still use dotless imports of local files.** [read,
+  2026-11-01] Violates MOD-7 in a separate repo: usage/examples (e.g.
+  demos/fasta, flu-case-study) writes `import x` for a local `x.loc`, which
+  now names an installed module only. The repo is documented as outdated;
+  migrate to `import .x` when it is next updated.

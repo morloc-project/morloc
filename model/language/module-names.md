@@ -70,11 +70,16 @@ program that imports it made an installed package with submodules
 unloadable.
 
 ### MOD-7 A dotless import is a system module
-Intent: proposed
-Code: deviates (issues/programs.md)
+Intent: ruled 2026-10-29
+Tests: spec-mod-7-1, spec-mod-7-2, spec-mod-7-3, spec-mod-7-4
+Code: conforms 2026-11-01
 
 `import m` names the installed module `m`, and `import .m` names a local
-one. A local module and a system module never collide.
+one. A local module and a system module never collide: a dotless import
+never reaches a local file. `morloc make` installs a missing module, unless
+the importing module's package has a local module of that name. A dotless
+import with no installed module is then a load error; when a local module
+of that name exists, the error names it and says to import it as `.m`.
 
 ### MOD-8 Both a file module and a directory module exist
 Intent: open

@@ -40,9 +40,9 @@ import Morloc.CodeGenerator.Namespace (Arg, PolyHead (..), SerialManifold)
 import qualified Morloc.CodeGenerator.Nexus as Nexus
 import Morloc.CodeGenerator.Parameterize (parameterize)
 import Morloc.CodeGenerator.Guest.Pass (lowerGuests)
-import Morloc.CodeGenerator.Realize (realityCheck)
+import Morloc.CodeGenerator.Realize (placeNormalized, realityCheck)
 import qualified Morloc.CodeGenerator.Infer as Infer
-import Morloc.CodeGenerator.Segment (segment)
+import Morloc.CodeGenerator.Segment (checkScopes, segment)
 import Morloc.CodeGenerator.Serial (checkPackerCoherence)
 import Morloc.CodeGenerator.Reduce (reduce)
 import Morloc.CodeGenerator.Serialize (serialize)
@@ -53,10 +53,14 @@ import Morloc.Frontend.Labels (checkLabels)
 import Morloc.Frontend.AutoRequire (autoRequire)
 import qualified Morloc.Frontend.AST as AST
 import Morloc.Frontend.Restructure (restructure)
+import Morloc.Frontend.Link (checkRsize)
+import Morloc.Frontend.PatternCheck (checkPatterns)
 import Morloc.Frontend.Treeify (treeify, Validation (..))
 import Morloc.Frontend.Share (shareBindings)
 import Morloc.Frontend.Specialize (specialize)
 import qualified Morloc.Data.PoolHash as PoolHash
+import qualified Morloc.Data.GMap as GMap
+import qualified Morloc.Version
 import qualified Morloc.Monad as MM
 import Morloc.ProgramBuilder.Build (buildProgram, withStagingCleanup)
 
@@ -70,11 +74,21 @@ typecheckFrontend path code = do
   evalMode <- MM.gets stateEvalMode
   if evalMode then checkEvalRestrictions dag else return ()
   case DAG.roots dag of
-    (r : _) -> MM.modify (\s -> s {stateModuleName = Just r})
+    (r : _) -> MM.modify' (\s -> s {stateModuleName = Just r})
     _ -> return ()
   (checks, exports) <- restructure dag >>= treeify
+  checkRsize
   F.validate (validationTrees checks) (validationInstances checks)
-  specialize checks exports
+  es <- specialize checks exports
+  specNames <- MM.gets stateSpecNames
+  Specs specTrees <- MM.gets stateSpecs
+  GMap idmap _ <- MM.gets stateSignatures
+  owners <- MM.gets stateWhereOwner
+  sites <- MM.gets stateDefinitionSite
+  mapM_ (F.checkRecursion specNames (`Map.lookup` idmap) owners sites) (es <> specTrees)
+  checkPatterns (es <> specTrees)
+  MM.modify' (\s -> s {stateExportTypes = Map.fromList [(i, t) | AnnoS (Idx i t) _ _ <- es]})
+  return es
 
 -- | Check general types and also resolve implementations
 typecheck ::
@@ -111,7 +125,7 @@ typecheck path code =
 -- LamS"). A multiply-used lambda is kept as a shared native closure (rASTs
 -- become pools, not the pure nexus evaluator).
 generatePools :: [AnnoS (Indexed Type) One (Indexed Lang)] -> MorlocMonad [(Lang, [SerialManifold])]
-generatePools rASTs = mapM applyPoolLambdas rASTs >>= specializeStaticArgs >>= lowerPools
+generatePools rASTs = mapM applyPoolLambdas rASTs >>= specializeStaticArgs >>= placeNormalized >>= lowerPools
 
 -- | Lower realized pool trees to per-language serial manifolds. This is the
 -- whole path from parameterization to pool assembly, shared by 'writeProgram'
@@ -121,7 +135,7 @@ lowerPools rASTs = do
   paramRASTs <- mapM parameterize rASTs
   let langMap = Map.fromList
         [(midx, lang) | AnnoS (Idx midx _) (Idx _ lang, _) _ <- paramRASTs]
-  MM.modify (\s -> s { stateManifoldLang = langMap })
+  MM.modify' (\s -> s { stateManifoldLang = langMap })
   reg <- MM.gets stateLangRegistry
   mapM (\r -> expressRoot r >>= checkHeadLang langMap) paramRASTs
     -- Wrap each cache:true manifold's body in a 'PolyCacheBody'.
@@ -143,6 +157,8 @@ lowerPools rASTs = do
                  checkEffectBoundaries ph'
                  lowerSuspensions (etaReduceForwarders ph'))
     >>= mapM segment |>> concat
+    -- every variable a generated manifold refers to is bound in it
+    >>= mapM checkScopes
     >>= mapM serialize
     >>= mapM reduce
     >>= (\ms -> checkManifoldIds reg ms >> return (pool reg ms))
@@ -203,6 +219,8 @@ writeProgram translateFn path code =
     -- It creates trees, so it runs before the nexus sees the pool trees and
     -- before the counter is reused for code generation.
     >>= (\(g, r) -> (,) g <$> specializeStaticArgs r)
+    -- Place languages again on the normalized pool trees.
+    >>= (\(g, r) -> (,) g <$> placeNormalized r)
     -- process docstrings to determine how to build CLI
     >>= bimapM (mapM processDocstrings) (mapM processDocstrings)
     -- generate nexus and pools
@@ -224,7 +242,7 @@ writeProgram translateFn path code =
         mapM_ (warnSkip . fst) genericRASTs
         let skippedEntry (AnnoS (Idx i t) _ _) = fmap (\v -> (v, (i, t))) <$> MM.metaName i
         skipped <- (<>) <$> mapM (skippedEntry . fst) genericGASTs <*> mapM (skippedEntry . fst) genericRASTs
-        MM.modify (\st -> st {stateSkippedGeneric = Map.fromListWith (\_ old -> old) (catMaybes skipped)})
+        MM.modify' (\st -> st {stateSkippedGeneric = Map.fromListWith (\_ old -> old) (catMaybes skipped)})
         -- Only exports become commands, but helper rASTs also flow to
         -- 'Nexus.generate' so it can see their languages for pool
         -- enumeration -- the export tree ends at a bare 'CallS' back-edge
@@ -263,7 +281,10 @@ writeProgram translateFn path code =
         let buildSalt
               | null guestObjects = BP.renderSalt params
               | otherwise = BP.renderSalt params <> "|obj:" <> PoolHash.poolHashHex objHash
-        poolHashes <- MM.liftIO $ PoolHash.computePoolHashes buildSalt hashIncludes pools
+        sources <- MM.gets (concat . GMap.elems . stateSources)
+        let sourcedFiles lang = Set.toAscList (Set.fromList [p | s <- sources, srcLang s == lang, Just p <- [srcPath s]])
+            salt = buildSalt <> "|morloc:" <> T.pack Morloc.Version.versionStr
+        poolHashes <- MM.liftIO $ PoolHash.computePoolHashes salt hashIncludes sourcedFiles pools
         let nexusPatched = PoolHash.patchManifestPoolHashes poolHashes nexus
         -- The envspec Script carries no make commands; it is written to the
         -- build dir alongside manifest.json and the pool sources.
@@ -321,5 +342,5 @@ checkEvalRestrictions dag = do
     checkImport :: Set.Set MVar -> (MVar, Import) -> MorlocMonad ()
     checkImport allowed (childMV, _)
       | Set.member childMV allowed = return ()
-      | otherwise = MM.throwSystemError $
+      | otherwise = MM.throwRejected $
           "module" <+> squotes (pretty childMV) <+> "is not in the eval allow-list"

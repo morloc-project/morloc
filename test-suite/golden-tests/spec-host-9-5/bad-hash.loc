@@ -1,0 +1,12 @@
+--' Hash a function Python made
+module main (hashed)
+
+import root-py
+import root-cpp
+import .helpers
+
+--' Hash a Python adder
+hashed :: Int -> <IO> Str
+hashed n = do
+  h <- mkPy n
+  @hash h

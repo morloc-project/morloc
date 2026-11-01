@@ -1,8 +1,8 @@
--- Spec HOST-2: a sourced function calls a callback by the callback's type
--- as written. `zipWith :: (a -> b -> c) -> ...` calls its callback with two
--- arguments even where `c` is itself a function, here an effectful one: the
--- callback returns that function, and the effect runs only when the result
--- is applied and run.
+-- Spec HOST-2: a type variable of a source's signature ends the arguments
+-- of a callback. `zipWith :: (a -> b -> c) -> ...` calls its callback with
+-- two arguments even where `c` is itself a function, here an effectful one:
+-- the callback returns that function, and the effect runs only when the
+-- result is applied and run.
 module main (runPy, runCpp, runR, runRust)
 
 import root-py

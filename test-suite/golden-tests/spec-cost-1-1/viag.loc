@@ -1,0 +1,6 @@
+module viag (*)
+
+import root-py
+import .sig
+
+source Py from "g.py" ("twice")

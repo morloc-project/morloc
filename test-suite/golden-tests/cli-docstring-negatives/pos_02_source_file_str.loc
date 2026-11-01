@@ -4,7 +4,7 @@ import root
 
 -- Sanity: source: file on a Str arg is legal.
 foo ::
-  --' source: file
+  --' @source file
   Str ->
   Int
 foo x = 0

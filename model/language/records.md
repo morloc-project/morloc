@@ -41,12 +41,13 @@ anonymous records, which pure nexus code, getters and views use.
 
 ### REC-5 Field access and update are getter and setter patterns
 Intent: proposed
-Tests: spec-rec-5-1
-Code: conforms 2026-10-21
+Tests: spec-rec-5-1, spec-rec-5-2, spec-rec-5-3, spec-rec-5-4, spec-rec-5-5, spec-rec-5-6, spec-rec-5-7, spec-rec-5-8
+Code: conforms 2026-11-01
 
 `.f r` is the value of field `f` of `r`. `.(.f = e) r` is a new record equal
 to `r` except that `f` is `e`; `r` itself is unchanged. Naming a field the
-record type does not have is a compile error.
+record type does not have is a compile error, also where the type of `r` is
+not known at the getter and is fixed later by a caller.
 
 ### REC-6 A native record form names only the container
 Intent: proposed

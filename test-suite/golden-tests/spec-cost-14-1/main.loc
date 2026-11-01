@@ -1,0 +1,36 @@
+-- The body of a recursive definition runs once per level, so its crossings
+-- count one deeper than the call (COST-14). `count` steps with a
+-- function that exists only in C++, and its caller reads its argument and
+-- renders its result in Python. Run in Python, the body would cross into C++
+-- once per level; run in C++, the call crosses twice in all, its argument in
+-- and its result out. The realizer runs the recursion in C++. The placement
+-- listing of `morloc typecheck --realize` is the output; the run checks the
+-- program still computes.
+
+--' Recursion counted one deeper
+module main (countFrom)
+
+import root-py
+import root-cpp
+
+source Py from "f.py" ("parse_int" as parseInt, "show_int" as showInt)
+source Cpp from "f.hpp" ("dec")
+
+--' Read an integer
+parseInt :: Str -> Int
+
+--' Render an integer
+showInt :: Int -> Str
+
+--' Subtract one
+dec :: Int -> Int
+
+--' Count down to zero
+count :: Int -> Int
+count n
+  ? n == 0 = 0
+  : 1 + count (dec n)
+
+--' Count down from a number given as text
+countFrom :: Str -> Str
+countFrom s = showInt (count (parseInt s))

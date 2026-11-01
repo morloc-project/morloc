@@ -1,0 +1,40 @@
+-- A recursive function returning a function, called with only the arguments
+-- before the function it returns, is staged: the work before the returned
+-- function runs once, however often the function is called. `pick` returns
+-- its callback after `n` steps, so building it ticks n + 1 times; `bump`
+-- returns a lambda that recurses when called, so its calls tick too. The
+-- host's `apply2` calls its function twice. `tick` records each of its
+-- evaluations in the file $TICK_LOG; `ticks` returns, once its argument is
+-- evaluated, how many times `tick` ran.
+module main (value, pickTicks, bumpTicks, localTicks)
+
+import root-r
+
+source R from "helpers.R" ("apply2", "tick", "ticks")
+
+apply2 :: (Int -> Int) -> Int -> Int
+tick :: Int -> Int
+ticks :: Int -> Int
+
+pick :: Int -> (Int -> Int) -> (Int -> Int)
+pick n g
+  ? tick n == 0 = g
+  : pick (n - 1) g
+
+bump :: Int -> (Int -> Int) -> (Int -> Int)
+bump n g
+  ? tick n == 0 = g
+  : \x -> bump (n - 1) g x + 1
+
+value :: Int -> Int
+value n = apply2 (pick 2 (\x -> x + n)) 1 + apply2 (bump 2 (\x -> x * n)) 1
+
+pickTicks :: Int -> Int
+pickTicks n = ticks (apply2 (pick 2 (\x -> x + n)) 1)
+
+bumpTicks :: Int -> Int
+bumpTicks n = ticks (apply2 (bump 2 (\x -> x * n)) 1)
+
+localTicks :: Int -> Int
+localTicks n = ticks (f 1 + f 10) where
+  f = pick 2 (\x -> x + n)

@@ -85,7 +85,7 @@ specializeExport spec (gi, v) = do
             if back
               then do
                 let tok = recName v k0
-                MM.modify (\st -> st {stateRecursionTargets = Map.insert tok gi (stateRecursionTargets st)})
+                MM.modify' (\st -> st {stateRecursionTargets = Map.insert tok gi (stateRecursionTargets st)})
                 return (AnnoS (Idx gt t) c (VarS tok alts'))
               else return (AnnoS (Idx gt t) c (VarS name alts'))
       _ -> do
@@ -98,15 +98,9 @@ specializeExport spec (gi, v) = do
 -- 'Bool' says whether every remaining reference can be elaborated, so the
 -- caller knows whether the tree is ready to splice.
 --
--- One such reference used to cost the whole tree its sharing. It need not:
--- a definition whose element type nothing determines is expanded where it is
--- used, and a deep chain beside it is still shared.
---
--- Each pass expands at least one more term than the last, so this ends after
--- at most as many passes as there are terms to share; in practice the first
--- answers. A reference that is not a term this pass can expand -- a class
--- method, whose instances are held back whenever anything is -- leaves the
--- set unchanged, and the last pass expands everything, as before.
+-- Each pass expands at least one more term than the last, so this
+-- terminates. A stuck reference this pass cannot expand (a class method)
+-- leaves the set unchanged, and the final pass expands everything.
 collectElaborable
   :: Spec
   -> (AnnoS Int ManyPoly Int -> MorlocMonad Typed)
@@ -158,19 +152,12 @@ refTerm _ _ = return Nothing
 -- | A type a definition can be elaborated at on its own: no unsolved
 -- existential, and no free effect variable.
 --
--- A free kind variable is allowed, and a free 'ExistU' is not, because of
--- what each one means downstream. A kind variable stands for a row count, a
--- column set or a label that the program never determines; every one of them
--- erases to the same thing before code generation ('typeOf'), and no pass
--- after this one can solve it, so two uses that both leave it open compile
--- identically and may share one elaboration. A use that does determine it
--- has a key with the value in it and gets an elaboration of its own. An
--- 'ExistU' is different: it is a variable the checker still intends to
--- solve, and its solution is the enclosing gamma's to give.
---
+-- A free kind variable is allowed: no later pass solves it and it erases
+-- before code generation, so two uses that leave it open compile
+-- identically. An 'ExistU' is still to be solved by the enclosing gamma.
 -- An effect variable is excluded because a signature's effect variables are
--- rigid when it is checked ('Morloc.Frontend.Typecheck.validate'), but the
--- row a use supplies is part of what the use computes.
+-- rigid when it is checked, but the row a use supplies is part of what the
+-- use computes.
 isElaborable :: TypeU -> Bool
 isElaborable = go
   where
@@ -224,19 +211,13 @@ generatedVars t = case t of
 
 -- | The Type-kinded variables the checker generated in a type.
 --
--- A kind-tagged variable is not one of these. The reason is not that it
--- erases small: it is that a Type variable is a wildcard in implementation
--- selection and a kind variable is not. An unsolved Type variable reaches
--- 'Morloc.CodeGenerator.Realize' as @UnkT@, which matches any candidate, so
--- which implementation a use gets can depend on the use. A free Nat reaches
--- it as @NatVoidT@, compatible only with a Nat literal, and a free row as a
--- phantom; neither can steer the choice. So a root shared under a kind
--- variable means the same thing at every use, and one shared under an
--- invented Type variable need not.
+-- These are excluded from sharing because an unsolved Type variable reaches
+-- 'Morloc.CodeGenerator.Realize' as @UnkT@, a wildcard in implementation
+-- selection, so the implementation a use gets can depend on the use. A
+-- kind variable erases to a phantom that cannot steer the choice.
 --
--- 'Morloc.Typecheck.Internal.renameWithMap' writes the kind into the name it
--- invents -- @\@q@ for a Type variable, @\@n@, @\@s@, @\@r@, @\@l@,
--- @\@e@ for the others -- so the tag answers this exactly.
+-- 'Morloc.Typecheck.Internal.renameWithMap' tags a generated variable by
+-- kind: @\@q@ for Type, @\@n@, @\@s@, @\@r@, @\@l@, @\@e@ for the others.
 generatedTypeVars :: TypeU -> [TVar]
 generatedTypeVars t = [v | v@(TV n) <- generatedVars t, "@q" `T.isInfixOf` n]
 
@@ -282,8 +263,8 @@ elaborate spec target use key@(k, t) = do
         Definition -> case Map.lookup k (specDefs spec) of
           Just x -> return x
           Nothing -> MM.throwCompilerBug $ "specialize: no definition for term" <+> pretty k
-      -- checked as a use at the key is: a definition against its signature,
-      -- a method by resolving its instances
+      -- checked at the key; a method's result is still a set of candidate
+      -- instances, chosen among in Realize
       let check = typecheckRootAt t
       e <- snd <$> collectElaborable spec check root
       -- A body may determine a kind-tagged slot that the key it is filed
@@ -306,14 +287,10 @@ elaborate spec target use key@(k, t) = do
 -- there too. A slot solved to another variable is not narrower: both sides
 -- canonicalise to the same name.
 --
--- This is also what keeps sharing independent of how much the typechecker
--- writes back. 'Morloc.Typecheck.Internal.recheckDeferred' currently drops
--- the substitutions it computes, so a slot determined only by a deferred
--- constraint reaches here open. Either the elaboration shows the value, and
--- the key is not shared, or the program really does leave it open. Teaching
--- the recheck to write its solutions back would move such a key from the
--- first case to a ground key of its own, and neither outcome shares an
--- elaboration across two different values.
+-- 'Morloc.Typecheck.Internal.recheckDeferred' does not write its solutions
+-- back, so a slot fixed only by a deferred constraint reaches here open:
+-- either the elaboration shows the value, and the key is not shared, or the
+-- program leaves it open.
 pinsKey :: SpecKey -> Typed -> Bool
 pinsKey (_, t) (AnnoS (Idx _ t') _ _) = canonical t' /= t
 
@@ -362,7 +339,7 @@ splice spec backs stack n@(AnnoS (Idx gi t) ci e) = refTerm spec n >>= \r -> let
                     let (sourced, defined) = List.partition isSourced alts'
                     root <- AnnoS <$> (Idx <$> plainIndex gi <*> pure t) <*> plainIndex ci <*> pure (VarS tok (Many defined))
                     liftIO (modifyIORef' (specShared spec) (Map.insert (k, key) tok))
-                    MM.modify (\st -> let Specs xs = stateSpecs st in st {stateSpecs = Specs (xs <> [root]), stateSpecNames = Set.insert tok (stateSpecNames st)})
+                    MM.modify' (\st -> let Specs xs = stateSpecs st in st {stateSpecs = Specs (xs <> [root]), stateSpecNames = Set.insert tok (stateSpecNames st)})
                     callAt tok name sourced
                   else do
                     when closed $
@@ -377,7 +354,7 @@ splice spec backs stack n@(AnnoS (Idx gi t) ci e) = refTerm spec n >>= \r -> let
     refName _ = EV "?"
     methodDepth = 64
     -- a use of a shared specialization: its sourced implementations, each
-    -- chosen per use as before, and a call of the shared one
+    -- chosen per use, and a call of the shared one
     sharedUse tok (AnnoS _ _ (VarS name (Many alts))) = do
       sourced <- mapM instantiate (filter isSourced alts)
       callAt tok name sourced
@@ -509,5 +486,5 @@ instantiate e0 = do
 plainIndex :: Int -> MorlocMonad Int
 plainIndex parent = do
   i <- newIndex parent
-  MM.modify (\s -> s {stateExports = filter (/= i) (stateExports s)})
+  MM.modify' (\s -> s {stateExports = filter (/= i) (stateExports s)})
   return i

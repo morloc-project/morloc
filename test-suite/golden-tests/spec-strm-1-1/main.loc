@@ -1,0 +1,135 @@
+-- STRM-1: a stream's element type is fixed at open and checked against the
+-- file. Each case opens an `[Int]` stream file at `[Real]`, which must fail,
+-- and at `[Int]`, which must read it; an `IFile` argument given as a path is
+-- opened the same way, and so is a stream file given for a list argument. A
+-- handle a foreign function relabels at another element type is refused when
+-- it is decoded. bad.loc holds a type that recurses through a handle, which
+-- has no closed schema and is refused at build.
+module main
+  ( writeInts
+  , openNexus, openPy, openCpp, openR, openRust
+  , streamNexus, streamPy
+  , argNexus, argPy, argCpp, argR, argRust
+  , listPy, listCpp, listR, listRust
+  , intsNexus, intsPy
+  , lieCpp
+  )
+
+import root
+import root-py
+import root-cpp
+import root-r
+import root-rust
+
+source Py from "lib.py" ("total" as totalPy)
+source Cpp from "lib.hpp" ("total" as totalCpp)
+source R from "lib.R" ("total" as totalR)
+source Rust from "lib.rs" ("total" as totalRust)
+
+totalPy :: [Real] -> Real
+totalCpp :: [Real] -> Real
+totalR :: [Real] -> Real
+totalRust :: [Real] -> Real
+
+source Py from "lib.py" ("total_int" as totalIntPy, "relabel")
+totalIntPy :: [Int] -> Int
+relabel :: IFile [Int] -> IFile [Real]
+
+writeInts :: Str -> <IO> ()
+writeInts path = do
+  Ok o <- @open path :: <IO> (Try Str (OStream Int))
+  @write 0 o [1, 2, 3]
+  @close o
+
+openNexus :: Str -> <IO> Str
+openNexus path = do
+  r <- @open path :: <IO> (Try Str (IFile [Real]))
+  match r
+    | (Ok f) = (do "opened")
+    | (Err e) = (do "refused")
+
+openPy :: Str -> <IO> Real
+openPy path = do
+  r <- @open path :: <IO> (Try Str (IFile [Real]))
+  match r
+    | (Ok f) = (do (totalPy (.[0:3] f)))
+    | (Err e) = (do (-1.0))
+
+openCpp :: Str -> <IO> Real
+openCpp path = do
+  r <- @open path :: <IO> (Try Str (IFile [Real]))
+  match r
+    | (Ok f) = (do (totalCpp (.[0:3] f)))
+    | (Err e) = (do (-1.0))
+
+openR :: Str -> <IO> Real
+openR path = do
+  r <- @open path :: <IO> (Try Str (IFile [Real]))
+  match r
+    | (Ok f) = (do (totalR (.[0:3] f)))
+    | (Err e) = (do (-1.0))
+
+openRust :: Str -> <IO> Real
+openRust path = do
+  r <- @open path :: <IO> (Try Str (IFile [Real]))
+  match r
+    | (Ok f) = (do (totalRust (.[0:3] f)))
+    | (Err e) = (do (-1.0))
+
+streamNexus :: Str -> <IO> Str
+streamNexus path = do
+  r <- @open path :: <IO> (Try Str (IStream Real))
+  match r
+    | (Ok s) = (do "opened")
+    | (Err e) = (do "refused")
+
+streamPy :: Str -> <IO> Real
+streamPy path = do
+  r <- @open path :: <IO> (Try Str (IStream Real))
+  match r
+    | (Ok s) = (do
+        Ok xs <- @next s
+        totalPy xs)
+    | (Err e) = (do (-1.0))
+
+argNexus :: IFile [Real] -> [Real]
+argNexus f = .[0:3] f
+
+argPy :: IFile [Real] -> Real
+argPy f = totalPy (.[0:3] f)
+
+argCpp :: IFile [Real] -> Real
+argCpp f = totalCpp (.[0:3] f)
+
+argR :: IFile [Real] -> Real
+argR f = totalR (.[0:3] f)
+
+argRust :: IFile [Real] -> Real
+argRust f = totalRust (.[0:3] f)
+
+intsNexus :: IFile [Int] -> [Int]
+intsNexus f = .[0:3] f
+
+intsPy :: Str -> <IO> Int
+intsPy path = do
+  r <- @open path :: <IO> (Try Str (IFile [Int]))
+  match r
+    | (Ok f) = (do (totalIntPy (.[0:3] f)))
+    | (Err e) = (do (-1))
+
+listPy :: [Real] -> Real
+listPy xs = totalPy xs
+
+listCpp :: [Real] -> Real
+listCpp xs = totalCpp xs
+
+listR :: [Real] -> Real
+listR xs = totalR xs
+
+listRust :: [Real] -> Real
+listRust xs = totalRust xs
+
+lieCpp :: Str -> <IO> Real
+lieCpp path = do
+  Ok f <- @open path :: <IO> (Try Str (IFile [Int]))
+  totalCpp (.[0:3] (relabel f))

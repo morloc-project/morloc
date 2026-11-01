@@ -8,6 +8,8 @@ all:
 	$${TO:+$$TO 10} morloc typecheck a.loc >> obs.txt 2>&1 || true
 	@TO=`command -v timeout || command -v gtimeout || true`; \
 	$${TO:+$$TO 10} morloc typecheck c.loc >> obs.txt 2>&1 || true
+	@TO=`command -v timeout || command -v gtimeout || true`; \
+	$${TO:+$$TO 10} morloc typecheck f.loc >> obs.txt 2>&1 || true
 
 clean:
 	rm -f *.err

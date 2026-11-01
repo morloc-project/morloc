@@ -2,6 +2,7 @@ branchy all True
 branchy batches True
 branchy folded True
 partial all False
+pair all True
 --- branchy a ---
 batch of 2
 batch of 3
@@ -25,3 +26,5 @@ sum=6 batches=1
 5: 1 2 3 4 5
 --- partial false --all ---
 0:
+--- pair [3,9] --all ---
+3: 1 2 3

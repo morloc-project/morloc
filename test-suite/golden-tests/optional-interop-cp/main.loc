@@ -8,8 +8,8 @@ module main
   )
 
 import .types
-import cppfuncs (cSafeDiv, cFromNull, cDouble)
-import pyfuncs (pSafeDiv, pFromNull, pDouble)
+import .cppfuncs (cSafeDiv, cFromNull, cDouble)
+import .pyfuncs (pSafeDiv, pFromNull, pDouble)
 
 -- C++ produces optional, Python consumes it
 testCppToPy :: Int

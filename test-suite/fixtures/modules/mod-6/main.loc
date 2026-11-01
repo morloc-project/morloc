@@ -1,0 +1,10 @@
+module main (fromMain, fromPkg)
+
+import pkg (pkgValue)
+import .lib.types (localValue)
+
+fromMain :: Int
+fromMain = localValue
+
+fromPkg :: Int
+fromPkg = pkgValue

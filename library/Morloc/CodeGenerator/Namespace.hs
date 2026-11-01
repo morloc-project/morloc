@@ -1,3 +1,4 @@
+{-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TypeFamilies #-}
@@ -24,23 +25,15 @@ module Morloc.CodeGenerator.Namespace
 
     -- ** Types used in final translations
   , TypeM (..)
-  , TypeF (..)
+  , TypeF (.., NatVoidF, StrVoidF)
   , TypeS (..)
   , FVar (..)
 
-    -- ** Kind-kinded type helpers
+    -- ** Kinds of type arguments
     --
-    -- Kind-kinded args are positional type-args whose kind is NOT
-    -- @KindType@ (currently @KindNat@ and @KindStr@). They appear as
-    -- structural metadata in @TypeF@/@Type@ arg lists but are skipped
-    -- by macro substitution -- the @$N@ index in a per-language form
-    -- counts TYPE args only, not kind args.
-  , isKindTypeF
-  , isKindTypeT
-  , isKindTypeU
-  , partitionKindArgsF
-  , partitionKindArgsT
-  , partitionKindArgsU
+    -- The @$N@ index in a per-language form counts Type-kinded arguments
+    -- only.
+  , kindOfF
 
     -- ** Typeclasses
   , HasTypeF (..)
@@ -214,71 +207,23 @@ data TypeF
   | VariantF FVar [TypeF] [(T.Text, [TypeF])]
   | OptionalF TypeF
   | NatLitF Integer
-  -- | Erased phantom Nat slot. See NatVoidU in 'Morloc.Namespace.Type'
-  -- for the rationale.
-  | NatVoidF
-  | StrLitF Text -- ^ Type-level Str literal at the codegen level (kind-Str ground form)
-  | StrVoidF -- ^ Erased phantom Str slot. Mirrors NatVoidF.
+  | VoidF Kind -- ^ An erased placeholder of a non-Type kind
+  | StrLitF Text
   deriving (Show, Ord, Eq)
 
+pattern NatVoidF :: TypeF
+pattern NatVoidF = VoidF KindNat
 
--- | True iff a TypeF entry is kind-kinded (Nat or Str): a kind literal
--- or the erased-phantom sentinel. These positions are structural
--- metadata; macros never index them.
-isKindTypeF :: TypeF -> Bool
-isKindTypeF (NatLitF _) = True
-isKindTypeF NatVoidF = True
-isKindTypeF (StrLitF _) = True
-isKindTypeF StrVoidF = True
-isKindTypeF _ = False
+pattern StrVoidF :: TypeF
+pattern StrVoidF = VoidF KindStr
 
--- | True iff a Type entry is kind-kinded. Mirrors 'isKindTypeF',
--- including Nat arithmetic (which is a kind-Nat expression).
-isKindTypeT :: Type -> Bool
-isKindTypeT (NatLitT _) = True
-isKindTypeT (NatAddT _ _) = True
-isKindTypeT (NatMulT _ _) = True
-isKindTypeT (NatSubT _ _) = True
-isKindTypeT (NatDivT _ _) = True
-isKindTypeT NatVoidT = True
-isKindTypeT _ = False
-
--- | TypeU-level kind predicate. Includes nat variables and arithmetic
--- (which are kind-Nat expressions before reduction).
-isKindTypeU :: TypeU -> Bool
-isKindTypeU (NatLitU _) = True
-isKindTypeU (NatVarU _) = True
-isKindTypeU (NatAddU _ _) = True
-isKindTypeU (NatMulU _ _) = True
-isKindTypeU (NatSubU _ _) = True
-isKindTypeU (NatDivU _ _) = True
-isKindTypeU NatVoidU = True
-isKindTypeU (StrLitU _) = True
-isKindTypeU (StrVarU _) = True
-isKindTypeU (StrConcatU _ _) = True
-isKindTypeU StrVoidU = True
-isKindTypeU _ = False
-
--- | Split a positional arg list into (type-args, count-of-kind-args).
--- Used by every macro-substitution caller: pre-filtering at the
--- @TypeF@ level keeps the indexing convention uniform (\"$N indexes
--- the Nth type arg\") and threads the count for error-message hints.
-partitionKindArgsF :: [TypeF] -> ([TypeF], Int)
-partitionKindArgsF ts =
-  let types = filter (not . isKindTypeF) ts
-  in (types, length ts - length types)
-
--- | Type-level companion to 'partitionKindArgsF'.
-partitionKindArgsT :: [Type] -> ([Type], Int)
-partitionKindArgsT ts =
-  let types = filter (not . isKindTypeT) ts
-  in (types, length ts - length types)
-
--- | TypeU-level companion to 'partitionKindArgsF'.
-partitionKindArgsU :: [TypeU] -> ([TypeU], Int)
-partitionKindArgsU ts =
-  let types = filter (not . isKindTypeU) ts
-  in (types, length ts - length types)
+-- | 'kindOfT' for a concrete type.
+kindOfF :: TypeF -> Maybe Kind
+kindOfF t = case t of
+  NatLitF _ -> Just KindNat
+  StrLitF _ -> Just KindStr
+  VoidF k -> Just k
+  _ -> Nothing
 data TypeM
   = -- | serialized data that is not deserialized (and may not be representable) in this segment
     Passthrough
@@ -331,16 +276,13 @@ data SerialAST
   | SerialUInt64 FVar
   | SerialBool FVar
   | SerialString FVar
-  -- | Cross-pool stream handles. In-language native form is uint64_t
-  -- (the local slot id). The wire form is a 16-byte tagged union:
-  -- `TAG_PATH` carries the file path so the receiving pool can open a
-  -- fresh handle, `TAG_HANDLE` carries the raw slot id for the
-  -- intra-nexus shared-registry case. See SCHEMA_IFILE / SCHEMA_OSTREAM
-  -- / SCHEMA_ISTREAM in data/morloc/morloc.h and
-  -- morloc-runtime-types::stream_handle for the wire layout.
-  | SerialIFile FVar
-  | SerialOStream FVar
-  | SerialIStream FVar
+  -- | Stream handles. The second field is the general (hint-free) form of
+  -- what the handle's file stores: `a` for `IFile a`, `[a]` for the
+  -- streams. It is printed as a closed schema of its own and is never
+  -- walked as part of the value.
+  | SerialIFile FVar SerialAST
+  | SerialOStream FVar SerialAST
+  | SerialIStream FVar SerialAST
   -- A function value. Carries the signature (argument schemas and the
   -- result schema) so the native type is a callable of the right shape;
   -- the wire form is signature-independent -- home language, manifold id,
@@ -412,9 +354,9 @@ instance Pretty SerialAST where
   pretty (SerialUInt64 v) = parens ("SerialUInt64" <+> pretty v)
   pretty (SerialBool v) = parens ("SerialBool" <+> pretty v)
   pretty (SerialString v) = parens ("SerialString" <+> pretty v)
-  pretty (SerialIFile v) = parens ("SerialIFile" <+> pretty v)
-  pretty (SerialOStream v) = parens ("SerialOStream" <+> pretty v)
-  pretty (SerialIStream v) = parens ("SerialIStream" <+> pretty v)
+  pretty (SerialIFile v s) = parens ("SerialIFile" <+> pretty v <+> pretty s)
+  pretty (SerialOStream v s) = parens ("SerialOStream" <+> pretty v <+> pretty s)
+  pretty (SerialIStream v s) = parens ("SerialIStream" <+> pretty v <+> pretty s)
   pretty (SerialClosure ins out) = parens ("SerialClosure" <+> list (map pretty ins) <+> pretty out)
   pretty (SerialNull v) = parens ("SerialNull" <+> pretty v)
   pretty (SerialOptional v s) = parens ("SerialOptional" <+> pretty v <+> pretty s)
@@ -674,7 +616,7 @@ data PolyExpr
     -- The [Indexed Type] is the FULL list of positional type args of
     -- the list head (Vector / List / Deque / etc.), preserving Nat-kinded
     -- entries as NatLitT so phantom dimensions survive into language
-    -- code generators. Use 'partitionKindArgsT' to split into type-args
+    -- code generators. Use 'partitionKindArgs' to split into type-args
     -- and kind-arg count when feeding macro substitution; the wire-side
     -- @applyDimsToList@ consumes the kind positions directly.
     PolyList (Indexed TVar) [Indexed Type] [PolyExpr]
@@ -902,6 +844,17 @@ data NativeExpr
   -- that expandSerialize\/expandDeserialize do for SerialPack inside
   -- SerialOptional. Used by Serialize.hs to wrap intrinsic results
   -- (@load) whose user-facing optional type wraps a Packable inner.
+  | WireToNativeN TypeF SerialAST Intrinsic Text [NativeExpr]
+  -- ^ A runtime intrinsic that decodes a value (@read, @load, @unpack,
+  -- @cellget), called with its schema and arguments, and the decoded value
+  -- given its native form as a received argument is: decoded into the form
+  -- the language decodes that serial AST into, then the packers applied at
+  -- every level. The TypeF is the native result.
+  | NativeToWireN TypeF SerialAST NativeExpr
+  -- ^ A native value in the wire form the serial AST describes, taken apart
+  -- as a sent argument is (unpackers at every level), for a runtime
+  -- intrinsic that writes it (@show, @save, @cellput, ...). The TypeF is the
+  -- wire type.
   | LoopN TypeF [(Int, NativeExpr)] (LoopBody NativeExpr SerialExpr NativeExpr)
     -- ^ A native tail-loop: the entry of a loop called from its own pool,
     -- taking and returning native values. Fields: result type; each
@@ -1033,6 +986,8 @@ foldlNE f b (CoerceN_ _ _ x) = f b x
 foldlNE f b (IfN_ _ c t e) = foldl f b [c, t, e]
 foldlNE f b (IntrinsicN_ _ _ _ xs) = foldl f b xs
 foldlNE f b (MapOptionalN_ _ _ _ x) = f b x
+foldlNE f b (WireToNativeN_ _ _ _ _ xs) = foldl f b xs
+foldlNE f b (NativeToWireN_ _ _ x) = f b x
 foldlNE f b (LoopN_ _ starts body) = foldl f b (map snd starts <> loopBodyLeaves body)
 
 -- | Direct 'PolyExpr' children, for structural traversal. 'PolyExpr' has no
@@ -1168,6 +1123,9 @@ makeMonoidFoldDefault mempty' mappend' =
     monoidNativeExpr' (IntrinsicN_ t intr msch (unzip -> (reqs, es))) =
       return (foldl mappend' mempty' reqs, IntrinsicN t intr msch es)
     monoidNativeExpr' (MapOptionalN_ t wt src (a, ne)) = return (a, MapOptionalN t wt src ne)
+    monoidNativeExpr' (WireToNativeN_ t s intr sch (unzip -> (reqs, es))) =
+      return (foldl mappend' mempty' reqs, WireToNativeN t s intr sch es)
+    monoidNativeExpr' (NativeToWireN_ t s (a, ne)) = return (a, NativeToWireN t s ne)
     monoidNativeExpr' (LoopN_ t starts body) =
       let reqs = map (fst . snd) starts <> loopBodyLeaves (trimap fst fst fst body)
        in return (foldl mappend' mempty' reqs, LoopN t (map (second snd) starts) (trimap snd snd snd body))
@@ -1320,6 +1278,8 @@ data NativeExpr_ nm se ne sr nr
   | IfN_ TypeF ne ne ne
   | IntrinsicN_ TypeF Intrinsic (Maybe Text) [ne]
   | MapOptionalN_ TypeF TypeF Source ne
+  | WireToNativeN_ TypeF SerialAST Intrinsic Text [ne]
+  | NativeToWireN_ TypeF SerialAST ne
   | LoopN_ TypeF [(Int, ne)] (LoopBody ne se ne)
 
 manifoldFoldToFoldWith :: FoldManifoldM m sm nm se ne sr nr -> FoldWithManifoldM m sm nm se ne sr nr
@@ -1543,6 +1503,12 @@ surroundFoldNativeExprM sfm fm = surroundNativeExprM sfm f
     f full@(MapOptionalN t wt src ne) = do
       ne' <- surroundFoldNativeExprM sfm fm ne
       opFoldWithNativeExprM fm full (MapOptionalN_ t wt src ne')
+    f full@(WireToNativeN t sa intr sch nes) = do
+      nes' <- mapM (surroundFoldNativeExprM sfm fm) nes
+      opFoldWithNativeExprM fm full (WireToNativeN_ t sa intr sch nes')
+    f full@(NativeToWireN t sa ne) = do
+      ne' <- surroundFoldNativeExprM sfm fm ne
+      opFoldWithNativeExprM fm full (NativeToWireN_ t sa ne')
     f full@(LoopN t starts body) = do
       starts' <- mapM (\(i, e) -> (,) i <$> surroundFoldNativeExprM sfm fm e) starts
       body' <- trimapM (surroundFoldNativeExprM sfm fm) (surroundFoldSerialExprM sfm fm) (surroundFoldNativeExprM sfm fm) body
@@ -1582,6 +1548,8 @@ instance HasTypeF NativeExpr where
   typeFof (IfN t _ _ _) = t
   typeFof (IntrinsicN t _ _ _) = t
   typeFof (MapOptionalN t _ _ _) = t
+  typeFof (WireToNativeN t _ _ _ _) = t
+  typeFof (NativeToWireN t _ _) = t
   typeFof (LoopN t _ _) = t
 
 class HasTypeM e where
@@ -1795,6 +1763,8 @@ instance MFunctor NativeExpr where
         (IfN t c thenE elseE) -> mapNativeExpr f $ IfN t (mgatedMap g f c) (mgatedMap g f thenE) (mgatedMap g f elseE)
         (IntrinsicN t intr msch nes) -> mapNativeExpr f $ IntrinsicN t intr msch (map (mgatedMap g f) nes)
         (MapOptionalN t wt src ne) -> mapNativeExpr f $ MapOptionalN t wt src (mgatedMap g f ne)
+        (WireToNativeN t s intr sch nes) -> mapNativeExpr f $ WireToNativeN t s intr sch (map (mgatedMap g f) nes)
+        (NativeToWireN t s ne) -> mapNativeExpr f $ NativeToWireN t s (mgatedMap g f ne)
         (LoopN t starts body) -> mapNativeExpr f $ LoopN t (map (second (mgatedMap g f)) starts) (trimap (mgatedMap g f) (mgatedMap g f) (mgatedMap g f) body)
     | otherwise = mapNativeExpr f ne0
 
@@ -1817,9 +1787,8 @@ instance Pretty TypeF where
       <+> encloseSep "{" "}" " | " [pretty n <+> hsep (map pretty ts) | (n, ts) <- as]
   pretty (OptionalF t) = "?" <> pretty t
   pretty (NatLitF n) = pretty n
-  pretty NatVoidF = "_"
+  pretty (VoidF _) = "_"
   pretty (StrLitF s) = dquotes (pretty s)
-  pretty StrVoidF = "_"
 
 instance Pretty TypeM where
   pretty Passthrough = "Passthrough"
@@ -2001,9 +1970,9 @@ data CmdDocSet = CmdDocSet
     -- labeled downstream (MCP content blocks, HTTP Content-Type). Nothing when
     -- the return type carries no media type.
   , cmdDocTerminals :: [WithSpec]
-    -- terminal-action declarations (`--' with:`) attached to this command.
+    -- terminal-action declarations (`--' @with`) attached to this command.
     -- Empty for internal / synthesized entries and for commands without any
-    -- `--' with:` atom. Populated verbatim from the signature preamble.
+    -- `--' @with` atom. Populated verbatim from the signature preamble.
   , cmdDocEpilogues :: [[Text]]
     -- `@epilogue` blocks from the signature preamble, rendered verbatim at
     -- the foot of this command's help.

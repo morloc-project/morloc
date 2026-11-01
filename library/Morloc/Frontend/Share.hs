@@ -47,7 +47,7 @@ import qualified Data.Map as Map
 import qualified Data.Set as Set
 import qualified Data.Text as T
 import qualified Morloc.BaseTypes as BT
-import Morloc.CodeGenerator.Value (etaParts, isSuspension, isValue)
+import Morloc.CodeGenerator.Value (isLambda, isSuspension, isValue)
 import Morloc.Frontend.Namespace
 import qualified Morloc.Monad as MM
 import Morloc.Data.Doc (pretty, (<+>))
@@ -385,13 +385,6 @@ replaceNodesM p f n@(AnnoS g c e)
 nodeType :: Node -> Type
 nodeType (AnnoS (Idx _ t) _ _) = t
 
--- | A lambda, not counting a partial application the typechecker wrote as
--- one ('etaParts'): that computes its function when evaluated.
-isLambda :: Node -> Bool
-isLambda n@(AnnoS _ _ (LamS _ _)) = case etaParts n of
-  Just _ -> False
-  Nothing -> True
-isLambda _ = False
 
 -- | A function type; one built by a computation is shared like data.
 isFunctionValued :: Type -> Bool
@@ -422,7 +415,7 @@ freshName _ = do
 plainIndex :: Int -> MorlocMonad Int
 plainIndex parent = do
   i <- newIndex parent
-  MM.modify (\s -> s {stateExports = filter (/= i) (stateExports s)})
+  MM.modify' (\s -> s {stateExports = filter (/= i) (stateExports s)})
   return i
 
 -- | A copy of a subtree with fresh indices, for a right-hand side served in

@@ -13,6 +13,6 @@
 "hello world"
 "hello world"
 === native runtime types ===
-"python: bytes, len=3"
+"python: list, len=3"
 "c++: std::vector<uint8_t>, size=3"
 "r: raw, length=3"

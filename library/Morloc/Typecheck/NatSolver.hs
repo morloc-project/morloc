@@ -19,12 +19,18 @@ module Morloc.Typecheck.NatSolver
   , normalize
   , natEqual
   , solveNat
+  , solveNatFixing
   , substituteNat
   , isGround
   , freeNatVars
   , sopToNatExpr
-  , naturalSolution
+  , linearEquation
   , hasOpaqueDivision
+  , evalNat
+  , splitIntVars
+  , intHalves
+  , intVars
+  , nonNegativeEverywhere
   ) where
 
 import Data.Map.Strict (Map)
@@ -35,12 +41,12 @@ import Data.Ord (comparing)
 import Data.Function (on)
 import Morloc.Namespace.Prim (TVar(..))
 import qualified Data.Text as T
-import Data.Maybe (isJust)
 
 -- | A type-level natural number expression
 data NatExpr
   = NatLit Integer        -- ^ literal: 0, 1, 2, ...
   | NatVar TVar           -- ^ type variable of kind Nat
+  | IntVar TVar           -- ^ type variable of kind Int (a label's value)
   | NatAdd NatExpr NatExpr -- ^ addition
   | NatMul NatExpr NatExpr -- ^ multiplication
   | NatSub NatExpr NatExpr -- ^ subtraction (a - b = a + negate b in SOP)
@@ -77,6 +83,7 @@ data NatError
 normalize :: NatExpr -> NatSOP
 normalize (NatLit n)   = NatSOP [NatProduct n Map.empty]
 normalize (NatVar v)   = NatSOP [NatProduct 1 (Map.singleton v 1)]
+normalize (IntVar v)   = NatSOP [NatProduct 1 (Map.singleton (intKey v) 1)]
 normalize (NatAdd a b) = addSOP (normalize a) (normalize b)
 normalize (NatMul a b) = mulSOP (normalize a) (normalize b)
 normalize (NatSub a b) = addSOP (normalize a) (negateSOP (normalize b))
@@ -115,11 +122,12 @@ natEqual e1 e2 = normalize e1 == normalize e2
 
 -- | Solve the constraint e1 ~ e2, returning variable substitutions
 solveNat :: NatExpr -> NatExpr -> Either NatError (Map TVar NatExpr)
-solveNat e1 e2 =
-  let sop1 = normalize e1
-      sop2 = normalize e2
-      diff = subSOP sop1 sop2
-  in solveSOP diff
+solveNat = solveNatFixing Set.empty
+
+-- | 'solveNat' without solving any variable in @fixed@: an equation that
+-- only a fixed variable could satisfy is deferred.
+solveNatFixing :: Set.Set TVar -> NatExpr -> NatExpr -> Either NatError (Map TVar NatExpr)
+solveNatFixing fixed e1 e2 = solveSOP fixed (subSOP (normalize e1) (normalize e2))
 
 -- | Subtract two SOPs: sop1 - sop2
 subSOP :: NatSOP -> NatSOP -> NatSOP
@@ -139,7 +147,7 @@ negateSOP (NatSOP ps) = NatSOP (map negateProduct ps)
 -- Otherwise: return the original forms unchanged (will be Deferred by solver).
 divSOP :: NatSOP -> NatSOP -> NatSOP
 divSOP (NatSOP ps1) (NatSOP [NatProduct d vs2])
-  | Map.null vs2, d /= 0
+  | Map.null vs2, d > 0
   , all (\p -> npCoeff p `mod` d == 0) ps1
   = NatSOP (mergeLikeTerms [NatProduct (npCoeff p `div` d) (npVars p) | p <- ps1])
 divSOP (NatSOP ps1) (NatSOP ps2)
@@ -148,7 +156,7 @@ divSOP (NatSOP ps1) (NatSOP ps2)
   , all (\p -> Map.null (npVars p)) ps2
   , let n = sum (map npCoeff ps1)
   , let d = sum (map npCoeff ps2)
-  , d /= 0
+  , d > 0
   = NatSOP (mergeLikeTerms [NatProduct (n `quot` d) Map.empty])
   -- Cannot simplify: an opaque variable named for the operands, so that
   -- equal quotients are equal and the solver never solves one.
@@ -163,35 +171,93 @@ divPrefix = "__div__"
 isDivVar :: TVar -> Bool
 isDivVar (TV v) = T.pack divPrefix `T.isPrefixOf` v
 
+-- | An Int variable in a normal form is keyed apart from a Nat one, so that
+-- it converts back as itself and may be solved to a negative value.
+intPrefix :: T.Text
+intPrefix = "__int__"
+
+intKey :: TVar -> TVar
+intKey (TV v) = TV (intPrefix <> v)
+
+fromIntKey :: TVar -> Maybe TVar
+fromIntKey (TV v) = TV <$> T.stripPrefix intPrefix v
+
+-- | The variable a normal-form key names, as solutions are keyed.
+keyVar :: TVar -> TVar
+keyVar k = maybe k id (fromIntKey k)
+
+-- | Whether a normal-form key may take any integer value.
+signedKey :: TVar -> Bool
+signedKey = maybe False (const True) . fromIntKey
+
+-- | Whether @e >= 0@ for every value of its variables, read from its normal
+-- form: every coefficient is non-negative, and every Int variable has an
+-- even power in each product, so no product is negative. No division.
+nonNegativeEverywhere :: NatExpr -> Bool
+nonNegativeEverywhere e =
+  not (hasOpaqueDivision sop)
+    && all (\p -> npCoeff p >= 0 && all even [k | (v, k) <- Map.toList (npVars p), signedKey v]) (unNatSOP sop)
+  where
+    sop = normalize e
+
+-- | The Int variables of an expression.
+intVars :: NatExpr -> Set.Set TVar
+intVars e = case e of
+  IntVar v -> Set.singleton v
+  NatAdd a b -> intVars a <> intVars b
+  NatMul a b -> intVars a <> intVars b
+  NatSub a b -> intVars a <> intVars b
+  NatDiv a b -> intVars a <> intVars b
+  _ -> Set.empty
+
+-- | The two naturals whose difference an Int variable is decided as.
+intHalves :: TVar -> (TVar, TVar)
+intHalves (TV v) = (TV (v <> "@+"), TV (v <> "@-"))
+
+-- | Each Int variable as the difference of its 'intHalves': every integer is
+-- one, so a question over Int variables becomes one over naturals alone.
+splitIntVars :: NatExpr -> NatExpr
+splitIntVars = go
+  where
+    go e = case e of
+      IntVar v -> let (p, n) = intHalves v in NatSub (NatVar p) (NatVar n)
+      NatAdd a b -> NatAdd (go a) (go b)
+      NatMul a b -> NatMul (go a) (go b)
+      NatSub a b -> NatSub (go a) (go b)
+      NatDiv a b -> NatDiv (go a) (go b)
+      _ -> e
+
 -- | Solve sop = 0
-solveSOP :: NatSOP -> Either NatError (Map TVar NatExpr)
-solveSOP sop@(NatSOP ps)
+solveSOP :: Set.Set TVar -> NatSOP -> Either NatError (Map TVar NatExpr)
+solveSOP _ sop@(NatSOP ps)
   | any (any isDivVar . Map.keys . npVars) ps = Left (Deferred sop)
-solveSOP (NatSOP []) = Right Map.empty  -- 0 = 0
-solveSOP (NatSOP [NatProduct c vs])
+solveSOP _ (NatSOP []) = Right Map.empty  -- 0 = 0
+solveSOP fixed (NatSOP [NatProduct c vs])
   | Map.null vs && c /= 0 = Left Contradiction  -- c = 0 where c /= 0
   | Map.null vs           = Right Map.empty      -- 0 = 0
-  | Map.size vs == 1, [(v, 1)] <- Map.toList vs =
+  | Map.size vs == 1, [(v, 1)] <- Map.toList vs, not (Set.member (keyVar v) fixed) =
       -- c*v = 0, only solution is v = 0 (but only if c divides 0, which it does)
       if c == 0
         then Right Map.empty
-        else Right (Map.singleton v (NatLit 0))
+        else Right (Map.singleton (keyVar v) (NatLit 0))
   | otherwise = Left (Deferred (NatSOP [NatProduct c vs]))
-solveSOP (NatSOP prods)
-  | Just (v, a, b) <- extractLinearVar prods =
-      if b `mod` a == 0 && negate b `div` a >= 0
-        then Right (Map.singleton v (NatLit (negate b `div` a)))
+solveSOP fixed (NatSOP prods)
+  | Just (v, a, b) <- extractLinearVar fixed prods =
+      if b `mod` a == 0 && (signedKey v || negate b `div` a >= 0)
+        then Right (Map.singleton (keyVar v) (NatLit (negate b `div` a)))
         else Left Contradiction
-  | Just (v, e) <- extractLinearVarPoly prods =
-      Right (Map.singleton v e)
+  | Just (v, e) <- extractLinearVarPoly fixed prods =
+      Right (Map.singleton (keyVar v) e)
   | otherwise = Left (Deferred (NatSOP prods))
 
 -- | Solve @c*v + P(others) = 0@ as @v := -P/c@ when @c@ divides every
--- coefficient in @P@ and the result has no negative coefficient, so that
--- it is a natural number for every value of the other variables. Distinct
+-- coefficient in @P@ and, for a Nat @v@, the result has no negative
+-- coefficient. That makes it a natural for every natural value of the other
+-- variables; an Int among them can still make it negative, which the
+-- non-negativity of the positions holding @v@ catches (KIND-4). Distinct
 -- from 'extractLinearVar', which requires @P@ to be a constant.
-extractLinearVarPoly :: [NatProduct] -> Maybe (TVar, NatExpr)
-extractLinearVarPoly prods =
+extractLinearVarPoly :: Set.Set TVar -> [NatProduct] -> Maybe (TVar, NatExpr)
+extractLinearVarPoly fixed prods =
   case candidates of
     ((v, c, others) : _) ->
       Just (v, sopToNatExpr (NatSOP [NatProduct (negate (npCoeff p) `div` c) (npVars p) | p <- others]))
@@ -201,69 +267,25 @@ extractLinearVarPoly prods =
       [ (v, c, others)
       | p0 <- prods
       , [(v, 1)] <- [Map.toList (npVars p0)]
+      , not (Set.member (keyVar v) fixed)
       , let c = npCoeff p0
       , c /= 0
       , length [() | p <- prods, Map.member v (npVars p)] == 1
       , let others = [p | p <- prods, not (Map.member v (npVars p))]
-      , all (\p -> npCoeff p `mod` c == 0 && negate (npCoeff p) `div` c >= 0) others
+      , all (\p -> npCoeff p `mod` c == 0 && (signedKey v || negate (npCoeff p) `div` c >= 0)) others
       ]
 
--- | Whether the equations @a = b@ have a common solution in the naturals:
--- @Just True@ when one is found, @Just False@ when there is none, @Nothing@
--- when neither is shown. A single linear equation is decided exactly; other
--- systems are searched for a small witness. A difference that goes below
--- zero is not a natural (KIND-4), so a witness never passes through one.
-naturalSolution :: [(NatExpr, NatExpr)] -> Maybe Bool
-naturalSolution eqs
-  | any signed sops = Just False
-  | [NatSOP ps] <- sops, Just answer <- linear ps = Just answer
-  | any holds candidates = Just True
+-- | Whether a linear equation @a = b@ over Nat variables, without division,
+-- has a solution with every variable a natural, read from its normal form;
+-- Nothing when it is not linear.
+linearEquation :: NatExpr -> NatExpr -> Maybe Bool
+linearEquation a b
+  | hasOpaqueDivision sop = Nothing
+  | all (\p -> Map.size (npVars p) <= 1 && all (== 1) (Map.elems (npVars p))) ps =
+      linearNatural [npCoeff p | p <- ps, not (Map.null (npVars p))] (negate (sum [npCoeff p | p <- ps, Map.null (npVars p)]))
   | otherwise = Nothing
   where
-    sops = [normalize (NatSub a b) | (a, b) <- eqs]
-    vs = Set.toList (Set.unions [freeNatVars a <> freeNatVars b | (a, b) <- eqs])
-    bound = 1 + maximum (0 : [abs (npCoeff p) | NatSOP ps <- sops, p <- ps])
-    width = last (0 : takeWhile (\w -> (w + 1) ^ length vs <= (40000 :: Integer)) [1 .. bound])
-    candidates = [Map.fromList (zip vs xs) | xs <- mapM (const [0 .. width]) vs]
-    holds env = all (\(a, b) -> isJust (eval env a) && eval env a == eval env b) eqs
-    eval env e = case e of
-      NatLit n -> Just n
-      NatVar v -> Map.lookup v env
-      NatAdd a b -> (+) <$> eval env a <*> eval env b
-      NatMul a b -> (*) <$> eval env a <*> eval env b
-      NatSub a b -> case (-) <$> eval env a <*> eval env b of
-        Just x | x >= 0 -> Just x
-        _ -> Nothing
-      NatDiv a b -> case (eval env a, eval env b) of
-        (Just x, Just y) | y /= 0 -> Just (x `quot` y)
-        _ -> Nothing
-    -- every product of naturals is non-negative, so a sum of terms whose
-    -- coefficients share one sign and include a nonzero constant is never 0;
-    -- a quotient of an expression with subtraction may be negative, so an
-    -- equation holding one says nothing
-    signed (NatSOP ps)
-      | hasOpaqueDivision (NatSOP ps) = False
-      | otherwise =
-          let constant = sum [npCoeff p | p <- ps, Map.null (npVars p)]
-              varCoeffs = [npCoeff p | p <- ps, not (Map.null (npVars p))]
-          in (constant > 0 && all (> 0) varCoeffs) || (constant < 0 && all (< 0) varCoeffs)
-    -- the equation came from expressions without subtraction, so its
-    -- normal form is the whole constraint
-    noSubtraction = not (any (\(a, b) -> hasSub a || hasSub b) eqs)
-    hasSub e = case e of
-      NatSub _ _ -> True
-      NatAdd a b -> hasSub a || hasSub b
-      NatMul a b -> hasSub a || hasSub b
-      NatDiv a b -> hasSub a || hasSub b
-      _ -> False
-    linear ps
-      | noSubtraction
-      , not (hasOpaqueDivision (NatSOP ps))
-      , all (\p -> Map.size (npVars p) <= 1 && all (== 1) (Map.elems (npVars p))) ps =
-          let k = negate (sum [npCoeff p | p <- ps, Map.null (npVars p)])
-              cs = [npCoeff p | p <- ps, not (Map.null (npVars p))]
-          in linearNatural cs k
-      | otherwise = Nothing
+    sop@(NatSOP ps) = normalize (NatSub a b)
 
 -- | Whether @sum (zipWith (*) cs xs) == k@ has a solution with every
 -- @xs@ a natural. With coefficients of both signs it has one exactly when
@@ -303,13 +325,14 @@ hasOpaqueDivision (NatSOP ps) = any (any isDivVar . Map.keys . npVars) ps
 
 -- | Find a variable that appears linearly (exponent 1, alone in its product)
 -- Returns (variable, coefficient, sum of constant terms)
-extractLinearVar :: [NatProduct] -> Maybe (TVar, Integer, Integer)
-extractLinearVar prods =
+extractLinearVar :: Set.Set TVar -> [NatProduct] -> Maybe (TVar, Integer, Integer)
+extractLinearVar fixed prods =
   let -- Find products with exactly one variable at exponent 1
       linearSingles = [ (v, npCoeff p)
                        | p <- prods
                        , Map.size (npVars p) == 1
                        , [(v, 1)] <- [Map.toList (npVars p)]
+                       , not (Set.member (keyVar v) fixed)
                        ]
       -- Check which linear variables appear only once AND all other
       -- products are constant (no other variables). Without this guard,
@@ -325,6 +348,21 @@ extractLinearVar prods =
        ((v, c, s) : _) -> Just (v, c, s)
        [] -> Nothing
 
+-- | Evaluate in the integers, with division truncating toward zero (KIND-3);
+-- Nothing when a variable is unassigned or a divisor is not positive.
+evalNat :: Map TVar Integer -> NatExpr -> Maybe Integer
+evalNat env e = case e of
+  NatLit n -> Just n
+  NatVar v -> Map.lookup v env
+  IntVar v -> Map.lookup v env
+  NatAdd a b -> (+) <$> evalNat env a <*> evalNat env b
+  NatMul a b -> (*) <$> evalNat env a <*> evalNat env b
+  NatSub a b -> (-) <$> evalNat env a <*> evalNat env b
+  NatDiv a b -> do
+    x <- evalNat env a
+    y <- evalNat env b
+    if y > 0 then Just (x `quot` y) else Nothing
+
 -- | Apply substitutions to a NatExpr
 substituteNat :: Map TVar NatExpr -> NatExpr -> NatExpr
 substituteNat m = go
@@ -333,6 +371,9 @@ substituteNat m = go
     go (NatVar v) = case Map.lookup v m of
       Just e  -> e
       Nothing -> NatVar v
+    go (IntVar v) = case Map.lookup v m of
+      Just e  -> e
+      Nothing -> IntVar v
     go (NatAdd a b) = NatAdd (go a) (go b)
     go (NatMul a b) = NatMul (go a) (go b)
     go (NatSub a b) = NatSub (go a) (go b)
@@ -342,6 +383,7 @@ substituteNat m = go
 isGround :: NatExpr -> Bool
 isGround (NatLit _) = True
 isGround (NatVar _) = False
+isGround (IntVar _) = False
 isGround (NatAdd a b) = isGround a && isGround b
 isGround (NatMul a b) = isGround a && isGround b
 isGround (NatSub a b) = isGround a && isGround b
@@ -351,6 +393,7 @@ isGround (NatDiv a b) = isGround a && isGround b
 freeNatVars :: NatExpr -> Set.Set TVar
 freeNatVars (NatLit _) = Set.empty
 freeNatVars (NatVar v) = Set.singleton v
+freeNatVars (IntVar v) = Set.singleton v
 freeNatVars (NatAdd a b) = Set.union (freeNatVars a) (freeNatVars b)
 freeNatVars (NatMul a b) = Set.union (freeNatVars a) (freeNatVars b)
 freeNatVars (NatSub a b) = Set.union (freeNatVars a) (freeNatVars b)
@@ -374,4 +417,4 @@ sopToNatExpr (NatSOP prods) = foldl1 NatAdd (map productToExpr prods)
     expandVar :: (TVar, Integer) -> [NatExpr]
     expandVar (v, n)
       | n <= 0    = []
-      | otherwise = replicate (fromIntegral n) (NatVar v)
+      | otherwise = replicate (fromIntegral n) (maybe (NatVar v) IntVar (fromIntKey v))

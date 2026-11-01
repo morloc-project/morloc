@@ -102,8 +102,8 @@ same name sees what was taken.
   `tlG c = match c | (Link x rest) ? x > 0 = rest : c | _ = c` stays a
   manifold returning an owned `Chain`, and `dropG (k - 1) (tlG c)` copies
   the rest of the chain each step (3 steps over 1000 links: 2994 clones).
-  Open question: a result that borrows from an argument needs a by-reference
-  return convention, which no item states.
+  A result that borrows from an argument needs the by-reference return
+  convention OWN-8 proposes (open, unaudited).
 - **A function's local and remote-worker segments share one plan key.**
   [read, speculative impact] A C++ or Rust pool can hold two segments for
   one manifold id, the local one and its remote-worker twin
@@ -124,3 +124,14 @@ same name sees what was taken.
   items name no language, are marked conforms, and Cpp.hs cites OWN-2/3/5/7.
   Either each item says it is Rust-only, or C++ is `deviates` against
   codegen-copies.md.
+
+- **A same-pool serial call's result is never released.** [read, 2026-10-24]
+  `isCallResult` (Translator/Imperative.hs) excludes `AppRecS` on the
+  premise that a callee may return an argument packet as it is. In C++ and
+  Rust a manifold that returns an argument now returns a copy
+  (`lcDupPacket`, tagged by `serialManifoldArgsBound` in
+  Grammars/Common.hs), so every serial manifold result there is a packet of
+  its own; the caller of an `AppRecS` never frees it, leaking the packet
+  bytes until the process ends and its shared memory until the dispatch's
+  flush. Needs a reproduction (a same-pool serial recursion in C++ whose
+  callee returns an argument) before changing who releases it.

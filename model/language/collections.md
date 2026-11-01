@@ -43,3 +43,26 @@ Code: unaudited
 arriving as pairs repeats a key, is the result (a) the first pair,
 (b) the last pair, or (c) a failure? The answer must not depend on the
 language that builds the map.
+
+### COLL-6 A set has no order
+Intent: ruled 2026-10-29
+Tests: spec-coll-6-1
+Code: deviates (issues/values.md)
+
+`Set a` has no order. The order of its elements, in any form and in any
+language, is unspecified: it may differ between languages, runs, versions
+and ways of building the same set, and no program may depend on it. Equal
+sets nonetheless hash (`@hash`) and compare (`@eq`, `@le`) the same in every
+language, so a set's wire form lists its elements sorted, whatever the
+order of its native form.
+
+### COLL-7 A tuple getter fixes its receiver's shape
+Intent: proposed
+Tests: spec-coll-7-1, spec-coll-7-2, spec-coll-7-3, spec-coll-7-4, spec-coll-7-5, spec-coll-7-6, spec-coll-7-7, spec-coll-7-8, spec-coll-7-9, spec-coll-7-10, spec-coll-7-11, spec-coll-7-12, spec-coll-7-13
+Code: conforms 2026-11-01
+
+`.i t` is element `i` of the tuple `t`, and has that element's type. Where
+the type of `t` is not yet known, `.i t` makes it a tuple of more than `i`
+elements whose element `i` is the result; every other use of `t` must agree,
+so `t` cannot also be a record, a function or an element of itself. A setter
+`.(.i = e) t` requires `e` to have the type of element `i`.

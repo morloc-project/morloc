@@ -148,8 +148,8 @@ printExpr (IIntrinsicSave fmt sid level e path) = case fmt of
         <> ", " <> printExpr level <> ", " <> refExpr path <> ")"
 printExpr (IIntrinsicLoad sid mt path) =
   "::rustmorloc::load" <> turbofish mt <> "(" <> schemaRef sid <> ", " <> refExpr path <> ")"
-printExpr (IIntrinsicOpen kind path) =
-  "::rustmorloc::open(" <> refExpr path <> ", " <> pretty kind <> ")"
+printExpr (IIntrinsicOpenIFile sid path) =
+  "::rustmorloc::open_ifile(" <> schemaRef sid <> ", " <> refExpr path <> ")"
 printExpr (IIntrinsicClose h) = "::rustmorloc::close(" <> printExpr h <> ")"
 printExpr (IIntrinsicUnlinkTemp path) = "::rustmorloc::unlink_tmp(" <> refExpr path <> ")"
 printExpr (IIntrinsicFSchema path) = "::rustmorloc::fschema(" <> refExpr path <> ")"
@@ -179,12 +179,11 @@ printExpr (IIntrinsicCellGet sid mt h) =
   "::rustmorloc::cell_get" <> turbofish mt <> "(" <> schemaRef sid <> ", " <> printExpr h <> ")"
 printExpr (IIntrinsicCellPut sid h e) =
   "::rustmorloc::cell_put(" <> schemaRef sid <> ", " <> printExpr h <> ", " <> refExpr e <> ")"
-printExpr (IIntrinsicCellReduce sid mt f h) =
-  -- The accumulator type has to be given (it appears only in the return),
-  -- but the combine's type is an anonymous closure type, so it is left to
-  -- inference: a turbofish must name every parameter or none.
-  "::rustmorloc::cell_reduce" <> reduceTurbofish mt <> "(" <> schemaRef sid <> ", "
-    <> printExpr f <> ", " <> printExpr h <> ")"
+-- The element type comes from the list the binding is annotated with.
+printExpr (IIntrinsicCellSlots sid _ h) =
+  "::rustmorloc::cell_slots(" <> schemaRef sid <> ", " <> printExpr h <> ")"
+printExpr (IIntrinsicReduceList f xs) =
+  "::rustmorloc::reduce_list(" <> printExpr f <> ", " <> printExpr xs <> ")"
 printExpr (IIntrinsicChannel sid) =
   "::rustmorloc::open_channel(" <> schemaRef sid <> ")"
 printExpr (IIntrinsicSpawn sid h f) =
@@ -192,8 +191,8 @@ printExpr (IIntrinsicSpawn sid h f) =
 printExpr (IIntrinsicSettle h) =
   "::rustmorloc::settle(" <> printExpr h <> ")"
 printExpr (IIntrinsicReplay sid mt h f) =
-  -- As for cell_reduce: the element type is given, the function's closure
-  -- type is left to inference.
+  -- The element type is given, the function's closure type is left to
+  -- inference.
   "::rustmorloc::replay" <> reduceTurbofish mt <> "(" <> schemaRef sid <> ", "
     <> printExpr h <> ", " <> printExpr f <> ")"
 printExpr (IIntrinsicStdin sid) = "::rustmorloc::open_stdin(" <> schemaRef sid <> ")"
@@ -204,6 +203,9 @@ printExpr (IIntrinsicIFileWalk sid mt pathExpr h runtimeArgs) =
     <> ", " <> refExpr pathExpr <> ", &[" <> argList <> "])"
   where
     argList = hcat (punctuate ", " (map printExpr runtimeArgs))
+-- A Rust value is decoded into its declared type, so a literal already has
+-- the decoder's form.
+printExpr (IIntrinsicConform _ e) = printExpr e
 printExpr _ = error "RustPrinter: this intrinsic/expression is unsupported in Rust v1"
 
 -- | The serializer a manifold's result goes through; 'rustReply' recognizes it.
@@ -231,8 +233,8 @@ refExpr e = "&" <> parens (printExpr e)
 turbofish :: Maybe IType -> MDoc
 turbofish = maybe "" (\t -> "::<" <> rustType t <> ">")
 
--- | Turbofish for @cell_reduce@, whose second parameter is the combine's
--- closure type and can only be inferred.
+-- | Turbofish for a shim whose second parameter is a closure type, which can
+-- only be inferred.
 reduceTurbofish :: Maybe IType -> MDoc
 reduceTurbofish = maybe "" (\t -> "::<" <> rustType t <> ", _>")
 

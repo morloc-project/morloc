@@ -7,7 +7,7 @@ module main
   )
 
 -- Import infix operators from ops module
-import ops ((+), (*), (**), (<>))
+import .ops ((+), (*), (**), (<>))
 
 type Py => Int = "int"
 type Py => (List a) = "list" a

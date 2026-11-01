@@ -1,0 +1,24 @@
+--- py ---
+value 10
+pickTicks 3
+bumpTicks 5
+localTicks 3
+--- cpp ---
+value 10
+pickTicks 3
+bumpTicks 5
+localTicks 3
+--- rust ---
+value 10
+pickTicks 3
+bumpTicks 5
+localTicks 3
+--- r ---
+value 10
+pickTicks 3
+bumpTicks 5
+localTicks 3
+--- cross ---
+value 4
+pickTicks 3
+localTicks 3

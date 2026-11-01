@@ -1,0 +1,12 @@
+--' Apply in Python a function C++ made, named by an alias
+module main (aliasAway)
+
+import root-py
+import root-cpp
+import .helpers
+
+--' Apply in Python an adder whose type is an alias
+aliasAway :: Int -> <IO> Int
+aliasAway n = do
+  h <- mkAdder n
+  pyApply h 1

@@ -110,6 +110,7 @@ findTypeTerms (VarU v@(TV x))
   | otherwise = [v]
 findTypeTerms (ExistU _ (ps1, _) (rs2, _)) = concatMap findTypeTerms (ps1 ++ map snd rs2)
 findTypeTerms (NatVarU _) = []
+findTypeTerms (IntVarU _) = []
 findTypeTerms (ForallU _ e) = findTypeTerms e
 findTypeTerms (FunU ts t) = concatMap findTypeTerms ts <> findTypeTerms t
 findTypeTerms (AppU t ts) = findTypeTerms t <> concatMap findTypeTerms ts
@@ -155,7 +156,7 @@ findFixityMap (ExprI _ (ModE _ es)) = do
       (EVar, (Associativity, Int)) ->
       MorlocMonad (Map.Map EVar (Associativity, Int))
     tryAddTerm m (k, v)
-      | Map.member k m = MM.throwSystemError $ "Conflicting fixity definitions for" <+> pretty k
+      | Map.member k m = MM.throwRejected $ "Conflicting fixity definitions for" <+> pretty k
       | otherwise = return $ Map.insert k v m
 findFixityMap _ = return Map.empty
 

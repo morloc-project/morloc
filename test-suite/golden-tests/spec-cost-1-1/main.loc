@@ -1,0 +1,35 @@
+-- When placements cross equally often, the preferred language wins
+-- (COST-16: C++ before Python), and among implementations that run in the
+-- same languages the one with fewer calls wins, so a sourced function beats
+-- a definition in morloc that calls two (COST-1). `twice` has a Python and a
+-- C++ implementation and its caller has no language of its own, so it runs
+-- in C++; `quad` is sourced in Python and also defined from `twice`, and the
+-- sourced one is used under a Python caller. Two different Python sources
+-- of one function, imported from two modules, are refused (bad.loc).
+
+--' Ties broken by language and size
+module main (doubled, quadrupled)
+
+import root-py
+import root-cpp
+
+source Py from "f.py" ("twice", "quad", "show_int" as showInt)
+source Cpp from "f.hpp" ("twice")
+
+--' Double an integer
+twice :: Int -> Int
+
+--' Multiply an integer by four
+quad :: Int -> Int
+quad x = twice (twice x)
+
+--' Render an integer
+showInt :: Int -> Str
+
+--' Double an integer
+doubled :: Int -> Int
+doubled x = twice x
+
+--' Quadruple an integer and render it
+quadrupled :: Int -> Str
+quadrupled x = showInt (quad x)

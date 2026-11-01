@@ -8,8 +8,8 @@ module main
   )
 
 import .types
-import cppfuncs (cSafeDiv, cFromNull, cDouble)
-import rfuncs (rSafeDiv, rFromNull, rDouble)
+import .cppfuncs (cSafeDiv, cFromNull, cDouble)
+import .rfuncs (rSafeDiv, rFromNull, rDouble)
 
 testRToCpp :: Int
 testRToCpp = cFromNull (-1) (rSafeDiv 10 2)

@@ -2,10 +2,15 @@
 
 {- |
 Module      : Morloc.CodeGenerator.Instance
-Description : Resolve a typeclass method's source binding for a type
+Description : Find the source of a method call built by the code generator
 Copyright   : (c) Zebulun Arendsee, 2016-2026
 License     : Apache-2.0
 Maintainer  : z@morloc.io
+
+Used only for method calls the code generator itself builds (such as
+@__get_slice__@ or @map@ over an effect boundary). It takes the first
+sourced instance that matches, without ranking by specificity, and does not
+see instances written in morloc.
 -}
 module Morloc.CodeGenerator.Instance
   ( findInstanceByArgHead
@@ -20,8 +25,8 @@ import qualified Morloc.Monad as MM
 import qualified Morloc.TypeEval as TE
 import Morloc.Typecheck.Internal (instanceArgHead)
 
--- | Look up the per-language source binding of a class method whose
--- receiver type head occupies a known argument position.
+-- | The source of a method in a language, for the instance whose argument at
+-- @pos@ has the given head.
 findInstanceByArgHead :: Int -> EVar -> Lang -> TVar -> MorlocMonad (Maybe Source)
 findInstanceByArgHead pos method lang containerTv = do
   sigmap <- MM.gets stateTypeclasses
@@ -35,22 +40,13 @@ findInstanceByArgHead pos method lang containerTv = do
       , srcLang src == lang
       ]
 
--- | Look up the @Functor@ @map@ instance for a container type in
--- language @lang@. The instance method signature is @(a -> b) -> f a
--- -> f b@; the container head sits at argument index 1.
+-- | The source of @map@ for a container type; the container is argument 1.
 findFunctorMap :: Lang -> TypeU -> MorlocMonad (Maybe Source)
 findFunctorMap lang receiverType =
   findInstanceByArgHead 1 (EV "map") lang (extractKey receiverType)
 
--- | Resolve a typeclass-method instance for a value's type by walking
--- the alias chain. Tests the type's outermost head TVar against the
--- per-TVar lookup; on miss, reduces the type one alias step
--- (via 'TE.reduceType') and retries. Returns the first hit, or
--- 'Nothing' if the chain is exhausted. This is the key mechanism by
--- which @type Array a = List a@ inherits @instance Indexable List@:
--- the call site type @Array Int@ misses on @Array@, reduces to
--- @List Int@, then hits. A type nothing determined selects no instance
--- and is rejected at @i@ (POLY-6).
+-- | The first hit of a lookup along a type's alias chain. A type nothing
+-- determined is rejected at @i@ (POLY-6).
 resolveInstanceForType
   :: (Lang -> TypeU -> MorlocMonad (Maybe Source))
   -> Int

@@ -115,7 +115,8 @@ extern "C" {
     fn mlc_save_json(data: *const c_void, schema: *const CSchema, level: i64, path: *const c_char, errmsg: *mut *mut c_char) -> i32;
     fn mlc_save_voidstar(data: *const c_void, schema: *const CSchema, level: i64, path: *const c_char, errmsg: *mut *mut c_char) -> i32;
     fn mlc_load(path: *const c_char, schema: *const CSchema, errmsg: *mut *mut c_char) -> *mut c_void;
-    fn mlc_open(path: *const c_char, kind: u8, errmsg: *mut *mut c_char) -> i64;
+    fn mlc_open_ifile(schema_str: *const c_char, path: *const c_char, errmsg: *mut *mut c_char) -> i64;
+    fn morloc_exit_if_shared_memory_lost(msg: *const c_char);
     fn mlc_close(handle: i64, errmsg: *mut *mut c_char) -> i32;
     fn mlc_unlink_tmp(path: *const c_char, errmsg: *mut *mut c_char) -> i32;
     fn mlc_fschema(path: *const c_char, errmsg: *mut *mut c_char) -> *mut c_char;
@@ -159,7 +160,7 @@ extern "C" {
     // can re-resolve the slot. These marshal that field; `cursor` advances past
     // any path suballoc; `space` is where a read's relptrs lead.
     fn mlc_write_handle_voidstar(handle: i64, dest: *mut c_void, cursor: *mut *mut c_void, errmsg: *mut *mut c_char) -> i32;
-    fn mlc_read_handle_voidstar(field: *const c_void, space: MorlocSpace, kind: u8, errmsg: *mut *mut c_char) -> i64;
+    fn mlc_read_handle_voidstar(field: *const c_void, space: MorlocSpace, kind: u8, storage: *const c_char, storage_len: usize, errmsg: *mut *mut c_char) -> i64;
     // Remote (SLURM/nexus-dispatched) call. Builds the remote packet, resolves
     // the `_remote` cache dir, rewrites args to self-contained form, and
     // dispatches to the nexus. Renamed via link_name so the wrapper below can
@@ -588,6 +589,9 @@ pub fn morloc_throw_as<T>(msg: impl Into<String>) -> T {
 /// packet is what keeps them fatal across pools: a caller's socket read fails,
 /// which it classifies as infrastructure in turn.
 pub fn morloc_infra_abort(msg: impl AsRef<str>) -> ! {
+    if let Ok(c) = std::ffi::CString::new(msg.as_ref().replace('\0', " ")) {
+        unsafe { morloc_exit_if_shared_memory_lost(c.as_ptr()) };
+    }
     eprintln!("morloc internal error (Rust pool): {}", msg.as_ref());
     // PANIC-5
     unsafe { libc::_exit(morloc_runtime_types::panic::PANIC_EXIT_STATUS) }
@@ -2155,10 +2159,13 @@ macro_rules! int_impl {
                     // which would read the tag byte at offset 0.
                     SerialType::IFile | SerialType::OStream | SerialType::IStream => {
                         let mut err: *mut c_char = std::ptr::null_mut();
+                        let storage = morloc_runtime_types::schema::handle_storage(schema).unwrap_or("");
                         let handle = mlc_read_handle_voidstar(
                             data as *const c_void,
                             space,
                             handle_kind(schema.serial_type),
+                            storage.as_ptr() as *const c_char,
+                            storage.len(),
                             &mut err,
                         );
                         if !err.is_null() || handle < 0 {
@@ -3073,6 +3080,11 @@ pub unsafe fn get_value<T: FromVoidstar>(packet: *const u8, schema: &Schema) -> 
         let mut err: *mut c_char = std::ptr::null_mut();
         let block = get_morloc_data_packet_value(packet, cs, &mut err);
         if block.is_null() || !err.is_null() {
+            // PANIC-13: a value read from a file or carried inline is input;
+            // PANIC-14: one another pool built is not.
+            if !materialized {
+                morloc_infra_abort(&reason_or_abort(err, "reading a table argument"));
+            }
             morloc_throw(reason_or_abort(err, "reading a table argument"));
         }
         // A materialized block is released here unless the tracker takes
@@ -3127,6 +3139,10 @@ pub unsafe fn get_value<T: FromVoidstar>(packet: *const u8, schema: &Schema) -> 
     let mut err: *mut c_char = std::ptr::null_mut();
     let voidstar = get_morloc_data_packet_value(packet, cs, &mut err);
     if voidstar.is_null() || !err.is_null() {
+        // PANIC-13, PANIC-14
+        if source == PKT_SOURCE_RPTR {
+            morloc_infra_abort(&reason_or_abort(err, "reading an argument"));
+        }
         morloc_throw(reason_or_abort(err, "reading an argument"));
     }
     if source == PKT_SOURCE_RPTR {
@@ -3146,6 +3162,8 @@ pub unsafe fn get_value<T: FromVoidstar>(packet: *const u8, schema: &Schema) -> 
     // read out: every read copies (a table, read in place, is handled above).
     // The guard also drops it when the read throws.
     let _held = ShmGuard::new(voidstar as *mut c_void);
+    // PANIC-14
+    let _built = (source == PKT_SOURCE_RPTR).then(RuntimeValueRead::enter);
     <T as FromVoidstar>::read(schema, voidstar, MorlocSpace::SHM)
 }
 
@@ -3388,6 +3406,10 @@ pub unsafe fn unpack<T: FromVoidstar>(packet: &[u8], schema: &Schema) -> T {
     if packet.len() < PKT_HEADER_SIZE {
         morloc_throw("@unpack: packet is shorter than its header");
     }
+    // PANIC-14: only a pool passes a value by reference.
+    if packet[PKT_SOURCE_OFF] == PKT_SOURCE_RPTR {
+        morloc_throw("@unpack: the bytes are a reference into shared memory, not a value");
+    }
     get_value::<T>(packet.as_ptr(), schema)
 }
 
@@ -3546,11 +3568,11 @@ pub unsafe fn load<T: FromVoidstar>(schema: &Schema, path: &str) -> T {
     read_voidstar(voidstar, err, schema, "@load")
 }
 
-/// @open (IFile): open a file as a handle of the given kind byte.
-pub unsafe fn open(path: &str, kind: u8) -> u64 {
+/// @open (IFile): the file must store what `schema` describes.
+pub unsafe fn open_ifile(schema: &Schema, path: &str) -> u64 {
     let path_c = cstr_arg(path, "@open");
     let mut err: *mut c_char = std::ptr::null_mut();
-    let h = mlc_open(path_c.as_ptr(), kind, &mut err);
+    let h = with_schema_str(schema, |s| mlc_open_ifile(s, path_c.as_ptr(), &mut err));
     handle_or_throw(h, err, "@open")
 }
 
@@ -3760,27 +3782,10 @@ pub unsafe fn cell_put<T: ToVoidstar>(schema: &Schema, handle: u64, value: &T) {
     }
 }
 
-/// @cellreduce: merge every accumulator with `combine` and release the cell.
-///
-/// The count is never zero -- an untouched cell answers with its seed -- so
-/// this always has a value to return.
-/// The combine may be an inline closure or a function value.
-pub unsafe fn cell_reduce<T: FromVoidstar, F: Invoke2<T, T, T>>(
-    schema: &Schema,
-    combine: F,
-    handle: u64,
-) -> T {
+/// Every accumulator of a cell, in its wire form; with `reduce_list` it
+/// runs @cellreduce.
+pub unsafe fn cell_slots<T: FromVoidstar>(schema: &Schema, handle: u64) -> Vec<T> {
     let mut err: *mut c_char = std::ptr::null_mut();
-    let n = mlc_cell_count(handle as i64, &mut err);
-    check_err(err);
-    if n < 1 {
-        failed_without_reason("@fold");
-    }
-    let slot = |i: i64| -> T {
-        let mut serr: *mut c_char = std::ptr::null_mut();
-        let vs = mlc_cell_slot(handle as i64, i, cschema_of(schema), &mut serr);
-        read_runtime_voidstar(vs, serr, schema, "@fold")
-    };
     struct FreeOnUnwind(i64);
     impl Drop for FreeOnUnwind {
         fn drop(&mut self) {
@@ -3792,14 +3797,34 @@ pub unsafe fn cell_reduce<T: FromVoidstar, F: Invoke2<T, T, T>>(
         }
     }
     let guard = FreeOnUnwind(handle as i64);
-    let mut acc = slot(0);
-    for i in 1..n {
-        acc = combine.invoke(&acc, &slot(i));
+    let n = mlc_cell_count(handle as i64, &mut err);
+    check_err(err);
+    if n < 1 {
+        failed_without_reason("@fold");
+    }
+    let mut xs = Vec::with_capacity(n.max(0) as usize);
+    for i in 0..n {
+        let mut serr: *mut c_char = std::ptr::null_mut();
+        let vs = mlc_cell_slot(handle as i64, i, cschema_of(schema), &mut serr);
+        xs.push(read_runtime_voidstar(vs, serr, schema, "@fold"));
     }
     std::mem::forget(guard);
     let mut ferr: *mut c_char = std::ptr::null_mut();
     mlc_cell_free(handle as i64, &mut ferr);
     check_err(ferr);
+    xs
+}
+
+/// A non-empty list folded with `combine`.
+pub fn reduce_list<T, F: Invoke2<T, T, T>>(combine: F, xs: Vec<T>) -> T {
+    let mut items = xs.into_iter();
+    let mut acc = match items.next() {
+        Some(first) => first,
+        None => failed_without_reason("@fold"),
+    };
+    for x in items {
+        acc = combine.invoke(&acc, &x);
+    }
     acc
 }
 

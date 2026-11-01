@@ -44,9 +44,10 @@ re-checked.
 - **The socket protocol is unspecified.** Gap in model/runtime/network.md:
   NET-4..NET-7 cover the transport, but nothing states the LP request and
   response (methods, fields, `media`, packet mode, error kinds).
-- **An `IFile` given as `"-"` skips the existence check.** [read]
+- **An `IFile` given as JSON skips the existence and `"-"` checks.** [read]
   morloc-nexus/src/dispatch.rs `check_ifile_arg` runs only for
-  `ArgValue::Value`; a test asserts a JSON `"-"` passes (~l.2352).
+  `ArgValue::Value` (a bare `-` is refused); a test asserts a JSON `"-"`
+  passes (~l.1969).
 - **Internal argument errors are classed bad-request.** [read]
   morloc-runtime/src/daemon_ffi.rs: any `call_arg_packet` or
   `make_call_packet` error, SHM exhaustion included, answers 400

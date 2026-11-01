@@ -1,4 +1,4 @@
-module main (guardedDiv, guardedRec, branched, unreadSibling, readTwice)
+module main (guardedDiv, guardedRec, branched, unreadSibling, readTwice, constRec, mutual, param, alias)
 
 import root-py
 
@@ -43,3 +43,28 @@ readTwice :: Int -> Int
 readTwice n = w + w
   where
     w = n * 3
+
+-- A where-bound value on a cycle through its own definition (BIND-7).
+constRec :: Int -> Int
+constRec n = ? n <= 0 = 7 : n + c
+  where
+    c = 1 + constRec 0
+
+-- Mutually recursive where functions (BIND-2).
+mutual :: Int -> Bool
+mutual x = ev x
+  where
+    ev n = ? n == 0 = True : od (n - 1)
+    od n = ? n == 0 = False : ev (n - 1)
+
+-- A where binding that is only a parameter.
+param :: Int -> Int
+param x = d
+  where
+    d = x
+
+-- Recursion through a name for a where-bound function.
+alias :: Int -> Int
+alias = step
+  where
+    step n = ? n <= 0 = 0 : 2 + alias (n - 1)

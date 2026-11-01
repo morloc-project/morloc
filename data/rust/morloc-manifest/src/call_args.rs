@@ -206,7 +206,9 @@ fn omitted(arg: &Arg) -> Result<CallArg, String> {
         }
         Arg::Optional { default_val: Some(d), .. } => {
             let schema = arg.schema_str().unwrap_or("");
-            let raw = if cli_value::schema_is_float_scalar(schema) {
+            let is_float = morloc_runtime_types::schema::parse_schema(schema)
+                .is_ok_and(|s| cli_value::is_float_scalar(&s));
+            let raw = if is_float {
                 cli_value::maybe_float_special_to_json(d).unwrap_or_else(|| d.clone())
             } else {
                 d.clone()

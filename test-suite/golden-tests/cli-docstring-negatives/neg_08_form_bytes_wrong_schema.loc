@@ -4,8 +4,8 @@ import root
 
 -- form: bytes requires the wire schema to be au1 (Vec<U8>).
 foo ::
-  --' source: file
-  --' form: bytes
+  --' @source file
+  --' @form bytes
   Str ->
   Int
 foo x = 0

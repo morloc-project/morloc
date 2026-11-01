@@ -19,6 +19,7 @@ module Morloc.ProgramBuilder.Build
   , resolveBuildDirs
   , ensureStagingDir
   , stagingPoolsDir
+  , requireStrictToolchain
   , discardStagingDir
   , withStagingCleanup
   ) where
@@ -26,13 +27,16 @@ module Morloc.ProgramBuilder.Build
 import Control.Exception (IOException, try)
 import Control.Monad.Except (catchError, throwError)
 import qualified Data.Map as Map
+import qualified Data.Set as Set
 import qualified Morloc.Config as MC
 import Morloc.Data.Doc ((<+>), line, vsep, pretty)
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Monad as MM
 import qualified Morloc.Build.CargoLock as CL
+import Morloc.CodeGenerator.SystemConfig (strictToolchainError)
 import Morloc.Namespace.Prim
 import Morloc.Namespace.State
+import Morloc.ProgramBuilder.Install (matchGlob)
 import Morloc.ProgramBuilder.Paths (buildDirName, buildMarker)
 import qualified Morloc.System as MS
 import qualified System.Directory as SD
@@ -86,7 +90,7 @@ resolveBuildDirs = do
             cwd <- liftIO SD.getCurrentDirectory
             liftIO $ SD.makeAbsolute (fromMaybe cwd (stateBuildParentDir st))
       let buildDir = root </> buildDirName dirKey
-      MM.modify (\s -> s {stateInstallDir = Just buildDir, stateBuildRoot = Just root})
+      MM.modify' (\s -> s {stateInstallDir = Just buildDir, stateBuildRoot = Just root})
       return (BuildDirs dirKey root buildDir)
 
 -- | The unit 'buildProgram' atomically swaps into place. For install it is the
@@ -124,7 +128,7 @@ ensureStagingDir = do
       liftIO $ removeDirIfExists staging
       liftIO $ SD.createDirectoryIfMissing True staging
       liftIO $ MT.writeFile (staging </> buildMarker) ""
-      MM.modify (\s -> s {stateStagingDir = Just staging})
+      MM.modify' (\s -> s {stateStagingDir = Just staging})
       return staging
   dst <- stagingDst staging
   liftIO $ SD.createDirectoryIfMissing True dst
@@ -156,7 +160,7 @@ discardStagingDir = do
     Nothing -> return ()
     Just staging -> do
       liftIO $ removeDirIfExists staging
-      MM.modify (\s -> s {stateStagingDir = Nothing})
+      MM.modify' (\s -> s {stateStagingDir = Nothing})
 
 -- | Run an action, discarding the staging directory if it fails.
 withStagingCleanup :: MorlocMonad a -> MorlocMonad a
@@ -185,14 +189,14 @@ buildProgram (manifest, wrappers, pools) = do
         when dirExists $ do
           contents <- liftIO $ SD.listDirectory swapTarget
           when (not (null contents) && not force) $
-            MM.throwSystemError $ "Install directory already exists: " <> pretty swapTarget
+            MM.throwFailed $ "Install directory already exists: " <> pretty swapTarget
               <> ". Use --force to overwrite."
       (staging, dst) <- ensureStagingDir
       liftIO $ SD.setCurrentDirectory dst
       buildAll projectRoot (manifest : pools)
       liftIO $ SD.setCurrentDirectory origDir
       liftIO $ swapIn staging swapTarget
-      MM.modify (\s -> s {stateStagingDir = Nothing})
+      MM.modify' (\s -> s {stateStagingDir = Nothing})
     ) `catchError` \e -> do
       liftIO $ SD.setCurrentDirectory origDir
       discardStagingDir
@@ -209,9 +213,11 @@ buildProgram (manifest, wrappers, pools) = do
     -- files ever get written. Between the two, provision the program's
     -- declared dependencies (a no-op outside a managed environment), so the
     -- pool compiles find the required headers/libraries/interpreters.
+    -- The toolchain checks run once each, before any pool compiles.
     buildAll projectRoot ss = do
       mapM_ writeScript ss
       syncEnvDeps projectRoot
+      mapM_ requireStrictToolchain (Set.toList (Set.fromList [k | s <- ss, SysRequireToolchain k <- scriptMake s]))
       mapM_ runMakes ss
 
 -- | Provision a program's declared package dependencies before its pools are
@@ -284,15 +290,15 @@ syncEnvDeps projectRoot = do
           result <- liftIO (runHook hook self installed key root)
           case result of
             Left e ->
-              MM.throwSystemError $ "could not run " <> pretty hook <> ": " <> pretty (show e)
+              MM.throwFailed $ "could not run " <> pretty hook <> ": " <> pretty (show e)
             Right ExitSuccess -> return ()
             Right (ExitFailure _) ->
-              MM.throwSystemError
+              MM.throwFailed
                 "environment dependency provisioning failed (see the output above)."
         -- MORLOC_ENV is set (a managed env that expects provisioning) but no build
         -- hook is named.
         _ | requireHook ->
-              MM.throwSystemError . vsep $
+              MM.throwFailed . vsep $
                 [ "This program declares package dependencies and MORLOC_ENV is set, but"
                 , "MORLOC_BUILD_HOOK names no provisioning program. A managed environment"
                 , "must export MORLOC_BUILD_HOOK (the dependency agent, e.g. mim) so"
@@ -375,10 +381,13 @@ writeScript s = do
     [] -> return ()
     errs -> do
       msgs <- liftIO (mapM describeWriteFailure errs)
-      MM.throwSystemError (vsep msgs)
+      MM.throwFailed (vsep msgs)
 
 runMakes :: Script -> MorlocMonad ()
-runMakes s = mapM_ runSysCommand (scriptMake s)
+runMakes s = mapM_ runSysCommand [c | c <- scriptMake s, not (isToolchainCheck c)]
+  where
+    isToolchainCheck (SysRequireToolchain _) = True
+    isToolchainCheck _ = False
 
 -- | Turn a directory-tree write failure into an actionable message.
 -- A directory occupying the output path is the common, recoverable
@@ -398,9 +407,29 @@ describeWriteFailure (Failed _ e) = do
       else "Failed to write generated file:" <+> pretty (show e)
 describeWriteFailure _ = return "Failed to write generated files."
 
+-- | In strict conda mode, fail if a build of this kind would run a program
+-- from outside the environment.
+requireStrictToolchain :: PoolToolchain -> MorlocMonad ()
+requireStrictToolchain kind =
+  liftIO (strictToolchainError kind) >>= maybe (return ()) (MM.throwFailed . pretty)
+
 runSysCommand :: SysCommand -> MorlocMonad ()
-runSysCommand (SysExe path) = liftIO $ callProcess "chmod" ["755", path]
 runSysCommand (SysRun (Code cmd)) = MM.runCommand "runSysCommand" cmd
+runSysCommand (SysRemoveMatching pattern) = removeMatching pattern
 runSysCommand (SysMergeCargoLock base envLock pool) = liftIO $ CL.mergeLockFiles base envLock pool
-runSysCommand other =
-  MM.throwSystemError $ "Unsupported SysCommand: " <> pretty (show other)
+runSysCommand (SysRequireToolchain kind) = requireStrictToolchain kind
+
+removeMatching :: Path -> MorlocMonad ()
+removeMatching pattern = do
+  let dir = takeDirectory pattern
+      namePat = takeFileName pattern
+  exists <- liftIO $ SD.doesDirectoryExist dir
+  when exists $ do
+    names <- liftIO $ SD.listDirectory dir
+    forM_ (filter (matchGlob namePat) names) $ \name -> do
+      let path = dir </> name
+      result <- liftIO $ try (SD.removeFile path) :: MorlocMonad (Either IOException ())
+      case result of
+        Right () -> return ()
+        Left e ->
+          MM.throwFailed $ "Cannot remove" <+> pretty path <> ":" <+> pretty (show e)

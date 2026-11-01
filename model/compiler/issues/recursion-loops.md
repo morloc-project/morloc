@@ -1,7 +1,7 @@
 # Tail calls kept as calls
 
 RECUR-2 (ruled) promises constant stack for any tail call, but the loop
-lowering (Express.hs addLoopWraps ~263-330, rewriteLoopTail ~395-425) leaves
+lowering (Express.hs addLoopWraps ~275-345, rewriteLoopTail ~394-432) leaves
 these as real calls; each fails past Python's recursion limit at depth
 200000. [reproduced, 2026-10-23; probes in a session scratch dir, rebuild
 from the shapes below]
@@ -22,5 +22,5 @@ from the shapes below]
   as a leaf. Code fix: treat that shape as a tail `call`; RECUR-2 should
   define tail position to include it.
 - The `effectfulLoop`/`returnEager` gate in addLoopWraps never fires (both
-  RecCallP construction sites strip EffectT, Express.hs ~634, ~1991); every
+  RecCallP construction sites strip EffectT, Express.hs ~658, ~2032); every
   effectful shape tried loops correctly. Delete the gate and its comment.

@@ -1,4 +1,5 @@
 {-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE GADTs #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ViewPatterns #-}
 
@@ -48,13 +49,22 @@ module Morloc.Namespace.Expr
   , saveFormatName
   , intrinsicName
   , intrinsicArity
+  , InternalApp (..)
+  , InternalView (..)
+  , viewInternal
   , intrinsicIsIO
   , parseIntrinsic
   , Expr (..)
   , ExprI (..)
   , E (..)
+  , PatShape (..)
+  , ShapeForm (..)
+  , PreTyped (..)
   , Lit (..)
   , RealLit (..)
+  , MatchSite (..)
+  , SitePat (..)
+  , SiteLit (..)
   , isFiniteRealLit
   , showRealLit
   , Import (..)
@@ -545,20 +555,23 @@ data Intrinsic
                     -- effects pass through.
   | IntrTell        -- ^ @tell :: <IO> U64@ -- the number of elements written
                     -- to the process's @stdout OStream so far (its
-                    -- element_count). Used by the offset-aware `with:`/
-                    -- `render:` synthesis to thread the per-batch element
+                    -- element_count). Used by the offset-aware `@with`/
+                    -- `@render` synthesis to thread the per-batch element
                     -- offset into a handler; also user-callable.
   | IntrCollect     -- ^ @collect :: (([a] -> <IO,e> ()) -> <IO,e> ()) -> <IO,e> ()@
                     -- Provide the default stdout sink to a producer body and
                     -- manage its lifecycle. Desugar-expands to
                     -- `do { o <- @stdout; body (@write 0 o); @close o }`. The
                     -- sink type `[a] -> ...` carries the stream element type,
-                    -- which the `with:`/`render:` handler synthesis reads off
+                    -- which the `@with`/`@render` handler synthesis reads off
                     -- to type the flag handlers.
+  | IntrShape       -- ^ a destructuring pattern's shape on its receiver, as
+                    -- Desugar writes it: [skeleton, receiver]. Treeify turns
+                    -- it into 'ShapeS'.
   | IntrTmpfile     -- ^ @tmpfile :: <IO> Str@ -- create a fresh empty file in
                     -- the morloc tmpdir, register it for removal when the pool
                     -- call ends, and return its path. NOT user-facing;
-                    -- synthesized by the whole-form `with:`/`render:` handler
+                    -- synthesized by the whole-form `@with`/`@render` handler
                     -- to gather a stream to disk before applying the handler.
   | IntrCellNew     -- ^ @cellnew :: b -> <IO> (Cell b)@ -- create a fold
                     -- accumulator seeded with the given value. NOT
@@ -590,6 +603,16 @@ data Intrinsic
   | IntrSettle      -- ^ internal @settle :: IStream a -> <IO> (): end a
                     -- channel once its readers are done; a producer failure
                     -- a reader was handed is raised again here.
+  | IntrConform     -- ^ internal @conform :: a -> a, synthesized by Express.hs
+                    -- around the wire form of a Packable literal: gives it
+                    -- the form the pool's decoder gives a received value of
+                    -- its schema (NATIVE-8). Python and R only.
+  | IntrCellSlots   -- ^ internal @cellslots :: Cell b -> <IO> [b]: every
+                    -- accumulator of a cell, in its wire form, and the cell
+                    -- released. With IntrReduceList it is how @cellreduce
+                    -- runs when a packer builds the accumulator's native form.
+  | IntrReduceList  -- ^ internal @reducelist :: (b -> b -> b) -> [b] -> b,
+                    -- over a non-empty list.
   | IntrIFileWalk   -- ^ Unified IFile pattern walker. Synthesized by Express.hs
                     -- and Nexus.hs from any pattern application with an IFile
                     -- receiver (`.[i] f`, `.[s:e:p] f`, `.foo.bar f`, mixed
@@ -644,6 +667,7 @@ intrinsicName IntrThrow = "throw"
 intrinsicName IntrTry = "try"
 intrinsicName IntrTell = "tell"
 intrinsicName IntrCollect = "collect"
+intrinsicName IntrShape = "shape"
 intrinsicName IntrTmpfile = "tmpfile"
 intrinsicName IntrCellNew = "cellnew"
 intrinsicName IntrCellGet = "cellget"
@@ -654,6 +678,9 @@ intrinsicName IntrChannel = "channel"
 intrinsicName IntrSpawn = "spawn"
 intrinsicName IntrSettle = "settle"
 intrinsicName IntrIFileWalk = "ifile_walk"
+intrinsicName IntrConform = "conform"
+intrinsicName IntrCellSlots = "cellslots"
+intrinsicName IntrReduceList = "reducelist"
 
 -- | Does this intrinsic perform IO? True iff its type carries an `IO` effect
 -- (see 'Morloc.Frontend.Typecheck.intrinsicType'/'intrinsicTypeG'). Used by the
@@ -684,8 +711,12 @@ intrinsicIsIO IntrTmpfile = True
 -- @collect desugar-expands to @stdout/@write/@close (all IO); classify IO so a
 -- stray @collect that reached this check is still refused.
 intrinsicIsIO IntrCollect = True
+intrinsicIsIO IntrShape = False
 -- Synthesized post-typecheck (never user-written); IO by nature.
 intrinsicIsIO IntrIFileWalk = True
+intrinsicIsIO IntrConform = False
+intrinsicIsIO IntrCellSlots = True
+intrinsicIsIO IntrReduceList = False
 -- Synthesized by the `@fold` handler form; all touch runtime-owned state.
 intrinsicIsIO IntrCellNew = True
 intrinsicIsIO IntrCellGet = True
@@ -758,6 +789,38 @@ parseIntrinsic "tell" = Just IntrTell
 parseIntrinsic "collect" = Just IntrCollect
 parseIntrinsic _ = Nothing
 
+-- | An intrinsic only the compiler writes, with its fixed arguments; a
+-- literal argument a consumer rebuilds is kept beside its value.
+data InternalApp e
+  = TagTest e e Text
+  | CtorField e e Text e Int
+  | ListLenTest e e Int
+  | ListElem e e
+
+-- | What an intrinsic application is, as an internal intrinsic.
+data InternalView e
+  = NotInternal
+  | Malformed
+  | Internal (InternalApp e)
+
+-- | Read an internal intrinsic's fixed arguments.
+viewInternal :: Intrinsic -> [AnnoS g f c] -> InternalView (AnnoS g f c)
+viewInternal intr args = case intr of
+  IntrTagTest -> case args of
+    [s, n@(AnnoS _ _ (StrS t))] -> Internal (TagTest s n t)
+    _ -> Malformed
+  IntrCtorField -> case args of
+    [s, n@(AnnoS _ _ (StrS t)), k@(AnnoS _ _ (IntS _ i))]
+      | i >= 0 -> Internal (CtorField s n t k (fromIntegral i))
+    _ -> Malformed
+  IntrListLenTest -> case args of
+    [s, k@(AnnoS _ _ (IntS _ i))] | i >= 0 -> Internal (ListLenTest s k (fromIntegral i))
+    _ -> Malformed
+  IntrListElem -> case args of
+    [s, k@(AnnoS _ _ (IntS _ i))] | i >= 0 -> Internal (ListElem s k)
+    _ -> Malformed
+  _ -> NotInternal
+
 -- | Expected number of arguments for each intrinsic
 intrinsicArity :: Intrinsic -> Int
 intrinsicArity IntrSave = 3
@@ -801,6 +864,7 @@ intrinsicArity IntrThrow = 1
 intrinsicArity IntrTry = 1
 intrinsicArity IntrTell = 0
 intrinsicArity IntrCollect = 1
+intrinsicArity IntrShape = 2
 intrinsicArity IntrTmpfile = 0
 intrinsicArity IntrCellNew = 1
 intrinsicArity IntrCellGet = 1
@@ -810,6 +874,9 @@ intrinsicArity IntrReplay = 2
 intrinsicArity IntrChannel = 0
 intrinsicArity IntrSpawn = 2
 intrinsicArity IntrSettle = 1
+intrinsicArity IntrConform = 1
+intrinsicArity IntrCellSlots = 1
+intrinsicArity IntrReduceList = 2
 intrinsicArity IntrIFileWalk =
   error "intrinsicArity: IntrIFileWalk has dynamic arity (path + handle + 0..n bracket bounds) and is never eta-expanded"
 
@@ -894,6 +961,34 @@ data Lit
   | MNull
   deriving (Ord, Eq, Show)
 
+-- | A pattern match: where it is written, and each clause's position with
+-- one pattern per receiver, each at its own position.
+data MatchSite = MatchSite
+  { siteIndex :: Int
+  , siteRows :: [(Int, [(Int, SitePat)])]
+  , siteTotal :: Bool
+  -- ^ whether every value must be matched; a refutable `<-` bind throws
+  -- on a value it does not match
+  }
+  deriving (Show, Eq)
+
+-- | A pattern as written: variables are 'SitePatWild'.
+data SitePat
+  = SitePatWild
+  | SitePatLit SiteLit
+  | SitePatCon Text [SitePat]
+  | SitePatTuple [SitePat]
+  | SitePatRecord [(Key, SitePat)]
+  | SitePatList [SitePat]
+  deriving (Show, Eq, Ord)
+
+data SiteLit
+  = SiteInt Integer
+  | SiteReal RealLit
+  | SiteStr Text
+  | SiteBool Bool
+  deriving (Show, Eq, Ord)
+
 -- | Real (IEEE 754) literal. Finite values carry a 'Scientific' to preserve
 -- arbitrary precision until codegen, where they are bounds-checked against
 -- the target Float32/Float64 representation. The non-finite forms are
@@ -945,6 +1040,8 @@ data E
   | EvalP (Indexed Type) E
   | CoerceP Coercion (Indexed Type) E
   | IntrinsicP (Indexed Type) Intrinsic [E]
+  -- | A `data` constructor applied to its fields.
+  | ConP (Indexed Type) Text [E]
   deriving (Ord, Eq, Show)
 
 -- | Coercion tag for implicit type conversions inserted by the typechecker.
@@ -1014,6 +1111,28 @@ data ExprS g f c
   -- index keys the label's configuration in 'stateManifoldConfig'; it names
   -- no node, so no pass renumbers it.
   | LabelS Int (AnnoS g f c)
+  -- | A destructuring pattern's shape on the value it destructures (PAT-1);
+  -- the node's value is that value. Written by Treeify from 'IntrShape';
+  -- typed, then erased: only a pretyped tree can hold one.
+  | ShapeS !(PreTyped f) PatShape (AnnoS g f c)
+
+-- | The shape a destructuring pattern demands of its value: anything, or the
+-- form of the (sub)pattern at this index.
+data PatShape
+  = ShapeAny
+  | Shape Int ShapeForm
+  deriving (Show, Eq, Ord)
+
+-- | A tuple of exactly these components, or a record with at least these
+-- fields.
+data ShapeForm
+  = FormTuple [PatShape]
+  | FormRecord [(Key, PatShape)]
+  deriving (Show, Eq, Ord)
+
+-- | Evidence that a tree has not yet been through instance resolution.
+data PreTyped f where
+  PreTyped :: PreTyped ManyPoly
 
 data ManyPoly a = MonomorphicExpr (Maybe EType) [a] | PolymorphicExpr ClassName EVar EType [(EType, [a])]
   deriving (Show, Eq, Ord)
@@ -1172,6 +1291,7 @@ mapExprSM ::
 mapExprSM f (VarS v xs) = VarS v <$> traverse f xs
 mapExprSM f (AppS x xs) = AppS <$> f x <*> mapM f xs
 mapExprSM f (LamS vs x) = LamS vs <$> f x
+mapExprSM f (ShapeS w sh r) = ShapeS w sh <$> f r
 mapExprSM f (LstS xs) = LstS <$> mapM f xs
 mapExprSM f (TupS xs) = TupS <$> mapM f xs
 mapExprSM f (NamS rs) = NamS <$> mapM (secondM f) rs
@@ -1237,6 +1357,7 @@ mapExprSC f = mapExprS (\(AnnoS gi ci e) -> AnnoS gi (f ci) (mapExprSC f e))
 -- | Fold a monoid over every immediate child 'AnnoS' of an 'ExprS'.
 foldExprS :: (Foldable f, Monoid m) => (AnnoS g f c -> m) -> ExprS g f c -> m
 foldExprS f (VarS _ xs)       = foldMap f xs
+foldExprS f (ShapeS _ _ r)    = f r
 foldExprS f (AppS x xs)       = f x <> foldMap f xs
 foldExprS f (LamS _ x)        = f x
 foldExprS f (LstS xs)         = foldMap f xs
@@ -1302,6 +1423,7 @@ instance Pretty E where
   pretty (EvalP _ e) = "!" <> pretty e
   pretty (CoerceP _ _ e) = "coerce(" <> pretty e <> ")"
   pretty (IntrinsicP _ intr args) = "@" <> pretty (intrinsicName intr) <+> hsep (map pretty args)
+  pretty (ConP _ c args) = hsep (pretty c : map pretty args)
 
 instance Pretty Source where
   pretty s =
@@ -1404,7 +1526,7 @@ instance Pretty Expr where
   pretty (LogE x) = pretty x
   pretty (LetE bindings body) = vsep [pretty v <+> "=" <+> pretty e | (v, e) <- bindings] <+> "in" <+> pretty body
   pretty (AssE v e es) = pretty v <+> "=" <+> pretty e <+> "where" <+> (align . vsep . map pretty) es
-  pretty (SrcE (Source srcname lang file' alias _ rsizes _ _ _ _)) =
+  pretty (SrcE Source {srcName = srcname, srcLang = lang, srcPath = file', srcAlias = alias, srcRsize = rsizes}) =
     "source"
       <+> viaShow lang
       <> maybe "" (\f -> "from" <+> pretty f) file'
@@ -1440,6 +1562,7 @@ instance (Foldable f) => Pretty (AnnoS a f b) where
 
 instance (Foldable f) => Pretty (ExprS a f b) where
   pretty (AppS e es) = "(AppS" <+> list (map pretty (e : es)) <> ")"
+  pretty (ShapeS _ _ r) = "(ShapeS" <+> pretty r <> ")"
   pretty (VarS v res) = "(VarS" <+> pretty v <+> "=" <+> list (map pretty (toList res)) <> ")"
   pretty (LamS vs e) = "(LamS" <+> list (map pretty vs) <+> "->" <+> pretty e <> ")"
   pretty (LstS es) = "(LstS" <+> list (map pretty es) <> ")"

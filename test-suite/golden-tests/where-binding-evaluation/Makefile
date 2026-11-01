@@ -7,6 +7,10 @@ all:
 	./nexus branched 6 0 >> obs.txt 2>> obs.err
 	./nexus unreadSibling 5 >> obs.txt 2>> obs.err
 	./nexus readTwice 5 >> obs.txt 2>> obs.err
+	./nexus constRec 3 >> obs.txt 2>> obs.err
+	./nexus mutual 5 >> obs.txt 2>> obs.err
+	./nexus param 9 >> obs.txt 2>> obs.err
+	./nexus alias 4 >> obs.txt 2>> obs.err
 
 clean:
 	rm -f *.err nexus

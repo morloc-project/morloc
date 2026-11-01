@@ -4,7 +4,7 @@
 //!
 //! * [`print_json_help`] -- a lossless, morloc-native JSON view of the same
 //!   information the human `--help` renders: positional/option/flag/group
-//!   roles, metavars, the `source:`/`form:`/`check.*`/`list.*` CLI-shape
+//!   roles, metavars, the `@source`/`@form`/`check.*`/`list.*` CLI-shape
 //!   grammar, variadic/stdin/quoted, defaults, terminal-action formatter
 //!   flags, morloc type strings + wire schemas, record/table field layouts,
 //!   return info, and module/command docstrings. "morloc help, but
@@ -658,7 +658,7 @@ fn parse_json(p: &morloc_manifest::ArgParse) -> Value {
     })
 }
 
-/// The `source:`/`form:`/`check.*`/`list.*` CLI-shape grammar as JSON.
+/// The `@source`/`@form`/`check.*`/`list.*` CLI-shape grammar as JSON.
 fn input_object(
     source: &SourceAtom,
     form: &FormAtom,
@@ -1232,13 +1232,13 @@ mod tests {
             "return": { "schema": "s" },
             "args": [
                 { "kind": "pos", "key": "_1", "schema": "?s", "stdin": true },
-                { "kind": "pos", "key": "_2", "schema": "F" }
+                { "kind": "pos", "key": "_2", "schema": "F2aj" }
             ],
         }));
         let shape = command_to_tool_shape(&cmd).expect("servable");
         assert_eq!(required(&shape), vec!["_1", "_2"]);
         let handle_return = cmd_from_json(json!({
-            "name": "open", "type": "remote", "return": { "schema": "F" }, "args": [],
+            "name": "open", "type": "remote", "return": { "schema": "F2aj" }, "args": [],
         }));
         assert!(command_to_tool_shape(&handle_return).is_err());
     }
@@ -1301,7 +1301,7 @@ mod tests {
         // 'F' is the IFile (stream-handle) wire schema.
         let cmd = cmd_from_json(json!({
             "name": "open", "type": "remote",
-            "return": { "schema": "F" },
+            "return": { "schema": "F2aj" },
             "args": [],
         }));
         assert!(command_to_tool_shape(&cmd).is_err());

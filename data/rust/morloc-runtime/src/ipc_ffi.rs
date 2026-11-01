@@ -280,8 +280,10 @@ pub(crate) unsafe fn close_socket(socket_id: i32) {
             );
         }
         let _ = REQUEST.try_with(|r| {
-            if r.get().0 == socket_id {
-                r.set((-1, 0));
+            let mut request = r.get();
+            if request.fd == socket_id {
+                request.fd = -1;
+                r.set(request);
             }
         });
         libc::close(socket_id);
@@ -652,11 +654,17 @@ unsafe fn read_packet(client_fd: i32, wait: Wait, reply: bool, errmsg: *mut *mut
             set_errmsg(errmsg, &MorlocError::Ipc(why.into()));
             ptr::null_mut()
         }
+        Err(ReadFailure::Alloc) => {
+            set_errmsg(errmsg, &MorlocError::Ipc("malloc failure".into()));
+            ptr::null_mut()
+        }
     }
 }
 
 pub(crate) enum ReadFailure {
     Io(&'static str),
+    /// This process could not hold the packet.
+    Alloc,
     /// A malformed header; the C string is the caller's to free.
     Packet(*mut c_char),
 }
@@ -685,7 +693,7 @@ unsafe fn read_packet_raw(client_fd: i32, wait: Wait, reply: bool) -> Result<*mu
     }
     let result = libc::malloc(packet_length.max(1)) as *mut u8;
     if result.is_null() {
-        return Err(ReadFailure::Io("malloc failure"));
+        return Err(ReadFailure::Alloc);
     }
     let copied = have.min(packet_length);
     ptr::copy_nonoverlapping(head.as_ptr(), result, copied);
@@ -849,6 +857,10 @@ pub(crate) unsafe fn stream_from_client(
             set_errmsg(errmsg, &MorlocError::Ipc(why.into()));
             ptr::null_mut()
         }
+        Err(ReadFailure::Alloc) => {
+            set_errmsg(errmsg, &MorlocError::Ipc("malloc failure".into()));
+            ptr::null_mut()
+        }
     }
 }
 
@@ -858,27 +870,91 @@ pub(crate) unsafe fn read_request(client_fd: i32) -> Result<*mut u8, ReadFailure
         Some(peer) => read_packet_raw(client_fd, Wait::Peer(&peer), false),
         None => read_packet_raw(client_fd, Wait::Stall, false),
     }?;
-    REQUEST.with(|r| r.set((client_fd, crate::fork_policy::generation())));
+    REQUEST.with(|r| r.set(Request {
+        fd: client_fd,
+        generation: crate::fork_policy::generation(),
+        failures: Failures::now(),
+    }));
+    LAST_PEER_DEATH.with(|m| m.borrow_mut().take());
     Ok(request)
 }
 
+#[derive(Clone, Copy)]
+struct Request {
+    fd: i32,
+    generation: u64,
+    failures: Failures,
+}
+
 thread_local! {
-    static REQUEST: std::cell::Cell<(i32, u64)> = const { std::cell::Cell::new((-1, 0)) };
+    static REQUEST: std::cell::Cell<Request> = const {
+        std::cell::Cell::new(Request { fd: -1, generation: 0, failures: Failures { peer_deaths: 0, pipe_closes: 0 } })
+    };
+    // LIFE-5
+    static LAST_PEER_DEATH: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+// LIFE-5
+static PEER_DEATHS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static PIPE_CLOSES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+#[derive(Clone, Copy, PartialEq)]
+struct Failures {
+    peer_deaths: u64,
+    pipe_closes: u64,
+}
+
+impl Failures {
+    fn now() -> Self {
+        use std::sync::atomic::Ordering::SeqCst;
+        Failures { peer_deaths: PEER_DEATHS.load(SeqCst), pipe_closes: PIPE_CLOSES.load(SeqCst) }
+    }
+}
+
+// LIFE-5
+fn note_peer_death(message: String) {
+    PEER_DEATHS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    LAST_PEER_DEATH.with(|m| *m.borrow_mut() = Some(message));
+}
+
+// LIFE-5
+pub(crate) fn note_pipe_closed() -> i32 {
+    PIPE_CLOSES.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    morloc_runtime_types::MLC_RESULT_PIPE_CLOSED
+}
+
+// LIFE-5
+fn failure_since_request(client_fd: i32) -> Option<*mut u8> {
+    let request = REQUEST.with(|r| r.get());
+    if request.fd != client_fd {
+        return None;
+    }
+    let now = Failures::now();
+    if now.pipe_closes != request.failures.pipe_closes {
+        let msg = std::ffi::CString::new("downstream pipe closed").ok()?;
+        return Some(unsafe { crate::packet_ffi::make_pipe_closed_packet(msg.as_ptr()) });
+    }
+    if now.peer_deaths != request.failures.peer_deaths {
+        let msg = LAST_PEER_DEATH.with(|m| m.borrow().clone())
+            .unwrap_or_else(|| "a pool this call depended on ended during the call".to_string());
+        return Some(crate::packet_ffi::make_peer_died_packet(&msg));
+    }
+    None
 }
 
 // FORK-12
 fn refuse_a_reply_from_a_fork(client_fd: i32) {
-    let (fd, generation) = REQUEST.with(|r| r.get());
-    if fd == client_fd {
-        exit_if_forked_since(generation);
+    let request = REQUEST.with(|r| r.get());
+    if request.fd == client_fd {
+        exit_if_forked_since(request.generation);
     }
 }
 
 // FORK-12: called as soon as user code returns, on the thread that read the request.
 pub(crate) fn morloc_exit_if_forked() {
-    let (fd, generation) = REQUEST.with(|r| r.get());
-    if fd >= 0 {
-        exit_if_forked_since(generation);
+    let request = REQUEST.with(|r| r.get());
+    if request.fd >= 0 {
+        exit_if_forked_since(request.generation);
     }
 }
 
@@ -913,6 +989,14 @@ pub(crate) unsafe fn mlc_set_self_socket(socket_path: *const c_char) {
     }
     let path = std::path::PathBuf::from(CStr::from_ptr(socket_path).to_string_lossy().into_owned());
     *SELF_SOCKET.lock() = Some(path);
+    IS_POOL.store(true, std::sync::atomic::Ordering::Release);
+}
+
+// SHM-17
+static IS_POOL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub(crate) fn is_pool_process() -> bool {
+    IS_POOL.load(std::sync::atomic::Ordering::Acquire)
 }
 
 fn is_self_socket(socket_path: *const c_char) -> bool {
@@ -1069,7 +1153,13 @@ pub(crate) fn drop_cached_connections() {
 
 /// Connect to `socket_path`, retrying while the pool starts. The descriptor
 /// is tracked when there is room, which allows it to be reused.
-unsafe fn connect_to(socket_path: *const c_char) -> Result<(i32, bool), MorlocError> {
+enum ConnectFail {
+    // LIFE-5
+    PeerGone(String),
+    Local(MorlocError),
+}
+
+unsafe fn connect_to(socket_path: *const c_char) -> Result<(i32, bool), ConnectFail> {
     let (client_fd, tracked) = loop {
         let seq = crate::fork_policy::fork_seq_settled();
         let mut err: *mut c_char = ptr::null_mut();
@@ -1077,7 +1167,7 @@ unsafe fn connect_to(socket_path: *const c_char) -> Result<(i32, bool), MorlocEr
         if fd < 0 {
             let msg = CStr::from_ptr(err).to_string_lossy().into_owned();
             libc::free(err as *mut c_void);
-            return Err(MorlocError::Ipc(msg));
+            return Err(ConnectFail::Local(MorlocError::Ipc(msg)));
         }
         let tracked = track_conn(fd);
         if crate::fork_policy::fork_seq() == seq {
@@ -1087,13 +1177,13 @@ unsafe fn connect_to(socket_path: *const c_char) -> Result<(i32, bool), MorlocEr
         // the fork handler does not close; it has carried nothing yet.
         drop_conn(fd);
     };
-    let fail = |e: MorlocError| {
+    let fail = |e: ConnectFail| {
         drop_conn(client_fd);
         Err(e)
     };
     let addr = match new_server_addr(socket_path) {
         Ok(a) => a,
-        Err(e) => return fail(e),
+        Err(e) => return fail(ConnectFail::Local(e)),
     };
     let mut attempts = 0;
     loop {
@@ -1102,19 +1192,26 @@ unsafe fn connect_to(socket_path: *const c_char) -> Result<(i32, bool), MorlocEr
         if retcode == 0 {
             return Ok((client_fd, tracked));
         }
+        let errno = std::io::Error::last_os_error();
         attempts += 1;
         if crate::daemon_ffi::is_recovering() || crate::daemon_ffi::is_shutting_down() {
-            return fail(MorlocError::Ipc(format!(
+            return fail(ConnectFail::Local(MorlocError::Ipc(format!(
                 "Failed to connect to pipe '{}': the daemon is {}",
                 CStr::from_ptr(socket_path).to_string_lossy(),
                 if crate::daemon_ffi::is_recovering() { "recovering from a pool crash" } else { "shutting down" }
-            )));
+            ))));
         }
         if attempts > 300 { // ~30 seconds with 100ms sleep
-            return fail(MorlocError::Ipc(format!(
-                "Failed to connect to pipe '{}'",
-                CStr::from_ptr(socket_path).to_string_lossy()
-            )));
+            let gone = matches!(errno.raw_os_error(), Some(libc::ECONNREFUSED) | Some(libc::ENOENT));
+            let why = format!("cannot connect: {errno}");
+            return fail(if gone {
+                ConnectFail::PeerGone(why)
+            } else {
+                ConnectFail::Local(MorlocError::Ipc(format!(
+                    "Failed to connect to pipe '{}': {errno}",
+                    CStr::from_ptr(socket_path).to_string_lossy()
+                )))
+            });
         }
         libc::usleep(100_000); // 100ms
     }
@@ -1193,7 +1290,8 @@ pub(crate) unsafe fn send_and_receive_over_socket(
             Some(fd) => (fd, true),
             None => match connect_to(socket_path) {
                 Ok(c) => c,
-                Err(e) => {
+                Err(ConnectFail::PeerGone(why)) => return peer_died(socket_path, &why),
+                Err(ConnectFail::Local(e)) => {
                     set_errmsg(errmsg, &e);
                     return ptr::null_mut();
                 }
@@ -1204,11 +1302,7 @@ pub(crate) unsafe fn send_and_receive_over_socket(
             Err(SendFail::PeerClosed) if reused => drop_conn(fd),
             Err(_) => {
                 drop_conn(fd);
-                set_errmsg(errmsg, &MorlocError::Ipc(format!(
-                    "Failed to send data to '{}'",
-                    CStr::from_ptr(socket_path).to_string_lossy()
-                )));
-                return ptr::null_mut();
+                return peer_died(socket_path, "the request could not be sent");
             }
         }
     };
@@ -1220,11 +1314,37 @@ pub(crate) unsafe fn send_and_receive_over_socket(
     }
 
     let peer = Peer::of(client_fd);
-    let result = read_packet(client_fd, reply_wait(&peer), true, &mut err);
-    if !err.is_null() {
-        drop_conn(client_fd);
-        *errmsg = err;
-        return ptr::null_mut();
+    let result = match read_packet_raw(client_fd, reply_wait(&peer), true) {
+        Ok(p) => p,
+        Err(ReadFailure::Io(why)) => {
+            drop_conn(client_fd);
+            return peer_died(socket_path, why);
+        }
+        Err(ReadFailure::Alloc) => {
+            drop_conn(client_fd);
+            set_errmsg(errmsg, &MorlocError::Ipc("malloc failure".into()));
+            return ptr::null_mut();
+        }
+        Err(ReadFailure::Packet(e)) => {
+            drop_conn(client_fd);
+            *errmsg = e;
+            return ptr::null_mut();
+        }
+    };
+    let reply_header = &*(result as *const morloc_runtime_types::packet::PacketHeader);
+    if reply_header.is_pipe_closed() {
+        note_pipe_closed();
+    }
+    if reply_header.is_peer_died() {
+        let mut err: *mut c_char = ptr::null_mut();
+        let msg = crate::packet_ffi::get_morloc_data_packet_error_message(result, &mut err);
+        if !err.is_null() { libc::free(err as *mut c_void); }
+        let text = if msg.is_null() { String::new() } else {
+            let t = CStr::from_ptr(msg).to_string_lossy().into_owned();
+            libc::free(msg as *mut c_void);
+            t
+        };
+        note_peer_death(text);
     }
 
     let kept = take_keep_bit(result);
@@ -1234,6 +1354,20 @@ pub(crate) unsafe fn send_and_receive_over_socket(
     // SHM-8
     crate::packet_ffi::inherit_reply(result);
     result
+}
+
+// LIFE-5
+unsafe fn peer_died(socket_path: *const c_char, why: &str) -> *mut u8 {
+    let path = CStr::from_ptr(socket_path).to_string_lossy();
+    let name = path.rsplit('/').next().unwrap_or(&path);
+    let pool = name.strip_prefix("pipe-").unwrap_or(name);
+    let message = format!("the {pool} pool ended during the call ({why})");
+    let packet = crate::packet_ffi::make_peer_died_packet(&message);
+    if packet.is_null() {
+        morloc_runtime_types::panic::fatal("out of memory building a dead-peer reply");
+    }
+    note_peer_death(message);
+    packet
 }
 
 // -- mlc_spawn ----------------------------------------------------------------
@@ -1396,7 +1530,29 @@ pub(crate) unsafe fn send_reply_to_foreign_server(
 ) -> usize {
     refuse_a_reply_from_a_fork(client_fd);
     clear_errmsg(errmsg);
+    // LIFE-5: the dispatch's own value is released as usual and not sent.
+    let substitute = failure_since_request(client_fd);
+    if let Some(p) = substitute {
+        if p.is_null() {
+            morloc_runtime_types::panic::fatal("out of memory building a failure reply");
+        }
+        // NET-7: the substitute answers the keep request the reply did.
+        use morloc_runtime_types::packet::PKT_MODE_OFF;
+        std::ptr::copy_nonoverlapping(packet.add(PKT_MODE_OFF), p.add(PKT_MODE_OFF), 2);
+    }
+    let sent = send_reply_packet(client_fd, substitute.unwrap_or(packet), release, errmsg);
+    if let Some(p) = substitute {
+        libc::free(p as *mut c_void);
+    }
+    sent
+}
 
+unsafe fn send_reply_packet(
+    client_fd: i32,
+    packet: *mut u8,
+    release: Option<unsafe extern "C" fn()>,
+    errmsg: *mut *mut c_char,
+) -> usize {
     let mut err: *mut c_char = ptr::null_mut();
     let size = crate::packet_ffi::morloc_packet_size(packet, &mut err);
     if !err.is_null() {
@@ -1947,8 +2103,8 @@ mod dispatch_fork_tests {
         reaper.join().unwrap();
         unsafe { libc::close(hold[1]) };
         let _ = std::fs::remove_dir_all(&dir);
-        assert!(reply.is_null(), "no reply came");
-        unsafe { libc::free(err as *mut c_void) };
+        assert!(!reply.is_null() && unsafe { (*(reply as *const crate::packet::PacketHeader)).is_peer_died() }, "the death was not reported");
+        unsafe { libc::free(reply as *mut c_void) };
         assert!(took < std::time::Duration::from_secs(5), "the dead callee was noticed: {took:?}");
     }
 
@@ -2350,6 +2506,10 @@ mod reuse_tests {
             let m = unsafe { CStr::from_ptr(err) }.to_string_lossy().into_owned();
             unsafe { libc::free(err as *mut c_void) };
             return Err(m);
+        }
+        if unsafe { (*(reply as *const PacketHeader)).is_peer_died() } {
+            unsafe { libc::free(reply as *mut c_void) };
+            return Err("the callee died".into());
         }
         let mode = mode_of(unsafe { std::slice::from_raw_parts(reply, PKT_HEADER_SIZE) });
         unsafe { libc::free(reply as *mut c_void) };

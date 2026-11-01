@@ -3,7 +3,8 @@ Module      : ValueArgsTests
 Description : Unit tests for deciding which arguments of a type are values
 -}
 {-# LANGUAGE OverloadedStrings #-}
-module ValueArgsTests (valueArgsTests) where
+{-# LANGUAGE PatternSynonyms #-}
+module ValueArgsTests (valueArgsTests, kindOfTests) where
 
 import qualified Data.Map as Map
 import Morloc.CodeGenerator.Namespace
@@ -77,4 +78,27 @@ valueArgsTests =
         ( valueArgsT Map.empty (TV "Foo") [StrLitT "lbl", StrVoidT, VarT (TV "Int")]
         , valueArgsF Map.empty (TV "Foo") [StrLitF "lbl", StrVoidF, int] )
           @?= ([VarT (TV "Int")], [int])
+    ]
+
+kindOfTests :: TestTree
+kindOfTests =
+  testGroup
+    "the kind of an argument is fixed by its form (KIND-1)"
+    [ testCase "erasure keeps the kind of a placeholder" $
+        map (kindOfT . typeOf) [RecVarU (TV "r"), ListVarU (TV "l"), SetVarU (TV "s"), StrVarU (TV "t"), NatVarU (TV "n")]
+          @?= map Just [KindRec, KindList KindStr, KindSet KindStr, KindStr, KindNat]
+    , testCase "a placeholder lifts back at its own kind" $
+        map (type2typeu . typeOf) [RecVarU (TV "r"), ListVarU (TV "l"), SetVarU (TV "s")]
+          @?= [RecVoidU, ListVoidU, SetVoidU]
+    , testCase "a Str argument is a kind argument at every level" $
+        ( partitionKindArgs kindOfT [StrLitT "id", NatLitT 1, VoidT KindRec, VarT (TV "Real")]
+        , partitionKindArgs kindOfF [StrLitF "id", NatLitF 1, VoidF KindRec, real]
+        , partitionKindArgs kindOfU [StrLitU "id", NatLitU 1, RecVarU (TV "r"), VarU (TV "Real")] )
+          @?= (([VarT (TV "Real")], 3), ([real], 3), ([VarU (TV "Real")], 3))
+    , testCase "a ground row's kind depends on its parameter, an open row's does not" $
+        ( kindOfU (RecExtendU "x" (VarU (TV "Int")) RecEmptyU)
+        , kindOfU (RecExtendU "x" (VarU (TV "Int")) (RecVarU (TV "r"))) )
+          @?= (Nothing, Just KindRec)
+    , testCase "a Rec placeholder is not a Nat" $
+        kindOfT (typeOf (RecVarU (TV "r"))) /= Just KindNat @? "Rec placeholder read as Nat"
     ]

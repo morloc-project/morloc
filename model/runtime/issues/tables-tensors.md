@@ -1,13 +1,11 @@
 # Tables and tensors
 
-- Bad table cell kills the pool: see failure-classification.md.
 - [reproduced] Undeclared CSV column typed from the first 100 rows
-  (morloc-runtime/src/arrow_ipc_reader.rs:667); a later mismatch kills the
-  pool.
+  (morloc-runtime/src/arrow_ipc_reader.rs:698); a later mismatch fails the
+  call on valid data.
 - [reproduced] Undeclared JSON column typed from its first value:
-  `[{"u":1},{"u":2.5}]` -> "Expected integer" (arrow_ffi.rs:640-648).
-- [reproduced] NaN/Inf cells print `nan`/`inf`, invalid JSON
-  (arrow_ffi.rs:349-350).
+  `[{"u":1},{"u":2.5}]` -> "Expected integer" (arrow_ffi.rs
+  `discover_json_columns` keeps the first sample).
 - [reproduced] `?(?Int)` column compiles, fails at run time (Serial.hs:748
   vs arrow_shm.rs:212-221).
 - **Tensor dims unchecked.** [reproduced] Violates DIM-3. Only the flat
@@ -25,14 +23,8 @@
 CSV input to a `Table` argument (reader: arrow_ipc_reader.rs
 `delimited_batch`, rules CLI-13..CLI-19).
 
-- **Bad table input kills the Python pool.** [reproduced, 0.109.0] Violates
-  the failure classification (failure-classification.md: user data decode
-  is classified infrastructure). A `Table` is read in the pool, so a bad
-  cell (`99999999999999999999` in an `Int` column,
-  test-suite/golden-tests/spec-cli-17-1) or an empty file raises
-  MorlocInternalError in pybinding__get_value and ends the pool. Under
-  `@form table` the nexus checks the header first, so only cell errors
-  reach the pool. This is CLI-20's deviation.
-- **A packet without schema metadata skips the schema check.** [read]
-  cli.rs ~2036 decodes it under the requested schema; a record packet with
-  swapped same-typed fields would bind wrong.
+- **A bad table cell fails the call after the command starts.** [reproduced
+  2026-10-29] CLI-20 asks for the error before the command runs; a `Table`
+  is read by the pool that holds it, so the nexus checks only the header and
+  the cell error comes back as the call's failure (golden
+  bad-table-cell-fails-the-call).

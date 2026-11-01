@@ -18,8 +18,8 @@ form, not the type's name: a type that packs to `[(a, b)]` reads as one.
 Intent: proposed
 Code: deviates (issues/programs.md)
 
-`source: inline|file`, `form: list|table|bytes|bytes-only|packet` and `check.path`
-each take one value, and the `list.` forms do the same per element. No field
+`@source inline|file`, `@form list|table|bytes|bytes-only|packet` and `@check.path`
+each take one value, and the `@list.` forms do the same per element. No field
 takes an OR chain, and `auto` cannot be written. A combination the wire type
 does not allow is a build error at the docstring line that wrote it.
 
@@ -143,7 +143,7 @@ for a `Table` whose undeclared columns are `Str`.
 
 ### CLI-20 A table read error names where it is
 Intent: proposed
-Code: deviates model/runtime/issues/failure-classification.md
+Code: deviates (../runtime/issues/tables-tensors.md)
 
 A rejected table names the line (or row, for a columnar file), the column,
 the cell and the type it is not, and is reported before the command runs.

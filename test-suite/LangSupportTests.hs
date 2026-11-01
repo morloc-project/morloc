@@ -15,6 +15,7 @@ structural tests assert presence rather than exact ceilings.
 module LangSupportTests (langSupportTests) where
 
 import qualified Data.Map as Map
+import Data.Containers.ListUtils (nubOrd)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Morloc.DataFiles as DF
@@ -45,7 +46,7 @@ langSupportTests =
             let names = map pkgName (lsToolchain t)
             assertBool "c-compiler" ("c-compiler" `elem` names)
             assertBool "rust" ("rust" `elem` names)
-        , testCase "compiler metapackages stay on the activation-bearing 1.x line" $ withParsed $ \t -> do
+        , testCase "compiler metapackages are pinned to one 1.x release" $ withParsed $ \t -> do
             -- c-compiler/cxx-compiler 2.x depend on the bare gcc/clang packages,
             -- which ship no activate.d and so never export $CC/$CXX/$AR.
             let cpp = maybe [] leRequires (Map.lookup "cpp" (lsLanguages t))
@@ -53,7 +54,8 @@ langSupportTests =
                        | p <- lsToolchain t ++ cpp
                        , pkgName p `elem` ["c-compiler", "cxx-compiler"] ]
             assertBool "both metapackages present" (length pins == 3)
-            mapM_ (\(n, c) -> assertBool (T.unpack n <> " excludes 2.x: " <> T.unpack c) (T.isInfixOf "<2" c)) pins
+            mapM_ (\(n, c) -> assertBool (T.unpack n <> " is an exact 1.x pin: " <> T.unpack c) (T.isPrefixOf "==1." c)) pins
+            assertEqual "one release for every metapackage pin" 1 (length (nubOrd (map snd pins)))
         , testCase "python runtime is capped below the 3.14 break" $ withParsed $ \t ->
             case Map.lookup "py" (lsLanguages t) >>= leRuntime of
               Just rs -> assertBool "python ceiling <3.14" (T.isInfixOf "<3.14" (rsVersion rs))

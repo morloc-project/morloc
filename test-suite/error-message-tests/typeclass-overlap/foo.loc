@@ -1,4 +1,4 @@
 module foo (*) 
 
-import foo2 (Farcy)
-import foo3 (Marcy)
+import .foo2 (Farcy)
+import .foo3 (Marcy)

@@ -14,7 +14,7 @@
 // (Morloc.Abi). Provisioning refuses to run a prebuilt libmorloc/nexus whose
 // version differs from the compiler's expected value (fail-closed), preventing
 // silent cross-pool struct/offset corruption.
-#define MORLOC_ABI_VERSION 14
+#define MORLOC_ABI_VERSION 15
 
 // Atomic includes must sit outside any `extern "C"` block because the
 // C++ <atomic> header pulls in <type_traits> et al., which use C++
@@ -172,11 +172,6 @@ typedef enum {
     MORLOC_IFILE    = 21, // Random-access stream-file handle (read-only).
     MORLOC_OSTREAM  = 22, // Sequential stream-file writer handle.
     MORLOC_ISTREAM  = 23, // Sequential stream-file reader handle.
-    MORLOC_CLOSURE  = 24, // Function value: home language, manifold id, and
-                          // captured argument packets. Wire form is
-                          // `[u32 home][u32 mid][u32 n][ (u32 len, bytes) x n ]`;
-                          // the captured packets are opaque (serialized by the
-                          // home language, deserialized by its dispatch table).
     MORLOC_ENUM     = 25, // A `data` type whose constructors take no
                           // arguments. One byte: the constructor's 0-based
                           // position in the declaration IS the wire tag.
@@ -220,26 +215,6 @@ typedef enum {
     // of tag; sender and receiver each own independent fds, mmaps, and
     // arena-tracked close lifetimes.
 } morloc_serial_type;
-
-// Single-character schema encoding tokens.
-#define SCHEMA_NIL      'z'
-#define SCHEMA_BOOL     'b'
-#define SCHEMA_SINT     'i'
-#define SCHEMA_UINT     'u'
-#define SCHEMA_FLOAT    'f'
-#define SCHEMA_STRING   's'
-#define SCHEMA_ARRAY    'a'
-#define SCHEMA_TUPLE    't'
-#define SCHEMA_MAP      'm'
-#define SCHEMA_OPTIONAL '?'
-#define SCHEMA_INT      'j'
-#define SCHEMA_TABLE    'T'
-#define SCHEMA_IFILE    'F'
-#define SCHEMA_OSTREAM  'O'
-#define SCHEMA_ISTREAM  'I'
-#define SCHEMA_CLOSURE  'C'
-#define SCHEMA_ENUM     'e'
-#define SCHEMA_VARIANT  'v'
 
 // Schema: recursive type descriptor used for serialisation/deserialisation.
 //
@@ -338,6 +313,7 @@ typedef struct __attribute__((packed)) packet_command_call_s {
 #define PACKET_STATUS_PASS 0x00
 #define PACKET_STATUS_FAIL 0x01
 #define PACKET_STATUS_PIPE_CLOSED 0x02
+#define PACKET_STATUS_PEER_DIED 0x03
 
 // The reader closed the pipe: mlc_write / mlc_flush / mlc_close return it
 // with no errmsg.
@@ -472,7 +448,7 @@ typedef struct __attribute__((packed)) morloc_metadata_header_s {
     uint32_t size;
 } morloc_metadata_header_t;
 
-// Handle-kind discriminants for mlc_open / mlc_close. Must agree with
+// Handle-kind discriminants. Must agree with
 // morloc-runtime-types::packet::MLC_KIND_*.
 #define MLC_KIND_IFILE   0
 #define MLC_KIND_ISTREAM 1
@@ -1402,7 +1378,7 @@ uint8_t* make_data_packet_from_mpk(const char* mpk, size_t mpk_size, const Schem
 // per-language pool `_get_value` implementations to detect stream
 // indirection targets (nexus emits FILE+DATA for stream files, and
 // the language runtime discriminates here whether to slurp via
-// get_morloc_data_packet_value or iterate via mlc_open/mlc_next).
+// get_morloc_data_packet_value or iterate via mlc_open_istream/mlc_next).
 int32_t file_is_stream_packet(const char* path);
 uint8_t* make_fail_packet(const char* failure_message);
 uint8_t* make_pipe_closed_packet(const char* failure_message);
@@ -1653,7 +1629,7 @@ argument_t* initialize_positional(char* value);
 argument_t* initialize_unrolled(size_t size, char* default_value, char** fields, char** default_fields);
 void free_argument_t(argument_t* arg);
 uint8_t* parse_cli_data_argument(uint8_t* dest, const argument_t* arg, const Schema* schema, ERRMSG);
-// Variadic-list assembly entry point (matches `--' many: true` in the
+// Variadic-list assembly entry point (matches `--' @many` in the
 // nexus manifest). Parses N CLI argument_t's into a single packet
 // wrapping a morloc list whose element schema is the list schema's
 // inner type. Each element goes through the same source classifier
@@ -1697,9 +1673,12 @@ int mlc_compare(const void* a, const void* b, const Schema* schema, ERRMSG);
 void* mlc_read(const char* json_str, const Schema* schema, ERRMSG);
 
 // -- Stream-handle intrinsics ---------------------------------------------
-// Open a STREAM_PACKET file as the given handle kind (MLC_KIND_*) and
-// return a 64-bit handle ID. Returns -1 on failure, with errmsg set.
-int64_t mlc_open(const char* path, uint8_t kind, ERRMSG);
+// Open `path` as an IFile whose file must store `schema_str`. Returns the
+// handle, or -1 with errmsg set.
+int64_t mlc_open_ifile(const char* schema_str, const char* path, ERRMSG);
+// A pool's defect exit calls this first: when `msg` says shared memory was
+// lost, the process ends with status 71 instead (SHM-17, PANIC-14).
+void morloc_exit_if_shared_memory_lost(const char* msg);
 // Close any open handle, bumping its registry slot's generation.
 // Returns 0 on success, non-zero on failure.
 int32_t mlc_close(int64_t handle, ERRMSG);
@@ -1754,8 +1733,11 @@ int64_t mlc_handle_path_len(int64_t handle, ERRMSG);
 // On the read side, `space` is where the field's path lives.
 int32_t mlc_write_handle_voidstar(int64_t handle, void* dest,
                                   void** cursor, ERRMSG);
+// `storage` (`storage_len` bytes) is the schema the handle's file must
+// store: the key of the handle's schema.
 int64_t mlc_read_handle_voidstar(const void* arr, morloc_space_t space,
-                                 uint8_t kind, ERRMSG);
+                                 uint8_t kind, const char* storage,
+                                 size_t storage_len, ERRMSG);
 
 // Batched IFile-array helpers. Each acquires the stream registry mutex
 // once and walks N handles, instead of N short critical sections through

@@ -57,19 +57,8 @@ Generated code that a language's own tools refuse.
   call today (a Deque's Python form is its representation's, so no pack is
   inserted); a pack whose source is shared and whose form differs would.
   Candidate: give a compiler-built call the instance method it implements.
-- [reproduced, 2026-10-20, d352b5d4] A Rust manifold whose body is a
-  value it received serialized does not build: it returns its
-  `*const u8` argument as its `*mut u8` result (`return s1;`, E0308 "types
-  differ in mutability"). It arises when a Python caller hands a
-  Rust-made value to a Rust `do` branch that only yields it. With
-  `record R where on :: Bool; n :: Int` (Rust "RR", Py "dict"),
-  `noR = mkR 0` from Rust and `pyR :: Str -> <IO> R` from Python,
-  `riboOf path = do ? path == "" = do noR : do pyR path` fails to build.
-  biolib rnaseq (`riboOf` in lib/prepare.loc, the same shape) built with
-  the compiler at ee516029 on 2026-10-19 and fails now, so this is
-  probably a regression in ee516029..d352b5d4. A passthrough result needs
-  a copy into a reply packet (or the caller should keep its own packet).
-- [read, 2026-10-21] The C++ enum collector (Cpp.hs `collectCppEnums`) does
+- [read, 2026-10-21] The C++ enum collector
+  (CodeGenerator/Pools/CAbi/Members/Cpp.hs `collectCppEnums`) does
   not descend into a `data` type's parameters, where the Rust one does. With
   `data Tag a = Tag Int` used as `Tag Color`, Color an argument-free `data`
   reached nowhere else, the C++ pool renders `Tag<Color>` without declaring
@@ -95,23 +84,3 @@ Generated code that a language's own tools refuse.
   data/lang/py/lang.yaml `ldErrorWrapOpen`/`ldErrorWrapClose`, applied by
   Grammars/Translator/Generic.hs `lcMakeFunction` `wrapError`.
   spec-emit-3-1 covers only C++ and Rust. Repro: /work/plans/model-audit-2026-10-21/repro/H/rec/.
-- **A sourced function whose signature ends in a function-type alias does
-  not build when partially applied.** [reproduced, 2026-10-22] Gap: no
-  item says an alias in a sourced signature generates the same code as its
-  expansion (ALIAS items cover typing, not codegen). With `type Reader a =
-  Str -> Sink a -> <IO> ()`, `feed :: Int -> Reader Int` sourced from C++
-  and used as `run (feed 1 p)` fails `conversion from 'void' to
-  non-scalar type 'std::function<mlc::Unit()>'`: the call is emitted as
-  returning a suspension. Written flat (`feed :: Int -> Str -> Sink Int ->
-  <IO> ()`) it builds and runs. Rust fails the same way (`expected
-  function, found ()`, and the sink passed as `&Arc<dyn Fn>` to an `S: Fn`
-  parameter). With no leading argument (`feed :: Reader Int`) both forms
-  build. Repro: /work/plans/biolib-convert-repro/alias-signature/
-  (alias2.loc fails, flat2.loc builds).
-- **`Null` in a field of a parameterized record literal is not given a
-  type.** [reproduced, 2026-10-22] Violates OPT-1 (`Null` has type `?T`).
-  With `record Outer t c` holding `inner :: ?(Inner c)`, the top-level
-  value `xs :: [Outer Str Str]; xs = [{ann = "a", inner = {...}}, {ann =
-  "b", inner = Null}]` fails in Express.hs "Cannot infer type for Null
-  literal of type ?(Inner Str)". An annotation `(Null :: ?(Inner Str))`
-  fails the same way. Repro: /work/plans/biolib-convert-repro/null-in-record/.

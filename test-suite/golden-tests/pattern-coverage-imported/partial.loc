@@ -1,0 +1,9 @@
+module main (area)
+
+import root-py
+import .shapes
+
+area :: Shape -> Real
+area s = match s
+  | (Circle r) = 3.0 * r * r
+  | (Rect w h) = w * h

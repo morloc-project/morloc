@@ -19,6 +19,7 @@ module Morloc.Frontend.API
   , Typecheck.validate
   , Typecheck.resolveTypes
   , Valuecheck.valuecheck
+  , Valuecheck.checkRecursion
   ) where
 
 import qualified Data.Set as Set
@@ -32,6 +33,7 @@ import qualified Morloc.Data.Text as MT
 import Morloc.Frontend.Namespace
 import Morloc.Frontend.Parser (PState (..), emptyPState)
 import qualified Morloc.Frontend.Parser as Parser
+import Morloc.Frontend.Token (posSrcLoc)
 import qualified Morloc.Frontend.Typecheck as Typecheck
 import qualified Morloc.Frontend.Valuecheck as Valuecheck
 import qualified Morloc.LangRegistry as LR
@@ -62,23 +64,23 @@ parse f (Code code) = do
   autoInstall <- MM.gets stateAutoInstall
   when autoInstall $ do
     snapshot <- Mod.loadSnapshot
-    MM.modify (\st -> st {stateSnapshot = snapshot})
+    MM.modify' (\st -> st {stateSnapshot = snapshot})
 
   -- The main module's @log-template@ becomes the program-wide default
   -- log message template. Per-label overrides win over this; the
   -- built-in defaults in 'Morloc.CodeGenerator.LogTemplate' fill any
   -- subfield neither this nor the per-label config supplies.
-  MM.modify (\st -> st {stateLogTemplate = moduleConfigLogTemplate moduleConfig})
+  MM.modify' (\st -> st {stateLogTemplate = moduleConfigLogTemplate moduleConfig})
 
   -- Likewise the program-wide @benchmark-template@: one row shape for the
   -- end-of-run summary the nexus renders from every label's timings.
-  MM.modify (\st -> st {stateBenchTemplate = moduleConfigBenchTemplate moduleConfig})
+  MM.modify' (\st -> st {stateBenchTemplate = moduleConfigBenchTemplate moduleConfig})
 
   -- The main module's run-scope @prologue@ / @epilogue@ templates are
   -- rendered by the nexus at run boundaries. Sub-modules cannot
   -- contribute to these (a workflow has exactly one entry-point, so
   -- run-scope events have exactly one source of truth).
-  MM.modify
+  MM.modify'
     ( \st -> st
         { stateRunLog =
             case (moduleConfigPrologue moduleConfig, moduleConfigEpilogue moduleConfig) of
@@ -107,7 +109,7 @@ parse f (Code code) = do
       case projectRoot of
         Just root -> do
           paths <- MM.liftIO $ Install.resolveIncludePatterns root patterns
-          MM.modify (\st -> st {stateHashIncludePaths = paths})
+          MM.modify' (\st -> st {stateHashIncludePaths = paths})
         Nothing -> return ()
     _ -> return ()
 
@@ -121,7 +123,7 @@ parse f (Code code) = do
   -- store source text, project root, and load package metadata for the main file
   case f of
     Just path -> do
-      MM.modify (\st -> st
+      MM.modify' (\st -> st
         { stateSourceText = Map.insert path code (stateSourceText st)
         , stateProjectRoot = projectRoot
         })
@@ -129,10 +131,10 @@ parse f (Code code) = do
     Nothing -> return ()
 
   case Parser.readProgram Nothing f code parserState mempty of
-    (Left e) -> MM.throwSystemError $ pretty e
+    (Left (pos, e)) -> MM.throwRejectedSource (posSrcLoc pos) (pretty e)
     (Right (mainDag, mainState)) -> do
       -- capture module-level docs from the main module before imports overwrite them
-      MM.modify (\st -> st
+      MM.modify' (\st -> st
         { stateModuleDoc = psModuleDoc mainState
         , stateModuleEpilogues = psModuleEpilogues mainState
         })
@@ -144,24 +146,24 @@ parse f (Code code) = do
     -- Resolve an import to a file path. Local (.dot) imports are project
     -- files and are never downloaded. A missing bare/namespaced import is
     -- auto-downloaded only when stateAutoInstall is set (make, unless
-    -- --offline) and we are not in eval mode. Resolution itself always goes
-    -- through findModule, which reports ambiguity errors and the
-    -- local-resolution warning; findBareModuleMaybe is only a presence probe
-    -- that decides whether an install is needed.
+    -- --offline), we are not in eval mode, and the importing module's
+    -- package holds no local module of that name (MOD-7: findModule then
+    -- names it rather than install a registry package in its place).
     resolveImport :: Maybe Path -> MVar -> MVar -> MorlocMonad Path
-    resolveImport mainPath mainModule importedModule
+    resolveImport localRoot mainModule importedModule
       | Mod.isLocalImport importedModule =
-          Mod.findModule (mainPath, mainModule) importedModule
+          Mod.findModule localRoot mainModule importedModule
       | otherwise = do
           present <- Mod.findBareModuleMaybe importedModule
           case present of
-            Just _ -> Mod.findModule (mainPath, mainModule) importedModule
+            Just path -> return path
             Nothing -> do
               autoInstall <- MM.gets stateAutoInstall
               evalMode <- MM.gets stateEvalMode
-              when (autoInstall && not evalMode) $
+              local <- Mod.bareLocalMatch localRoot importedModule
+              when (autoInstall && not evalMode && isNothing local) $
                 Mod.autoInstallDep importedModule
-              Mod.findModule (mainPath, mainModule) importedModule
+              Mod.findModule localRoot mainModule importedModule
 
     -- descend recursively into imports
     --
@@ -183,10 +185,11 @@ parse f (Code code) = do
     parseImports entryPath d s m pkgs rw = case unimported of
       [] -> do
         -- transfer source positions from parser state into MorlocState
-        MM.modify (\st -> st
+        MM.modify' (\st -> st
           { stateSourceMap = psSourceMap s <> stateSourceMap st
           , stateTermDocs = psTermDocs s <> stateTermDocs st
           , stateStreamElems = psStreamElems s <> stateStreamElems st
+          , stateMatchSites = psMatchSites s <> stateMatchSites st
           })
         -- emit any docstring warnings accumulated during desugar
         case psWarnings s of
@@ -194,39 +197,44 @@ parse f (Code code) = do
           ws -> MM.tell ws
         case MDD.findCycle d of
           Nothing -> return d
-          Just cyc -> MM.throwSystemError $
+          Just cyc -> MM.throwRejected $
             "Import cycle:" <+> hsep (punctuate " ->" (map pretty cyc))
       ((mainModule, importedModule) : _) -> do
         importPath <- case Map.lookup importedModule rw of
           Just (root, written) -> Mod.findLocalModuleAt mainModule root written
-          Nothing -> resolveImport (Map.lookup mainModule m) mainModule importedModule
+          Nothing -> do
+            localRoot <- case Map.lookup mainModule pkgs of
+              Just (_, root) -> return (Just root)
+              Nothing -> MM.gets stateProjectRoot
+            resolveImport localRoot mainModule importedModule
 
         -- Every loaded module is reached from the entry file, so importing
         -- the entry file closes a cycle.
         canonPath <- MM.liftIO $ canonicalizePath importPath
-        when (Just canonPath == entryPath) . MM.throwSystemError $
+        when (Just canonPath == entryPath) . MM.throwRejected $
           "Import cycle: module" <+> pretty mainModule <+> "imports the entry file"
             <+> pretty importPath <+> "as" <+> pretty importedModule
 
         -- Load the <main>.yaml file associated with the main morloc package file
         moduleConfig <- Config.loadModuleConfig (Just importPath)
-        let newState = s {psModuleConfig = moduleConfig}
+        -- the package this module belongs to, absent for the program's own
+        let pkg = case Map.lookup importedModule rw of
+              Just _ -> Map.lookup mainModule pkgs
+              Nothing
+                | Mod.isLocalImport importedModule -> Map.lookup mainModule pkgs
+                | otherwise -> Just (importedModule, MS.takeDirectory importPath)
+            newState = s {psModuleConfig = moduleConfig, psOwnModule = isNothing pkg}
 
         Mod.loadModuleMetadata False importPath
         (childPath, code') <- openLocalModule importPath
         case Parser.readProgram (Just importedModule) childPath code' newState d of
-          (Left e) -> MM.throwSystemError $ pretty e
+          (Left (pos, e)) -> MM.throwRejectedSource (posSrcLoc pos) (pretty e)
           (Right (d', s')) ->
             -- The parsed module may have a different internal name than the
             -- import edge target (e.g., file declares "module units" but
             -- import edge targets ".units"). Reconcile by renaming the DAG
             -- entry to match the import name.
             let d'' = reconcileModuleName importedModule d d'
-                pkg = case Map.lookup importedModule rw of
-                  Just _ -> Map.lookup mainModule pkgs
-                  Nothing
-                    | Mod.isLocalImport importedModule -> Map.lookup mainModule pkgs
-                    | otherwise -> Just (importedModule, MS.takeDirectory importPath)
                 (d3, renamed) = case pkg of
                   Just (p, root) -> renameLocalImports p root importedModule d''
                   Nothing -> (d'', [])
@@ -234,7 +242,7 @@ parse f (Code code) = do
                 rw' = Map.union rw (Map.fromList renamed)
             in if Map.member importedModule d3
                  then parseImports entryPath d3 s' (maybe m (\v -> Map.insert importedModule v m) childPath) pkgs' rw'
-                 else MM.throwSystemError $
+                 else MM.throwRejected $
                    "Loading" <+> pretty importPath <+> "for the import of" <+> pretty importedModule
                      <+> "defined no module of that name;"
                      <+> case newModules d d' of
@@ -291,7 +299,7 @@ parse f (Code code) = do
 openLocalModule :: Path -> MorlocMonad (Maybe Path, Text)
 openLocalModule filename = do
   code <- liftIO $ MT.readFile filename
-  MM.modify (\st -> st {stateSourceText = Map.insert filename code (stateSourceText st)})
+  MM.modify' (\st -> st {stateSourceText = Map.insert filename code (stateSourceText st)})
   return (Just filename, code)
 
 {- | Build a map from language aliases to Lang values, combining the

@@ -15,8 +15,8 @@ type Rust => Str = "String"
 source Rust from "src/h.rs" ("helper_panics" as helperPanics, "add_one" as addOne, "text_panics" as textPanics)
 
 source Rust from "src/h.rs" where
-  --' name: curried_panics
-  --' rsize: 1
+  --' @name curried_panics
+  --' @rsize 1
   curriedPanics
 
 helperPanics :: Int -> Int

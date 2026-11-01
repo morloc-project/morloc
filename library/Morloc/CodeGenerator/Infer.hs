@@ -30,7 +30,7 @@ import qualified Control.Monad.State as CMS
 import Control.Monad.Except (catchError)
 import Data.Functor.Const (Const (..))
 import Morloc.CodeGenerator.Namespace
-import Morloc.CodeGenerator.ValueArgs (appValueArgsT, valueArgsT)
+import Morloc.CodeGenerator.ValueArgs (appValueArgsT, declaredKinds, valueArgsT)
 import Morloc.Data.Doc
 import qualified Morloc.Data.Map as Map
 import qualified Data.Set as Set
@@ -39,7 +39,8 @@ import qualified Morloc.Monad as MM
 import qualified Morloc.LangRegistry as LR
 import qualified Morloc.Language as ML
 import qualified Morloc.TypeEval as T
-import Morloc.Typecheck.Internal (typeUChildren)
+import Morloc.Typecheck.Internal (typeUChildren, typeUToNatExpr)
+import qualified Morloc.Typecheck.NatSolver as NS
 import Numeric (showHex)
 import Data.Char (isDigit)
 
@@ -58,7 +59,8 @@ inferConcreteTypeU lang (Idx i t0) = do
   attemptT <- inferConcreteTypeU' t0 <$> getScope lang
   case attemptT of
     (Right t') -> return t'
-    (Left (SystemError e2)) -> MM.throwSourcedError i e2
+    (Left (Rejected Unplaced e2)) -> MM.throwSourcedError i e2
+    (Left (Fault Nothing e2)) -> MM.throwError (Fault (Just (AtNode i)) e2)
     (Left e2) -> MM.throwError e2
 
 inferConcreteTypeU' :: TypeU -> (Scope, Scope) -> Either MorlocError TypeU
@@ -106,13 +108,10 @@ undetermined gscope t = case t of
 typeChildren :: Scope -> TypeU -> [TypeU]
 typeChildren gscope t = case T.flattenApp t of
   OpU {} -> []
-  AppU h@(VarU name) args
-    | Just ((ps, _, _, _, _) : _) <- Map.lookup name gscope ->
-        h : [a | (a, k) <- zip args (map paramKind ps <> repeat KindType), k == KindType]
+  AppU h@(VarU name) args -> h : case declaredKinds gscope name (length args) of
+    Just ks -> [a | (a, k) <- zip args ks, k == KindType]
+    Nothing -> [a | a <- args, isNothing (kindOfU a)]
   t' -> typeUChildren t'
-  where
-    paramKind (Left (_, k)) = k
-    paramKind (Right _) = KindType
 
 -- | Record, for each undetermined variable, the outermost term whose type
 -- holds it. Code generation finds a variable deep inside a type, where the
@@ -152,11 +151,11 @@ needed gscope = go Set.empty
               else concatMap (go (Set.insert key seen)) (fields name args)
       _ -> concatMap (go seen) (typeChildren gscope t)
     fields name args =
-      let params = case Map.lookup name gscope of
-            Just ((ps, _, _, _, _) : _) -> [tv | Left (tv, _) <- ps]
-            _ -> []
-          inst f = foldl (\acc (tv, a) -> substituteTVar tv a acc) f (zip params args)
-      in [inst f | Just cs <- [dataCtorsOfName gscope name], (_, fs) <- cs, f <- fs]
+      [ instantiateParams (zip params args) f
+      | Just (params, cs) <- [dataDeclOfName gscope name]
+      , (_, fs) <- cs
+      , f <- fs
+      ]
 
 -- | Reject a type holding a variable nothing determines that a native form
 -- needs and that occurs in a term of the program (POLY-6).
@@ -258,12 +257,8 @@ inferVariantArms lang i gscope vG vC targs = do
     Nothing -> return []
   -- Instantiate the declaration's parameters with the applied arguments.
   -- Empty for a bare `data`, in which case this is the identity.
-  let params = case Map.lookup vG gscope of
-        Just ((ps, _, _, _, _) : _) -> [tv | Left (tv, _) <- ps]
-        _ -> []
-      inst t = foldl (\acc (tv, arg) -> substituteTVar tv arg acc)
-                     t (zip params targs)
-      arms = [(n, map inst ts) | (n, ts) <- arms0]
+  let params = maybe [] fst (dataDeclOfName gscope vG)
+      arms = [(n, map (instantiateParams (zip params targs)) ts) | (n, ts) <- arms0]
   -- The applied arguments, resolved to this language, travel on the type:
   -- a user's per-language form may be a template, and these are what it is
   -- instantiated with. They are resolved before the arms so a self-reference
@@ -437,7 +432,7 @@ inferConcreteTypeStructuralRest lang i gscope g c = case (g, c) of
   -- aliases like @FixedPair (n :: Nat) a = (a, a)@ where the general
   -- side has [NatLit, Type] but the concrete resolves through Tuple2
   -- to a 2-type template -- a naive zip would pair NatLit with a
-  -- type slot, then 'partitionKindArgsF' would strip it at render
+  -- type slot, then 'partitionKindArgs' would strip it at render
   -- time and crash macro expansion. Mismatches fall through to
   -- 'weave', which steps the alias and re-weaves on the body's head.
   (AppU (VarU vG) ts1, AppU (VarU (TV vC)) ts2)
@@ -510,7 +505,7 @@ inferConcreteTypeUniversalStructural lang i gscopeUni t g c
     cscopeUni <- MM.getConcreteScope lang
     if Map.member vG cscopeUni
       then
-        MM.throwSystemError $
+        MM.throwRejected $
           "The" <+> pretty lang <+> "form of" <+> squotes (pretty vG)
             <+> "takes no arguments, but" <+> squotes (pretty vG)
             <+> "has" <+> pretty (length ts) <> "."
@@ -540,7 +535,7 @@ inferConcreteTypeUniversalStructural lang i gscopeUni t g c
           case inheritedForm cscopeUni gscopeUni g of
             Just parent -> inferConcreteTypeUniversal lang i (typeOf parent)
             Nothing ->
-              MM.throwSystemError $
+              MM.throwRejected $
                 "Failed to infer concrete type for" <+> pretty t
                   <> ": Could not reduce type in broadest scope"
 
@@ -630,7 +625,7 @@ stepTowardCompound scope g c = case T.evaluateStep scope g of
       || isJust (structuralCompound (\_ _ -> Const ()) g' c)
       || case (g', c) of
            (AppU (VarU _) ts1, AppU (VarU _) ts2) ->
-             snd (partitionKindArgsU ts1) == 0 && appArgsCorrespond ts1 ts2
+             snd (partitionKindArgs kindOfU ts1) == 0 && appArgsCorrespond ts1 ts2
            _ -> False
 
 -- | Two argument lists the applied-type shortcut pairs one to one. The kind
@@ -638,7 +633,7 @@ stepTowardCompound scope g c = case T.evaluateStep scope g of
 appArgsCorrespond :: [TypeU] -> [TypeU] -> Bool
 appArgsCorrespond ts1 ts2 =
   length ts1 == length ts2
-    && length (fst (partitionKindArgsU ts1)) == length (fst (partitionKindArgsU ts2))
+    && length (fst (partitionKindArgs kindOfU ts1)) == length (fst (partitionKindArgs kindOfU ts2))
 
 -- | The concrete side of an applied type, which is either applied too or
 -- has already collapsed to a bare name. Mirrors @concreteHeadName@ in the
@@ -655,8 +650,8 @@ inferConcreteTypeUUniversal lang generalType = do
   let attemptUni = inferConcreteTypeU' generalType (cscopeUni, gscopeUni)
   case attemptUni of
     (Right t) -> return t
-    (Left (SystemError e2)) ->
-      MM.throwSystemError $
+    (Left (Rejected Unplaced e2)) ->
+      MM.throwRejected $
         "Failed to infer concrete universal type for lang"
           <+> pretty lang
           <+> "for type"
@@ -718,11 +713,13 @@ weave gscope = w Set.empty
     w _ (NatLitU n) (NatLitU _) = return $ NatLitF n
     w _ (NatLitU n) _ = return $ NatLitF n  -- Nat params may be erased in concrete type
     w _ NatVoidU _ = return NatVoidF  -- Erased phantom Nat slot
-    w _ (NatAddU _ _) _ = return NatVoidF  -- Nat arithmetic erased in concrete type
-    w _ (NatMulU _ _) _ = return NatVoidF  -- Nat arithmetic erased in concrete type
-    w _ (NatSubU _ _) _ = return NatVoidF  -- Nat arithmetic erased in concrete type
-    w _ (NatDivU _ _) _ = return NatVoidF  -- Nat arithmetic erased in concrete type
+    w _ t@(NatAddU _ _) _ = return (groundNatF t)
+    w _ t@(NatMulU _ _) _ = return (groundNatF t)
+    w _ t@(NatSubU _ _) _ = return (groundNatF t)
+    w _ t@(NatDivU _ _) _ = return (groundNatF t)
     w _ (NatVarU _) _ = return NatVoidF  -- Nat variable erased in concrete type
+    w _ (IntVarU _) _ = return NatVoidF  -- an Int fills only Nat positions
+    w _ g _ | Just k <- kindOfU g, k /= KindNat = return (kindArg k g)
     w anc (LabeledU _ t1) t2 = w anc t1 t2
     w _ (ForallU v (VarU v')) _ | v == v' = return NatVoidF  -- Unresolved variable (UnkT pattern)
     w anc t1 t2 = wStep anc t1 t2
@@ -742,24 +739,33 @@ weave gscope = w Set.empty
     weaveArgs :: Set.Set TVar -> [TypeU] -> [TypeU] -> Either MDoc [TypeF]
     weaveArgs _ [] [] = Right []
     weaveArgs _ [] cs
-      | all isKindTypeU cs = Right []  -- trailing kind args in concrete only
+      | all (isJust . kindOfU) cs = Right []  -- trailing kind args in concrete only
       | otherwise = Left "concrete type has more non-Nat args than general type in weave"
-    weaveArgs anc (NatLitU n : gs) cs = (NatLitF n :) <$> weaveArgs anc gs (dropNatHead cs)
-    weaveArgs anc (NatVoidU : gs) cs = (NatVoidF :) <$> weaveArgs anc gs (dropNatHead cs)
-    weaveArgs anc (NatAddU _ _ : gs) cs = (NatVoidF :) <$> weaveArgs anc gs (dropNatHead cs)
-    weaveArgs anc (NatMulU _ _ : gs) cs = (NatVoidF :) <$> weaveArgs anc gs (dropNatHead cs)
-    weaveArgs anc (NatSubU _ _ : gs) cs = (NatVoidF :) <$> weaveArgs anc gs (dropNatHead cs)
-    weaveArgs anc (NatDivU _ _ : gs) cs = (NatVoidF :) <$> weaveArgs anc gs (dropNatHead cs)
+    weaveArgs anc (NatLitU n : gs) cs = (NatLitF n :) <$> weaveArgs anc gs (dropKindHead KindNat cs)
+    weaveArgs anc (NatVoidU : gs) cs = (NatVoidF :) <$> weaveArgs anc gs (dropKindHead KindNat cs)
+    weaveArgs anc (g@(NatAddU _ _) : gs) cs = (groundNatF g :) <$> weaveArgs anc gs (dropKindHead KindNat cs)
+    weaveArgs anc (g@(NatMulU _ _) : gs) cs = (groundNatF g :) <$> weaveArgs anc gs (dropKindHead KindNat cs)
+    weaveArgs anc (g@(NatSubU _ _) : gs) cs = (groundNatF g :) <$> weaveArgs anc gs (dropKindHead KindNat cs)
+    weaveArgs anc (g@(NatDivU _ _) : gs) cs = (groundNatF g :) <$> weaveArgs anc gs (dropKindHead KindNat cs)
     -- Unresolved nat dimension variable (opaque output dims): treat as erased
-    weaveArgs anc (NatVarU _ : gs) cs = (NatVoidF :) <$> weaveArgs anc gs (dropNatHead cs)
-    weaveArgs anc (ForallU v (VarU v') : gs) cs | v == v' = (NatVoidF :) <$> weaveArgs anc gs (dropNatHead cs)
+    weaveArgs anc (NatVarU _ : gs) cs = (NatVoidF :) <$> weaveArgs anc gs (dropKindHead KindNat cs)
+    weaveArgs anc (IntVarU _ : gs) cs = (NatVoidF :) <$> weaveArgs anc gs (dropKindHead KindNat cs)
+    weaveArgs anc (ForallU v (VarU v') : gs) cs | v == v' = (NatVoidF :) <$> weaveArgs anc gs (dropKindHead KindNat cs)
+    weaveArgs anc (g : gs) cs
+      | Just k <- kindOfU g = (kindArg k g :) <$> weaveArgs anc gs (dropKindHead k cs)
     weaveArgs anc (g:gs) (c:cs) = (:) <$> w anc g c <*> weaveArgs anc gs cs
     weaveArgs _ _ [] = Left "general type has more non-Nat args than concrete type in weave"
 
-    -- Drop a leading kind-shaped concrete arg, if present.
-    dropNatHead :: [TypeU] -> [TypeU]
-    dropNatHead (c : cs) | isKindTypeU c = cs
-    dropNatHead cs = cs
+    -- Drop a leading concrete argument of kind @k@, if there is one.
+    dropKindHead :: Kind -> [TypeU] -> [TypeU]
+    dropKindHead k (c : cs) | kindOfU c == Just k || k == KindNat && maybe False fillsNat (kindOfU c) = cs
+    dropKindHead _ cs = cs
+
+    kindArg k g = maybe (VoidF k) StrLitF (groundStr g)
+    groundStr (StrLitU s) = Just s
+    groundStr (StrConcatU a b) = (<>) <$> groundStr a <*> groundStr b
+    groundStr (LabeledU _ t) = groundStr t
+    groundStr _ = Nothing
 
 -- | Whether values of a general type have a representation in a language:
 -- the type resolves there, and, when @declaredRecords@, every record in it is
@@ -790,7 +796,7 @@ canHoldType' declaredRecords lang i t = do
         then and <$> mapM (declared gscope) (recordNames gscope t)
         else return True
     )
-    `catchError` (\_ -> CMS.put st0 >> return False)
+    `MM.recoverRejected` (CMS.put st0 >> return False)
   where
     declared gscope v = do
       cscope <- MM.getConcreteScope lang
@@ -907,3 +913,9 @@ concreteNameOf :: Scope -> TVar -> MT.Text
 concreteNameOf cscope v = case Map.lookup v cscope of
   Just entries | (n : _) <- [n' | (_, body, _, _, _) <- entries, Just n' <- [bodyNameOf body]] -> n
   _ -> unTVar v
+
+-- | A Nat expression in a concrete type: its value when ground, so that a
+-- Vector's computed length is still checked (DIM-8), and the unknown
+-- placeholder otherwise.
+groundNatF :: TypeU -> TypeF
+groundNatF t = maybe NatVoidF NatLitF (typeUToNatExpr t >>= NS.evalNat Map.empty)

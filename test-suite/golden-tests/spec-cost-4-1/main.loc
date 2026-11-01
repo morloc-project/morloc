@@ -1,0 +1,33 @@
+-- A function handed to a sourced function may be called many times, so its
+-- crossings count one deeper than the call (COST-4). Here the
+-- list comes from C++ and its sum goes back to C++, `mapEach` exists in Python
+-- and C++, and the function it applies exists only in Python. Mapping in
+-- C++ crosses once per element; mapping in Python crosses twice in all, the
+-- list in and the result out. The realizer maps in Python. The placement
+-- listing of `morloc typecheck --realize` is the output; the run checks the
+-- program still computes.
+
+--' Callbacks counted one deeper
+module main (total)
+
+import root-py
+import root-cpp
+
+source Py from "f.py" ("py_map" as mapEach, "step")
+source Cpp from "f.hpp" ("cpp_map" as mapEach, "upto", "total_of" as totalOf)
+
+--' Apply a function to each element
+mapEach :: (a -> b) -> [a] -> [b]
+
+--' Double an integer
+step :: Int -> Int
+
+--' The integers from 1 to n
+upto :: Int -> [Int]
+
+--' Sum a list
+totalOf :: [Int] -> Int
+
+--' Sum the doubles of 1 to n
+total :: Int -> Int
+total n = totalOf (mapEach step (upto n))

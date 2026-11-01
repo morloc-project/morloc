@@ -19,6 +19,7 @@ the result type is written or inferred.
 
 ### TAB-3 Naming a column the schema does not have is a type error
 Intent: proposed
+Tests: spec-tab-3-1, spec-tab-3-2
 Code: deviates (issues/typecheck.md)
 
 A field lookup or projection of a schema by a name or names known at

@@ -583,9 +583,10 @@ mod tests {
             if reply.is_null() {
                 return false;
             }
+            let died = (*(reply as *const crate::packet::PacketHeader)).is_peer_died();
             libc::free(reply as *mut c_void);
+            !died
         }
-        true
     }
 
     /// Wait for the coordinator to end, at most `secs`; its exit status, or

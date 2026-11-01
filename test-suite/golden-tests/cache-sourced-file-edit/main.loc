@@ -1,0 +1,10 @@
+-- A cached result is not served after a sourced file the call runs changes.
+module main (foo)
+
+import root-py
+
+source Py from "bump.py" ("bump")
+bump :: Real -> Real
+
+foo :: Real -> Real
+foo x = a@bump x

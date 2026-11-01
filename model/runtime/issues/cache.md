@@ -2,13 +2,35 @@
 
 There is no cache spec yet; these are gaps until one is written.
 
-- **Stale result after editing a sourced file.** [reproduced] `foo x =
-  a@bump x`, label `a: {cache: true}`, foo.py `def bump(x): return x + 1.0`.
-  `./prog foo 7` -> 8; change to `x + 100.0`, rebuild, `./prog foo 7` -> 8
-  (stale), `./prog foo 8` -> 108. The key's fingerprint hashes the generated
-  pool source (library/Morloc/Data/PoolHash.hs:52-104), which only imports
-  foo.py. Library sources and the runtime version are not in the key
-  either. Open: what the key must cover.
+- **A cached result is keyed by what the pool sources, not by what those
+  files import.** [read, 2026-10-29] The key covers the pool's source text,
+  the files its language sources, `hash-include` files and the compiler
+  version; a header or module those files load in turn is covered only when
+  it is listed under `hash-include`.
+- **A Python or R pool finds a sourced file by searching, not by the path
+  that was hashed.** [read] data/lang/py/lang.yaml:22-26 searches the
+  program dir, then `.`, then `{{lib}}`; the R pool's `.morloc.source` does
+  the same. SRC-8 checks the absolute path recorded at build, which refuses
+  the run when that file is missing; but if the recorded path is not the
+  first match of the search (a build run from another directory), the pool
+  can load a file that was never hashed.
+- **An installed program built from outside its package directory cannot
+  find its own sourced files.** [reproduced 2026-11-01 for the run from the
+  parent; read for the run elsewhere] `morloc make
+  --install -f prog/main.loc` run from prog's parent names a sourced
+  `prog/own.py` by the dotted path `prog.own`, relative to the working
+  directory, but mirrors the package into `exe/prog/` as `exe/prog/own.py`.
+  The pool looks for `exe/prog/prog/own.py`, misses, and falls through to
+  `./prog/own.py`: run from the parent it loads the project file rather than
+  the installed copy (and SRC-8 checks the copy), and run from anywhere else
+  it fails to import. Built from inside `prog/`, the paths agree
+  (golden spec-src-8-3).
+- **A stream handle argument is keyed by its path, not its file.** [read]
+  cache.rs ~730 folds the path bytes of an `IFile`/`IStream` argument into
+  the key, so a file rewritten in place at the same path returns the
+  result computed from its old contents. Gap in model/runtime/cache.md:
+  no item says what a handle contributes to a key (path, content hash, or
+  path plus size and mtime).
 - **Unverified 64-bit keys.** [read] Neither key nor data hash is checked on
   a hit; a data-hash collision skips the write (cache.rs:579-585); an empty
   pool hash is 0, so programs sharing a label share keys (cache.rs:109-117).
@@ -27,12 +49,3 @@ There is no cache spec yet; these are gaps until one is written.
 - [read] Dead hit/miss counters with a false comment (cache.rs:209-253);
   `start.json` described in run.rs:20-21, never written (golden
   `workdir-basics` skipped).
-
-- **`cache: true` under `--debug` references an unbound argument.**
-  [reproduced, 2026-10-22] Violates DIAG-5. `boomP n =
-  idpy (big@pyThrowAtZero n)` with `labeled-groups: {big: {cache: true}}`,
-  built `--debug` (py): the label manifold takes `n0`, but the inlined inner
-  manifold's cache key and debug frame read `[s0]`, so `./prog 0` fails
-  "name 's0' is not defined" instead of "float division by zero"; the
-  build without `--debug` reports the real error. The label wrapper's frame
-  is unnamed (`at _`): its body is the inner manifold, not a call.

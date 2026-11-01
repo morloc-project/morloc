@@ -1,0 +1,31 @@
+-- Spec NATIVE-9: a folding handler's combine sees native accumulator values,
+-- here a Set, merged across the threads that folded into the cell.
+module main (stream, pstream)
+
+import root-cpp
+import set (Set)
+import set-cpp (Set)
+
+source Cpp from "impl.hpp" ("mk", "zeroAcc", "addBatch", "mergeAcc", "showAcc", "produceParallel")
+
+mk :: Int -> [Int]
+zeroAcc :: Set Int
+addBatch :: Set Int -> [Int] -> Set Int
+mergeAcc :: Set Int -> Set Int -> Set Int
+showAcc :: Set Int -> Str
+produceParallel :: ([Int] -> <IO> ()) -> <IO> ()
+
+produce :: ([Int] -> <IO> ()) -> <IO> ()
+produce sink = do
+  _ <- sink (mk 0)
+  sink (mk 1)
+
+--' Stream integer batches
+--' @render -f/--folded=showAcc @fold=addBatch @init=zeroAcc @combine=mergeAcc
+stream :: <IO> ()
+stream = @collect produce
+
+--' Stream from four threads
+--' @render -f/--folded=showAcc @fold=addBatch @init=zeroAcc @combine=mergeAcc
+pstream :: <IO> ()
+pstream = @collect produceParallel

@@ -1,0 +1,21 @@
+--' A Python adder used in C++, beside an unrelated C++ term of the same name
+module main (unrelated)
+
+import root-py
+import root-cpp
+import .helpers
+import .other as other
+
+source Py from "f.py" ("py_make_adder" as mkPy)
+source Cpp from "f.hpp" ("cpp_make_adder" as mkCpp)
+
+--' Make an adder in Python
+mkPy :: Int -> <IO> (Int -> Int)
+--' Make an adder in C++
+mkCpp :: Int -> <IO> (Int -> Int)
+
+--' Use a Python adder in C++
+unrelated :: Int -> <IO> Int
+unrelated n = do
+  h <- mkPy n
+  cppSum (cppMap (\x -> cppF (h x)) [1, 2])

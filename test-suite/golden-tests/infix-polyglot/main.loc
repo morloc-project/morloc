@@ -1,7 +1,7 @@
 module main (test_sum_py, test_sum_cpp, test_product_py, test_chain_py)
 
-import ops-py
-import ops-cpp
+import .ops-py
+import .ops-cpp
 
 type Py => Int = "int"
 type Cpp => Int = "int"

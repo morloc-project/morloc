@@ -22,10 +22,9 @@ import Morloc.CodeGenerator.Namespace
 import Morloc.Frontend.Namespace (newIndex)
 import qualified Morloc.Monad as MM
 import qualified Data.Map as Map
-import Morloc.Data.Doc (pretty, squotes, (<+>))
 import Morloc.CodeGenerator.Serial (containsFunT)
 import Morloc.CodeGenerator.Value (etaParts, isValue)
-import Morloc.CodeGenerator.EffectBoundary (sourceSignature)
+import Morloc.CodeGenerator.EffectBoundary (declaredFun, declaredSignature)
 import qualified Morloc.Data.Text as MT
 import Data.IORef (modifyIORef, newIORef, readIORef, writeIORef)
 
@@ -289,47 +288,29 @@ stagedValue gi c v stageV k caps ts r = do
 -- @stage@.
 recordStage :: Int -> Int -> Int -> MorlocMonad ()
 recordStage flat k stage =
-  MM.modify (\st -> st { stateStageEntries = Map.insert flat (k, stage) (stateStageEntries st) })
+  MM.modify' (\st -> st { stateStageEntries = Map.insert flat (k, stage) (stateStageEntries st) })
 
 -- | Hand each function a source is passed in the grouping the source calls it
--- with. Morloc does not distinguish @a -> b -> c@ from @a -> (b -> c)@, but
--- code in another language does, and the way it calls a function argument is
--- the source's signature as written: a parameter @(a -> b -> c)@ is called
--- with two arguments, @(a -> (b -> c))@ with one. A function taking more than
--- that is passed as @\a1..an -> g a1..an@: a partial application of it, which
--- runs any stage it reaches ('mlc_papply').
+-- with: every argument of the parameter's type at once (HOST-2), where only
+-- an effect or a type variable of the signature ends the arguments. A
+-- parameter @(a -> b -> c)@ instantiated at @c = d -> e@ is called with two
+-- arguments, so a function taking three is passed as @\a b -> g a b@: a
+-- partial application of it, which runs any stage it reaches ('mlc_papply').
 groupCallbacks :: AnnoS (Indexed Type) One (Indexed Lang) -> MorlocMonad (AnnoS (Indexed Type) One (Indexed Lang))
 groupCallbacks = go
   where
-    params (ForallU _ t) = params t
-    params (FunU ts _) = ts
-    params _ = []
-    -- the argument groups a parameter's type is written with:
-    -- @(a -> (b -> c))@ is [1, 1], @(a -> b -> c)@ is [2]
-    groups (ForallU _ t) = groups t
-    groups (FunU ts r) = length ts : groups r
-    groups _ = []
-    -- a function the source passes to the function it is passed, written
-    -- with more than one group: morloc would call it with every argument
-    passesGrouped (ForallU _ t) = passesGrouped t
-    passesGrouped (FunU ts _) = any ((> 1) . length . groups) ts
-    passesGrouped _ = False
-
-    go (AnnoS g@(Idx gi _) c (AppS f xs)) = do
+    go (AnnoS g c (AppS f xs)) = do
       f' <- go f
       xs' <- mapM go xs
-      sig <- maybe (return Nothing) (uncurry sourceSignature) (sourceOf f)
-      xs'' <- case (sourceOf f, sig) of
-        (Just (_, src), Just et) -> do
-          let gss = map groups (params (etype et))
-          when (any passesGrouped (params (etype et))) $
-            MM.throwSourcedError gi $
-              "The source" <+> squotes (pretty (unEVar (srcAlias src)))
-                <+> "passes a function to a function it is given, and its signature groups that"
-                <+> "function's arguments; morloc cannot call a function in the grouping of another"
-                <+> "language, so write that parameter's type without parentheses around an arrow."
-          sequence [regroup x gs | (x, gs) <- zip xs' (gss ++ repeat [])]
-        _ -> return xs'
+      scope <- MM.getGeneralScope
+      declared <- maybe (return Nothing) (fmap snd . uncurry declaredSignature) (sourceOf f)
+      let arity p = case declaredFun scope p of
+            FunT as@(_ : _) _ -> [length as]
+            _ -> []
+          gss = case declaredFun scope <$> declared of
+            Just (FunT ps _) -> map arity ps
+            _ -> []
+      xs'' <- sequence [regroup x gs | (x, gs) <- zip xs' (gss ++ repeat [])]
       return (AnnoS g c (AppS f' xs''))
     go (AnnoS g c e) = AnnoS g c <$> mapExprSM go e
 
@@ -434,11 +415,6 @@ reduce ai n@(AnnoS g c (LamS _ _))
       -- the application computes what the lambda did, and keeps its index
       -- (an export's root is named by it)
       reduce ai (AnnoS g c (AppS f pre))
-  where
-    isKnownLambda (AnnoS _ _ (LamS _ _)) = True
-    isKnownLambda (AnnoS _ _ (VarS _ (One x))) = isKnownLambda x
-    isKnownLambda (AnnoS _ _ (LabelS _ x)) = isKnownLambda x
-    isKnownLambda _ = False
 -- The same, with a function value held in a variable as the head: it is the
 -- partial application @f pre@, its arguments evaluated once, first; the pool
 -- runtime runs @f@'s stage entry when it has one ('PapplyP').
@@ -505,7 +481,7 @@ reduce ai
     -- The application of a named function is a call of it: the value it
     -- reduces to keeps the application's index, which takes the function's
     -- name for the failure trace (DIAG-5).
-    MM.modify $ \st -> case Map.lookup i2 (stateName st) of
+    MM.modify' $ \st -> case Map.lookup i2 (stateName st) of
       Just name | Map.notMember i1n (stateName st) ->
         st { stateName = Map.insert i1n name (stateName st)
            , stateNameSource = Map.insert i1n i2 (stateNameSource st)
@@ -776,7 +752,7 @@ reindexTree t0 = do
           , Just (k, s) <- [Map.lookup gi entries]
           , Just s' <- [Map.lookup s renamed]
           ]
-  MM.modify (\st -> st {stateStageEntries = Map.union copied (stateStageEntries st)})
+  MM.modify' (\st -> st {stateStageEntries = Map.union copied (stateStageEntries st)})
   return t'
 
 -- | A fresh let-name for the closure a function-typed argument computes.
@@ -855,12 +831,19 @@ substituteAnnoS ::
   MorlocMonad (AnnoS (Indexed Type) One a)
 substituteAnnoS v r target = do
   reused <- MM.liftIO (newIORef False)
-  let place _ = do
+  let next = do
         seen <- MM.liftIO (readIORef reused)
         if seen
           then reindexAnnoS r
           else MM.liftIO (writeIORef reused True) >> return r
-  onFreeRef v place target
+  onFreeRef v (const next) target
+
+-- | A lambda, possibly reached through the names and labels around it.
+isKnownLambda :: AnnoS g One c -> Bool
+isKnownLambda (AnnoS _ _ (LamS _ _)) = True
+isKnownLambda (AnnoS _ _ (VarS _ (One x))) = isKnownLambda x
+isKnownLambda (AnnoS _ _ (LabelS _ x)) = isKnownLambda x
+isKnownLambda _ = False
 
 -- | Rebind @v@ from lambda-form to let-form: rewrite each free reference to
 -- @LetBndS v@, keeping its index and type. Used by the 'reduce' share

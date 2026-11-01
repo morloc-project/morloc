@@ -1,0 +1,37 @@
+-- `@many` on a field of an unrolled record.
+--
+-- An unrolled record's fields are options, and a list field marked `@many`
+-- takes its values the way a top-level `@many` option does: several tokens
+-- after one flag, or the flag repeated, each token read as one element.
+-- Absent, the field takes its default. A string element is taken as it is
+-- written; any other element is read as a value of its type.
+
+module main (show)
+
+import root-py
+
+--' Selection settings
+--' @unroll
+record Opts where
+  --' Languages to include
+  --' @arg -l/--lang
+  --' @metavar LANG
+  --' @many
+  --' @default []
+  lang :: [Str]
+  --' Sizes to include
+  --' @arg --size
+  --' @metavar N
+  --' @many
+  --' @default [7]
+  size :: [Int]
+  --' A label
+  --' @arg -n/--name
+  --' @default "x"
+  name :: Str
+record Py => Opts = "dict"
+
+source Py from "h.py" ("show")
+
+--' Show the settings
+show :: Opts -> Str

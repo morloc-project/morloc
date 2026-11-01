@@ -59,9 +59,9 @@ server inverts them to the positional array `daemon_dispatch` expects.
 |---|---|---|
 | `module (f, g, ...)` export list | which functions become tools | `shape`: count == exports |
 | leading `--'` command docstring | tool `description` | `shape`: `addOne` description |
-| `--' name: foo` | overrides the tool name | `shape`: `greet` -> `hello` |
+| `--' @name foo` | overrides the tool name | `shape`: `greet` -> `hello` |
 | pure vs remote (has a pool) | pure -> in-process `morloc_eval`; remote -> pool round-trip; both are tools | `call`: `pureAnswer` (pure) + others (remote) |
-| `--' with: -x/--long=term` | synthesizes an **internal** command that is NOT a tool (only the base command is); the terminal is a CLI-only formatter | covered by the `!internal` filter + the `--mcp-tools` golden; not re-driven here |
+| `--' @with -x/--long=term` | synthesizes an **internal** command that is NOT a tool (only the base command is); the terminal is a CLI-only formatter | covered by the `!internal` filter + the `--mcp-tools` golden; not re-driven here |
 
 ### Argument level -- positionals
 
@@ -72,10 +72,10 @@ server inverts them to the positional array `daemon_dispatch` expects.
 | `--' @metavar N` | **no effect on the name** -- a metavar describes a type, so it repeats when a command takes two of them | `shape`: `addOne` -> `_1`, not `n` |
 | plain typed positional | property is required | `shape`: `addOne.required = [_1]` |
 | `?T` positional | not required + type unions `"null"` | `shape`: `maybeDouble` |
-| `--' many: true` | property is an `array` of the element type | `shape`: `sumMany` |
+| `--' @many` | property is an `array` of the element type | `shape`: `sumMany` |
 | `Int`/`Real`/`Str`/`Bool` | `integer`/`number`/`string`/`boolean` | `shape`: scalar types |
 | `[a]`, `(a,b)` | `array`; `array` with `prefixItems` (tuple) | `shape` (list); tuples via unit tests |
-| a non-Bool arg with `--' arg: --x` + `--' default: v` | a top-level **option**: a non-required property named for the option, default `v` filled by the inverse | `shape`+`call`: `scale`'s `factor` |
+| a non-Bool arg with `--' @arg --x` + `--' @default v` | a top-level **option**: a non-required property named for the option, default `v` filled by the inverse | `shape`+`call`: `scale`'s `factor` |
 
 ### Argument level -- records
 
@@ -83,10 +83,10 @@ Records reach the CLI two ways, and MCP mirrors the author's choice:
 
 | morloc source | MCP effect | tested by |
 |---|---|---|
-| record with `--' unroll: true`, no record-level `arg:` | **flat**: one property per field, keyed by the **field name**; each field carries its `desc:` + `(default: ...)`; a field is **not required** when it has a default (which unrolled fields always do), so the inverse fills omitted fields | `shape`+`call`: `configFlat` |
-| record with `--' arg: --x` | **whole-object**: one property named for the record type (lowercased); the client passes the entire object, or omits it to get the field defaults | `shape`+`call`: `configWhole` |
-| field `--' arg:` + `--' default:` (non-Bool) | that field's option + typed default | `call`: `configFlat` defaults |
-| field `--' true:`/`--' false:` (Bool) | that field's flag, property type `boolean` | `shape`: `removeCaches` |
+| record with `--' @unroll`, no record-level `@arg` | **flat**: one property per field, keyed by the **field name**; each field carries its `desc:` + `(default: ...)`; a field is **not required** when it has a default (which unrolled fields always do), so the inverse fills omitted fields | `shape`+`call`: `configFlat` |
+| record with `--' @arg --x` | **whole-object**: one property named for the record type (lowercased); the client passes the entire object, or omits it to get the field defaults | `shape`+`call`: `configWhole` |
+| field `--' @arg` + `--' @default` (non-Bool) | that field's option + typed default | `call`: `configFlat` defaults |
+| field `--' @true`/`--' @false` (Bool) | that field's flag, property type `boolean` | `shape`: `removeCaches` |
 
 Note the deliberate asymmetry: in the **flat** form, omitting a field fills its
 default per-field; in the **whole-object** form, defaults apply only when the
@@ -105,8 +105,8 @@ inner `required` fields are enforced by the pool, not the nexus).
 
 These CLI-shape docstrings describe how bytes are *sourced/parsed* on the command
 line and have **no** MCP representation (MCP always delivers typed JSON): `--'
-source: ...`, `--' form: ...`, `--' check.path: ...`, `--' list.* ...`,
-`--' quoted`/literal. They remain visible via `--json-help`.
+@source ...`, `--' @form ...`, `--' @check.path ...`, `--' @list.* ...`,
+`--' @literal`. They remain visible via `--json-help`.
 
 ### Exclusions (dropped from `tools/list`)
 
@@ -114,7 +114,7 @@ A command is excluded when it cannot be served correctly over MCP:
 
 | condition | reason | tested by |
 |---|---|---|
-| a positional with `--' stdin: true` | fd 0 is the JSON-RPC input stream | `exclude`: `readStdin` |
+| a positional with `--' @stdin` | fd 0 is the JSON-RPC input stream | `exclude`: `readStdin` |
 | any argument or the return is an Arrow `Table` | `Table` is unmarshalable to/from JSON both ways | `exclude`: `readTable`/`sumTable` (needs pyarrow) |
 | any argument or the return is a stream handle (`IFile`/`IStream`/`OStream`) | would need per-call stdout capture | unit test (these types do not appear in exported signatures in practice) |
 | a property-name collision (two args collapsing to one key) | fail-closed; the whole command is dropped | unit test / guarded by `validateFlagRevCollisions` |

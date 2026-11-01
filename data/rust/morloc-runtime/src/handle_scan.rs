@@ -502,7 +502,7 @@ mod tests {
 
     #[test]
     fn ifile_scalar_at_root_is_discovered() {
-        let schema = parse_schema("F").unwrap();
+        let schema = parse_schema("F2aj").unwrap();
         let payload = make_field(sh::TAG_HANDLE, 0xDEAD_BEEF_u64);
         let fields = collect_stream_fields(&payload, &schema).unwrap();
         assert_eq!(fields.len(), 1);
@@ -512,7 +512,7 @@ mod tests {
 
     #[test]
     fn ostream_scalar_at_root_is_discovered() {
-        let schema = parse_schema("O").unwrap();
+        let schema = parse_schema("O2aj").unwrap();
         let payload = make_field(sh::TAG_HANDLE, 42);
         let fields = collect_stream_fields(&payload, &schema).unwrap();
         assert_eq!(fields.len(), 1);
@@ -521,7 +521,7 @@ mod tests {
 
     #[test]
     fn istream_scalar_at_root_is_discovered() {
-        let schema = parse_schema("I").unwrap();
+        let schema = parse_schema("I2aj").unwrap();
         let payload = make_field(sh::TAG_HANDLE, 7);
         let fields = collect_stream_fields(&payload, &schema).unwrap();
         assert_eq!(fields.len(), 1);
@@ -534,7 +534,7 @@ mod tests {
     #[test]
     fn handles_behind_variant_and_back_reference_are_discovered() {
         let _shm = crate::init_test_shm();
-        let schema = parse_schema("v21N01H1F").unwrap();
+        let schema = parse_schema("v21N01H1F2aj").unwrap();
         assert!(schema_contains_kind(&schema, StreamFieldKind::IFile));
         let ptr = crate::json::read_json_with_schema("{\"H\":[\"/tmp/a.txt\"]}", &schema).unwrap();
         let payload = crate::voidstar::flatten_to_buffer(ptr, &schema).unwrap();
@@ -542,11 +542,11 @@ mod tests {
         assert_eq!(fields.len(), 1);
         assert!(matches!(fields[0].kind, StreamFieldKind::IFile));
 
-        let schema = parse_schema("&2LLm24headF4tail?^2LL").unwrap();
+        let schema = parse_schema("&2LLm24headF2aj4tail?^2LL").unwrap();
         assert!(schema_contains_kind(&schema, StreamFieldKind::IFile));
         crate::deep_tests::on_small_stack(|| {
             let _shm = crate::init_test_shm();
-            let schema = parse_schema("&2LLm24headF4tail?^2LL").unwrap();
+            let schema = parse_schema("&2LLm24headF2aj4tail?^2LL").unwrap();
             let depth = 20_000;
             let mut text = String::new();
             for i in 0..depth {
@@ -572,7 +572,7 @@ mod tests {
 
     #[test]
     fn payload_too_small_errors() {
-        let schema = parse_schema("F").unwrap();
+        let schema = parse_schema("F2aj").unwrap();
         let payload = vec![0u8; 8]; // less than the 16-byte field
         assert!(collect_stream_fields(&payload, &schema).is_err());
     }

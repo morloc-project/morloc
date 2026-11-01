@@ -1,0 +1,22 @@
+3
+made in py
+4
+made in py
+5
+made in py
+4
+made in py
+3
+made in py
+10
+OK: built placement costs the least
+OK: bad-chosen refused
+OK: bad-do refused
+OK: bad-suspended refused
+OK: bad-alias refused
+OK: bad-data refused
+OK: bad-branches refused
+OK: bad-suspended-two refused
+OK: bad-unrelated refused
+OK: bad-relayed refused
+OK: no unrelated source offered

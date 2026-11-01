@@ -1,7 +1,7 @@
 module main (test)
 
 import root-py (Int)
-import lib (Foo as Bar)
+import .lib (Foo as Bar)
 
 source Py from "foo.py" ("make_bar" as makeBar)
 makeBar :: Int -> Bar

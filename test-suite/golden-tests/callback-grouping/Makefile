@@ -20,8 +20,9 @@ all:
 	-./main-r flatDef 4 >> obs.txt 2>> obs.err
 	-./main-r stagedDef 4 >> obs.txt 2>> obs.err
 	-./main-r threeGroups 4 >> obs.txt 2>> obs.err
-	if morloc make -o bad bad.loc > /dev/null 2>> obs.err; then echo 'UNEXPECTED bad' >> obs.txt; else echo 'OK bad' >> obs.txt; fi
+	morloc make -o passed passed.loc 2>> build.err
+	-./passed passed >> obs.txt 2>> obs.err
 
 clean:
-	rm -rf main-py main-cpp main-rust main-r bad __pycache__ *.err
+	rm -rf main-py main-cpp main-rust main-r passed __pycache__ *.err
 	rm -rf *-build *build.tmp*

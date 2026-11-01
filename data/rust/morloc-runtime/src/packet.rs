@@ -1,10 +1,8 @@
 //! Packet protocol: header layout (stateless, in types crate) plus the
-//! runtime-tunable config statics and SHM-touching payload helpers
-//! (defined here so the nexus does not duplicate them via the rlib).
+//! runtime-tunable config statics (defined here so the nexus does not
+//! duplicate them via the rlib).
 
 pub use morloc_runtime_types::packet::*;
-
-use crate::error::MorlocError;
 
 // ── Inline threshold (runtime-tunable; stays in libmorloc.so) ──────────────
 
@@ -43,6 +41,17 @@ pub static TEST_CONFIG_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 pub fn inline_threshold() -> usize {
     ensure_config_loaded();
     INLINE_THRESHOLD.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+// Set from the `MORLOC_CODE_CHECKS` env var a debug build's nexus sets.
+static CODE_CHECKS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Whether this is a debug build, whose values the program builds are
+/// checked against their types (`origin`). Cheap and lock-free.
+#[inline]
+pub fn code_checks() -> bool {
+    ensure_config_loaded();
+    CODE_CHECKS.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 // Read the live SHM-enabled flag. Cheap and lock-free.
@@ -92,11 +101,12 @@ fn ensure_config_loaded() {
     if CONFIG_LOADED.load(Ordering::Acquire) {
         return;
     }
-    let inline = std::env::var("MORLOC_INLINE_SIZE").ok().and_then(|s| s.parse::<i64>().ok()).filter(|n| *n >= 0);
-    let no_shm = std::env::var("MORLOC_NO_SHM")
-        .map(|s| matches!(s.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
-        .unwrap_or(false);
-    let tmpdir = std::env::var("MORLOC_TMPDIR").ok().filter(|s| !s.is_empty());
+    let var = |name: &str| std::env::var(name).ok();
+    let inline = var("MORLOC_INLINE_SIZE").and_then(|s| s.parse::<i64>().ok()).filter(|n| *n >= 0);
+    let no_shm = var("MORLOC_NO_SHM")
+        .is_some_and(|s| matches!(s.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"));
+    let tmpdir = var("MORLOC_TMPDIR").filter(|s| !s.is_empty());
+    let code_checks = var(crate::origin::CODE_CHECKS_ENV).is_some_and(|s| s == "1");
     let mut config = TMPDIR.lock();
     if config.loaded {
         return;
@@ -107,72 +117,14 @@ fn ensure_config_loaded() {
     if no_shm {
         SHM_ENABLED.store(false, Ordering::Relaxed);
     }
+    if code_checks {
+        CODE_CHECKS.store(true, Ordering::Relaxed);
+    }
     if tmpdir.is_some() {
         config.tmpdir = tmpdir;
     }
     config.loaded = true;
     CONFIG_LOADED.store(true, Ordering::Release);
-}
-
-// ── SHM-resolving payload extraction (stays in libmorloc.so) ───────────────
-
-/// Get the voidstar value from a data packet (resolves relptr to absptr).
-pub fn get_data_value(
-    packet: &[u8],
-    schema: &crate::Schema,
-) -> Result<crate::shm::AbsPtr, MorlocError> {
-    let header = PacketHeader::from_bytes(packet[..32].try_into().unwrap())?;
-    let source = unsafe { header.command.data.source };
-    let format = unsafe { header.command.data.format };
-
-    let payload = get_data_payload(packet)?;
-
-    match source {
-        PACKET_SOURCE_RPTR => {
-            // Payload is a relptr
-            if payload.len() < std::mem::size_of::<crate::shm::RelPtr>() {
-                return Err(MorlocError::Packet("relptr payload too small".into()));
-            }
-            let relptr = crate::shm::RelPtr::from_ne_bytes(
-                payload[..std::mem::size_of::<crate::shm::RelPtr>()].try_into().unwrap()
-            );
-            crate::shm::rel2abs(relptr)
-        }
-        PACKET_SOURCE_MESG => {
-            match format {
-                PACKET_FORMAT_MSGPACK => {
-                    crate::mpack::unpack_with_schema(payload, schema)
-                }
-                PACKET_FORMAT_JSON => {
-                    let json_str = std::str::from_utf8(payload)
-                        .map_err(|e| MorlocError::Packet(format!("invalid UTF-8: {}", e)))?;
-                    crate::json::read_json_with_schema(json_str, schema)
-                }
-                PACKET_FORMAT_VOIDSTAR => {
-                    let hint = read_vol_index_from_meta(packet)
-                        .ok().flatten().unwrap_or(0);
-                    read_voidstar_binary(payload, schema, hint)
-                }
-                _ => {
-                    Err(MorlocError::Packet(format!(
-                        "unsupported data format: {}", format
-                    )))
-                }
-            }
-        }
-        _ => Err(MorlocError::Packet(format!("unsupported source: {}", source))),
-    }
-}
-
-/// Read a flat voidstar binary blob into shared memory, adjusting
-/// relptrs by the Layer-3 producer hint from the packet's metadata block
-/// (0 if absent).
-fn read_voidstar_binary(
-    blob: &[u8],
-    schema: &crate::Schema,
-    vol_idx_hint: u16,
-) -> Result<crate::shm::AbsPtr, MorlocError> {
-    crate::voidstar::read_binary_with_hint(blob, schema, vol_idx_hint)
 }
 
 #[cfg(test)]

@@ -19,8 +19,12 @@ import IrrefutablePatternLexerTests (irrefutablePatternLexerTests)
 import LangSupportTests (langSupportTests)
 import MorlocDepsTests (morlocDepsTests)
 import PatternChainTests (patternChainTests)
+import ArgsBoundTests (argsBoundTests)
+import LangRegistryCostTests (langRegistryCostTests)
 import PropertyTests (propertyTests)
+import UsefulnessTests (usefulnessTests)
 import RecSolverTests (recSolverTests)
+import NatDecideTests (natDecideTests)
 import RefutablePatternTests (refutablePatternTests)
 import LockFileTests (lockFileTests)
 import RustPoolBuildTests (rustPoolBuildTests)
@@ -28,7 +32,7 @@ import SchemaHintTests (schemaHintTests)
 import SizeParseTests (sizeParseTests)
 import SpecTests (specTests)
 import VariantMergeTests (variantMergeTests)
-import ValueArgsTests (valueArgsTests)
+import ValueArgsTests (valueArgsTests, kindOfTests)
 import ManifoldNameTests (manifoldNameTests)
 import SystemConfigTests (systemConfigTests)
 import UnitTypeTests
@@ -53,6 +57,7 @@ unitTests =
   , numericLiteralAliasTests
   , pendingNumLitTests
   , propertyTests
+  , usefulnessTests
   , whereTests
   , orderInvarianceTests
   , signatureContractTests
@@ -115,8 +120,12 @@ unitTests =
   , sizeParseTests
   , variantMergeTests
   , valueArgsTests
+  , kindOfTests
+  , natDecideTests
   , manifoldNameTests
   , patternChainTests
+  , argsBoundTests
+  , langRegistryCostTests
   , irrefutablePatternLexerTests
   , refutablePatternTests
   , rustPoolBuildTests

@@ -1,5 +1,4 @@
 //! C ABI wrappers for packet functions.
-//! Replaces packet.c with calls to Rust packet.rs + voidstar.rs.
 
 use std::ffi::{c_char, c_void, CStr};
 use std::ptr;
@@ -28,13 +27,19 @@ pub(crate) unsafe fn read_morloc_packet_header(
 ) -> *mut PacketHeader {
     clear_errmsg(errmsg);
     if msg.is_null() {
-        set_errmsg(errmsg, &MorlocError::Packet("Cannot make packet from NULL pointer".into()));
+        set_errmsg(errmsg, &MorlocError::Other("Cannot make packet from NULL pointer".into()));
         return ptr::null_mut();
     }
-    // Validate magic
     let header = &*(msg as *const PacketHeader);
     if !header.is_valid() {
         set_errmsg(errmsg, &MorlocError::Packet("Malformed morloc packet".into()));
+        return ptr::null_mut();
+    }
+    let length = header.length;
+    if length > (isize::MAX as u64) - 32 - u64::from(u32::MAX) {
+        set_errmsg(errmsg, &MorlocError::Packet(format!(
+            "a packet header claims a {length}-byte payload, more than any packet can hold"
+        )));
         return ptr::null_mut();
     }
     msg as *mut PacketHeader
@@ -104,18 +109,9 @@ pub(crate) unsafe fn release_received_packet(packet: *mut u8) {
 }
 
 /// A copy of `packet` a pool can return as its own result when the result
-/// is one of its arguments, unchanged.
-///
-/// A pool's result must be a fresh `malloc` block that it holds a reference
-/// to: the dispatcher sends it and frees it, and frees the call the
-/// arguments point into before that. So the argument cannot be returned
-/// itself. A packet naming a shared-memory block holds it by reference, so
-/// the copy takes a reference of its own, and `block_out` receives the
-/// block for the pool's tracker (null when the packet names none). A
-/// file-backed packet's file belongs to the evaluation that wrote it and is
-/// removed when that evaluation ends, not when a packet naming it is freed;
-/// the caller waiting on this call is inside that evaluation, so a copy of
-/// the packet is as valid as the argument itself.
+/// is one of its arguments, unchanged. A packet naming a shared-memory
+/// block gets a reference of its own, and `block_out` receives the block
+/// for the pool's tracker (null when the packet names none).
 pub(crate) unsafe fn morloc_dup_packet(
     packet: *const u8,
     block_out: *mut *mut c_void,
@@ -137,7 +133,6 @@ pub(crate) unsafe fn morloc_dup_packet(
         )));
         return ptr::null_mut();
     }
-    // A refused reference means the block is already gone.
     let block = match packet_rptr_block(packet)
         .and_then(|b| b.map_or(Ok(ptr::null_mut()), |b| shm::shincref(b).map(|()| b)))
     {
@@ -179,7 +174,7 @@ pub(crate) unsafe fn return_ping(
     if size == 0 { return ptr::null_mut(); }
     let buf = libc::calloc(size, 1) as *mut u8;
     if buf.is_null() {
-        set_errmsg(errmsg, &MorlocError::Packet("Failed to allocate ping response".into()));
+        set_errmsg(errmsg, &MorlocError::Other("Failed to allocate ping response".into()));
         return ptr::null_mut();
     }
     ptr::copy_nonoverlapping(packet, buf, size);
@@ -213,21 +208,19 @@ unsafe fn build_schema_metadata(schema: *const CSchema) -> (*mut u8, usize) {
         return (ptr::null_mut(), 0);
     }
 
-    // Write metadata header
     *metadata = b'm';
     *metadata.add(1) = b'm';
     *metadata.add(2) = b'h';
     *metadata.add(3) = METADATA_TYPE_SCHEMA_STRING;
     *(metadata.add(4) as *mut u32) = schema_len as u32;
 
-    // Write schema string
     ptr::copy_nonoverlapping(schema_bytes.as_ptr(), metadata.add(meta_header_size), schema_bytes.len());
     // Null terminator already zeroed by calloc
 
     (metadata, padded_meta_len)
 }
 
-/// Generic data packet builder matching C's make_morloc_data_packet.
+/// Generic data packet builder.
 ///
 /// # Safety
 /// If non-null, `data` must point to `data_length` readable bytes.
@@ -319,7 +312,6 @@ pub(crate) unsafe fn make_standard_data_packet(
     );
     if packet.is_null() { return ptr::null_mut(); }
 
-    // Write the relptr into the payload area
     let header = &*(packet as *const PacketHeader);
     let payload_offset = 32 + header.offset as usize;
     *(packet.add(payload_offset) as *mut RelPtr) = relptr;
@@ -379,31 +371,10 @@ unsafe fn checked_rptr_block(packet: *const u8, payload: *const u8) -> Result<Ab
 
 // ── Msgpack packets ──────────────────────────────────────────────────────────
 
-pub(crate) unsafe fn make_mpk_data_packet(
-    mpk_filename: *const c_char,
-    schema: *const CSchema,
-) -> *mut u8 {
-    if mpk_filename.is_null() { return ptr::null_mut(); }
-    let filename = CStr::from_ptr(mpk_filename);
-    let bytes = filename.to_bytes();
-    make_data_packet_with_schema(
-        bytes.as_ptr(),
-        bytes.len(),
-        schema,
-        PACKET_SOURCE_FILE,
-        PACKET_FORMAT_MSGPACK,
-        PACKET_COMPRESSION_NONE,
-        PACKET_ENCRYPTION_NONE,
-        PACKET_STATUS_PASS,
-    )
-}
-
 /// FILE-source indirection whose referenced file is itself a morloc
 /// data packet (`PACKET_FORMAT_DATA`). The outer packet's `compression`
 /// byte refers to the filename bytes (always NONE); the referenced
-/// file carries its own header + compression byte. Used by the cache
-/// and debug-dump writers to point at a content-addressed `.dat`
-/// sidecar without inlining its bytes.
+/// file carries its own header and compression byte.
 pub(crate) unsafe fn make_data_indirection_packet(
     dat_filename: *const c_char,
     schema: *const CSchema,
@@ -423,9 +394,40 @@ pub(crate) unsafe fn make_data_indirection_packet(
     )
 }
 
-/// A table argument that names its file. The receiving pool reads and
-/// decodes it, so the bytes are held once, by the process that will use
-/// the table, rather than being decoded in the nexus and shipped on.
+/// A packet naming a file this program wrote: its cache, or a value one
+/// pool hands another. Its metadata marks the file as the program's own, so
+/// a reader treats it as a value the program built.
+pub(crate) unsafe fn make_program_file_packet(
+    filename: *const c_char,
+    schema: *const CSchema,
+    fmt: u8,
+) -> *mut u8 {
+    if filename.is_null() { return ptr::null_mut(); }
+    let bytes = CStr::from_ptr(filename).to_bytes();
+    let (metadata, metadata_length) = build_schema_metadata(schema);
+    let existing: &[u8] = if metadata.is_null() { &[] } else { std::slice::from_raw_parts(metadata, metadata_length) };
+    let meta = morloc_runtime_types::packet::append_metadata_entry(
+        existing,
+        morloc_runtime_types::packet::METADATA_TYPE_PROGRAM_FILE,
+        &[],
+    );
+    if !metadata.is_null() {
+        libc::free(metadata as *mut c_void);
+    }
+    make_data_packet_raw(
+        bytes.as_ptr(),
+        bytes.len(),
+        meta.as_ptr(),
+        meta.len(),
+        PACKET_SOURCE_FILE,
+        fmt,
+        PACKET_COMPRESSION_NONE,
+        PACKET_ENCRYPTION_NONE,
+        PACKET_STATUS_PASS,
+    )
+}
+
+/// A table argument that names its file; the receiving pool reads it.
 pub(crate) unsafe fn make_table_file_packet(
     path: *const c_char,
     schema: *const CSchema,
@@ -461,8 +463,6 @@ pub(crate) unsafe fn make_data_packet_from_mpk(
     )
 }
 
-// ── get_data_packet_as_mpk ───────────────────────────────────────────────────
-
 // ── Schema from metadata ─────────────────────────────────────────────────────
 
 pub(crate) unsafe fn read_schema_from_packet_meta(
@@ -484,7 +484,6 @@ pub(crate) unsafe fn read_schema_from_packet_meta(
             let meta_type = *packet.add(pos + 3);
             let meta_size = *(packet.add(pos + 4) as *const u32) as usize;
             if meta_type == METADATA_TYPE_SCHEMA_STRING {
-                // Return pointer into the packet buffer (matches C behavior)
                 return packet.add(pos + 8) as *mut c_char;
             }
             pos += 8 + meta_size;
@@ -501,18 +500,7 @@ pub(crate) unsafe fn make_fail_packet(
     failure_message: *const c_char,
 ) -> *mut u8 {
     if failure_message.is_null() { return ptr::null_mut(); }
-    let msg = CStr::from_ptr(failure_message).to_bytes();
-    make_data_packet_raw(
-        msg.as_ptr(),
-        msg.len(),
-        ptr::null(),
-        0,
-        PACKET_SOURCE_MESG,
-        PACKET_FORMAT_TEXT,
-        PACKET_COMPRESSION_NONE,
-        PACKET_ENCRYPTION_NONE,
-        PACKET_STATUS_FAIL,
-    )
+    make_status_packet(CStr::from_ptr(failure_message).to_bytes(), PACKET_STATUS_FAIL)
 }
 
 /// A fail packet saying the call ended because its downstream reader
@@ -521,18 +509,32 @@ pub(crate) unsafe fn make_pipe_closed_packet(
     failure_message: *const c_char,
 ) -> *mut u8 {
     if failure_message.is_null() { return ptr::null_mut(); }
-    let msg = CStr::from_ptr(failure_message).to_bytes();
-    make_data_packet_raw(
-        msg.as_ptr(),
-        msg.len(),
-        ptr::null(),
-        0,
-        PACKET_SOURCE_MESG,
-        PACKET_FORMAT_TEXT,
-        PACKET_COMPRESSION_NONE,
-        PACKET_ENCRYPTION_NONE,
+    make_status_packet(
+        CStr::from_ptr(failure_message).to_bytes(),
         morloc_runtime_types::packet::PACKET_STATUS_PIPE_CLOSED,
     )
+}
+
+/// A fail packet saying a pool the call depended on ended (LIFE-5).
+pub(crate) fn make_peer_died_packet(failure_message: &str) -> *mut u8 {
+    make_status_packet(failure_message.as_bytes(), morloc_runtime_types::packet::PACKET_STATUS_PEER_DIED)
+}
+
+/// A text packet carrying `msg` with failure `status`.
+fn make_status_packet(msg: &[u8], status: u8) -> *mut u8 {
+    unsafe {
+        make_data_packet_raw(
+            msg.as_ptr(),
+            msg.len(),
+            ptr::null(),
+            0,
+            PACKET_SOURCE_MESG,
+            PACKET_FORMAT_TEXT,
+            PACKET_COMPRESSION_NONE,
+            PACKET_ENCRYPTION_NONE,
+            status,
+        )
+    }
 }
 
 pub(crate) unsafe fn morloc_packet_is_pipe_closed(packet: *const u8) -> bool {
@@ -558,7 +560,7 @@ pub(crate) unsafe fn get_morloc_data_packet_error_message(
         let payload_len = (*header).length as usize;
         let buf = libc::calloc(payload_len + 1, 1) as *mut c_char;
         if buf.is_null() {
-            set_errmsg(errmsg, &MorlocError::Packet("Failed to allocate error message".into()));
+            set_errmsg(errmsg, &MorlocError::Other("Failed to allocate error message".into()));
             return ptr::null_mut();
         }
         ptr::copy_nonoverlapping(data.add(payload_start), buf as *mut u8, payload_len);
@@ -575,6 +577,21 @@ pub(crate) unsafe fn get_morloc_data_packet_value(
     schema: *const CSchema,
     errmsg: *mut *mut c_char,
 ) -> *mut u8 {
+    get_morloc_data_packet_value_from(data, schema, errmsg, None)
+}
+
+/// [`get_morloc_data_packet_value`] for a packet of a known origin. With
+/// none, a value carried inline or by reference is taken as one the program
+/// built, and a file the packet names as outside data unless the packet
+/// marks it as the program's own (FMT-3). A packet file is always outside
+/// data.
+pub(crate) unsafe fn get_morloc_data_packet_value_from(
+    data: *const u8,
+    schema: *const CSchema,
+    errmsg: *mut *mut c_char,
+    origin: Option<crate::origin::Origin>,
+) -> *mut u8 {
+    use crate::origin::Origin;
     clear_errmsg(errmsg);
     let header = read_morloc_packet_header(data, errmsg);
     if header.is_null() { return ptr::null_mut(); }
@@ -584,7 +601,6 @@ pub(crate) unsafe fn get_morloc_data_packet_value(
         return ptr::null_mut();
     }
 
-    // Check for error
     let packet_error = get_morloc_data_packet_error_message(data, errmsg);
     if !packet_error.is_null() {
         let err_str = CStr::from_ptr(packet_error).to_string_lossy().into_owned();
@@ -592,24 +608,17 @@ pub(crate) unsafe fn get_morloc_data_packet_value(
         set_errmsg(errmsg, &MorlocError::Packet(format!("\n{}", err_str)));
         return ptr::null_mut();
     }
-    // Clear any errmsg from get_morloc_data_packet_error_message
     clear_errmsg(errmsg);
 
-    // If the packet body is zstd-compressed, expand it to a heap Vec
-    // and re-enter with the decompressed packet. This is the shared
-    // entry point for stdio-received sub-packets (the file-OStream
-    // reader has its own compression branch in
-    // `materialize_subpacket_at_offset` and never comes through here
-    // for compressed data).
     let compression = (*header).command.data.compression;
     if compression == morloc_runtime_types::packet::PACKET_COMPRESSION_ZSTD {
-        let packet_size = 32 + (*header).offset as usize + (*header).length as usize;
+        let packet_size = morloc_packet_size_from_header(header);
         let packet_bytes = std::slice::from_raw_parts(data, packet_size);
         let decompressed = match morloc_runtime_types::compression::decompress_packet(packet_bytes) {
             Ok(v) => v,
             Err(e) => { set_errmsg(errmsg, &e); return ptr::null_mut(); }
         };
-        return get_morloc_data_packet_value(decompressed.as_ptr(), schema, errmsg);
+        return get_morloc_data_packet_value_from(decompressed.as_ptr(), schema, errmsg, origin);
     }
 
     let rs = CSchema::to_rust(schema);
@@ -622,13 +631,15 @@ pub(crate) unsafe fn get_morloc_data_packet_value(
         PACKET_SOURCE_MESG => {
             if format == PACKET_FORMAT_MSGPACK {
                 let payload = std::slice::from_raw_parts(data.add(payload_start), payload_len);
-                match crate::mpack::unpack_with_schema(payload, &rs) {
+                match crate::mpack::unpack_from(payload, &rs, origin.unwrap_or(Origin::Program)) {
                     Ok(abs) => abs,
                     Err(e) => { set_errmsg(errmsg, &e); ptr::null_mut() }
                 }
             } else if format == PACKET_FORMAT_VOIDSTAR {
                 let payload = std::slice::from_raw_parts(data.add(payload_start), payload_len);
-                match crate::voidstar::read_binary(payload, &rs) {
+                let packet = std::slice::from_raw_parts(data, payload_start + payload_len);
+                let hint = morloc_runtime_types::packet::read_vol_index_from_meta(packet).ok().flatten().unwrap_or(0);
+                match crate::voidstar::read_binary_with_hint(payload, &rs, hint, origin.unwrap_or(Origin::Program)) {
                     Ok(abs) => abs,
                     Err(e) => { set_errmsg(errmsg, &e); ptr::null_mut() }
                 }
@@ -646,13 +657,26 @@ pub(crate) unsafe fn get_morloc_data_packet_value(
             }
         }
         PACKET_SOURCE_FILE => {
-            let filename_bytes = std::slice::from_raw_parts(data.add(payload_start), payload_len.min(4096));
-            let filename = std::str::from_utf8(filename_bytes).unwrap_or("");
+            let origin = origin.unwrap_or_else(|| {
+                let meta = std::slice::from_raw_parts(data.add(32), (*header).offset as usize);
+                if morloc_runtime_types::packet::marks_program_file(meta) { Origin::Program } else { Origin::Outside }
+            });
+            if payload_len > 4096 {
+                set_errmsg(errmsg, &MorlocError::Packet(format!(
+                    "a file packet's path is {payload_len} bytes; at most 4096 are read"
+                )));
+                return ptr::null_mut();
+            }
+            let filename_bytes = std::slice::from_raw_parts(data.add(payload_start), payload_len);
+            let Ok(filename) = std::str::from_utf8(filename_bytes) else {
+                set_errmsg(errmsg, &MorlocError::Packet("a file packet's path is not UTF-8".into()));
+                return ptr::null_mut();
+            };
             let filename = filename.trim_end_matches('\0');
             if format == PACKET_FORMAT_MSGPACK {
                 match std::fs::read(filename) {
                     Ok(file_data) => {
-                        match crate::mpack::unpack_with_schema(&file_data, &rs) {
+                        match crate::mpack::unpack_from(&file_data, &rs, origin) {
                             Ok(abs) => abs,
                             Err(e) => { set_errmsg(errmsg, &e); ptr::null_mut() }
                         }
@@ -663,9 +687,6 @@ pub(crate) unsafe fn get_morloc_data_packet_value(
                     }
                 }
             } else if format == PACKET_FORMAT_ARROW {
-                // A table argument names its file rather than carrying a
-                // decoded copy: the bytes are read here, in the process
-                // that will hold the table, and never in the nexus.
                 let path_cstr = match std::ffi::CString::new(filename) {
                     Ok(c) => c,
                     Err(_) => {
@@ -686,8 +707,7 @@ pub(crate) unsafe fn get_morloc_data_packet_value(
                     Err(e) => { set_errmsg(errmsg, &e); ptr::null_mut() }
                 }
             } else if format == PACKET_FORMAT_DATA {
-                // Indirection: the file at `filename` is a complete
-                // morloc data packet, loaded as `@load` loads a file.
+                // The file at `filename` is a complete morloc data packet.
                 let filename_cstr = match std::ffi::CString::new(filename) {
                     Ok(c) => c,
                     Err(_) => {
@@ -709,7 +729,12 @@ pub(crate) unsafe fn get_morloc_data_packet_value(
             }
         }
         PACKET_SOURCE_RPTR => {
-            if format == PACKET_FORMAT_VOIDSTAR || format == PACKET_FORMAT_ARROW {
+            if payload_len < 8 {
+                set_errmsg(errmsg, &MorlocError::Packet(format!(
+                    "a shared-memory reference packet carries {payload_len} payload bytes, not 8"
+                )));
+                ptr::null_mut()
+            } else if format == PACKET_FORMAT_VOIDSTAR || format == PACKET_FORMAT_ARROW {
                 match checked_rptr_block(data, data.add(payload_start)) {
                     Ok(abs) => abs,
                     Err(e) => { set_errmsg(errmsg, &e); ptr::null_mut() }
@@ -730,21 +755,10 @@ pub(crate) unsafe fn get_morloc_data_packet_value(
 
 // ── Call packet construction ─────────────────────────────────────────────────
 
-/// Take a reference on the shared block a data packet names, so the packet
-/// carries one of its own for as long as it is in flight. The sender holds
-/// this reference on behalf of whoever receives the packet: without it there
-/// is an interval between the send and the receiver taking its own reference
-/// in which nobody holds one, and the sender's own release can fall inside
-/// that interval and scrub the block under the reader.
-///
-/// A no-op for packets whose payload travels inside them.
-///
-/// Fails when the block can no longer be referenced. That is not a
-/// formality: the receiver takes ownership of this reference and releases
-/// it without checking, so a refusal that goes unnoticed here becomes a
-/// release of a reference nobody held. Under the older arrangement the
-/// receiver's own acquire caught this; the check has moved to the sender
-/// along with the ownership.
+/// Take a reference on the shared block a data packet names, held on
+/// behalf of whoever receives the packet. A no-op for packets whose
+/// payload travels inside them. Fails when the block can no longer be
+/// referenced.
 pub(crate) unsafe fn donate_packet_reference(
     packet: *const u8,
 ) -> Result<(), MorlocError> {
@@ -803,7 +817,6 @@ unsafe fn make_call_packet_gen(
 ) -> *mut u8 {
     clear_errmsg(errmsg);
 
-    // Calculate total data length
     let mut data_length: usize = 0;
     for i in 0..nargs {
         let arg = read_morloc_packet_header(*arg_packets.add(i), errmsg);
@@ -814,7 +827,7 @@ unsafe fn make_call_packet_gen(
     let total = 32 + data_length;
     let packet = libc::calloc(total, 1) as *mut u8;
     if packet.is_null() {
-        set_errmsg(errmsg, &MorlocError::Packet("Failed to allocate call packet".into()));
+        set_errmsg(errmsg, &MorlocError::Other("Failed to allocate call packet".into()));
         return ptr::null_mut();
     }
 
@@ -880,7 +893,7 @@ pub(crate) unsafe fn read_morloc_call_packet(
 
     let call = libc::calloc(1, std::mem::size_of::<MorlocCall>()) as *mut MorlocCall;
     if call.is_null() {
-        set_errmsg(errmsg, &MorlocError::Packet("calloc failed".into()));
+        set_errmsg(errmsg, &MorlocError::Other("calloc failed".into()));
         return ptr::null_mut();
     }
 
@@ -901,13 +914,21 @@ pub(crate) unsafe fn read_morloc_call_packet(
     (*call).owns_args = 0; // borrowing pointers into packet
 
     let start_pos = 32 + (*header).offset as usize;
-    let end_pos = start_pos + (*header).length as usize;
+    let end_pos = morloc_packet_size_from_header(header);
 
-    // First pass: count args
     let mut pos = start_pos;
     while pos < end_pos {
-        let arg_size = morloc_packet_size(packet.add(pos), errmsg);
-        if arg_size == 0 {
+        let arg_size = if end_pos - pos < 32 {
+            0
+        } else {
+            morloc_packet_size(packet.add(pos), errmsg)
+        };
+        if arg_size == 0 || arg_size > end_pos - pos {
+            if !errmsg.is_null() && (*errmsg).is_null() {
+                set_errmsg(errmsg, &MorlocError::Packet(format!(
+                    "argument #{} of a call packet runs past the packet's end", (*call).nargs
+                )));
+            }
             free_morloc_call(call);
             return ptr::null_mut();
         }
@@ -915,15 +936,13 @@ pub(crate) unsafe fn read_morloc_call_packet(
         (*call).nargs += 1;
     }
 
-    // Allocate args array
     (*call).args = libc::calloc((*call).nargs, std::mem::size_of::<*mut u8>()) as *mut *mut u8;
     if (*call).args.is_null() {
-        set_errmsg(errmsg, &MorlocError::Packet("calloc failed for args".into()));
+        set_errmsg(errmsg, &MorlocError::Other("calloc failed for args".into()));
         libc::free(call as *mut c_void);
         return ptr::null_mut();
     }
 
-    // Second pass: fill pointers (borrowing into original packet)
     pos = start_pos;
     for i in 0..(*call).nargs {
         let arg_header = read_morloc_packet_header(packet.add(pos), errmsg);
@@ -962,8 +981,6 @@ pub(crate) unsafe fn free_morloc_call(call: *mut MorlocCall) {
     libc::free(call as *mut c_void);
 }
 
-// ── write_voidstar_binary (for intrinsics.c) ─────────────────────────────────
-
 // ── flatten_voidstar_to_buffer ───────────────────────────────────────────────
 
 pub(crate) unsafe fn flatten_voidstar_to_buffer(
@@ -983,7 +1000,7 @@ pub(crate) unsafe fn flatten_voidstar_to_buffer(
             let len = buf.len();
             let c_buf = libc::malloc(len) as *mut u8;
             if c_buf.is_null() {
-                set_errmsg(errmsg, &MorlocError::Packet("malloc failed".into()));
+                set_errmsg(errmsg, &MorlocError::Other("malloc failed".into()));
                 return 1;
             }
             ptr::copy_nonoverlapping(buf.as_ptr(), c_buf, len);
@@ -1023,11 +1040,7 @@ pub(crate) unsafe fn make_data_packet_with(
 
     let threshold = crate::packet::inline_threshold();
     let t_sz = crate::log::trace_enabled().then(std::time::Instant::now);
-    // Bounded size walk: we only need to know whether the serialized
-    // form fits inline (i.e. is `<= threshold`), so cap the walk at
-    // `threshold + 1`. For payloads that clearly overflow inline the
-    // walk exits after visiting ~threshold bytes of structure rather
-    // than recursing through every nested record.
+    // Capped at threshold + 1: only whether the value fits inline matters.
     let flat_size = match crate::ffi::calc_voidstar_size_bounded(
         voidstar as *const u8,
         &rs,
@@ -1066,10 +1079,7 @@ pub(crate) unsafe fn make_data_packet_with(
 }
 
 /// A packet that carries the value's flat form inside it, whatever its
-/// size: the inline arm of `make_data_packet_auto`, also used for a
-/// value that must outlive the shared-memory block it was laid out in (a
-/// closure's captured value, applied back after the producing dispatch
-/// has released its blocks). A table's flat form is its block.
+/// size. A table's flat form is its block.
 pub(crate) unsafe fn make_inline_data_packet(
     voidstar: *mut c_void,
     schema: *const CSchema,
@@ -1090,7 +1100,7 @@ pub(crate) unsafe fn make_inline_data_packet(
                 PACKET_STATUS_PASS,
             );
             if packet.is_null() {
-                set_errmsg(errmsg, &MorlocError::Packet("Failed to create inline data packet".into()));
+                set_errmsg(errmsg, &MorlocError::Other("Failed to create inline data packet".into()));
             }
             packet
         }
@@ -1103,49 +1113,11 @@ pub(crate) unsafe fn make_inline_data_packet(
 
 // ── normalize_data_packet_for_output ─────────────────────────────────────────
 //
-// Produce a self-contained packet suitable for writing to disk. The
-// pool may return a result packet whose source is RPTR (an 8-byte
-// relptr into SHM) or FILE (a filename whose contents are msgpack);
-// neither survives the lifetime of the producing process. This helper
-// rewrites such packets so the payload is inline (source = MESG),
-// then optionally applies zstd compression.
-//
-// Normalization rules (source x format x compression):
-//
-//   MESG + any format, compression = NONE
-//      level > 0: compress payload region with zstd, stamp ZSTD
-//      level = 0: copy through unchanged
-//
-//   MESG + any format, compression = ZSTD
-//      copy through unchanged (do not recompress -- the existing
-//      level is not recoverable from the frame header)
-//
-//   RPTR + VOIDSTAR
-//      dereference SHM, flatten voidstar to a flat buffer (the same
-//      writer the SLURM serialization path uses), wrap as
-//      MESG + VOIDSTAR, then compress if level > 0.
-//
-//   RPTR + ARROW
-//      dereference SHM, serialize the Arrow SHM table to IPC bytes
-//      (existing write_arrow_ipc_to_buffer), wrap as MESG + ARROW,
-//      then compress if level > 0.
-//
-//   FILE + MSGPACK
-//      read the file, wrap the msgpack bytes as MESG + MSGPACK, then
-//      compress if level > 0. Inlining keeps the on-disk packet
-//      meaningful after the producing process exits.
-//
-// FAIL packets and non-DATA packets (CALL/PING) pass through.
-//
-// Performance: the implementation does at most one materialize-sized
-// allocation (flatten / file read), at most one compressed-sized
-// allocation (zstd output), and exactly one libc::malloc of the final
-// output bytes. No intermediate "build a full packet then re-extract
-// its payload to compress it" copy; the payload region is fed straight
-// to the encoder and the header/metadata/payload are stitched into the
-// output buffer in a single pass.
-//
-// The output buffer is libc::malloc'd; the caller must libc::free.
+// Produce a self-contained packet for writing to disk: an RPTR or FILE
+// payload is inlined (source MESG) and, when `compression_level > 0` and
+// the packet is uncompressed, zstd-compressed. An already-ZSTD payload
+// is not recompressed: its level is not recoverable from the frame
+// header. FAIL and non-DATA packets pass through.
 pub(crate) unsafe fn normalize_data_packet_for_output(
     packet: *const u8,
     packet_size: usize,
@@ -1163,7 +1135,6 @@ pub(crate) unsafe fn normalize_data_packet_for_output(
         return 1;
     }
 
-    // CALL/PING and FAIL packets ride out unchanged.
     if !(*header).is_data() || (*header).is_fail() {
         return alloc_out(packet, packet_size, out_buf, out_size, errmsg);
     }
@@ -1182,9 +1153,6 @@ pub(crate) unsafe fn normalize_data_packet_for_output(
         return 1;
     }
 
-    // Phase 1: get the inline-payload bytes. For MESG, that is the
-    // existing payload region (borrowed -- zero extra copy). For RPTR
-    // and FILE, we materialize into an owned Vec.
     let materialized: Option<Vec<u8>> = match source {
         PACKET_SOURCE_MESG => None,
         PACKET_SOURCE_RPTR => {
@@ -1211,10 +1179,6 @@ pub(crate) unsafe fn normalize_data_packet_for_output(
         None => std::slice::from_raw_parts(packet.add(payload_start), payload_len),
     };
 
-    // Phase 2: optionally compress. We only compress when the user
-    // asked for it AND the input is currently uncompressed. The
-    // already-ZSTD case passes through with its existing compression
-    // byte intact (see header comment).
     let compressed: Option<(Vec<u8>, Vec<crate::packet::FrameEntry>)> =
         if compression_level > 0 && compression == PACKET_COMPRESSION_NONE {
             let lvl = match crate::compression::CompressionLevel::from_u8(compression_level) {
@@ -1232,10 +1196,6 @@ pub(crate) unsafe fn normalize_data_packet_for_output(
         } else {
             None
         };
-    // Build the output metadata. When we compressed here, splice the
-    // frame-index entry past any padding in the original block via
-    // `append_metadata_entry`. Pass-through preserves the original
-    // metadata byte-for-byte.
     let new_metadata: Vec<u8> = match &compressed {
         Some((_, frames)) => {
             let body = crate::packet::encode_frame_index_entry(frames);
@@ -1253,14 +1213,11 @@ pub(crate) unsafe fn normalize_data_packet_for_output(
         None => (raw_payload, compression),
     };
 
-    // Phase 3: emit a libc::malloc'd buffer of exactly
-    // 32 + new_metadata.len() + final_payload.len() and stitch the
-    // regions into it in one pass.
     let new_metadata_size = new_metadata.len();
     let total = 32 + new_metadata_size + final_payload.len();
     let mem = libc::malloc(total) as *mut u8;
     if mem.is_null() {
-        set_errmsg(errmsg, &MorlocError::Packet("malloc failed".into()));
+        set_errmsg(errmsg, &MorlocError::Other("malloc failed".into()));
         return 1;
     }
 
@@ -1293,9 +1250,6 @@ pub(crate) unsafe fn normalize_data_packet_for_output(
     0
 }
 
-// Read a FILE+MSGPACK packet's referenced file into a fresh Vec.
-// Symmetric with read_rptr_payload so the materialize match arm in
-// normalize_data_packet_for_output has uniform shape.
 unsafe fn read_file_payload(
     packet: *const u8,
     payload_start: usize,
@@ -1324,8 +1278,6 @@ unsafe fn read_file_payload(
     }
 }
 
-// Materialize the SHM-backed payload of an RPTR packet into a flat
-// byte buffer suitable for inlining.
 unsafe fn read_rptr_payload(
     packet: *const u8,
     payload_start: usize,
@@ -1342,7 +1294,7 @@ unsafe fn read_rptr_payload(
         PACKET_FORMAT_VOIDSTAR => {
             let schema_ptr = read_schema_from_packet_meta(packet, errmsg);
             if schema_ptr.is_null() {
-                if (*errmsg).is_null() {
+                if !errmsg.is_null() && (*errmsg).is_null() {
                     set_errmsg(errmsg, &MorlocError::Packet(
                         "RPTR+VOIDSTAR packet missing schema metadata".into()
                     ));
@@ -1394,14 +1346,10 @@ unsafe fn read_rptr_payload(
 
 // ── normalize_data_packet_to_fd ──────────────────────────────────────────────
 //
-// fd variant of normalize_data_packet_for_output. Routes through the
-// streaming path when the destination supports pwrite (regular file),
-// the source is RPTR+VOIDSTAR or FILE+MSGPACK, and the payload is large
-// enough to amortize the streaming setup; otherwise falls back to the
-// buffered helper. Streaming writes the header with a length-field
-// placeholder, streams the payload, then pwrites the corrected length.
-// Returns total bytes written, or -1 on error. RPTR+ARROW is currently
-// always buffered -- see TODO at stream_packet_to_fd.
+// Writes the normalized packet to `fd`; returns total bytes written, or a
+// negative value on error. A large payload named by reference (RPTR or
+// FILE, but not an RPTR table) bound for a positionally writable fd is
+// streamed.
 pub(crate) unsafe fn normalize_data_packet_to_fd(
     packet: *const u8,
     packet_size: usize,
@@ -1421,9 +1369,6 @@ pub(crate) unsafe fn normalize_data_packet_to_fd(
     let source = if is_data { (*header).command.data.source } else { 0 };
     let format = if is_data { (*header).command.data.format } else { 0 };
 
-    // Streaming preconditions. Any failure routes us through the
-    // buffered path (which produces identical bytes; the only cost is
-    // memory).
     let stream_eligible = is_data
         && !is_fail
         && source != PACKET_SOURCE_MESG
@@ -1448,8 +1393,6 @@ pub(crate) unsafe fn normalize_data_packet_to_fd(
 // Below 1 MiB the buffered alloc + memcpy beats the streaming setup cost.
 const STREAMING_THRESHOLD: u64 = 1 << 20;
 
-// Run the existing in-memory normalizer, then write the resulting
-// buffer to the fd in one syscall. Used for every non-streamed path.
 unsafe fn buffered_packet_to_fd(
     packet: *const u8,
     packet_size: usize,
@@ -1505,8 +1448,8 @@ fn create_packet_file(
     Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, "no free name for a file packet"))
 }
 
-// Write `len` bytes from `buf` to `fd`, retrying on partial writes
-// and EINTR. Returns bytes written or -1 with errmsg set.
+// Returns bytes written, -1 with errmsg set, or PACKET_TO_FD_PIPE_CLOSED
+// without errmsg on EPIPE.
 pub(crate) unsafe fn write_all_fd(
     fd: libc::c_int,
     buf: *const u8,
@@ -1525,10 +1468,6 @@ pub(crate) unsafe fn write_all_fd(
             if err.kind() == std::io::ErrorKind::Interrupted {
                 continue;
             }
-            // A broken pipe is an <IO> condition the nexus surfaces as
-            // MorlocError::PipeClosed (so @catch does not swallow it);
-            // return the distinct sentinel, no errmsg, so the caller can
-            // classify it apart from a generic write failure.
             if err.raw_os_error() == Some(libc::EPIPE) {
                 return morloc_runtime_types::PACKET_TO_FD_PIPE_CLOSED;
             }
@@ -1558,12 +1497,9 @@ unsafe fn positionally_writable(fd: libc::c_int) -> bool {
     flags != -1 && flags & libc::O_APPEND == 0
 }
 
-// Estimate the eventual on-disk payload size for the streaming threshold
-// check. Returns None on error (errmsg already set).
-//
-// Estimation errors (e.g., a corrupted relptr) return Some(0); this
-// will fall through to the buffered path, which will surface the same
-// error consistently.
+// Estimated on-disk payload size, used to choose streaming and to size
+// the frame-index reservation. None with errmsg set when the relptr does
+// not resolve; other failures give Some(0), which selects buffering.
 unsafe fn estimate_payload_size(
     packet: *const u8,
     source: u8,
@@ -1586,13 +1522,8 @@ unsafe fn estimate_payload_size(
                 Err(e) => { set_errmsg(errmsg, &e); return None; }
             };
             let t_est = std::time::Instant::now();
-            // O(1) shortcut: when the voidstar sits at the base of an
-            // SHM allocation, the block-header size is an exact upper
-            // bound on the serialized voidstar -- which is all we need
-            // here. The returned value drives the stream/buffered
-            // decision and the frame-index metadata reservation; it is
-            // no longer used as a strict pledged size (each frame in
-            // the multi-frame encoder sets its own exact FCS).
+            // The size of the block the value heads bounds its serialized size when
+            // the value lies within that block.
             if let Some(sz) = unsafe { shm::shm_block_size(abs_ptr) } {
                 crate::morloc_trace!(
                     "[estimate_payload_size] shm_block_size = {} MiB in {:.2?}",
@@ -1601,8 +1532,6 @@ unsafe fn estimate_payload_size(
                 );
                 return Some(sz as u64);
             }
-            // Below the shortcut threshold -- need the exact walk, which
-            // means parsing the schema metadata first.
             let schema_ptr = read_schema_from_packet_meta(packet, errmsg);
             if schema_ptr.is_null() {
                 return Some(0);
@@ -1682,8 +1611,6 @@ unsafe fn stream_packet_to_fd(
         None
     };
 
-    // Remember the fd's starting offset so we can pwrite the length
-    // field at the right absolute position when streaming is done.
     let start_pos = libc::lseek(fd, 0, libc::SEEK_CUR);
     if start_pos < 0 {
         set_errmsg(errmsg, &MorlocError::Io(std::io::Error::last_os_error()));
@@ -1701,24 +1628,11 @@ unsafe fn stream_packet_to_fd(
     // The payload's relptrs are written buffer-relative (volume 0), never
     // with the producer's volume index: a file whose offsets matched live
     // SHM relptrs would resolve silently if a reader forgot to rebase it,
-    // where a buffer-relative offset fails to resolve. Readers still accept
-    // a volume-index hint in files written before this.
-    // When compressing, reserve worst-case bytes in the metadata
-    // block for the frame-index entry, sized from
-    // `estimated_payload_bytes` (an upper bound). The entry's
-    // 4-byte size field is written up front with the reserved
-    // amount; the actual frame index body is patched in via pwrite
-    // after the payload streams out. Decoders use the `frame_count`
-    // field inside the entry body -- not the entry's size field --
-    // to know how many frames to consume, so trailing zero padding
-    // is fine.
-    // Build the full output metadata block in a Vec, then write it in
-    // one shot. Compose via the metadata helpers so the
-    // "splice-past-padding + repad to alignment" logic lives in one
-    // place (`packet::prepend_metadata_entries` and
-    // `packet::append_metadata_entry`). Max metadata size is a few KB
-    // -- the frame index for the user's 2.4 GiB payload is ~2400
-    // bytes -- so the Vec allocation is negligible vs the payload.
+    // where a buffer-relative offset fails to resolve.
+    // When compressing, the frame-index entry is reserved at its worst-case
+    // size for `estimated_payload_bytes` and patched in once the payload is
+    // written. Decoders read the entry's `frame_count`, not its size field,
+    // so trailing zero padding is fine.
     let original_meta = std::slice::from_raw_parts(packet.add(32), metadata_size);
     let frame_index_reserved_body: usize = if lvl_opt.is_some() {
         let max_frames =
@@ -1729,11 +1643,6 @@ unsafe fn stream_packet_to_fd(
     };
     let original = original_meta.to_vec();
     let new_meta: Vec<u8> = if frame_index_reserved_body > 0 {
-        // Reserve worst-case body bytes -- zero-filled -- so the
-        // entry header records `size = max_frames * FRAME_ENTRY_BYTES
-        // + 4`. The actual frame-index body is patched in via pwrite
-        // after the payload streams out; the leading u32 frame_count
-        // tells decoders how many entries are populated.
         let zeros = vec![0u8; frame_index_reserved_body];
         crate::packet::append_metadata_entry(
             &original,
@@ -1753,19 +1662,7 @@ unsafe fn stream_packet_to_fd(
     if n < 0 {
         return n;
     }
-    // The frame-index body lives in `new_meta` at the offset right
-    // after the entry header (mmh + type + u32 size). We'll pwrite
-    // the actual body there after streaming finishes. Locate it by
-    // re-running `metadata_entries_end` on everything except the
-    // appended entry, which is exactly `new_meta` minus the trailing
-    // [entry header + reserved body + padding].
     let frame_index_body_start = if frame_index_reserved_body > 0 {
-        // Find where the frame-index entry starts: walk `new_meta`
-        // until we hit our frame-index entry. Since
-        // `append_metadata_entry` placed it immediately after the
-        // last pre-existing entry, the entry
-        // header begins at `metadata_entries_end(&new_meta) - (8 +
-        // reserved_body)`. The body offset is +8 past that.
         let entry_total = 8 + frame_index_reserved_body;
         let entries_end_in_new = crate::packet::metadata_entries_end(&new_meta);
         let body_offset_in_meta = entries_end_in_new - entry_total + 8;
@@ -1823,10 +1720,6 @@ unsafe fn stream_packet_to_fd(
         return -1;
     }
 
-    // Patch the actual frame index into the reserved metadata
-    // region. Compressed packets always have a frame index; the
-    // encoder emits at least one frame per packet (possibly empty
-    // for an empty payload).
     if let Some(body_start) = frame_index_body_start {
         if frame_index.is_empty() {
             set_errmsg(errmsg, &MorlocError::Packet(
@@ -1866,8 +1759,6 @@ unsafe fn stream_packet_to_fd(
     (end_pos - start_pos) as i64
 }
 
-// Write to a raw fd via the std::io::Write trait. Borrowed: never
-// closes the underlying fd on drop. Retries partial writes and EINTR.
 struct FdWriter(libc::c_int);
 
 impl std::io::Write for FdWriter {
@@ -1889,12 +1780,7 @@ impl std::io::Write for FdWriter {
     fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
 }
 
-// Stream an RPTR+VOIDSTAR payload to fd, optionally through a zstd
-// encoder. Uses `voidstar::write_flat_to_writer` for forward-only
-// flatten so the full payload never materializes in a Vec on the
-// way out. Returns the per-frame index for the caller to stamp into
-// the packet's METADATA_TYPE_FRAME_INDEX entry. Uncompressed output
-// returns an empty index.
+// Returns the frame index; empty when uncompressed.
 unsafe fn stream_rptr_payload(
     packet: *const u8,
     payload_start: usize,
@@ -1938,17 +1824,6 @@ unsafe fn stream_rptr_payload(
     };
 
     let writer = FdWriter(fd);
-    // Capture the moment the walker finishes inside the closure so we
-    // can split the user-visible walk+encode number into:
-    //   * walker  -- producer thread walking the voidstar (plus any
-    //                time it spent blocked on worker queue backpressure)
-    //   * drain   -- remainder spent in BufWriter::flush and
-    //                MultiFrameEncoder::finish waiting on in-flight
-    //                worker frames after the walker had no more bytes
-    //                to produce.
-    // A walker > payload / 1 GB/s suggests parallelizing the walker;
-    // a large drain suggests compression-side optimizations are more
-    // interesting.
     let t_total = std::time::Instant::now();
     let mut walker_elapsed: Option<std::time::Duration> = None;
     let walker_ref = &mut walker_elapsed;
@@ -1980,11 +1855,7 @@ unsafe fn stream_rptr_payload(
     }
 }
 
-// Stream a FILE+MSGPACK payload: open the source file, io::copy
-// through the optional encoder into the fd. Peak in-process memory
-// is bounded by the io::copy chunk size (8 KiB) + the encoder's
-// internal worker buffers. Returns the per-frame index (empty for
-// the uncompressed pass-through path).
+// Returns the frame index; empty when uncompressed.
 unsafe fn stream_file_payload(
     packet: *const u8,
     payload_start: usize,
@@ -2035,9 +1906,6 @@ unsafe fn stream_file_payload(
     }
 }
 
-// libc::malloc a copy of `src[..len]` and hand it back through the
-// (out_buf, out_size) outparams. Used by the pass-through cases of
-// normalize_data_packet_for_output so the C ABI is uniform.
 unsafe fn alloc_out(
     src: *const u8,
     len: usize,
@@ -2047,7 +1915,7 @@ unsafe fn alloc_out(
 ) -> i32 {
     let mem = libc::malloc(len) as *mut u8;
     if mem.is_null() {
-        set_errmsg(errmsg, &MorlocError::Packet("malloc failed".into()));
+        set_errmsg(errmsg, &MorlocError::Other("malloc failed".into()));
         return 1;
     }
     if len > 0 {
@@ -2060,14 +1928,8 @@ unsafe fn alloc_out(
 
 // ── make_file_data_packet_voidstar ───────────────────────────────────────────
 //
-// FILE-routed data path for `morloc make --no-shm` (or when SHM is
-// disabled at runtime). Serializes the voidstar with the same
-// msgpack writer used for cross-language transport, drops the bytes
-// into a unique temp file, and emits a FILE+MSGPACK packet pointing
-// at that path. The file is registered with `eval_arena` so it is
-// unlinked when the surrounding eval scope ends. The receiver reads
-// the file in `get_data_packet_as_mpk` / `get_morloc_data_packet_value`
-// (existing FILE+MSGPACK branch).
+// A FILE+MSGPACK packet for a value when shared memory is disabled: the
+// value is written as msgpack to a new file the packet names.
 unsafe fn make_file_data_packet_voidstar(
     voidstar: *mut c_void,
     schema: *const CSchema,
@@ -2082,20 +1944,13 @@ unsafe fn make_file_data_packet_voidstar(
         Err(e) => { set_errmsg(errmsg, &e); return ptr::null_mut(); }
     };
 
-    // Persistence rule: a user-supplied `--tmpdir` (manifest /
-    // env var / FFI setter) means "I picked this location to inspect
-    // files, don't delete them out from under me". Default behavior
-    // (no override) puts files in $TMPDIR and registers them with
-    // eval_arena for cleanup at end-of-eval.
+    // Files in a user-supplied tmpdir are kept for inspection.
     let user_dir = crate::packet::file_packet_tmpdir();
     let persistent = user_dir.is_some();
     let dir: std::path::PathBuf = match user_dir {
         Some(d) => std::path::PathBuf::from(d),
         None    => std::env::temp_dir(),
     };
-    // Create the directory if a user-specified path doesn't exist yet.
-    // std::env::temp_dir() always exists, but a manifest-supplied
-    // `--tmpdir` may not.
     if let Err(e) = std::fs::create_dir_all(&dir) {
         set_errmsg(errmsg, &MorlocError::Io(e));
         return ptr::null_mut();
@@ -2112,7 +1967,7 @@ unsafe fn make_file_data_packet_voidstar(
     let path_str = match path.to_str() {
         Some(s) => s,
         None => {
-            set_errmsg(errmsg, &MorlocError::Packet("Non-UTF8 temp path for file packet".into()));
+            set_errmsg(errmsg, &MorlocError::Other("Non-UTF8 temp path for file packet".into()));
             let _ = std::fs::remove_file(&path);
             return ptr::null_mut();
         }
@@ -2120,22 +1975,19 @@ unsafe fn make_file_data_packet_voidstar(
     let path_cstr = match std::ffi::CString::new(path_str) {
         Ok(c) => c,
         Err(_) => {
-            set_errmsg(errmsg, &MorlocError::Packet("Embedded NUL in temp path for file packet".into()));
+            set_errmsg(errmsg, &MorlocError::Other("Embedded NUL in temp path for file packet".into()));
             let _ = std::fs::remove_file(&path);
             return ptr::null_mut();
         }
     };
 
-    let packet = make_mpk_data_packet(path_cstr.as_ptr(), schema);
+    let packet = make_program_file_packet(path_cstr.as_ptr(), schema, PACKET_FORMAT_MSGPACK);
     if packet.is_null() {
-        set_errmsg(errmsg, &MorlocError::Packet("Failed to create FILE data packet".into()));
+        set_errmsg(errmsg, &MorlocError::Other("Failed to create FILE data packet".into()));
         let _ = std::fs::remove_file(&path);
         return ptr::null_mut();
     }
 
-    // Only track for auto-cleanup when no user override is in effect.
-    // A `--tmpdir` user is expecting to inspect these files; an
-    // automatic unlink would defeat the purpose.
     if !persistent {
         crate::eval_arena::record_file_if_active(path);
     }
@@ -2158,7 +2010,6 @@ pub(crate) unsafe fn print_morloc_data_packet(
         return 1;
     }
 
-    // Check for error
     let packet_error = get_morloc_data_packet_error_message(packet, errmsg);
     if !packet_error.is_null() {
         let err_str = CStr::from_ptr(packet_error).to_string_lossy().into_owned();
@@ -2175,7 +2026,6 @@ pub(crate) unsafe fn print_morloc_data_packet(
 
     match source {
         PACKET_SOURCE_MESG | PACKET_SOURCE_FILE => {
-            // Print the raw packet bytes
             let rc = print_binary(packet, packet_size, errmsg);
             if rc != 0 {
                 return rc;
@@ -2185,31 +2035,27 @@ pub(crate) unsafe fn print_morloc_data_packet(
             match format {
                 PACKET_FORMAT_VOIDSTAR => {
                     let payload_start = 32 + (*header).offset as usize;
-                    let relptr = *(packet.add(payload_start) as *const RelPtr);
+                    let relptr = std::ptr::read_unaligned(packet.add(payload_start) as *const RelPtr);
                     let voidstar_ptr = match shm::rel2abs(relptr) {
                         Ok(p) => p,
                         Err(e) => { set_errmsg(errmsg, &e); return 1; }
                     };
 
-                    // Build modified header with flat size
                     let flat_size = match crate::ffi::calc_voidstar_size_inner(voidstar_ptr, &rs) {
                         Ok(s) => s,
                         Err(e) => { set_errmsg(errmsg, &e); return 1; }
                     };
 
                     let mut new_header = *header;
+                    new_header.command.data.source = PACKET_SOURCE_MESG;
                     new_header.command.data.format = PACKET_FORMAT_VOIDSTAR;
-                    // Safely set length (packed struct)
-                    let new_hdr_ptr = &mut new_header as *mut PacketHeader as *mut u8;
-                    *(new_hdr_ptr.add(24) as *mut u64) = flat_size as u64;
+                    new_header.length = flat_size as u64;
 
-                    // Print header
                     let rc = print_binary(&new_header as *const PacketHeader as *const u8, 32, errmsg);
                     if rc != 0 {
                         return rc;
                     }
 
-                    // Print metadata
                     let offset = (*header).offset as usize;
                     if offset > 0 {
                         let rc = print_binary(packet.add(32), offset, errmsg);
@@ -2218,17 +2064,15 @@ pub(crate) unsafe fn print_morloc_data_packet(
                         }
                     }
 
-                    // Write flattened voidstar data to stdout
                     match crate::voidstar::write_binary_to_fd(libc::STDOUT_FILENO, voidstar_ptr, &rs) {
                         Ok(_) => {}
                         Err(e) => {
                             set_errmsg(errmsg, &e);
-                            return if matches!(e, MorlocError::PipeClosed) { morloc_runtime_types::MLC_RESULT_PIPE_CLOSED } else { 1 };
+                            return if matches!(e, MorlocError::PipeClosed) { crate::ipc_ffi::note_pipe_closed() } else { 1 };
                         }
                     }
                 }
                 _ => {
-                    // Other formats: print raw packet
                     let rc = print_binary(packet, packet_size, errmsg);
                     if rc != 0 {
                         return rc;
@@ -2263,9 +2107,7 @@ unsafe fn print_binary(
 mod donation_tests {
 
     //! The reference a sender takes on behalf of a recipient must keep the
-    //! block alive across the sender's own release. A concurrency soak can
-    //! only show that the window narrowed; this shows the ordering property
-    //! itself.
+    //! block alive across the sender's own release.
     use super::*;
 
     #[test]
@@ -2385,24 +2227,9 @@ mod donation_tests {
 
 #[cfg(test)]
 mod auto_routing_tests {
-    //! Verifies the inline-vs-RPTR routing decision in
-    //! `make_data_packet_auto`. The packet header layout puts the
-    //! `source` byte at offset 13 (4 magic + 2 plain + 2 version + 2
-    //! flavor + 2 mode + 1 cmd_type = 13). PACKET_SOURCE_MESG = 0x00
-    //! triggers the inline path; PACKET_SOURCE_RPTR = 0x02 ships the
-    //! relptr. Tests synthesize an `Array<u8>` voidstar of a chosen
-    //! flat size, run the routing function, and inspect the resulting
-    //! packet's source byte.
-    //!
-    //! The flat size of an `Array<u8>` of N data bytes is `16 + N`
-    //! (an `Array` wrapper is 16 bytes: usize size + isize relptr).
-    //! `MORLOC_INLINE_THRESHOLD` is 65536 bytes. So:
-    //!   - N <= 65520 → flat <= 65536 → MESG (inline)
-    //!   - N >  65520 → flat >  65536 → RPTR
-    //!
-    //! Sizes far from the boundary are picked to avoid the test
-    //! becoming alignment-sensitive; the boundary itself is checked
-    //! once each side.
+    //! `make_data_packet_auto` inlines a value whose flat size is at most the
+    //! inline threshold (source MESG) and sends a larger one by reference
+    //! (source RPTR).
     use super::*;
 
     #[test]
@@ -2435,16 +2262,10 @@ mod auto_routing_tests {
         crate::init_test_shm()
     }
 
-    /// Build a flat blob laid out as `Array<u8>` with `n` data bytes,
-    /// hand it to `voidstar::read_binary` to materialize into SHM, and
-    /// return both the abs-ptr and the relptr ready to feed into
-    /// `make_data_packet_auto`.
+    /// An `Array<u8>` of `n` bytes in shared memory.
     unsafe fn build_byte_array_voidstar(n: usize) -> (AbsPtr, RelPtr) {
         let total = std::mem::size_of::<Array>() + n;
         let mut blob = vec![0u8; total];
-        // Wrapper: size = n, data = relative offset 16 within the blob
-        // (read_binary's relocation adds the global base so it
-        // resolves to the byte-array region after copy).
         let arr = Array {
             size: n,
             data: std::mem::size_of::<Array>() as RelPtr,
@@ -2454,9 +2275,6 @@ mod auto_routing_tests {
             blob.as_mut_ptr(),
             std::mem::size_of::<Array>(),
         );
-        // Fill data with a recognizable pattern so any in-place
-        // corruption later would be visible (the pattern itself is
-        // not asserted on; tests only check the source byte).
         for i in 0..n {
             blob[std::mem::size_of::<Array>() + i] = (i & 0xff) as u8;
         }
@@ -2471,14 +2289,8 @@ mod auto_routing_tests {
         crate::schema::parse_schema("au1").unwrap()
     }
 
-    /// Run `make_data_packet_auto` on a synthetic byte-array voidstar
-    /// of size `n` and return the `source` byte from the resulting
-    /// packet header.
-    ///
-    /// Acquires [`TEST_CONFIG_LOCK`] for the duration of the call so
-    /// the read of [`crate::packet::inline_threshold`] inside
-    /// `make_data_packet_auto` can't race with a concurrent test's
-    /// write.
+    /// The `source` byte of the packet `make_data_packet_auto` builds for an
+    /// `n`-byte array.
     fn auto_route_source_for(n: usize) -> u8 {
         let _guard = TEST_CONFIG_LOCK.lock().unwrap();
         let _shm = ensure_shm();
@@ -2499,7 +2311,6 @@ mod auto_routing_tests {
                 n
             );
             let source = *packet.add(SOURCE_OFFSET);
-            // Sanity: cmd_type at offset 12 should be DATA.
             assert_eq!(
                 *packet.add(12),
                 crate::packet::PACKET_TYPE_DATA,
@@ -2508,8 +2319,6 @@ mod auto_routing_tests {
             );
             libc::free(packet as *mut c_void);
             crate::cschema::CSchema::free(cs);
-            // Best-effort SHM cleanup so the small test pool isn't
-            // exhausted across many tests; arena isn't active here.
             let _ = shm::shfree(abs);
             source
         }
@@ -2517,7 +2326,6 @@ mod auto_routing_tests {
 
     #[test]
     fn empty_payload_inlines() {
-        // N=0: just the 16-byte wrapper, no data. Far below threshold.
         assert_eq!(auto_route_source_for(0), PACKET_SOURCE_MESG);
     }
 
@@ -2533,15 +2341,11 @@ mod auto_routing_tests {
 
     #[test]
     fn just_below_threshold_inlines() {
-        // 16 + 65000 = 65016 < 65536. Comfortable under the cutoff.
         assert_eq!(auto_route_source_for(65000), PACKET_SOURCE_MESG);
     }
 
-    /// Per-element overhead the size calculator adds beyond the raw
-    /// `sizeof::<Array>() + N` payload for the byte-array schema:
-    /// the wrapper plus the `array_data_alignment - 1` bytes the
-    /// allocator may need for SIMD/BLAS-aligned element storage
-    /// (see [`crate::ffi::calc_voidstar_size_inner`]).
+    /// The flat size of an `n`-byte array minus `n`: the wrapper plus
+    /// `array_data_alignment - 1` bytes of alignment slack.
     fn byte_array_flat_overhead() -> usize {
         let schema = byte_array_schema();
         let elem_align = schema.parameters[0].array_data_alignment();
@@ -2550,31 +2354,19 @@ mod auto_routing_tests {
 
     #[test]
     fn at_threshold_inlines() {
-        // The contract is `flat_size <= MORLOC_INLINE_THRESHOLD` so the
-        // exactly-equal case must inline. flat_size for an N-byte
-        // byte-array payload is `overhead + N`; pick N so the sum
-        // equals the threshold exactly (this is also the largest
-        // allowed inline payload).
+        // The contract is `flat_size <= threshold`: equality inlines.
         let n = MORLOC_INLINE_THRESHOLD - byte_array_flat_overhead();
         assert_eq!(auto_route_source_for(n), PACKET_SOURCE_MESG);
     }
 
     #[test]
     fn one_byte_over_threshold_uses_rptr() {
-        // Same wrapper, one extra data byte: must flip to RPTR.
         let n = MORLOC_INLINE_THRESHOLD - byte_array_flat_overhead() + 1;
         assert_eq!(auto_route_source_for(n), PACKET_SOURCE_RPTR);
     }
 
     #[test]
     fn bounded_size_exits_early_above_bound() {
-        // Build a voidstar large enough that an unbounded walk would
-        // visibly count past the bound, then verify
-        // `calc_voidstar_size_bounded` returns a value `> bound` (and
-        // therefore the inline-vs-RPTR routing test below it sees the
-        // correct "exceeded" signal). The exact returned value is the
-        // accumulator at the moment the walk short-circuited; we only
-        // assert the predicate the routing decision uses.
         let _guard = TEST_CONFIG_LOCK.lock().unwrap();
         let _shm = ensure_shm();
         let schema = byte_array_schema();
@@ -2588,7 +2380,6 @@ mod auto_routing_tests {
             "bounded walk returned {} for {}-byte payload; expected > bound {}",
             sz, n, bound
         );
-        // And the unbounded walk should still return the exact size.
         let exact = crate::ffi::calc_voidstar_size_inner(abs as *const u8, &schema).unwrap();
         assert!(
             exact >= n,
@@ -2600,8 +2391,6 @@ mod auto_routing_tests {
 
     #[test]
     fn bounded_size_matches_exact_when_bound_clears_payload() {
-        // When the bound exceeds the actual size, bounded must match
-        // the unbounded inner -- no short-circuit fires.
         let _guard = TEST_CONFIG_LOCK.lock().unwrap();
         let _shm = ensure_shm();
         let schema = byte_array_schema();
@@ -2617,7 +2406,6 @@ mod auto_routing_tests {
 
     #[test]
     fn well_over_threshold_uses_rptr() {
-        // ~128 KB. Comfortably in the RPTR regime.
         assert_eq!(auto_route_source_for(128 * 1024), PACKET_SOURCE_RPTR);
     }
 }
@@ -2818,5 +2606,55 @@ mod generation_tests {
         }
         assert!(err.is_null());
         assert_eq!(got, abs as *mut u8);
+    }
+}
+
+#[cfg(test)]
+mod call_packet_bounds_tests {
+    use super::*;
+
+    unsafe fn call_with_one_arg() -> Vec<u8> {
+        let arg = make_fail_packet(c"x".as_ptr());
+        let args = [arg as *const u8];
+        let mut err: *mut c_char = ptr::null_mut();
+        let call = make_morloc_local_call_packet(7, args.as_ptr(), 1, &mut err);
+        assert!(err.is_null());
+        let size = morloc_packet_size(call, &mut err);
+        let bytes = std::slice::from_raw_parts(call, size).to_vec();
+        libc::free(call as *mut c_void);
+        libc::free(arg as *mut c_void);
+        bytes
+    }
+
+    unsafe fn read_call(bytes: &[u8]) -> Result<usize, String> {
+        let mut err: *mut c_char = ptr::null_mut();
+        let call = read_morloc_call_packet(bytes.as_ptr(), &mut err);
+        if call.is_null() {
+            let msg = CStr::from_ptr(err).to_string_lossy().into_owned();
+            libc::free(err as *mut c_void);
+            return Err(msg);
+        }
+        let n = (*call).nargs;
+        free_morloc_call(call);
+        Ok(n)
+    }
+
+    #[test]
+    fn a_well_formed_call_packet_reads_its_arguments() {
+        unsafe { assert_eq!(read_call(&call_with_one_arg()), Ok(1)) };
+    }
+
+    /// An argument whose own header claims more bytes than the call packet
+    /// holds is refused before anything past the packet is read.
+    #[test]
+    fn an_argument_past_the_call_packets_end_is_refused() {
+        unsafe {
+            let mut bytes = call_with_one_arg();
+            let arg_start = 32 + u32::from_le_bytes(bytes[20..24].try_into().unwrap()) as usize;
+            let arg_length_at = arg_start + 24;
+            bytes[arg_length_at..arg_length_at + 8].copy_from_slice(&(1u64 << 20).to_le_bytes());
+            let msg = read_call(&bytes).unwrap_err();
+            assert!(msg.contains("runs past the packet's end"), "{msg}");
+        }
     }
 }

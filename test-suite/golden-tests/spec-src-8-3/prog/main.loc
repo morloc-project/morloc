@@ -1,0 +1,18 @@
+-- SRC-8: `morloc install --force` rebuilds the installed programs whose
+-- sourced files it changed.
+--
+-- prog sources its own own.py and imports bumpmod, which sources bump.py.
+-- Reinstalling a changed bumpmod rebuilds the installed prog, which then runs
+-- the new code; with `--no-rebuild` prog is only named, and refuses to run.
+-- Editing prog's own project file does not touch the installed copy, so the
+-- installed program keeps running.
+module prog (foo)
+
+import root-py
+import bumpmod (bump)
+
+source Py from "own.py" ("own")
+own :: Real -> Real
+
+foo :: Real -> Real
+foo x = own (bump x)

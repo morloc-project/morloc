@@ -21,6 +21,6 @@ source R from "hosts.R"
 
 -- a curried host: `mk(k)` returns a callable, so the call is `mk(k)(x)`
 source R from "hosts.R" where
-  --' name: home_mk
+  --' @name home_mk
   --' @rsize 1
   mkHome

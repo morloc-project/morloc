@@ -7,8 +7,8 @@ module main (f)
 import vector
 
 f ::
-  --' arg: -v
-  --' default: "[1,2]"
+  --' @arg -v
+  --' @default "[1,2]"
   Vector 3 Int ->
   Int
 f v = 0

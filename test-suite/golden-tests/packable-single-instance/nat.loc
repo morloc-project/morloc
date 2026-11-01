@@ -6,9 +6,9 @@ module nat (howVec)
 
 import root-py
 
-newtype Vec n a = [a]
+newtype Vec (n :: Nat) a = [a]
 
-type Py => (Vec n a) = "dict" n a
+type Py => (Vec (n :: Nat) a) = "dict" n a
 
 instance Packable [a] (Vec n a) where
   source Py from "helpers.py" ("pack_generic" as pack, "unpack_generic" as unpack)

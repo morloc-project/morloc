@@ -1,0 +1,28 @@
+-- Spec NATIVE-9: in Python a numpy array a literal builds or a pool receives
+-- is read-only, inline or through shared memory, numeric or object.
+module main (literal, literalObject, received, receivedObject)
+
+import root-py
+import root-cpp
+import vector
+import vector-py
+import vector-cpp
+
+source Py from "flags.py" ("writable")
+writable :: Vector n a -> Str
+
+source Cpp from "make.hpp" ("make", "make_ints" as makeInts)
+make :: Int -> Vector n Real
+makeInts :: Int -> Vector n Int
+
+literal :: Str
+literal = writable ([1, 2, 3] :: Vector 3 U8)
+
+literalObject :: Str
+literalObject = writable ([1, 2] :: Vector 2 Int)
+
+received :: Int -> Str
+received n = writable (make n)
+
+receivedObject :: Int -> Str
+receivedObject n = writable (makeInts n)

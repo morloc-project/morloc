@@ -32,6 +32,7 @@ pub mod spawn;
 pub mod child_group;
 pub mod owner_word;
 pub mod schema;
+pub mod dims;
 pub mod cschema;
 pub mod null_check;
 pub mod packet;
@@ -57,7 +58,7 @@ pub use cschema::is_top_null;
 /// provisioning can refuse a prebuilt binary whose version differs from the
 /// compiler's expected value. Bump it (and the header) whenever the C ABI or
 /// wire packet format changes.
-pub const MORLOC_ABI_VERSION: u32 = 14;
+pub const MORLOC_ABI_VERSION: u32 = 15;
 
 #[cfg(test)]
 mod abi_version_tests {
@@ -92,6 +93,14 @@ pub const PRINT_RESULT_ERR: i32 = 1;
 /// (not PRINT_*) since @write/@flush/@close do not print; the C++ pool
 /// mirrors it as MLC_RESULT_PIPE_CLOSED.
 pub const MLC_RESULT_PIPE_CLOSED: i32 = 2;
+
+/// The tag on an error that says this process lost shared memory (SHM-17,
+/// PANIC-14).
+pub const SHARED_MEMORY_LOST: &str = "[SHM-17] shared memory lost: ";
+
+/// The exit status of a pool process that lost its shared memory: it ran out
+/// of space (SHM-17) or could not map a volume it reads from (PANIC-14).
+pub const EXIT_SHARED_MEMORY_LOST: i32 = 71;
 
 /// Back-compat alias for the print path.
 pub const PRINT_RESULT_PIPE_CLOSED: i32 = MLC_RESULT_PIPE_CLOSED;

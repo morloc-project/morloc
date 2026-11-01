@@ -1,0 +1,169 @@
+-- A let-bound value holding a function, used from code in several
+-- languages, is built again in each language that uses it (COST-15): a
+-- reference in C++ or Rust to a lambda let-bound in Python calls a copy
+-- made there, not the Python one. Covered: a shared lambda used from two
+-- and three languages, the shared lambdas function evaluation leaves in a
+-- ladder of helpers (`chain`), a binder between the let and a use that
+-- rebinds a name the lambda captures, a record holding a suspension, a
+-- function chosen by a conditional (computed once, not copied), a copy
+-- under `@try`,
+-- a labeled lambda, a copy inside a recursive helper, and a lambda capturing
+-- a function host code made, used where the host is and from C++. Each result
+-- matches the same computation by hand; `hostCopy` in bad-host.loc, whose
+-- C++ callback would call a function made by Python, is refused at build.
+
+--' Copies of let-bound function values
+module main
+  ( letTwo
+  , letThree
+  , chain
+  , shadowPy
+  , letShadow
+  , letRecord
+  , chosenOnce
+  , tryCopy
+  , labeled
+  , recCopy
+  , hostHome
+  , hostDirect
+  )
+
+import root-py
+import root-cpp
+import root-rust
+
+source Py from "f.py"
+  ( "py_f" as pyF
+  , "py_map" as pyMap
+  , "py_sum" as pySum
+  , "py_tick" as pyTick
+  , "py_feed" as pyFeed
+  )
+source Cpp from "f.hpp" ("cpp_f" as cppF, "cpp_map" as cppMap, "cpp_sum" as cppSum)
+source Rust from "f.rs" ("rust_f" as rustF, "rust_map" as rustMap, "rust_sum" as rustSum)
+
+--' Add one
+pyF :: Int -> Int
+--' Double
+cppF :: Int -> Int
+--' Triple
+rustF :: Int -> Int
+--' Map in Python
+pyMap :: (Int -> Int) -> [Int] -> [Int]
+--' Map in C++
+cppMap :: (Int -> Int) -> [Int] -> [Int]
+--' Map in Rust
+rustMap :: (Int -> Int) -> [Int] -> [Int]
+--' Sum in Python
+pySum :: [Int] -> Int
+--' Sum in C++
+cppSum :: [Int] -> Int
+--' Sum in Rust
+rustSum :: [Int] -> Int
+--' Print a tick and return the input
+pyTick :: Int -> <IO> Int
+--' Call a function with a Python function that triples
+pyFeed :: ((Int -> Int) -> Int) -> Int
+
+--' Use a shared lambda from Python and C++
+letTwo :: Int -> Int
+letTwo n =
+  let h = \x -> cppF (x + n)
+  in pySum (pyMap (\x -> pyF (h x)) [1, 2, 3]) + cppSum (cppMap (\x -> cppF (h x)) [1, 2, 3])
+
+--' Use a shared lambda from Python, C++ and Rust
+letThree :: Int -> Int
+letThree n =
+  let h = \x -> pyF (cppF (x + n))
+  in pySum (pyMap (\x -> pyF (h x)) [1, 2])
+       + cppSum (cppMap (\x -> cppF (h x)) [1, 2])
+       + rustSum (rustMap (\x -> rustF (h x)) [1, 2])
+
+k0 :: (Int -> Int) -> Int
+k0 g = pySum (pyMap g [1, 2, 3])
+
+k1 :: (Int -> Int) -> Int
+k1 g = k0 (\x -> pyF (g x)) + k0 (\x -> cppF (g x))
+
+k2 :: (Int -> Int) -> Int
+k2 g = k1 (\x -> pyF (g x)) + k1 (\x -> cppF (g x))
+
+k3 :: (Int -> Int) -> Int
+k3 g = k2 (\x -> pyF (g x)) + k2 (\x -> cppF (g x))
+
+--' Run a ladder of helpers that share lambdas
+chain :: Int -> Int
+chain n = k3 (\x -> x + n)
+
+--' Rebind a captured name between the let and a use
+shadowPy :: Int -> Int
+shadowPy n =
+  let h = \x -> pyF (pyF (x + n))
+  in pySum (pyMap (\n -> pyF (h n)) [1, 2]) + cppSum (cppMap (\n -> cppF (h n)) [1, 2])
+
+--' Rebind a captured name, the let in C++
+letShadow :: Int -> Int
+letShadow n =
+  let h = \x -> cppF (x + n)
+  in pySum (pyMap (\n -> pyF (h n)) [1, 2]) + cppSum (cppMap (\n -> cppF (h n)) [1, 2])
+
+--' A suspension and a value
+record Holder where
+  act :: <IO> Int
+  base :: Int
+
+record Py => Holder = "dict"
+record Cpp => Holder = "struct"
+
+useHolder :: Holder -> <IO> Int
+useHolder hd = do
+  a <- .act hd
+  cppF (a + .base hd)
+
+--' Run a suspension held in a record from two languages
+letRecord :: Int -> <IO> Int
+letRecord n = do
+  let hd = {act = pyTick n, base = 1}
+  a <- useHolder hd
+  b <- .act hd
+  pyF (a + b)
+
+--' Choose a function once and use it from two languages
+chosenOnce :: Int -> <IO> Int
+chosenOnce n = do
+  k <- pyTick n
+  let h = ? k > 0 = (\x -> x + k) : (\x -> x - k)
+  pySum (pyMap (\x -> pyF (h x)) [1, 2]) + cppSum (cppMap (\x -> cppF (h x)) [1, 2])
+
+--' Use a shared lambda under @try
+tryCopy :: Int -> Int
+tryCopy n =
+  let h = \x -> cppF (x + n)
+  in match (@try (pySum (pyMap (\x -> pyF (h x)) [1, 2])))
+       | (Ok v) = v + cppSum (cppMap (\x -> cppF (h x)) [1])
+       | (Err _) = 0
+
+--' Use a labeled shared lambda from two languages
+labeled :: Int -> Int
+labeled n =
+  let h = \x -> step@cppF (x + n)
+  in pySum (pyMap (\x -> pyF (h x)) [1, 2]) + cppSum (cppMap (\x -> cppF (h x)) [1, 2])
+
+countWith :: (Int -> Int) -> Int -> Int
+countWith h k
+  ? k == 0 = 0
+  : pyF (h k) + countWith h (k - 1)
+
+--' Use a shared lambda in a recursion and outside it
+recCopy :: Int -> Int
+recCopy n =
+  let h = \x -> cppF (x + n)
+  in countWith h 3 + cppSum (cppMap (\x -> cppF (h x)) [1])
+
+--' Use a lambda capturing a host function where the host is
+hostHome :: Int -> Int
+hostHome n = pyFeed (\g -> let h = \x -> cppF (g x + n) in pySum (pyMap (\x -> pyF (h x)) [1, 2]) + pyF (h n))
+
+--' Use a lambda capturing a host function from C++
+hostDirect :: Int -> Int
+hostDirect n = pyFeed (\g -> let h = \x -> pyF (g x + n) in pySum (pyMap h [1, 2]) + cppF (h n))

@@ -2,7 +2,7 @@ module main (foo)
 
 -- 00n - declare n
 
-import fooroot
+import .fooroot
 
 foo x y = x + -1 * y
 foo x y = 0 + x + -1 * y

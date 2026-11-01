@@ -1,4 +1,4 @@
-module main (viaCpp, viaPy, viaR, viaRust, rustHosted)
+module main (viaCpp, viaPy, viaR, viaRust, rustHosted, rHosted)
 
 import root
 import root-py
@@ -6,10 +6,10 @@ import root-cpp
 import root-r
 import root-rust
 
--- Summarising a run of chunks one at a time. Each chunk is built,
--- measured, and finished with before the next begins, so the shared
--- memory a run needs is one chunk or two, whatever its length and
--- whichever language drives it.
+-- Summarising a run of chunks one at a time. Each chunk is built and
+-- measured before the next begins, so the shared
+-- memory a run needs does not grow with its length, whichever language
+-- drives it.
 --
 -- Each pipeline sums the rows of every chunk and then reports the shared
 -- memory the run needed. The row total is what `highWaterMiB` takes as
@@ -19,7 +19,8 @@ import root-rust
 -- has to let each one go. `rustHosted` varies the pool that drives the
 -- loop, which is what has to let go of the results it has been handed;
 -- it reports from Rust because the reporter has to be somewhere that has
--- seen the blocks.
+-- seen the blocks. `rHosted` drives the loop from R, inside one request
+-- (SHM-16).
 
 type Table
 type Py => Table = "pyarrow.RecordBatch"
@@ -29,7 +30,7 @@ type Rust => Table = "rustmorloc::arrow_array::RecordBatch"
 
 source Py from "src.py" ("mkChunk" as mkChunkPy, "nRows" as nRowsPy)
 source Cpp from "src.hpp" ("mkChunk" as mkChunkCpp, "nRows" as nRowsCpp, "highWaterMiB")
-source R from "src.R" ("nRows" as nRowsR)
+source R from "src.R" ("nRows" as nRowsR, "sumOver" as sumOverR)
 source Rust from "src.rs" ("n_rows" as nRowsRust, "high_water_mib" as highWaterMiBRust)
 
 mkChunkPy :: Int -> Table
@@ -38,6 +39,7 @@ nRowsPy :: Table -> Int
 nRowsCpp :: Table -> Int
 nRowsR :: Table -> Int
 nRowsRust :: Table -> Int
+sumOverR :: (Int -> Int) -> [Int] -> Int
 highWaterMiB :: Int -> Int
 highWaterMiBRust :: Int -> Int
 
@@ -55,3 +57,6 @@ viaRust n = highWaterMiB (sum (map (\i -> nRowsRust (mkChunkCpp i)) (range 0 n))
 
 rustHosted :: Int -> Int
 rustHosted n = highWaterMiBRust (sum (map (\i -> nRowsRust (mkChunkPy i)) (range 0 n)))
+
+rHosted :: Int -> Int
+rHosted n = highWaterMiB (sumOverR (\i -> nRowsR (mkChunkCpp i)) (range 0 n))

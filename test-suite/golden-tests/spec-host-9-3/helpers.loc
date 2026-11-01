@@ -1,0 +1,21 @@
+--' Functions in Python and C++ to place the adders' uses
+module helpers (pyF, cppF, pyMap, pySum, cppMap, cppSum)
+
+import root-py
+import root-cpp
+
+source Py from "f.py" ("py_f" as pyF, "py_map" as pyMap, "py_sum" as pySum)
+source Cpp from "f.hpp" ("cpp_f" as cppF, "cpp_map" as cppMap, "cpp_sum" as cppSum)
+
+--' Add one
+pyF :: Int -> Int
+--' Double
+cppF :: Int -> Int
+--' Map in Python
+pyMap :: (Int -> Int) -> [Int] -> [Int]
+--' Sum in Python
+pySum :: [Int] -> Int
+--' Map in C++
+cppMap :: (Int -> Int) -> [Int] -> [Int]
+--' Sum in C++
+cppSum :: [Int] -> Int

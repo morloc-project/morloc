@@ -209,6 +209,7 @@ extern "C" const char* mlc_current_frame(size_t* len) {
 }
 
 [[noreturn]] void mlc_runtime_defect(const std::string& msg) {
+    morloc_exit_if_shared_memory_lost(msg.c_str());
     std::fprintf(stderr, "morloc internal error (C++ pool): %s\n", msg.c_str());
     std::fflush(stderr);
     // PANIC-5

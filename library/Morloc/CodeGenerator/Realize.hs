@@ -1,3 +1,4 @@
+{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ViewPatterns #-}
 
@@ -17,10 +18,13 @@ implementation.
 module Morloc.CodeGenerator.Realize
   ( realityCheck
   , removeVarS
+  , placeNormalized
   ) where
 
-import Morloc.CodeGenerator.Serial (containsFunT)
-import Morloc.CodeGenerator.Value (etaParts, isValueWith)
+import Morloc.CodeGenerator.Serial (containsEffectT, containsFunT)
+import Morloc.CodeGenerator.Value (etaParts, isValue, isValueWith)
+import Morloc.CodeGenerator.HostProvenance (HostLimit (..), planHostFunctions, sameTermSources)
+import Morloc.CodeGenerator.LambdaEval (reindexTree)
 import Morloc.Frontend.Namespace (newIndex)
 import Morloc.Frontend.Rename (displayName)
 import Morloc.CodeGenerator.Namespace
@@ -28,14 +32,89 @@ import qualified Morloc.CodeGenerator.SystemConfig as MCS
 import Morloc.Data.Doc
 import Morloc.Data.Map (Map)
 import qualified Morloc.Data.Map as Map
-import Data.IORef (modifyIORef, newIORef, readIORef)
+import Data.IORef (IORef, modifyIORef, newIORef, readIORef)
 import qualified Data.Set as Set
+import Data.Graph (SCC (..), stronglyConnComp)
 import qualified Data.List as List
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Monad as MM
 import qualified Morloc.TypeEval as TE
 import qualified Morloc.LangRegistry as LR
 import qualified Morloc.CodeGenerator.Infer as Infer
+
+-- | How the placement listing names a node that has no name of its own.
+nodeKind :: ExprS g f c -> MT.Text
+nodeKind e = case e of
+  AppS {} -> "application"
+  LamS {} -> "lambda"
+  LstS {} -> "list"
+  TupS {} -> "tuple"
+  NamS {} -> "record"
+  ConS _ n _ _ -> n
+  LetS {} -> "let"
+  IfS {} -> "if"
+  DoBlockS {} -> "do"
+  EvalS {} -> "eval"
+  CoerceS {} -> "cast"
+  IntrinsicS {} -> "intrinsic"
+  LabelS {} -> "label"
+  VarS v _ -> unEVar (displayName v)
+  BndS v -> unEVar (displayName v)
+  LetBndS v -> unEVar (displayName v)
+  CallS v -> "call " <> unEVar (displayName v)
+  ExeS (SrcCall src) -> unEVar (displayName (srcAlias src))
+  _ -> "value"
+
+-- | One line per named call of a realized tree, its arguments and body
+-- indented beneath it, with the language its implementation runs in. @*@
+-- marks a node in another language than the line above it: a crossing. An
+-- unnamed node is listed only when it crosses, by its kind.
+placementLines :: Maybe EVar -> AnnoS (Indexed Type) One (Indexed Lang) -> [MT.Text]
+placementLines (Just root) t@(AnnoS _ (Idx _ l) _) = listedAt 0 Nothing l (unEVar (displayName root)) : placementLinesAt 1 (Just l) t
+placementLines Nothing t = placementLinesAt 0 Nothing t
+
+-- | A listing line: a name and its language, marked when it crosses.
+listedAt :: Int -> Maybe Lang -> Lang -> MT.Text -> MT.Text
+listedAt depth parent l x =
+  MT.replicate depth "  " <> x <> " [" <> render (pretty l) <> "]"
+    <> (if maybe False (/= l) parent then " *" else "")
+
+placementLinesAt :: Int -> Maybe Lang -> AnnoS (Indexed Type) One (Indexed Lang) -> [MT.Text]
+placementLinesAt = go
+  where
+    go :: Int -> Maybe Lang -> AnnoS (Indexed Type) One (Indexed Lang) -> [MT.Text]
+    go depth parent (AnnoS _ (Idx _ appLang) e) = case e of
+      -- a named call is listed in the language its implementation runs in
+      AppS f@(AnnoS _ (Idx _ headLang) _) xs | Just v <- callName f ->
+        listed headLang (name v) : concatMap (go (depth + 1) (Just headLang)) (definition f <> xs)
+      VarS v (One body) -> entry (name v) : below (definition' body)
+      ExeS (SrcCall src) -> [entry (name (srcAlias src))]
+      CallS v -> [entry ("call " <> name v)]
+      LetBndS v | moved -> [entry (name v)]
+      BndS v | moved -> [entry (name v)]
+      _ | moved -> entry ("(" <> nodeKind e <> ")") : below (children e)
+      _ -> concatMap (go depth (Just lang)) (children e)
+      where
+        lang = appLang
+        moved = maybe False (/= lang) parent
+        listed = listedAt depth parent
+        entry = listed lang
+        below = concatMap (go (depth + 1) (Just lang))
+        name = unEVar . displayName
+
+    children = foldExprS (: [])
+
+    callName :: AnnoS g One c -> Maybe EVar
+    callName (AnnoS _ _ (VarS v _)) = Just v
+    callName (AnnoS _ _ (ExeS (SrcCall src))) = Just (srcAlias src)
+    callName (AnnoS _ _ (CallS v)) = Just (EV ("call " <> unEVar (displayName v)))
+    callName _ = Nothing
+
+    definition (AnnoS _ _ (VarS _ (One body))) = definition' body
+    definition _ = []
+
+    definition' (AnnoS _ _ (ExeS _)) = []
+    definition' body = [body]
 
 realityCheck ::
   -- | one AST forest for each command exported from main
@@ -55,7 +134,7 @@ realityCheck es = do
   -- select a single instance at each node of each exported tree, and
   -- separate unrealized (general) trees from realized ones
   (gASTs0, rASTs00) <-
-    mapM (\e -> realize tables e >>= \(_, finish) -> finish Nothing) roots
+    mapM (\e -> realize tables noPins e >>= \(_, finish) -> finish Nothing) roots
       |>> partitionEithers
   rASTs0 <- realizeDemanded finishers rASTs00
   let takesFunction = Set.fromList [v | AnnoS (Idx _ (FunT ts _)) _ (VarS v _) <- specs, any containsFunT ts]
@@ -89,7 +168,7 @@ scoreSpec ::
   AnnoS (Indexed Type) Many Int ->
   MorlocMonad (Map EVar [(Lang, Score)], Map EVar Finisher)
 scoreSpec (tables, finishers) spec@(AnnoS _ _ (VarS v _)) = do
-  (AnnoS _ (Idx _ scores) _, finish) <- realize tables spec
+  (AnnoS _ (Idx _ scores) _, finish) <- realize tables noPins spec
   return (Map.insert v scores tables, Map.insert v finish finishers)
 scoreSpec acc _ = return acc
 
@@ -122,7 +201,7 @@ realizeDemanded finishers trees0
                 let name = EV (unEVar v <> "@" <> langName l')
                     firstCopy = not (any ((== v) . fst) (Map.keys landed))
                 copy@(AnnoS (Idx gi _) _ _) <- renameRoot name <$> if firstCopy then return tree else reindexOne tree
-                MM.modify (\st -> st {stateRecursionTargets = Map.insert name gi (stateRecursionTargets st)})
+                MM.modify' (\st -> st {stateRecursionTargets = Map.insert name gi (stateRecursionTargets st)})
                 loop (Map.insert d name named) (Map.insert (v, l') name landed) (copies <> [copy]) (ds <> demands copy)
     renameUses named = go
       where
@@ -170,7 +249,7 @@ nexusDemanded finishers takesFunction trees0
                           MM.liftIO (modifyIORef namedRef (Map.insert v name))
                           -- a copy of its own: a pool may hold another
                           copy@(AnnoS (Idx ri _) _ _) <- renameRoot name <$> (pure' v >>= rewrite)
-                          MM.modify (\st -> st {stateNamedGasts = Map.insert ri name (stateNamedGasts st)})
+                          MM.modify' (\st -> st {stateNamedGasts = Map.insert ri name (stateNamedGasts st)})
                           MM.liftIO (modifyIORef copiesRef (<> [copy]))
                           return (AnnoS g c (CallS name))
             _ -> AnnoS g c <$> mapExprSM rewrite e
@@ -178,24 +257,99 @@ nexusDemanded finishers takesFunction trees0
       copies <- MM.liftIO (readIORef copiesRef)
       return (trees <> copies)
 
--- | The realize objective: @(accumulated cost, number of language switches)@,
--- compared lexicographically. Cost dominates; switch-count is a PURE tiebreaker
--- that only resolves genuine cost-ties (it never overrides a real cost
--- difference), keeping language-agnostic terms in the parent's language to avoid
--- gratuitous boundaries. The same objective is used in both scoring and collapse
--- (replacing the old backward-only @+1@ biasedCost).
-type Score = (Int, Int)
+-- | The realize objective (COST-1), compared lexicographically: whether any
+-- part is unrealizable; crossings between pools at each depth, the
+-- deepest first (COST-4); changes of language within one pool; calls in each
+-- language by preference rank, the least preferred first (COST-16); and the
+-- number of calls, so a sourced implementation beats a definition that makes
+-- several. The lists are indexed from 0.
+data Score = Score
+  { scoreUnrealizable :: !Int
+  , scoreCrossings :: ![Int] -- ^ by depth, depth 0 first
+  , scoreSwitches :: !Int
+  , scorePreference :: ![Int] -- ^ calls by preference rank, most preferred first
+  , scoreSize :: !Int
+  }
+  deriving (Show)
 
--- | Component-wise addition of two scores.
-addScore :: Score -> Score -> Score
-addScore (a, b) (c, d) = (a + c, b + d)
+instance Eq Score where
+  a == b = compare a b == EQ
+
+instance Ord Score where
+  compare (Score u1 c1 w1 p1 z1) (Score u2 c2 w2 p2 z2) =
+    compare u1 u2 <> lastFirst c1 c2 <> compare w1 w2 <> lastFirst p1 p2 <> compare z1 z2
+    where
+      lastFirst xs ys =
+        let n = max (length xs) (length ys)
+            pad zs = reverse (zs <> replicate (n - length zs) 0)
+         in compare (pad xs) (pad ys)
+
+instance Semigroup Score where
+  Score u1 c1 w1 p1 z1 <> Score u2 c2 w2 p2 z2 =
+    Score (u1 + u2) (addLevels c1 c2) (w1 + w2) (addLevels p1 p2) (z1 + z2)
+
+instance Monoid Score where
+  mempty = Score 0 [] 0 [] 0
+
+addLevels :: [Int] -> [Int] -> [Int]
+addLevels (x : xs) (y : ys) = x + y : addLevels xs ys
+addLevels xs [] = xs
+addLevels [] ys = ys
+
+-- | A score counted @k@ deeper: only its crossings move.
+deeper :: Int -> Score -> Score
+deeper k sc
+  | k <= 0 || null (scoreCrossings sc) = sc
+  | otherwise = sc {scoreCrossings = replicate k 0 <> scoreCrossings sc}
+
+-- | One call of a sourced function in a language (COST-1 rules 2 and 3).
+callScore :: LangRegistry -> Lang -> Score
+callScore registry l =
+  mempty
+    { scorePreference = replicate (LR.registryPreference registry (langName l)) 0 <> [1]
+    , scoreSize = 1
+    }
+
+-- | A scored child as its parent sees it: its type, whether code
+-- generation always builds it in its parent's language, how much deeper
+-- than its parent it is (COST-4), and its table.
+data Kid = Kid Type Bool Int [(Lang, Score)]
+
+kidTable :: Kid -> [(Lang, Score)]
+kidTable (Kid _ _ _ table) = table
+
+-- | A node collapse places in its parent's language whatever it costs:
+-- a constructor application, and a container of function values
+-- ('collapseElement').
+pinnedToParent :: ExprS (Indexed Type) f a -> Bool
+pinnedToParent ConS {} = True
+pinnedToParent (LabelS _ (AnnoS _ _ e)) = pinnedToParent e
+pinnedToParent e = isFunctionalData e
 
 -- State for the realize scoring algorithm
 data RState = RState
   { rLangs :: [Lang]
-  , rApplied :: [AnnoS (Indexed Type) Many Int]
-  , rBndVars :: Map EVar (AnnoS (Indexed Type) Many Int)
-  , rLetVars :: Map EVar [(Lang, Score)] -- ^ let-bound variable -> RHS scores
+  -- | The arguments of the application whose head is being scored, each
+  -- with its type and table, for the head's lambda to bind.
+  , rApplied :: [(Type, [(Lang, Score)])]
+  -- | A lambda parameter bound to a function value: the table of that value.
+  , rBndVars :: Map EVar [(Lang, Score)]
+  -- | A let-bound variable: the table of a reference to it when its value
+  -- is or holds a function, 'Nothing' for data, whose references are free.
+  , rLetVars :: Map EVar (Maybe [(Lang, Score)])
+  -- | When rescoring a placement collapse built: the language of every node
+  -- it kept ('Nothing' for a language-free one), so each table is cut to
+  -- the choice made and each term to the implementation chosen.
+  , rForced :: Maybe (Map Int (Maybe Lang))
+  -- | When rescoring: every language the built placement uses.
+  , rForcedLangs :: [Lang]
+  -- | The names called beneath each node.
+  , rBelow :: Map Int (Set.Set EVar)
+  -- | When rescoring: for each reference collapse gave a copy, the
+  -- languages of that copy's nodes.
+  , rCopies :: Map Int (Map Int (Maybe Lang))
+  -- | The definition of each let-bound name in scope.
+  , rLetDefs :: Map EVar (AnnoS (Indexed Type) Many Int)
   }
 
 emptyRState =
@@ -204,6 +358,11 @@ emptyRState =
     , rApplied = []
     , rBndVars = Map.empty
     , rLetVars = Map.empty
+    , rForced = Nothing
+    , rForcedLangs = []
+    , rBelow = Map.empty
+    , rCopies = Map.empty
+    , rLetDefs = Map.empty
     }
 
 
@@ -216,11 +375,10 @@ emptyRState =
 -- reindexing): this cannot bloat and needs no fresh indices. Multiply-used
 -- redexes are left for the post-collapse 'applyLambdas'.
 --
--- The point is tractability, not tidiness: a point-free composition chain
--- @id . id . ..@ desugars to nested singly-used literal-lambda redexes that
--- collapse here to a single @\\x -> x@. Removing them removes the input on which
--- the scorer re-scores function-typed bound variables, the source of the
--- exponential blow-up on composition depth.
+-- A point-free composition chain @id . id . ..@ desugars to nested
+-- singly-used literal-lambda redexes that collapse here to a single
+-- @\\x -> x@, so the scorer sees the chain's calls rather than its
+-- plumbing.
 normalizePop1 ::
   (EVar -> Maybe Int) ->
   AnnoS (Indexed Type) Many Int ->
@@ -314,9 +472,10 @@ statistical info describing inputs.
 -}
 realize ::
   Map EVar [(Lang, Score)] ->
+  Pins ->
   AnnoS (Indexed Type) Many Int ->
   MorlocMonad (Scored, Finisher)
-realize tables s0 = do
+realize tables pins s0 = do
   registry <- MM.gets stateLangRegistry
   -- A term that calls nothing sourced has no language of its own and is
   -- evaluated by the nexus. That evaluator has no name to call a function
@@ -349,7 +508,44 @@ realize tables s0 = do
                 MM.throwCompilerBugAt i0 "a replay entry in a program with no pool language"
           ls -> return ls
       else return []
-  realizeWithRegistry registry tables langs s0
+  realizeWithRegistry registry tables pins langs s0
+
+-- | What a boundary from one language to another costs: nothing within a
+-- language, a switch within a pool, one crossing between pools (COST-3).
+boundaryScore :: LangRegistry -> Lang -> Lang -> Score
+boundaryScore registry l1 l2
+  | l1 == l2 = mempty
+  | LR.coLocated registry l1 l2 = mempty {scoreSwitches = 1}
+  | otherwise = mempty {scoreCrossings = [1]}
+
+-- | What collapse knows about the tree around a node: the enclosing
+-- recursive heads, outermost first, each with its language (see
+-- 'pickLanguage'), and the let-bound values in scope that a reference in
+-- another language gets its own copy of, each with its scored definition
+-- and the language its let was placed in; and, for each reference given a
+-- copy, the language collapse chose for each node of the definition there.
+data Ctx = Ctx
+  { ctxHeads :: [(EVar, Lang)]
+  , ctxCopies :: Map EVar (Scored, Lang)
+  , ctxCopyLog :: IORef (Map Int (Map Int (Maybe Lang)))
+  }
+
+-- | Languages a tree must keep when it is placed. @pinHeads@ are recursive
+-- functions, each with its language, a node calling one is placed in (see
+-- 'pickLanguage'); @pinWork@ is the language the root's manifold is built
+-- in: a root lambda's body's, else the root's own. @pinCheck@ names the
+-- tree in a COST-11 check of its placement; without it there is no check.
+-- @pinHost@ gives, by c index, the language of each node that holds or
+-- receives a function made by host code (HOST-9).
+data Pins = Pins
+  { pinHeads :: [(EVar, Lang)]
+  , pinWork :: Maybe Lang
+  , pinCheck :: Maybe MT.Text
+  , pinHost :: Map Int HostLimit
+  }
+
+noPins :: Pins
+noPins = Pins [] Nothing Nothing Map.empty
 
 -- | Score a tree, returning the scored tree and how to finish it: a shared
 -- specialization is scored once and finished once per language it is used in.
@@ -357,19 +553,46 @@ realize tables s0 = do
 realizeWithRegistry ::
   LangRegistry ->
   Map EVar [(Lang, Score)] ->
+  Pins ->
   [Lang] ->
   AnnoS (Indexed Type) Many Int ->
   MorlocMonad (Scored, Finisher)
-realizeWithRegistry registry tables seedLangs s0 = do
-  -- Normalize language-invariant (literal-lambda-head) redexes before scoring so
-  -- the scorer is not fed composition chains it would re-score exponentially.
+realizeWithRegistry registry tables pins seedLangs s00 = do
+  -- a copy of a let-bound value (collapseCopy) is built where it is used,
+  -- so no binder between the let and the use may rebind a name it captures
+  s0 <- renameShadowing Map.empty s00
+  -- Normalize language-invariant (literal-lambda-head) redexes before scoring.
   let sp = stagePoints s0
   s0' <- normalizePop1 (`Map.lookup` sp) s0
-  scored <- scoreAnnoS emptyRState {rLangs = seedLangs} s0'
-  return (scored, finish scored)
+  scored <- scoreAnnoS (rootState s0') s0'
+  return (scored, finish s0' scored)
   where
-    finish scored ctx = do
-      e@(AnnoS g li x) <- collapseAnnoS [] ctx scored
+    -- the names called beneath each node, for 'onCycle'
+    callsBelow :: AnnoS (Indexed Type) Many Int -> Map Int (Set.Set EVar)
+    callsBelow = snd . go
+      where
+        go (AnnoS _ i e) =
+          let kids = map go (foldExprS (: []) e)
+              own = case e of
+                CallS v -> Set.singleton v
+                _ -> Set.empty
+              names = Set.unions (own : map fst kids)
+           in (names, Map.insert i names (Map.unions (map snd kids)))
+
+    -- the function parameters of a pool tree's root lambda are values of
+    -- the language its manifold is built in, where a call of one runs
+    rootState s = emptyRState {rLangs = seedLangs, rApplied = rootParams s, rBelow = callsBelow s}
+    rootParams (AnnoS (Idx _ (FunT ts _)) _ (LamS _ _)) | Just l <- pinWork pins = [(t, [(l, mempty)]) | t <- ts]
+    rootParams _ = []
+
+    finish s0' scored0 ctx = do
+      hostCulprit scored0
+      scored <- maybe (return scored0) (pinRoot scored0) (pinWork pins)
+      hostCulprit scored
+      copyLog <- MM.liftIO (newIORef Map.empty)
+      e@(AnnoS g li x) <- collapseAnnoS (Ctx (pinHeads pins) Map.empty copyLog) ctx scored
+      copies <- MM.liftIO (readIORef copyLog)
+      checkPlacement copies s0' scored ctx e
       case (li, ctx) of
         -- language-free code used from a pool runs in that pool, as it
         -- would inlined there
@@ -377,19 +600,120 @@ realizeWithRegistry registry tables seedLangs s0 = do
         (Idx _ Nothing, Nothing) -> makeGAST e |>> Left
         _ -> propagateDown e |>> Right
 
-    pairwiseCost :: Lang -> Lang -> Int
-    pairwiseCost l1 l2
-      | l1 == l2 = case Map.lookup (langName l2) (lrSameLangCosts registry) of
-          Nothing -> lrDefaultSameCost registry
-          (Just score) -> score
-      | otherwise = case Map.lookup (langName l1, langName l2) (lrOptimizedPairs registry) of
-          Nothing -> case Map.lookup (langName l2) (lrCrossLangCosts registry) of
-            Nothing -> lrDefaultCrossCost registry
-            (Just score) -> score
-          (Just score) -> score
+    gIdx (Idx gi _) = gi
 
-    languageCost :: Lang -> Int
-    languageCost lang = pairwiseCost lang lang
+    -- A placement that cannot be realized because code that must run with a
+    -- function made by host code cannot run in its host's language is
+    -- refused at the deepest such node (HOST-9).
+    hostCulprit :: Scored -> MorlocMonad ()
+    hostCulprit scored
+      | Map.null (pinHost pins) = return ()
+      | all ((> 0) . scoreUnrealizable . snd) (scoresOf scored), not (null (scoresOf scored)) =
+          case reverse (List.sortOn fst (culprits (0 :: Int) scored)) of
+            ((_, (gi, doc)) : _) -> MM.throwSourcedError gi doc
+            [] -> return ()
+      | otherwise = return ()
+      where
+        -- a node that cannot be placed while each of its children can is
+        -- where the failure starts; it is reported here only if that node
+        -- is limited to a host's language
+        culprits d (AnnoS (Idx gi _) (Idx ci tbl) ex) =
+          [ (d, (gi, doc))
+          | Just (HostLimit _ doc) <- [Map.lookup ci (pinHost pins)]
+          , stuck tbl
+          , not (any (\(AnnoS _ (Idx _ kt) _) -> stuck kt) (foldExprS (: []) ex))
+          ]
+            <> concat (foldExprS (\y -> [culprits (d + 1) y]) ex)
+        stuck tbl = not (null tbl) && all ((> 0) . scoreUnrealizable . snd) tbl
+
+    -- the root's manifold is built in the given language
+    pinRoot :: Scored -> Lang -> MorlocMonad Scored
+    pinRoot (AnnoS g c (LamS vs body)) l = AnnoS g c . LamS vs <$> pinTable body l
+    pinRoot root l = pinTable root l
+
+    pinTable :: Scored -> Lang -> MorlocMonad Scored
+    pinTable (AnnoS g (Idx j ss) e) l =
+      case [(l', sc) | (l', sc) <- ss, l' == l] of
+        -- language-free code costs nothing anywhere
+        [] | null ss -> return (AnnoS g (Idx j [(l, mempty)]) e)
+        []
+          | Just (HostLimit _ doc) <- Map.lookup j (pinHost pins) -> MM.throwSourcedError (gIdx g) doc
+          | otherwise -> MM.throwCompilerBugAt j $ "a pool tree's manifold cannot be placed in" <+> pretty l <> ", where it is built; it can be placed in" <+> list (map (pretty . fst) ss)
+        ss' -> return (AnnoS g (Idx j ss') e)
+
+    -- COST-11: the placement collapse built costs what the scorer found
+    -- least. When the placement listing is wanted with verbosity, the tree is
+    -- scored again with every node cut to its chosen language and
+    -- implementation, and a difference is listed with the placement.
+    checkPlacement copies s0' scored ctx e = do
+      wanted <- MM.gets statePlacement
+      verbosity <- MM.gets stateVerbosity
+      case (pinCheck pins, wanted) of
+        (Just label, Just prior) | verbosity > 0 -> do
+          -- a node collapsed at two sites into different languages is
+          -- left unforced
+          let kept = Map.fromListWith (\a b -> if a == b then a else Nothing) [(i, l) | Idx i l <- collectIdx e]
+          rescored <- scoreAnnoS (rootState s0') {rForced = Just kept, rForcedLangs = unique (catMaybes (concatMap Map.elems (kept : Map.elems copies))), rCopies = copies} s0'
+          let best tbl = case (ctx, tbl) of
+                (_, []) -> Nothing
+                (Just l, _) -> Just (reachFrom l tbl)
+                (Nothing, _) -> Just (minimum (map snd tbl))
+              optimum = best (scoresOf scored)
+              built = best (scoresOf rescored)
+              site = label <> maybe "" (\l -> " used from " <> render (pretty l)) ctx
+          when (optimum /= built) $
+            MM.modify' $ \st ->
+              st { statePlacement = Just (prior <> ["cost check failed for " <> site
+                     <> ": built " <> renderScore built <> ", least " <> renderScore optimum
+                     <> offenders kept scored <> origins kept scored rescored]) }
+        _ -> return ()
+
+    -- the nodes collapse put in a language their table does not offer
+    offenders :: Map Int (Maybe Lang) -> AnnoS (Indexed Type) Many (Indexed [(Lang, Score)]) -> MT.Text
+    offenders kept t = case take 3 (go t) of
+      [] -> ""
+      xs -> "; off-table: " <> MT.intercalate ", " xs
+      where
+        go :: AnnoS (Indexed Type) Many (Indexed [(Lang, Score)]) -> [MT.Text]
+        go (AnnoS _ (Idx i tbl) ex) =
+          [ nodeKind ex <> " in " <> render (pretty l) <> " not " <> render (pretty (map fst tbl))
+          | Just (Just l) <- [Map.lookup i kept], not (null tbl), l `notElem` map fst tbl
+          ] <> concat (foldExprS (\y -> [go y]) ex)
+
+    -- the deepest nodes whose cost in their chosen language changed when
+    -- rescored: where the difference starts
+    origins :: Map Int (Maybe Lang) -> Scored -> Scored -> MT.Text
+    origins kept a b =
+      let tabA = nodeTables a
+          tabB = nodeTables b
+          diffs =
+            [ (d, i, k, l, sa, sb)
+            | (i, (d, k, ta)) <- Map.toList tabA
+            , Just (Just l) <- [Map.lookup i kept]
+            , Just (_, _, tb) <- [Map.lookup i tabB]
+            , let sa = lookup l ta
+            , let sb = lookup l tb
+            , sa /= sb
+            ]
+          deepest = take 4 (reverse (List.sortOn (\(d, _, _, _, _, _) -> d) diffs))
+       in case deepest of
+            [] -> ""
+            xs -> "; origins: " <> MT.intercalate ", " [k <> "@" <> MT.pack (show i) <> " " <> render (pretty l) <> " " <> renderScore sa <> " -> " <> renderScore sb | (_, i, k, l, sa, sb) <- xs]
+      where
+        nodeTables :: Scored -> Map Int (Int, MT.Text, [(Lang, Score)])
+        nodeTables = Map.fromList . go (0 :: Int)
+        go d (AnnoS _ (Idx i tbl) ex) = (i, (d, nodeKind ex, tbl)) : concat (foldExprS (\y -> [go (d + 1) y]) ex)
+
+    renderScore :: Maybe Score -> MT.Text
+    renderScore Nothing = "nothing"
+    renderScore (Just (Score u c w p z))
+      | u > 0 = "unrealizable"
+      | otherwise =
+          "crossings " <> MT.pack (show c) <> ", switches " <> MT.pack (show w)
+            <> ", calls by preference " <> MT.pack (show p) <> ", size " <> MT.pack (show z)
+
+    collectIdx :: AnnoS g One c -> [c]
+    collectIdx (AnnoS _ c ex) = c : concat (foldExprS (\y -> [collectIdx y]) ex)
 
     -- \| Depth first pass calculating scores for each language. Alternates with
     -- scoresSExpr.
@@ -397,12 +721,73 @@ realizeWithRegistry registry tables seedLangs s0 = do
       RState ->
       AnnoS (Indexed Type) Many Int ->
       MorlocMonad (AnnoS (Indexed Type) Many (Indexed [(Lang, Score)]))
-    scoreAnnoS rstat (AnnoS gi@(Idx gidx t) ci e) = do
+    scoreAnnoS rstat0 (AnnoS gi@(Idx gidx t) ci e) = do
+      -- The arguments of an application reach only the lambdas its head
+      -- binds them with ('boundArgs' follows the same chain).
+      let rstat = if passesApplied e then rstat0 else rstat0 {rApplied = []}
       (e', Idx ci' table) <- scoreExpr rstat (e, ci)
       -- An operation that belongs to no language runs where its context
       -- puts it, but only in a language that can hold what it computes.
-      table' <- maybe (return table) (\ts -> holding gidx ts table) (heldTypes e t)
-      return $ AnnoS gi (Idx ci' table') e'
+      held <- maybe (return table) (\(j, ts) -> holding j ts table) (heldTypes gidx e t)
+      table' <- onHost ci gidx t e (onCycle (rBelow rstat) ci e held)
+      -- a term's table holds, for each language, its chosen implementation
+      -- reached from there; only the implementation is forced
+      let forced = case e of
+            VarS {} -> table'
+            _ -> forcedTable rstat ci' table'
+      return $ AnnoS gi (Idx ci' forced) e'
+
+    -- COST-15: a node that calls a function on a recursion cycle around it
+    -- runs in that cycle's pool, as collapse places it ('pickLanguage').
+    -- An application of a sourced head is placed by its sources instead.
+    onCycle :: Map Int (Set.Set EVar) -> Int -> ExprS (Indexed Type) Many Int -> [(Lang, Score)] -> [(Lang, Score)]
+    onCycle _ _ (AppS f _) table | isSourcedMany f = table
+    onCycle below i _ table = case [l | (w, l) <- pinHeads pins, Set.member w (Map.findWithDefault Set.empty i below)] of
+      [] -> table
+      (l : _) -> case [(l', sc) | (l', sc) <- table, LR.coLocated registry l l'] of
+        [] | null table -> table
+        [] -> [(l, noScore)]
+        kept -> kept
+
+    -- COST-15: a node holding or receiving a function made by host code
+    -- runs in that host's language (HOST-9). A node that only combines its
+    -- children (a let, a conditional, a container) can run there whatever
+    -- its children's languages, reaching them across boundaries; a call
+    -- runs where its function does.
+    onHost :: Int -> Int -> Type -> ExprS (Indexed Type) Many Int -> [(Lang, Score)] -> MorlocMonad [(Lang, Score)]
+    onHost i gidx t e table = case Map.lookup i (pinHost pins) of
+      Nothing -> return table
+      Just (HostLimit l _) -> case [x | x@(l', _) <- table, l' == l] of
+        [] | null table -> return table
+        []
+          | combines e -> do
+              canHold <- maybe (return True) (\(j, ts) -> elem l . map fst <$> holding j ts [(l, mempty)]) (heldTypes gidx e t)
+              return [(l, if canHold then reachFrom l table else noScore)]
+        [] -> return [(l, noScore)]
+        kept -> return kept
+      where
+        -- a let binding a function lives at its home; a newtype cast is
+        -- placed by the languages that can convert it
+        combines x = case x of
+          LetS _ (AnnoS (Idx _ bt) _ _) _ -> not (holdsCallable bt)
+          IfS {} -> True
+          LstS {} -> True
+          TupS {} -> True
+          NamS {} -> True
+          DoBlockS {} -> True
+          _ -> False
+
+    -- A table cut to the language collapse chose for its node, when
+    -- rescoring. A choice the table does not offer (a lambda built in its
+    -- parent's language around a body placed elsewhere) costs reaching the
+    -- table from there.
+    forcedTable :: RState -> Int -> [(Lang, Score)] -> [(Lang, Score)]
+    forcedTable _ _ [] = []
+    forcedTable rstat i table = case rForced rstat >>= Map.lookup i of
+      Just (Just l) -> case [x | x@(l', _) <- table, l' == l] of
+        [] -> [(l, reachFrom l table)]
+        kept -> kept
+      _ -> table
 
     -- The languages of @table@ that can hold values of types @ts@ (codegen
     -- finds each a concrete type there). When none of them can, the
@@ -417,7 +802,7 @@ realizeWithRegistry registry tables seedLangs s0 = do
       able <- ableLangs i ts (map fst table)
       return $ case (able, [x | x@(l, _) <- table, l `elem` able]) of
         ([], _) -> table
-        (_, []) -> [(l, minimum [addScore sc (transScore l0 l) | (l0, sc) <- table]) | l <- able]
+        (_, []) -> [(l, reachFrom l table) | l <- able]
         (_, kept) -> kept
 
     -- The language a language-free computation placed in context @l@ runs
@@ -429,7 +814,7 @@ realizeWithRegistry registry tables seedLangs s0 = do
       return $ case able of
         _ | l `elem` able -> l
         [] -> l
-        _ -> snd (minimum [(transScore l l', l') | l' <- able])
+        _ -> snd (snd (minimum [(boundaryScore registry l l', preferred l') | l' <- able]))
 
     -- Of these languages and the program's pool languages, those in which
     -- codegen finds a concrete type for each of @ts@.
@@ -440,8 +825,12 @@ realizeWithRegistry registry tables seedLangs s0 = do
       filterM (\l -> and <$> mapM (Infer.canHoldType True l i) ts) candidates
 
     -- The types a language-free computation works on, for one that is.
-    heldTypes :: ExprS (Indexed Type) f c -> Type -> Maybe [Type]
-    heldTypes e t = case e of
+    heldTypes :: Int -> ExprS (Indexed Type) f c -> Type -> Maybe (Int, [Type])
+    -- A function value a let binds is held natively where the let runs;
+    -- data can pass through a pool as a packet it never reads.
+    heldTypes _ (LetS _ (AnnoS (Idx j boundT) _ _) _) _
+      | holdsCallable boundT = Just (j, [boundT])
+    heldTypes gidx e t = (,) gidx <$> case e of
       ExeS (PatCall _) -> Just (componentTypes t)
       AppS (AnnoS (Idx _ ft) _ (ExeS (PatCall _))) _ -> Just (componentTypes ft)
       -- a call of a function value runs wherever it is placed
@@ -464,96 +853,116 @@ realizeWithRegistry registry tables seedLangs s0 = do
       (ExprS (Indexed Type) Many Int, Int) ->
       MorlocMonad (ExprS (Indexed Type) Many (Indexed [(Lang, Score)]), Indexed [(Lang, Score)])
     scoreExpr rstat (LstS xs, i) = do
-      (xs', best) <- scoreMany rstat xs
-      return (LstS xs', Idx i best)
+      (xs', best) <- componentsOf (LstS xs) rstat xs
+      return (LstS xs', orAmbient i rstat best)
     scoreExpr rstat (TupS xs, i) = do
-      (xs', best) <- scoreMany rstat xs
-      return (TupS xs', Idx i best)
+      (xs', best) <- componentsOf (TupS xs) rstat xs
+      return (TupS xs', orAmbient i rstat best)
     scoreExpr rstat (NamS rs, i) = do
-      (xs, best) <- scoreMany rstat (map snd rs)
-      return (NamS (zip (map fst rs) xs), Idx i best)
+      (xs, best) <- componentsOf (NamS rs) rstat (map snd rs)
+      return (NamS (zip (map fst rs) xs), orAmbient i rstat best)
     scoreExpr rstat (LamS vs x, i) = do
       x' <- scoreAnnoS (updateRState vs rstat) x
       return (LamS vs x', Idx i (scoresOf x'))
+    -- Each argument is scored once, before the head, so a lambda the head
+    -- binds it to refers to its table rather than scoring it again at every
+    -- use. A function argument the head's lambda binds is priced where the
+    -- body calls it (COST-4); every other argument is priced here. A lambda
+    -- handed to a function is built in that function's language, so the
+    -- arguments are scored in the head's languages when they are known (its
+    -- sources, or the function value a parameter or let holds): a call
+    -- there on a parameter the host supplies stays with the host.
     scoreExpr rstat (AppS f xs, i) = do
-      -- store all applied arguments
-      -- these may be bound to lambdas within f
-      -- they are required for resolving the application language
-      let rstat' = rstat {rLangs = [], rApplied = xs}
-
-      f0 <- scoreAnnoS rstat' f
-
-      -- A head with no language of its own is a function-typed parameter: the
-      -- caller supplies its value, so it lives wherever the expression holding
-      -- it lives. Clearing the ambient languages to derive the head's own
-      -- language leaves such a head with no candidate at all, and the
-      -- application's language is then decided entirely by its arguments --
-      -- which is how a call on a parameter gets placed in another pool and
-      -- drags the function value across the boundary with it.
-      f' <-
-        if null (scoresOf f0)
-          then scoreAnnoS (rstat {rApplied = xs}) f
-          else return f0
-
-      -- best scores for each language for f
-      let scores = scoresOf f'
-          rstat'' = emptyRState {rLangs = unique $ map fst scores}
-
-      xs' <- mapM (scoreAnnoS rstat'') xs
-
-      let pairss = [(t, minPairs pairs) | AnnoS (Idx _ t) (Idx _ pairs) _ <- xs']
-      let best = scoreApp scores pairss
-
-      return (AppS f' xs', Idx i best)
+      let argLangs = case f of
+            AnnoS _ _ (BndS v) | Just table <- Map.lookup v (rBndVars rstat) -> map fst table
+            AnnoS _ _ (LetBndS v) | Just (Just table) <- Map.lookup v (rLetVars rstat) -> map fst table
+            _ -> sourceLangs f
+      xs' <- mapM (scoreAnnoS rstat {rLangs = argLangs, rApplied = []}) xs
+      let args = [(t, scoresOf x') | x'@(AnnoS (Idx _ t) _ _) <- xs']
+          bound = boundArgs f
+          pairss =
+            [ (if loopsOver f then runsDeeper else id) (kid x')
+            | (k, x'@(AnnoS (Idx _ t) _ _)) <- zip [0 ..] xs'
+            , not (k < bound && isCallableType t)
+            ]
+      -- A head has no ambient language: it is placed by its own
+      -- implementations. One with none (a call on a function parameter
+      -- bound to no table, a recursive call) lives where the expression
+      -- holding it lives.
+      f' <- scoreAnnoS rstat {rLangs = [], rApplied = args} f
+      let headTable = case scoresOf f' of
+            [] -> [(l, mempty) | l <- rLangs rstat]
+            table -> table
+      return (AppS f' xs', Idx i (scoreApp headTable pairss))
     -- non-recursive expressions
-    scoreExpr rstat (UniS, i) = return (UniS, zipLang i rstat)
-    scoreExpr rstat (NullS, i) = return (NullS, zipLang i rstat)
+    -- A literal is built wherever it is used (COST-11).
+    scoreExpr _ (UniS, i) = return (UniS, Idx i [])
+    scoreExpr _ (NullS, i) = return (NullS, Idx i [])
     scoreExpr rstat (VarS v (Many xs), i) = do
-      (xs', best) <- scoreMany rstat xs
+      (xs', best) <- scoreAlternatives v rstat xs
       return (VarS v (Many xs'), Idx i best)
+    -- A parameter bound to no function value is data the caller passes
+    -- in, read wherever it is used (COST-3).
     scoreExpr rstat (BndS v, i) = do
       case Map.lookup v (rBndVars rstat) of
-        (Just e@(AnnoS (Idx _ (FunT _ _)) _ _)) -> do
-          scores <- scoreAnnoS rstat e |>> scoresOf
-          return (BndS v, Idx i scores)
-        _ -> return (BndS v, zipLang i rstat)
-    scoreExpr _ (ExeS x@(SrcCall src), i) = return (ExeS x, Idx i [(srcLang src, (callCost src, 0))])
+        Just scores -> return (BndS v, Idx i scores)
+        Nothing -> return (BndS v, Idx i [])
+    scoreExpr _ (ExeS x@(SrcCall src), i) = return (ExeS x, Idx i [(srcLang src, callScore registry (srcLang src))])
     scoreExpr rstat (ExeS x@(PatCall _), i) = return (ExeS x, zipLang i rstat)
-    scoreExpr rstat (RealS si x, i) = return (RealS si x, zipLang i rstat)
-    scoreExpr rstat (IntS si x, i) = return (IntS si x, zipLang i rstat)
-    scoreExpr rstat (LogS x, i) = return (LogS x, zipLang i rstat)
-    scoreExpr rstat (StrS x, i) = return (StrS x, zipLang i rstat)
+    scoreExpr _ (RealS si x, i) = return (RealS si x, Idx i [])
+    scoreExpr _ (IntS si x, i) = return (IntS si x, Idx i [])
+    scoreExpr _ (LogS x, i) = return (LogS x, Idx i [])
+    scoreExpr _ (StrS x, i) = return (StrS x, Idx i [])
+    -- a constructor with no fields is built wherever it is used, at no cost
+    scoreExpr _ (ConS tv n j [], i) = return (ConS tv n j [], Idx i [])
     scoreExpr rstat (ConS tv n j xs, i) = do
-      xs' <- mapM (scoreAnnoS rstat) xs
-      return (ConS tv n j xs', zipLang i rstat)
+      (xs', best) <- scorePinnedComponents rstat xs
+      return (ConS tv n j xs', orAmbient i rstat best)
     scoreExpr rstat (LetS v e1 e2, i) = do
-      e1' <- scoreAnnoS rstat e1
-      -- A reference to the bound value costs what it takes to have the value
-      -- in the reference's language: computing it in its cheapest home
-      -- relative to the cheapest place overall, plus moving it. The RHS's own
-      -- cost is counted once, at the LetS below, not again at every
-      -- reference. An empty table leaves LetBndS to the calling context.
-      let rhs = scoresOf e1'
-          refTable = case rhs of
-            [] -> []
-            _ ->
-              let base = minimum (map snd rhs)
-                  rel (c, n) (bc, bn) = (c - bc, n - bn)
-                  langs = unique (map fst rhs <> rLangs rstat)
-               in [ (l, minimum [addScore (rel sc base) (transScore h l) | (h, sc) <- rhs])
-                  | l <- langs
-                  ]
-          rstat' = rstat { rLetVars = Map.insert v refTable (rLetVars rstat) }
+      e10 <- scoreAnnoS rstat {rApplied = []} e1
+      -- A data value is read where its let runs, or carried into a subtree
+      -- in another pool as one of the free variables that subtree's single
+      -- boundary passes (COST-3), so a reference to it adds nothing of its
+      -- own. A value holding a function that computes nothing to build gets
+      -- its own copy in each language a reference is in ('collapseCopy'), so a
+      -- reference carries one use of the value from its own language and the
+      -- let nothing. Any other function value is built once, at its home (its
+      -- definition's least language), and every reference reaches it there.
+      let callable = holdsCallable (annoType e10)
+          copied = callable && copyable e10
+          home = if callable && not copied then minBy (\(l, sc) -> (sc, preferred l)) (scoresOf e10) else Nothing
+          e1' = maybe e10 (\h -> withTable [h] e10) home
+          rhs = scoresOf e1'
+          langs = unique (map fst rhs <> rLangs rstat)
+          refTable
+            | Just (h, _) <- home = [(l, boundaryScore registry l h) | l <- unique (h : langs)]
+            | null rhs = []
+            | otherwise = [(l, reachFrom l rhs) | l <- langs]
+          ref = if callable then Just refTable else Nothing
+          rstat' = rstat {rLetVars = Map.insert v ref (rLetVars rstat), rLetDefs = Map.insert v e1 (rLetDefs rstat)}
       e2' <- scoreAnnoS rstat' e2
       -- Score the chain like an application: the binding's RHS and the body
-      -- both contribute, with cross-language penalties applied per-lang.
-      let best = scoreApp [] [ (annoType e1', minPairs (scoresOf e1'))
-                             , (annoType e2', minPairs (scoresOf e2'))
-                             ]
+      -- both contribute, with cross-language penalties applied per-lang. A
+      -- function that is not copied lives where its let is, so the let is
+      -- placed at its home.
+      let best0 = scoreApp [] (if copied then [kid e2'] else [kid e1', kid e2'])
+          best = case home of
+            Nothing -> best0
+            Just (h, _) -> case [(l, sc) | (l, sc) <- best0, LR.coLocated registry l h] of
+              [] -> [(h, noScore)]
+              kept -> kept
       return (LetS v e1' e2', Idx i best)
+    -- when rescoring, a reference given a copy costs that copy as built
+    scoreExpr rstat (LetBndS v, i)
+      | Just chosen <- Map.lookup i (rCopies rstat)
+      , Just def <- Map.lookup v (rLetDefs rstat) = do
+          copy <- scoreAnnoS rstat {rForced = Just chosen, rApplied = []} def
+          let table = scoresOf copy
+          return (LetBndS v, Idx i [(l, reachFrom l table) | not (null table), l <- unique (map fst table <> rForcedLangs rstat)])
     scoreExpr rstat (LetBndS v, i) =
       case Map.lookup v (rLetVars rstat) of
-        Just scs@(_ : _) -> return (LetBndS v, Idx i scs)
+        Just Nothing -> return (LetBndS v, Idx i [])
+        Just (Just scs@(_ : _)) -> return (LetBndS v, Idx i scs)
         _ -> return (LetBndS v, zipLang i rstat)
     scoreExpr rstat (CallS v, i) = case Map.lookup v tables of
       -- a shared specialization costs what it costs in each language
@@ -570,10 +979,7 @@ realizeWithRegistry registry tables seedLangs s0 = do
       -- returns a parameter, score 0 in every language) mask the real cost of a
       -- heavy branch (e.g. a cross-pool recursive loop body), collapsing the
       -- manifold's language choice to an arbitrary tiebreak. Mirrors 'LetS'.
-      let best = scoreApp [] [ (annoType c', minPairs (scoresOf c'))
-                             , (annoType t', minPairs (scoresOf t'))
-                             , (annoType e', minPairs (scoresOf e'))
-                             ]
+      let best = scoreApp [] [kid c', kid t', kid e']
       return (IfS c' t' e', Idx i best)
     scoreExpr rstat (DoBlockS x, i) = do
       x' <- scoreAnnoS rstat x
@@ -587,7 +993,7 @@ realizeWithRegistry registry tables seedLangs s0 = do
       (candidates, allowed) <- castLangs (castHead dir target (annoType x')) (rLangs rstat <> map fst childScores)
       let best = case allowed of
             [] -> [(l, noScore) | l <- candidates]
-            _ -> scoreApp [(l, (0, 0)) | l <- allowed] [(annoType x', childScores)]
+            _ -> scoreApp [(l, mempty) | l <- allowed] [kid x']
       return (CoerceS c x', Idx i best)
     scoreExpr rstat (CoerceS c x, i) = do
       x' <- scoreAnnoS rstat x
@@ -600,100 +1006,191 @@ realizeWithRegistry registry tables seedLangs s0 = do
       let Idx _ langScores = zipLang i rstat
           best = case xs' of
             [] -> langScores
-            _ -> scoreApp [] [(annoType x', minPairs (scoresOf x')) | x' <- xs']
+            _ -> scoreApp [] (map kid xs')
       return (IntrinsicS intr xs', Idx i best)
 
-    -- calculate the score for an application based on the score of the function
-    -- and the scores of the arguments
-    scoreApp ::
-      [ ( Lang -- the language of the ith calling function implementation
-        , Score -- the score of the ith implementation
-        )
-      ] ->
-      [ ( Type -- the type of the kth argument, priced by 'crossingPayloadCost'
-        , [ ( Lang -- the language of the jth implementation of the kth argument
-            , Score -- the score of the jth implementation of the kth argument
-            )
-          ]
-        )
-      ] ->
-      [(Lang, Score)]
-    -- if nothing is known, nothing is returned
-    scoreApp [] (concatMap snd -> []) = []
-    -- if none of the arguments are language-specific, the scores are based only
-    -- on the functions
-    scoreApp scores (concatMap snd -> []) = scores
-    -- if the function is not language-specific, calculate the cost of calling
-    -- all arguments from each possible language context
-    scoreApp [] pairss =
-      let score = [(lang, (0, 0)) | lang <- unique $ map fst (concatMap snd pairss)]
-       in scoreApp score pairss
-    -- if arguments and function have implementations, calculate cost relative to
-    -- each function implementation
-    scoreApp scores pairss =
-      [ ( l1
-        , foldl
-            addScore
-            s1
-            [ -- An argument with no candidates carries no language information,
-              -- so it costs nothing and constrains nothing. It is NOT
-              -- unrealizable: the clause above says the same of a head with no
-              -- candidates. Folding in the "no realization" sentinel instead
-              -- would swamp every real cross-language difference, after which
-              -- the enclosing choice is made by rounding error.
-              minimumDef (0, 0) [addScore s2 (crossScore t l1 l2) | (l2, s2) <- pairs]
-            | (t, pairs) <- pairss
-            ]
-        )
-      | (l1, s1) <- scores
-      ]
+    -- The cost of an application in each language of its head: the head's
+    -- own cost plus reaching each argument from there. An argument with no
+    -- candidates carries no language information, so it costs nothing and
+    -- constrains nothing; a head with none takes its arguments' languages.
+    scoreApp :: [(Lang, Score)] -> [Kid] -> [(Lang, Score)]
+    scoreApp scores kids
+      | null placed = scores
+      | null scores = scoreApp [(l, mempty) | l <- unique (concatMap (map fst . kidTable) placed)] kids
+      | otherwise = [(l1, s1 <> mconcat (map (reachKid l1) placed)) | (l1, s1) <- scores]
+      where
+        placed = filter (not . null . kidTable) kids
+
+    -- A function or suspension passed to a sourced function, or to a shared
+    -- specialization whose body is placed on its own, may be called many
+    -- times per call: it is one deeper (COST-4).
+    runsDeeper :: Kid -> Kid
+    runsDeeper (Kid t pinned n table)
+      | isCallableType t || isEffect t = Kid t pinned (n + 1) table
+      where
+        isEffect (EffectT _ _) = True
+        isEffect _ = False
+    runsDeeper kd = kd
+
+    loopsOver :: AnnoS (Indexed Type) Many c -> Bool
+    loopsOver f = sourcedHead f || callHead f
+      where
+        callHead (AnnoS _ _ (CallS _)) = True
+        callHead (AnnoS _ _ (LabelS _ x)) = callHead x
+        callHead _ = False
+
+    -- The head of an application is sourced in every implementation, seen
+    -- through labels and casts.
+    sourcedHead :: AnnoS (Indexed Type) Many c -> Bool
+    sourcedHead (AnnoS _ _ e) = case e of
+      ExeS (SrcCall _) -> True
+      VarS _ (Many xs@(_ : _)) -> all sourcedHead xs
+      LabelS _ x -> sourcedHead x
+      CoerceS _ x -> sourcedHead x
+      _ -> False
+
+    -- The sources of a head's implementations.
+    headSources :: AnnoS (Indexed Type) Many c -> [Source]
+    headSources (AnnoS _ _ e) = case e of
+      ExeS (SrcCall src) -> [src]
+      VarS _ (Many ys) -> concatMap headSources ys
+      LabelS _ x -> headSources x
+      CoerceS _ x -> headSources x
+      _ -> []
+
+    -- A child scored, for its parent to reach.
+    kid :: AnnoS (Indexed Type) Many (Indexed [(Lang, Score)]) -> Kid
+    kid x@(AnnoS (Idx _ t) _ e) = Kid t (pinnedToParent e) 0 (scoresOf x)
+
+    -- Reaching a child from its parent's language: from the cheapest
+    -- language for it, across a boundary, unless it is always built in its
+    -- parent's language and priced there.
+    reachKid :: Lang -> Kid -> Score
+    reachKid l (Kid _ pinned n table)
+      | pinned, Just sc <- lookup l table = deeper n sc
+      | otherwise = deeper n (reachFrom l table)
 
     updateRState :: [EVar] -> RState -> RState
     updateRState [] rstat = rstat
-    updateRState _ rstat@(RState _ [] _ _) = rstat
-    updateRState (v : vs) rstat@(RState _ (p : ps) bound _) =
+    updateRState vs rstat@(RState _ [] bound _ _ _ _ _ _) =
+      rstat {rBndVars = foldr Map.delete bound vs}
+    updateRState (v : vs) rstat@(RState _ ((t, table) : ps) bound _ _ _ _ _ _) =
       updateRState vs $
-        rstat {rApplied = ps, rBndVars = Map.insert v p bound}
+        rstat
+          { rApplied = ps
+          , rBndVars = if isCallableType t then Map.insert v table bound else Map.delete v bound
+          }
+
+    -- How many leading arguments of an application its head's lambda binds:
+    -- the fewest any implementation binds, a sourced one binding none.
+    boundArgs :: AnnoS (Indexed Type) Many c -> Int
+    boundArgs (AnnoS _ _ e) = case e of
+      LamS vs body -> length vs + boundArgs body
+      VarS _ (Many ys@(_ : _)) -> minimum (map boundArgs ys)
+      LetS _ _ body -> boundArgs body
+      LabelS _ x -> boundArgs x
+      CoerceS _ x -> boundArgs x
+      _ -> 0
+
+    -- The nodes through which an application's arguments reach the lambdas
+    -- of its head.
+    passesApplied :: ExprS g f c -> Bool
+    passesApplied e = case e of
+      LamS {} -> True
+      VarS {} -> True
+      LetS {} -> True
+      LabelS {} -> True
+      CoerceS {} -> True
+      _ -> False
+
+    -- A table, or the ambient languages for a node that has none.
+    orAmbient :: Int -> RState -> [(Lang, Score)] -> Indexed [(Lang, Score)]
+    orAmbient i rstat [] = zipLang i rstat
+    orAmbient i _ table = Idx i table
+
+    -- The languages a head is sourced in.
+    sourceLangs :: AnnoS (Indexed Type) Many c -> [Lang]
+    sourceLangs = unique . map srcLang . headSources
 
     zipLang :: Int -> RState -> Indexed [(Lang, Score)]
-    zipLang i (rLangs -> langs) = Idx i (zip langs (repeat (0, 0)))
+    zipLang i (rLangs -> langs) = Idx i (zip langs (repeat mempty))
 
     scoresOf :: AnnoS a Many (Indexed [(Lang, Score)]) -> [(Lang, Score)]
     scoresOf (AnnoS _ (Idx _ xs) _) = minPairs xs
 
-    -- find the scores of all implementations from all possible language contexts
-    scoreMany ::
+    -- The implementations of term @v@: one is chosen, so each language costs
+    -- its cheapest implementation reached from there. A recursive
+    -- implementation runs its body many times per call (COST-14).
+    scoreAlternatives ::
+      EVar ->
       RState ->
       [AnnoS (Indexed Type) Many Int] ->
       MorlocMonad ([AnnoS (Indexed Type) Many (Indexed [(Lang, Score)])], [(Lang, Score)])
-    scoreMany rstat xs0 = do
-      xs1 <- mapM (scoreAnnoS rstat) xs0
-      return (xs1, scoreMany' xs1)
+    scoreAlternatives v rstat xs00 = do
+      -- rescoring a placement keeps only the implementation collapse chose
+      xs0 <- case rForced rstat of
+        Nothing -> return xs00
+        Just kept -> case [x | x@(AnnoS _ j _) <- xs00, Map.member j kept] of
+          [] -> MM.throwCompilerBug $ "rescoring a placement: no implementation of" <+> pretty v <+> "was built"
+          chosen -> return chosen
+      xs1 <- mapM (fmap repeated . scoreAnnoS rstat) xs0
+      let pairs = minPairs (concat [xs' | (AnnoS _ (Idx _ xs') _) <- xs1])
+      -- rescoring keeps one implementation, but the term is still reached
+      -- from every language the placement uses
+      let langs = unique (map fst pairs <> rForcedLangs rstat)
+      return (xs1, [(l1, reachFrom l1 pairs) | not (null pairs), l1 <- langs])
       where
-        scoreMany' :: [AnnoS (Indexed Type) Many (Indexed [(Lang, Score)])] -> [(Lang, Score)]
-        scoreMany' xs =
-          let pairss = [(minPairs . concat) [xs' | (AnnoS _ (Idx _ xs') _) <- xs]]
-              langs' = unique (rLangs rstat <> concatMap (map fst) pairss)
-           in [ ( l1
-                , foldl
-                    addScore
-                    (0, 0)
-                    [ minimumDef
-                      noScore
-                      [ addScore score (transScore l1 l2)
-                      | (l2, score) <- pairs
-                      ]
-                    | pairs <- pairss
-                    ]
-                )
-              | l1 <- langs'
-              ]
+        repeated x@(AnnoS g (Idx j ss) e)
+          | containsCallS v x = AnnoS g (Idx j [(l, deeper 1 sc) | (l, sc) <- ss]) e
+          | otherwise = x
+
+    -- The components of a list, tuple or record: all of them are built, so
+    -- each is priced like an argument (COST-11).
+    scoreComponents ::
+      RState ->
+      [AnnoS (Indexed Type) Many Int] ->
+      MorlocMonad ([AnnoS (Indexed Type) Many (Indexed [(Lang, Score)])], [(Lang, Score)])
+    scoreComponents rstat xs0 = do
+      xs1 <- mapM (scoreAnnoS rstat) xs0
+      return (xs1, scoreApp [] (map kid xs1))
+
+    -- The components of a constructor or of a container of function values,
+    -- which collapse builds in its parent's language: priced from every
+    -- language the parent may be in, so the parent finds its own.
+    scorePinnedComponents ::
+      RState ->
+      [AnnoS (Indexed Type) Many Int] ->
+      MorlocMonad ([AnnoS (Indexed Type) Many (Indexed [(Lang, Score)])], [(Lang, Score)])
+    scorePinnedComponents rstat xs0 = do
+      xs1 <- mapM (scoreAnnoS rstat) xs0
+      langs <- programLangs
+      let kids = map kid xs1
+          heads = unique (langs <> rLangs rstat <> concatMap (map fst . kidTable) kids)
+      return (xs1, if all (null . kidTable) kids then [] else scoreApp [(l, mempty) | l <- heads] kids)
+
+    componentsOf container
+      | isFunctionalData container = scorePinnedComponents
+      | otherwise = scoreComponents
+
+    programLangs :: MorlocMonad [Lang]
+    programLangs = do
+      scopes <- MM.gets stateConcreteTypedefs
+      return (unique (map (LR.poolOf registry) (Map.keys scopes)))
+
+    -- The cheapest way to have a value from @table@ in language @l@.
+    reachFrom :: Lang -> [(Lang, Score)] -> Score
+    reachFrom l table = minimum [sc <> boundaryScore registry l l2 | (l2, sc) <- table]
+
+    -- COST-16: a language's place in the preference order, then the
+    -- language itself, for ties between equal scores
+    preferred :: Lang -> (Int, Lang)
+    preferred l = (LR.registryPreference registry (langName l), l)
 
     -- The enclosing recursive heads, outermost first, each with the
     -- language it was placed in. A node with a back-edge to one of them
     -- beneath it is placed in that head's language (see 'pickLanguage').
     collapseAnnoS ::
-      [(EVar, Lang)] ->
+      Ctx ->
       Maybe Lang ->
       AnnoS (Indexed Type) Many (Indexed [(Lang, Score)]) ->
       MorlocMonad (AnnoS (Indexed Type) One (Indexed (Maybe Lang)))
@@ -702,7 +1199,7 @@ realizeWithRegistry registry tables seedLangs s0 = do
     -- The head of an application is not a value: a lambda there is applied
     -- in place, so a named one keeps its own choice.
     collapseHead ::
-      [(EVar, Lang)] ->
+      Ctx ->
       Maybe Lang ->
       AnnoS (Indexed Type) Many (Indexed [(Lang, Score)]) ->
       MorlocMonad (AnnoS (Indexed Type) One (Indexed (Maybe Lang)))
@@ -710,18 +1207,18 @@ realizeWithRegistry registry tables seedLangs s0 = do
 
     collapseNode ::
       Bool ->
-      [(EVar, Lang)] ->
+      Ctx ->
       Maybe Lang ->
       AnnoS (Indexed Type) Many (Indexed [(Lang, Score)]) ->
       MorlocMonad (AnnoS (Indexed Type) One (Indexed (Maybe Lang)))
-    collapseNode isValue heads l1 (AnnoS gi@(Idx gidx gt) ci0 e0) = do
-      l1' <- case (l1, heldTypes e0 gt) of
-        (Just l, Just ts) -> Just <$> holdingLang gidx ts l
+    collapseNode asValue heads l1 (AnnoS gi@(Idx gidx gt) ci0 e0) = do
+      l1' <- case (l1, heldTypes gidx e0 gt) of
+        (Just l, Just (j, ts)) -> Just <$> holdingLang j ts l
         _ -> return l1
       let AnnoS _ ci e = case l1' of
-            Just l | isValue -> pinNamedLambda l (AnnoS gi ci0 e0)
+            Just l | asValue -> pinNamedLambda l (AnnoS gi ci0 e0)
             _ -> AnnoS gi ci0 e0
-      (e', ci'') <- collapseExpr heads gt l1' (e, ci)
+      (e', ci'') <- collapseExpr heads gi l1' (e, ci)
       -- moved away from its context, a language-free computation keeps the
       -- language it was moved to rather than inheriting its context's again
       let ci' = case ci'' of
@@ -735,7 +1232,12 @@ realizeWithRegistry registry tables seedLangs s0 = do
         "realize: node" <+> pretty idx
           <+> ("parent=" <> maybe "general" pretty l1)
           <+> ("chose=" <> maybe "general" pretty mlang)
+          <+> ("table=" <> tableDoc ci0)
       return (AnnoS gi ci' e')
+
+    tableDoc :: Indexed [(Lang, Score)] -> MDoc
+    tableDoc (Idx _ ss) =
+      list [pretty l <> ":" <> pretty (renderScore (Just sc)) | (l, sc) <- ss]
 
     -- The newtype a cast converts: the argument's type when unwrapping, the
     -- result's when wrapping.
@@ -753,81 +1255,25 @@ realizeWithRegistry registry tables seedLangs s0 = do
       allowed <- filterM (\l -> not . Map.member n <$> MM.getConcreteScope l) candidates
       return (candidates, allowed)
 
-    -- Sentinel "no realization" score. Cost dominates, so the switch component
-    -- is irrelevant. Got 10 billion nodes in your AST? I didn't think so.
+    -- A placement that cannot be realized, above every one that can.
     noScore :: Score
-    noScore = (999999999, 999999999)
+    noScore = mempty {scoreUnrealizable = 1}
 
-    -- Cost of moving a value from parent language l1 to l2: the pairwise
-    -- (transition/self) cost, plus one language switch when the languages differ.
-    -- The switch component is the pure lexicographic tiebreaker (see 'Score'):
-    -- among languages of equal cost it keeps the value in the parent's language,
-    -- the boundary-minimizing choice the old backward-only +1 biasedCost made.
     -- | The general type an annotated expression carries.
     annoType :: AnnoS (Indexed Type) f c -> Type
     annoType (AnnoS (Idx _ t) _ _) = t
-
-    transScore :: Lang -> Lang -> Score
-    transScore l1 l2 = (pairwiseCost l1 l2, if l1 == l2 then 0 else 1)
-
-    -- | What it costs to move a value of this type across a pool boundary,
-    -- added to the cost of the language pair itself. Zero within a pool,
-    -- where nothing is moved.
-    crossScore :: Type -> Lang -> Lang -> Score
-    crossScore t l1 l2
-      | l1 == l2 = transScore l1 l2
-      | otherwise = let (c, sw) = transScore l1 l2 in (c + crossingPayloadCost t, sw)
-
-    -- | THE EXTENSION POINT for pricing a crossing by WHAT is moved rather
-    -- than only by where it is going.
-    --
-    -- It answers zero for every type, which is exactly the historical
-    -- behaviour: a crossing costs what the language pair costs, whether it
-    -- carries a byte or a gigabyte. Every alternative is a research question,
-    -- so the choice is named and given one home rather than being spread
-    -- through the scorer.
-    --
-    -- Three types are mispriced by the flat answer, in rough order of how
-    -- badly:
-    --
-    --   * A FUNCTION value is not moved at all. It is replaced by a proxy
-    --     that calls home on every application, so its real cost is
-    --     (number of applications) x (round trip) -- unbounded, and not
-    --     knowable from the type. Anything finite here understates it.
-    --   * A variable-width aggregate costs its serialized size, which is a
-    --     property of the value rather than of the type. A type-level answer
-    --     can only be a prior on size.
-    --   * A fixed-width primitive is very nearly free, and is the one case
-    --     the flat answer overcharges relative to the others.
-    --
-    -- The smallest useful refinement is a constant: zero for primitives and
-    -- fixed-width containers of them, one for everything else. Richer answers
-    -- (size priors from a type, amortizing a function value over an estimated
-    -- call count, letting a backend declare its own table) all fit here
-    -- without touching the scorer.
-    --
-    -- Any refinement must remain a pure function of the type: this runs before
-    -- values exist. The type given is the general type at the crossing point,
-    -- already monomorphized, so a cost may depend on type parameters.
-    crossingPayloadCost :: Type -> Int
-    crossingPayloadCost _ = 0
 
     cost ::
       Maybe Lang -> -- parent language (if given)
       Lang -> -- child lang (should always be given if we are working from scored pairs)
       Score -> -- score
       Score
-    cost (Just l1) l2 score = addScore score (transScore l1 l2)
+    cost (Just l1) l2 score = score <> boundaryScore registry l1 l2
     cost _ _ score = score
 
-    -- FIXME: in the future, this function should be replaced by an estimate of
-    -- the function runtime, for now I will just base it off languages.
-    callCost :: Source -> Int
-    callCost src = languageCost (srcLang src)
-
     collapseExpr ::
-      [(EVar, Lang)] ->
-      Type ->
+      Ctx ->
+      Indexed Type ->
       Maybe Lang -> -- the language of the parent expression (if Nothing, then this is a GAST)
       (ExprS (Indexed Type) Many (Indexed [(Lang, Score)]), Indexed [(Lang, Score)]) ->
       MorlocMonad (ExprS (Indexed Type) One (Indexed (Maybe Lang)), Indexed (Maybe Lang))
@@ -835,14 +1281,43 @@ realizeWithRegistry registry tables seedLangs s0 = do
     collapseExpr _ _ _ (VarS v (Many []), Idx i _) =
       MM.throwSourcedError i $ "No implementation found for" <+> squotes (pretty (displayName v))
     -- Select one implementation for the given term
-    collapseExpr heads gt l1 (VarS v (Many xs), Idx i _) = do
-      let minXs = minsBy (\(AnnoS _ (Idx _ ss) _) -> minimumMay [cost l1 l2 s | (l2, s) <- ss]) xs
+    -- CLS-2 first, where the implementations' types differ: those whose
+    -- type matches the use best; then the least by COST-1, ties going to the
+    -- preferred language (COST-16). Two different sources of one type still
+    -- tied are an error; definitions in morloc that tie are interchangeable
+    -- (REAL-1) and the first is taken.
+    collapseExpr heads (Idx _ gt) l1 (VarS v (Many xs), Idx i _) = do
+      typed <- case xs of
+        (AnnoS (Idx _ t0) _ _ : _)
+          | any (\(AnnoS (Idx _ t) _ _) -> t /= t0) xs -> resolveInstances gt xs
+        _ -> return xs
+      let minXs = minsBy (\(AnnoS _ (Idx _ ss) _) -> minimumMay [(cost l1 l2 s, fst (preferred l2)) | (l2, s) <- ss]) typed
       (x, lang) <- case minXs of
         [] -> MM.throwSourcedError i $ "No implementation found for" <+> squotes (pretty (displayName v))
-        [x] -> handleOne x
-        choices -> mapM handleOne choices >>= handleMany gt
+        (y@(AnnoS (Idx _ ty) _ _) : _)
+          | length (List.nubBy sameImplementation (mapMaybe sourceOf minXs)) <= 1 -> handleOne y
+          -- implementations of different types are instance resolution's
+          -- to separate, and a type left open is reported where it is used
+          | any (\(AnnoS (Idx _ t) _ _) -> t /= ty) minXs -> handleOne y
+          | otherwise ->
+              MM.throwSourcedError i $
+                "Ambiguous implementations of" <+> squotes (pretty (displayName v)) <> ":"
+                  <> "\n" <> indent 2 (vsep (map describe (List.nubBy sameImplementation (mapMaybe sourceOf minXs))))
+                  <> "\nEach is placed equally well (COST-1). Remove all but one from scope,"
+                  <+> "by importing fewer modules."
       return (VarS v (One x), Idx i lang)
       where
+        sameImplementation :: Source -> Source -> Bool
+        sameImplementation sa sb = srcLang sa == srcLang sb && srcPath sa == srcPath sb && srcName sa == srcName sb
+
+        sourceOf :: AnnoS g f c -> Maybe Source
+        sourceOf (AnnoS _ _ (ExeS (SrcCall src))) = Just src
+        sourceOf (AnnoS _ _ (LabelS _ y)) = sourceOf y
+        sourceOf _ = Nothing
+
+        describe :: Source -> MDoc
+        describe src = pretty (srcLang src) <+> pretty (srcName src) <+> maybe "" (\pth -> "from" <+> pretty pth) (srcPath src)
+
         handleOne ::
           AnnoS (Indexed Type) Many (Indexed [(Lang, Score)]) ->
           MorlocMonad (AnnoS (Indexed Type) One (Indexed (Maybe Lang)), Maybe Lang)
@@ -855,34 +1330,30 @@ realizeWithRegistry registry tables seedLangs s0 = do
           -- head: everything beneath it down to the back-edge follows its
           -- language.
           let heads' = case newLang of
-                Just l | containsCallS v x -> heads ++ [(v, l)]
+                Just l | containsCallS v x -> heads {ctxHeads = ctxHeads heads ++ [(v, l)]}
                 _ -> heads
           x' <- collapseAnnoS heads' newLang x
           return (x', newLang)
 
-        handleMany ::
+        -- The implementations whose type matches the use best: the most
+        -- specific instance, at the nearest link of the use's alias chain.
+        resolveInstances ::
           Type ->
-          [(AnnoS (Indexed Type) One (Indexed (Maybe Lang)), Maybe Lang)] ->
-          MorlocMonad (AnnoS (Indexed Type) One (Indexed (Maybe Lang)), Maybe Lang)
-        handleMany gt' xs' = do
+          [AnnoS (Indexed Type) Many (Indexed [(Lang, Score)])] ->
+          MorlocMonad [AnnoS (Indexed Type) Many (Indexed [(Lang, Score)])]
+        resolveInstances gt' xs' = do
           gscope <- MM.getGeneralScope
-          -- gt' followed by each step of its alias chain toward the root
-          -- type (C -> B -> A -> Str). A candidate matches at the first
-          -- link its head is compatible with, so an instance on a nearer
-          -- alias is preferred over one on a farther alias, and a sibling
-          -- alias never matches at all.
+          -- A candidate matches at the first link of the alias chain its
+          -- head is compatible with, so a nearer alias wins and a sibling
+          -- alias never matches.
           let chain = gt' : List.unfoldr (fmap (\t -> (t, t)) . reduceStep gscope) gt'
               matched =
                 [ (lvl, type2typeu t, x)
-                | x@(AnnoS (Idx _ t) _ _, _) <- xs'
+                | x@(AnnoS (Idx _ t) _ _) <- xs'
                 , Just lvl <- [List.findIndex (`compatibleType` t) chain]
                 ]
-              -- Instance heads are ordered by subsumption (UnkT lowers to
-              -- a per-leaf forall), so a well-formed set of matches has a
-              -- unique greatest element: the most specific instance. Heads
-              -- that tie on specificity (distinct aliases of one type) are
-              -- separated by chain position; incomparable maxima mean the
-              -- heads overlap without either specializing the other.
+              -- Equally specific heads are separated by the chain link they
+              -- matched; incomparable maxima overlap.
               maxima = mostSpecific [h | (_, h, _) <- matched]
               best = [(lvl, h, x) | (lvl, h, x) <- matched, any (equivalent h) maxima]
               nearest = [(h, x) | (lvl, h, x) <- best, lvl == minimum [l | (l, _, _) <- best]]
@@ -892,11 +1363,10 @@ realizeWithRegistry registry tables seedLangs s0 = do
                 "No matching implementation found for" <+> squotes (pretty (displayName v))
                   <+> "at type" <+> pretty gt'
             -- one head, possibly sourced several times (duplicate imports)
-            ((h0, x) : rest) | all (equivalent h0 . fst) rest -> return x
-            -- The use site does not fix the type, so the overlap cannot be
-            -- judged here. A generic export is dropped before code
-            -- generation, so the pick below is never observed there.
-            ((_, x) : _) | containsUnk gt' -> return x
+            ((h0, _) : rest) | all (equivalent h0 . fst) rest -> return (map snd nearest)
+            -- The use's type holds an unsolved variable, so the overlap is
+            -- not judged and the nearest candidates are kept.
+            _ | containsUnk gt' -> return (map snd nearest)
             _ ->
               MM.throwSourcedError i $
                 "Ambiguous instances for" <+> squotes (pretty (displayName v))
@@ -906,17 +1376,12 @@ realizeWithRegistry registry tables seedLangs s0 = do
                   <> "\nDeclare an instance for their common specialization to"
                   <+> "disambiguate, or remove one of them."
 
-        -- One alias-reduction step: the top-level constructor first, then
-        -- (when aliases sit inside a compound type, e.g. Celsius -> Celsius
-        -- with type Celsius = Int) the leaves.
+        -- One alias-reduction step: the head first, else the leaves.
         reduceStep :: Scope -> Type -> Maybe Type
         reduceStep gscope t =
           typeOf <$> (TE.reduceType gscope (type2typeu t) <|> TE.reduceTypeLeaves gscope (type2typeu t))
 
-        -- Structural type equality with UnkT as wildcard.
-        -- UnkT arises from unsolved generics (e.g., mempty :: List (UnkT a)).
-        -- This allows List Int to match List (UnkT a) without matching
-        -- Deque (UnkT a) or accepting sibling aliases in function types.
+        -- Structural equality with UnkT (an unsolved generic) as wildcard.
         compatibleType :: Type -> Type -> Bool
         compatibleType (UnkT _) _ = True
         compatibleType _ (UnkT _) = True
@@ -938,7 +1403,7 @@ realizeWithRegistry registry tables seedLangs s0 = do
         compatibleType (OptionalT t1) (OptionalT t2) = compatibleType t1 t2
         compatibleType (EffectT e1 t1) (EffectT e2 t2) = e1 == e2 && compatibleType t1 t2
         compatibleType (NatLitT n1) (NatLitT n2) = n1 == n2
-        -- NatVoidT is wildcard-compatible with any Nat-shaped value
+        -- An erased Nat placeholder matches any Nat literal.
         compatibleType NatVoidT (NatLitT _) = True
         compatibleType (NatLitT _) NatVoidT = True
         compatibleType NatVoidT NatVoidT = True
@@ -962,13 +1427,28 @@ realizeWithRegistry registry tables seedLangs s0 = do
         Nothing -> pickLanguage heads l1 [x] ss
       x' <- collapseAnnoS heads lang x
       return (LamS vs x', Idx i lang)
-    collapseExpr heads _ l1 (AppS f xs, Idx i ss) = do
+    collapseExpr heads (Idx gidx gt) l1 (AppS f xs, Idx i ss) = do
       -- A sourced function runs where it is sourced; only a call whose
       -- head is defined in morloc can follow a recursive head's language.
       lang <- if isSourcedMany f then chooseLanguage l1 ss else pickLanguage heads l1 (f : xs) ss
-      f' <- collapseHead heads lang f
-      xs' <- mapM (if isSourceHead f' then collapseCarried heads lang else collapseAnnoS heads lang) xs
-      return (AppS f' xs', Idx i lang)
+      case (f, lang) of
+        -- a copy that is called is bound to a name, then called: a lambda
+        -- applied in place is not lowered
+        (AnnoS fg (Idx fi _) (LetBndS v), Just l)
+          | Just (rhs, lv) <- Map.lookup v (ctxCopies heads)
+          , lv /= l -> do
+              copy <- collapseCopy heads fi l rhs
+              xs' <- mapM (collapseAnnoS heads lang) xs
+              v' <- (\k -> EV (unEVar (displayName v) <> "`c" <> MT.show' k)) <$> MM.getCounter
+              gk <- newIndex gidx
+              k <- newIndex i
+              let call = AnnoS (Idx gk gt) (Idx k lang) (AppS (AnnoS fg (Idx fi lang) (LetBndS v')) xs')
+              j <- newIndex i
+              return (LetS v' copy call, Idx j lang)
+        _ -> do
+          f' <- collapseHead heads lang f
+          xs' <- mapM (if isSourceHead f' then collapseCarried heads lang else collapseAnnoS heads lang) xs
+          return (AppS f' xs', Idx i lang)
     -- Propagate data
     collapseExpr heads _ l1 (e@(LstS xs), Idx i ss) = do
       lang <- if isFunctionalData e then return l1 else pickLanguage heads l1 xs ss
@@ -998,8 +1478,17 @@ realizeWithRegistry registry tables seedLangs s0 = do
     collapseExpr heads _ l1 (LetS v e1 e2, Idx i ss) = do
       lang <- pickLanguage heads l1 [e1, e2] ss
       e1' <- collapseAnnoS heads lang e1
-      e2' <- collapseAnnoS heads lang e2
+      let inner = case lang of
+            Just l | copyable e1 && holdsCallable (annoType e1) -> heads {ctxCopies = Map.insert v (e1, l) (ctxCopies heads)}
+            _ -> heads {ctxCopies = Map.delete v (ctxCopies heads)}
+      e2' <- collapseAnnoS inner lang e2
       return (LetS v e1' e2', Idx i lang)
+    -- a reference in another language than its let gets a copy built here
+    collapseExpr heads _ (Just lang) (LetBndS v, Idx ri _)
+      | Just (rhs, l) <- Map.lookup v (ctxCopies heads)
+      , l /= lang = do
+          AnnoS _ ci e <- collapseCopy heads ri lang rhs
+          return (e, ci)
     collapseExpr _ _ lang (LetBndS v, Idx i _) = return (LetBndS v, Idx i lang)
     collapseExpr _ _ lang (CallS v, Idx i _) = return (CallS v, Idx i lang)
     collapseExpr heads _ l1 (IfS c t e, Idx i ss) = do
@@ -1060,7 +1549,7 @@ realizeWithRegistry registry tables seedLangs s0 = do
     -- A function value handed straight to a sourced function is carried the
     -- same way: the host's pool holds the callable it is given.
     collapseElement ::
-      [(EVar, Lang)] ->
+      Ctx ->
       ExprS (Indexed Type) Many (Indexed [(Lang, Score)]) ->
       Maybe Lang ->
       AnnoS (Indexed Type) Many (Indexed [(Lang, Score)]) ->
@@ -1070,12 +1559,22 @@ realizeWithRegistry registry tables seedLangs s0 = do
       | otherwise = collapseAnnoS heads lang x
 
     collapseCarried ::
-      [(EVar, Lang)] ->
+      Ctx ->
       Maybe Lang ->
       AnnoS (Indexed Type) Many (Indexed [(Lang, Score)]) ->
       MorlocMonad (AnnoS (Indexed Type) One (Indexed (Maybe Lang)))
+    -- a conditional choosing a function value: each branch is carried
+    collapseCarried heads lang (AnnoS g@(Idx _ t) (Idx i _) (IfS c a b))
+      | isCallableType t = do
+          c' <- collapseAnnoS heads lang c
+          a' <- collapseCarried heads lang a
+          b' <- collapseCarried heads lang b
+          return (AnnoS g (Idx i lang) (IfS c' a' b'))
+    -- a sourced function exists only in its source's language
+    collapseCarried heads lang x
+      | isSourceLeaf x = collapseAnnoS heads lang x
     collapseCarried heads lang x@(AnnoS (Idx _ t) _ e)
-      | isClosureType t, not (isNewtypeCast e) = do
+      | isCallableType t, not (isNewtypeCast e) = do
           AnnoS g (Idx i _) e' <- collapseAnnoS heads lang x
           return (AnnoS g (Idx i lang) e')
       | otherwise = collapseAnnoS heads lang x
@@ -1098,6 +1597,38 @@ realizeWithRegistry registry tables seedLangs s0 = do
         pinScores ss0 = case minimumMay [cost (Just lang) l2 s2 | (l2, s2) <- ss0] of
           Nothing -> ss0
           Just s -> [(lang, s)]
+
+    isSourceLeaf :: AnnoS g Many c -> Bool
+    isSourceLeaf (AnnoS _ _ (ExeS (SrcCall _))) = True
+    isSourceLeaf (AnnoS _ _ (LabelS _ x)) = isSourceLeaf x
+    isSourceLeaf _ = False
+
+    -- A copy of a let-bound value for the reference at index @ref@ in
+    -- language @l@: its definition collapsed again as used from @l@, with
+    -- fresh indices. The languages chosen are logged for the COST-11 check.
+    collapseCopy ::
+      Ctx ->
+      Int ->
+      Lang ->
+      AnnoS (Indexed Type) Many (Indexed [(Lang, Score)]) ->
+      MorlocMonad (AnnoS (Indexed Type) One (Indexed (Maybe Lang)))
+    collapseCopy heads ref l rhs = do
+      copy <- collapseAnnoS heads (Just l) rhs
+      let chosen = Map.fromListWith (\a b -> if a == b then a else Nothing) [(i, cl) | Idx i cl <- collectIdx copy]
+      MM.liftIO (modifyIORef (ctxCopyLog heads) (Map.insert ref chosen))
+      reindexTree copy >>= mapAnnoSCM (\(Idx ci cl) -> (`Idx` cl) <$> newIndex ci)
+
+    -- A value that may be built again wherever it is used: evaluating it
+    -- computes nothing, and it carries no label, which names one manifold.
+    copyable :: AnnoS (Indexed Type) Many c -> Bool
+    copyable x = isValue x && not (hasLabel x)
+      where
+        hasLabel (AnnoS _ _ (LabelS _ _)) = True
+        hasLabel (AnnoS _ _ e) = any hasLabel (foldExprS (: []) e)
+
+    -- A node with its table replaced.
+    withTable :: [(Lang, Score)] -> AnnoS g f (Indexed [(Lang, Score)]) -> AnnoS g f (Indexed [(Lang, Score)])
+    withTable table (AnnoS g (Idx j _) e) = AnnoS g (Idx j table) e
 
     isNamedLambda :: AnnoS g Many c -> Bool
     isNamedLambda (AnnoS _ _ (LamS _ _)) = True
@@ -1124,14 +1655,10 @@ realizeWithRegistry registry tables seedLangs s0 = do
     isNewtypeCast (CoerceS (CoerceNewtype _ _) _) = True
     isNewtypeCast _ = False
 
-    isClosureType :: Type -> Bool
-    isClosureType (FunT _ _) = True
-    isClosureType (EffectT _ _) = True
-    isClosureType _ = False
 
     chooseLanguage :: Maybe Lang -> [(Lang, Score)] -> MorlocMonad (Maybe Lang)
     chooseLanguage l1 ss =
-      case minBy snd [(l2, cost l1 l2 s2) | (l2, s2) <- ss] of
+      case minBy (\(l2, s2) -> (s2, preferred l2)) [(l2, cost l1 l2 s2) | (l2, s2) <- ss] of
         Nothing -> return Nothing
         (Just (l3, _)) -> return (Just l3)
 
@@ -1146,17 +1673,17 @@ realizeWithRegistry registry tables seedLangs s0 = do
     -- pool serves as well as the head's own language. A scorer cannot
     -- decide this, since a back-edge scores nothing in every language.
     pickLanguage ::
-      [(EVar, Lang)] ->
+      Ctx ->
       Maybe Lang ->
       [AnnoS (Indexed Type) Many (Indexed [(Lang, Score)])] ->
       [(Lang, Score)] ->
       MorlocMonad (Maybe Lang)
     pickLanguage heads l1 xs ss =
-      case [l | (w, l) <- heads, any (containsCallS w) xs] of
+      case [l | (w, l) <- ctxHeads heads, any (containsCallS w) xs] of
         (l : _) -> return (Just (hostedWith l))
         [] -> chooseLanguage l1 ss
       where
-        hostedWith l = case minBy snd [(l2, s) | (l2, s) <- ss, LR.coLocated registry l l2] of
+        hostedWith l = case minBy (\(l2, s) -> (s, preferred l2)) [(l2, s) | (l2, s) <- ss, LR.coLocated registry l l2] of
           Just (l2, _) -> l2
           Nothing -> l
 
@@ -1197,7 +1724,7 @@ realizeWithRegistry registry tables seedLangs s0 = do
           MorlocMonad (AnnoS (Indexed Type) One (Indexed Lang))
         -- an inherited language, for a computation that can run there
         f lang (AnnoS g@(Idx gidx gt) (Idx i Nothing) e') = do
-          lang' <- maybe (return lang) (\ts -> holdingLang gidx ts lang) (heldTypes e' gt)
+          lang' <- maybe (return lang) (\(j, ts) -> holdingLang j ts lang) (heldTypes gidx e' gt)
           f lang' (AnnoS g (Idx i (Just lang')) e')
         f _ (AnnoS g (Idx i (Just lang)) e') = do
           e'' <- case e' of
@@ -1252,21 +1779,168 @@ makeGAST ::
   AnnoS (Indexed Type) One (Indexed (Maybe Lang)) -> MorlocMonad (AnnoS (Indexed Type) One ())
 makeGAST = mapAnnoSCM (\(Idx _ _) -> return ())
 
+-- | Place languages on pool trees again after normalization (LambdaEval), so the placement is decided on the shape code
+-- generation lowers. Each tree is scored and collapsed again with the same
+-- cost model; its root keeps its language (the manifold's identity), a root
+-- lambda's body the language its manifold is built in, and a sourced call
+-- its source's. The trees on one recursion cycle are placed in one pool. A
+-- call of another tree costs what that tree's language does.
+placeNormalized :: [AnnoS (Indexed Type) One (Indexed Lang)] -> MorlocMonad [AnnoS (Indexed Type) One (Indexed Lang)]
+placeNormalized trees0 = do
+  (trees, hostLimits) <- treeTargets trees0 >>= \target -> planHostFunctions target trees0
+  registry <- MM.gets stateLangRegistry
+  nameMap <- MM.gets stateName
+  recTargets <- MM.gets stateRecursionTargets
+  target <- treeTargets trees
+  let rootLang = Map.fromList [(i, l) | AnnoS (Idx i _) (Idx _ l) _ <- trees]
+      calledNames = [(i, unique [(v, j) | AnnoS _ _ (CallS v) <- annoNodes t, Just j <- [target v]]) | t@(AnnoS (Idx i _) _ _) <- trees]
+      -- a node calling a function on a recursion cycle through its tree is
+      -- placed in the tree's language, so the back-edge stays in its pool
+      namesOnCycle =
+        Map.fromList
+          [ (i, names)
+          | CyclicSCC members <- stronglyConnComp [(i, i, unique (map snd vs)) | (i, vs) <- calledNames]
+          , let names = unique [v | (_, vs) <- calledNames, (v, j) <- vs, j `elem` members]
+          , i <- members
+          ]
+      cycleHeads i l = [(v, l) | v <- Map.findWithDefault [] i namesOnCycle]
+      -- a call of another tree is a call of its manifold, from any pool
+      langs = unique [l | t <- trees, AnnoS _ (Idx _ l) _ <- annoNodes t]
+      callTable =
+        Map.fromList
+          [ (v, [(l, boundaryScore registry l lt) | l <- langs])
+          | (_, vs) <- calledNames
+          , (v, j) <- vs
+          , Just lt <- [Map.lookup j rootLang]
+          ]
+      place t@(AnnoS (Idx i _) (Idx _ l0) e) = do
+        let work = case e of
+              LamS _ (AnnoS _ (Idx _ lb) _) -> lb
+              _ -> l0
+            label = maybe ("tree " <> MT.show' i) (unEVar . displayName) (treeName nameMap recTargets i)
+            limits = Map.findWithDefault Map.empty i hostLimits
+        opened <- reopenSources limits (unrealized t)
+        (_, finish) <- realize callTable (Pins (cycleHeads i work) (Just work) (Just label) limits) opened
+        placed <- removeVarS <$> (finish (Just l0) >>= either (const (MM.throwCompilerBugAt i "a pool tree was placed in no language")) return)
+        sequence_
+          [ MM.throwCompilerBugAt gi $ "a node holding a function made by host code was placed in" <+> pretty l <+> "rather than" <+> pretty lh
+          | AnnoS (Idx gi _) (Idx ci l) _ <- annoNodes placed
+          , Just (HostLimit lh _) <- [Map.lookup ci limits]
+          , l /= lh
+          ]
+        return placed
+  final <- mapM place trees
+  checks <- MM.gets statePlacement
+  case checks of
+    Just cs -> do
+      names <- MM.gets stateName
+      recs <- MM.gets stateRecursionTargets
+      let listed t@(AnnoS (Idx i _) _ _) = placementLines (treeName names recs i) t
+          listing = concatMap listed final <> cs
+      sum (map MT.length listing) `seq` MM.modify' (\st -> st {statePlacement = Just listing})
+    Nothing -> return ()
+  return final
+
+-- | A sourced call that must run in the language of a function made by host
+-- code it is given may take its term's source in that language instead of
+-- the one first chosen (HOST-9): its head offers every source of the term
+-- with the same call groups. Only a call whose result holds no function,
+-- and whose callbacks are given none, is offered, so where the functions
+-- around it were made does not depend on the choice.
+reopenSources :: Map Int HostLimit -> AnnoS (Indexed Type) Many Int -> MorlocMonad (AnnoS (Indexed Type) Many Int)
+reopenSources limits n@(AnnoS g ci e)
+  | Map.null limits = return n
+  | otherwise = AnnoS g ci <$> case e of
+      AppS f@(AnnoS fg@(Idx fgi ft) _ (ExeS (SrcCall src))) xs
+        | Map.member ci limits
+        , FunT ins out <- ft
+        , not (holdsCallable out)
+        , not (any givenFunction ins) -> do
+            others <- sameTermSources src
+            alts <- mapM (\s -> (\gi k -> AnnoS (Idx gi ft) k (ExeS (SrcCall s))) <$> newIndex fgi <*> MM.getCounter) others
+            xs' <- mapM (reopenSources limits) xs
+            hd <-
+              if null alts
+                then return f
+                else (\k -> AnnoS fg k (VarS (srcAlias src) (Many (f : alts)))) <$> MM.getCounter
+            return (AppS hd xs')
+      _ -> mapExprSM (reopenSources limits) e
+  where
+    givenFunction (FunT ps _) = any holdsCallable ps
+    givenFunction _ = False
+
+-- | The pool tree a call of each name reaches.
+treeTargets :: [AnnoS (Indexed Type) One (Indexed Lang)] -> MorlocMonad (EVar -> Maybe Int)
+treeTargets trees = do
+  nameMap <- MM.gets stateName
+  recTargets <- MM.gets stateRecursionTargets
+  let roots = Set.fromList [i | AnnoS (Idx i _) _ _ <- trees]
+      byName = Map.fromList [(n, i) | (i, n) <- Map.toList nameMap, Set.member i roots]
+  return $ \v -> case Map.lookup v byName of
+    Just i -> Just i
+    Nothing -> case Map.lookup v recTargets of
+      Just i | Set.member i roots -> Just i
+      _ -> Nothing
+
+-- | The name a pool tree is called by: a shared specialization's copy or a
+-- recursive helper by the name its callers use, else its term's name.
+treeName :: Map Int EVar -> Map EVar Int -> Int -> Maybe EVar
+treeName names recs i = case [v | (v, j) <- Map.toList recs, j == i] of
+  (v : _) -> Just v
+  [] -> Map.lookup i names
+
+-- | Give every binder that rebinds a name already in scope a fresh name,
+-- through its scope, so that no name is bound twice on any path from the
+-- root. One pass: @names@ maps each name in scope to what it is now called.
+renameShadowing :: Map EVar EVar -> AnnoS g Many c -> MorlocMonad (AnnoS g Many c)
+renameShadowing names (AnnoS g c e) = AnnoS g c <$> case e of
+  BndS v -> return (BndS (Map.findWithDefault v v names))
+  LetBndS v -> return (LetBndS (Map.findWithDefault v v names))
+  LamS vs b -> do
+    vs' <- mapM fresh vs
+    LamS vs' <$> renameShadowing (foldr (uncurry Map.insert) names (zip vs vs')) b
+  LetS v a b -> do
+    a' <- renameShadowing names a
+    v' <- fresh v
+    LetS v' a' <$> renameShadowing (Map.insert v v' names) b
+  _ -> mapExprSM (renameShadowing names) e
+  where
+    fresh v
+      | Map.member v names = (\k -> EV (unEVar (displayName v) <> "`r" <> MT.show' k)) <$> MM.getCounter
+      | otherwise = return v
+
+-- | A realized tree as the scorer takes it: every term with its one
+-- implementation, no language.
+unrealized :: AnnoS (Indexed Type) One (Indexed Lang) -> AnnoS (Indexed Type) Many Int
+unrealized (AnnoS g (Idx i _) e) = AnnoS g i $ case e of
+  UniS -> UniS
+  NullS -> NullS
+  BndS v -> BndS v
+  VarS v (One x) -> VarS v (Many [unrealized x])
+  AppS f xs -> AppS (unrealized f) (map unrealized xs)
+  LamS vs x -> LamS vs (unrealized x)
+  LstS xs -> LstS (map unrealized xs)
+  TupS xs -> TupS (map unrealized xs)
+  NamS rs -> NamS [(k, unrealized x) | (k, x) <- rs]
+  RealS j x -> RealS j x
+  IntS j x -> IntS j x
+  LogS x -> LogS x
+  StrS x -> StrS x
+  ConS v n k xs -> ConS v n k (map unrealized xs)
+  ExeS x -> ExeS x
+  LetS v a b -> LetS v (unrealized a) (unrealized b)
+  LetBndS v -> LetBndS v
+  CallS v -> CallS v
+  IfS a b c -> IfS (unrealized a) (unrealized b) (unrealized c)
+  DoBlockS x -> DoBlockS (unrealized x)
+  EvalS x -> EvalS (unrealized x)
+  CoerceS co x -> CoerceS co (unrealized x)
+  IntrinsicS intr xs -> IntrinsicS intr (map unrealized xs)
+  LabelS k x -> LabelS k (unrealized x)
+
 removeVarS :: AnnoS g One c -> AnnoS g One c
 removeVarS (AnnoS g1 _ (VarS _ (One (AnnoS _ c2 x)))) = removeVarS (AnnoS g1 c2 x)
-removeVarS (AnnoS g c (AppS x xs)) = AnnoS g c (AppS (removeVarS x) (map removeVarS xs))
-removeVarS (AnnoS g c (LamS vs x)) = AnnoS g c (LamS vs (removeVarS x))
-removeVarS (AnnoS g c (LstS xs)) = AnnoS g c (LstS (map removeVarS xs))
-removeVarS (AnnoS g c (TupS xs)) = AnnoS g c (TupS (map removeVarS xs))
-removeVarS (AnnoS g c (NamS rs)) = AnnoS g c (NamS (map (second removeVarS) rs))
-removeVarS (AnnoS g c (LetS v e1 e2)) = AnnoS g c (LetS v (removeVarS e1) (removeVarS e2))
-removeVarS (AnnoS g c (IfS cond thenE elseE)) = AnnoS g c (IfS (removeVarS cond) (removeVarS thenE) (removeVarS elseE))
-removeVarS (AnnoS g c (DoBlockS e)) = AnnoS g c (DoBlockS (removeVarS e))
-removeVarS (AnnoS g c (EvalS e)) = AnnoS g c (EvalS (removeVarS e))
-removeVarS (AnnoS g c (CoerceS co e)) = AnnoS g c (CoerceS co (removeVarS e))
-removeVarS (AnnoS g c (LabelS k e)) = AnnoS g c (LabelS k (removeVarS e))
-removeVarS (AnnoS g c (IntrinsicS intr es)) = AnnoS g c (IntrinsicS intr (map removeVarS es))
-removeVarS x = x
+removeVarS (AnnoS g c e) = AnnoS g c (mapExprS removeVarS e)
 
 -- | Lift each non-exported self-recursive @where@-bound helper into its own
 -- top-level rAST (Johnsson-style super-combinator conversion). Runs before
@@ -1294,7 +1968,7 @@ processTree exportSet tree = do
   (modifiedE, helpersE) <- extractFromRoot exportSet tree
   (modified0, helpers0) <- addStageEntries modifiedE helpersE
   let captureMap = closeFreeVars helpers0
-  MM.modify (\st -> st {stateRecStages = Map.mapWithKey
+  MM.modify' (\st -> st {stateRecStages = Map.mapWithKey
     (\v (k, sv, n) -> (k, sv, maybe n length (Map.lookup v captureMap))) (stateRecStages st)})
   modified1 <- rewriteCalls captureMap modified0
   -- a let-bound value a helper captures becomes one of its parameters
@@ -1342,7 +2016,7 @@ addStageEntries modified helpers = do
             stageT = FunT (take k ts) (FunT (drop k ts) r)
         AnnoS (Idx gi' _) c' e' <- reindexOne t
         let AnnoS (Idx source _) _ _ = t
-        MM.modify (\st -> st
+        MM.modify' (\st -> st
           { stateName = Map.insert gi' stageV (stateName st)
           , stateNameSource = Map.insert gi' source (stateNameSource st)
           })
@@ -1352,7 +2026,7 @@ addStageEntries modified helpers = do
     , k < length ts
     , not (isLamBody body)
     ]
-  MM.modify (\st -> st {stateRecStages = Map.union (Map.fromList [(v, (k, sv, 0)) | (v, sv, k, _, _) <- staged]) (stateRecStages st)})
+  MM.modify' (\st -> st {stateRecStages = Map.union (Map.fromList [(v, (k, sv, 0)) | (v, sv, k, _, _) <- staged]) (stateRecStages st)})
   let rewriteAll x = foldr (\(v, sv, k, st, _) acc -> rewritePartialCalls v sv k st acc) x staged
       helpers' = [(v, rewriteAll t) | (v, t) <- helpers]
       stages = [(sv, rewriteAll t) | (_, sv, _, _, t) <- staged]
@@ -1459,7 +2133,7 @@ extractExpr exports (VarS v (One child@(AnnoS (Idx midx _) _ _)))
       -- recursion), so its back-edges are renamed with this one's
       let renamedChild = renameCallS v newV child'
           innerHelpers' = [(w, renameCallS v newV h) | (w, h) <- innerHelpers]
-      MM.modify (\s -> s { stateName = Map.insert midx newV (stateName s) })
+      MM.modify' (\s -> s { stateName = Map.insert midx newV (stateName s) })
       return (CallS newV, (newV, renamedChild) : innerHelpers')
 extractExpr exports (VarS v (One child)) = do
   (child', helpers) <- extractFromTree exports child
@@ -1769,9 +2443,13 @@ isFunctionalData (NamS (map snd -> xs)) = any isFunctionalDataAnnoS xs
 isFunctionalData _ = False
 
 isFunctionalDataAnnoS :: AnnoS (Indexed Type) f a -> Bool
-isFunctionalDataAnnoS (AnnoS (Idx _ t) _ e) = handleType t || isFunctionalData e
-  where
-    handleType :: Type -> Bool
-    handleType (FunT _ _) = True
-    handleType (EffectT _ _) = True
-    handleType _ = False
+isFunctionalDataAnnoS (AnnoS (Idx _ t) _ e) = isCallableType t || isFunctionalData e
+
+-- | A function or a suspension.
+isCallableType :: Type -> Bool
+isCallableType (FunT _ _) = True
+isCallableType (EffectT _ _) = True
+isCallableType _ = False
+
+holdsCallable :: Type -> Bool
+holdsCallable t = containsFunT t || containsEffectT t

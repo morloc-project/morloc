@@ -1,0 +1,43 @@
+-- FAIL-6 and LIFE-5: a call during which a peer pool died reports the death,
+-- whatever user code did. An intermediate pool whose callee dies fails the run with
+-- status 1, not 70; a catch-all in user code (C++ catch (...), Python
+-- except BaseException, R tryCatch) cannot turn it into a value; neither can
+-- @try (FAIL-6).
+module main (viaCpp, viaRust, tryCpp, guardCpp, guardPy, guardR)
+
+import root
+import root-py
+import root-cpp
+import root-r
+import root-rust
+
+source Py from "lib.py" ("die" as diePy, "guard" as guardPyF)
+source Cpp from "lib.hpp" ("die" as dieCpp, "guard" as guardCppF, "inc" as incCpp)
+source R from "lib.R" ("guard" as guardRF)
+source Rust from "lib.rs" ("inc" as incRust)
+
+diePy :: Int -> Int
+dieCpp :: Int -> Int
+incCpp :: Int -> Int
+incRust :: Int -> Int
+guardPyF :: (Int -> Int) -> Int -> Int
+guardCppF :: (Int -> Int) -> Int -> Int
+guardRF :: (Int -> Int) -> Int -> Int
+
+viaCpp :: Int -> Int
+viaCpp x = incCpp (diePy x)
+
+viaRust :: Int -> Int
+viaRust x = incRust (diePy x)
+
+tryCpp :: Int -> Try Str Int
+tryCpp x = @try (incCpp (diePy x))
+
+guardCpp :: Int -> Int
+guardCpp x = guardCppF diePy x
+
+guardPy :: Int -> Int
+guardPy x = guardPyF dieCpp x
+
+guardR :: Int -> Int
+guardR x = guardRF diePy x

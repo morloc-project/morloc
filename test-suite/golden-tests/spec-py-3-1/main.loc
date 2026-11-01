@@ -1,0 +1,27 @@
+-- PY-3: a build removes the bytecode of every file it sources.
+--
+-- Each sourced file is compiled to a timestamp pyc, as a plain `python`
+-- import leaves it, then rewritten to a same-size version with the old mtime,
+-- which that pyc still matches. `bump` is imported under its own name, `copy`
+-- (a stdlib name) by location, and `app.main` inside a package. `bumper.py`
+-- is not sourced and shares a prefix with `bump.py`; its bytecode stays.
+module main (bumpIt, copyIt, appIt)
+
+import root-py
+
+source Py from "bump.py" ("bump")
+source Py from "copy.py" ("copy_bump")
+source Py from "app/main.py" ("app_bump")
+
+bump :: Real -> Real
+copy_bump :: Real -> Real
+app_bump :: Real -> Real
+
+bumpIt :: Real -> Real
+bumpIt = bump
+
+copyIt :: Real -> Real
+copyIt = copy_bump
+
+appIt :: Real -> Real
+appIt = app_bump

@@ -62,6 +62,19 @@ pub fn set_scope(kind: u8) -> u8 {
     outer | if unwinding { UNWINDING_BIT } else { 0 }
 }
 
+// PANIC-1: whether a panic is unwinding on this thread. Async-signal-safe.
+pub fn unwinding() -> bool {
+    UNWINDING.try_with(|u| u.get()).unwrap_or(false)
+}
+
+// PANIC-1: the standard library aborts a panic raised while another
+// unwinds, after this crate's hook let the first one go; that abort is
+// still a panic's end.
+pub fn exit_nested_in_signal_frame() -> ! {
+    write_stderr(b"morloc: the abort came while a panic was unwinding on this thread\n");
+    unsafe { libc::_exit(PANIC_EXIT_STATUS) }
+}
+
 // PANIC-6: a host's own catch caught the panic.
 pub fn caught() {
     UNWINDING.with(|u| u.set(false));

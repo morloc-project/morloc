@@ -1,0 +1,12 @@
+viaPy exit 1
+"zz" is not Int
+internal: 0
+viaCpp exit 1
+"zz" is not Int
+internal: 0
+viaR exit 1
+"zz" is not Int
+internal: 0
+viaRust exit 1
+"zz" is not Int
+internal: 0

@@ -1,7 +1,7 @@
 module main (test)
 
-import foor
-import foopy
+import .foor
+import .foopy
 
 source Py from "eq.py" ("eq", "check")
 eq :: a -> a -> Bool

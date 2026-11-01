@@ -1,0 +1,36 @@
+-- Spec COLL-6: a set has no order, but equal sets hash and compare equal in
+-- every language, however each was built.
+module main (hashes, equal)
+
+import root-py
+import root-r
+import root-cpp
+import set (Set)
+import set-py (Set)
+import set-r (Set)
+import set-cpp (Set)
+
+source Py from "sets.py" ("forward" as pyForward, "backward" as pyBackward)
+pyForward :: Int -> Set Str
+pyBackward :: Int -> Set Str
+
+source R from "sets.R" ("forward" as rForward)
+rForward :: Int -> Set Str
+
+source Cpp from "sets.hpp" ("backward" as cppBackward)
+cppBackward :: Int -> Set Str
+
+hashes :: Int -> [Str]
+hashes n =
+  [ @hash (pyForward n)
+  , @hash (pyBackward n)
+  , @hash (rForward n)
+  , @hash (cppBackward n)
+  ]
+
+equal :: Int -> [Bool]
+equal n =
+  [ pyForward n == pyBackward n
+  , pyForward n == rForward n
+  , rForward n == cppBackward n
+  ]

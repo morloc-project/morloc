@@ -1,0 +1,21 @@
+--' Force a bound suspension making a Python adder and use it in C++
+module main (suspendedAway)
+
+import root-py
+import root-cpp
+import .helpers
+
+source Py from "f.py" ("py_make_adder" as mkPy)
+source Cpp from "f.hpp" ("cpp_make_adder" as mkCpp)
+
+--' Make an adder in Python
+mkPy :: Int -> <IO> (Int -> Int)
+--' Make an adder in C++
+mkCpp :: Int -> <IO> (Int -> Int)
+
+--' Use a Python adder from a forced suspension in C++
+suspendedAway :: Int -> <IO> Int
+suspendedAway n = do
+  let s = mkPy n
+  g <- s
+  cppSum (cppMap (\x -> cppF (g x)) [1, 2])

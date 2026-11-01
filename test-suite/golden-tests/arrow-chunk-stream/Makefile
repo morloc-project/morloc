@@ -1,14 +1,14 @@
 SHORT = 12
 LONG = 48
-CMDS = viaCpp viaPy viaR viaRust rustHosted
+CMDS = viaCpp viaPy viaR viaRust rustHosted rHosted
 
-# A chunk-at-a-time run holds a chunk or two, so quadrupling its length
-# must not change what it needs at once. Comparing a run against a longer
+# A chunk-at-a-time run holds a bounded number of chunks, so quadrupling
+# its length must not change what it needs at once. Comparing a run against a longer
 # one of its own asserts that without pinning an allocator's numbers.
 all:
 	rm -f *.err obs.txt
 	morloc make -X rust:lto=thin -o nexus main.loc 2> build.err
-	for c in $(CMDS); do \
+	export MORLOC_R_GC_BUDGET=33554432; for c in $(CMDS); do \
 	  short=$$(./nexus $$c $(SHORT) 2>> obs.err); \
 	  long=$$(./nexus $$c $(LONG) 2>> obs.err); \
 	  echo "$$c holds-steady=$$([ "$$short" = "$$long" ] && echo yes || echo "no ($$short vs $$long MiB)")" >> obs.txt; \

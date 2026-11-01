@@ -20,32 +20,32 @@ source R from "src.R" ("mkData", "makeT_r", "makeXR", "makeYR")
 --                   (reverseRows was removed; this verifies the
 --                   composition is sound on the R backend too)
 
-mkData :: Int -> Table n {x=Int, y=Str}
-makeT_r :: Int -> Table n {x=Int, y=Str}
-makeXR :: Int -> Table n {x=Int}
-makeYR :: Int -> Table n {y=Str}
+mkData :: n@U64 -> Table n {x=Int, y=Str}
+makeT_r :: n@U64 -> Table n {x=Int, y=Str}
+makeXR :: n@U64 -> Table n {x=Int}
+makeYR :: n@U64 -> Table n {y=Str}
 
-mvp :: Int -> Table n r
+mvp :: n@U64 -> Table n r
 mvp n = makeT_r n
 
-rbound :: Int -> Table m {x=Int, y=Str}
+rbound :: n@U64 -> Table {x=Int, y=Str}
 rbound n =
   let t = makeT_r n
   in rbind t t
 
-cbound :: Int -> Table n ({x=Int} + {y=Str})
+cbound :: n@U64 -> Table n ({x=Int} + {y=Str})
 cbound n = cbind (makeXR n) (makeYR n)
 
-sliced :: Int -> Table m {x=Int, y=Str}
+sliced :: n@U64 -> Table m {x=Int, y=Str}
 sliced n = sliceRows 1 3 (mkData n)
 
-sorted :: Int -> Table n {x=Int, y=Str}
+sorted :: n@U64 -> Table n {x=Int, y=Str}
 sorted n = sortRows [("x", False)] (mkData n)
 
-picked :: Int -> Table n r2
+picked :: n@U64 -> Table n r2
 picked n = selectColsDyn ["y"] (mkData n)
 
-reversed_ :: Int -> Table n {x=Int, y=Str}
+reversed_ :: n@U64 -> Table n {x=Int, y=Str}
 reversed_ n =
   let t = mkData n
   in pickRows (pack (.[::-1] (range 0 (nrow t))) :: Vector n Int) t

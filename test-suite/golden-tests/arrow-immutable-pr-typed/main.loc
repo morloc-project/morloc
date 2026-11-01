@@ -21,12 +21,12 @@ sumReals :: [Real] -> Real
 
 result ::
   --' number of rows in table
-  --' arg: --nrows
-  --' default: 100000
+  --' @arg --nrows
+  --' @default 100000
   Int ->
   --' number of foreign calls
-  --' arg: --ncalls
-  --' default: 1000
+  --' @arg --ncalls
+  --' @default 1000
   Int ->
   Real
 result nrows ncalls =

@@ -13,7 +13,7 @@ Walks the module DAG bottom-up and populates 'MorlocState' with signatures
 mappings ('stateName'). This is the bridge between the parsed AST and the
 state-based representation consumed by 'Treeify'.
 -}
-module Morloc.Frontend.Link (link) where
+module Morloc.Frontend.Link (link, checkRsize) where
 
 import Data.Set (Set)
 import qualified Data.Set as Set
@@ -26,6 +26,7 @@ import qualified Morloc.Data.Text as DT
 import Morloc.Frontend.Merge (mergeSignatureSet, weaveTermTypes)
 import Morloc.Frontend.Namespace
 import qualified Morloc.Monad as MM
+import qualified Morloc.TypeEval as TE
 import Morloc.Typecheck.Internal (qualify, unqualify)
 
 -- The following terms are modified in morloc state
@@ -139,7 +140,7 @@ realiasLinkState m1 (m2, ss, s) = do
       missing -> error $ "Undefined " <> msg <> " imports:" <> show missing <> "\n  ss = " <> show ss
 
 throwInheritanceError :: MVar -> MDoc -> MorlocMonad a
-throwInheritanceError m msg = MM.throwSystemError $ "In module" <+> squotes (pretty m) <> ":" <+> msg
+throwInheritanceError m msg = MM.throwRejected $ "In module" <+> squotes (pretty m) <> ":" <+> msg
 
 -- All LinkState objects whould have already been renamed by realiasLinkState.
 --
@@ -240,7 +241,7 @@ addLocalState m0 e0 s0 = do
           sigmap' = Map.insert sigIndex sigset sigmap
       -- update state with the signature, the signature index will be linked to by
       -- all future terms of this type (even after they have been aliased)
-      MM.modify (\s -> s {stateSignatures = GMap idmap sigmap'})
+      MM.modify' (\s -> s {stateSignatures = GMap idmap sigmap'})
       -- update the map between term names and signature indices
       return $ lstate {linkTerms = Map.insert v sigIndex (linkTerms lstate)}
     -- create new entries for class definitions and type signatures
@@ -258,7 +259,7 @@ addLocalState m0 e0 s0 = do
       tmap' <- foldlM (\m (k, v) -> insertWithCheck k v m) tmap xs
 
       -- update morloc state
-      MM.modify
+      MM.modify'
         ( \s ->
             s
               { stateSignatures = GMap idmap sigmap'
@@ -280,10 +281,10 @@ addLocalState m0 e0 s0 = do
       case Map.lookup lbl effs of
         Just esc'
           | esc' /= esc ->
-              MM.throwSystemError $
+              MM.throwRejected $
                 "Conflicting effect declarations for" <+> squotes (pretty lbl)
                   <> ": declared both as escapable and inescapable"
-        _ -> MM.modify (\s -> s {stateEffects = Map.insert lbl esc (stateEffects s)})
+        _ -> MM.modify' (\s -> s {stateEffects = Map.insert lbl esc (stateEffects s)})
       return lstate
     -- We only search for definitions at the top level. This may be the top-level
     -- inside of a where statement.
@@ -314,7 +315,7 @@ addLocalState m0 e0 s0 = do
           let sigset = Monomorphic (TermTypes Nothing [] [])
               sigmap' = Map.insert idx sigset sigmap
               terms' = Set.insert v terms
-          MM.modify (\s -> s {stateSignatures = GMap idmap sigmap'})
+          MM.modify' (\s -> s {stateSignatures = GMap idmap sigmap'})
           let lstate' = lstate {linkTerms = Map.insert v idx (linkTerms lstate)}
           return (terms', lstate')
     findFreeDefs (ExprI _ (LetE bindings body)) s = do
@@ -354,7 +355,7 @@ linkLocalTerms m0 s0 e0 = linkLocal Set.empty s0 (toCondensedState s0) e0
             _ -> (bnds, c)
       c'' <- foldrM (addLocalState m0) c' (e : es)
       let owned = [ w | ExprI _ (AssE w _ _) <- es ]
-      MM.modify $ \ms -> ms
+      MM.modify' $ \ms -> ms
         { stateWhereOwner = foldr
             (\w m -> maybe m (\wi -> Map.insert wi ownerIdx m) (Map.lookup w (linkTerms c'')))
             (stateWhereOwner ms)
@@ -388,7 +389,7 @@ linkLocalTerms m0 s0 e0 = linkLocal Set.empty s0 (toCondensedState s0) e0
                   tt' = tt {termConcrete = srcTerm : termConcrete tt}
                   sigmap' = Map.insert termIdx (Monomorphic tt') sigmap
                   idmap' = Map.insert i termIdx idmap
-              MM.modify (\s -> s
+              MM.modify' (\s -> s
                 { stateSignatures = GMap idmap' sigmap'
                 , stateDefinitionSite = Map.insertWith (\_ old -> old) termIdx i (stateDefinitionSite s)
                 })
@@ -416,7 +417,7 @@ linkLocalTerms m0 s0 e0 = linkLocal Set.empty s0 (toCondensedState s0) e0
               let tt' = tt {termDecl = e : termDecl tt}
                   sigmap' = Map.insert termIdx (Monomorphic tt') sigmap
                   idmap' = Map.insert i termIdx idmap
-              MM.modify (\ms -> ms
+              MM.modify' (\ms -> ms
                 { stateSignatures = GMap idmap' sigmap'
                 , stateDefinitionSite = Map.insert termIdx i (stateDefinitionSite ms)
                 })
@@ -479,9 +480,6 @@ linkLocalTerms m0 s0 e0 = linkLocal Set.empty s0 (toCondensedState s0) e0
               checkSuperclassConstraints i cls (zip vs ts) superConstraints
               if null es
                 then
-                  -- Source-less instance: register each method with its
-                  -- specialized general type but no implementations.
-                  -- This enables typechecking without requiring sources.
                   linkEmptyInstance m0 cls (zip vs ts) sigs emap
                 else
                   mapM_ (linkInstance origin (linkScoped bnds c) m0 cls (zip vs ts) sigs emap) es
@@ -564,7 +562,7 @@ linkLocalTerms m0 s0 e0 = linkLocal Set.empty s0 (toCondensedState s0) e0
     updateSigLinks v termIdx sigIdx = do
       (GMap idmap sigmap) <- MM.gets stateSignatures
       let idmap' = Map.insert termIdx sigIdx idmap
-      MM.modify
+      MM.modify'
         ( \ms ->
             ms
               { stateSignatures = GMap idmap' sigmap
@@ -573,11 +571,10 @@ linkLocalTerms m0 s0 e0 = linkLocal Set.empty s0 (toCondensedState s0) e0
         )
 
     updateName :: Int -> EVar -> MorlocMonad ()
-    updateName i v = MM.modify (\s -> s {stateName = Map.insert i v (stateName s)})
+    updateName i v = MM.modify' (\s -> s {stateName = Map.insert i v (stateName s)})
 
--- Register a source-less instance: for each method in the typeclass, create a
--- TermTypes with the specialized general type but no concrete implementations.
--- This allows typechecking to succeed even without language-specific sources.
+-- | Register each method of a source-less instance with its specialized type
+-- and no implementations, so that it typechecks.
 linkEmptyInstance ::
   MVar ->
   ClassName ->
@@ -599,9 +596,8 @@ linkEmptyInstance _ cls0 params0 sigs emap = mapM_ go sigs
           case Map.lookup stateIdx sigmap of
             Nothing -> return ()
             (Just sigset) -> do
-              -- Use the general class type (et) for the Polymorphic wrapper,
-              -- matching linkInstance. The specialized type (et') is only
-              -- inside the TermTypes.
+              -- The Polymorphic wrapper carries the class type, as in
+              -- linkInstance; only the TermTypes carry the specialized one.
               sigset' <- mergeSignatureSet sigset (Polymorphic cls0 v et [tt])
               let sigmap' = Map.insert stateIdx sigset' sigmap
               newInstance <- case Map.lookup v tcls of
@@ -610,12 +606,10 @@ linkEmptyInstance _ cls0 params0 sigs emap = mapM_ go sigs
                 (Just inst) ->
                   return $ inst {instanceTerms = weaveTermTypes tt (instanceTerms inst)}
               let tcls' = Map.insert v newInstance tcls
-              MM.modify (\ms -> ms {stateSignatures = GMap idmap sigmap', stateTypeclasses = tcls'})
+              MM.modify' (\ms -> ms {stateSignatures = GMap idmap sigmap', stateTypeclasses = tcls'})
 
--- Goal:
---   for each term in [Signature], add a TermTypes instance to the correct
---   SignatureSet in stateSignatures. This will be a polymorphic case.
---     Polymorphic ClassName EVar EType [TermTypes]
+-- | Add one sourced or defined instance method to its signature set and to
+-- 'stateTypeclasses'.
 linkInstance ::
   InstanceOrigin ->
   (Int -> ExprI -> [ExprI] -> MorlocMonad ()) ->
@@ -639,7 +633,7 @@ linkInstance origin linker m0 cls0 params0 sigs0 emap0 e0 = linkExpr e0
       (Signature _ _ et, stateIdx) <- lookupInfo v
       -- a derived body is not a definition anyone wrote
       when (origin == Declared) $
-        MM.modify (\ms -> ms {stateDefinitionSite = Map.insert stateIdx ai (stateDefinitionSite ms)})
+        MM.modify' (\ms -> ms {stateDefinitionSite = Map.insert stateIdx ai (stateDefinitionSite ms)})
       linker stateIdx e es
       t <- substituteInstanceTypes params0 (etype et)
       let et' = et {etype = t}
@@ -647,7 +641,7 @@ linkInstance origin linker m0 cls0 params0 sigs0 emap0 e0 = linkExpr e0
       linkTermTypes v et tt stateIdx
     linkExpr _ =
       error
-        "Unreachable, instances may only contain sources and instances -- this should have been caught in the parser."
+        "linkInstance: unexpected declaration in an instance body"
 
     lookupInfo :: EVar -> MorlocMonad (Signature, Int)
     lookupInfo v = case ([sig | sig@(Signature v' _ _) <- sigs0, v == v'], Map.lookup v emap0) of
@@ -674,7 +668,7 @@ linkInstance origin linker m0 cls0 params0 sigs0 emap0 e0 = linkExpr e0
             (Just inst) -> do
               return $ inst {instanceTerms = weaveTermTypes tt (instanceTerms inst)}
           let tcls' = Map.insert v newInstance tcls
-          MM.modify (\ms -> ms {stateSignatures = GMap idmap sigmap', stateTypeclasses = tcls'})
+          MM.modify' (\ms -> ms {stateSignatures = GMap idmap sigmap', stateTypeclasses = tcls'})
 
 {- Substitute the instance types into the class function definition
 
@@ -753,8 +747,9 @@ substituteInstanceTypes (unzip -> (clsVars, instanceParameters)) clsType = do
     substituteQualifiers (ForallU v t) (r : rs) = substituteQualifiers (substituteTVar v r t) rs
     substituteQualifiers t _ = t
 
--- Check that all superclass constraints are satisfied for an instance declaration.
--- For example, if `class Eq a => Ord a`, then `instance Ord Int` requires `instance Eq Int`.
+-- | For each superclass of an instance's class, require that some instance of
+-- the superclass with at least one method has been registered. The
+-- instance's type arguments are not compared.
 checkSuperclassConstraints :: Int -> ClassName -> [(TVar, TypeU)] -> [Constraint] -> MorlocMonad ()
 checkSuperclassConstraints _ _ _ [] = return ()
 checkSuperclassConstraints i cls params constraints = do
@@ -762,9 +757,7 @@ checkSuperclassConstraints i cls params constraints = do
   mapM_ (checkOne classDefs) constraints
   where
     checkOne :: Map ClassName [Constraint] -> Constraint -> MorlocMonad ()
-    -- Primitive constraints (CMember / CSubset / CDisjoint) are not
-    -- superclass constraints; they are typecheck-time constraints over
-    -- kind-level structural relationships. Skip them here.
+    -- Primitive constraints are checked by the typechecker, not here.
     checkOne _ (CMember _ _) = return ()
     checkOne _ (CSubset _ _) = return ()
     checkOne _ (CDisjoint _ _) = return ()
@@ -796,3 +789,34 @@ checkSuperclassConstraints i cls params constraints = do
 
     matchesSuperInstance :: [TypeU] -> Instance -> Bool
     matchesSuperInstance _ inst = not (null (instanceTerms inst))
+
+-- | HOST-3: the call groups an @rsize@ declares leave at least one argument
+-- for the last group, counting the arguments of the signature, aliases
+-- expanded, up to its first effect.
+checkRsize :: MorlocMonad ()
+checkRsize = do
+  GMap _ sigmap <- MM.gets stateSignatures
+  scope <- MM.getGeneralScope
+  sequence_
+    [ case TE.evaluateType scope (etype et) of
+        -- a signature that does not evaluate is reported where it is used
+        Left _ -> return ()
+        Right t
+          | sum ns < arity t -> return ()
+          | otherwise ->
+              MM.throwSourcedError i $
+                "The rsize declaration on" <+> squotes (pretty (srcAlias src))
+                  <+> "declares groups of" <+> hsep (punctuate comma (map pretty ns))
+                  <+> "arguments, but its signature takes" <+> pretty (arity t)
+                  <+> "before its first effect; the declared groups must leave at least one"
+                  <+> "argument for the last group"
+    | tt <- concatMap termTypes (Map.elems sigmap)
+    , Just et <- [termGeneral tt]
+    , (_, Idx i src@Source {srcRsize = ns@(_ : _)}) <- termConcrete tt
+    ]
+  where
+    termTypes (Monomorphic tt) = [tt]
+    termTypes (Polymorphic _ _ _ tts) = tts
+    arity (ForallU _ t) = arity t
+    arity (FunU ts r) = length ts + arity r
+    arity _ = 0

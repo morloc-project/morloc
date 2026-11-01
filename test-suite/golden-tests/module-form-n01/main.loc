@@ -2,7 +2,7 @@ module main (foo)
 
 -- n01 - source n, import 0, declare 1
 
-import fooroot
+import .fooroot
 
 source Py from "foo.py" ("foo")
 source Py from "foo.R" ("foo")

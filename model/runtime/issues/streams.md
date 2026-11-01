@@ -47,6 +47,14 @@ here touch locks and ownership: model first.
   without, 4.3 s before the custodian (2026-10-10). Chosen for now (not
   ruled): no wait.
   Should pools' raw stdout go to stderr while a command streams to stdout?
+- **Pool prints reach stdout out of call order.** [reproduced, 2026-10-28]
+  Gap: no item orders raw text that pools print. In
+  /work/tests/sumtypes/04-graphics-csg-sdf/core, `prog-cpp test` (unittest
+  harness sourced in Python) prints each `printGroup` header after the PASS
+  lines of its group, though the header's result feeds those checks; with
+  `PYTHONUNBUFFERED=1` the order is right, so two writers flush separately
+  buffered stdout. Which second writer (a forked Python worker is the
+  suspect) is speculative.
 - Open question (`@tell`): intrinsics.md gives `@tell` no failure value and
   it returns 0 when this process has no `@stdout` open, so a pool other
   than the one that opened the run's stdout reports 0 while elements have
@@ -75,9 +83,9 @@ here touch locks and ownership: model first.
   `./rs producer | ./rs checkSum` (rust-stdio golden) prints "@next:
   @next: stdin ended after 23 byte(s) ...".
 - **The daemon's remote path sets no call id and runs no sweep.** [read]
-  Against SLOT-19. data/rust/morloc-runtime/src/daemon_ffi.rs:2359-2360 and
-  2438-2439 set and sweep a call id on the pure path only; the remote
-  branch (2441 on) does neither, and stream.rs:2485-2489 claims "the nexus
+  Against SLOT-19. data/rust/morloc-runtime/src/daemon_ffi.rs:2434-2435 and
+  2527-2528 set and sweep a call id on the pure path only; the remote
+  branch (2529 on) does neither, and stream.rs:2530-2534 claims "the nexus
   dispatch always pre-sets a call_id", which holds only there.
 - **A reader cannot tell a finished stream file from an unfinished one.**
   [reproduced 0.109.0, and read] Spec: SLOT-28 to SLOT-31 (streams.md,
@@ -144,7 +152,7 @@ here touch locks and ownership: model first.
   by both `finish` and `set_cap`, which changes the QueueWake model.
 - **The stream queue bound has no setting.** [read] Open ruling, SLOT-32.
   `write_behind::queue_bytes` is a fixed 1 GiB. A setting would be one more
-  environment read, and source_rules.rs caps those (`MAX_ENV_READS`, 67)
+  environment read, and source_rules.rs caps those (`MAX_ENV_READS`, 65)
   as a ratchet; adding one needs that cap raised, or an existing read
   folded into a shared settings read.
 - **The SLOT-32 bound is per writing process, not per host.** [read] Gap in
@@ -179,16 +187,16 @@ here touch locks and ownership: model first.
   stack) would make each O(1).
 - **SLOT-28's table misstates where a PAUSED footer comes from.** [read,
   2026-10-21] The code writes a PAUSED footer (unflushed elements first)
-  from the daemon call sweep (stream.rs:5554-5581), a reopen after the
-  opener died (:3080), a stdio claim whose owner died (:2418),
-  `pool_reclaim_stdio_after_dispatch` (:5615), and stdout/stderr at the end
+  from the daemon call sweep (stream.rs:5604-5630), a reopen after the
+  opener died (:3130), a stdio claim whose owner died (:2418),
+  `pool_reclaim_stdio_after_dispatch` (:5647), and stdout/stderr at the end
   of a successful run (morloc-nexus main.rs:73-82). The table's one source,
   "a remote child returns the stream without @close", has no code path. So
   a stream left open by a daemon call ends PAUSED with its elements
   written, while at the end of a CLI run it is discarded (SLOT-13); SLOT-13
   and SLOT-19 give two endings without saying so.
 - **Idle slots per handle are capped at 16.** [read, 2026-10-21] Violates
-  SLOT-23 (one per processor): stream.rs:1100 `idle_slots_kept` clamps to
+  SLOT-23 (one per processor): stream.rs:1098 `idle_slots_kept` clamps to
   16. Speed only.
 - **SLOT-29 is silent on a present but corrupt footer.** [read,
   2026-10-21] stream_format.rs:112 treats `Ok(None) | Err(_)` alike, so a

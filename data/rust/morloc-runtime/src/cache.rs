@@ -386,6 +386,10 @@ pub(crate) unsafe fn morloc_cache_lookup(
 ///   content sidecar does not exist or is empty; unlink the dangling
 ///   indirection.
 ///
+/// - Any other data packet: the store writes only file indirections, and
+///   a value carried inline or by reference would be decoded as one the
+///   program built rather than checked as data read back from disk.
+///
 /// All other headers pass through (the caller trusts the packet
 /// framework to reject any leftover invalid combinations).
 unsafe fn cache_entry_is_valid(
@@ -416,7 +420,8 @@ unsafe fn cache_entry_is_valid(
     let src = cmd.source;
     let fmt = cmd.format;
     if src != PACKET_SOURCE_FILE {
-        return true; // Inline / RPTR entries need no sidecar checks.
+        libc::unlink(indirection_filename);
+        return false;
     }
 
     let payload_start = 32 + hdr.offset as usize;

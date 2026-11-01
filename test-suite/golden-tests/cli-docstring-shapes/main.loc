@@ -53,13 +53,13 @@ str_default s = py_id s
 
 --' Str source: file: returns the contents of the path argument.
 str_file ::
-  --' source: file
+  --' @source file
   Str -> Str
 str_file s = py_id s
 
 --' Str check.path: r: argv must be a readable path; returns the path.
 str_check_r ::
-  --' check.path: r
+  --' @check.path r
   Str -> Str
 str_check_r s = py_id s
 
@@ -69,81 +69,81 @@ bytes_default xs = py_size xs
 
 --' [U8] form: bytes: file is sniffed (packet -> raw); count bytes.
 bytes_hybrid ::
-  --' form: bytes
+  --' @form bytes
   [U8] -> Int
 bytes_hybrid xs = py_size xs
 
 --' [U8] form: bytes-only: file is raw bytes (no sniff); count.
 bytes_only ::
-  --' form: bytes-only
+  --' @form bytes-only
   [U8] -> Int
 bytes_only xs = py_size xs
 
 --' [U8] inline + form: bytes: ASCII chars become bytes; count.
 bytes_inline ::
-  --' source: inline
-  --' form: bytes
+  --' @source inline
+  --' @form bytes
   [U8] -> Int
 bytes_inline xs = py_size xs
 
 --' [I32] form: bytes: file has packed 32-bit ints; count elements.
 bytes_int32 ::
-  --' form: bytes
+  --' @form bytes
   [I32] -> Int
 bytes_int32 xs = py_size xs
 
 --' [F64] form: bytes-only: file is packed 8-byte floats; sum.
 bytes_float64 ::
-  --' form: bytes-only
+  --' @form bytes-only
   [F64] -> F64
 bytes_float64 xs = py_sum_float xs
 
 --' [Bool] form: bytes: file is 0/1 bytes; count elements.
 bytes_bool ::
-  --' form: bytes
+  --' @form bytes
   [Bool] -> Int
 bytes_bool xs = py_size xs
 
 --' [Str] form: list: file has one Str per line; count lines.
 list_str ::
-  --' form: list
+  --' @form list
   [Str] -> Int
 list_str xs = py_size xs
 
 --' [Int] form: list: file has one Int per line; return the sum.
 list_int ::
-  --' form: list
+  --' @form list
   [Int] -> Int
 list_int xs = py_sum_int xs
 
 --' [(Int, Str)] form: list: JSON-array-per-line tuple; count rows.
 list_tuple_json ::
-  --' form: list
+  --' @form list
   [(Int, Str)] -> Int
 list_tuple_json xs = py_size xs
 
 --' [(Int, Str)] form: list: TSV/CSV tabular fallback; count rows.
 list_tuple_tsv ::
-  --' form: list
+  --' @form list
   [(Int, Str)] -> Int
 list_tuple_tsv xs = py_size xs
 
 --' [Str] form: list + list.check.path: r: each line readable; count.
 list_path_check ::
-  --' form: list
-  --' list.check.path: r
+  --' @form list
+  --' @list.check.path r
   [Str] -> Int
 list_path_check xs = py_size xs
 
 --' [Str] many: true: variadic argv tokens; count tokens.
 many_str ::
-  --' many: true
+  --' @many true
   [Str] -> Int
 many_str xs = py_size xs
 
 --' [Int] many: true: variadic argv Int tokens; return the sum.
 many_int ::
-  --' many: true
+  --' @many true
   [Int] -> Int
 many_int xs = py_sum_int xs
 
@@ -155,33 +155,33 @@ default_tuple t = py_fst_int t
 --' shape-family paths (`form: list`, `source: inline + form: bytes`,
 --' `check.path:`, Unix `-` shorthand) across the unrolled-record
 --' boundary.
---' unroll: true
+--' @unroll true
 record RecOpts where
   --' one Str per line, JSON array, or `-` for stdin
-  --' arg: --xs
-  --' form: list
-  --' default: []
+  --' @arg --xs
+  --' @form list
+  --' @default []
   xs :: [Str]
 
   --' one Int per line, JSON array, or `-` for stdin
-  --' arg: --ys
-  --' form: list
-  --' default: []
+  --' @arg --ys
+  --' @form list
+  --' @default []
   ys :: [Int]
 
   --' ASCII bytes shortcut on `[U8]`: `--dna GATTACA` becomes
   --' `[71,65,84,84,65,67,65]` before the value reaches the pool.
-  --' arg: --dna
-  --' source: inline
-  --' form: bytes
-  --' default: []
+  --' @arg --dna
+  --' @source inline
+  --' @form bytes
+  --' @default []
   dna :: [U8]
 
   --' `check.path: r` gate: `--pathr FILE` must be readable at CLI
   --' parse time; `-` rewrites to `/dev/stdin`.
-  --' arg: --pathr
-  --' check.path: r
-  --' default: "/dev/null"
+  --' @arg --pathr
+  --' @check.path r
+  --' @default "/dev/null"
   pathr :: Str
 
 record Py => RecOpts = "dict"

@@ -94,7 +94,7 @@ treeify d
   | Map.size d == 0 = return (Validation [] [] Map.empty, [])
   | otherwise = case DAG.roots d of
       -- if no parentless element exists, then the graph must be empty or cyclic
-      [] -> MM.throwSystemError "cyclic import dependency in treeify"
+      [] -> MM.throwCompilerBug "cyclic import dependency in treeify"
       -- else if exactly one module name key (k) is found
       [k] -> do
         case DAG.lookupNode k d of
@@ -150,7 +150,7 @@ treeify d
             -- - Add the export name to state. Failing to do so here, will lose
             --   the name of terms that are exported but not defined, this leads
             --   to cryptic error messages.
-            MM.modify
+            MM.modify'
               ( \s ->
                   s
                     { stateExports = map fst exports'
@@ -499,7 +499,7 @@ linkAndRemoveAnnotations = f
       --     ^                ^-- this one is connected to the given types
       --     '-- this index disappears with the lost annotation node
       s <- MM.get
-      MM.put $ s {stateAnnotations = Map.insert i t (stateAnnotations s)}
+      MM.put $! s {stateAnnotations = Map.insert i t (stateAnnotations s)}
       f e -- notice the topology change
       -- everything below is boilerplate (this is why I need recursion schemes)
     f (ExprI i (ModE v es)) = ExprI i <$> (ModE v <$> mapM f es)
@@ -622,6 +622,14 @@ collect namer0 (gi, v) = do
 collectAnnoS :: Namer -> ExprI -> MorlocMonad (Namer, AnnoS Int ManyPoly Int)
 collectAnnoS namer e@(ExprI gi _) = collectExprS namer e |>> second (AnnoS gi gi)
 
+-- | The shape a pattern skeleton written by Desugar stands for.
+skeletonShape :: ExprI -> Maybe PatShape
+skeletonShape (ExprI i e) = case e of
+  UniE -> Just ShapeAny
+  TupE xs -> Shape i . FormTuple <$> mapM skeletonShape xs
+  NamE rs -> Shape i . FormRecord <$> mapM (\(k, x) -> (,) k <$> skeletonShape x) rs
+  _ -> Nothing
+
 -- | Translate ExprI to ExprS tree
 collectExprS :: Namer -> ExprI -> MorlocMonad (Namer, ExprS Int ManyPoly Int)
 collectExprS namer0 (ExprI gi0 e0) = f namer0 e0
@@ -633,7 +641,7 @@ collectExprS namer0 (ExprI gi0 e0) = f namer0 e0
           (namer', e) <- f namer (VarE defaultValue v)
           inner <- newIndex gi0
           k <- MM.getCounter
-          MM.modify $ \st ->
+          MM.modify' $ \st ->
             st { stateManifoldConfig = Map.insert k cfg {manifoldConfigLabelIdx = Just gi0} (stateManifoldConfig st)
                , stateName = Map.insertWith (\_ old -> old) gi0 (displayName v) (stateName st)
                }
@@ -646,10 +654,11 @@ collectExprS namer0 (ExprI gi0 e0) = f namer0 e0
       sigs@(GMap idmap _) <- MM.gets stateSignatures
       let termId = Map.lookup gi0 idmap
       case (termId, GMap.lookup gi0 sigs) of
-        -- Collecting for specialization: a class method is used by its
-        -- instances' types alone, and the instance a use resolves to is
-        -- elaborated at the use's type. Within a method's own expansion a
-        -- use of it is not a back-edge: it may resolve to another instance.
+        -- Shallow collection for specialization: a class method is left as
+        -- its instances' types, to be elaborated at the use's type. Here a
+        -- use of a method inside its own expansion is not a back-edge, since
+        -- it may resolve to another instance; in full collection the next
+        -- case makes it one.
         (Just k, GMapJust (Polymorphic cls clsName t ts))
           | Just _ <- namerShallowOnly namer
           , Just r <- namerShallow namer
@@ -723,7 +732,7 @@ collectExprS namer0 (ExprI gi0 e0) = f namer0 e0
               -- renamed by Realize.
               exports <- MM.gets stateExports
               when (gi0 `elem` exports) $
-                MM.modify (\st -> st {stateRecursionTargets = Map.insert token gi0 (stateRecursionTargets st)})
+                MM.modify' (\st -> st {stateRecursionTargets = Map.insert token gi0 (stateRecursionTargets st)})
               return token
           | otherwise = return v
 
@@ -761,12 +770,18 @@ collectExprS namer0 (ExprI gi0 e0) = f namer0 e0
       (namer1, e1') <- collectAnnoS namer e1
       let namer2 = updateRenamer LetBound v namer1
           v' = fst $ fromJust $ Map.lookup v (namerMap namer2)
-          innerBody = case rest of
-            [] -> body
-            _ -> ExprI (exprIIdx body) (LetE rest body)
+      -- Each remaining binding is a let node of its own, so it takes an
+      -- index of its own, placed at that binding: nodes sharing an index
+      -- share whatever is keyed by it, such as the name of the manifold a
+      -- node is emitted as.
+      innerBody <- case rest of
+        [] -> return body
+        ((_, ExprI k _) : _) -> do
+          j <- MM.getCounterWithPos k
+          return (ExprI j (LetE rest body))
       (inner, body') <- collectAnnoS namer2 innerBody
       return (namer {namerRecursive = namerRecursive inner, namerIndex = namerIndex inner}, LetS v' e1' body')
-    f _ (LetE [] _) = error "Bug in collectExprS: empty let bindings"
+    f _ (LetE [] _) = MM.throwCompilerBugAt gi0 "a let with no bindings reached Treeify"
     f namer (AppE e es) = do
       (namer', e') <- collectAnnoS namer e
       (namer'', es') <- statefulMapM collectAnnoS namer' es
@@ -791,6 +806,11 @@ collectExprS namer0 (ExprI gi0 e0) = f namer0 e0
     f namer (EvalE e) = do
       (namer', e') <- collectAnnoS namer e
       return (namer', EvalS e')
+    f namer (IntrinsicE IntrShape es) = case es of
+      [sk, r] | Just sh <- skeletonShape sk -> do
+        (namer1, r') <- collectAnnoS namer r
+        return (namer1, ShapeS PreTyped sh r')
+      _ -> MM.throwCompilerBugAt gi0 "malformed shape intrinsic"
     f namer (IntrinsicE intr es) = do
       (namer', es') <- go namer [] es
       return (namer', IntrinsicS intr es')

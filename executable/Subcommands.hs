@@ -17,6 +17,8 @@ import Control.Exception (SomeException, bracket, finally, try)
 import Data.Time.Clock (getCurrentTime)
 import Data.Time.Format (formatTime, defaultTimeLocale)
 import qualified Data.Aeson as JSON
+import qualified Data.Aeson.Types as JSONT
+import qualified Morloc.Data.PoolHash as PoolHash
 import qualified Data.ByteString.Lazy as BL
 import Data.Int (Int64)
 import qualified Data.Map as Map
@@ -63,11 +65,13 @@ import System.Directory
   , doesFileExist
   , getCurrentDirectory
   , listDirectory
+  , makeAbsolute
   , removeDirectoryRecursive
   , removeFile
   , setCurrentDirectory
   )
-import System.Environment (lookupEnv)
+import System.Environment (getArgs, getEnvironment, getExecutablePath, lookupEnv)
+import System.Exit (ExitCode (..))
 import System.Exit (exitFailure, exitSuccess)
 import System.FilePath (dropExtension, takeBaseName, takeDirectory, takeFileName)
 import System.IO (hPutStrLn, stderr)
@@ -155,7 +159,7 @@ typecheckModuleFn mainFile = do
   -- Save current state, run typecheck in a clean sub-state
   savedState <- MM.get
   result <-
-    MM.catchError
+    MM.recoverRejected
       ( do
           xs <- M.typecheckFrontend (Just mainFile) (Code code)
           st <- MM.get
@@ -165,7 +169,7 @@ typecheckModuleFn mainFile = do
             , Just v <- [Map.lookup i (stateName st)]
             ]
       )
-      (\_ -> return [])
+      (return [])
   -- Restore state so module typechecking doesn't pollute the parent state
   MM.put savedState
   return result
@@ -198,9 +202,13 @@ cmdInstall args verbosity conf buildConfig = do
           )
           moduleTexts
   passed <- MM.runMorlocMonad Nothing verbosity conf buildConfig cmdInstall' >>= MM.writeMorlocReturn
-  if passed && installBuild args
-    then buildInstalledModules args verbosity conf buildConfig moduleTexts libpath
-    else return passed
+  built <-
+    if passed && installBuild args
+      then buildInstalledModules args verbosity conf buildConfig moduleTexts libpath
+      else return passed
+  if built && installForce args == ForceOverwrite
+    then rebuildStalePrograms (installNoRebuild args) (Config.exeDir conf)
+    else return built
   where
     libpath = Config.configLibrary conf </> Config.configPlane conf
     moduleTexts = map MT.pack (installModuleStrings args)
@@ -229,13 +237,29 @@ buildInstalledModules args verbosity conf buildConfig moduleTexts libpath = do
           return True
         Just locFile -> do
           origDir <- getCurrentDirectory
+          configArgs <- case installConfig args of
+            "" -> return []
+            c -> (\c' -> ["--config", c']) <$> makeAbsolute c
+          absModuleDir <- makeAbsolute moduleDir
+          absLocFile <- makeAbsolute locFile
+          envParams <- lookupEnv langParamsEnvVar
+          let recipe =
+                RebuildRecipe
+                  { rebuildCwd = absModuleDir
+                  , rebuildArgs =
+                      ["make", "--install", "--force", "--name", name]
+                        ++ configArgs
+                        ++ ["--vanilla" | installVanilla args]
+                        ++ [absLocFile]
+                  , rebuildLangParamsEnv = envParams
+                  }
           setCurrentDirectory moduleDir
           buildResult <-
-            buildModuleExecutable locFile name verbosity conf buildConfig force
+            buildModuleExecutable locFile name verbosity conf buildConfig force recipe
               `finally` setCurrentDirectory origDir
           return buildResult
 
-    buildModuleExecutable locFile name verbosity' config buildConfig' forceOverwrite = do
+    buildModuleExecutable locFile name verbosity' config buildConfig' forceOverwrite recipe = do
       code <- MT.readFile locFile
       -- `morloc install --build` re-enters the make pipeline. The
       -- --unsafe-skip-null-check, --inline-size, --no-shm, --tmpdir, and
@@ -254,6 +278,7 @@ buildInstalledModules args verbosity conf buildConfig moduleTexts libpath = do
                 defaultMakeOptions
                   { moLangParams = langParams
                   , moProgramKey = Just name
+                  , moRebuild = Just recipe
                   }
           makeAndInstall (Just locFile) Nothing (Code code) [] verbosity' config buildConfig' forceOverwrite mopts
 
@@ -271,6 +296,7 @@ data MakeOptions = MakeOptions
   , moWrapperSpecs :: Maybe [WrapperSpec]
   , moBuildParentDir :: Maybe Path
   , moOffline :: Bool
+  , moRebuild :: Maybe RebuildRecipe
   }
 
 -- | Safe defaults for paths that re-enter the make pipeline without the full
@@ -288,6 +314,7 @@ defaultMakeOptions =
     , moWrapperSpecs = Nothing
     , moBuildParentDir = Nothing
     , moOffline = False
+    , moRebuild = Nothing
     }
 
 -- | Resolve build parameters by layering, lowest to highest: the build
@@ -321,6 +348,7 @@ applyMakeOptions mopts s =
     , stateProgramKey = moProgramKey mopts
     , stateWrapperSpecs = moWrapperSpecs mopts
     , stateBuildParentDir = moBuildParentDir mopts
+    , stateRebuild = moRebuild mopts
     -- applyMakeOptions runs only on build paths (make / make --install /
     -- install --build); auto-install defaults on there unless --offline.
     , stateAutoInstall = not (moOffline mopts)
@@ -426,6 +454,19 @@ cmdMakeWith args verbosity config buildConfig path code progKey = do
       hPutStrLn stderr (T.unpack err)
       return False
     Right langParams -> do
+      recipe <-
+        if makeInstall args
+          then do
+            argv <- getArgs
+            cwd <- getCurrentDirectory
+            envParams <- lookupEnv langParamsEnvVar
+            return . Just $
+              RebuildRecipe
+                { rebuildCwd = cwd
+                , rebuildArgs = argv ++ ["--force" | not (makeForce args)]
+                , rebuildLangParamsEnv = envParams
+                }
+          else return Nothing
       let mopts =
             MakeOptions
               { moUnsafeSkipNullCheck = makeUnsafeSkipNullCheck args
@@ -438,6 +479,7 @@ cmdMakeWith args verbosity config buildConfig path code progKey = do
               , moWrapperSpecs = Just wrapperSpecs
               , moBuildParentDir = makeBuildDir args
               , moOffline = makeOffline args
+              , moRebuild = recipe
               }
       if makeInstall args
         then
@@ -647,10 +689,12 @@ cmdTypecheck args _ config buildConfig = do
               -- tree; a typecheck never builds, so the tree is discarded
               -- whether or not the check passed.
               ( do
+                  MM.modify (\st -> st {statePlacement = Just []})
                   pools <- Build.withStagingCleanup (M.typecheck path code >>= (generatePools . snd))
                   Build.discardStagingDir
                   return pools
               )
+              >>= reportWarnings
               |>> writeTypecheckOutput verbosity
           putDoc (result <> "\n")
           return passed
@@ -662,9 +706,13 @@ cmdTypecheck args _ config buildConfig = do
               config
               buildConfig
               (M.typecheckFrontend path code)
+              >>= reportWarnings
               |>> writeFrontendTypecheckOutput verbosity
           putDoc (result <> "\n")
           return passed
+
+reportWarnings :: ((a, [MT.Text]), MorlocState) -> IO ((a, [MT.Text]), MorlocState)
+reportWarnings r@((_, msgs), _) = MM.printWarnings msgs >> return r
 
 writeFrontendTypecheckOutput ::
   Int ->
@@ -684,7 +732,11 @@ writeFrontendTypes st (AnnoS (Idx i t) _ _) =
 writeTypecheckOutput ::
   Int -> ((Either MorlocError [(Lang, [SerialManifold])], [MT.Text]), MorlocState) -> (Bool, MDoc)
 writeTypecheckOutput _ ((Left e, _), st) = (False, MM.makeMorlocError st e)
-writeTypecheckOutput _ ((Right pools, _), _) = (True, vsep $ map (uncurry writePool) pools)
+writeTypecheckOutput _ ((Right pools, _), st) =
+  (True, vsep $ writePlacement (fromMaybe [] (statePlacement st)) : map (uncurry writePool) pools)
+
+writePlacement :: [MT.Text] -> MDoc
+writePlacement ls = vsep ("placement:" : map (("  " <>) . pretty) ls) <> "\n"
 
 writePool :: Lang -> [SerialManifold] -> MDoc
 writePool lang manifolds = pretty lang <+> "pool:" <> "\n" <> vsep (map pseudocodeSerialManifold manifolds) <> "\n"
@@ -693,7 +745,8 @@ cmdDump :: DumpCommand -> Int -> Config.Config -> BuildConfig -> IO Bool
 cmdDump args _ config buildConfig = do
   (path, code) <- readScript (dumpExpression args) (dumpScript args)
   let verbosity = dumpVerbose args
-  ((x, _), st) <- MM.runMorlocMonad Nothing verbosity config buildConfig (F.parse path code)
+  ((x, msgs), st) <- MM.runMorlocMonad Nothing verbosity config buildConfig (F.parse path code)
+  MM.printWarnings msgs
   case x of
     (Left e) -> do
       putDoc $ MM.makeMorlocError st e
@@ -1038,6 +1091,89 @@ loadModuleManifests fdbDir = do
                   Left _ -> return Nothing
           )
           moduleFiles
+
+-- | After a forced install, rebuild every installed program whose sourced
+-- files no longer hold what it was built from, since such a program refuses
+-- to run (SRC-8). With @listOnly@, name them instead. False when a program is
+-- left unable to run.
+rebuildStalePrograms :: Bool -> FilePath -> IO Bool
+rebuildStalePrograms listOnly exeDir = do
+  stale <- findStalePrograms exeDir
+  and <$> mapM rebuildOne stale
+  where
+    rebuildOne (name, changed, recipe) = do
+      let what = "Installed program '" <> name <> "' sources files that changed (" <> intercalate ", " changed <> ")"
+      case (listOnly, recipe) of
+        (True, _) -> do
+          hPutStrLn stderr $ what <> "; it will not run until it is rebuilt"
+          return True
+        (False, Nothing) -> do
+          hPutStrLn stderr $ what <> ", and its build records no way to repeat it; rebuild it with `morloc make --install --force`"
+          return False
+        (False, Just r) -> do
+          hPutStrLn stderr $ what <> "; rebuilding it"
+          ok <- runRebuild r
+          unless ok . hPutStrLn stderr $
+            "Failed to rebuild '" <> name <> "'; it will not run until it is rebuilt"
+          return ok
+
+    runRebuild r = do
+      exe <- getExecutablePath
+      env0 <- getEnvironment
+      let env' =
+            [kv | kv@(k, _) <- env0, k /= langParamsEnvVar]
+              ++ maybe [] (\v -> [(langParamsEnvVar, v)]) (rebuildLangParamsEnv r)
+      result <- try (do
+        (_, _, _, ph) <- SP.createProcess (SP.proc exe (rebuildArgs r)) {SP.cwd = Just (rebuildCwd r), SP.env = Just env'}
+        SP.waitForProcess ph) :: IO (Either SomeException ExitCode)
+      case result of
+        Right ExitSuccess -> return True
+        Right _ -> return False
+        Left e -> do
+          hPutStrLn stderr (show e)
+          return False
+
+-- | Installed programs, by name, whose recorded sourced files are missing or
+-- changed, with those files and the recipe that repeats their build.
+findStalePrograms :: FilePath -> IO [(String, [FilePath], Maybe RebuildRecipe)]
+findStalePrograms exeDir = do
+  result <- try (listDirectory exeDir) :: IO (Either SomeException [FilePath])
+  catMaybes <$> mapM check (sort (either (const []) id result))
+  where
+    check name = do
+      let manifestPath = installedManifestPath (exeDir </> name)
+      exists <- doesFileExist manifestPath
+      parsed <- if exists then JSON.decode <$> BL.readFile manifestPath else return Nothing
+      case parsed of
+        Nothing -> return Nothing
+        Just v -> do
+          changed <- filterM isChanged (fromMaybe [] (JSONT.parseMaybe manifestSources v))
+          return $
+            if null changed
+              then Nothing
+              else Just (name, map fst changed, JSONT.parseMaybe manifestRebuild v)
+
+    isChanged (path, hash) = do
+      exists <- doesFileExist path
+      if exists
+        then (/= hash) . PoolHash.poolHashHex <$> PoolHash.hashFiles [path]
+        else return True
+
+    manifestSources :: JSON.Value -> JSONT.Parser [(FilePath, T.Text)]
+    manifestSources = JSON.withObject "manifest" $ \o -> do
+      pools <- o JSON..:? "pools" JSON..!= []
+      concat <$> mapM poolSources pools
+
+    poolSources :: JSON.Value -> JSONT.Parser [(FilePath, T.Text)]
+    poolSources = JSON.withObject "pool" $ \p -> do
+      srcs <- p JSON..:? "sources" JSON..!= []
+      mapM (JSON.withObject "source" (\s -> (,) <$> s JSON..: "path" <*> s JSON..: "hash")) srcs
+
+    manifestRebuild :: JSON.Value -> JSONT.Parser RebuildRecipe
+    manifestRebuild = JSON.withObject "manifest" $ \o -> do
+      build <- o JSON..: "build"
+      r <- build JSON..: "rebuild"
+      RebuildRecipe <$> r JSON..: "cwd" <*> r JSON..: "args" <*> r JSON..:? "lang_params_env"
 
 -- | Load program manifests by scanning the exe directory. Each installed
 -- program lives in @exe/<name>/@ with a @manifest.json@ written in place by

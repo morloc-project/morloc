@@ -1,0 +1,10 @@
+--' Apply in Python a function from a C++ tuple
+module main (pairAway)
+
+import root-py
+import root-cpp
+import .helpers
+
+--' Apply in Python the function in a C++ tuple
+pairAway :: Int -> Int
+pairAway n = pyApply (.0 (cppPair n)) 3

@@ -1,6 +1,5 @@
-# A [DNA] arrives as a compact buffer of one-byte ordinals -- a numpy uint8
-# array where numpy is available, otherwise bytes -- not a list of IntEnum
-# members. Constructing one Python object per base would defeat the purpose
+# A Vector of DNA arrives as a compact buffer of one-byte ordinals, a numpy
+# uint8 array, not a list of IntEnum members. Constructing one Python object per base would defeat the purpose
 # of the tier, so nothing here indexes the buffer element by element.
 
 

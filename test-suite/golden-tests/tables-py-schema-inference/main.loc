@@ -26,10 +26,10 @@ import root-py
 -- All four exports use `sliceRows 0 k` as the "take first k rows" idiom;
 -- the `head` primitive was removed in the table-module redesign.
 
-open_csv :: Table n {x=Int} -> Table n {x=Int}
+open_csv :: Table n {x=Int} -> Table m {x=Int}
 open_csv = sliceRows 0 3
 
-open_json :: Table n {x=Int} -> Table n {x=Int}
+open_json :: Table n {x=Int} -> Table m {x=Int}
 open_json = sliceRows 0 3
 
 sniff_promote = sliceRows 0 7

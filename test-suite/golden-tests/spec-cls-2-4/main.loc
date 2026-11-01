@@ -1,5 +1,6 @@
 -- Spec CLS-2: a literal is built by the instance whose `pack` the language
--- implements, even when that instance implements `unpack` elsewhere.
+-- implements, even when that instance implements `unpack` in other languages
+-- too.
 module main (viaLit)
 
 import root-py
@@ -9,7 +10,7 @@ newtype Frozen a = [a]
 type Py => (Frozen a) = "tuple" a
 
 instance Packable [a] (Frozen a) where
-  source Py from "main.py" ("freeze" as pack)
+  source Py from "main.py" ("freeze" as pack, "thaw" as unpack)
   source Cpp from "main.hpp" ("thaw" as unpack)
 
 source Py from "main.py" ("keep")

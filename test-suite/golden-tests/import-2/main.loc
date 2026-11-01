@@ -8,4 +8,4 @@
 -- there should be no conflict.
 
 module main (person)
-import localmap (person)
+import .localmap (person)

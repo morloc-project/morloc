@@ -22,6 +22,8 @@ module Morloc.TypeEval
   , reduceTypeLeaves
   , expandHeadOnly
   , expandWireParent
+  , parsub
+  , parsubAll
   , wireParentRoot
   , expandLeavesOnce
   , Whnf
@@ -32,6 +34,9 @@ module Morloc.TypeEval
   , whnf
   , dataHead
   , dataCtors
+  , dataCtorsAt
+  , dataCtorsOf
+  , dataParams
   , dataIsEnum
   , enumCtors
   ) where
@@ -121,7 +126,7 @@ pairEval cscope gscope =
           | length paramKinds == length ts ->
               let params = [p | Left (p, _) <- paramKinds]
               in if length params == length ts
-                   then Just (foldr parsub body (zip params ts))
+                   then Just (parsubAll (zip params ts) body)
                    else Nothing
           | otherwise -> Nothing
       _ -> Nothing
@@ -240,11 +245,11 @@ resolveFail ::
   TypeU ->
   Either MorlocError TypeU
 resolveFail _ _ (AppU (VarU v) _) =
-  MM.throwSystemError $
+  MM.throwRejected $
     "Could not resolve type applied variable" <+> squotes (pretty v)
       <> ". You may be missing a language-specific type definition."
 resolveFail _ _ (VarU v) =
-  MM.throwSystemError $
+  MM.throwRejected $
     "Could not resolve type for variable" <+> squotes (pretty v)
       <> ". You may be missing a language-specific type definition."
 resolveFail _ _ _ = MM.throwCompilerBug "resolveFail reached an unexpected branch"
@@ -339,7 +344,7 @@ generalTransformType bnd0 recurse' resolve' scope = f bnd0
                 -- general name into generated code.
                 (Just (vs, newType, _, isTerminal, kind)) ->
                   let bnd' = if isSelfRecursive v newType then Set.insert v bnd else bnd
-                      substituted = foldr parsub newType (zip vs ts)
+                      substituted = parsubAll (zip vs ts) newType
                   in case (kind, isTerminal) of
                        -- Newtype and primitive are nominal for typeclass
                        -- instance lookup, but a record newtype's per-language
@@ -362,7 +367,7 @@ generalTransformType bnd0 recurse' resolve' scope = f bnd0
                        (TypedefAlias, True) -> terminate bnd' substituted
                        (TypedefAlias, False) -> recurse bnd' substituted
                 Nothing ->
-                  MM.throwSystemError $
+                  MM.throwRejected $
                     "No matching alias found for" <+> pretty t0
                       <> "\n  Available aliases have"
                       <+> pretty (length ts') <+> "entries, none match the given arguments"
@@ -411,7 +416,7 @@ generalTransformType bnd0 recurse' resolve' scope = f bnd0
                        | isTerminal -> terminate bnd' t2
                        | otherwise -> recurse bnd' t2
               Nothing ->
-                MM.throwSystemError $
+                MM.throwRejected $
                   "No matching alias found for" <+> pretty t0
                     <> "\n  Available aliases have"
                     <+> pretty (length ts1) <+> "entries, none match"
@@ -420,6 +425,7 @@ generalTransformType bnd0 recurse' resolve' scope = f bnd0
     f bnd (EffectU effs t) = EffectU effs <$> recurse bnd t
     f bnd (OptionalU t) = OptionalU <$> recurse bnd t
     f _ t@(NatVarU _) = return t  -- nat vars are not type aliases
+    f _ t@(IntVarU _) = return t
     f _ t@NatVoidU = return t
     f _ t@(StrVarU _) = return t
     f _ t@StrVoidU = return t
@@ -462,6 +468,7 @@ generalTransformType bnd0 recurse' resolve' scope = f bnd0
       in NamU o v <$> mapM (recurse bnd') ts <*> mapM (secondM (recurse bnd')) rs
     terminate _ (VarU v) = return (VarU v)
     terminate _ t@(NatVarU _) = return t
+    terminate _ t@(IntVarU _) = return t
     terminate bnd (EffectU effs t) = EffectU effs <$> recurse bnd t
     terminate bnd (OptionalU t) = OptionalU <$> recurse bnd t
     terminate _ t@NatVoidU = return t
@@ -580,7 +587,7 @@ generalTransformType bnd0 recurse' resolve' scope = f bnd0
       , kind1 == TypedefAlias && kind2 == TypedefAlias =
           return (Just a)
       | otherwise =
-          MM.throwSystemError $
+          MM.throwRejected $
             "Cannot merge conflicting type aliases:"
               <> "\n  t1:" <+> pretty t1
               <> "\n  t2:" <+> pretty t2
@@ -618,6 +625,14 @@ generalTransformType bnd0 recurse' resolve' scope = f bnd0
       length ts1 == length ts2
         && all (\(x, y) -> either (const True) (\ytype -> isSubtypeOf ytype x) y) (zip ts1 ts2)
 
+-- | Replace several type variables at once: an argument that names another
+-- parameter is not substituted again.
+parsubAll :: [(TVar, TypeU)] -> TypeU -> TypeU
+parsubAll pairs body =
+  let fresh = [TV ("#" <> MT.show' j) | j <- [0 .. length pairs - 1]]
+      named = foldr parsub body (zip (map fst pairs) (map VarU fresh))
+   in foldr parsub named (zip fresh (map snd pairs))
+
 -- Replace a type variable with an expression. For example:
 -- parsub ("a", "Int") -> "Map a b" -> "Map Int b"
 parsub :: (TVar, TypeU) -> TypeU -> TypeU
@@ -631,6 +646,9 @@ parsub (v, t2) t1@(VarU v0)
 -- Vector (n + m) Int`) would expand to a body that still references the
 -- unbound NatVarU, leaving the Nat solver unable to reduce the result.
 parsub (v, t2) t1@(NatVarU v0)
+  | v0 == v = t2
+  | otherwise = t1
+parsub (v, t2) t1@(IntVarU v0)
   | v0 == v = t2
   | otherwise = t1
 parsub (v, t2) t1@(StrVarU v0)
@@ -717,7 +735,7 @@ expandHeadWith stopAt scope (AppU (VarU v) args) =
       | length paramKinds == length args ->
           let params = [p | Left (p, _) <- paramKinds]
           in if length params == length args
-             then Just $ foldr parsub body (zip params args)
+             then Just $ parsubAll (zip params args) body
              else Nothing
       | length args < length paramKinds ->
           -- Kind-based realignment: bind type-kinded params from `args`
@@ -729,10 +747,11 @@ expandHeadWith stopAt scope (AppU (VarU v) args) =
               natParams  = [p | Left (p, KindNat)  <- paramKinds]
               strParams  = [p | Left (p, KindStr)  <- paramKinds]
           in if length typeParams == length args
-             then Just $ foldr parsub body
+             then Just $ parsubAll
                     (zip typeParams args
                       ++ [(p, NatVoidU) | p <- natParams]
                       ++ [(p, StrVoidU) | p <- strParams])
+                    body
              else Nothing
       | otherwise -> Nothing
     _ -> Nothing
@@ -883,6 +902,26 @@ dataHead scope (Whnf t) = case t of
   VarU v -> (\cs -> (v, [], cs)) <$> dataCtorsOfName scope v
   AppU (VarU v) ts -> (\cs -> (v, ts, cs)) <$> dataCtorsOfName scope v
   _ -> Nothing
+
+-- | The constructor table of the `data` type at the head, its fields with the
+-- type's parameters set to the arguments it is applied to.
+dataCtorsAt :: Scope -> Whnf -> Maybe [(MT.Text, [TypeU])]
+dataCtorsAt scope (Whnf t) = case t of
+  VarU v -> dataCtorsOf scope v []
+  AppU (VarU v) ts -> dataCtorsOf scope v ts
+  _ -> Nothing
+
+-- | The constructors of the `data` type of this name applied to these
+-- arguments.
+dataCtorsOf :: Scope -> TVar -> [TypeU] -> Maybe [(MT.Text, [TypeU])]
+dataCtorsOf scope v args = do
+  (params, cs) <- dataDeclOfName scope v
+  let inst = instantiateParams (zip params args)
+  return [(c, map inst fs) | (c, fs) <- cs]
+
+-- | The type parameters of a `data` declaration.
+dataParams :: Scope -> TVar -> [TVar]
+dataParams scope v = maybe [] fst (dataDeclOfName scope v)
 
 -- | The constructor table of the `data` type at the head.
 dataCtors :: Scope -> Whnf -> Maybe [(MT.Text, [TypeU])]

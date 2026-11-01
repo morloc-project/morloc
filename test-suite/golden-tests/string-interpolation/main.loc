@@ -1,4 +1,4 @@
-module main (sr, spy, scpp, escR, escPy, escCpp, trpR, trpPy, trpCpp)
+module main (sr, spy, scpp, escR, escPy, escCpp, trpR, trpPy, trpCpp, braces, braceStr, afterEsc, sliced)
 
 import root
 import root-r
@@ -35,3 +35,22 @@ trpPy x y = """x=#{idpy x};y=#{idpy y};"""
 
 trpCpp :: Str -> Str -> Str
 trpCpp x y = """x=#{idcpp x};y=#{idcpp y};"""
+
+-- A hole closes at its own brace, not at one inside a record or a string
+record Pt where
+  a :: Int
+record Py => Pt = "dict"
+
+braces :: Str -> Str
+braces x = "#{x}#{show (.a ({a = 1} :: Pt))}"
+
+braceStr :: Str -> Str
+braceStr x = "#{x}#{"}"}"
+
+-- A token after a string with an escape is placed after the string
+afterEsc :: U64
+afterEsc = size "\n"-1
+
+-- A slice keeps its bracket context inside a hole
+sliced :: [Int] -> Str
+sliced xs = "#{show (.[::-1] xs)} #{show (.[1:-1] xs)}"

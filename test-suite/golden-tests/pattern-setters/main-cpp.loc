@@ -2,5 +2,5 @@ module testcpp (test)
 
 source Cpp from "types.hpp" ("location_t", "worker_t")
 
-import tests
+import .tests
 import root-cpp

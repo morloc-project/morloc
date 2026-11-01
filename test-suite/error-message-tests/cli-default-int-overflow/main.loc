@@ -4,8 +4,8 @@
 module main (f)
 
 f ::
-  --' arg: -i
-  --' default: 999
+  --' @arg -i
+  --' @default 999
   I8 ->
   I8
 f x = x

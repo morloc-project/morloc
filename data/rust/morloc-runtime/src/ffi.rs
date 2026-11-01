@@ -134,6 +134,13 @@ pub(crate) unsafe fn rel2abs_extent(ptr: RelPtr, extent: usize, errmsg: *mut *mu
     ffi_try!(errmsg, ptr::null_mut(), shm::rel2abs_extent(ptr, extent).map(|p| p as *mut c_void))
 }
 
+// PANIC-14: a pool's defect exit asks this before it ends with 70.
+pub(crate) unsafe fn morloc_exit_if_shared_memory_lost(msg: *const c_char) {
+    if !msg.is_null() {
+        shm::exit_if_shared_memory_lost(&CStr::from_ptr(msg).to_string_lossy());
+    }
+}
+
 /// The error C's inline payload resolve reports. Always returns null.
 pub(crate) unsafe fn morloc_payload_region_error(
     relptr: RelPtr,
@@ -676,6 +683,11 @@ mod c_abi {
     #[no_mangle]
     pub unsafe extern "C" fn total_shm_size() -> usize {
         super::total_shm_size()
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn morloc_exit_if_shared_memory_lost(msg: *const c_char) {
+        super::morloc_exit_if_shared_memory_lost(msg)
     }
 
     #[no_mangle]

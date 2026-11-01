@@ -4,11 +4,18 @@
 
 ### DOC-1 A docstring attaches to what follows it
 Intent: proposed
+Tests: spec-doc-1-1, spec-doc-1-2, spec-doc-1-3
 Code: conforms 2026-10-21
 
-A `--'` block attaches to the next module header, signature, type inside a
-signature, `source` list item, `type`/`newtype`/`record` declaration, or
-record field. A line beginning `@keyword` is a directive, any other is prose;
+A `--'` block attaches to the next module header, signature (a class
+method's included), definition, type inside a signature, `source` item,
+`type`/`newtype`/`record`/`data` declaration, `data` constructor, record
+field, or `class`, `instance` or `effect` declaration (whose docstrings are
+for readers of the source). An item of a `source` list takes the blocks above it, above
+the comma before it, and above the list's opening parenthesis if it is the
+first, and two of these blocks for one item are an error; an item of a `source` block takes the block above it, `%inline`
+included. A block above anything else documents nothing and is ignored with
+a warning. A line beginning `@keyword` is a directive, any other is prose;
 prose lines join in order, `\@` escapes a leading `@`, and an unknown
 directive is kept as prose with a warning.
 
@@ -46,11 +53,14 @@ signature, else the docstring of the alias named there, else that of the next
 alias down its chain, field by field. A `newtype` does not inherit its
 representation's docstring.
 
-### DOC-6 Prose lines whose first word ends in a colon
-Intent: open
+### DOC-6 Directive form
+Intent: retired 2026-10-27
 Code: unaudited
 
-For compatibility, `--' Example: text` is read as the directive `Example`
-rather than as prose. Candidates: (a) keep the colon form as a synonym for
-`@keyword`; (b) retire it, so only `@` begins a directive and such lines are
-prose.
+Directives are written `@keyword` (DOC-1).
+
+### DOC-7 Cost directives state sizes, counts and times for the realizer
+Intent: retired 2026-10-26
+Code: unaudited
+
+The realizer reads no directives (cost.md: COST-1).

@@ -1,3 +1,139 @@
+0.112.0 [2026-11-01]
+--------------------
+
+New features
+ * A command's input is checked against the dimensions its type states
+   before the command runs: shared vector lengths, label values, lengths
+   written as expressions (`Vector (n + 1) a`), matrix and tensor headers
+   and table row counts. A mismatch is bad input naming the argument (exit
+   1 on the command line, HTTP 400 over the API)
+ * A newtype's representation may label its header integers with its Nat
+   parameters: `newtype Matrix (m :: Nat) (n :: Nat) a = ((m@Int, n@Int),
+   Vector (m * n) a)`
+ * `morloc make --debug` also checks the lengths of values passed between
+   pools; other builds no longer do
+ * `morloc make -X py:check=on` compiles each sourced Python file and fails
+   the build on a syntax error
+
+Changed
+ * A program refuses to run when a Python or R file it sources has changed
+   or gone since it was built, naming the file; rebuild it with `morloc
+   make`
+ * `morloc install --force` rebuilds the installed programs whose sourced
+   files the install changed; `--no-rebuild` lists them instead
+ * A label inside a type other than a whole signature argument or a newtype
+   header is an error; it was silently ignored
+ * The length of a run-time value, or a label whose argument is not a
+   literal or the caller's own label, must meet every condition a body puts
+   on it for all its values; state the relation in a signature, e.g.
+   `w@Int -> Vector (m + w - 1) Int`, and the input is checked for it
+ * A dimension that only a signature's result names (`sliceRows :: ... ->
+   Table n r -> Table m r`) is one the function chooses: two calls no
+   longer share it, and a body may not claim it equals another length
+ * A label on an unsigned type (`n@U64`) is known to be non-negative, so
+   `width :: n@U64 -> Int` may pass `n` where a dimension is expected
+ * A dotless import (`import m`) names only an installed module; import a
+   local module with a leading dot (`import .m`). When no module is
+   installed and a local file has the name, the build fails suggesting both
+   fixes rather than downloading a registry package of that name
+ * A match that misses a value is an error naming what it misses; a clause
+   that can never run is a warning
+ * A tuple or record pattern must fit its value, also where the value's
+   type is inferred: a tuple of exactly the pattern's width, a record with
+   its keys. `\(a, b)` applied to a triple is an error
+ * A binding whose computation needs its own value (`a = b + 1; b = a + 1`)
+   is an error; a value in the `where` block of a recursive function is
+   accepted
+ * Several implementations of one term are rejected only where they
+   provably differ
+ * `\'` and `\"` are valid escapes in every string literal
+
+Syntax and typing fixes
+ * A block opened mid-line ends before a `,`, `;`, `:`, `|` or `where` that
+   belongs to the enclosing construct: `(do f x, 1)`,
+   `t x = do f x where ...`
+ * String literals: escapes after an interpolation hole are decoded, every
+   multiline literal is dedented, and a brace inside a nested string or
+   record in a hole no longer ends the hole
+ * A getter on a value whose type is inferred keeps every field and tuple
+   slot it reads: a caller passing a record without one is rejected, naming
+   the field, instead of failing at run time
+ * Fix crashes on cyclic value bindings and on comparing a lambda
+   implementation with an alias
+ * An `@rsize` that leaves no argument for the last call group is rejected
+   at the source declaration
+
+Diagnostics
+ * User errors that have only a source position, parse errors among them,
+   are no longer reported as compiler bugs
+ * A duplicate constructor in a file with no `module` header is reported as
+   one
+
+Fixes
+ * A sourced Python file edited within a second of its last run, keeping its
+   size, no longer runs as its old version after a rebuild, and no longer
+   caches the old version's results under the new build
+
+0.111.1 [2026-10-27]
+--------------------
+
+New features
+ * The realizer places calls minimize crosses between language pools; ties
+   prefer C++, Rust, Futhark, Python, R
+ * `morloc typecheck --realize` lists where each call is placed
+
+Changed
+ * Functions passed to or returned by foreign functions are called with all
+   their arguments at once, however parenthesized; only `rsize` splits calls
+ * A function made by foreign code stays in its language; sending one to
+   another language is refused at build
+ * Retire the old `<field>:` style docstring syntax
+ * In Python a list is always a Python `list`, `[U8]` and lists of
+   constructors without fields included, whether built or received; a
+   compact byte buffer is `Vector n U8` (a numpy uint8 array). Declaring
+   another Python form for a list is an error
+ * In Python a numpy array that a literal builds or a pool receives is
+   read-only; call `.copy()` to change one
+ * In R a `Vector n D` of constructors without fields is `raw`, like
+   `Vector n U8`; `[D]` stays a factor
+ * A Packable instance gives a language both `pack` and `unpack`, or
+   neither, where the type has a form of its own there
+
+Docstrings and diagnostics
+ * Docstrings above items of a `source (...)` list, above `%inline` items
+   and above operator items are read instead of silently dropped
+ * A docstring that documents nothing is warned about (in your own modules)
+ * `@name` above an item that already names its foreign function, or two
+   docstring blocks above one item, is an error
+ * `morloc typecheck` and `morloc dump` print warnings
+ * Scripts without a module header report errors at the right line
+
+Fixes
+ * A function passed through a Morloc function into another language's
+   higher-order function (e.g. `pmapWith` in parallel-rust) no longer fails
+   to compile with a compiler bug
+ * A C++ or Rust function that returns one of its arguments no longer fails
+   to compile (C++) or frees it twice (Rust) when the argument is reached
+   through a let or a foreign call
+ * An R pool that receives many tables within one request collects them as
+   they pile up (`MORLOC_R_GC_BUDGET`)
+ * In strict conda mode, `morloc make` refuses a compiler or cargo from
+   outside the environment, naming it, instead of failing deep in a build
+ * Recursive functions returning functions, Rust closures returned after an
+   effect, and some `--debug` and cache builds no longer hit compiler bugs
+ * A literal has exactly the form of the same value received from another
+   language: in Python a Vector has its exact numpy dtype (uint8, int32,
+   float32, ...), and in R a list of scalars is an atomic vector (U8 `raw`,
+   I64 `integer64`, ...) where it was an R list; an element out of range is
+   an error
+ * `@read`, `@load` and `@unpack` give a nested Packable value its form at
+   every level (`[Set Int]` reads as a list of sets), and C++ compiles lists
+   of records holding a Packable field
+ * A list field marked `@many` in an `@unroll` record takes several values
+   after one flag (`--lang r py`) or a repeated flag
+ * An `@unroll` record passed to a function written only in Morloc no longer
+   fails with "record source must be a JSON object"
+
 0.110.1 [2026-10-23]
 --------------------
 

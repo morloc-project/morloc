@@ -1,0 +1,37 @@
+-- A function a Python source returns was made by host code (HOST-9): its
+-- binding and every application of it stay in Python, and only results
+-- cross. `madeHome` uses it from a Python callback, `madeDirect` hands the
+-- result of applying it to C++; bad.loc, whose C++ callback would call it,
+-- is refused at build rather than failing when run.
+
+--' Functions a source returns stay in its pool
+module main (madeHome, madeDirect)
+
+import root-py
+import root-cpp
+
+source Py from "f.py" ("py_f" as pyF, "py_map" as pyMap, "py_sum" as pySum, "py_make_adder" as pyMakeAdder)
+source Cpp from "f.hpp" ("cpp_f" as cppF)
+
+--' Add one
+pyF :: Int -> Int
+--' Double
+cppF :: Int -> Int
+--' Map in Python
+pyMap :: (Int -> Int) -> [Int] -> [Int]
+--' Sum in Python
+pySum :: [Int] -> Int
+--' Print and make an adder in Python
+pyMakeAdder :: Int -> <IO> (Int -> Int)
+
+--' Use a function a Python source made, in Python
+madeHome :: Int -> <IO> Int
+madeHome n = do
+  h <- pyMakeAdder n
+  pySum (pyMap (\x -> pyF (h x)) [1, 2])
+
+--' Apply a function a Python source made, its result going to C++
+madeDirect :: Int -> <IO> Int
+madeDirect n = do
+  h <- pyMakeAdder n
+  cppF (h n)

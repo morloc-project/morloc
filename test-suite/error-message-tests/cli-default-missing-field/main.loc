@@ -9,8 +9,8 @@ record Config where
   beta :: Int
 
 f ::
-  --' arg: -c/--config
-  --' default: {"alpha":1}
+  --' @arg -c/--config
+  --' @default {"alpha":1}
   Config ->
   Int
 f c = 0

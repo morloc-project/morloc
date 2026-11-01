@@ -1,0 +1,4 @@
+11
+1
+12
+OK: a function made by Python is not sent to C++

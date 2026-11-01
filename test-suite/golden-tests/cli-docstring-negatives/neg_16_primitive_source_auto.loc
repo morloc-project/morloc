@@ -5,7 +5,7 @@ import root
 -- Primitive args reject source: auto. The filename-as-value fallback
 -- the auto-classifier provides is incoherent for a scalar primitive.
 foo ::
-  --' source: auto
+  --' @source auto
   Int ->
   Int
 foo x = 0

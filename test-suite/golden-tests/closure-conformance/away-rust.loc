@@ -36,6 +36,6 @@ source Rust from "hosts.rs"
 
 -- also curried: `pass_through(f)` returns the callable, applied as `(f)(x)`
 source Rust from "hosts.rs" where
-  --' name: away_pass_through
+  --' @name away_pass_through
   --' @rsize 1
   passAway

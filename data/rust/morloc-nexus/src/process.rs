@@ -511,6 +511,7 @@ pub struct PoolSocket {
     /// whenever source or external dependencies change. Empty for
     /// manifests that predate the field.
     pub pool_hash: CString,
+    pub sources: Vec<crate::manifest::SourceFile>,
 }
 
 // ── Signal handlers (async-signal-safe) ────────────────────────────────────
@@ -1193,6 +1194,7 @@ pub fn setup_sockets(pools: &[Pool], tmpdir: &str, shm_basename: &str) -> Vec<Po
                 pid: 0,
                     pool_hash: CString::new(pool.pool_hash.as_str())
                     .unwrap_or_else(|_| CString::new("").unwrap()),
+                sources: pool.sources.clone(),
             }
         })
         .collect()
@@ -1333,6 +1335,9 @@ static SPAWN_TO_RECORD_DELAY_MS: std::sync::atomic::AtomicU64 = std::sync::atomi
 
 /// Start pool daemons for the given socket indices and wait for them to respond to pings.
 pub fn start_daemons(sockets: &mut [PoolSocket], indices: &[usize]) -> Result<(), String> {
+    for &idx in indices {
+        crate::sources::verify(&sockets[idx].sources)?;
+    }
     for &idx in indices {
         let since = unsafe { morloc_reaped_sequence() };
         let (pid, pgid, pin) = start_language_server(&sockets[idx])?;
@@ -1515,7 +1520,11 @@ pub fn pool_death_info(pool_index: usize) -> Option<String> {
         Some(format!("Pool process crashed with signal {sig}"))
     } else if libc::WIFEXITED(st) {
         let code = libc::WEXITSTATUS(st);
-        Some(format!("Pool process exited with status {code}"))
+        if code == morloc_runtime_types::EXIT_SHARED_MEMORY_LOST {
+            Some(format!("Pool process lost its shared memory (status {code})"))
+        } else {
+            Some(format!("Pool process exited with status {code}"))
+        }
     } else {
         Some("Pool process died unexpectedly".into())
     }
@@ -1905,6 +1914,7 @@ mod tests {
             syscmd: Vec::new(),
             pid: 0,
             pool_hash: CString::new("").unwrap(),
+            sources: Vec::new(),
         }
     }
 
@@ -2216,6 +2226,7 @@ mod tests {
             syscmd: vec![CString::new("true").unwrap()],
             pid: 0,
             pool_hash: CString::new("").unwrap(),
+            sources: Vec::new(),
         }];
         let died = matches!(start_daemons(&mut sockets, &[0]), Err(e) if e.contains("died"));
         std::process::exit(if died { 0 } else { 1 });

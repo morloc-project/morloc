@@ -65,7 +65,7 @@ lowerFuthark asts futSrcs = do
   guestSources <- dedupSources futSrcs
   langParams <- MM.gets stateLangParams
   (backend, device) <- case resolveFutharkBuild langParams of
-    Left msg -> MM.throwSystemError (pretty msg)
+    Left msg -> MM.throwRejected (pretty msg)
     Right bd -> return bd
   products <- guestBuild futharkGuest guestSources (BuildOpts backend device outDir)
   let sigs = [SourcedSig src t | (src, t) <- futSrcs]
@@ -78,7 +78,7 @@ lowerFuthark asts futSrcs = do
   -- Rewrite the source table too, so downstream include-collection
   -- (metaSources / lookupConstructors) sees the C++ glue header rather than
   -- the raw .fut (which is compiled separately to kernels.o, not #included).
-  MM.modify $ \s -> s {stateSources = GMap.mapVals (map (rewriteFutSource bindings)) (stateSources s)}
+  MM.modify' $ \s -> s {stateSources = GMap.mapVals (map (rewriteFutSource bindings)) (stateSources s)}
   return (map (rewriteSrc bindings) asts)
 
 -- Point a futhark Source at its generated glue (header path + function name),
@@ -167,7 +167,7 @@ dedupSources futSrcs =
 injectBuild :: BuildProducts -> MorlocMonad ()
 injectBuild products = do
   let flags = map (T.pack . MS.shellQuote) (bpObjects products) ++ bpLinkFlags products
-  MM.modify $ \s ->
+  MM.modify' $ \s ->
     let pms' = case statePackageMeta s of
           [] -> [defaultValue {packageCxxFlags = flags}]
           (p : ps) -> p {packageCxxFlags = packageCxxFlags p ++ flags} : ps

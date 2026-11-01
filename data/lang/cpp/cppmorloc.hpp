@@ -296,6 +296,15 @@ relptr_t abs2rel_cpp(absptr_t ptr);
 // Ends the pool with the reason a runtime call gave, and frees it.
 [[noreturn]] void mlc_defect_take(char* errmsg);
 
+// PANIC-14: set while a value another pool built is read.
+static thread_local bool mlc_reading_runtime_value = false;
+
+struct MlcRuntimeValueRead {
+    bool prev;
+    explicit MlcRuntimeValueRead(bool on) : prev(mlc_reading_runtime_value) { mlc_reading_runtime_value = on; }
+    ~MlcRuntimeValueRead() { mlc_reading_runtime_value = prev; }
+};
+
 // Resolve `relptr` to `extent` readable bytes in `space`, throwing when the
 // region is not there (see resolve_region in morloc.h).
 static inline void* resolve_region_cpp(relptr_t relptr, size_t extent, morloc_space_t space) {
@@ -305,6 +314,7 @@ static inline void* resolve_region_cpp(relptr_t relptr, size_t extent, morloc_sp
         if (err == NULL) mlc_runtime_defect("relptr did not resolve, and the runtime gave no reason");
         std::string msg(err);
         free(err);
+        if (mlc_reading_runtime_value) mlc_runtime_defect(msg);
         throw std::runtime_error(msg);
     }
     return p;
@@ -318,6 +328,7 @@ static inline void* resolve_array_cpp(relptr_t relptr, size_t n, size_t width, m
         if (err == NULL) mlc_runtime_defect("relptr did not resolve, and the runtime gave no reason");
         std::string msg(err);
         free(err);
+        if (mlc_reading_runtime_value) mlc_runtime_defect(msg);
         throw std::runtime_error(msg);
     }
     return p;
@@ -665,7 +676,7 @@ void mlc_leaf_write(void* dest, void** cursor, const Schema* schema, const T& da
                 break;
             case MORLOC_NIL: case MORLOC_STRING: case MORLOC_ARRAY: case MORLOC_TUPLE:
             case MORLOC_MAP: case MORLOC_OPTIONAL: case MORLOC_TABLE: case MORLOC_RECUR:
-            case MORLOC_CLOSURE: case MORLOC_VARIANT:
+            case MORLOC_VARIANT:
                 throw std::runtime_error("cannot write a number where the schema holds a non-numeric type");
         }
     }
@@ -714,8 +725,9 @@ T mlc_leaf_read(const Schema* schema, const void* data, morloc_space_t space) {
                 uint8_t kind = (schema->type == MORLOC_IFILE)   ? MLC_KIND_IFILE
                              : (schema->type == MORLOC_OSTREAM) ? MLC_KIND_OSTREAM
                              :                                    MLC_KIND_ISTREAM;
+                const char* storage = schema->keys ? schema->keys[0] : NULL;
                 int64_t handle = mlc_read_handle_voidstar(
-                    data, space, kind, &err);
+                    data, space, kind, storage, storage ? strlen(storage) : 0, &err);
                 if (err || handle < 0) {
                     if (err == NULL) mlc_runtime_defect("mlc_read_handle_voidstar failed without a reason");
                     std::string msg(err);
@@ -778,7 +790,7 @@ T mlc_leaf_read(const Schema* schema, const void* data, morloc_space_t space) {
             case MORLOC_ENUM: return static_cast<T>(*(const uint8_t*)data);
             case MORLOC_NIL: case MORLOC_STRING: case MORLOC_ARRAY: case MORLOC_TUPLE:
             case MORLOC_MAP: case MORLOC_OPTIONAL: case MORLOC_TABLE: case MORLOC_RECUR:
-            case MORLOC_CLOSURE: case MORLOC_VARIANT:
+            case MORLOC_VARIANT:
                 break;
         }
         throw std::runtime_error("cannot read a number where the schema holds a non-numeric type");

@@ -1,6 +1,6 @@
 module lib.foo (f, FooType)
 
-import lib.footypes (FooType)
+import .lib.footypes (FooType)
 
 source Py from "foo.py" ("f")
 

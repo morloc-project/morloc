@@ -1,0 +1,7 @@
+-- A module whose Python source the test rewrites and reinstalls.
+module bumpmod (bump)
+
+import root-py
+
+source Py from "bump.py" ("bump")
+bump :: Real -> Real

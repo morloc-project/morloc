@@ -1,5 +1,5 @@
 name:             morloc
-version:          0.110.1
+version:          0.112.0
 homepage:         https://github.com/morloc-project/morloc
 synopsis:         A multi-lingual, typed, workflow language
 description: |
@@ -84,6 +84,7 @@ dependencies:
   - template-haskell
   - text
   - time
+  - transformers
   - unix
   - unordered-containers
   - vector

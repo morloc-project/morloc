@@ -1,0 +1,4 @@
+build_rejected
+0
+main.loc:7:1:
+3

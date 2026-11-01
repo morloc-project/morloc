@@ -1,0 +1,13 @@
+--' Apply in C++ a Python adder a recursive function hands back
+module main (pickAway)
+
+import root-py
+import root-cpp
+import .helpers
+
+--' Apply in C++ the Python adder a recursive function hands back
+pickAway :: Int -> <IO> Int
+pickAway n = do
+  h <- mkPy n
+  f <- pick 2 h
+  cppApply f 1

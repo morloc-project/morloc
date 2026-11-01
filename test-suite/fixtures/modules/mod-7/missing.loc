@@ -1,0 +1,6 @@
+module main (f)
+
+import mloc (localValue)
+
+f :: Int
+f = localValue

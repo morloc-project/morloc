@@ -22,8 +22,7 @@ module Morloc.LangRegistry
   , buildLangMap
   , poolOf
   , coLocated
-  , registryPairwiseCost
-  , registryLanguageCost
+  , registryPreference
   , registrySerialType
   , registryIsCompiled
   , registryRunCommand
@@ -32,6 +31,7 @@ module Morloc.LangRegistry
   , registryMakeExecutablePoolName
   , registryMakeSourcePoolName
   , parseLangYamlFile
+  , parseLanguagesYaml
   ) where
 
 import Data.Aeson ((.!=), (.:), (.:?))
@@ -48,11 +48,8 @@ import Morloc.Language (Lang (..))
 data LangRegistry = LangRegistry
   { lrEntries :: Map Text LangRegistryEntry -- keyed by canonical name
   , lrAliases :: Map Text Text -- alias -> canonical name
-  , lrSameLangCosts :: Map Text Int
-  , lrCrossLangCosts :: Map Text Int
-  , lrOptimizedPairs :: Map (Text, Text) Int
-  , lrDefaultSameCost :: Int
-  , lrDefaultCrossCost :: Int
+  -- | The realizer's language preference, most preferred first (COST-16).
+  , lrLanguageOrder :: [Text]
   }
   deriving (Show)
 
@@ -61,7 +58,6 @@ data LangRegistryEntry = LangRegistryEntry
   , lreIsCompiled :: !Bool
   , lreRunCommand :: ![Text]
   , lreSerialType :: !Text
-  , lreCost :: !Int
   , lrePreamble :: ![Text]
   -- | Whether the language can carry a Str with interior NUL bytes.
   -- False means the morloc runtime rejects NUL-bearing Strs at the
@@ -78,19 +74,20 @@ data LangRegistryEntry = LangRegistryEntry
   deriving (Show)
 
 emptyRegistry :: LangRegistry
-emptyRegistry = LangRegistry Map.empty Map.empty Map.empty Map.empty Map.empty 10 10000
+-- | No languages and no preference, until languages.yaml is read.
+emptyRegistry = LangRegistry Map.empty Map.empty []
 
 -- | Build the default registry from embedded lang.yaml files and languages.yaml
 buildDefaultRegistry :: [(String, Text)] -> Text -> Either String LangRegistry
 buildDefaultRegistry langFiles languagesText = do
   langs <- mapM parseLangYaml langFiles
-  costs <- parseLanguagesYaml languagesText
+  order <- parseLanguagesYaml languagesText
   let entries = Map.fromList [(lymName ly, entryFromYaml ly) | ly <- langs]
       aliases =
         Map.fromList $
           concatMap (\ly -> [(a, lymName ly) | a <- lymAliases ly] ++ [(lymName ly, lymName ly)]) langs
   return
-    costs
+    order
       { lrEntries = entries
       , lrAliases = aliases
       }
@@ -140,21 +137,10 @@ poolOf reg l =
 coLocated :: LangRegistry -> Lang -> Lang -> Bool
 coLocated reg a b = poolOf reg a == poolOf reg b
 
-registryPairwiseCost :: LangRegistry -> Text -> Text -> Int
-registryPairwiseCost reg from to
-  | from == to = case Map.lookup from (lrSameLangCosts reg) of
-      Just c -> c
-      Nothing -> lrDefaultSameCost reg
-  | otherwise = case Map.lookup (from, to) (lrOptimizedPairs reg) of
-      Just c -> c
-      Nothing -> case Map.lookup to (lrCrossLangCosts reg) of
-        Just c -> c
-        Nothing -> lrDefaultCrossCost reg
-
-registryLanguageCost :: LangRegistry -> Text -> Int
-registryLanguageCost reg name = case Map.lookup name (lrEntries reg) of
-  Just entry -> lreCost entry
-  Nothing -> 5
+-- | A language's place in the preference order, 0 most preferred; a
+-- language not listed comes after every listed one (COST-16).
+registryPreference :: LangRegistry -> Text -> Int
+registryPreference reg name = length (takeWhile (/= name) (lrLanguageOrder reg))
 
 registrySerialType :: LangRegistry -> Text -> Text
 registrySerialType reg name = case Map.lookup name (lrEntries reg) of
@@ -204,7 +190,6 @@ data LangYamlMeta = LangYamlMeta
   , lymIsCompiled :: Bool
   , lymRunCommand :: [Text]
   , lymSerialType :: Text
-  , lymCost :: Int
   , lymPreamble :: [Text]
   , lymAllowStringNull :: Bool
   , lymHost :: Maybe Text
@@ -220,32 +205,15 @@ instance Aeson.FromJSON LangYamlMeta where
       <*> o .:? "is_compiled" .!= False
       <*> o .:? "run_command" .!= []
       <*> o .:? "serial_type" .!= "bytes"
-      <*> o .:? "cost" .!= 5
       <*> o .:? "preamble" .!= []
       <*> o .:? "allow_string_null" .!= True
       <*> o .:? "host"
 
-data LanguagesYaml = LanguagesYaml
-  { lysSameLangCosts :: Map Text Int
-  , lysCrossLangCosts :: Map Text Int
-  , lysOptimizedPairs :: [(Text, Text, Int)]
-  , lysDefaultSame :: Int
-  , lysDefaultCross :: Int
-  }
+newtype LanguagesYaml = LanguagesYaml {lysLanguageOrder :: [Text]}
   deriving (Show)
 
 instance Aeson.FromJSON LanguagesYaml where
-  parseJSON = Aeson.withObject "LanguagesYaml" $ \o -> do
-    same <- o .:? "same_language_costs" .!= Map.empty
-    cross <- o .:? "cross_language_costs" .!= Map.empty
-    pairs <- o .:? "optimized_pairs" .!= []
-    defSame <- o .:? "default_same_language" .!= 10
-    defCross <- o .:? "default_cross_language" .!= 10000
-    parsedPairs <- mapM parsePair pairs
-    return $ LanguagesYaml same cross parsedPairs defSame defCross
-    where
-      parsePair = Aeson.withObject "OptimizedPair" $ \o ->
-        (,,) <$> o .: "from" <*> o .: "to" <*> o .: "cost"
+  parseJSON = Aeson.withObject "LanguagesYaml" $ \o -> LanguagesYaml <$> o .: "language_order"
 
 entryFromYaml :: LangYamlMeta -> LangRegistryEntry
 entryFromYaml ly =
@@ -254,7 +222,6 @@ entryFromYaml ly =
     , lreIsCompiled = lymIsCompiled ly
     , lreRunCommand = lymRunCommand ly
     , lreSerialType = lymSerialType ly
-    , lreCost = lymCost ly
     , lrePreamble = lymPreamble ly
     , lreAllowStringNull = lymAllowStringNull ly
     , lreHost = lymHost ly
@@ -283,9 +250,5 @@ parseLanguagesYaml content =
         LangRegistry
           { lrEntries = Map.empty
           , lrAliases = Map.empty
-          , lrSameLangCosts = lysSameLangCosts lys
-          , lrCrossLangCosts = lysCrossLangCosts lys
-          , lrOptimizedPairs = Map.fromList [((f, t), c) | (f, t, c) <- lysOptimizedPairs lys]
-          , lrDefaultSameCost = lysDefaultSame lys
-          , lrDefaultCrossCost = lysDefaultCross lys
+          , lrLanguageOrder = lysLanguageOrder lys
           }

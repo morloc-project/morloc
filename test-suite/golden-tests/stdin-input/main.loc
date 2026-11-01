@@ -1,6 +1,6 @@
 module main (produce, readStream, readStr, readAny)
 
--- stdin input for CLI filters. A `--' stdin: true` positional is optional and
+-- stdin input for CLI filters. A `--' @stdin` positional is optional and
 -- reads stdin when omitted (or given `-`). @open on the injected `/dev/stdin`
 -- sentinel routes an IStream through the nexus stdin channel and rejects an
 -- IFile open (a pipe is not seekable) catchably, so the IFile-first / IStream-
@@ -22,7 +22,7 @@ echoStr :: [Str] -> [Str]
 identI  :: Int -> Int
 
 --' A readable filename
---' check.path: r
+--' @check.path r
 type RFile = Str
 
 --' Produce the first n integers as a morloc value (pipe with -f packet)
@@ -31,7 +31,7 @@ produce n = mk n
 
 --' Read integers as an IStream (file OR stdin); return the first batch.
 readStream ::
-  --' stdin: true
+  --' @stdin
   RFile ->
   <IO> [Int]
 readStream f = do
@@ -42,7 +42,7 @@ readStream f = do
 --' Read STRINGS as an IStream. Feeding an [Int] packet must fail the schema
 --' guard at the boundary rather than mis-decode.
 readStr ::
-  --' stdin: true
+  --' @stdin
   RFile ->
   <IO> [Str]
 readStr f = do
@@ -54,7 +54,7 @@ readStr f = do
 --' IFile fast path; stdin fails the IFile open catchably and the IStream
 --' fallback runs (its @flen has no footer count on a pipe, hence 0).
 readAny ::
-  --' stdin: true
+  --' @stdin
   RFile ->
   <IO> Int
 readAny f = do

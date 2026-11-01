@@ -1,0 +1,27 @@
+-- An unrolled record passed to a function written in morloc alone.
+--
+-- No pool is involved, so the nexus evaluates the call itself; the record
+-- its options describe must reach that evaluation the same as it would reach
+-- a pool.
+
+module main (same)
+
+import root-py
+
+--' Settings
+--' @unroll
+record Opts where
+  --' A label
+  --' @arg -n/--name
+  --' @default "x"
+  name :: Str
+  --' Sizes
+  --' @arg --size
+  --' @many
+  --' @default []
+  size :: [Int]
+record Py => Opts = "dict"
+
+--' Return the settings unchanged
+same :: Opts -> Opts
+same o = o

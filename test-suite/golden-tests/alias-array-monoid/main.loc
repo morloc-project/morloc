@@ -8,19 +8,19 @@ testDequeMonoidPy :: Bool
 testDequeMonoidPy =
   let t1 = (([1,2] :: Deque Int) <> [3,4]) == [1,2,3,4]
       t2 = (mempty :: Deque Int) == []
-      t3 = concat ([[1,2],[3],[4,5]] :: Deque (Deque Int)) == [1,2,3,4,5]
+      t3 = concat ([[1,2],[3],[4,5]] :: [Deque Int]) == [1,2,3,4,5]
   in t1 && t2 && t3
 
 testDequeMonoidCpp :: Bool
 testDequeMonoidCpp =
   let t1 = (([1,2] :: Deque Int) <> [3,4]) == [1,2,3,4]
       t2 = (mempty :: Deque Int) == []
-      t3 = concat ([[1,2],[3],[4,5]] :: Deque (Deque Int)) == [1,2,3,4,5]
+      t3 = concat ([[1,2],[3],[4,5]] :: [Deque Int]) == [1,2,3,4,5]
   in t1 && t2 && t3
 
 testDequeMonoidR :: Bool
 testDequeMonoidR =
   let t1 = (([1,2] :: Deque Int) <> [3,4]) == [1,2,3,4]
       t2 = (mempty :: Deque Int) == []
-      t3 = concat ([[1,2],[3],[4,5]] :: Deque (Deque Int)) == [1,2,3,4,5]
+      t3 = concat ([[1,2],[3],[4,5]] :: [Deque Int]) == [1,2,3,4,5]
   in t1 && t2 && t3

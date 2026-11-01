@@ -1,6 +1,6 @@
 module foopy (*)
 
-import foo
+import .foo
 
 pneg :: Int -> Int
 padd :: Int -> Int -> Int

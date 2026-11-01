@@ -1,0 +1,13 @@
+placement:
+  countFrom [py]
+    showInt [py]
+      call count [py]
+        parseInt [py]
+  count [cpp]
+    == [cpp]
+    + [cpp]
+      call count [cpp]
+        dec [cpp]
+
+"50"
+OK: built placement costs the least

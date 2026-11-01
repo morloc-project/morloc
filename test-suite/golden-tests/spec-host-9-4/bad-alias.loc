@@ -1,0 +1,24 @@
+--' Make a Python adder through a morloc name and use it in C++
+module main (aliasAway)
+
+import root-py
+import root-cpp
+import .helpers
+
+source Py from "f.py" ("py_make_adder" as mkPy)
+source Cpp from "f.hpp" ("cpp_make_adder" as mkCpp)
+
+--' Make an adder in Python
+mkPy :: Int -> <IO> (Int -> Int)
+--' Make an adder in C++
+mkCpp :: Int -> <IO> (Int -> Int)
+
+--' A morloc name for the Python adder
+adder :: Int -> <IO> (Int -> Int)
+adder k = mkPy k
+
+--' Use a Python adder made through a morloc name in C++
+aliasAway :: Int -> <IO> Int
+aliasAway n = do
+  h <- adder n
+  cppSum (cppMap (\x -> cppF (h x)) [1, 2])

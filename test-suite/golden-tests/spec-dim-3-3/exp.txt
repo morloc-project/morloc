@@ -1,0 +1,7 @@
+--- release build: not checked ---
+2
+exit: 0
+--- debug build: a defect ---
+exit: 1
+1
+1

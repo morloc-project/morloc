@@ -1,3 +1,4 @@
+{-# LANGUAGE StrictData #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 {- |
@@ -33,6 +34,7 @@ module Morloc.Namespace.State
 
     -- * Error handling
   , MorlocError (..)
+  , Location (..)
 
     -- * Configuration
   , Config (..)
@@ -72,6 +74,8 @@ module Morloc.Namespace.State
 
     -- * System
   , SysCommand (..)
+  , RebuildRecipe (..)
+  , PoolToolchain (..)
   , Script (..)
 
     -- * Language registry
@@ -81,8 +85,8 @@ module Morloc.Namespace.State
 
 import Control.Monad.Except (ExceptT)
 import Control.Monad.Reader (ReaderT)
-import Control.Monad.State (StateT)
-import Control.Monad.Writer (WriterT)
+import Control.Monad.State.Strict (StateT)
+import Control.Monad.Writer.CPS (WriterT)
 import Data.Aeson (FromJSON (..), (.!=), (.:), (.:?))
 import qualified Data.Aeson as Aeson
 import Data.Int (Int64)
@@ -154,6 +158,12 @@ data MorlocState = MorlocState
   , stateTypeclasses :: Map.Map EVar Instance
   , stateConcreteTypedefs :: Map Lang Scope
   , stateGeneralTypedefs :: Scope
+  , stateNewtypeHeaders :: Map.Map TVar [(TVar, [Int])]
+  -- ^ Each newtype's header labels (DIM-9): the parameter and the tuple
+  -- fields that reach its integer in the representation.
+  , stateExportTypes :: Map.Map Int TypeU
+  -- ^ Each export's inferred general type, by its index, with its Nat
+  -- variables: the contract of an export without a signature (DIM-3).
   , stateSources :: GMap Int MVar [Source]
   , stateAnnotations :: Map Int TypeU
   , stateOutfile :: Maybe Path
@@ -232,6 +242,9 @@ data MorlocState = MorlocState
   -- Set to @--name@ if given, else the source-file basename. @Nothing@ falls
   -- back to the outfile/module name (this is how eval reuses its @--save@ name).
   , stateWrapperSpecs :: Maybe [WrapperSpec]
+  , stateRebuild :: Maybe RebuildRecipe
+    -- ^ How to repeat this build, recorded in an installed program's manifest
+    -- so a reinstall that changes its sources can rebuild it
   -- ^ Exact set of launcher wrappers to emit. @Nothing@ = default (a single
   -- CLI wrapper named after the program); @Just []@ = emit none (@--no-cli@
   -- with no other output flags).
@@ -261,6 +274,9 @@ data MorlocState = MorlocState
   -- | The term that owns each where-bound term (both by term identity, the
   -- inner key of 'stateSignatures').
   , stateWhereOwner :: Map Int Int
+  -- | The clauses of each pattern match, by the name its receiver is bound
+  -- to ('Morloc.Frontend.PatternCheck')
+  , stateMatchSites :: Map Text MatchSite
   -- | The constant each expression is a copy of, by index
   -- ('Restructure.markConstants'): copies of one constant are bound once per
   -- command ('Share').
@@ -290,9 +306,18 @@ data MorlocState = MorlocState
   , stateSpecs :: Specs
   -- | The names the uses of shared specializations call them by.
   , stateSpecNames :: Set.Set EVar
+  -- | The realizer's placement of each exported tree, one line per named
+  -- call, for `morloc typecheck --realize`; collected only when set to
+  -- @Just@ before realization.
+  , statePlacement :: Maybe [Text]
   -- | The copies of shared specializations the nexus calls by name, by the
   -- index of their root.
   , stateNamedGasts :: Map Int EVar
+  , stateHostFunctionVars :: Set.Set EVar
+  -- ^ Binders of a function made by host code (renamed apart by
+  -- 'Morloc.CodeGenerator.HostProvenance.planHostFunctions').
+  , stateHostFunctionArgs :: Set.Set Int
+  -- ^ The argument ids of those parameters ('Morloc.CodeGenerator.Parameterize').
   , stateHostOriginClosures :: Set.Set Int
   -- ^ Manifolds that wrap a function value a HOST created (the adapter at
   -- a sourced call's result). Such a value has no identity of its own, so
@@ -441,14 +466,21 @@ data TermTypes = TermTypes
 
 ---- Error types
 
--- | All compiler errors
+-- | Why a compilation stopped: the program is wrong, the environment failed,
+-- or the compiler is wrong (DIAG-1: a 'Fault' is a defect).
 data MorlocError
-  = -- | Error tied to a specific AST node index
-    SourcedError Int MDoc
-  | -- | Internal compiler error (bug)
-    SystemError MDoc
-  | -- | Type unification failure
-    UnificationError Int Int Int MDoc
+  = Rejected Location MDoc
+  | EnvFailed MDoc
+  | Fault (Maybe Location) MDoc
+  deriving (Show)
+
+-- | Where in the program an error is. 'Unplaced' marks a rejection that does
+-- not yet name its source (DIAG-2).
+data Location
+  = AtNode Int
+  | AtSource SrcLoc
+  | AtUnification Int Int Int
+  | Unplaced
   deriving (Show)
 
 ---- Configuration
@@ -963,9 +995,25 @@ data Gamma = Gamma
   -- contracts: a signature's type variables are then rigid (skolems), and
   -- the set holds those introduced so far. 'Nothing' in ordinary inference.
   , gammaRigid :: Maybe (Set.Set TVar)
+  -- | The Nat and Int variables of the signatures being checked as
+  -- contracts, at every depth (POLY-7).
+  , gammaRigidNats :: Set.Set TVar
+  -- | The row variables of those signatures; a size over them is rigid.
+  , gammaRigidRows :: Set.Set TVar
+  -- | The Nat positions of those signatures, whose non-negativity their
+  -- bodies may assume (KIND-4).
+  , gammaRigidDomain :: [(Int, TypeU)]
+  -- | The parameters of the definitions being checked as contracts that a
+  -- label binds to an Int, with that Int (POLY-3).
+  , gammaLabelVars :: Map.Map EVar TVar
+  -- | The label variables of calls whose label argument has no value
+  -- known before run time (DIM-3): never solved by an equation, and every
+  -- condition over one must hold for each of its values.
+  , gammaObserved :: Set.Set TVar
   -- | The type variables of the signatures being checked around this point,
-  -- by the name the signature wrote to the name the check gave it. A local
-  -- signature or annotation writing one of these names means that variable.
+  -- by the name the signature wrote to the name the check gave it. An
+  -- annotation writing one of these names means that variable; a local
+  -- signature's are its own (POLY-4).
   , gammaScoped :: Map TVar TVar
   }
 
@@ -1000,17 +1048,35 @@ data Socket = Socket
   }
   deriving (Show)
 
+-- | A @morloc@ invocation that repeats a build: run with @rebuildArgs@ in
+-- @rebuildCwd@, with @MORLOC_LANG_PARAMS@ set to @rebuildLangParamsEnv@ (unset
+-- when 'Nothing').
+data RebuildRecipe = RebuildRecipe
+  { rebuildCwd :: FilePath
+  , rebuildArgs :: [String]
+  , rebuildLangParamsEnv :: Maybe String
+  }
+  deriving (Show, Eq)
+
 data SysCommand
-  = SysExe Path
-  | SysMove Path Path
-  | SysRun Code
-  | SysInstall Path
-  | SysUnlink Path
+  = SysRun Code
+  | -- | Delete every file matching a path whose last component may hold @*@
+    -- wildcards (a language's @remove@ build hook, see SRC-7).
+    SysRemoveMatching Path
   | -- | Merge a freshly built Rust pool's Cargo.lock into the environment
     -- lock: @SysMergeCargoLock base env pool@ rewrites @env@ as @base@ plus
     -- the crates in @env@ and @pool@ that @base@ lacks (see
     -- "Morloc.Build.CargoLock").
     SysMergeCargoLock Path Path Path
+  | -- | In strict conda mode, refuse to go on if this build would run a
+    -- program from outside the environment (see
+    -- "Morloc.CodeGenerator.SystemConfig").
+    SysRequireToolchain PoolToolchain
+  deriving (Show, Ord, Eq)
+
+-- | The builds that run a conda toolchain at @morloc make@ time: a C++ pool, a
+-- Rust pool, and a C guest compile (Futhark's emitted C).
+data PoolToolchain = CppPoolToolchain | RustPoolToolchain | CGuestToolchain
   deriving (Show, Ord, Eq)
 
 data Script
@@ -1036,6 +1102,8 @@ instance Defaultable MorlocState where
       , stateTypeclasses = Map.empty
       , stateConcreteTypedefs = Map.empty
       , stateGeneralTypedefs = Map.empty
+      , stateNewtypeHeaders = Map.empty
+      , stateExportTypes = Map.empty
       , stateSources = GMap Map.empty Map.empty
       , stateAnnotations = Map.empty
       , stateOutfile = Nothing
@@ -1064,6 +1132,7 @@ instance Defaultable MorlocState where
       , stateStagingDir = Nothing
       , stateProgramKey = Nothing
       , stateWrapperSpecs = Nothing
+      , stateRebuild = Nothing
       , stateBuildParentDir = Nothing
       , stateClassDefs = Map.empty
       , stateEffects = Map.empty
@@ -1073,6 +1142,7 @@ instance Defaultable MorlocState where
       , stateNativeRecEntries = Map.empty
       , stateRecursionTargets = Map.empty
       , stateWhereOwner = Map.empty
+      , stateMatchSites = Map.empty
       , stateConstantOrigin = Map.empty
       , stateHoldCache = Map.empty
       , stateUndeterminedSites = Map.empty
@@ -1082,7 +1152,10 @@ instance Defaultable MorlocState where
       , stateRecStages = Map.empty
       , stateSpecs = Specs []
       , stateSpecNames = Set.empty
+      , statePlacement = Nothing
       , stateNamedGasts = Map.empty
+      , stateHostFunctionVars = Set.empty
+      , stateHostFunctionArgs = Set.empty
       , stateHostOriginClosures = Set.empty
       , stateArgTypes = Map.empty
       , stateManifoldEffects = Map.empty
@@ -1254,5 +1327,5 @@ instance Pretty GammaIndex where
       <+> list (map ((\(x, y) -> tupled [x, y]) . bimap pretty pretty) rs)
   pretty (SolvedG tv t) = "SolvedG:" <+> pretty tv <+> "=" <+> pretty t
   pretty (MarkG tv) = "MarkG:" <+> pretty tv
-  pretty (SrcG (Source ev1 lang _ _ _ _ _ _ _ _)) = "SrcG:" <+> pretty ev1 <+> viaShow lang
+  pretty (SrcG Source {srcName = ev1, srcLang = lang}) = "SrcG:" <+> pretty ev1 <+> viaShow lang
   pretty (AnnG v t) = pretty v <+> "::" <+> pretty t

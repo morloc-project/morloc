@@ -1,0 +1,10 @@
+-- Spec NATIVE-7: a Python form for a list other than `list` is refused where
+-- it is declared.
+module main (f)
+
+import root-py
+
+type Py => (List U8) = "bytes" U8
+
+f :: [U8] -> Int
+f xs = length xs

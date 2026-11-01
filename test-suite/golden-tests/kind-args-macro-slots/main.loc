@@ -1,0 +1,58 @@
+--' Kind arguments fill no slot of a native form
+--'
+--' A Rec, Str or Nat argument fills no slot of a per-language form: in
+--' `Frame {x = Int} Real` the form `std::vector<$1>` takes `Real` though the
+--' ground row comes first, and in `Tagged "id" Real` the Str label is skipped
+--' the same way, in C++ and in Rust. A newtype whose body drops its label,
+--' `Labeled "x" Int` over `[Int]`, crosses between C++ and Python.
+module main (cppGround, cppLabel, rustGround, rustLabel, labeledViaCpp, labeledViaPy)
+
+import root-cpp
+import root-rust
+import root-py
+
+type Frame (r :: Rec) a
+type Cpp => (Frame (r :: Rec) a) = "std::vector<$1>" r a
+type Rust => (Frame (r :: Rec) a) = "Vec<$1>" r a
+
+type Tagged (s :: Str) a
+type Cpp => (Tagged (s :: Str) a) = "std::vector<$1>" s a
+type Rust => (Tagged (s :: Str) a) = "Vec<$1>" s a
+
+source Cpp from "f.hpp" ("mkF", "lenF", "mkT", "lenT", "mkL", "sumL")
+source Py from "f.py" ("mkL" as mkLp, "sumL" as sumLp)
+source Rust from "f.rs" ("mkF" as mkFr, "lenF" as lenFr, "mkT" as mkTr, "lenT" as lenTr)
+
+mkF :: Int -> Frame {x = Int} Real
+lenF :: Frame {x = Int} Real -> Int
+mkT :: Int -> Tagged "id" Real
+lenT :: Tagged "id" Real -> Int
+mkFr :: Int -> Frame {x = Int} Real
+lenFr :: Frame {x = Int} Real -> Int
+mkTr :: Int -> Tagged "id" Real
+lenTr :: Tagged "id" Real -> Int
+
+newtype Labeled (s :: Str) a = [a]
+
+mkL :: Int -> Labeled "x" Int
+sumL :: Labeled "x" Int -> Int
+mkLp :: Int -> Labeled "x" Int
+sumLp :: Labeled "x" Int -> Int
+
+cppGround :: Int -> Int
+cppGround k = lenF (mkF k)
+
+cppLabel :: Int -> Int
+cppLabel k = lenT (mkT k)
+
+rustGround :: Int -> Int
+rustGround k = lenFr (mkFr k)
+
+rustLabel :: Int -> Int
+rustLabel k = lenTr (mkTr k)
+
+labeledViaCpp :: Int -> Int
+labeledViaCpp k = sumLp (mkL k)
+
+labeledViaPy :: Int -> Int
+labeledViaPy k = sumL (mkLp k)

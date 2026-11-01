@@ -1,0 +1,13 @@
+-- A match over a `data` type declared in another module is checked for
+-- coverage like a local one (PAT-3, SUM-3); partial.loc misses `Dot` and
+-- must not build.
+module main (area)
+
+import root-py
+import .shapes
+
+area :: Shape -> Real
+area s = match s
+  | (Circle r) = 3.0 * r * r
+  | (Rect w h) = w * h
+  | Dot = 0.0

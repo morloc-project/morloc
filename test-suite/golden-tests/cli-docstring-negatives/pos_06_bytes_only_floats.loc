@@ -2,10 +2,10 @@ module main (foo)
 
 import root
 
--- `form: bytes-only` on a fixed-width-scalar array reads the file as
+-- `@form bytes-only` on a fixed-width-scalar array reads the file as
 -- packed raw bytes without packet sniffing.
 foo ::
-  --' form: bytes-only
+  --' @form bytes-only
   [F64] ->
   Int
 foo x = 0

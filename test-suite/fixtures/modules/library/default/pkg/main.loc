@@ -1,0 +1,6 @@
+module pkg (pkgValue)
+
+import .lib.types (innerValue)
+
+pkgValue :: Int
+pkgValue = innerValue

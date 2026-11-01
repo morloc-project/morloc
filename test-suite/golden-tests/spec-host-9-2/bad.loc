@@ -1,0 +1,20 @@
+module main (madeOnce)
+
+import root-py
+import root-cpp
+
+source Py from "f.py" ("py_f" as pyF, "py_map" as pyMap, "py_sum" as pySum, "py_make_adder" as pyMakeAdder)
+source Cpp from "f.hpp" ("cpp_f" as cppF, "cpp_map" as cppMap, "cpp_sum" as cppSum)
+
+pyF :: Int -> Int
+cppF :: Int -> Int
+pyMap :: (Int -> Int) -> [Int] -> [Int]
+cppMap :: (Int -> Int) -> [Int] -> [Int]
+pySum :: [Int] -> Int
+cppSum :: [Int] -> Int
+pyMakeAdder :: Int -> <IO> (Int -> Int)
+
+madeOnce :: Int -> <IO> Int
+madeOnce n = do
+  h <- pyMakeAdder n
+  pySum (pyMap (\x -> pyF (h x)) [1, 2]) + cppSum (cppMap (\x -> cppF (h x)) [1, 2])

@@ -1,0 +1,82 @@
+-- A function that host code makes and passes to a lambda (here R's
+-- `feed`, which calls its argument with an R function) has no identity
+-- outside its pool, so every use of it stays in R: applied to a value
+-- whose consumer is in Python, the application runs in R and only its
+-- result crosses (`hoisted`); given to a recursive morloc helper that
+-- is placed in Python, the helper is copied into R (`recursive`),
+-- and the same helper called with a Python host's function stays in
+-- Python (`twoHosts`). Mutually recursive helpers are copied together
+-- (`mutual`), and the functions a copy applies to the host's function are
+-- made in the copy's language (`listed`).
+
+--' Host-made functions stay in their language
+module main (hoisted, recursive, twoHosts, mutual, listed)
+
+import root-py
+import root-r
+
+source R from "f.R" ("feed")
+source Py from "f.py" ("py_feed" as pyFeed, "py_inc" as pyInc, "py_add" as pyAdd, "py_sub" as pySub)
+
+--' Call a function with an R function that doubles
+feed :: ((Int -> Int) -> Int) -> Int
+
+--' Call a function with a Python function that triples
+pyFeed :: ((Int -> Int) -> Int) -> Int
+
+--' Add one
+pyInc :: Int -> Int
+
+--' Add two numbers
+pyAdd :: Int -> Int -> Int
+
+--' Subtract two numbers
+pySub :: Int -> Int -> Int
+
+--' Sum g n + g (n-1) + ... + g 1
+total :: Int -> (Int -> Int) -> Int
+total n g
+  ? n == 0 = 0
+  : pyAdd (g n) (total (pySub n 1) g)
+
+--' Increment the doubled input
+hoisted :: Int -> Int
+hoisted x = feed (\g -> pyInc (g x))
+
+--' Sum the doubles up to n
+recursive :: Int -> Int
+recursive n = feed (\g -> total n g)
+
+--' Sum the doubles and the triples up to n
+twoHosts :: Int -> Int
+twoHosts n = pyAdd (feed (\g -> total n g)) (pyFeed (\g -> total n g))
+
+--' Sum g n + g (n-2) + ... down to 1 or 2
+evens :: Int -> (Int -> Int) -> Int
+evens n g
+  ? n <= 0 = 0
+  : pyAdd (g n) (odds (pySub n 1) g)
+
+--' Skip one step of 'evens'
+odds :: Int -> (Int -> Int) -> Int
+odds n g
+  ? n <= 0 = 0
+  : evens (pySub n 1) g
+
+--' Sum the doubles of every other number down from n
+mutual :: Int -> Int
+mutual n = feed (\g -> evens n g)
+
+--' Apply each function of a list to g and sum the results
+applyAll :: [(Int -> Int) -> Int] -> (Int -> Int) -> Int
+applyAll fs g
+  ? length fs == 0 = 0
+  : pyAdd ((.[0] fs) g) (applyAll (.[1:] fs) g)
+
+--' Apply g to a number
+withAt :: Int -> (Int -> Int) -> Int
+withAt x g = g x
+
+--' Sum the doubles of 1 and n
+listed :: Int -> Int
+listed n = feed (\g -> applyAll [withAt 1, withAt n] g)

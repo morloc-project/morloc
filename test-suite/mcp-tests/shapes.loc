@@ -5,13 +5,13 @@
 --' exercises the inverse (named -> positional) mapping via `tools/call`.
 --'
 --' Mapping cheat-sheet (see README.md for the full matrix):
---'   metavar:      -> the property NAME (lowercased); else "arg0", "arg1", ...
---'   many: true    -> the property is an array (variadic)
+--' @metavar      -> the property NAME (lowercased); else "arg0", "arg1", ...
+--' @many    -> the property is an array (variadic)
 --'   ?T positional -> nullable + not required
 --'   record unroll -> flat per-field properties, keyed by field name
 --'   record arg:   -> the whole record as ONE object property (group_opt)
 --'   record return -> structuredContent + object outputSchema
---'   name:         -> overrides the tool name
+--' @name         -> overrides the tool name
 --'   command doc   -> the tool description
 --'   pure command  -> served in-process (no pool); remote command -> pool
 module main
@@ -51,52 +51,52 @@ mkResultPy    :: Int -> Result
 noisyPy       :: Int -> Int
 
 -- A record used only as an ARGUMENT, unrolled into flat per-field CLI
--- options (no record-level `arg:`), so MCP renders one property per field.
---' unroll: true
+-- options (no record-level `@arg`), so MCP renders one property per field.
+--' @unroll
 record ConfigFlat where
   --' Scratch directory
-  --' arg: --tmp-dir
-  --' metavar: DIR
-  --' default: "/tmp"
+  --' @arg --tmp-dir
+  --' @metavar DIR
+  --' @default "/tmp"
   tmpDir :: Str
 
   --' Worker thread count
-  --' arg: -t/--threads
-  --' metavar: INT
-  --' default: 1
+  --' @arg -t/--threads
+  --' @metavar INT
+  --' @default 1
   numThreads :: Int
 
   --' Purge caches on exit
-  --' true:  --clean
-  --' false: --no-clean
-  --' default: false
+  --' @true --clean
+  --' @false --no-clean
+  --' @default false
   removeCaches :: Bool
 
 record Py => ConfigFlat = "dict"
 
 configStrFlat :: ConfigFlat -> Str
 
--- The same fields, but a record-level `arg:` makes the whole record one CLI
+-- The same fields, but a record-level `@arg` makes the whole record one CLI
 -- option, so MCP renders ONE object property named for the record type.
---' unroll: true
---' arg: --config
+--' @unroll
+--' @arg --config
 record ConfigWhole where
   --' Scratch directory
-  --' arg: --tmp-dir
-  --' metavar: DIR
-  --' default: "/tmp"
+  --' @arg --tmp-dir
+  --' @metavar DIR
+  --' @default "/tmp"
   tmpDir :: Str
 
   --' Worker thread count
-  --' arg: -t/--threads
-  --' metavar: INT
-  --' default: 1
+  --' @arg -t/--threads
+  --' @metavar INT
+  --' @default 1
   numThreads :: Int
 
   --' Purge caches on exit
-  --' true:  --clean
-  --' false: --no-clean
-  --' default: false
+  --' @true --clean
+  --' @false --no-clean
+  --' @default false
   removeCaches :: Bool
 
 record Py => ConfigWhole = "dict"
@@ -112,14 +112,14 @@ record Py => Result = "dict"
 
 --' Add one to an integer
 addOne ::
-  --' metavar: N
+  --' @metavar N
   Int ->
   Int
 addOne x = addOnePy x
 
 --' Sum a variadic list of integers
 sumMany ::
-  --' many: true
+  --' @many
   [Int] ->
   Int
 sumMany xs = sumIntsPy xs
@@ -128,11 +128,11 @@ sumMany xs = sumIntsPy xs
 --' top-level OPTION (arg: + default:), a distinct manifest shape from the
 --' record-derived options above: MCP renders it as a non-required property.
 scale ::
-  --' metavar: N
+  --' @metavar N
   Int ->
-  --' arg: --factor
-  --' metavar: FACTOR
-  --' default: 2
+  --' @arg --factor
+  --' @metavar FACTOR
+  --' @default 2
   Int ->
   Int
 scale x f = mulPy x f
@@ -142,9 +142,9 @@ maybeDouble :: ?Int -> ?Int
 maybeDouble x = maybeDoublePy x
 
 --' Greet a person by name
---' name: hello
+--' @name hello
 greet ::
-  --' metavar: NAME
+  --' @metavar NAME
   Str ->
   Str
 greet name = greetPy name
@@ -159,7 +159,7 @@ configWhole c = configStrWhole c
 
 --' Build a result record (record return -> structuredContent)
 mkResult ::
-  --' metavar: N
+  --' @metavar N
   Int ->
   Result
 mkResult n = mkResultPy n
@@ -170,7 +170,7 @@ pureAnswer = 42
 
 --' Always fails, for error-path coverage (@throw -> isError result)
 mustFail ::
-  --' metavar: X
+  --' @metavar X
   Int ->
   Int
 mustFail _ = @throw "intentional failure: boom"
@@ -178,7 +178,7 @@ mustFail _ = @throw "intentional failure: boom"
 --' Add one; the pool implementation also prints to stdout. The stray
 --' output must not corrupt the JSON-RPC stream (fd-discipline coverage).
 noisyAdd ::
-  --' metavar: N
+  --' @metavar N
   Int ->
   Int
 noisyAdd n = noisyPy n

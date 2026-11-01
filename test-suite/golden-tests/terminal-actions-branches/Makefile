@@ -23,6 +23,8 @@ all:
 	cat a.out f.out >> obs.txt
 	$(call run,partial true --all)
 	$(call run,partial false --all)
+	printf -- '--- pair [3,9] --all ---\n' >> obs.txt
+	./nexus pair '[3,9]' --all >> obs.txt 2>> obs.err
 
 clean:
 	rm -rf nexus pools __pycache__ *.err *.out

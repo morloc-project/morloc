@@ -8,9 +8,9 @@ record Person where
 
 -- form: list on a list-of-record does not take a list.source override.
 foo ::
-  --' source: file
-  --' form: list
-  --' list.source: file
+  --' @source file
+  --' @form list
+  --' @list.source file
   [Person] ->
   Int
 foo x = 0

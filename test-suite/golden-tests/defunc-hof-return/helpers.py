@@ -7,4 +7,4 @@ def applyIt(f, x):
 
 
 def makeAndApply(g, x):
-    return applyIt(g(x), x)
+    return applyIt(lambda y: g(x, y), x)

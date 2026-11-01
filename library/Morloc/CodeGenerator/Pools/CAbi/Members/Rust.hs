@@ -72,7 +72,7 @@ import Morloc.CodeGenerator.Grammars.Translator.Imperative
   , toIType
   )
 import Morloc.CodeGenerator.Namespace
-import Morloc.CodeGenerator.ValueArgs (appValueArgs, valueArgsF)
+import Morloc.CodeGenerator.ValueArgs (appValueArgs, appMacroArgs, macroArgsF, valueArgsF)
 import Morloc.CodeGenerator.Ownership
 import Morloc.Build.CargoLock (mergeCargoLocks)
 import qualified Morloc.Build.Params as BP
@@ -80,6 +80,7 @@ import qualified Morloc.Data.PoolHash as PH
 import qualified Morloc.CodeGenerator.Pools.CAbi.Members.RustPrinter as RP
 import Morloc.CodeGenerator.Serial (containsFunF, serialAstToMsgpackSchema, serialAstToNativeType, serialAstToType, shallowType, wireSerialAstToType)
 import Morloc.Typecheck.Internal (unqualify)
+import Morloc.CodeGenerator.EffectBoundary (declaredFun, expandT)
 import Morloc.Data.Doc
 import qualified Morloc.Data.Map as Map
 import qualified Morloc.Data.Text as MT
@@ -121,6 +122,9 @@ data RustState = RustState
   -- which decides the arguments that are values ('valueArgsF').
   , rsThinClosures :: Set.Set Text
   -- ^ Closure manifolds emitted as a plain closure: see 'thinClosures'.
+  , rsSrcMakers :: Set.Set SrcName
+  -- ^ The sourced functions whose declared result, after its effect, is a
+  -- function rather than a type variable: the host makes it ('impl Fn').
   , rsSrcTypeVarMask :: Map.Map SrcName [(Bool, Bool)]
   -- ^ Per sourced function, per parameter position: @(isBareTypeVar,
   -- isFunctionParam)@ from the declared morloc signature. @isBareTypeVar@: the
@@ -150,7 +154,7 @@ data RustState = RustState
   }
 
 instance Defaultable RustState where
-  defaultValue = RustState 0 Map.empty Set.empty Set.empty (\_ -> Nothing) Map.empty [] Map.empty Map.empty Set.empty Map.empty Map.empty Map.empty Set.empty emptyPoolPlan Set.empty 0 []
+  defaultValue = RustState 0 Map.empty Set.empty Set.empty (\_ -> Nothing) Map.empty [] Map.empty Map.empty Set.empty Set.empty Map.empty Map.empty Map.empty Set.empty emptyPoolPlan Set.empty 0 []
 
 -- | The ownership environment: the borrowed (@&T@) parameter indices of the
 -- manifold whose body is currently being lowered ('oeCurrent') and of its
@@ -222,9 +226,10 @@ rustTypeOf = f
     -- the name itself otherwise -- a generated type is monomorphic per
     -- instantiation and spells nothing of its arguments. The arguments are
     -- stored positions, so a function among them boxes ('rustFieldType').
-    nominalTypeName x ps
+    nominalTypeName gv x ps
       | T.any (== '$') x = do
-          let (typeTs, kindCount) = partitionKindArgsF ps
+          gscope <- CMS.gets rsGScope
+          let (typeTs, kindCount) = macroArgsF gscope gv ps
           ts' <- mapM rustFieldType typeTs
           return . pretty $ expandMacro x (map render ts') kindCount
       | otherwise = return (pretty (nativeTypeName x))
@@ -235,13 +240,14 @@ rustTypeOf = f
     -- An enum lowers to its concrete name; the `#[repr(u8)] enum` that
     -- name refers to is either generated for this pool or supplied by the
     -- user through a `data Rust => X = "..."` mapping.
-    f (EnumF (FV _ (CV x)) ps _) = nominalTypeName x ps
+    f (EnumF (FV gv (CV x)) ps _) = nominalTypeName gv x ps
     -- A variant lowers to its concrete name; the `enum` carrying the arms
     -- is generated for this pool or supplied by a `data Rust => X = "..."`.
-    f (VariantF (FV _ (CV x)) ps _) = nominalTypeName x ps
+    f (VariantF (FV gv (CV x)) ps _) = nominalTypeName gv x ps
     f (AppF t ts) = do
       t' <- f t
-      let (typeTs, kindCount) = partitionKindArgsF ts
+      gscope <- CMS.gets rsGScope
+      let (typeTs, kindCount) = appMacroArgs gscope t ts
       -- Type arguments are STORED positions (a Vec element, a tuple slot): a
       -- function leaf among them must box to `Arc<dyn Fn>` (a bare
       -- `impl Fn` is illegal in a container), which is exactly 'rustFieldType'.
@@ -258,9 +264,8 @@ rustTypeOf = f
       t' <- rustFieldType t
       return $ "::std::option::Option<" <> t' <> ">"
     f (NatLitF _) = return mempty
-    f NatVoidF = return mempty
+    f (VoidF _) = return mempty
     f (StrLitF _) = return mempty
-    f StrVoidF = return mempty
     -- A function value inside a type (a field, an element, a payload, the
     -- result of a function) is a trait object; only a manifold's own
     -- parameters and return are `impl` ('rustArgType', 'rustReturnType').
@@ -279,7 +284,7 @@ rustTypeOf = f
         Nothing -> error $ "Rust: record missing from recmap: " <> show v
     -- User-mapped record: the concrete struct name is the CVar text, or the
     -- template it holds instantiated with this occurrence's arguments.
-    f (NamF _ (FV _ (CV s)) ps _) = nominalTypeName s ps
+    f (NamF _ (FV gv (CV s)) ps _) = nominalTypeName gv s ps
     -- Back-reference to a recursive record: resolve the concrete struct name
     -- via the concrete scope (the CVar slot is unreliable after weave).
     -- A record the compiler would generate cannot refer to itself: its
@@ -323,7 +328,7 @@ rustIsCopy (OptionalF t) = rustIsCopy t
 -- shape 'printRustEnum' emits.
 rustIsCopy (EnumF _ _ _) = True
 rustIsCopy (AppF (VarF (FV (TV gv) _)) ts)
-  | T.isPrefixOf "Tuple" gv = all rustIsCopy (fst (partitionKindArgsF ts))
+  | T.isPrefixOf "Tuple" gv = all rustIsCopy (fst (partitionKindArgs kindOfF ts))
 -- An applied type whose Rust spelling is a Copy scalar: its arguments are
 -- phantom (no `$n` in the mapping), so it is that scalar. The stream and
 -- cell handles (`IFile a`, `IStream a`, `OStream a`, `Cell a`) are all `u64`
@@ -572,7 +577,7 @@ rustTakeGetter t0 sel0 subj0
     opens t = isJust (tupleArgs t)
 
     tupleArgs (AppF (VarF (FV (TV gv) _)) ts)
-      | T.isPrefixOf "Tuple" gv = Just (fst (partitionKindArgsF ts))
+      | T.isPrefixOf "Tuple" gv = Just (fst (partitionKindArgs kindOfF ts))
     tupleArgs _ = Nothing
 
     -- The value @v@ is owned; each path is a result index and the steps
@@ -1380,35 +1385,55 @@ rustReflectClosureParsed tup s = ($ tup) <$> rustReflectClosureAssembler s
 -- whose per-instance 'termGeneral' has been monomorphized, so the class-level
 -- signature + the instance's 'classVars' carry the real type variables.
 buildSrcTypeVarMask :: MorlocMonad (Map.Map SrcName [(Bool, Bool)])
-buildSrcTypeVarMask = do
-  GMap _ sigmap <- MM.gets stateSignatures
-  tcls <- MM.gets stateTypeclasses
-  return . Map.fromList . concatMap (fromSig tcls) . Map.elems $ sigmap
+buildSrcTypeVarMask = Map.fromList <$> fromSourceSignatures paramMask
   where
-    fromSig _ (Monomorphic (TermTypes (Just et) srcs _)) =
-      let (qs, t') = unqualify (etype et)
-       in entries (Set.fromList qs) t' srcs
-    fromSig _ (Monomorphic (TermTypes Nothing _ _)) = []
-    fromSig tcls (Polymorphic _ methodEV classET tts) =
-      let cvars = maybe [] classVars (Map.lookup methodEV tcls)
-          (fs, t') = unqualify (etype classET)
-          qs = Set.fromList (fs <> cvars)
-       in concat [entries qs t' srcs | TermTypes _ srcs _ <- tts]
+    paramMask scope qs t = case declaredFun scope t of
+      FunT ps _ -> map (\a -> (isBareVar qs a, isFunParam scope a)) ps
+      _ -> []
 
-    entries qs t' srcs =
-      [(srcName s, paramMask qs t') | (_, isrc) <- srcs, let s = val isrc, srcLang s == rustLang]
-
-    paramMask qs (FunU args _) = map (\a -> (isBareVar qs a, isFunParam a)) args
-    paramMask _ _ = []
-
-    isBareVar qs (VarU v) = Set.member v qs
+    isBareVar qs (VarT v) = Set.member v qs
     isBareVar _ _ = False
 
     -- A suspension is a function value of no arguments; the host takes it
     -- through the same trait as any other callable.
-    isFunParam (FunU _ _) = True
-    isFunParam (EffectU _ _) = True
-    isFunParam _ = False
+    isFunParam scope a = case expandT scope a of
+      FunT _ _ -> True
+      EffectT _ _ -> True
+      _ -> False
+
+-- | 'rsSrcMakers'.
+buildSrcMakers :: MorlocMonad (Set.Set SrcName)
+buildSrcMakers = Set.fromList . map fst . filter snd <$> fromSourceSignatures (\scope _ t -> makes scope (result (declaredFun scope t)))
+  where
+    result (FunT _ r) = r
+    result r = r
+    makes scope r = case declaredFun scope r of
+      EffectT _ u -> makes scope u
+      FunT (_ : _) _ -> True
+      _ -> False
+
+-- | A value per sourced Rust function, from its declared signature, read
+-- through the general scope, and the type variables it quantifies.
+fromSourceSignatures :: (Scope -> Set.Set TVar -> Type -> a) -> MorlocMonad [(SrcName, a)]
+fromSourceSignatures f0 = do
+  GMap _ sigmap <- MM.gets stateSignatures
+  tcls <- MM.gets stateTypeclasses
+  scope <- MM.getGeneralScope
+  let f qs t = f0 scope qs (typeOf t)
+  return . concatMap (fromSig f tcls) . Map.elems $ sigmap
+  where
+    fromSig f _ (Monomorphic (TermTypes (Just et) srcs _)) =
+      let (qs, t') = unqualify (etype et)
+       in entries f (Set.fromList qs) t' srcs
+    fromSig _ _ (Monomorphic (TermTypes Nothing _ _)) = []
+    fromSig f tcls (Polymorphic _ methodEV classET tts) =
+      let cvars = maybe [] classVars (Map.lookup methodEV tcls)
+          (fs, t') = unqualify (etype classET)
+          qs = Set.fromList (fs <> cvars)
+       in concat [entries f qs t' srcs | TermTypes _ srcs _ <- tts]
+
+    entries f qs t' srcs =
+      [(srcName s, f qs t') | (_, isrc) <- srcs, let s = val isrc, srcLang s == rustLang]
 
 translate :: [Source] -> [SerialManifold] -> MorlocMonad Script
 translate srcs es0 = do
@@ -1434,6 +1459,7 @@ translate srcs es0 = do
       recmap = unifyRecords . concatMap collectRecords $ es
 
   srcTypeVarMask <- buildSrcTypeVarMask
+  srcMakers <- buildSrcMakers
   -- Per closure-manifold wire schemas (captured/bound/result), shared with every
   -- pool member; drives the reify path + home-pool dispatch wrappers for a
   -- closure this Rust pool produces and sends to another pool.
@@ -1441,15 +1467,15 @@ translate srcs es0 = do
   let closureTable = Map.map closureSchemaTexts closureAsts
   logTemplates <- collectRenderedTemplates rustLang
   stageTable <- stageTableEntries
-  let st0 = defaultValue {rsDebugInfo = debugInfo, rsRecmap = recmap, rsCScope = mergedRustScope, rsGScope = generalScope, rsSrcTypeVarMask = srcTypeVarMask, rsLogTemplates = logTemplates, rsStageTable = stageTable, rsPool = planPool rustCaps es, rsBuilds = lastBuilds Map.empty Set.empty (rustSeeds (planPool rustCaps es) es0) es0}
+  let st0 = defaultValue {rsDebugInfo = debugInfo, rsRecmap = recmap, rsCScope = mergedRustScope, rsGScope = generalScope, rsSrcTypeVarMask = srcTypeVarMask, rsSrcMakers = srcMakers, rsLogTemplates = logTemplates, rsStageTable = stageTable, rsPool = planPool rustCaps es, rsBuilds = lastBuilds Map.empty Set.empty (rustSeeds (planPool rustCaps es) es0) es0}
       (code, stEnd) = CMS.runState (runReaderT (makeRustCode includeDocs closureAsts closureTable es) emptyOwnEnv) st0
-  mapM_ (MM.throwSystemError . ("Rust pool:" <+>) . pretty) (rsErrors stEnd)
+  mapM_ (MM.throwRejected . ("Rust pool:" <+>) . pretty) (rsErrors stEnd)
 
   home <- MM.asks configHome
   deps <- rustDepsUnion
   localCrates <- rustLocalDeps
   installDir <- MM.gets stateInstallDir
-  profile <- MM.gets stateLangParams >>= either (MM.throwSystemError . pretty) return . resolveRustProfile
+  profile <- MM.gets stateLangParams >>= either (MM.throwRejected . pretty) return . resolveRustProfile
   -- The pool crate/bin name is derived from the build LOCATION (unique per
   -- program/build-dir, stable across edits of one program). With a shared cargo
   -- --target-dir (used to cache rustmorloc/deps across builds), this keeps one
@@ -1522,7 +1548,7 @@ readRustLock lockPath = do
   if exists
     then liftIO (MT.readFile lockPath)
     else
-      MM.throwSystemError $
+      MM.throwFailed $
         "missing Rust workspace lock at " <> squotes (pretty lockPath)
           <> "; run `morloc init -f` to persist the Rust runtime source"
 
@@ -2075,7 +2101,7 @@ generateRustStructs closureAsts es = do
 isVarWidthF :: TypeF -> Bool
 isVarWidthF (VarF (FV (TV gv) _)) = gv == "Str"
 isVarWidthF (AppF (VarF (FV (TV gv) _)) ts)
-  | T.isPrefixOf "Tuple" gv = any isVarWidthF (fst (partitionKindArgsF ts))
+  | T.isPrefixOf "Tuple" gv = any isVarWidthF (fst (partitionKindArgs kindOfF ts))
 isVarWidthF _ = True
 
 -- | Lower a manifold body in its own ownership scope: 'oeCurrent' becomes the
@@ -2121,8 +2147,9 @@ translateSegment m0@(SerialManifold root _ _ _ _) = do
   resetCounter
   CMS.modify (\st -> st {rsCurrentRoot = root})
   mask <- CMS.gets rsSrcTypeVarMask
+  makers <- CMS.gets rsSrcMakers
   consumed <- CMS.gets (ppByValue . rsPool)
-  e <- surroundFoldSerialManifoldM rustSurround (defaultFoldRules (rustLowerConfig mask consumed)) m0
+  e <- surroundFoldSerialManifoldM rustSurround (defaultFoldRules (rustLowerConfig mask makers consumed)) m0
   return $ renderPoolDocs e
 
 -- | Local (filesystem-path) Rust crates declared in @local-deps: {rust: ...}@,
@@ -2153,7 +2180,7 @@ rustDepsUnion = do
     ( \acc (crate, ver) -> case Map.lookup crate acc of
         Just v
           | v /= ver ->
-              MM.throwSystemError $
+              MM.throwRejected $
                 "conflicting rust-deps versions for crate "
                   <> squotes (pretty crate)
                   <> ": "
@@ -2279,7 +2306,7 @@ makeTheMaker crateName locks = do
   case cargoAvail of
     Just _ -> return ()
     Nothing ->
-      MM.throwSystemError
+      MM.throwFailed
         "building a Rust pool requires `cargo` on PATH (install Rust: https://rustup.rs)"
   home <- MM.asks configHome
   state <- MM.asks configState
@@ -2312,14 +2339,14 @@ makeTheMaker crateName locks = do
       -- Runs only after a successful build, so a failed resolution never
       -- writes anything into the environment lock.
       mergeCmd = SysMergeCargoLock (rlBase locks) (rlEnv locks) poolLock
-  return [buildCmd, mergeCmd, copyCmd]
+  return [SysRequireToolchain RustPoolToolchain, buildCmd, mergeCmd, copyCmd]
 
 -- | The lowering configuration. The core fields are real; the fields for
 -- closures/partial application, remote calls, caching, and pattern evaluation
 -- raise a clear v1-unsupported error and are unreachable for the pool shapes
 -- v1 supports.
-rustLowerConfig :: Map.Map SrcName [(Bool, Bool)] -> Map.Map Int (Set.Set Int) -> LowerConfig RustM
-rustLowerConfig mask consumed =
+rustLowerConfig :: Map.Map SrcName [(Bool, Bool)] -> Set.Set SrcName -> Map.Map Int (Set.Set Int) -> LowerConfig RustM
+rustLowerConfig mask makers consumed =
   LowerConfig
     { lcSrcName = \src -> pretty (T.cons userCallMark (unSrcName (srcName src)))
     , lcOperator = rustOperator
@@ -2327,6 +2354,15 @@ rustLowerConfig mask consumed =
     -- mark records where the call is (PANIC-16).
     , lcApplySrcGroup = \f as ->
         pretty (T.singleton userCallMark) <> parens f <> tupled as
+    -- A function the host returns is any 'impl Fn'; morloc holds it as a
+    -- function value. One a call group returns is the host's too; a
+    -- function at a type variable of the signature is one the host was
+    -- given, and is returned as it was (HOST-8).
+    , lcSourcedResult = \src n t x -> case t of
+        FunF ins@(_ : _) _
+          | n < maybe 0 length (Map.lookup (srcName src) mask) || Set.member (srcName src) makers ->
+              "::rustmorloc::IntoFnValue" <> pretty (length ins) <> "::into_fn_value" <> parens x
+        _ -> x
     , lcSourcedArg = \site own tm x ->
         -- Pass each argument to match how the callee's parameter is written,
         -- adapting by the argument's ownership so no unnecessary copy is made.
@@ -2541,8 +2577,8 @@ rustLowerConfig mask consumed =
           , "|mlcTryV|" <+> okWrap "mlcTryV"
           , "|mlcTryM|" <+> errWrap "mlcTryM"
           ]
-    , lcSerialize = defaultSerialize (rustLowerConfig mask consumed)
-    , lcDeserialize = \_ -> defaultDeserialize (rustLowerConfig mask consumed)
+    , lcSerialize = defaultSerialize (rustLowerConfig mask makers consumed)
+    , lcDeserialize = \_ -> defaultDeserialize (rustLowerConfig mask makers consumed)
     -- Reify a crossing closure to its wire tuple via the arity-indexed trait
     -- method `reifyN` (`ClosureOrigin` = `(String, i64, Vec<Vec<u8>>)`). This is
     -- uniform across a closure built here and a proxy reflected from another

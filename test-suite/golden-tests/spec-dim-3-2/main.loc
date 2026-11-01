@@ -1,0 +1,130 @@
+module main (mk, same, dot, roll, rep, pairLen, firstOpt, opts, deep, grow, named, rows, three, plus1, twice, square, square1, pair1, down, unsigned, stated)
+
+import root-py
+import vector-py
+import table-py
+
+source Py from "src.py"
+  ( "mk" as mk
+  , "dot" as dot
+  , "roll" as roll
+  , "rep" as rep
+  , "pair_len" as pairLen
+  , "first_opt" as firstOpt
+  , "opts_len" as optsLen
+  , "deep" as deep
+  , "grow" as grow
+  , "named" as named
+  , "rows" as rows
+  , "three" as three
+  , "plus1" as plus1
+  , "twice" as twice
+  , "square" as square
+  , "square1" as square1
+  , "pair1" as pair1
+  , "down" as down
+  )
+
+--' Count up from zero
+mk :: n@Int -> Vector n Int
+
+--' Keep the first of two vectors of one length
+same :: Vector n Int -> Vector n Int -> Vector n Int
+same a b = a
+
+--' Dot product
+dot :: Vector n Int -> Vector n Int -> Int
+
+--' Sums over a sliding window
+roll :: w@Int -> Vector n Int -> Vector (n - w + 1) Int
+
+--' Repeat a value
+rep :: n@Int -> Int -> Vector n Int
+
+--' Count the vectors of a pair's second part
+pairLen :: (Vector n Int, [Vector n Int]) -> Int
+
+--' Length of the first of an optional pair
+firstOpt :: ?(Vector n Int, Vector n Int) -> Int
+
+--' Two vectors
+--' @unroll
+record TwoOpts where
+  --' Left values
+  --' @arg --left
+  --' @default []
+  left :: Vector n Int
+  --' Right values
+  --' @arg --right
+  --' @default []
+  right :: Vector n Int
+
+record Py => TwoOpts = "dict"
+
+--' Length of the left vector
+opts :: TwoOpts -> Int
+opts o = optsLen o
+
+optsLen :: TwoOpts -> Int
+
+--' An entry
+record Entry (n :: Nat) where
+  --' Values
+  a :: Vector n Int
+  --' Tag
+  b :: Int
+
+record Py => Entry n = "dict"
+
+--' Length of a vector the entries share
+deep :: [Entry n] -> Vector n Int -> Int
+
+--' Lengths of a vector and one a longer
+grow :: Vector n Int -> Vector (n + 1) Int -> Int
+
+--' A name
+type Name = Str
+
+--' Dot product under a name
+named :: s@Name -> Vector n Int -> Vector n Int -> Int
+
+--' Count a table's rows against a vector's length
+rows ::
+  --' Table
+  --' @form table
+  Table n {x = Int} ->
+  --' One value per row
+  Vector n Int ->
+  Int
+
+--' Count a table of three rows
+three ::
+  --' Table
+  --' @form table
+  Table 3 {x = Int} ->
+  Int
+
+--' Length of a vector with at least one element
+plus1 :: Vector (n + 1) Int -> Int
+
+--' Length of a vector of even length
+twice :: Vector (2 * n) Int -> Int
+
+--' Length of a vector whose length is a square
+square :: Vector (n * n) Int -> Vector n Int -> Int
+
+--' Length of a vector whose length is a square, on its own
+square1 :: Vector (n * n) Int -> Int
+
+--' Lengths of two vectors one apart
+pair1 :: Vector (n + 1) Int -> Vector (n + 2) Int -> Int
+
+--' Length of a vector of at most ten elements
+down :: Vector (10 - n) Int -> Int
+
+-- An export without a signature is held to its inferred type.
+unsigned xs ys = dot xs ys
+
+--' Window sums totalled, for an input at least as long as the window
+stated :: w@Int -> Vector (m + w - 1) Int -> Int
+stated w src = dot (roll w src) (roll w src)

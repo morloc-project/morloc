@@ -3,28 +3,28 @@ module main (bif)
 import root-py
 
 --' System configuration
---' metavar: SYS_CONFIG
---' unroll: true
---' arg: --sys-config
+--' @metavar SYS_CONFIG
+--' @unroll true
+--' @arg --sys-config
 record SysConfig where
-  --' arg: --tmp-dir
-  --' metavar: FILE
-  --' default: "/tmp"
+  --' @arg --tmp-dir
+  --' @metavar FILE
+  --' @default "/tmp"
   tmpDir :: Str
 
-  --' arg: -t/--threads
-  --' metavar: INT
-  --' default: 1
+  --' @arg -t/--threads
+  --' @metavar INT
+  --' @default 1
   numThreads :: Int
 
-  --' true:  --clean
-  --' false: --no-clean
-  --' default: false
+  --' @true --clean
+  --' @false --no-clean
+  --' @default false
   removeCaches :: Bool
 
 record Py => SysConfig = "dict"
 
---' name: bif
+--' @name bif
 bif :: SysConfig -> Str
 
 source Py from "helpers.py" ("bif")

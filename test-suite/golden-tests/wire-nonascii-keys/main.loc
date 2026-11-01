@@ -1,0 +1,40 @@
+module main (make, viaPy, viaCpp, viaR, chain, colours)
+
+import root-py
+import root-cpp
+import root-r
+
+record Farbe where
+  grün :: Int
+  名前 :: Str
+record Cpp => Farbe = "farbe_t"
+record Py => Farbe = "dict"
+record R => Farbe = "list"
+
+data Ton = Hell | Dunkel | Mittelgroß
+
+source Cpp from "farbe.hpp" ("same" as sameCpp)
+source Py from "farbe.py" ("same" as samePy)
+source R from "farbe.R" ("same" as sameR)
+
+sameCpp :: a -> a
+samePy :: a -> a
+sameR :: a -> a
+
+make :: Int -> Farbe
+make x = { grün = x, 名前 = "blau" }
+
+viaPy :: Farbe -> Farbe
+viaPy x = samePy x
+
+viaCpp :: Farbe -> Farbe
+viaCpp x = sameCpp x
+
+viaR :: Farbe -> Farbe
+viaR x = sameR x
+
+chain :: Farbe -> Farbe
+chain x = sameR (sameCpp (samePy x))
+
+colours :: [Ton] -> [Ton]
+colours xs = sameR (sameCpp (samePy xs))

@@ -26,7 +26,7 @@ import Morloc.Data.Doc
 import qualified Morloc.Data.Map as Map
 import qualified Morloc.Frontend.AST as AST
 import qualified Morloc.Frontend.Desugar as Desugar
-import Morloc.Frontend.Token (Pos (..))
+import Morloc.Frontend.Token (Pos (..), posSrcLoc)
 import Morloc.Frontend.Namespace
 import qualified Morloc.Monad as MM
 import Morloc.Typecheck.Internal (expandTransparentAliases)
@@ -69,10 +69,10 @@ synthesizeTerminalActions dag = do
             Just txt | null (Desugar.peSourceLines err) -> err {Desugar.peSourceLines = T.lines txt}
             _ -> err
           label = if null file then "<terminal-action synthesis>" else file
-      MM.throwSystemError . pretty $ Desugar.showParseError label err'
+      MM.throwRejectedSource (posSrcLoc (Desugar.pePos err')) . pretty $ Desugar.showParseError label err'
     Right (results, dsFinal) -> do
       MM.setCounter (Desugar.dsExpIndex dsFinal)
-      MM.modify (\st -> st
+      MM.modify' (\st -> st
         { stateSourceMap = Desugar.dsSourceMap dsFinal
         , stateModuleCommands = Map.fromList (map snd results)
         , stateErrorNotes = Map.map pretty (Desugar.dsErrorNotes dsFinal) <> stateErrorNotes st
@@ -114,11 +114,13 @@ mkDState idx srcMap = Desugar.DState
   { Desugar.dsExpIndex = idx
   , Desugar.dsSourceMap = srcMap
   , Desugar.dsDocMap = Map.empty
+  , Desugar.dsDocsRead = Set.empty
   , Desugar.dsModulePath = Nothing
   , Desugar.dsModuleConfig = defaultValue
   , Desugar.dsSourceLines = []
   , Desugar.dsLangMap = Map.empty
   , Desugar.dsProjectRoot = Nothing
+  , Desugar.dsOwnModule = True
   , Desugar.dsTermDocs = Map.empty
   , Desugar.dsWarnings = []
   , Desugar.dsModuleDoc = []
@@ -126,6 +128,7 @@ mkDState idx srcMap = Desugar.DState
   , Desugar.dsNamespaces = Set.empty
   , Desugar.dsDataCtors = Map.empty
   , Desugar.dsStreamElems = Map.empty
+  , Desugar.dsMatchSites = Map.empty
   , Desugar.dsReplayPlans = Map.empty
   , Desugar.dsCompanions = Map.empty
   , Desugar.dsParseSlots = Map.empty

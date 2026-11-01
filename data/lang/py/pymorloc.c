@@ -39,6 +39,9 @@ typedef struct {
 
 static __thread shm_view_ctx_t shm_view_ctx = { NULL, NULL };
 
+// PANIC-14: set while a value another pool built is read.
+static __thread int reading_runtime_value = 0;
+
 static void shm_view_owner_release(PyObject* capsule) {
     shm_view_owner_t* o = (shm_view_owner_t*)PyCapsule_GetPointer(capsule, "morloc.shm_view");
     if (o == NULL) {
@@ -215,10 +218,9 @@ char* get_prior_err(){
     goto error; \
     }
 
-// PyMorlocException extends RuntimeError; `_mlc_catch`'s `except
-// Exception:` intercepts it. PyMorlocInternalError inherits from
-// BaseException so `_mlc_catch` naturally skips it and the error
-// terminates the pool. Both set in PyInit_pymorloc.
+// MorlocException, a RuntimeError, is a call's failure: `@try` and user
+// code catch it (PANIC-6). MorlocInternalError derives from BaseException,
+// so `except Exception` and `@try` pass it and it ends the pool (PANIC-5).
 static PyObject* PyMorlocException = NULL;
 static PyObject* PyMorlocInternalError = NULL;
 static PyObject* PyMorlocPipeClosed = NULL;
@@ -232,12 +234,6 @@ static PyObject* PyMorlocPipeClosed = NULL;
     goto error; \
     }
 
-// PyTRY for the machinery that carries values between pools: IPC, packet
-// construction and decode. These failures are not attributable to user data
-// or foreign-function behavior and leave the pool unable to continue, so
-// they raise PyMorlocInternalError -- which derives from BaseException and
-// so passes straight through `_mlc_catch`'s `except Exception:` -- rather
-// than the catchable RuntimeError that PyTRY raises.
 // PyTRY with the GIL released around the call, for a libmorloc call that
 // may wait on another worker (a channel read or write). `out` receives the
 // result.
@@ -258,12 +254,39 @@ static PyObject* PyMorlocPipeClosed = NULL;
         goto error; \
     }
 
+// PANIC-5: a failure of the machinery that carries values between pools
+// ends the pool.
 #define PyTRY_INFRA(fun, ...) \
     fun(__VA_ARGS__ __VA_OPT__(,) &child_errmsg_); \
     if(child_errmsg_ != NULL){ \
+        morloc_exit_if_shared_memory_lost(child_errmsg_); \
         PyErr_Format(PyMorlocInternalError, \
                      "morloc internal error (Py pool, %s:%d in %s):\n%s", \
                      __FILE__, __LINE__, __func__, child_errmsg_); \
+        free(child_errmsg_); \
+        child_errmsg_ = NULL; \
+        goto error; \
+    }
+
+// PyTRY for a structural read: a defect inside a value another pool built.
+#define PyTRY_READ(fun, ...) \
+    fun(__VA_ARGS__ __VA_OPT__(,) &child_errmsg_); \
+    if(child_errmsg_ != NULL && reading_runtime_value){ \
+        morloc_exit_if_shared_memory_lost(child_errmsg_); \
+        PyErr_Format(PyMorlocInternalError, "morloc internal error (Py pool, %s:%d in %s):\n%s", \
+                     __FILE__, __LINE__, __func__, child_errmsg_); \
+        free(child_errmsg_); \
+        child_errmsg_ = NULL; \
+        goto error; \
+    } \
+    if(child_errmsg_ != NULL){ \
+        char* prior_err = get_prior_err(); \
+        if(prior_err == NULL){ \
+            PyErr_Format(PyExc_RuntimeError, "Error (%s:%d in %s):\n%s", __FILE__, __LINE__, __func__, child_errmsg_); \
+        } else { \
+            PyErr_Format(PyExc_RuntimeError, "%s\nError (%s:%d in %s):\n%s", prior_err, __FILE__, __LINE__, __func__, child_errmsg_); \
+            free(prior_err); \
+        } \
         free(child_errmsg_); \
         child_errmsg_ = NULL; \
         goto error; \
@@ -435,6 +458,14 @@ static int schema_to_npy_type(morloc_serial_type type) {
         case MORLOC_FLOAT64: return NPY_FLOAT64;
         default:             return -1;
     }
+}
+
+// The dtype of a "numpy.ndarray" whose elements have this schema: a
+// fixed-width primitive's own, otherwise dtype=object, which keeps a Vector a
+// NumPy array whatever its elements.
+static int numpy_type_of(const Schema* element_schema) {
+    int t = schema_to_npy_type(element_schema->type);
+    return t < 0 ? NPY_OBJECT : t;
 }
 
 // How a numpy array becomes the data of a list of `elem`.
@@ -1791,7 +1822,7 @@ static int py_read_step(py_walk_t* w, const Schema* schema, const void* data, si
             break;
         // The runtime hands back the ordinal and the generated pool code
         // wraps it in the enum class. Keeping the Python class out of the
-        // C runtime is what lets a bare [DNA] stay a raw buffer.
+        // C runtime is what lets a Vector of an enum stay a uint8 array.
         case MORLOC_ENUM:
             obj = PyLong_FromUnsignedLong(*(uint8_t*)data);
             break;
@@ -1820,7 +1851,7 @@ static int py_read_step(py_walk_t* w, const Schema* schema, const void* data, si
                 obj = PyLong_FromLongLong(val);
             } else {
                 // Overflow: second field is relptr to limb array
-                void* limb_ptr = PyTRY(resolve_array, *(relptr_t*)&fields[1], (size_t)bigint_size, sizeof(uint64_t), space);
+                void* limb_ptr = PyTRY_READ(resolve_array, *(relptr_t*)&fields[1], (size_t)bigint_size, sizeof(uint64_t), space);
                 obj = _PyLong_FromByteArray(
                     (const unsigned char*)limb_ptr,
                     bigint_size * sizeof(uint64_t),
@@ -1835,8 +1866,10 @@ static int py_read_step(py_walk_t* w, const Schema* schema, const void* data, si
             uint8_t kind = (schema->type == MORLOC_IFILE)   ? MLC_KIND_IFILE
                          : (schema->type == MORLOC_OSTREAM) ? MLC_KIND_OSTREAM
                          :                                    MLC_KIND_ISTREAM;
+            const char* storage = schema->keys ? schema->keys[0] : NULL;
             int64_t handle = PyTRY(mlc_read_handle_voidstar,
-                                   data, space, kind);
+                                   data, space, kind,
+                                   storage, storage ? strlen(storage) : 0);
             obj = PyLong_FromLongLong((long long)handle);
             if (!obj) {
                 PyINTERNAL_ABORT("Failed to wrap stream handle as PyLong");
@@ -1848,7 +1881,7 @@ static int py_read_step(py_walk_t* w, const Schema* schema, const void* data, si
             void* tmp_ptr = NULL;
 
             if (str_array->size != 0) {
-                tmp_ptr = PyTRY(resolve_array, str_array->data, str_array->size, 1, space);
+                tmp_ptr = PyTRY_READ(resolve_array, str_array->data, str_array->size, 1, space);
             }
 
             if (schema->hint != NULL && strcmp(schema->hint, "bytes") == 0) {
@@ -1893,7 +1926,7 @@ static int py_read_step(py_walk_t* w, const Schema* schema, const void* data, si
             size_t width = element_schema->width;
             void* absptr = NULL;
             if (array->size != 0) {
-                absptr = PyTRY(resolve_array, array->data, array->size, width, space);
+                absptr = PyTRY_READ(resolve_array, array->data, array->size, width, space);
             }
             // The "numpy.ndarray" hint is authoritative: the user wants a
             // NumPy array, regardless of element type. For fixed-width
@@ -1905,27 +1938,8 @@ static int py_read_step(py_walk_t* w, const Schema* schema, const void* data, si
             // asString ([1,2,3] :: Vector 3 Int)` stays a NumPy ndarray on
             // both sides, the dtype just shifts from int64 to object.
             int numpy_type_num = -1;
-            bool numpy_hint = (schema->hint != NULL && strcmp(schema->hint, "numpy.ndarray") == 0);
-            if (numpy_hint) {
-                switch (element_schema->type) {
-                    case MORLOC_BOOL:    numpy_type_num = NPY_BOOL; break;
-                    case MORLOC_SINT8:   numpy_type_num = NPY_INT8; break;
-                    case MORLOC_SINT16:  numpy_type_num = NPY_INT16; break;
-                    case MORLOC_SINT32:  numpy_type_num = NPY_INT32; break;
-                    case MORLOC_SINT64:  numpy_type_num = NPY_INT64; break;
-                    case MORLOC_UINT8:   numpy_type_num = NPY_UINT8; break;
-                    // A [DNA] stays a compact uint8 buffer. Falling to the
-                    // NPY_OBJECT path below would build one Python object
-                    // per element, which is exactly what the one-byte form
-                    // exists to avoid.
-                    case MORLOC_ENUM:    numpy_type_num = NPY_UINT8; break;
-                    case MORLOC_UINT16:  numpy_type_num = NPY_UINT16; break;
-                    case MORLOC_UINT32:  numpy_type_num = NPY_UINT32; break;
-                    case MORLOC_UINT64:  numpy_type_num = NPY_UINT64; break;
-                    case MORLOC_FLOAT32: numpy_type_num = NPY_FLOAT32; break;
-                    case MORLOC_FLOAT64: numpy_type_num = NPY_FLOAT64; break;
-                    default: numpy_type_num = NPY_OBJECT; break;  // boxed dtype=object path below
-                }
+            if (schema->hint != NULL && strcmp(schema->hint, "numpy.ndarray") == 0) {
+                numpy_type_num = numpy_type_of(element_schema);
             }
             unsigned char elem_slot_kind = PY_SLOT_LIST;
             if (numpy_type_num == NPY_OBJECT) {
@@ -1938,6 +1952,9 @@ static int py_read_step(py_walk_t* w, const Schema* schema, const void* data, si
                 if (obj == NULL) {
                     PyINTERNAL_ABORT("Failed to allocate numpy object array");
                 }
+                // Every numpy array is read-only (NATIVE-9); the slots are
+                // filled through PyArray_SETITEM.
+                PyArray_CLEARFLAGS((PyArrayObject*)obj, NPY_ARRAY_WRITEABLE);
                 elem_slot_kind = PY_SLOT_NPY;
             } else if (numpy_type_num >= 0) {
                 if (import_numpy() != 0) goto error;
@@ -1976,23 +1993,15 @@ static int py_read_step(py_walk_t* w, const Schema* schema, const void* data, si
                         Py_DECREF(owner);
                         goto error;
                     }
-                    // The view aliases shared memory that other pools may be
-                    // reading, and morloc values are immutable, so the array
-                    // is read-only. A kernel that needs to modify it calls
-                    // .copy() and pays for its own buffer. Without this a
-                    // write through the view corrupts another pool's data
-                    // with no error and no way to trace it.
-                    PyArray_CLEARFLAGS((PyArrayObject*)obj, NPY_ARRAY_WRITEABLE);
                 }
+                // Every numpy array is read-only, owned copy or view of shared
+                // memory alike (NATIVE-9): a view aliases memory other pools
+                // may be reading, and a write through it would corrupt their
+                // data. A kernel that needs to modify it calls .copy().
+                PyArray_CLEARFLAGS((PyArrayObject*)obj, NPY_ARRAY_WRITEABLE);
                 // Note that we do not want to give ownership to Python.
                 break;
             } else if (schema->hint != NULL && strcmp(schema->hint, "list") == 0) {
-                // Explicit "list" hint takes precedence over the UInt8 fast-path
-                // below: the user declared `type Py => (List a) = "list" a`
-                // (or similar), so honour that representation even for UInt8
-                // elements. Without this, a [UInt8] packet would silently
-                // arrive as `bytes` and mismatch a Python-pool list literal
-                // of the same morloc type.
                 obj = PyList_New(array->size);
                 if(obj == NULL){
                     PyINTERNAL_ABORT("Failed to allocate list");
@@ -2012,20 +2021,14 @@ static int py_read_step(py_walk_t* w, const Schema* schema, const void* data, si
                 // Note: Similar to the numpy case, we don't want to give ownership to Python.
                 // The bytearray is created from a copy of the data, so no additional handling is needed.
                 break;
-            } else if (element_schema->type == MORLOC_UINT8
-                       || element_schema->type == MORLOC_ENUM) {
-                // Default for UInt8 arrays when hint is "bytes" or absent.
-                //
-                // An enum array takes the same path: its elements are tag
-                // bytes, so the wire buffer is already the right shape. The
-                // alternative -- one Python object per element -- is what
-                // the one-byte form exists to avoid, and over a genomic
-                // [DNA] it is the difference between usable and not. The
-                // caller sees ordinals; the generated pool code is where an
-                // enum identity is reattached if one is wanted.
+            } else if (schema->hint != NULL && strcmp(schema->hint, "bytes") == 0
+                       && bytes_fit_elements(element_schema)) {
+                // A newtype whose Python form is bytes. Any other "bytes"
+                // hint is the post-pack form of a Packable outer type, and
+                // its wire array is read as a list below.
                 obj = PyBytes_FromStringAndSize((const char*)absptr, array->size);
                 if (obj == NULL) {
-                    PyRAISE("Failed to one bytes")
+                    PyRAISE("Failed to create bytes")
                 }
                 break;
             } else {
@@ -2089,7 +2092,7 @@ static int py_read_step(py_walk_t* w, const Schema* schema, const void* data, si
             // this is a documented interim form, not the intended end state.
             uint8_t tag = *(const uint8_t*)data;
             if ((size_t)tag >= schema->size) {
-                PyErr_Format(PyExc_RuntimeError,
+                PyErr_Format(reading_runtime_value ? PyMorlocInternalError : PyExc_RuntimeError,
                     "variant tag %u is out of range; the type has %zu arms",
                     (unsigned)tag, schema->size);
                 goto error;
@@ -2113,7 +2116,7 @@ static int py_read_step(py_walk_t* w, const Schema* schema, const void* data, si
                 PyTuple_SET_ITEM(pair, 1, fields);
                 return 0;
             }
-            const void* payload = PyTRY(resolve_region, vrelptr, arm->width, space);
+            const void* payload = PyTRY_READ(resolve_region, vrelptr, arm->width, space);
             // The arm's schema describes its fields as a tuple, so the walk
             // over that shape builds the field sequence.
             return py_read_child(w, arm, payload, PY_SLOT_TUPLE, pair, 1, NULL);
@@ -2129,7 +2132,7 @@ static int py_read_step(py_walk_t* w, const Schema* schema, const void* data, si
             }
             const Schema* inner = py_resolve(schema->parameters[0]);
             if (inner == NULL) goto error;
-            const void* inner_abs = PyTRY(resolve_region, relptr, inner->width, space);
+            const void* inner_abs = PyTRY_READ(resolve_region, relptr, inner->width, space);
             return py_read_child(w, schema->parameters[0], inner_abs, slot_kind, parent, slot, key);
         }
         default:
@@ -2836,7 +2839,13 @@ static PyObject* pybinding__get_value(PyObject* self, PyObject* args){ MAYFAIL
     // it twice.
     if (schema->type == MORLOC_TABLE) {
         bool materialized = (source != PACKET_SOURCE_RPTR);
-        voidstar = PyTRY_INFRA(get_morloc_data_packet_value, (uint8_t*)packet, schema);
+        // PANIC-13: a value read from a file or carried inline is input;
+        // PANIC-14: one another pool built is not.
+        if (materialized) {
+            voidstar = PyTRY(get_morloc_data_packet_value, (uint8_t*)packet, schema);
+        } else {
+            voidstar = PyTRY_INFRA(get_morloc_data_packet_value, (uint8_t*)packet, schema);
+        }
 
         const arrow_shm_header_t* arrow_hdr = (const arrow_shm_header_t*)voidstar;
 
@@ -2944,7 +2953,12 @@ static PyObject* pybinding__get_value(PyObject* self, PyObject* args){ MAYFAIL
         if (file_is_stream_packet(path)) {
             char* stream_err = NULL;
             PyObject* result = NULL;
-            int64_t handle = mlc_open(path, MLC_KIND_ISTREAM, &stream_err);
+            char* list_schema = schema_to_string(schema);
+            if (list_schema == NULL) {
+                PyINTERNAL_ABORT("stream ingest: schema_to_string returned NULL");
+            }
+            int64_t handle = mlc_open_istream(list_schema, path, &stream_err);
+            free(list_schema);
             if (stream_err) goto stream_error;
             result = PyList_New(0);
             if (!result) goto stream_error;
@@ -2997,7 +3011,12 @@ static PyObject* pybinding__get_value(PyObject* self, PyObject* args){ MAYFAIL
     // SHM paths (RPTR or MESG+MSGPACK)
     bool is_rptr = (source == PACKET_SOURCE_RPTR);
 
-    voidstar = PyTRY_INFRA(get_morloc_data_packet_value, (uint8_t*)packet, schema);
+    // PANIC-13, PANIC-14
+    if (is_rptr) {
+        voidstar = PyTRY_INFRA(get_morloc_data_packet_value, (uint8_t*)packet, schema);
+    } else {
+        voidstar = PyTRY(get_morloc_data_packet_value, (uint8_t*)packet, schema);
+    }
 
     // A value that arrived by reference is read under a reference of this
     // pool's own. Whoever handed over the packet keeps it alive meanwhile --
@@ -3015,7 +3034,9 @@ static PyObject* pybinding__get_value(PyObject* self, PyObject* args){ MAYFAIL
         }
     }
 
+    reading_runtime_value = is_rptr;
     obj = from_voidstar_owned(schema, voidstar);
+    reading_runtime_value = 0;
     {
         char* free_err = NULL;
         shfree((absptr_t)voidstar, &free_err);
@@ -3252,6 +3273,7 @@ static PyObject* pybinding__foreign_call(PyObject* self, PyObject* args) { MAYFA
     result = send_and_receive_over_socket(socket_path, packet, &child_errmsg_);
     Py_END_ALLOW_THREADS
     if (child_errmsg_ != NULL) {
+        morloc_exit_if_shared_memory_lost(child_errmsg_);
         char* prior_err = get_prior_err();
         if (prior_err == NULL) {
             PyErr_Format(PyMorlocInternalError, "morloc internal error (Py pool, %s:%d in %s):\n%s", __FILE__, __LINE__, __func__, child_errmsg_);
@@ -3276,7 +3298,7 @@ static PyObject* pybinding__foreign_call(PyObject* self, PyObject* args) { MAYFA
             (const uint8_t*)result, &fail_check_err);
         if (fail_check_err != NULL) { free(fail_check_err); }
         if (fail_msg != NULL) {
-            PyErr_Format(morloc_packet_is_pipe_closed((const uint8_t*)result) ? PyMorlocPipeClosed : PyExc_RuntimeError,
+            PyErr_Format(morloc_packet_is_pipe_closed((const uint8_t*)result) ? PyMorlocPipeClosed : PyMorlocException,
                          "%s", fail_msg);
             free(fail_msg);
             free(result);
@@ -3753,6 +3775,12 @@ static PyObject* pybinding__mlc_unpack(PyObject* self, PyObject* args) {
         PyErr_SetString(PyExc_RuntimeError, "@unpack: packet is shorter than its header");
         return NULL;
     }
+    // PANIC-14: only a pool passes a value by reference.
+    if (((const morloc_packet_header_t*)PyBytes_AS_STRING(packet))->command.data.source == PACKET_SOURCE_RPTR) {
+        Py_DECREF(packet);
+        PyErr_SetString(PyExc_RuntimeError, "@unpack: the bytes are a reference into shared memory, not a value");
+        return NULL;
+    }
     PyObject* inner = Py_BuildValue("(Os)", packet, schema_str);
     Py_DECREF(packet);
     if (inner == NULL) {
@@ -3776,16 +3804,15 @@ static PyObject* pybinding__mlc_read(PyObject* self, PyObject* args) { MAYFAIL
 
     voidstar = mlc_read(json_str, schema, &read_err);
 
-    // @read :: Str -> <Err> a -- parse failure raises MorlocException
-    // so _mlc_catch can intercept.
+    // PANIC-13
     if (voidstar == NULL && read_err == NULL) {
         PyINTERNAL_ABORT("@read: the runtime failed without giving a reason");
     }
     if (voidstar == NULL) {
         if (PyMorlocException != NULL) {
-            PyErr_SetString(PyMorlocException, read_err);
+            PyErr_Format(PyMorlocException, "@read: %s", read_err);
         } else {
-            PyErr_SetString(PyExc_RuntimeError, read_err);
+            PyErr_Format(PyExc_RuntimeError, "@read: %s", read_err);
         }
         if (read_err != NULL) free(read_err);
         free_schema(schema);
@@ -3820,6 +3847,64 @@ error:
     return NULL;
 }
 
+// A literal built in this pool, given the native form the decoder gives a
+// value received at the same schema (NATIVE-8). Only a "numpy.ndarray" form is
+// chosen by the decoder; any other value is returned as it is, for the type's
+// packer to build. Elements are checked as the encoder checks them.
+static PyObject* pybinding__mlc_conform(PyObject* self, PyObject* args) { MAYFAIL
+    PyObject* obj;
+    const char* schema_str;
+    Schema* schema = NULL;
+    PyObject* items = NULL;
+    PyObject* result = NULL;
+    py_walk_t w;
+    py_walk_init(&w, NULL);
+
+    PARSE_ARGS_OR_ABORT(args, "Os", &obj, &schema_str);
+
+    schema = PyTRY(parse_schema, schema_str);
+
+    if (schema->type != MORLOC_ARRAY || schema->hint == NULL
+        || strcmp(schema->hint, "numpy.ndarray") != 0) {
+        free_schema(schema);
+        Py_INCREF(obj);
+        return obj;
+    }
+    if (import_numpy() != 0) goto error;
+    items = PySequence_Fast(obj, "a Vector literal must be a sequence");
+    if (items == NULL) goto error;
+    {
+        // A back-reference names a compound type, which is boxed.
+        const Schema* element_schema = schema->parameters[0];
+        int type_num = numpy_type_of(element_schema);
+        Py_ssize_t n = PySequence_Fast_GET_SIZE(items);
+        npy_intp dims[] = {n};
+        result = PyArray_SimpleNew(1, dims, type_num);
+        if (result == NULL) goto error;
+        for (Py_ssize_t i = 0; i < n; i++) {
+            PyObject* item = PySequence_Fast_GET_ITEM(items, i);
+            void* slot = PyArray_GETPTR1((PyArrayObject*)result, i);
+            if (type_num == NPY_OBJECT) {
+                if (PyArray_SETITEM((PyArrayObject*)result, slot, item) < 0) goto error;
+            } else if (py_write_step(&w, element_schema, slot, item, 0) != 0) {
+                goto error;
+            }
+        }
+    }
+    Py_DECREF(items);
+    free_schema(schema);
+    py_walk_free(&w);
+    PyArray_CLEARFLAGS((PyArrayObject*)result, NPY_ARRAY_WRITEABLE);
+    return result;
+
+error:
+    Py_XDECREF(items);
+    Py_XDECREF(result);
+    free_schema(schema);
+    py_walk_free(&w);
+    return NULL;
+}
+
 static PyObject* pybinding__mlc_load(PyObject* self, PyObject* args) { MAYFAIL
     const char* schema_str;
     const char* path;
@@ -3833,8 +3918,7 @@ static PyObject* pybinding__mlc_load(PyObject* self, PyObject* args) { MAYFAIL
 
     voidstar = mlc_load(path, schema, &load_err);
 
-    // @load :: Str -> <IO, Err> a -- missing file / decode failure
-    // raises MorlocException so _mlc_catch can intercept.
+    // PANIC-13
     if (voidstar == NULL && load_err == NULL) {
         PyINTERNAL_ABORT("@load: the runtime failed without giving a reason");
     }
@@ -3881,11 +3965,12 @@ error:
 
 // -- Stream-handle bindings ----------------------------------------------
 
-static PyObject* pybinding__mlc_open(PyObject* self, PyObject* args) { MAYFAIL
+// _mlc_open_ifile(schema_str, path) -> handle
+static PyObject* pybinding__mlc_open_ifile(PyObject* self, PyObject* args) { MAYFAIL
+    const char* schema_str;
     const char* path;
-    int kind_i;
-    PARSE_ARGS_OR_ABORT(args, "si", &path, &kind_i);
-    int64_t handle = PyTRY(mlc_open, path, (uint8_t)kind_i);
+    PARSE_ARGS_OR_ABORT(args, "ss", &schema_str, &path);
+    int64_t handle = PyTRY(mlc_open_ifile, schema_str, path);
     return PyLong_FromLongLong((long long)handle);
 error:
     return NULL;
@@ -4349,6 +4434,7 @@ static PyObject* pybinding__mlc_spawn(PyObject* self, PyObject* args) { MAYFAIL
     }
     free(arg_packets);
     if (child_errmsg_ != NULL) {
+        morloc_exit_if_shared_memory_lost(child_errmsg_);
         PyErr_Format(PyMorlocInternalError, "morloc internal error (Py pool, %s:%d in %s):\n%s", __FILE__, __LINE__, __func__, child_errmsg_);
         free(child_errmsg_);
         return NULL;
@@ -4407,8 +4493,8 @@ error:
 }
 
 // -- Fold accumulators (the `@fold` stream-handler form) ------------------
-// One accumulator per thread that folds into it; the pool-side
-// _mlc_cell_reduce merges them with the handler's `combine`.
+// One accumulator per thread that folds into it; @cellreduce reads them all
+// (mlc_cell_slots) and merges them with the handler's `combine`.
 
 // mlc_cell_new(schema, init) -> handle
 static PyObject* pybinding__mlc_cell_new(PyObject* self, PyObject* args) { MAYFAIL
@@ -4538,57 +4624,67 @@ error:
     return NULL;
 }
 
-// mlc_cell_reduce(schema, combine, handle) -> value. Fold every accumulator
-// into one with `combine`, then release the cell. The count is never zero --
-// an untouched cell answers with its seed -- so there is always a value.
-static PyObject* pybinding__mlc_cell_reduce(PyObject* self, PyObject* args) { MAYFAIL
+// mlc_cell_slots(schema, handle) -> list. Every accumulator of a cell, in
+// its wire form; with mlc_reduce_list it runs @cellreduce.
+static PyObject* pybinding__mlc_cell_slots(PyObject* self, PyObject* args) { MAYFAIL
     const char* schema_str;
-    PyObject* combine;
-    // Initialized because the argument parse below can jump to `error`,
-    // where the cell is released.
     long long handle_ll = -1;
     Schema* schema = NULL;
-    PyObject* acc = NULL;
-    PARSE_ARGS_OR_ABORT(args, "sOL", &schema_str, &combine, &handle_ll);
+    PyObject* xs = NULL;
+    PARSE_ARGS_OR_ABORT(args, "sL", &schema_str, &handle_ll);
     int64_t n = PyTRY(mlc_cell_count, (int64_t)handle_ll);
     if (n < 1) {
-        PyINTERNAL_ABORT("mlc_cell_reduce: fold accumulator holds nothing to merge");
+        PyINTERNAL_ABORT("mlc_cell_slots: fold accumulator holds nothing to merge");
     }
+    xs = PyList_New(0);
+    if (xs == NULL) { goto error; }
     for (int64_t i = 0; i < n; i++) {
-        // One schema per accumulator: from_voidstar may hand back a numpy
-        // view over the block, so its release is deferred to the tracker --
-        // and the tracker frees the schema of every entry it holds.
         schema = PyTRY(parse_schema, schema_str);
         void* voidstar = PyTRY(mlc_cell_slot, (int64_t)handle_ll, i, schema);
-        // Takes the schema either way: to the tracker on success, freed
-        // on failure.
         PyObject* v = cell_value_to_py(schema, voidstar);
         schema = NULL;
         if (v == NULL) { goto error; }
-        if (acc == NULL) {
-            acc = v;
-        } else {
-            PyObject* merged = PyObject_CallFunctionObjArgs(combine, acc, v, NULL);
-            Py_DECREF(acc);
-            Py_DECREF(v);
-            acc = merged;
-            if (acc == NULL) { goto error; }
-        }
+        int r = PyList_Append(xs, v);
+        Py_DECREF(v);
+        if (r != 0) { goto error; }
     }
     PyTRY(mlc_cell_free, (int64_t)handle_ll);
-    return acc;
+    return xs;
 error:
     {
-        // The sweep at end of dispatch would reclaim this, but a @try-wrapped
-        // fold that fails and retries inside one dispatch would strand a cell
-        // per attempt.
         char* free_errmsg = NULL;
         mlc_cell_free((int64_t)handle_ll, &free_errmsg);
         free(free_errmsg);
     }
-    Py_XDECREF(acc);
+    Py_XDECREF(xs);
     free_schema(schema);
     return NULL;
+}
+
+// mlc_reduce_list(combine, xs) -> value. A non-empty list folded with
+// `combine`.
+static PyObject* pybinding__mlc_reduce_list(PyObject* self, PyObject* args) {
+    PyObject* combine;
+    PyObject* xs;
+    if (!PyArg_ParseTuple(args, "OO", &combine, &xs)) return NULL;
+    PyObject* items = PySequence_Fast(xs, "mlc_reduce_list: not a sequence");
+    if (items == NULL) return NULL;
+    Py_ssize_t n = PySequence_Fast_GET_SIZE(items);
+    if (n < 1) {
+        Py_DECREF(items);
+        PyErr_SetString(PyExc_RuntimeError, "mlc_reduce_list: nothing to reduce");
+        return NULL;
+    }
+    PyObject* acc = PySequence_Fast_GET_ITEM(items, 0);
+    Py_INCREF(acc);
+    for (Py_ssize_t i = 1; i < n; i++) {
+        PyObject* merged = PyObject_CallFunctionObjArgs(combine, acc, PySequence_Fast_GET_ITEM(items, i), NULL);
+        Py_DECREF(acc);
+        acc = merged;
+        if (acc == NULL) break;
+    }
+    Py_DECREF(items);
+    return acc;
 }
 
 static PyMethodDef Methods[] = {
@@ -4636,8 +4732,9 @@ static PyMethodDef Methods[] = {
     {"mlc_load", pybinding__mlc_load, METH_VARARGS, "Load a value from file"},
     {"mlc_show", pybinding__mlc_show, METH_VARARGS, "Serialize a value to JSON string"},
     {"mlc_read", pybinding__mlc_read, METH_VARARGS, "Deserialize a JSON string to a value"},
+    {"mlc_conform", pybinding__mlc_conform, METH_VARARGS, "Give a literal the native form of a received value"},
     {"mlc_unpack", pybinding__mlc_unpack, METH_VARARGS, "Decode a packet held as bytes"},
-    {"mlc_open", pybinding__mlc_open, METH_VARARGS, "Open a stream/file as IFile/IStream/OStream handle"},
+    {"mlc_open_ifile", pybinding__mlc_open_ifile, METH_VARARGS, "Open an IFile handle for the given schema + path"},
     {"mlc_close", pybinding__mlc_close, METH_VARARGS, "Close any stream/file handle"},
     {"mlc_fschema", pybinding__mlc_fschema, METH_VARARGS, "Read a file's element schema without typed open"},
     {"mlc_ifile_walk", pybinding__mlc_ifile_walk, METH_VARARGS, "Unified IFile pattern walker"},
@@ -4663,7 +4760,8 @@ static PyMethodDef Methods[] = {
     {"mlc_cell_new", pybinding__mlc_cell_new, METH_VARARGS, "Create a fold accumulator"},
     {"mlc_cell_get", pybinding__mlc_cell_get, METH_VARARGS, "Read this thread's fold accumulator"},
     {"mlc_cell_put", pybinding__mlc_cell_put, METH_VARARGS, "Replace this thread's fold accumulator"},
-    {"mlc_cell_reduce", pybinding__mlc_cell_reduce, METH_VARARGS, "Merge the fold accumulators and release the cell"},
+    {"mlc_cell_slots", pybinding__mlc_cell_slots, METH_VARARGS, "Every fold accumulator, and the cell released"},
+    {"mlc_reduce_list", pybinding__mlc_reduce_list, METH_VARARGS, "Fold a non-empty list with a function"},
     {"mlc_replay", pybinding__mlc_replay, METH_VARARGS, "Call a function on every element of an IStream"},
     {"mlc_throw", pybinding__mlc_throw, METH_VARARGS, "Raise a MorlocException with the given message"},
     {"mlc_try", pybinding__mlc_try, METH_VARARGS, "Evaluate body; wrap the value with ok, or a caught message with err"},
@@ -4698,7 +4796,6 @@ PyMODINIT_FUNC PyInit_pymorloc(void) {
         Py_DECREF(m);
         return NULL;
     }
-    // BaseException-derived so `_mlc_catch`'s `except Exception:` skips it.
     PyMorlocInternalError = PyErr_NewException(
         "pymorloc.MorlocInternalError", PyExc_BaseException, NULL);
     if (PyMorlocInternalError == NULL) {

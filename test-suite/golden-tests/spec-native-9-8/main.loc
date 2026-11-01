@@ -1,0 +1,25 @@
+-- Spec NATIVE-9: in Python a folding handler's accumulators reach its combine
+-- and its output in their native form, here a set.
+module main (stream)
+
+import root-py
+import set (Set)
+import set-py (Set)
+
+source Py from "impl.py" ("mk", "zeroAcc", "addBatch", "mergeAcc", "showAcc")
+
+mk :: Int -> [Int]
+zeroAcc :: Set Int
+addBatch :: Set Int -> [Int] -> Set Int
+mergeAcc :: Set Int -> Set Int -> Set Int
+showAcc :: Set Int -> Str
+
+produce :: ([Int] -> <IO> ()) -> <IO> ()
+produce sink = do
+  _ <- sink (mk 0)
+  sink (mk 1)
+
+--' Stream integer batches
+--' @render -f/--folded=showAcc @fold=addBatch @init=zeroAcc @combine=mergeAcc
+stream :: <IO> ()
+stream = @collect produce

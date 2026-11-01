@@ -51,6 +51,7 @@ import qualified Morloc.CodeGenerator.Serial as Serial
 import Morloc.CodeGenerator.LogTemplate (RenderedTemplate (..), collectRenderedTemplates)
 import Morloc.CodeGenerator.Namespace
 import qualified Data.Map.Strict as Map
+import qualified Morloc.Build.Params as BP
 import qualified Morloc.Config as MC
 import Morloc.Data.Doc
 import qualified Morloc.Data.Text as MT
@@ -62,7 +63,7 @@ import Morloc.Monad (asks, gets, newIndex, runIndex, getSchemaTable, registerSch
 import qualified Morloc.Monad as MM
 import Morloc.Quasi
 import qualified System.Directory as Dir
-import System.FilePath (isAbsolute, splitDirectories)
+import System.FilePath (isAbsolute, splitDirectories, takeBaseName, takeDirectory)
 import qualified System.Exit as Exit
 import System.IO (hClose, openBinaryTempFile)
 import qualified System.Process as Proc
@@ -132,13 +133,14 @@ translateBuiltin lang desc srcs es = do
   let rendered = T.replace "__MORLOC_VERSION__" (MT.pack MV.versionStr) (render code)
 
   let poolSubdir = getPoolSubdir lang
+  hooks <- sourceHookCommands lang desc srcs
 
   return $
     Script
       { scriptBase = "pool"
       , scriptLang = lang
       , scriptCode = "." :/ Dir "pools" [Dir poolSubdir [File exefile (Code rendered)]]
-      , scriptMake = []
+      , scriptMake = hooks
       }
   where
     substitutePreamble :: MDoc -> Text -> Text -> MDoc -> Path -> Text -> MDoc
@@ -149,6 +151,38 @@ translateBuiltin lang desc srcs es = do
         . T.replace "{{state}}" stateText
         . T.replace "{{opt}}" (render optDoc)
         $ t
+
+-- | The build commands of the language's per-source hooks (SRC-7), for each
+-- file the pool sources. @check@ hooks run only under @<lang>:check=on@.
+sourceHookCommands :: Lang -> LangDescriptor -> [Source] -> MorlocMonad [SysCommand]
+sourceHookCommands lang desc srcs = do
+  let langKey = ML.langName lang
+  params <- gets stateLangParams
+  checkOn <- case BP.lookupParam langKey "check" params of
+    Nothing -> return False
+    Just "off" -> return False
+    Just "on" -> return True
+    Just v ->
+      MM.throwRejected . pretty $
+        "unknown " <> langKey <> ":check value '" <> v <> "'; expected one of on, off"
+  paths <- liftIO $ mapM Dir.makeAbsolute (unique (mapMaybe srcPath srcs))
+  return
+    [ cmd
+    | path <- paths
+    , hook <- ldSourceHooks desc
+    , cmd <- case hook of
+        HookRemove pat -> [SysRemoveMatching (T.unpack (fill id path pat))]
+        HookCheck c -> [SysRun (Code (fill shellQuote path c)) | checkOn]
+    ]
+  where
+    fill q path t =
+      substituteT
+        t
+        [ ("path", q (T.pack path))
+        , ("dir", q (T.pack (takeDirectory path)))
+        , ("stem", q (T.pack (takeBaseName path)))
+        ]
+    shellQuote t = "'" <> T.replace "'" "'\\''" t <> "'"
 
 -- | Translate using an external codegen tool.
 translateExternal ::
@@ -207,7 +241,7 @@ translateExternal cmd lang desc srcs es = do
 
   case exitCode of
     Exit.ExitFailure code' ->
-      MM.throwSystemError $
+      MM.throwFailed $
         "External codegen '"
           <> pretty cmd
           <> "' failed with exit code "
@@ -219,7 +253,7 @@ translateExternal cmd lang desc srcs es = do
       let manifest = Aeson.decodeStrict (TE.encodeUtf8 (T.pack stdoutStr)) :: Maybe CodegenManifest
       case manifest of
         Nothing ->
-          MM.throwSystemError $
+          MM.throwFailed $
             "External codegen '"
               <> pretty cmd
               <> "' produced invalid manifest on stdout"
@@ -228,12 +262,13 @@ translateExternal cmd lang desc srcs es = do
               poolContent = T.replace "__MORLOC_VERSION__" (MT.pack MV.versionStr) (cgmPoolCode m)
               buildCmds = map (SysRun . Code) (cgmBuildCommands m)
               poolSubdir = getPoolSubdir lang
+          hooks <- sourceHookCommands lang desc srcs
           return $
             Script
               { scriptBase = "pool"
               , scriptLang = lang
               , scriptCode = "." :/ Dir "pools" [Dir poolSubdir [File exefile (Code poolContent)]]
-              , scriptMake = buildCmds
+              , scriptMake = hooks <> buildCmds
               }
 
 -- | Manifest returned by an external codegen tool on stdout.
@@ -279,7 +314,7 @@ loadDescriptorForLang lang = do
       case lookup (T.unpack name) [(n, DF.embededFileText ef) | (n, ef) <- DF.langRegistryFiles] of
         Just yamlText -> case loadLangDescriptorFromText yamlText of
           Left err ->
-            MM.throwSystemError $
+            MM.throwCompilerBug $
               "Failed to parse embedded lang.yaml for " <> pretty name <> ": " <> pretty err
           Right desc -> return desc
         Nothing -> do
@@ -289,7 +324,7 @@ loadDescriptorForLang lang = do
           result <- liftIO $ loadLangDescriptor descPath
           case result of
             Left err ->
-              MM.throwSystemError $
+              MM.throwFailed $
                 "Failed to load language descriptor for " <> pretty name <> ": " <> pretty err
             Right desc -> return desc
 
@@ -328,7 +363,7 @@ translateSource desc p = do
   -- Without this, a missing source surfaces as a confusing runtime
   -- ImportError / module-not-found inside the pool.
   exists <- liftIO $ Dir.doesFileExist p
-  unless exists . MM.throwSystemError $
+  unless exists . MM.throwRejected $
     "Source file not found:" <+> pretty p
   let p' = MT.stripPrefixIfPresent "./" (MT.pack p)
   if ldQualifiedImports desc
@@ -437,6 +472,7 @@ genericLowerConfig desc srcNamer debugInfo traceInfo debugMode = cfg
         { lcSrcName = srcNamer
         , lcOperator = infixOperator
         , lcApplySrcGroup = \f as -> f <+> tupled as
+        , lcSourcedResult = \_ _ _ x -> x
         , lcSourcedArg = \_ _ _ x -> x
         , lcConstArg = \_ _ x -> x
         , lcOwnership = \_ -> return Owned
@@ -1247,9 +1283,13 @@ genericPrintExpr desc = go
     go (IIntrinsicUnpack sid _ e) =
       let prefix = ldIntrinsicPrefix desc
        in pretty prefix <> "mlc_unpack(" <> schemaRef sid <> ", " <> go e <> ")"
-    go (IIntrinsicOpen kind path) =
+    go (IIntrinsicConform sid e) =
       let prefix = ldIntrinsicPrefix desc
-       in pretty prefix <> "mlc_open(" <> go path <> ", " <> pretty kind <> ")"
+       in pretty prefix <> "mlc_conform(" <> go e <> ", " <> schemaRef sid <> ")"
+    go (IIntrinsicOpenIFile sid path) =
+      let prefix = ldIntrinsicPrefix desc
+       in pretty prefix <> "mlc_open_ifile("
+            <> schemaRef sid <> ", " <> go path <> ")"
     go (IIntrinsicClose h) =
       let prefix = ldIntrinsicPrefix desc
        in pretty prefix <> "mlc_close(" <> go h <> ")"
@@ -1324,10 +1364,12 @@ genericPrintExpr desc = go
       let prefix = ldIntrinsicPrefix desc
        in pretty prefix <> "mlc_cell_put("
             <> go handle <> ", " <> schemaRef sid <> ", " <> go value <> ")"
-    go (IIntrinsicCellReduce sid _ combine handle) =
+    go (IIntrinsicCellSlots sid _ handle) =
       let prefix = ldIntrinsicPrefix desc
-       in pretty prefix <> "mlc_cell_reduce("
-            <> schemaRef sid <> ", " <> go combine <> ", " <> go handle <> ")"
+       in pretty prefix <> "mlc_cell_slots(" <> schemaRef sid <> ", " <> go handle <> ")"
+    go (IIntrinsicReduceList combine xs) =
+      let prefix = ldIntrinsicPrefix desc
+       in pretty prefix <> "mlc_reduce_list(" <> go combine <> ", " <> go xs <> ")"
     go (IIntrinsicReplay sid _ handle fn) =
       let prefix = ldIntrinsicPrefix desc
        in pretty prefix <> "mlc_replay("
@@ -1491,7 +1533,7 @@ printProgram desc prog =
     -- interpreted templates place inside a deferred post-fork loader, (3)
     -- manifolds, (4) dispatch.
     sections =
-      [ vsep (map pretty (ipSources prog) ++ [schemaTableInit, closureTableInit, stageTableInit])
+      [ vsep (map pretty (ipSources prog) ++ [schemaTableInit, closureSchemaInit, closureTableInit, stageTableInit])
       , vsep (map pretty (ipIncludes prog))
       , vsep (map pretty (ipManifolds prog) ++ logRebindings)
       , templateDispatch
@@ -1598,6 +1640,10 @@ printProgram desc prog =
     -- empty as "skip the per-label tee".
     quoteString :: Text -> MDoc
     quoteString t = dquotes (pretty (escapeQuotes "\"" "\\\"" (escapeStringLit t)))
+
+    closureSchemaInit
+      | T.null (ldClosureRegisterEntry desc) = mempty
+      | otherwise = "mlc_closure_schema" <+> pretty (ldAssignOp desc) <+> dquotes (pretty Serial.closureWireSchema)
 
     schemaTableInit
       | null (ipSchemaTable prog) = mempty

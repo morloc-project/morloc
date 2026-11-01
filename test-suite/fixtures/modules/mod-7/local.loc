@@ -1,0 +1,6 @@
+module main (f)
+
+import .m (localValue)
+
+f :: Int
+f = localValue

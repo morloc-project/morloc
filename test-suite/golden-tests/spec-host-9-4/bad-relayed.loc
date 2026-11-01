@@ -1,0 +1,17 @@
+--' Use from C++ a function a Python source returns
+module main (relayedAway)
+
+import root-py
+import root-cpp
+import .helpers
+
+source Py from "f.py" ("py_relay" as relayPy)
+
+--' Hand back a function, made by Python
+relayPy :: (Int -> Int) -> <IO> (Int -> Int)
+
+--' Use from C++ the function a Python source returns
+relayedAway :: Int -> <IO> Int
+relayedAway n = do
+  h <- relayPy (\x -> x + n)
+  cppSum (cppMap (\x -> cppF (h x)) [1, 2])

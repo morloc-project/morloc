@@ -26,9 +26,27 @@ Status: draft
 
 0 success; 1 call failure (user error, pool death, unreadable argument,
 runtime error); 2 usage error (unknown command or option); 70 panic only
-(PANIC); 128+N signal N; 141 broken stdout pipe. A pool reply that reports
+(PANIC); 128+N signal N; 141 broken stdout pipe. A pool exits 71 when
+shared memory runs out (SHM-17); the run still exits 1. A pool reply that reports
 the closed pipe ends the run with 141 and nothing on stderr, the same as
 the nexus finding the pipe closed itself, whichever comes first.
+A pool reply that reports a dead peer (LIFE-5) ends the run with 1 and
+its message.
+
+### LIFE-5 A call during which a peer died reports the death, whatever user code did
+Status: implemented
+Checked by: golden:spec-fail-6-1, golden:cpp-catch-cannot-hold-pool-death
+
+A pool process counts the peer deaths it sees: a call it makes whose
+connection is lost before the whole reply (the connect fails, a send on a
+new connection fails, the read fails), and a reply that itself reports a
+dead peer. The failed call fails in the caller's language like any failed
+call, so user code unwinds and may catch it, but when the count moved
+while a dispatch ran, that dispatch replies with a dead-peer packet
+(status 3) instead of its value (FAIL-6). A closed downstream pipe is
+counted the same way and answers with the closed-pipe status (PANIC-13).
+The count is per process, so another dispatch running in the same pool at
+the time also reports the death.
 
 ### LIFE-4 The run directory is under /tmp with an owner record
 Status: draft

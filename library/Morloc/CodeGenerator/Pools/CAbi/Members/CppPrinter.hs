@@ -127,10 +127,12 @@ printExpr (IIntrinsicCellGet sid Nothing h) =
   [idoc|_mlc_cell_get(mlc_schema_table[#{pretty sid}], #{printExpr h})|]
 printExpr (IIntrinsicCellPut sid h e) =
   [idoc|_mlc_cell_put(mlc_schema_table[#{pretty sid}], #{printExpr h}, #{printExpr e})|]
-printExpr (IIntrinsicCellReduce sid (Just t) f h) =
-  [idoc|_mlc_cell_reduce<#{renderIType t}>(mlc_schema_table[#{pretty sid}], #{printExpr f}, #{printExpr h})|]
-printExpr (IIntrinsicCellReduce sid Nothing f h) =
-  [idoc|_mlc_cell_reduce(mlc_schema_table[#{pretty sid}], #{printExpr f}, #{printExpr h})|]
+printExpr (IIntrinsicCellSlots sid (Just t) h) =
+  [idoc|_mlc_cell_slots<#{renderIType t}>(mlc_schema_table[#{pretty sid}], #{printExpr h})|]
+printExpr (IIntrinsicCellSlots sid Nothing h) =
+  [idoc|_mlc_cell_slots(mlc_schema_table[#{pretty sid}], #{printExpr h})|]
+printExpr (IIntrinsicReduceList f xs) =
+  [idoc|_mlc_reduce_list(#{printExpr f}, #{printExpr xs})|]
 printExpr (IIntrinsicChannel sid) =
   [idoc|_mlc_open_channel(mlc_schema_table[#{pretty sid}])|]
 printExpr (IIntrinsicSpawn sid h f) =
@@ -149,8 +151,11 @@ printExpr (IIntrinsicUnpack sid (Just t) e) =
   [idoc|_mlc_unpack<#{renderIType t}>(mlc_schema_table[#{pretty sid}], #{printExpr e})|]
 printExpr (IIntrinsicUnpack sid Nothing e) =
   [idoc|_mlc_unpack(mlc_schema_table[#{pretty sid}], #{printExpr e})|]
-printExpr (IIntrinsicOpen kind path) =
-  [idoc|_mlc_open(#{printExpr path}, #{pretty kind})|]
+-- A C++ value is decoded into its declared type, so a literal already has
+-- the decoder's form.
+printExpr (IIntrinsicConform _ e) = printExpr e
+printExpr (IIntrinsicOpenIFile sid path) =
+  [idoc|_mlc_open_ifile(mlc_schema_table[#{pretty sid}], #{printExpr path})|]
 -- @close and the temp-file unlink return void in the runtime, but their
 -- morloc type is `()`, and a call can land anywhere a value is consumed: a
 -- branch arm, a let, the tail of a manifold that returns `mlc::Unit`. Only

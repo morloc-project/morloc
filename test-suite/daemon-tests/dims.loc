@@ -1,0 +1,13 @@
+module main (dot, same)
+
+import root-py
+import vector-py
+
+source Py from "dims.py" ("dot" as dot)
+
+--' Dot product
+dot :: Vector n Int -> Vector n Int -> Int
+
+--' Keep the first of two vectors of one length
+same :: Vector n Int -> Vector n Int -> Vector n Int
+same a b = a

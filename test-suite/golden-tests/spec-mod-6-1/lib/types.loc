@@ -1,6 +1,0 @@
-module (*)
-
-import root-py
-
-localValue :: Int
-localValue = 1

@@ -378,6 +378,9 @@ T _get_value(const uint8_t* packet, Schema* schema){
         bool materialized = (source != PACKET_SOURCE_RPTR);
         char* errmsg = nullptr;
         uint8_t* raw = get_morloc_data_packet_value(packet, schema, &errmsg);
+        // PANIC-13: a value read from a file or carried inline is input;
+        // PANIC-14: one another pool built is not.
+        if (errmsg && materialized) { PROPAGATE_ERROR(errmsg); }
         if (errmsg) { PROPAGATE_INFRA_ERROR(errmsg); }
         // A materialized block is released here unless the tracker takes
         // it; a referenced one belongs to its sender until acquired.
@@ -400,6 +403,8 @@ T _get_value(const uint8_t* packet, Schema* schema){
         struct ArrowArray aa;
         char* aerr = nullptr;
         if (arrow_from_shm_owned(hdr, materialized ? 0 : 1, &as, &aa, &aerr) != 0) {
+            // PANIC-13, PANIC-14
+            if (aerr && materialized) { PROPAGATE_ERROR(aerr); }
             PROPAGATE_INFRA_ERROR(aerr);
         }
         owned.ptr = nullptr;
@@ -428,7 +433,12 @@ T _get_value(const uint8_t* packet, Schema* schema){
             if (file_is_stream_packet(path)) {
                 if constexpr (is_std_vector<T>::value) {
                     char* open_err = nullptr;
-                    int64_t handle = mlc_open(path, MLC_KIND_ISTREAM, &open_err);
+                    char* list_schema = schema_to_string(schema);
+                    if (list_schema == NULL) {
+                        MLC_INTERNAL_ABORT("stream ingest: schema_to_string returned NULL");
+                    }
+                    int64_t handle = mlc_open_istream(list_schema, path, &open_err);
+                    free(list_schema);
                     if (open_err) { PROPAGATE_ERROR(open_err); }
                     // Preallocate via the stream's element_count (from
                     // StreamDiag) so vector::insert never reallocates.
@@ -504,7 +514,11 @@ T _get_value(const uint8_t* packet, Schema* schema){
 
         char* errmsg = NULL;
         uint8_t* voidstar = get_morloc_data_packet_value(packet, schema, &errmsg);
-        if(errmsg != NULL) {
+        // PANIC-13, PANIC-14
+        if (errmsg != NULL && !is_rptr) {
+            PROPAGATE_ERROR(errmsg)
+        }
+        if (errmsg != NULL) {
             PROPAGATE_INFRA_ERROR(errmsg)
         }
 
@@ -528,6 +542,7 @@ T _get_value(const uint8_t* packet, Schema* schema){
         ShmOwned owned((void*)voidstar);
 
         T* dummy = nullptr;
+        MlcRuntimeValueRead reading(is_rptr);
         return from_voidstar(schema, (void*)voidstar, dummy);
     }
 }
@@ -659,6 +674,10 @@ T _mlc_unpack(Schema* schema, const std::vector<uint8_t>& packet) {
     if (packet.size() < sizeof(morloc_packet_header_t)) {
         throw MorlocException("@unpack: packet is shorter than its header");
     }
+    // PANIC-14: only a pool passes a value by reference.
+    if (((const morloc_packet_header_t*)packet.data())->command.data.source == PACKET_SOURCE_RPTR) {
+        throw MorlocException("@unpack: the bytes are a reference into shared memory, not a value");
+    }
     return _get_value<T>(packet.data(), schema);
 }
 
@@ -684,13 +703,6 @@ T _mlc_load(Schema* schema, const std::string& path) {
 }
 
 // ── Stream-handle wrappers ───────────────────────────────────────────────
-// @open: returns a 64-bit handle (kind = MLC_KIND_{IFILE|ISTREAM|OSTREAM}).
-inline int64_t _mlc_open(const std::string& path, uint8_t kind) {
-    char* errmsg = NULL;
-    int64_t handle = mlc_open(path.c_str(), kind, &errmsg);
-    if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
-    return handle;
-}
 // @close: returns void; the runtime bumps generation and frees the slot.
 inline void _mlc_close(int64_t handle) {
     char* errmsg = NULL;
@@ -895,20 +907,26 @@ inline int64_t _mlc_open_ostream(Schema* schema, const std::string& path) {
     return h;
 }
 
-// Typed IStream open. The element schema declares the opener's type so
-// the runtime can route the /dev/stdin sentinel through the nexus stdin
-// channel (guarding the incoming stream); for a real file it is read off
-// disk.
-inline int64_t _mlc_open_istream(Schema* schema, const std::string& path) {
+// Typed opens: the file must store what `schema` describes.
+inline int64_t _mlc_open_typed(
+    int64_t (*open)(const char*, const char*, char**),
+    Schema* schema, const std::string& path
+) {
     char* errmsg = NULL;
     char* s = schema_to_string(schema);
     if (s == NULL) {
-        MLC_INTERNAL_ABORT("_mlc_open_istream: schema_to_string returned NULL (invalid compile-time schema table entry)");
+        MLC_INTERNAL_ABORT("_mlc_open_typed: schema_to_string returned NULL (invalid compile-time schema table entry)");
     }
-    int64_t h = mlc_open_istream(s, path.c_str(), &errmsg);
+    int64_t h = open(s, path.c_str(), &errmsg);
     free(s);
     if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
     return h;
+}
+inline int64_t _mlc_open_istream(Schema* schema, const std::string& path) {
+    return _mlc_open_typed(mlc_open_istream, schema, path);
+}
+inline int64_t _mlc_open_ifile(Schema* schema, const std::string& path) {
+    return _mlc_open_typed(mlc_open_ifile, schema, path);
 }
 
 // @stdin / @stdout / @stderr: nullary intrinsics. Element schema is
@@ -1036,7 +1054,8 @@ inline void _mlc_unlink_tmp(const std::string& path) {
 
 // -- Fold-accumulator wrappers ------------------------------------------
 // A folding stream handler carries one accumulator per thread that folds
-// into it; `_mlc_cell_reduce` merges them and releases the cell.
+// into it; @cellreduce reads them all (`_mlc_cell_slots`) and merges them
+// with the handler's `combine` (`_mlc_reduce_list`).
 
 // @cellnew: create an accumulator seeded with `init`.
 template <typename B>
@@ -1098,15 +1117,30 @@ struct MlcCellGuard {
     }
 };
 
-template <typename B, typename F>
-B _mlc_cell_reduce(Schema* schema, F combine, int64_t handle) {
+// Every accumulator of a cell, in its wire form; with _mlc_reduce_list it
+// runs @cellreduce.
+template <typename L>
+L _mlc_cell_slots(Schema* schema, int64_t handle) {
     MlcCellGuard guard{handle};
     char* errmsg = NULL;
     int64_t n = mlc_cell_count(handle, &errmsg);
     if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
-    B acc = _mlc_cell_slot<B>(schema, handle, 0);
-    for (int64_t i = 1; i < n; i++) {
-        acc = combine(acc, _mlc_cell_slot<B>(schema, handle, i));
+    if (n < 1) { PROPAGATE_ERROR(strdup("@fold: the accumulator holds nothing to merge")) }
+    L xs;
+    xs.reserve((size_t)n);
+    for (int64_t i = 0; i < n; i++) {
+        xs.push_back(_mlc_cell_slot<typename L::value_type>(schema, handle, i));
+    }
+    return xs;
+}
+
+// A non-empty list folded with `combine`.
+template <typename F, typename L>
+typename L::value_type _mlc_reduce_list(F combine, L xs) {
+    if (xs.empty()) { PROPAGATE_ERROR(strdup("@fold: nothing to merge")) }
+    typename L::value_type acc = std::move(xs[0]);
+    for (size_t i = 1; i < xs.size(); i++) {
+        acc = combine(acc, xs[i]);
     }
     return acc;
 }

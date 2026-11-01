@@ -1,0 +1,114 @@
+-- Spec HOST-2: a function crossing into or out of host code is called with
+-- every argument at once, whatever parentheses its type is written with.
+-- `apply2` takes a callback written `(Int -> (Int -> Int))` and calls it
+-- with both arguments, given a lambda written as two nested lambdas
+-- (`\x -> \y -> ..`), a named function and a partial application; `feed`
+-- gives its callback a function written the same way, which morloc calls
+-- with both; `mkSub` returns one, which morloc calls with both. `applyJ`
+-- spells the callback `(Int -> Join)` through a function alias, and is
+-- also called with both. `first2` calls the first of a list of functions
+-- with two arguments: its element type `Int -> Int -> c` ends at a type
+-- variable, so `digits3`, which takes three, is passed partially applied.
+-- `subJ` is `mkSub` with its result spelled through an alias. `feedSplit`
+-- hands its callback a host function at `Int -> b`: with `b = Int -> Int`
+-- morloc calls it with one number and the function it returns with the
+-- next. `addJ` is typed `Int -> Join` and passed where two numbers go.
+module main (runPy, runCpp, runR, runRust)
+
+import root-py
+import root-cpp
+import root-r
+import root-rust
+
+source Py from "f.py" ("apply2" as pyApply2, "apply2" as pyApplyJ, "feed" as pyFeed, "make_sub" as pySub, "make_sub" as pySubJ, "first2" as pyFirst2, "feed_split" as pyFeedSplit)
+source Cpp from "f.hpp" ("apply2" as cppApply2, "apply2" as cppApplyJ, "feed" as cppFeed, "make_sub" as cppSub, "make_sub" as cppSubJ, "first2" as cppFirst2, "feed_split" as cppFeedSplit)
+source R from "f.R" ("apply2" as rApply2, "apply2" as rApplyJ, "feed" as rFeed, "make_sub" as rSub, "make_sub" as rSubJ, "first2" as rFirst2, "feed_split" as rFeedSplit)
+source Rust from "f.rs" ("apply2" as rustApply2, "apply2" as rustApplyJ, "feed" as rustFeed, "make_sub" as rustSub, "make_sub" as rustSubJ, "first2" as rustFirst2, "feed_split" as rustFeedSplit)
+
+--' A function of one number
+type Join = Int -> Int
+
+--' A function of two numbers
+type Join2 = Int -> Int -> Int
+
+--' Call a two-argument callback with two numbers
+pyApply2 :: (Int -> (Int -> Int)) -> Int -> Int -> Int
+pyApplyJ :: (Int -> Join) -> Int -> Int -> Int
+pyFirst2 :: [Int -> Int -> c] -> Int -> c
+pyFeedSplit :: ((Int -> b) -> c) -> c
+cppApply2 :: (Int -> (Int -> Int)) -> Int -> Int -> Int
+cppApplyJ :: (Int -> Join) -> Int -> Int -> Int
+cppFirst2 :: [Int -> Int -> c] -> Int -> c
+cppFeedSplit :: ((Int -> b) -> c) -> c
+rApply2 :: (Int -> (Int -> Int)) -> Int -> Int -> Int
+rApplyJ :: (Int -> Join) -> Int -> Int -> Int
+rFirst2 :: [Int -> Int -> c] -> Int -> c
+rFeedSplit :: ((Int -> b) -> c) -> c
+rustApply2 :: (Int -> (Int -> Int)) -> Int -> Int -> Int
+rustApplyJ :: (Int -> Join) -> Int -> Int -> Int
+rustFirst2 :: [Int -> Int -> c] -> Int -> c
+rustFeedSplit :: ((Int -> b) -> c) -> c
+
+--' Give a callback a function that subtracts
+pyFeed :: ((Int -> (Int -> Int)) -> Int) -> Int
+cppFeed :: ((Int -> (Int -> Int)) -> Int) -> Int
+rFeed :: ((Int -> (Int -> Int)) -> Int) -> Int
+rustFeed :: ((Int -> (Int -> Int)) -> Int) -> Int
+
+--' Make a function that scales a difference
+pySub :: Int -> <IO> (Int -> (Int -> Int))
+pySubJ :: Int -> <IO> Join2
+cppSub :: Int -> <IO> (Int -> (Int -> Int))
+cppSubJ :: Int -> <IO> Join2
+rSub :: Int -> <IO> (Int -> (Int -> Int))
+rSubJ :: Int -> <IO> Join2
+rustSub :: Int -> <IO> (Int -> (Int -> Int))
+rustSubJ :: Int -> <IO> Join2
+
+--' Join two digits
+digits :: Int -> Int -> Int
+digits x y = x * 10 + y
+
+--' Join three digits
+digits3 :: Int -> Int -> Int -> Int
+digits3 a x y = a * 100 + x * 10 + y
+
+--' Call a function of two numbers with n and 2
+useH :: Int -> (Int -> Int -> Int) -> Int
+useH n h = h n 2
+
+--' Add two numbers
+addJ :: Int -> Join
+addJ x y = x + y
+
+--' Apply a function to seven
+apply7 :: (Int -> Int) -> Int
+apply7 f = f 7
+
+--' Each grouping in Python
+runPy :: Int -> <IO> [Int]
+runPy n = do
+  h <- pySub n
+  g <- pySubJ n
+  [pyApply2 (\x -> \y -> x * 100 + y) 4 5, pyApply2 digits 4 5, pyApply2 (digits3 n) 4 5, pyFeed (\f -> f 7 2), h 10 3, pyApplyJ (\x y -> x - y) 9 4, apply7 (pyFirst2 [digits3] 4), g 5 3, pyFeedSplit (useH n), pyApply2 addJ 4 5]
+
+--' Each grouping in C++
+runCpp :: Int -> <IO> [Int]
+runCpp n = do
+  h <- cppSub n
+  g <- cppSubJ n
+  [cppApply2 (\x -> \y -> x * 100 + y) 4 5, cppApply2 digits 4 5, cppApply2 (digits3 n) 4 5, cppFeed (\f -> f 7 2), h 10 3, cppApplyJ (\x y -> x - y) 9 4, apply7 (cppFirst2 [digits3] 4), g 5 3, cppFeedSplit (useH n), cppApply2 addJ 4 5]
+
+--' Each grouping in R
+runR :: Int -> <IO> [Int]
+runR n = do
+  h <- rSub n
+  g <- rSubJ n
+  [rApply2 (\x -> \y -> x * 100 + y) 4 5, rApply2 digits 4 5, rApply2 (digits3 n) 4 5, rFeed (\f -> f 7 2), h 10 3, rApplyJ (\x y -> x - y) 9 4, apply7 (rFirst2 [digits3] 4), g 5 3, rFeedSplit (useH n), rApply2 addJ 4 5]
+
+--' Each grouping in Rust
+runRust :: Int -> <IO> [Int]
+runRust n = do
+  h <- rustSub n
+  g <- rustSubJ n
+  [rustApply2 (\x -> \y -> x * 100 + y) 4 5, rustApply2 digits 4 5, rustApply2 (digits3 n) 4 5, rustFeed (\f -> f 7 2), h 10 3, rustApplyJ (\x y -> x - y) 9 4, apply7 (rustFirst2 [digits3] 4), g 5 3, rustFeedSplit (useH n), rustApply2 addJ 4 5]

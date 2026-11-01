@@ -1,0 +1,26 @@
+--- json, wrong length ---
+Error: failed to parse argument #0: Array length mismatch: expected 2, got 3
+--- msgpack, wrong length ---
+Error: failed to parse argument #0: file: Array length mismatch: expected 2, got 3
+--- voidstar, wrong length ---
+Error: failed to parse argument #0: file: @load: schema mismatch reading 'three.vs': file has schema `a:3j`, requested `a:2j`
+--- voidstar list, wrong length ---
+Error: failed to parse argument #0: file: Array length mismatch: expected 2, got 3
+--- msgpack list, wrong length ---
+Error: failed to parse argument #0: file: Array length mismatch: expected 2, got 3
+--- msgpack, nested in a list ---
+Error: failed to parse argument #0: file: Array length mismatch: expected 2, got 3
+--- voidstar, nested in a list ---
+Error: failed to parse argument #0: file: Array length mismatch: expected 2, got 3
+--- msgpack, in a tuple ---
+Error: failed to parse argument #0: file: Array length mismatch: expected 2, got 3
+--- voidstar, in a record ---
+Error: failed to parse argument #0: file: Array length mismatch: expected 2, got 3
+--- msgpack, in an optional ---
+Error: failed to parse argument #0: file: Array length mismatch: expected 2, got 3
+--- voidstar, large, last row wrong ---
+Error: failed to parse argument #0: Array length mismatch: expected 2, got 3
+--- msgpack, right length ---
+2
+--- voidstar, right length ---
+2

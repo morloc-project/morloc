@@ -2,10 +2,10 @@ module main (greet)
 
 import root-py
 
---' name: greet
+--' @name greet
 greet ::
-  --' arg: -y/--yolo
-  --' default: "yolo"
+  --' @arg -y/--yolo
+  --' @default "yolo"
   Str ->
   Int
 

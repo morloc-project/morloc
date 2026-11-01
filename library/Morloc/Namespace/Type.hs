@@ -15,18 +15,18 @@ universals ('ForallU'), used during typechecking and in type signatures.
 'EType' extends 'TypeU' with typeclass constraints and documentation.
 
 A partial order is defined on 'TypeU' via "Data.PartialOrd" where @t1 <= t2@
-means t1 is at least as specific as t2 (t1 is a subtype of t2).
+means t1 is at least as general as t2 (t1 instantiates to t2), so
+@forall a . a <= Int@.
 -}
 module Morloc.Namespace.Type
   ( -- * Types
     NamType (..)
-  , Type (..)
-    -- Pattern synonyms for migrated kind constructors are bundled with
-    -- 'TypeU' so importers using @TypeU (..)@ pick them up as if they
-    -- were real constructors.
+  , Type (.., NatVoidT, StrVoidT)
+    -- Pattern synonyms bundled so that @TypeU (..)@ imports them.
   , TypeU
       ( ..
       , NatVarU
+      , IntVarU
       , StrVarU
       , RecVarU
       , NatVoidU
@@ -68,7 +68,6 @@ module Morloc.Namespace.Type
   , type2typeu
   , splitFunAt
   , EType (..)
-  , unresolvedType2type
 
     -- * Smart constructors for kind operators
   , opArity
@@ -131,6 +130,11 @@ module Morloc.Namespace.Type
   , ReplayPlan (..)
   , replayPlanKind
   , anonRecordVar
+  , opKind
+  , kindOfT
+  , kindOfU
+  , fillsNat
+  , partitionKindArgs
   , isInternalTerminalName
   , ArgDoc (..)
   , ArgDocVars (..)
@@ -163,10 +167,11 @@ module Morloc.Namespace.Type
   , equivalent
   , mostGeneral
   , mostSpecific
+  , generalizes
   , mostSpecificSubtypes
-  , substituteFirst
-  , findFirst
   , dataCtorsOfName
+  , dataDeclOfName
+  , instantiateParams
   , dataBodyCtors
   ) where
 
@@ -176,6 +181,7 @@ import qualified Data.Map.Strict as Map
 import qualified Data.PartialOrd as P
 import qualified Data.Set as Set
 import Data.Text (Text)
+import qualified Data.Text as T
 import qualified Data.Char as C
 import qualified Data.Text as DT
 import Morloc.Data.Doc
@@ -200,16 +206,13 @@ resolveEffectSet (EffectSet labels) = labels
 resolveEffectSet (EffectVar _) = Set.empty
 resolveEffectSet (EffectUnion a b) = Set.union (resolveEffectSet a) (resolveEffectSet b)
 
--- | An empty effect set (no effects)
 emptyEffectSet :: EffectSet
 emptyEffectSet = EffectSet Set.empty
 
--- | An IO effect set
 ioEffectSet :: EffectSet
 ioEffectSet = EffectSet (Set.singleton "IO")
 
--- | Check if one effect set is a subset of another (resolved labels).
--- Unsolved EffectVar resolves to empty, so EffectVar is a subset of everything.
+-- | Subset on resolved labels; an unsolved EffectVar is a subset of everything.
 effectSubsetOf :: EffectSet -> EffectSet -> Bool
 effectSubsetOf e1 e2 = Set.isSubsetOf (resolveEffectSet e1) (resolveEffectSet e2)
 
@@ -261,30 +264,28 @@ normalizeEffectSet es =
         (True, [v]) -> EffectVar v
         (_, vlist) -> foldl EffectUnion (EffectSet ls) (map EffectVar vlist)
 
--- | Union of two effect sets, normalized.
 unionEffectSet :: EffectSet -> EffectSet -> EffectSet
 unionEffectSet a b = normalizeEffectSet (EffectUnion a b)
 
 
 ---- Type definitions
 
-{- | Distinguishes the three forms of type declaration:
+{- | How a type name was introduced.
 
 * 'TypedefAlias' -- transparent @type Foo = Bar@: same identity as Bar,
-  same instances, NO per-language overrides allowed. Reduces freely.
+  same instances, no per-language overrides. Reduces freely.
 
 * 'TypedefNewtype' -- nominal @newtype Foo = Bar@: own per-language
   overrides, own instances, inherits only Bar's wire format.
   Opaque to reduction.
 
-* 'TypedefPrimitive' -- @type Bool@, @type List a@, etc.: built-in
-  forward declaration with no RHS. Recognized by the compiler as a
-  base type; has its own per-language overrides (in root-cpp etc.).
-  Opaque to reduction. Cannot be cyclic (no body to chain through).
+* 'TypedefPrimitive' -- @type Bool@, @type List a@, etc.: forward
+  declaration with no RHS; has its own per-language overrides.
+  Opaque to reduction.
+
+* 'TypedefEnum' -- a `data` declaration: nominal like a newtype, with a
+  closed constructor set and a wire form of its own.
 -}
--- | How a type name was introduced. 'TypedefEnum' is a `data` whose
--- constructors all take no arguments: nominal like a newtype, but with a
--- closed constructor set and a one-byte wire form of its own.
 data TypedefKind
   = TypedefAlias
   | TypedefNewtype
@@ -308,31 +309,39 @@ type Scope =
       )
     ]
 
--- | The constructor names of a `data` type, in declaration order, or
--- Nothing if the name is not a `data` type.
+-- | The constructors of a `data` type, in declaration order, or Nothing if
+-- the name is not a `data` type. A constructor's position is its wire tag.
 --
--- A `data` declaration stores its constructor list in its scope body as a
--- list of Str literals. That encoding is an implementation detail and this
--- is the only function that knows it: the alternative was a new 'TypeU'
--- constructor, which would force a decision at every one of the ~100 sites
--- that match on 'TypeU' for the sake of a leaf that never takes part in
--- unification. Reduction stops at the nominal boundary
--- ('stopAtNominalBoundary'), so the body is carried, never expanded.
---
--- A constructor's position in this list is its wire tag.
+-- The scope body encodes the constructors as type-level literals (see
+-- 'dataBodyCtors'); reduction stops at the nominal boundary, so the body
+-- is carried, never expanded.
 --
 -- Keyed by name, so it cannot see through an alias; use 'TypeEval.dataHead'.
 dataCtorsOfName :: Scope -> TVar -> Maybe [(Text, [TypeU])]
-dataCtorsOfName scope v = do
-  entries <- Map.lookup v scope
-  listToMaybe [cs | (_, body, _, _, TypedefEnum) <- entries, Just cs <- [dataBodyCtors body]]
+dataCtorsOfName scope v = snd <$> dataDeclOfName scope v
 
--- | Decode a `data` declaration's body into its constructor table.
---
--- Each constructor is a list whose head is its name and whose tail is its
--- argument types, and the body is the list of those. 'LList' can hold an
--- arbitrary 'TypeU', which is what lets the argument types ride along in a
--- shape the rest of the compiler already knows how to carry.
+-- | A `data` declaration's type parameters and constructors, read from one
+-- declaration.
+dataDeclOfName :: Scope -> TVar -> Maybe ([TVar], [(Text, [TypeU])])
+dataDeclOfName scope v = do
+  entries <- Map.lookup v scope
+  listToMaybe
+    [ ([p | Left (p, _) <- ps], cs)
+    | (ps, body, _, _, TypedefEnum) <- entries
+    , Just cs <- [dataBodyCtors body]
+    ]
+
+-- | Set each parameter to its argument at once: an argument that names a
+-- parameter is not substituted again, and a binder shadowing a parameter
+-- is respected.
+instantiateParams :: Typelike a => [(TVar, a)] -> a -> a
+instantiateParams pairs t =
+  let held = [TV (T.pack ("#" <> show i)) | i <- [0 .. length pairs - 1 :: Int]]
+      named = foldl (\acc ((p, _), h) -> substituteTVar p (tvar h) acc) t (zip pairs held)
+   in foldl (\acc ((_, a), h) -> substituteTVar h a acc) named (zip pairs held)
+
+-- | Decode a `data` declaration's body: a list of constructors, each a list
+-- of its name followed by its argument types.
 dataBodyCtors :: TypeU -> Maybe [(Text, [TypeU])]
 dataBodyCtors (LitU (LList xs)) = mapM oneCtor xs
   where
@@ -366,22 +375,23 @@ data Type
   | NatMulT Type Type
   | NatSubT Type Type
   | NatDivT Type Type
-  | NatVoidT  -- ^ Erased phantom Nat slot. Distinct from NatLitT 0
-              -- (which is a real empty-dim measurement). See note on
-              -- NatVoidU in TypeU below.
-  | StrLitT Text -- ^ Type-level Str literal at the ground level
-  | StrConcatT Type Type -- ^ Type-level Str concatenation at the ground level
-  | StrVoidT -- ^ Erased phantom Str slot. Mirrors NatVoidT.
+  | -- | An erased placeholder of a non-Type kind, distinct from a literal
+    -- of that kind (@NatLitT 0@).
+    VoidT Kind
+  | StrLitT Text
+  | StrConcatT Type Type
   deriving (Show, Ord, Eq)
+
+pattern NatVoidT :: Type
+pattern NatVoidT = VoidT KindNat
+
+pattern StrVoidT :: Type
+pattern StrVoidT = VoidT KindStr
 
 data OpenOrClosed = Open | Closed
   deriving (Show, Ord, Eq)
 
--- | Tags for kind-arithmetic operators carried by 'OpU' on 'TypeU'.
--- Arity is fixed per tag (see 'opArity'); smart constructors enforce it
--- at construction. Introduced in the kind-system cleanup; coexists with
--- the per-kind 'NatAddU'/'StrConcatU'/etc. constructors until migration
--- finishes.
+-- | Kind operators carried by 'OpU'. Arity is fixed per tag ('opArity').
 data OpTag
   = OpNatAdd | OpNatSub | OpNatMul | OpNatDiv     -- arity 2
   | OpStrConcat                                    -- arity 2
@@ -394,16 +404,13 @@ data OpTag
   | OpProjectField                                 -- arity 2
   deriving (Show, Ord, Eq)
 
--- | Kind-tagged type-level literal values carried by 'LitU' on 'TypeU'.
--- Subsumes 'NatLitU' / 'StrLitU' / 'RecEmptyU' + 'RecExtendU' chain /
--- 'ListLitU' / 'SetEmptyU' + 'SetLitU' under one constructor. Named with
--- the 'Ty' prefix to disambiguate from term-level 'Morloc.Namespace.Expr.Lit'.
+-- | Type-level literals carried by 'LitU'.
 data TyLit
-  = LNat Integer              -- ^ Nat literal: 0, 1, 2, ...
-  | LStr Text                 -- ^ Str literal: "x", "y", ...
-  | LRec [(Text, TypeU)]      -- ^ Rec literal: flat list of (field, type)
-  | LList [TypeU]             -- ^ List literal: element types in order
-  | LSet [TypeU]              -- ^ Set literal: canonical-form element types
+  = LNat Integer
+  | LStr Text
+  | LRec [(Text, TypeU)]
+  | LList [TypeU]
+  | LSet [TypeU]              -- ^ canonical form: sorted, deduplicated
   deriving (Show, Ord, Eq)
 
 {- | Full type with quantifiers. 'ExistU' represents existential variables
@@ -412,10 +419,9 @@ variables. This is the primary type representation during typechecking.
 -}
 data TypeU
   = VarU TVar
-  -- | Kind-tagged variable. Nat/Str/Rec variants are surfaced via the
-  -- 'NatVarU' / 'StrVarU' / 'RecVarU' pattern synonyms below. Bare
-  -- 'VarU TVar' represents Type-kinded variables. ListVarU / SetVarU
-  -- remain standalone because their element kind is not tracked here.
+  -- | Kind-tagged variable ('NatVarU', 'StrVarU', 'RecVarU'). 'VarU' is
+  -- Type-kinded; List and Set variables are separate constructors because
+  -- their element kind is not tracked.
   | KVarU (TVar, Kind)
   | ExistU
       TVar
@@ -427,43 +433,27 @@ data TypeU
   | NamU NamType TVar [TypeU] [(Key, TypeU)]
   | EffectU EffectSet TypeU
   | OptionalU TypeU
-  -- | Kind-tagged erased phantom slot. Nat/Str/Rec variants are surfaced
-  -- via 'NatVoidU' / 'StrVoidU' / 'RecVoidU' pattern synonyms. Filled in
-  -- for missing kind-arg positions during weave/eval and for kind
-  -- realignment in 'expandHeadOnly'. Distinct from a literal empty
-  -- value at the corresponding kind (e.g. @NatLitU 0@) so downstream
-  -- consumers (pretty printer, dim reification, equality) can tell
-  -- phantoms apart from real measurements.
+  -- | Kind-tagged erased phantom slot ('NatVoidU', 'StrVoidU', 'RecVoidU'),
+  -- filling a missing kind argument. Distinct from a literal such as
+  -- @NatLitU 0@ so that phantoms are not mistaken for real measurements.
   | VoidU Kind
-  -- List-kinded constructs. Ordered, position-preserving sequences;
-  -- equality is element-wise. Element kind is fixed at the carrier
-  -- (e.g. KindList KindStr); the TypeU level does not track it.
   | ListVarU TVar -- ^ List-kinded variable, never quantified by ForallU.
   | ListVoidU -- ^ Erased phantom List slot.
-  -- Set-kinded constructs. Order/duplicate-insensitive; canonical form
-  -- is sorted dedup.
   | SetVarU TVar -- ^ Set-kinded variable, never quantified by ForallU.
   | SetVoidU -- ^ Erased phantom Set slot.
-  -- Cross-kind functions (KeysU, ListToSetU, SizeU, ProjectFieldU,
-  -- RecSingletonU) are now pattern synonyms over 'OpU' (see below).
-  -- Rec/List operators 'RecRestrictU' and 'RecDiffListU' are also pattern
-  -- synonyms.
-  -- Unified carriers (kind-system cleanup, Stage 1). 'OpU' subsumes every
-  -- kind-arithmetic operator above (NatAdd/NatSub/.../KeysU/.../etc); 'LitU'
-  -- subsumes every kind literal (NatLit/StrLit/RecEmpty+RecExtend/ListLit/
-  -- SetLit). Arity for 'OpU' is fixed by 'opArity' and enforced by smart
-  -- constructors ('mkNatAdd', ...).
+  -- | Every kind operator; the per-operator forms below are pattern synonyms.
+  -- Build with the smart constructors ('mkNatAdd', ...), which enforce
+  -- 'opArity'.
   | OpU OpTag [TypeU]
   | LitU TyLit
-  | LabeledU TVar TypeU -- ^ Transient: m@Int -> LabeledU (TV "m") Int, stripped in desugar
+  | LabeledU TVar TypeU -- ^ m@Int: a signature argument's label, or a newtype header's (DIM-9)
   deriving (Show, Ord, Eq)
 
--- Pattern synonyms surfacing kind-specific views of 'KVarU' / 'VoidU'
--- and the unified 'OpU' / 'LitU' carriers. Bidirectional; usable in
--- both expression and pattern position. List/Set kept as standalone
--- constructors because their element kind is not tracked on 'KVarU'.
 pattern NatVarU :: TVar -> TypeU
 pattern NatVarU v = KVarU (v, KindNat)
+
+pattern IntVarU :: TVar -> TypeU
+pattern IntVarU v = KVarU (v, KindInt)
 
 pattern StrVarU :: TVar -> TypeU
 pattern StrVarU v = KVarU (v, KindStr)
@@ -525,10 +515,7 @@ pattern SetDiffU a b = OpU OpSetDiff [a, b]
 pattern RecEmptyU :: TypeU
 pattern RecEmptyU = LitU (LRec [])
 
--- Single-field Rec extension. The label is carried as a 'LitU (LStr k)'
--- in the first operand position so 'OpU OpRecExtend' has uniform shape
--- (no per-op data in 'OpTag'). The pattern synonym is bidirectional and
--- only matches when the label slot holds a literal Str.
+-- Matches only when the label slot holds a literal Str.
 pattern RecExtendU :: Text -> TypeU -> TypeU -> TypeU
 pattern RecExtendU k v rest = OpU OpRecExtend [LitU (LStr k), v, rest]
 
@@ -544,10 +531,8 @@ pattern RecRestrictU a b = OpU OpRecRestrict [a, b]
 pattern RecDiffListU :: TypeU -> TypeU -> TypeU
 pattern RecDiffListU a b = OpU OpRecDiffList [a, b]
 
--- | Drop a fixed set of named fields from a record. The 'Text' name list
--- is encoded as a 'LitU (LList ...)' of 'LitU (LStr _)' so it folds into
--- the existing 'OpRecDiffList' op. The pattern only matches when every
--- list element is a literal Str.
+-- | Drop a fixed set of named fields from a record. Matches only when every
+-- listed name is a literal Str.
 pattern RecDiffU :: TypeU -> [Text] -> TypeU
 pattern RecDiffU r ks <- OpU OpRecDiffList [r, (recDiffKeys -> Just ks)]
   where RecDiffU r ks = OpU OpRecDiffList [r, LitU (LList (map (LitU . LStr) ks))]
@@ -574,17 +559,8 @@ pattern ProjectFieldU r f = OpU OpProjectField [r, f]
 pattern RecSingletonU :: TypeU -> TypeU -> TypeU
 pattern RecSingletonU k v = OpU OpRecSingleton [k, v]
 
--- | The pattern synonyms above plus the kind-specific carriers
--- exhaustively cover 'TypeU'. GHC's exhaustiveness checker cannot infer
--- this on its own (especially because 'RecDiffU' uses a view pattern and
--- 'RecExtendU' requires a specific shape in slot 0), so we assert it
--- explicitly.
--- Two COMPLETE pragmas: one for code that pattern-matches through the
--- kind-specific synonyms (NatVarU / StrVarU / RecVarU / NatVoidU / ...),
--- and one for code that pattern-matches on the underlying KVarU / VoidU
--- carriers directly. GHC accepts either as exhaustive.
 {-# COMPLETE
-    VarU, NatVarU, ExistU, ForallU, FunU, AppU, NamU, EffectU, OptionalU,
+    VarU, NatVarU, IntVarU, ExistU, ForallU, FunU, AppU, NamU, EffectU, OptionalU,
     NatVoidU, StrVarU, StrVoidU, RecVarU, RecVoidU,
     ListVarU, ListVoidU, SetVarU, SetVoidU, LabeledU,
     NatLitU, NatAddU, NatSubU, NatMulU, NatDivU,
@@ -614,12 +590,8 @@ data EType
   }
   deriving (Show, Eq, Ord)
 
--- | Type-level constraints attached to a signature via @=>@.
---
--- - 'Constraint' is the existing typeclass form, e.g. @(Eq a) =>@.
--- - 'CMember' / 'CSubset' / 'CDisjoint' are Stage-9 generic primitives
---   over the new kinds. They are written with the same @=>@ syntax but
---   carry a fixed positional shape rather than a free class name.
+-- | Constraints attached to a signature via @=>@: a typeclass constraint,
+-- or one of the fixed-shape set primitives below.
 data Constraint
   = Constraint ClassName [TypeU]
   | CMember TypeU TypeU       -- ^ Member a s :: a is an element of set s
@@ -627,31 +599,23 @@ data Constraint
   | CDisjoint TypeU TypeU     -- ^ Disjoint s1 s2 :: s1 and s2 share no elements
   deriving (Show, Eq, Ord)
 
--- a CLI option that takes an argument
 data CliOpt
   = CliOptShort Char
   | CliOptLong Text
   | CliOptBoth Char Text
   deriving (Show, Ord, Eq)
 
--- | Where the bytes for an argument come from. The implicit default
--- (no `source:` field) is category-driven: scalar primitives and `Str`
--- parse the argv string directly (inline), lists/tuples/records use the
--- runtime auto-classifier (JSON inline OR file). `SourceAuto` is not a
--- writable value; users opt into a non-default by writing `source: file`
--- or `source: inline` (the only meaningful inline case is `[UInt8]`
--- with `form: bytes`/`form: bytes-only`).
+-- | Where an argument's bytes come from (`@source`). Without it, scalars and
+-- `Str` are read inline and other types are auto-classified as inline JSON
+-- or a file.
 data SourceAtom = SourceInline | SourceFile
   deriving (Show, Ord, Eq)
 
--- | How to interpret the bytes once they are resolved. Only meaningful
--- on lists. The implicit default (no `form:`) is the structured-format
--- classifier (JSON / MsgPack / packet / Arrow / ...); it never falls
--- through to raw bytes, so raw-byte interpretation is opt-in via
--- `FormBytes` (sniff packet -> raw bytes, the friendly path) or
--- `FormBytesOnly` (raw bytes only, never sniff). `FormPacket` is the
--- strictness guarantee (packet only, loud-fail otherwise). `FormTable`
--- reads a headed table (CLI-13).
+-- | How to interpret an argument's bytes (`@form`). Without it, the bytes are
+-- classified as a structured format and never read as raw bytes.
+-- `FormBytes` sniffs for a packet and falls back to raw bytes;
+-- `FormBytesOnly` never sniffs; `FormPacket` accepts only a packet;
+-- `FormTable` reads a headed table (CLI-13).
 data FormAtom = FormPacket | FormBytes | FormBytesOnly | FormList | FormTable
   deriving (Show, Ord, Eq)
 
@@ -659,9 +623,7 @@ data FormAtom = FormPacket | FormBytes | FormBytesOnly | FormList | FormTable
 newtype PathPerm = PathPerm Text
   deriving (Show, Ord, Eq)
 
--- | A single value-invariant for the new `check.<kind>:` namespace.
--- Initially only the `path` check kind is supported; future kinds slot in
--- as additional constructors without changing the docstring grammar.
+-- | A value invariant declared by `@check.<kind>`.
 data Check
   = CheckPath PathPerm
   deriving (Show, Ord, Eq)
@@ -676,20 +638,13 @@ data ArgSource
   | ArgValue     -- ^ `@value`, the formatted payload
   deriving (Show, Ord, Eq)
 
--- | The three terms a folding formatter declares. Grouping them makes
--- "an init with no step" unrepresentable: a formatter either folds and
--- names all three, or does not fold at all.
+-- | The three terms a folding formatter declares; a formatter names all
+-- three or does not fold.
 --
--- The accumulator is threaded by the synthesized body, so nothing here
--- fixes its type; that is settled when the synthesized body is
--- typechecked and the three terms must agree with each other and with
--- the handler that consumes the result.
---
--- The three must form a monoid: one accumulator exists per thread that
--- folds, each starting from 'fsInit', so unless 'fsInit' is an identity
--- for 'fsCombine' the answer depends on how many threads the producer
--- used. Neither that law nor 'fsCombine's associativity is checkable
--- here; both are the caller's to keep, as in every parallel fold.
+-- They must form a monoid: several accumulators may each start from
+-- 'fsInit' and be merged with 'fsCombine', so unless 'fsInit' is an
+-- identity and 'fsCombine' associative the answer depends on how the
+-- stream was split. Neither law is checked.
 data FoldSpec = FoldSpec
   { fsStep    :: EVar  -- ^ @b -> [a] -> b@, folds one batch into the accumulator
   , fsInit    :: EVar  -- ^ @b@, the identity: starts every accumulator, and
@@ -698,11 +653,9 @@ data FoldSpec = FoldSpec
   }
   deriving (Show, Ord, Eq)
 
--- | One `@with`/`@render` formatter declaration on a signature preamble.
--- Declares a command-scoped CLI flag that dispatches to a compile-time-
--- synthesized entry composing the referenced term with the head manifold
--- (see Frontend/Desugar.hs). The term's type discipline is enforced by
--- the normal typechecker.
+-- | One `@with`/`@render` formatter declaration on a signature preamble: a
+-- command flag that dispatches to a synthesized entry applying 'wsTerm' to
+-- the command's output.
 data WithSpec = WithSpec
   { wsShort   :: Maybe Char
   , wsLong    :: Text
@@ -732,14 +685,10 @@ data ParseSpec = ParseSpec
   }
   deriving (Show, Ord, Eq)
 
--- | Compose a mangled entry-point name from an export's name and one
--- of its `--' with:` long flags. Shared between the frontend (which
--- synthesizes the AssE) and the nexus manifest emitter (which reads
--- the same prefix to mark the emitted Command as `internal: true`).
+-- | The entry-point name of an export's `@with`/`@render` action.
 --
--- The `mlcp_` prefix sits inside every pool language's identifier
--- grammar and never contains `__`, which C++ reserves per lex.name.
--- Hyphens in the long flag become underscores.
+-- The `mlcp_` prefix is a legal identifier in every pool language and never
+-- contains `__`, which C++ reserves (lex.name).
 mangleTerminalName :: EVar -> Text -> EVar
 mangleTerminalName = mangleWithPrefix "mlcp_"
 
@@ -800,6 +749,79 @@ mangleWithPrefix prefix (EV parent) long =
 -- so no declared record can share it.
 anonRecordVar :: TVar
 anonRecordVar = TV "@REC"
+
+-- | The kind of the value of a type-level operator.
+opKind :: OpTag -> Kind
+opKind op = case op of
+  OpNatAdd -> KindNat
+  OpNatSub -> KindNat
+  OpNatMul -> KindNat
+  OpNatDiv -> KindNat
+  OpSize -> KindNat
+  OpStrConcat -> KindStr
+  OpRecExtend -> KindRec
+  OpRecUnion -> KindRec
+  OpRecIntersect -> KindRec
+  OpRecRestrict -> KindRec
+  OpRecDiffList -> KindRec
+  OpRecSingleton -> KindRec
+  OpListApp -> KindList KindStr
+  OpSetUnion -> KindSet KindStr
+  OpSetInter -> KindSet KindStr
+  OpSetDiff -> KindSet KindStr
+  OpKeys -> KindSet KindStr
+  OpListToSet -> KindSet KindStr
+  OpProjectField -> KindType
+
+-- | A kind that may fill a Nat position: Nat, or Int, which no parameter
+-- declares and which fills only Nat positions (KIND-1).
+fillsNat :: Kind -> Bool
+fillsNat k = k == KindNat || k == KindInt
+
+-- | The kind of a type argument whose form fixes it: a literal, an
+-- operator, a placeholder or a kinded variable. Nothing for a Type-kinded
+-- form and for a ground row, which is a Rec argument or a record type
+-- depending on the parameter it fills (see
+-- 'Morloc.CodeGenerator.ValueArgs').
+kindOfU :: TypeU -> Maybe Kind
+kindOfU t = case t of
+  KVarU (_, k) -> Just k
+  VoidU k -> Just k
+  ListVarU _ -> Just (KindList KindStr)
+  ListVoidU -> Just (KindList KindStr)
+  SetVarU _ -> Just (KindSet KindStr)
+  SetVoidU -> Just (KindSet KindStr)
+  LitU (LNat _) -> Just KindNat
+  LitU (LStr _) -> Just KindStr
+  LitU (LList _) -> Just (KindList KindStr)
+  LitU (LSet _) -> Just (KindSet KindStr)
+  LitU (LRec _) -> Nothing
+  r@(RecExtendU _ _ _) -> maybe (Just KindRec) (const Nothing) (groundRecFields r)
+  OpU op _ -> case opKind op of
+    KindType -> Nothing
+    k -> Just k
+  LabeledU _ x -> kindOfU x
+  _ -> Nothing
+
+-- | 'kindOfU' for an erased type.
+kindOfT :: Type -> Maybe Kind
+kindOfT t = case t of
+  NatLitT _ -> Just KindNat
+  NatAddT _ _ -> Just KindNat
+  NatMulT _ _ -> Just KindNat
+  NatSubT _ _ -> Just KindNat
+  NatDivT _ _ -> Just KindNat
+  StrLitT _ -> Just KindStr
+  StrConcatT _ _ -> Just KindStr
+  VoidT k -> Just k
+  _ -> Nothing
+
+-- | The arguments whose kind is not fixed by their form, and the number of
+-- the others.
+partitionKindArgs :: (a -> Maybe Kind) -> [a] -> ([a], Int)
+partitionKindArgs kindOf ts =
+  let types = [x | x <- ts, isNothing (kindOf x)]
+   in (types, length ts - length types)
 
 -- | Recognizes the compiler-internal name prefix produced by
 -- 'mangleTerminalName'. The nexus filters these out of the top-level
@@ -897,7 +919,6 @@ data ArgDoc
   -- constructor, in declaration order.
   deriving (Show, Ord, Eq)
 
--- Wraps all information stored in a type definition
 data ExprTypeE = ExprTypeE
   { exprTypeConcreteForm :: Maybe (Lang, Bool)
   , exprTypeName :: TVar
@@ -916,6 +937,9 @@ class Typelike a where
   free :: a -> Set.Set a
 
   substituteTVar :: TVar -> a -> a -> a
+
+  -- | A type that is just this variable.
+  tvar :: TVar -> a
 
   nargs :: a -> Int
   nargs (typeOf -> FunT ts _) = length ts
@@ -953,6 +977,8 @@ instance Defaultable ArgDocVars where
       }
 
 instance Typelike Type where
+  tvar = VarT
+
   typeOf = id
 
   substituteTVar v0 r0 t0 = sub t0
@@ -971,10 +997,9 @@ instance Typelike Type where
       sub (NatMulT a b) = NatMulT (sub a) (sub b)
       sub (NatSubT a b) = NatSubT (sub a) (sub b)
       sub (NatDivT a b) = NatDivT (sub a) (sub b)
-      sub t@NatVoidT = t
+      sub t@(VoidT _) = t
       sub t@(StrLitT _) = t
       sub (StrConcatT a b) = StrConcatT (sub a) (sub b)
-      sub t@StrVoidT = t
 
   free (UnkT _) = Set.empty
   free v@(VarT _) = Set.singleton v
@@ -988,20 +1013,16 @@ instance Typelike Type where
   free (NatMulT a b) = Set.union (free a) (free b)
   free (NatSubT a b) = Set.union (free a) (free b)
   free (NatDivT a b) = Set.union (free a) (free b)
-  free NatVoidT = Set.empty
+  free (VoidT _) = Set.empty
   free (StrLitT _) = Set.empty
   free (StrConcatT a b) = Set.union (free a) (free b)
-  free StrVoidT = Set.empty
 
   normalizeType (FunT ts1 (FunT ts2 ft)) = normalizeType $ FunT (ts1 <> ts2) ft
-  -- Flatten nested AppT heads -- see the TypeU instance below for context.
   normalizeType (AppT (AppT h innerArgs) outerArgs) =
     normalizeType (AppT h (innerArgs ++ outerArgs))
   normalizeType (AppT t ts) = AppT (normalizeType t) (map normalizeType ts)
   normalizeType (NamT n v ds ks) = NamT n v (map normalizeType ds) (zip (map fst ks) (map (normalizeType . snd) ks))
   normalizeType (EffectT effs t) = EffectT effs (normalizeType t)
-  -- An optional never wraps an effect: <E> ?T is the canonical form, so
-  -- push an OptionalT under a directly-nested EffectT.
   normalizeType (OptionalT t) = OptionalT (normalizeType t)
   normalizeType (NatAddT a b) = NatAddT (normalizeType a) (normalizeType b)
   normalizeType (NatMulT a b) = NatMulT (normalizeType a) (normalizeType b)
@@ -1022,16 +1043,15 @@ uncurryU (FunU ts r) = case uncurryU r of
 uncurryU t = ([], t)
 
 instance Typelike TypeU where
+  tvar = VarU
+
   typeOf (VarU v) = VarT v
-  typeOf (NatVarU _) = NatVoidT
   typeOf (ExistU _ (ps, _) (rs@(_ : _), _)) = NamT NamRecord (TV "Record") (map typeOf ps) (map (second typeOf) rs)
   typeOf (ExistU v _ _) = typeOf (ForallU v (VarU v))
   typeOf (ForallU v t) = substituteTVar v (UnkT v) (typeOf t)
-  -- One type, one spelling: `a -> (b -> c)` is `a -> b -> c`. How a function's
-  -- arguments are grouped is an implementation's choice (a source's @rsize@),
-  -- and a lambda that does work between its arguments is staged, so nothing a
-  -- morloc value is compiled to depends on how its type was parenthesized. An
-  -- effect or an empty argument list is a suspension, not a grouping.
+  -- `a -> (b -> c)` is `a -> b -> c`; grouping is an implementation's choice
+  -- (a source's @rsize@). An effect or an empty argument list is a
+  -- suspension, not a grouping.
   typeOf (FunU ts t) = case typeOf t of
     FunT us r | not (null ts), not (null us) -> FunT (map typeOf ts ++ us) r
     t' -> FunT (map typeOf ts) t'
@@ -1039,56 +1059,36 @@ instance Typelike TypeU where
   typeOf (NamU n o ps rs) = NamT n o (map typeOf ps) (zip (map fst rs) (map (typeOf . snd) rs))
   typeOf (EffectU effs t) = mkEffectT (resolveEffectSet effs) (typeOf t)
   typeOf (OptionalU t) = OptionalT (typeOf t)
-  typeOf NatVoidU = NatVoidT
-  typeOf (StrVarU _) = StrVoidT  -- free Str var erases to StrVoidT at ground level
-  typeOf StrVoidU = StrVoidT
-  -- Rec-kinded constructs collapse to NatVoidT when polymorphic (free row
-  -- variable somewhere in the chain). A fully ground RecExtend chain
-  -- terminating in RecEmptyU lowers to a NamT NamRecord so the runtime
-  -- layer can read the column schema (used for Arrow Tables in
-  -- nexus IO). See plans/tables/10-rec-solver-decidability.md.
-  typeOf (RecVarU _) = NatVoidT
+  typeOf (KVarU (_, KindInt)) = NatVoidT
+  typeOf (KVarU (_, k)) = VoidT k
+  typeOf (VoidU k) = VoidT k
+  -- A ground Rec chain lowers to a record so its column schema survives
+  -- (Arrow tables); a row-polymorphic one erases.
   typeOf r@(RecExtendU _ _ _) = case groundRecFields r of
     Just fs -> NamT NamRecord anonRecordVar [] [(Key k, typeOf t) | (k, t) <- fs]
-    Nothing -> NatVoidT
-  typeOf RecVoidU = NatVoidT
-  -- List- and Set-kinded constructs are entirely phantom at the ground
-  -- level; they contribute no runtime type information. They erase to
-  -- NatVoidT for the same reason Rec polymorphic forms do: the codegen
-  -- layer doesn't have a List/Set ground type to map to.
-  typeOf (ListVarU _) = NatVoidT
-  typeOf ListVoidU = NatVoidT
-  typeOf (SetVarU _) = NatVoidT
-  typeOf SetVoidU = NatVoidT
-  -- Kind-generic catch-all: KVarU / VoidU with kinds not covered above.
-  -- Nat kind -> NatVoidT, Str kind -> StrVoidT, others -> NatVoidT (there is
-  -- no per-kind void Type for List/Set/Rec; they all erase to NatVoidT).
-  typeOf (KVarU (_, KindStr)) = StrVoidT
-  typeOf (KVarU _) = NatVoidT
-  typeOf (VoidU KindStr) = StrVoidT
-  typeOf (VoidU _) = NatVoidT
-  -- Cross-kind functions are now pattern synonyms over 'OpU'; their
-  -- typeOf is dispatched via the unified 'OpU _ _' fallback below
-  -- (erase to NatVoidT). The Nat / Str cases reduce to ground forms
-  -- through the kind-specific OpU clauses.
-  -- Unified carriers: behave identically to the per-kind constructors.
-  -- Stage-1 coexistence; once per-kind constructors are removed these
-  -- become the only path.
+    Nothing -> VoidT KindRec
+  typeOf (ListVarU _) = VoidT (KindList KindStr)
+  typeOf ListVoidU = VoidT (KindList KindStr)
+  typeOf (SetVarU _) = VoidT (KindSet KindStr)
+  typeOf SetVoidU = VoidT (KindSet KindStr)
   typeOf (OpU OpNatAdd [a, b]) = NatAddT (typeOf a) (typeOf b)
   typeOf (OpU OpNatSub [a, b]) = NatSubT (typeOf a) (typeOf b)
   typeOf (OpU OpNatMul [a, b]) = NatMulT (typeOf a) (typeOf b)
   typeOf (OpU OpNatDiv [a, b]) = NatDivT (typeOf a) (typeOf b)
   typeOf (OpU OpStrConcat [a, b]) = StrConcatT (typeOf a) (typeOf b)
-  typeOf (OpU _ _) = NatVoidT  -- Rec/List/Set/cross-kind ops erase to phantom
+  typeOf (OpU op _) = case opKind op of
+    KindType -> NatVoidT
+    k -> VoidT k
   typeOf (LitU (LNat n)) = NatLitT n
   typeOf (LitU (LStr s)) = StrLitT s
   typeOf (LitU (LRec fs)) = NamT NamRecord anonRecordVar [] [(Key k, typeOf t) | (k, t) <- fs]
-  typeOf (LitU (LList _)) = NatVoidT
-  typeOf (LitU (LSet _)) = NatVoidT
+  typeOf (LitU (LList _)) = VoidT (KindList KindStr)
+  typeOf (LitU (LSet _)) = VoidT (KindSet KindStr)
   typeOf (LabeledU _ t) = typeOf t
 
   free v@(VarU _) = Set.singleton v
   free (NatVarU _) = Set.empty
+  free (IntVarU _) = Set.empty
   free v@(ExistU _ ([], _) (rs, _)) = Set.unions $ Set.singleton v : map (free . snd) rs
   free (ExistU v (ts, _) _) = Set.unions $ Set.singleton (AppU (VarU v) ts) : map free ts
   free (ForallU v t) = Set.delete (VarU v) (free t)
@@ -1098,29 +1098,18 @@ instance Typelike TypeU where
   free (EffectU _ t) = free t
   free (OptionalU t) = free t
   free NatVoidU = Set.empty
-  -- Str-kinded constructs are implicitly forall-quantified (like NatVarU);
-  -- they contribute no free type variables. See plans/tables/04-str-solver-scope.md.
+  -- Kind-tagged variables are implicitly quantified and are not free
+  -- Type-kinded variables.
   free (StrVarU _) = Set.empty
   free StrVoidU = Set.empty
   free (RecVarU _) = Set.empty
   free RecVoidU = Set.empty
-  -- List- and Set-kinded vars are implicitly forall-quantified (like Nat,
-  -- Str, Rec vars); they contribute no free Type-kinded variables.
   free (ListVarU _) = Set.empty
   free ListVoidU = Set.empty
   free (SetVarU _) = Set.empty
   free SetVoidU = Set.empty
-  -- Kind-generic catch-all for KVarU / VoidU carriers of kinds not covered
-  -- by the specific pattern synonyms above (e.g. VoidU KindType inserted
-  -- by the gradual-desugar pass at 'fillMissingKindArgs'). All kind-tagged
-  -- variables and voids are inert w.r.t. Type-kinded free variables.
   free (KVarU _) = Set.empty
   free (VoidU _) = Set.empty
-  -- Cross-kind functions are pattern synonyms over 'OpU'; their
-  -- recursion is handled by the unified 'OpU _ args' clause below.
-  -- Unified carriers: 'OpU' is uniform structural recursion across all
-  -- operators (no per-op logic needed). Literals are inert except for
-  -- recursive payloads in LRec/LList/LSet.
   free (OpU _ args) = Set.unions (map free args)
   free (LitU (LNat _)) = Set.empty
   free (LitU (LStr _)) = Set.empty
@@ -1142,12 +1131,12 @@ instance Typelike TypeU where
       sub t@(VarU v)
         | v0 == v = r0
         | otherwise = t
-      -- Kind-tagged carriers participate in substitution by name. A
-      -- caller that swaps a NatVarU (or Str/Rec/List/Set var) is
-      -- expected to pass a value of matching kind; a caller that swaps
-      -- a Type var will never match a kind-tagged carrier's name in
-      -- practice because kind namespaces are freshened separately.
+      -- Kind-tagged variables are substituted by name; the caller must pass
+      -- a replacement of matching kind.
       sub t@(NatVarU v)
+        | v0 == v = r0
+        | otherwise = t
+      sub t@(IntVarU v)
         | v0 == v = r0
         | otherwise = t
       sub t@(StrVarU v)
@@ -1176,17 +1165,10 @@ instance Typelike TypeU where
       sub t@RecVoidU = t
       sub t@ListVoidU = t
       sub t@SetVoidU = t
-      -- Kind-generic catch-all for KVarU / VoidU with kinds not covered
-      -- by the specific pattern synonyms above (e.g. VoidU KindType from
-      -- the gradual-desugar pass).
       sub t@(KVarU (v, _))
         | v0 == v = r0
         | otherwise = t
       sub t@(VoidU _) = t
-      -- Cross-kind functions are pattern synonyms over 'OpU'; their
-      -- substitution is handled by the unified 'OpU op args' clause below.
-      -- Unified carriers: uniform structural recursion. Lit payloads recurse
-      -- through their type-carrying sub-parts.
       sub (OpU op args) = OpU op (map sub args)
       sub (LitU (LNat n)) = LitU (LNat n)
       sub (LitU (LStr s)) = LitU (LStr s)
@@ -1196,11 +1178,9 @@ instance Typelike TypeU where
       sub (LabeledU n t) = LabeledU n (sub t)
 
   normalizeType (FunU ts1 (FunU ts2 ft)) = normalizeType $ FunU (ts1 <> ts2) ft
-  -- Flatten nested AppU heads. Substituting a partial-applied class
-  -- type into a method's @f a@ signature produces @AppU (AppU H [n])
-  -- [a]@; the parser-produced canonical shape is @AppU H [n, a]@.
-  -- Downstream code (weave, evaluateStep, codegen) only matches the
-  -- flat shape.
+  -- Substituting a partially applied class type into a method's @f a@
+  -- yields @AppU (AppU H [n]) [a]@; downstream code matches only the flat
+  -- @AppU H [n, a]@.
   normalizeType (AppU (AppU h innerArgs) outerArgs) =
     normalizeType (AppU h (innerArgs ++ outerArgs))
   normalizeType (AppU t ts) = AppU (normalizeType t) (map normalizeType ts)
@@ -1208,11 +1188,9 @@ instance Typelike TypeU where
   normalizeType (ForallU v t) = ForallU v (normalizeType t)
   normalizeType (ExistU v (map normalizeType -> ps, pc) (map (second normalizeType) -> rs, rc)) = ExistU v (ps, pc) (rs, rc)
   normalizeType (EffectU effs t) = mkEffectU effs (normalizeType t)
-  -- An optional never wraps an effect: <E> ?T is the canonical form, so
-  -- push an OptionalU under a directly-nested EffectU.
   normalizeType (OptionalU t) = OptionalU (normalizeType t)
   normalizeType t@(NatVarU _) = t
-  -- Unified carriers: recurse into payload so nested forms are normalized.
+  normalizeType t@(IntVarU _) = t
   normalizeType (OpU op args) = OpU op (map normalizeType args)
   normalizeType (LitU (LRec fs)) = LitU (LRec [(k, normalizeType t) | (k, t) <- fs])
   normalizeType (LitU (LList es)) = LitU (LList (map normalizeType es))
@@ -1224,125 +1202,99 @@ instance Typelike TypeU where
 ----- Partial order logic
 
 instance P.PartialOrd TypeU where
-  (<=) (VarU v1) (VarU v2) = v1 == v2
-  (<=) (NatVarU v1) (NatVarU v2) = v1 == v2
-  (<=) (ExistU v1 (ts1, _) (rs1, _)) (ExistU v2 (ts2, _) (rs2, _)) =
-    v1 == v2
-      && length ts1 == length ts2
-      && and (zipWith (P.<=) ts1 ts2)
-      && and [maybe False (t1 P.<=) (lookup k rs2) | (k, t1) <- rs1]
-  (<=) (ForallU v t1) t2
-    | (P.==) (ForallU v t1) t2 = True
-    | otherwise = (P.<=) (substituteFirst v t1 t2) t2
-  (<=) (FunU (t11 : rs1) t12) (FunU (t21 : rs2) t22) = t11 P.<= t21 && FunU rs1 t12 P.<= FunU rs2 t22
-  (<=) (FunU [] t12) (FunU [] t22) = t12 P.<= t22
-  (<=) (AppU t1 (t11 : rs1)) (AppU t2 (t21 : rs2)) = t11 P.<= t21 && AppU t1 rs1 P.<= AppU t2 rs2
-  (<=) (AppU t1 []) (AppU t2 []) = t1 P.<= t2
-  (<=) (NamU o1 n1 ps1 ((k1, e1) : rs1)) (NamU o2 n2 ps2 es2) =
-    case DL.partition ((== k1) . fst) es2 of
-      ([(_, e2)], rs2) -> e1 P.<= e2 && NamU o1 n1 ps1 rs1 P.<= NamU o2 n2 ps2 rs2
-      _ -> False
-  (<=) (NamU o1 n1 ps1 []) (NamU o2 n2 ps2 []) =
-    o1 == o2 && n1 == n2 && length ps1 == length ps2
-  (<=) (EffectU e1 t1) (EffectU e2 t2) = e1 == e2 && t1 P.<= t2
-  (<=) (OptionalU t1) (OptionalU t2) = t1 P.<= t2
-  -- NatVoid is wildcard-compatible with any Nat: erased phantoms compare
-  -- as equal to any real (or other erased) Nat slot. Nat-op and Nat-lit
-  -- wildcards are now handled below via the unified-carrier rules.
-  (<=) NatVoidU (NatVarU _) = True
-  (<=) (NatVarU _) NatVoidU = True
-  (<=) NatVoidU NatVoidU = True
-  -- Unified-carrier subtyping: structural for matching tags; NatVoid
-  -- wildcards extend to OpU Nat-ops and LitU LNat so the new forms are
-  -- interchangeable with NatAddU/NatLitU/etc at the subtype level.
-  (<=) (OpU op1 args1) (OpU op2 args2) =
-    op1 == op2
-      && length args1 == length args2
-      && and (zipWith (P.<=) args1 args2)
-  (<=) (LitU l1) (LitU l2) = l1 == l2
-  (<=) NatVoidU (OpU op _) = isNatOpTag op
-  (<=) (OpU op _) NatVoidU = isNatOpTag op
-  (<=) NatVoidU (LitU (LNat _)) = True
-  (<=) (LitU (LNat _)) NatVoidU = True
-  (<=) (LabeledU _ t1) t2 = t1 P.<= t2
-  (<=) t1 (LabeledU _ t2) = t1 P.<= t2
-  (<=) _ _ = False
+  (<=) = generalizes False
 
-  -- Alpha-equivalence, so that two types binding the same variables in a
-  -- different order compare equal. The subtyping rules above consult this
-  -- before their own quantifier handling, so ordering is settled in one place.
+  -- Alpha-equivalence: binding the same variables in a different order
+  -- gives an equal type.
   (==) = alphaEq
 
-substituteFirst :: TVar -> TypeU -> TypeU -> TypeU
-substituteFirst v t1 t2 = case findFirst v t1 t2 of
-  (Just t) -> substituteTVar v t t1
-  Nothing -> t1
-
-findFirst :: TVar -> TypeU -> TypeU -> Maybe TypeU
-findFirst v = f
+-- | Whether the first type instantiates to the second. Its forall-bound
+-- variables may each take one value, and so may its free kind variables
+-- when @kinds@ is set (they are implicitly quantified in an instance head);
+-- every variable of the second type is fixed. An erased Nat placeholder
+-- matches any Nat either way.
+generalizes :: Bool -> TypeU -> TypeU -> Bool
+generalizes kinds t1 t2 = isJust (match flex0 t1 t2 Map.empty)
   where
-    f (VarU v') t2
-      | v == v' = Just t2
-      | otherwise = Nothing
-    f (NatVarU v') t2
-      | v == v' = Just t2
-      | otherwise = Nothing
-    f (StrVarU v') t2
-      | v == v' = Just t2
-      | otherwise = Nothing
-    f (RecVarU v') t2
-      | v == v' = Just t2
-      | otherwise = Nothing
-    f (ListVarU v') t2
-      | v == v' = Just t2
-      | otherwise = Nothing
-    f (SetVarU v') t2
-      | v == v' = Just t2
-      | otherwise = Nothing
-    f (ForallU v1 t1) (ForallU v2 t2)
-      | v == v1 = Nothing
-      | otherwise = f t1 (substituteTVar v2 (VarU v1) t2)
-    f (ForallU v1 t1) t2
-      | v == v1 = Nothing
-      | otherwise = f (substituteTVar v1 (VarU v1) t1) t2
-    f (FunU ts1 t1) (FunU ts2 t2) =
-      foldl firstOf Nothing (zipWith f (ts1 <> [t1]) (ts2 <> [t2]))
-    f (AppU t1 ts1) (AppU t2 ts2) =
-      foldl firstOf Nothing (zipWith f (t1 : ts1) (t2 : ts2))
-    f (NamU o1 n1 ps1 ((k1, e1) : rs1)) (NamU o2 n2 ps2 es2) =
-      case DL.partition ((== k1) . fst) es2 of
-        ([(_, e2)], rs2) -> firstOf (f e1 e2) (f (NamU o1 n1 ps1 rs1) (NamU o2 n2 ps2 rs2))
-        _ -> Nothing
-    f (EffectU _ t1) (EffectU _ t2) = f t1 t2
-    f (OptionalU t1) (OptionalU t2) = f t1 t2
-    -- Unified-carrier matching: same op + same arity recurses pairwise.
-    -- LRec recurses on field values when keys agree in order.
-    f (OpU op1 args1) (OpU op2 args2)
-      | op1 == op2 && length args1 == length args2 =
-          foldl firstOf Nothing (zipWith f args1 args2)
-      | otherwise = Nothing
-    f (LitU (LRec fs1)) (LitU (LRec fs2))
-      | map fst fs1 == map fst fs2 =
-          foldl firstOf Nothing (zipWith f (map snd fs1) (map snd fs2))
-      | otherwise = Nothing
-    f (LitU (LList es1)) (LitU (LList es2))
-      | length es1 == length es2 =
-          foldl firstOf Nothing (zipWith f es1 es2)
-      | otherwise = Nothing
-    f (LitU (LSet es1)) (LitU (LSet es2))
-      | length es1 == length es2 =
-          foldl firstOf Nothing (zipWith f es1 es2)
-      | otherwise = Nothing
-    f (LabeledU _ t1) t2 = f t1 t2
-    f t1 (LabeledU _ t2) = f t1 t2
-    f _ _ = Nothing
+    flex0 = Set.fromList [v | kinds, (v, form) <- varForms t1, isKindForm form]
+    isKindForm VarPlain = False
+    isKindForm _ = True
 
-    firstOf :: Maybe a -> Maybe a -> Maybe a
-    firstOf (Just x) _ = Just x
-    firstOf _ (Just x) = Just x
-    firstOf _ _ = Nothing
+    match :: Set.Set TVar -> TypeU -> TypeU -> Map TVar TypeU -> Maybe (Map TVar TypeU)
+    match flex a b s = case (a, b) of
+      (LabeledU _ x, _) -> match flex x b s
+      (_, LabeledU _ y) -> match flex a y s
+      (ForallU v x, _) -> match (Set.insert v flex) x b s
+      _ | Just (v, ok) <- flexible flex a -> if ok b then bind v b s else Nothing
+      (_, ForallU w y) ->
+        let w' = rigidName flex w
+            form = maybe VarPlain id (lookup w (varForms y))
+         in match flex a (substituteTVar w (rebuildVar form w') y) s
+      (VarU v, VarU w) -> guard (v == w) s
+      (KVarU v, KVarU w) -> guard (v == w) s
+      (ListVarU v, ListVarU w) -> guard (v == w) s
+      (SetVarU v, SetVarU w) -> guard (v == w) s
+      (ExistU v (ts1, _) (rs1, _), ExistU w (ts2, _) (rs2, _))
+        | v == w, length ts1 == length ts2 ->
+            pairs flex (zip ts1 ts2) s
+              >>= \s' -> pairs flex [(x, y) | (k, x) <- rs1, Just y <- [lookup k rs2]] s'
+              >>= \s'' -> guard (all (\(k, _) -> isJust (lookup k rs2)) rs1) s''
+      (FunU ts1 r1, FunU ts2 r2) | length ts1 == length ts2 -> pairs flex (zip (r1 : ts1) (r2 : ts2)) s
+      (AppU h1 as1, AppU h2 as2) | length as1 == length as2 -> pairs flex (zip (h1 : as1) (h2 : as2)) s
+      (NamU o1 n1 ps1 rs1, NamU o2 n2 ps2 rs2)
+        | o1 == o2, n1 == n2, length ps1 == length ps2, DL.sort (map fst rs1) == DL.sort (map fst rs2) ->
+            pairs flex (zip ps1 ps2 <> [(x, y) | (k, x) <- rs1, Just y <- [lookup k rs2]]) s
+      (EffectU e1 x, EffectU e2 y) | e1 == e2 -> match flex x y s
+      (OptionalU x, OptionalU y) -> match flex x y s
+      (OpU op1 as1, OpU op2 as2) | op1 == op2, length as1 == length as2 -> pairs flex (zip as1 as2) s
+      (LitU (LRec fs1), LitU (LRec fs2)) | map fst fs1 == map fst fs2 -> pairs flex (zip (map snd fs1) (map snd fs2)) s
+      (LitU (LList es1), LitU (LList es2)) | length es1 == length es2 -> pairs flex (zip es1 es2) s
+      (LitU (LSet es1), LitU (LSet es2)) | length es1 == length es2 -> pairs flex (zip es1 es2) s
+      (LitU l1, LitU l2) -> guard (l1 == l2) s
+      (NatVoidU, y) | natLike y -> Just s
+      (x, NatVoidU) | natLike x -> Just s
+      (VoidU k1, VoidU k2) -> guard (k1 == k2) s
+      (ListVoidU, ListVoidU) -> Just s
+      (SetVoidU, SetVoidU) -> Just s
+      _ -> Nothing
 
--- | is t1 a generalization of t2?
+    -- A bound variable of the second type, renamed apart from the first's.
+    rigidName flex (TV w) = head [v | k <- [0 :: Int ..], let v = TV (w <> "~" <> DT.pack (show k)), not (Set.member v flex)]
+
+    pairs flex xys s = foldM (\s' (x, y) -> match flex x y s') s xys
+
+    bind v b s = case Map.lookup v s of
+      Just b0
+        | alphaEq b0 b -> Just s
+        | b0 == NatVoidU, natLike b -> Just (Map.insert v b s)
+        | b == NatVoidU, natLike b0 -> Just s
+        | otherwise -> Nothing
+      Nothing -> Just (Map.insert v b s)
+
+    guard True s = Just s
+    guard False _ = Nothing
+
+    -- A flexible variable, and what it may stand for.
+    flexible flex t = case t of
+      VarU v | Set.member v flex -> Just (v, \b -> isNothing (kindOfU b))
+      KVarU (v, k) | Set.member v flex -> Just (v, \b -> kindOfU b == Just k || k == KindNat && maybe False fillsNat (kindOfU b) || k == KindRec && isRow b)
+      ListVarU v | Set.member v flex -> Just (v, \b -> kindOfU b == Just (KindList KindStr))
+      SetVarU v | Set.member v flex -> Just (v, \b -> kindOfU b == Just (KindSet KindStr))
+      _ -> Nothing
+
+    isRow b = case b of
+      LitU (LRec _) -> True
+      RecExtendU {} -> True
+      _ -> False
+
+    natLike x = case x of
+      NatVarU _ -> True
+      IntVarU _ -> True
+      NatVoidU -> True
+      LitU (LNat _) -> True
+      OpU op _ -> isNatOpTag op
+      _ -> False
+
 -- | The carrier a type variable occurs in. A variable must be replaced by a
 -- value of its own kind, so a renaming has to rebuild the carrier it found.
 data VarForm = VarPlain | VarKinded Kind | VarListed | VarSetted
@@ -1445,10 +1397,8 @@ unifyU flex = go []
       (Just v) -> maybe t (resolve sub) (lookup v sub)
       Nothing -> t
 
-    -- Binding a variable to a term containing it would make an infinite type.
-    -- Composed eagerly so the substitution stays idempotent and applying it
-    -- is a plain fold. Binding a variable to a term containing it would make
-    -- an infinite type.
+    -- Composed eagerly so the substitution stays idempotent. Binding a
+    -- variable to a term containing it would make an infinite type.
     bind sub v t
       | Just v' <- flexVar t, v' == v = Just sub
       | v `elem` map fst (varForms t) = Nothing
@@ -1470,13 +1420,9 @@ wireFormsAgree (vs1, h1, w1) (vs2, h2, w2) =
         Nothing -> True
         (Just sub) -> alphaEq (applySubstU sub w1) (applySubstU sub w2')
 
--- | Equality up to a consistent renaming of bound variables.
---
--- Adjacent universals commute, so two types that bind the same variables in a
--- different order are the same type. Deciding that needs a bijection built from
--- the structure of the two types, not from the order their quantifiers happen
--- to be written in. On types with no bound variables this is exactly
--- structural equality.
+-- | Equality up to a consistent renaming of bound variables. Adjacent
+-- universals commute, so the bijection is built from the structure of the
+-- two types, not from the order of their quantifiers.
 alphaEq :: TypeU -> TypeU -> Bool
 alphaEq a b =
   let (vs1, t1) = peelForalls a
@@ -1574,22 +1520,23 @@ equivalent t1 t2 = isSubtypeOf t1 t2 && isSubtypeOf t2 t1
 
 -- | find the most specific subtypes
 mostSpecificSubtypes :: TypeU -> [TypeU] -> [TypeU]
-mostSpecificSubtypes t ts = mostSpecific $ filter (`isSubtypeOf` t) ts
+mostSpecificSubtypes t ts = mostSpecific $ filter (\x -> generalizes True x t) ts
 
--- | find all types that are not greater than any other type
+-- | The instance heads no other head is strictly more general than. A kind
+-- variable in a head is implicitly quantified, so it is flexible here.
 mostGeneral :: [TypeU] -> [TypeU]
-mostGeneral = P.minima
+mostGeneral ts = [t | t <- ts, not (any (`strictlyMoreGeneral` t) ts)]
 
--- | find all types that are not less than any other type
+-- | The instance heads no other head is strictly more specific than (CLS-16).
 mostSpecific :: [TypeU] -> [TypeU]
-mostSpecific = P.maxima
+mostSpecific ts = [t | t <- ts, not (any (strictlyMoreGeneral t) ts)]
+
+strictlyMoreGeneral :: TypeU -> TypeU -> Bool
+strictlyMoreGeneral a b = generalizes True a b && not (generalizes True b a)
 
 ---- Utility functions
 
--- | Walk a Rec extension chain, collecting (key, value) fields. Returns
--- Nothing if the chain does not terminate cleanly in RecEmptyU (e.g. ends
--- in a free RecVarU or contains an unsolved Rec operator). Used by the
--- TypeU -> Type lowering to preserve the column schema of ground Tables.
+-- | The fields of a Rec extension chain that ends in RecEmptyU, else Nothing.
 groundRecFields :: TypeU -> Maybe [(Text, TypeU)]
 groundRecFields RecEmptyU = Just []
 groundRecFields (RecExtendU k t rest) = ((k, t):) <$> groundRecFields rest
@@ -1598,6 +1545,7 @@ groundRecFields _ = Nothing
 extractKey :: TypeU -> TVar
 extractKey (VarU v) = v
 extractKey (NatVarU v) = v
+extractKey (IntVarU v) = v
 extractKey (ForallU _ t) = extractKey t
 extractKey (AppU t _) = extractKey t
 extractKey (NamU _ v _ _) = v
@@ -1613,8 +1561,6 @@ extractKey (ListVarU _) = TV "List"
 extractKey ListVoidU = TV "List"
 extractKey (SetVarU _) = TV "Set"
 extractKey SetVoidU = TV "Set"
--- Kind-generic catch-all for KVarU / VoidU carriers of kinds not covered
--- by the specific pattern synonyms above.
 extractKey (KVarU (v, _)) = v
 extractKey (VoidU KindNat) = TV "Nat"
 extractKey (VoidU KindStr) = TV "Str"
@@ -1631,9 +1577,7 @@ extractKey (LitU (LSet _)) = TV "Set"
 extractKey (LabeledU _ t) = extractKey t
 extractKey t = error $ "Cannot currently handle functional type imports: " <> show t
 
--- | Result-kind tag for each operator, used by 'extractKey' for
--- instance-resolution lookup. Mirrors the per-kind constructor mapping
--- (NatAddU -> "Nat", KeysU -> "Set", etc).
+-- | The result-kind key of an operator, for 'extractKey'.
 opKeyTag :: OpTag -> TVar
 opKeyTag OpNatAdd = TV "Nat"
 opKeyTag OpNatSub = TV "Nat"
@@ -1655,9 +1599,6 @@ opKeyTag OpListToSet = TV "Set"
 opKeyTag OpSize = TV "Nat"
 opKeyTag OpProjectField = TV "Type"
 
--- | Expected arity of a kind operator. The smart constructors below
--- enforce this at construction time so downstream code can rely on
--- well-formed 'OpU' nodes.
 opArity :: OpTag -> Int
 opArity OpKeys = 1
 opArity OpListToSet = 1
@@ -1665,9 +1606,6 @@ opArity OpSize = 1
 opArity OpRecExtend = 3
 opArity _ = 2
 
--- | Whether an operator produces a Nat-kinded result. Used by the
--- partial-order 'NatVoidU' wildcard rules so erased phantoms remain
--- compatible with the unified-carrier Nat-op forms.
 isNatOpTag :: OpTag -> Bool
 isNatOpTag OpNatAdd = True
 isNatOpTag OpNatSub = True
@@ -1676,8 +1614,7 @@ isNatOpTag OpNatDiv = True
 isNatOpTag OpSize = True
 isNatOpTag _ = False
 
--- | Generic smart constructor; validates arity. Production callers should
--- prefer the named helpers ('mkNatAdd', ...) for arity-correct-by-shape.
+-- | Build an 'OpU', checking its arity.
 mkOp :: OpTag -> [TypeU] -> TypeU
 mkOp op args
   | length args == opArity op = OpU op args
@@ -1686,7 +1623,6 @@ mkOp op args
            <> "; expected " <> show (opArity op)
            <> " got " <> show (length args)
 
--- Named smart constructors. Arity is encoded in the function signature.
 mkNatAdd, mkNatSub, mkNatMul, mkNatDiv :: TypeU -> TypeU -> TypeU
 mkNatAdd a b = OpU OpNatAdd [a, b]
 mkNatSub a b = OpU OpNatSub [a, b]
@@ -1726,7 +1662,6 @@ mkProjectField r f = OpU OpProjectField [r, f]
 mkEffectU :: EffectSet -> TypeU -> TypeU
 mkEffectU es t = EffectU (normalizeEffectSet es) t
 
--- | Ground-level companion to 'mkEffectU'.
 mkEffectT :: Set.Set EffectLabel -> Type -> Type
 mkEffectT = EffectT
 
@@ -1735,8 +1670,7 @@ type2typeu (VarT v) = VarU v
 type2typeu (UnkT v) = ForallU v (VarU v)
 type2typeu (FunT ts t) = FunU (map type2typeu ts) (type2typeu t)
 type2typeu (AppT (AppT h innerArgs) outerArgs) =
-  -- Flatten nested AppT during the lift; same canonical-shape contract
-  -- as 'normalizeType'.
+  -- Flattened, as in 'normalizeType'.
   type2typeu (AppT h (innerArgs ++ outerArgs))
 type2typeu (AppT v ts) = AppU (type2typeu v) (map type2typeu ts)
 type2typeu (NamT o n ps rs) = NamU o n (map type2typeu ps) [(k, type2typeu x) | (k, x) <- rs]
@@ -1747,10 +1681,11 @@ type2typeu (NatAddT a b) = NatAddU (type2typeu a) (type2typeu b)
 type2typeu (NatMulT a b) = NatMulU (type2typeu a) (type2typeu b)
 type2typeu (NatSubT a b) = NatSubU (type2typeu a) (type2typeu b)
 type2typeu (NatDivT a b) = NatDivU (type2typeu a) (type2typeu b)
-type2typeu NatVoidT = NatVoidU
+type2typeu (VoidT (KindList _)) = ListVoidU
+type2typeu (VoidT (KindSet _)) = SetVoidU
+type2typeu (VoidT k) = VoidU k
 type2typeu (StrLitT s) = StrLitU s
 type2typeu (StrConcatT a b) = StrConcatU (type2typeu a) (type2typeu b)
-type2typeu StrVoidT = StrVoidU
 
 -- | The first @n@ inputs of a function type and the type left once they are
 -- consumed. Types are flattened (@a -> (b -> c)@ is @a -> b -> c@), so a
@@ -1762,57 +1697,7 @@ splitFunAt n (FunT ins out)
   | otherwise = (ins, out)
 splitFunAt _ t = ([], t)
 
-unresolvedType2type :: TypeU -> Type
-unresolvedType2type (VarU v) = VarT v
-unresolvedType2type (NatVarU _) = NatVoidT
-unresolvedType2type ExistU {} = error "Cannot cast existential type to Type"
--- An undetermined variable is carried as 'UnkT', whose 'TypeU' form is a
--- variable quantified over itself ('type2typeu').
-unresolvedType2type (ForallU v (VarU v')) | v == v' = UnkT v
-unresolvedType2type (ForallU _ _) = error "Cannot cast universal type as Type"
-unresolvedType2type (FunU ts t) = FunT (map unresolvedType2type ts) (unresolvedType2type t)
-unresolvedType2type (AppU v ts) = AppT (unresolvedType2type v) (map unresolvedType2type ts)
-unresolvedType2type (NamU t n ps rs) = NamT t n (map unresolvedType2type ps) [(k, unresolvedType2type e) | (k, e) <- rs]
-unresolvedType2type (EffectU effs t) = mkEffectT (resolveEffectSet effs) (unresolvedType2type t)
-unresolvedType2type (OptionalU t) = OptionalT (unresolvedType2type t)
-unresolvedType2type NatVoidU = NatVoidT
-unresolvedType2type (StrVarU _) = StrVoidT
-unresolvedType2type StrVoidU = StrVoidT
--- Rec-kinded constructs: erase to NatVoidT at the ground type level. The
--- Type ADT does not represent Rec separately. See Stage 3 design memos.
-unresolvedType2type (RecVarU _) = NatVoidT
-unresolvedType2type RecVoidU = NatVoidT
--- List- and Set-kinded constructs erase to NatVoidT at the ground type
--- level. The Type ADT does not represent List or Set separately.
-unresolvedType2type (ListVarU _) = NatVoidT
-unresolvedType2type ListVoidU = NatVoidT
-unresolvedType2type (SetVarU _) = NatVoidT
-unresolvedType2type SetVoidU = NatVoidT
--- Kind-generic catch-all: KVarU / VoidU carriers not covered by the
--- specific per-kind synonyms above. Str-kinded erases to StrVoidT (the
--- only per-kind void Type); everything else erases to NatVoidT.
-unresolvedType2type (KVarU (_, KindStr)) = StrVoidT
-unresolvedType2type (KVarU _) = NatVoidT
-unresolvedType2type (VoidU KindStr) = StrVoidT
-unresolvedType2type (VoidU _) = NatVoidT
--- Cross-kind functions are pattern synonyms over 'OpU'; their lowering
--- is handled by the unified 'OpU _ _' clause below (erase to NatVoidT).
--- Unified carriers: mirror typeOf above. Only Nat-op forms have ground
--- Type-level counterparts; everything else erases to NatVoidT.
-unresolvedType2type (OpU OpNatAdd [a, b]) = NatAddT (unresolvedType2type a) (unresolvedType2type b)
-unresolvedType2type (OpU OpNatSub [a, b]) = NatSubT (unresolvedType2type a) (unresolvedType2type b)
-unresolvedType2type (OpU OpNatMul [a, b]) = NatMulT (unresolvedType2type a) (unresolvedType2type b)
-unresolvedType2type (OpU OpNatDiv [a, b]) = NatDivT (unresolvedType2type a) (unresolvedType2type b)
-unresolvedType2type (OpU OpStrConcat [a, b]) = StrConcatT (unresolvedType2type a) (unresolvedType2type b)
-unresolvedType2type (OpU _ _) = NatVoidT
-unresolvedType2type (LitU (LNat n)) = NatLitT n
-unresolvedType2type (LitU (LStr s)) = StrLitT s
-unresolvedType2type (LitU (LRec _)) = NatVoidT
-unresolvedType2type (LitU (LList _)) = NatVoidT
-unresolvedType2type (LitU (LSet _)) = NatVoidT
-unresolvedType2type (LabeledU _ t) = unresolvedType2type t
-
--- | get a fresh variable name that is not used in t1 or t2
+-- | A variable name used in neither type.
 newVariable :: TypeU -> TypeU -> TVar
 newVariable t1 t2 = findNew variables (Set.union (allVars t1) (allVars t2))
   where
@@ -1829,10 +1714,10 @@ newVariable t1 t2 = findNew variables (Set.union (allVars t1) (allVars t2))
     allVars :: TypeU -> Set.Set TypeU
     allVars (ForallU v t) = Set.union (Set.singleton (VarU v)) (allVars t)
     allVars (NatVarU v) = Set.singleton (NatVarU v)
+    allVars (IntVarU v) = Set.singleton (IntVarU v)
     allVars (EffectU _ t) = allVars t
     allVars (OptionalU t) = allVars t
-    -- Unified carriers: recurse into payload via allVars so nested
-    -- bound-quantified vars are still collected.
+    -- Recurse with allVars, not free, to collect nested bound variables.
     allVars (OpU _ args) = Set.unions (map allVars args)
     allVars (LitU (LRec fs)) = Set.unions (map (allVars . snd) fs)
     allVars (LitU (LList es)) = Set.unions (map allVars es)
@@ -1856,18 +1741,13 @@ containsUnk (NatAddT a b) = containsUnk a || containsUnk b
 containsUnk (NatMulT a b) = containsUnk a || containsUnk b
 containsUnk (NatSubT a b) = containsUnk a || containsUnk b
 containsUnk (NatDivT a b) = containsUnk a || containsUnk b
-containsUnk NatVoidT = False
+containsUnk (VoidT _) = False
 containsUnk (StrLitT _) = False
 containsUnk (StrConcatT a b) = containsUnk a || containsUnk b
-containsUnk StrVoidT = False
 
 ----- Pretty instances -------------------------------------------------------
 
--- | Records, objects, and tables render identically in type signatures -
--- just the type name optionally followed by parameters. The record/object/
--- table distinction is surfaced separately in the CLI help's type
--- definition block, where each named type is listed with its tag and
--- fields. Using a trivial instance here keeps signatures uncluttered.
+-- | Empty: records, objects and tables render the same in signatures.
 instance Pretty NamType where
   pretty _ = mempty
 
@@ -1897,10 +1777,9 @@ instance Pretty Type where
       f _ (NatMulT a b) = "(" <> f True a <+> "*" <+> f True b <> ")"
       f _ (NatSubT a b) = "(" <> f True a <+> "-" <+> f True b <> ")"
       f _ (NatDivT a b) = "(" <> f True a <+> "/" <+> f True b <> ")"
-      f _ NatVoidT = "_"
+      f _ (VoidT _) = "_"
       f _ (StrLitT s) = dquotes (pretty s)
       f _ (StrConcatT a b) = "(" <> f True a <+> "+" <+> f True b <> ")"
-      f _ StrVoidT = "_"
       -- A named type without parameters is a single token and never needs
       -- parentheses, whatever position it sits in.
       f _ (NamT _ n [] _) = pretty n
@@ -1911,10 +1790,7 @@ instance Pretty Type where
       f _ (FunT [] t) = "() -> " <> f True t
       f _ (FunT ts t) = hsep $ punctuate " ->" (map arrowArg ts <> [f True t])
       f _ (AppT t ts) = hsep (map (f False) (t : ts))
-      -- Named types (records / objects / tables) render as "name [p1 ...]",
-      -- Haskell-style. No tag and no inline field block; the record/table
-      -- distinction and the field list are surfaced in the CLI help's
-      -- type definition section and in typeclass-aware contexts.
+      -- A named type renders as its name and parameters, without fields.
       f _ (NamT _ n ps _) =
         let params = if null ps
                      then mempty
@@ -1925,20 +1801,15 @@ instance Pretty Type where
       arrowArg t@(FunT _ _) = parens (f True t)
       arrowArg t = f True t
 
--- | Walk a chain of nested 'RecExtendU' nodes and return its leaf fields
--- in source order plus the eventual tail expression (typically
--- 'RecEmptyU' for ground records, 'RecVarU' for row-polymorphic ones).
--- Used by the pretty printer to render iterated extensions as @{k=v,...}@.
+-- | The fields of a chain of 'RecExtendU' nodes, in source order, and its tail.
 collectExtends :: TypeU -> ([(Text, TypeU)], TypeU)
 collectExtends = go []
   where
     go acc (RecExtendU k t rest) = go ((k, t) : acc) rest
     go acc t = (reverse acc, t)
 
--- | Render an effect row as @\<L1,...,Ln, e\>@: concrete labels first
--- (sorted), then any effect variables. The angle-bracket form is the
--- only effect syntax; the empty row never reaches here because
--- 'mkEffectU' collapses it to the inner type.
+-- | Render an effect row as @\<L1,...,Ln, e\>@: sorted concrete labels, then
+-- effect variables. The empty row renders as @\<\>@.
 prettyEffectSet :: EffectSet -> Doc ann
 prettyEffectSet effs =
   let (ls, vs) = effectSetParts effs
@@ -1950,6 +1821,7 @@ instance Pretty TypeU where
     where
       f _ (VarU v) = pretty v
       f _ (NatVarU v) = pretty v
+      f _ (IntVarU v) = pretty v
       f _ (ExistU v ([], _) ([], _)) = "*" <> pretty v
       f _ (AppU (VarU (TV "List")) [t]) = "[" <> f True t <> "]"
       f _ (AppU (VarU (TV n)) ts) | isTupleName n = "(" <> hcat (punctuate ", " (map (f True) ts)) <> ")"
@@ -1960,29 +1832,19 @@ instance Pretty TypeU where
       f _ StrVoidU = "_"
       f _ (RecVarU v) = pretty v
       f _ rec@(RecExtendU _ _ _)
-        -- Render iterated extensions ending in RecEmptyU as `{k1=t1, k2=t2}`.
-        -- A non-empty tail (RecVarU or another operator) renders as
-        -- `(tail + k1=t1 + k2=t2)` to keep the tail visible.
+        -- `{k1=t1, k2=t2}`, or `(tail + k1=t1 + k2=t2)` when the tail is not empty.
         | (fields, RecEmptyU) <- collectExtends rec =
             braces (hcat (punctuate ", " [pretty k <> "=" <> f False t | (k, t) <- fields]))
         | (fields, tl) <- collectExtends rec =
             "(" <> f True tl <+> hsep ["+" <+> pretty k <> "=" <> f False t | (k, t) <- fields] <> ")"
       f _ (RecDiffU a ks) = "(" <> f True a <+> "-" <+> braces (hcat (punctuate "," (map pretty ks))) <> ")"
       f _ RecVoidU = "_"
-      -- List- and Set-kinded constructs.
       f _ (ListVarU v) = pretty v
       f _ ListVoidU = "_"
       f _ (SetVarU v) = pretty v
       f _ SetVoidU = "_"
-      -- Kind-generic catch-all: KVarU / VoidU carriers not covered by
-      -- the specific per-kind synonyms above. Render as the underlying
-      -- name / underscore.
       f _ (KVarU (v, _)) = pretty v
       f _ (VoidU _) = "_"
-      -- Cross-kind functions are pattern synonyms over 'OpU'; rendering
-      -- is dispatched by the unified 'OpU OpKeys / OpListToSet / OpSize /
-      -- OpProjectField / OpRecSingleton' clauses below.
-      -- Unified carriers: render identically to their per-kind counterparts.
       f _ (OpU OpNatAdd [a, b]) = "(" <> f True a <+> "+" <+> f True b <> ")"
       f _ (OpU OpNatSub [a, b]) = "(" <> f True a <+> "-" <+> f True b <> ")"
       f _ (OpU OpNatMul [a, b]) = "(" <> f True a <+> "*" <+> f True b <> ")"
@@ -2020,7 +1882,6 @@ instance Pretty TypeU where
       f _ (FunU ts t) = hsep $ punctuate " ->" (map arrowArgU ts <> [f True t])
       f _ (ForallU v t) = "forall" <+> pretty v <+> "." <+> f True t
       f _ (AppU t ts) = hsep $ map (f False) (t : ts)
-      -- See the NamT case in 'Pretty Type' above for the rendering rules.
       f _ (NamU _ n ps _) =
         let params = if null ps
                      then mempty

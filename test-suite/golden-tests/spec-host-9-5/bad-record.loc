@@ -1,0 +1,12 @@
+--' Apply in Python a function from a C++ record
+module main (recordAway)
+
+import root-py
+import root-cpp
+import .helpers
+
+--' Apply in Python the multiplier a C++ record holds
+recordAway :: Int -> <IO> Int
+recordAway n = do
+  ops <- cppOps n
+  pyApply (.run ops) 4

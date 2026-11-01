@@ -188,7 +188,10 @@ data IExpr
   | IIntrinsicShow Int IExpr -- schemaId, data -> JSON string
   | IIntrinsicRead Int (Maybe IType) IExpr -- schemaId, returnType, json_string -> typed data (nullable)
   | IIntrinsicUnpack Int (Maybe IType) IExpr -- schemaId, returnType, packet bytes -> typed data
-  | IIntrinsicOpen Word8 IExpr -- kind byte (IFile=0, IStream=1, OStream=2), path -> handle
+  | IIntrinsicConform Int IExpr -- schemaId, wire-form literal -> the form the decoder gives the schema
+  | IIntrinsicCellSlots Int (Maybe IType) IExpr -- element schemaId, list type, handle -> every accumulator
+  | IIntrinsicReduceList IExpr IExpr -- combine, non-empty list -> the list folded with combine
+  | IIntrinsicOpenIFile Int IExpr -- schema id of what the file stores, path -> handle
   | IIntrinsicClose IExpr -- handle -> ()
   | IIntrinsicUnlinkTemp IExpr
       -- ^ @close given a Str path: unlink a registered temp file (created
@@ -256,7 +259,6 @@ data IExpr
       --   given rather than deduced (as for @load).
   | IIntrinsicCellPut Int IExpr IExpr
       -- ^ @cellput: schemaId, handle, value.
-  | IIntrinsicCellReduce Int (Maybe IType) IExpr IExpr
   | IIntrinsicReplay Int (Maybe IType) IExpr IExpr
       -- ^ @replay: schemaId of one frame (the list `[a]`), element type
       --   `a`, stream handle, function. The per-language helper reads the
@@ -490,6 +492,10 @@ data LowerConfig m = LowerConfig
   -- call itself; each later group applies the function value the previous
   -- group returned. Default is juxtaposition, which is how a host language
   -- with first-class callables spells it.
+  , lcSourcedResult :: Source -> Int -> TypeF -> MDoc -> MDoc
+  -- ^ The value a source call given this many arguments returns, of this
+  -- type, as morloc holds it. Default is identity; Rust stores a function
+  -- the host made ('impl Fn') as a function value (HOST-8).
   , lcSourcedArg :: ArgSite -> IOwnership -> TypeM -> MDoc -> MDoc
   -- ^ How to pass one argument at a call, given the call kind ('ArgSite'), the
   -- argument's ownership ('IOwnership'), its 'TypeM', and its rendered
@@ -636,7 +642,7 @@ data LowerConfig m = LowerConfig
   , lcListConstructor :: FVar -> [TypeF] -> [MDoc] -> MDoc
   -- ^ Build a list literal from rendered elements. R needs FVar to choose c() vs list().
   -- The [TypeF] is the FULL applied-type arg list (kind positions included).
-  -- Use 'partitionKindArgsF' to extract type-args only when needed.
+  -- Use 'partitionKindArgs' to extract type-args only when needed.
   , lcTupleConstructor :: FVar -> [TypeF] -> [MDoc] -> MDoc
   -- ^ Build a tuple literal. The [TypeF] is the per-slot type list
   -- (one entry per element). C++ codegen will use these to dispatch
@@ -1334,6 +1340,8 @@ rnodeChildren (RN e) = case e of
   IfN _ c t f -> [RN c, RN t, RN f]
   IntrinsicN _ _ _ xs -> map RN xs
   MapOptionalN _ _ _ x -> [RN x]
+  WireToNativeN _ _ _ _ xs -> map RN xs
+  NativeToWireN _ _ x -> [RN x]
   LoopN _ starts body -> map (RN . snd) starts <> [RLN body]
   where
     nativeArg (NativeArgManifold nm) = RNM nm
@@ -2022,6 +2030,8 @@ scanNE (IntrinsicN _ IntrTagTest _ (LetVarN _ _ _ : rest)) = mconcat (map scanNE
 scanNE (IntrinsicN _ IntrTagTest _ (BndVarN _ _ _ : rest)) = mconcat (map scanNE rest)
 scanNE (IntrinsicN _ _ _ es) = mconcat (map scanNE es)
 scanNE (MapOptionalN _ _ _ e) = scanNE e
+scanNE (WireToNativeN _ _ _ _ es) = mconcat (map scanNE es)
+scanNE (NativeToWireN _ _ e) = scanNE e
 
 eitherArm :: ConsumeScan -> ConsumeScan -> ConsumeScan
 eitherArm a b =
@@ -2372,7 +2382,7 @@ lowerNativeExprRaw cfg origExpr (AppExeN_ _ (SrcCallP _ src) es0@[_, _])
   | srcOperator src =
       let operands = map snd (constArgs cfg (Just (map fst es0)) origExpr es0)
        in return $ mergePoolDocs (\xs -> case xs of [l, r] -> lcOperator cfg src l r; _ -> error "binary operator requires exactly 2 args") operands
-lowerNativeExprRaw cfg origExpr (AppExeN_ _ (SrcCallP _ src) es1) = do
+lowerNativeExprRaw cfg origExpr (AppExeN_ resT (SrcCallP _ src) es1) = do
   es <- bindCallArgs cfg origExpr (constArgs cfg Nothing origExpr es1)
   owns <- argOwnerships cfg origExpr
   let argTypes = map fst es
@@ -2388,7 +2398,7 @@ lowerNativeExprRaw cfg origExpr (AppExeN_ _ (SrcCallP _ src) es1) = do
         case provideClosure src (zipWith (\(i, t, own) e -> lcSourcedArg cfg (site i) own t e) (zip3 [0 ..] argTypes owns) exprs) of
           [] -> lcSrcName cfg src
           (g0 : gs) -> foldl (lcApplySrcGroup cfg) (lcSrcName cfg src <> (if null g0 then tupled g0 else tupledNoFold g0)) gs
-  return $ mergePoolDocs handleFunctionArgs (map snd es)
+  return $ mergePoolDocs (lcSourcedResult cfg src (length es) resT . handleFunctionArgs) (map snd es)
 lowerNativeExprRaw cfg origExpr (AppExeN_ t (PatCallP p) xs) = do
   es <- case (p, origExpr, map snd xs) of
     -- A setter's new values are stored in the rebuilt record, an owned sink.
@@ -2586,13 +2596,10 @@ lowerNativeExprRaw cfg origExpr (VariantN_ t n i xs)
 lowerNativeExprRaw cfg _ (NullN_ t)
   | isUnitTypeF t = return $ defaultValue {poolExpr = lcPrintExpr cfg IUnitLit}
 lowerNativeExprRaw cfg _ (NullN_ t) = do
-  -- NullN_ now carries the full @TypeF@ of the Null's type slot
-  -- (e.g. @?(BTree Int)@), not just the underlying constructor's
-  -- @FVar@. Pass it through @lcTypeOf@ to get the IType the printer
-  -- uses for the null literal -- though most language printers
-  -- ignore this IType (Python emits "None", C++ emits "std::nullopt"
-  -- unconditionally), threading it preserves the option for languages
-  -- that do type-tagged null forms.
+  -- NullN_ carries the full @TypeF@ of the Null's slot (e.g.
+  -- @?(BTree Int)@, nested Optionals included). The C++ and Rust printers
+  -- spell the absent value at that type (@T{}@, @<T>::None@); Python and R
+  -- ignore it.
   mayT <- lcTypeOf cfg t
   return $ defaultValue {poolExpr = lcPrintExpr cfg (INullLit mayT)}
 -- A thunk's result leaves the thunk by value, so it is an owned sink like a
@@ -2694,6 +2701,9 @@ lowerNativeExprRaw cfg origExpr (IntrinsicN_ _ IntrRead (Just schema) [strDocs])
   -- pass the resolved type so `_mlc_read<T>` gets its template arg.
   innerType <- lcTypeOf cfg (typeFof origExpr)
   return $ strDocs {poolExpr = lcPrintExpr cfg (IIntrinsicRead sid innerType (IRawExpr (render (poolExpr strDocs))))}
+lowerNativeExprRaw cfg _ (IntrinsicN_ _ IntrConform (Just schema) [dataDocs]) = do
+  sid <- lcRegisterSchema cfg schema
+  return $ dataDocs {poolExpr = lcPrintExpr cfg (IIntrinsicConform sid (IRawExpr (render (poolExpr dataDocs))))}
 lowerNativeExprRaw cfg origExpr (IntrinsicN_ _ IntrUnpack (Just schema) [bytesDocs]) = do
   sid <- lcRegisterSchema cfg schema
   innerType <- lcTypeOf cfg (typeFof origExpr)
@@ -2707,19 +2717,14 @@ lowerNativeExprRaw cfg _ (IntrinsicN_ _ IntrSchema (Just s) [dataDocs]) =
   return $ dataDocs {poolExpr = lcPrintExpr cfg (IStrLit Nothing s)}
 lowerNativeExprRaw cfg _ (IntrinsicN_ _ IntrTypeof (Just s) [dataDocs]) =
   return $ dataDocs {poolExpr = lcPrintExpr cfg (IStrLit Nothing s)}
--- @open: dispatch on the resolved handle type. IFile/IStream go through
--- the generic kind-byte runtime entry; OStream needs the element schema
--- threaded so the runtime can write the stream header at open time.
+-- @open: every handle kind opens with the schema its file stores, which
+-- the runtime checks the file against (an OStream writes it instead).
 lowerNativeExprRaw cfg origExpr (IntrinsicN_ _ IntrOpen maySchema [pathDocs]) = do
   let unwrapHead (AppF (VarF (FV v _)) _) = Just v
       unwrapHead (VarF (FV v _)) = Just v
       unwrapHead _ = Nothing
   let headVar = unwrapHead (typeFof origExpr)
       rawPath = IRawExpr (render (poolExpr pathDocs))
-      -- Typed open (OStream/IStream): thread the ascribed `[a]` schema through
-      -- lcRegisterSchema into the given IExpr constructor. OStream needs it to
-      -- write the stream header; IStream to open the stdin sentinel and guard
-      -- the incoming stream.
       openTyped mkExpr what = do
         schemaText <- case maySchema of
           Just s  -> return s
@@ -2729,10 +2734,7 @@ lowerNativeExprRaw cfg origExpr (IntrinsicN_ _ IntrOpen maySchema [pathDocs]) = 
   case headVar of
     Just v | v == BT.ostreamVar -> openTyped IIntrinsicOpenOStream "OStream"
     Just v | v == BT.istreamVar -> openTyped IIntrinsicOpenIStream "IStream"
-    Just v | v == BT.ifileVar ->
-      -- IFile reads its schema off disk (no ascription schema needed); an
-      -- IFile open of the stdin sentinel is a catchable runtime error.
-      return pathDocs { poolExpr = lcPrintExpr cfg (IIntrinsicOpen BT.mlcKindIFile rawPath) }
+    Just v | v == BT.ifileVar -> openTyped IIntrinsicOpenIFile "IFile"
     Just (TV t) ->
       error $ "@open: result type must be IFile/IStream/OStream, got " <> T.unpack t
     Nothing ->
@@ -2929,13 +2931,20 @@ lowerNativeExprRaw cfg (IntrinsicN _ _ _ [_, valueE]) (IntrinsicN_ _ IntrCellPut
   let raw d = IRawExpr (render (poolExpr d))
       putExpr = IIntrinsicCellPut sid (raw handleDocs) (raw valueDocs')
   return $ mergePoolDocs (const $ lcPrintExpr cfg putExpr) [handleDocs, valueDocs']
-lowerNativeExprRaw cfg origExpr (IntrinsicN_ _ IntrCellReduce (Just schema)
-                                  [combineDocs, handleDocs]) = do
+lowerNativeExprRaw cfg origExpr (IntrinsicN_ _ IntrCellSlots (Just schema) [handleDocs]) = do
   sid <- lcRegisterSchema cfg schema
-  innerType <- lcTypeOf cfg (typeFof origExpr)
+  listType <- lcTypeOf cfg (typeFof origExpr)
+  idx <- lcNewIndex cfg
+  -- Bound with its type, which is the only place a language that infers the
+  -- element type can read it.
+  let v = render (helperNamer idx)
+      call = IIntrinsicCellSlots sid listType (IRawExpr (render (poolExpr handleDocs)))
+  return $ handleDocs
+    { poolPriorLines = poolPriorLines handleDocs ++ [lcPrintStmt cfg (IAssign v listType call)]
+    , poolExpr = pretty v }
+lowerNativeExprRaw cfg _ (IntrinsicN_ _ IntrReduceList _ [combineDocs, listDocs]) = do
   let raw d = IRawExpr (render (poolExpr d))
-      reduceExpr = IIntrinsicCellReduce sid innerType (raw combineDocs) (raw handleDocs)
-  return $ mergePoolDocs (const $ lcPrintExpr cfg reduceExpr) [combineDocs, handleDocs]
+  return $ mergePoolDocs (const $ lcPrintExpr cfg (IIntrinsicReduceList (raw combineDocs) (raw listDocs))) [combineDocs, listDocs]
 lowerNativeExprRaw cfg (IntrinsicN _ _ _ [handleE, _]) (IntrinsicN_ _ IntrReplay (Just schema)
                                   [handleDocs, fnDocs]) = do
   sid <- lcRegisterSchema cfg schema
@@ -3042,6 +3051,46 @@ lowerNativeExprRaw cfg origExpr (MapOptionalN_ _ wireTf src innerDocs) = do
   return $ innerDocs
     { poolPriorLines = poolPriorLines innerDocs ++ [lcPrintStmt cfg ifStmt]
     , poolExpr = pretty v'
+    }
+
+-- A decoding intrinsic, its value decoded into the form a received argument
+-- is decoded into and given its native form the same way.
+lowerNativeExprRaw cfg _ (WireToNativeN_ _ s intr schema argDocs) = do
+  sid <- lcRegisterSchema cfg schema
+  rawType <- lcRawDeserialAstType cfg s
+  let arg d = IRawExpr (render (poolExpr d))
+  call <- case (intr, argDocs) of
+    (IntrLoad, [p]) -> return $ IIntrinsicLoad sid rawType (arg p)
+    (IntrRead, [x]) -> return $ IIntrinsicRead sid rawType (arg x)
+    (IntrUnpack, [x]) -> return $ IIntrinsicUnpack sid rawType (arg x)
+    (IntrCellGet, [h]) -> return $ IIntrinsicCellGet sid rawType (arg h)
+    (IntrCellSlots, [h]) -> return $ IIntrinsicCellSlots sid rawType (arg h)
+    _ -> error ("morloc bug: WireToNativeN over " <> show intr)
+  idx <- lcNewIndex cfg
+  let v = helperNamer idx
+  (x, stmts) <- wireToNative cfg v s
+  let merged = mergePoolDocs (const "") argDocs
+  return $ merged
+    { poolPriorLines = poolPriorLines merged
+        ++ map (lcPrintStmt cfg) (IAssign (render v) rawType call : stmts)
+    , poolExpr = lcPrintExpr cfg x
+    }
+
+-- A native value taken apart into its wire form, as a sent argument is, for
+-- a runtime intrinsic that writes it. It is bound as an owned value, as the
+-- elements of a value taken apart for sending are, since the walk consumes it.
+lowerNativeExprRaw cfg origExpr (NativeToWireN_ _ s innerDocs) = do
+  inner <- case origExpr of
+    NativeToWireN _ _ e -> return e
+    _ -> error "morloc bug: NativeToWireN lowered without its original expression"
+  docs <- adaptOwnedElem cfg inner innerDocs
+  idx <- lcNewIndex cfg
+  let v = helperNamer idx
+      binding = [IAssign (render v) Nothing (IRawExpr (render (poolExpr docs)))]
+  (stmts, x) <- nativeToWire cfg v s
+  return $ docs
+    { poolPriorLines = poolPriorLines docs ++ map (lcPrintStmt cfg) (binding ++ stmts)
+    , poolExpr = lcPrintExpr cfg x
     }
 
 {- | Lower a serial manifold to PoolDocs.

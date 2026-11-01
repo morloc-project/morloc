@@ -1,0 +1,5 @@
+OK: py refuses a host function
+OK: py refuses a host function named like a manifold
+OK: py passes an origin back
+OK: r refuses a host function
+OK: r passes an origin back

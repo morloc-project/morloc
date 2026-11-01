@@ -651,7 +651,7 @@ pub(crate) fn read_subpacket_header(
     }
     let payload_off = subpacket_off + 32 + header.offset as u64;
     let payload_len = header.length as u64;
-    if payload_off + payload_len > local.mmap_size {
+    if payload_off.checked_add(payload_len).map_or(true, |end| end > local.mmap_size) {
         return Err(MorlocError::Packet(
             "sub-packet payload past EOF".into(),
         ));
@@ -678,7 +678,10 @@ pub(crate) fn read_subpacket_size(
         )
     };
     let hdr = PacketHeader::from_bytes(hdr_bytes.try_into().unwrap())?;
-    Ok(32 + hdr.offset as u64 + hdr.length as u64)
+    hdr.length
+        .checked_add(32 + hdr.offset as u64)
+        .filter(|&size| size <= mmap_size - offset)
+        .ok_or_else(|| MorlocError::Packet("sub-packet runs past EOF".into()))
 }
 
 /// The sub-packet index and element count of a stream with no final

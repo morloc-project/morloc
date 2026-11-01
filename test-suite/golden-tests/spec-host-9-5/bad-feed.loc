@@ -1,0 +1,12 @@
+--' Apply in C++ a function Python passes
+module main (feedAway)
+
+import root-py
+import root-cpp
+import .helpers
+
+--' Hand Python a function that applies its argument in C++
+feedAway :: Int -> Int
+feedAway n =
+  let g = \f -> cppApply f n
+  in pyFeed g

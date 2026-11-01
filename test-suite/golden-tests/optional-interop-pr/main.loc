@@ -8,8 +8,8 @@ module main
   )
 
 import .types
-import pyfuncs (pSafeDiv, pFromNull, pDouble)
-import rfuncs (rSafeDiv, rFromNull, rDouble)
+import .pyfuncs (pSafeDiv, pFromNull, pDouble)
+import .rfuncs (rSafeDiv, rFromNull, rDouble)
 
 testPyToR :: Int
 testPyToR = rFromNull (-1) (pSafeDiv 10 3)

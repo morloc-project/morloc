@@ -1,21 +1,9 @@
 # Stream reads and writes copy each batch several times
 
-Status: analysed 2026-10-13, reviewed by the devil's advocate. W1 fixed
-2026-10-14: an element is flattened straight into the write buffer, laid
-out as before (files byte-identical), with every byte it does not fill
-zeroed; C++ level-0 write of 600 MiB of `[Vector U8]` 1.75 -> 1.64 s,
-pairs unchanged within noise. The size walk remains. R1 fixed 2026-10-14
-(SLOT-25): C++ and Rust pools decode an uncompressed, aligned batch where
-it is mapped; level-0 reads of 600 MiB of `[Vector U8]`, C++ 0.27 -> 0.18
-s, Rust 0.40 -> 0.26 s; 1M pairs, C++ 0.80 -> 0.49 s, Rust 1.14 -> 0.76 s
-(`cat` 0.07 s). W2 fixed 2026-10-15: compaction moves the smaller side
-(the header and index, or the data); a channel batch, a staged batch and
-an oversize element are built once in the block that is queued, with no
-staging copy and the write buffer untouched until the queue takes the
-batch. Interleaved A/B, C++ writes of 600 MiB: `[Vector U8]` level 0 CPU
-2.03 -> 1.96 s, flushed level 3 wall 4.29 -> 4.14 s; pairs flushed level
-3 4.86 -> 4.77 s. Compressed batches still land in shared memory (R2).
-Still copied on the write side: a stdout stream joins header and payload
+Status: analysed 2026-10-13, reviewed by the devil's advocate. W1, R1
+(SLOT-25) and W2 are done; the evidence and path sections below describe
+the code before them. The size walk remains, and compressed batches still
+land in shared memory (R2). Still copied on the write side: a stdout stream joins header and payload
 into one buffer before writing (`send_stdio`, custody.rs), and a
 multi-frame compressed batch joins its frames into one buffer before the
 write (`Ticket::wait`, write_behind.rs); both could hand an iovec to
@@ -132,43 +120,6 @@ No type or API change, each measurable alone:
 - **S0. Measure first.** Run once with `WORKDIR` on tmpfs and once with
   `dd conv=fdatasync` (or time `@close` separately); print `ru_minflt`
   (measure.py already calls `getrusage`); report the median of 5 runs.
-- **W1. Flatten straight into the write buffer.** The largest
-  critical-path win with no lock or ownership change: flatten already
-  runs under the slot lock (`R/stream.rs:3922` on), so SLOT-12 is
-  unchanged. `FlattenWalk` keeps the root slot separate from the cursor;
-  starting it at the buffer's index offset and data offset produces
-  buffer-relative pointers directly, removing memset 1, a copy, the
-  scratch allocation and the per-element shift walk (which matters for
-  pairs). Two hazards: `FlattenWalk` relies on a zero-filled buffer for
-  alignment gaps (R/voidstar.rs:1132, 1179) and spare buffers are not
-  scrubbed (`give_spare`, custody.rs:858), so the walk must zero its gaps
-  or files carry stale bytes; and the size bound assumes the cursor starts
-  at the slot width, so starting at the data offset must use a worst-case
-  bound or keep the data offset congruent mod 64. (A thread-local
-  `scratch` alone saves only the allocation: `resize(total, 0)` still
-  zero-fills.)
-- **R1. Decode inside the claim.** `mlc_next_with(handle, decode, ctx)`
-  runs the C++ decoder inside `with_process_local_slot`, after the claim
-  and before `drop_read_pages`, with no slot lock held (dropped at
-  `R/stream.rs:4137`). The claimed `ProcessLocalSlot` keeps its mapping
-  for the call; a pointer that escaped the call would dangle, since
-  mappings are unmapped on idle overflow (`R/stream.rs:1062-1069`), by the
-  SLOT-9 sweep and at close (SLOT-23). C++ decodes in payload space
-  (`morloc_payload_space`, M:1298-1352; as `mlc_read_inline_packet`,
-  C:1147-1157): payload relptrs are payload-relative and the resolver
-  masks the offset bits. The trampoline catches every C++ exception and
-  rethrows after Rust returns. Table schemas, unaligned and compressed
-  payloads keep the landing copy. No new ownership rule; fork, sweep and
-  multi-reader behaviour unchanged. Removes the landing copy, relocation
-  walk and scrub. Python cannot use it (numpy views need a shared-memory
-  owner).
-- **W2. Move the index, not the data.** Instead of memmoving the 10 MiB
-  data region left by the unused index (`wasted`), move the 16 + n*w
-  header and index right by `wasted` and emit one slice from `buf +
-  wasted`: the same relptr shift, no iovec, no format change, works for
-  the compressor, stdio and channels; stays 8-aligned. Off the critical
-  path at level 0 here: a CPU and bandwidth win, and a wall-time win for
-  channels, which compact in the pool under the lock (`R/stream.rs:3559`).
 - **W3. Encode in place (model first).** The pool reserves space in the
   slot's buffer and C++ encodes into it. C++ must then write
   buffer-relative pointers (it writes shared-memory relptrs via
@@ -232,11 +183,8 @@ Not acceptable: a non-owning `std::span` justified by "the parameter is
 `const&` and never escapes". The compiler cannot see what sourced C++ does
 with a reference; it would be an unchecked lifetime claim.
 
-Order: S0, W1, R1, W2, W3 (model first), R2; then A for C++ records and
-B for Rust. Expected for bytes [inferred]: W1 saves ~2 passes (~0.08-0.12
-s of 0.77), W1+W3 ~4 (~0.16-0.25 s); whether writes approach `dd` depends
-on the sync share, unmeasured. Reads ~0.26 -> ~0.15-0.18 s, floored by
-start-up, one pass and the mapping faults.
+Order: S0, W3 (model first), R2; then A for C++ records and B for Rust.
+Whether writes approach `dd` depends on the sync share, unmeasured.
 
 ## Tests
 
@@ -247,8 +195,6 @@ start-up, one pass and the mapping faults.
   truncated during a read fails no worse than today (today's landing
   memcpy has the same SIGBUS exposure); several readers of one stream
   still see every sub-packet once.
-- W1: files written into a reused spare buffer are byte-identical to
-  files written into a fresh one (no stale gap bytes).
 
 ## Open
 

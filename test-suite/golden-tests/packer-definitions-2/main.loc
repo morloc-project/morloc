@@ -1,6 +1,6 @@
 module main (foo)
 
-import lib.json (JsonObj, Str)
+import .lib.json (JsonObj, Str)
 
 source Py from "foo.py" ("foo")
 

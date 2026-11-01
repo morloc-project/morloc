@@ -1,0 +1,15 @@
+--' Hand Python a C++ function that returns a function C++ made
+module main (returnedAway)
+
+import root-py
+import root-cpp
+import .helpers
+
+source Py from "f.py" ("py_use" as pyUse)
+
+--' Call a maker and apply what it returns, in Python
+pyUse :: (Int -> <IO> (Int -> Int)) -> <IO> Int
+
+--' Have Python apply an adder C++ makes
+returnedAway :: <IO> Int
+returnedAway = pyUse mkCpp

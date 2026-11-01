@@ -9,7 +9,7 @@ type Py => Str = "str"
 type R => Str = "character"
 
 --' A large text read from a file
---' source:file
+--' @source file
 type Text = Str
 
 cid :: Text -> Str

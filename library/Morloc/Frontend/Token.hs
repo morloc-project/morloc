@@ -14,11 +14,13 @@ module Morloc.Frontend.Token
   , startPos
   , alexPos
   , showToken
+  , posSrcLoc
   ) where
 
 import Data.Scientific (Scientific)
 import Data.Text (Text)
 import qualified Data.Text as T
+import Morloc.Namespace.Prim (SrcLoc (..))
 
 -- | Source position: line, column (1-based)
 data Pos = Pos
@@ -282,3 +284,7 @@ showToken (TokTickName n) = "type-level string \"'" ++ T.unpack n ++ "\""
 showToken (TokBacktickName n) = "backtick-quoted operator '`" ++ T.unpack n ++ "`'"
 showToken TokPragmaInline = "'%inline'"
 showToken TokEOF = "end of input"
+
+-- | A lexer position as a source location of one character.
+posSrcLoc :: Pos -> SrcLoc
+posSrcLoc (Pos l c f) = SrcLoc (if null f then Nothing else Just f) l c l c
