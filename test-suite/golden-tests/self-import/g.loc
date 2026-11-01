@@ -1,0 +1,4 @@
+module g (y)
+import .h (z)
+y :: Int
+y = z

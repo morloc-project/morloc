@@ -1,6 +1,4 @@
 module (*)
 
-import root-py
-
 innerValue :: Int
 innerValue = 2

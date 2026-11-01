@@ -3,8 +3,8 @@ module main
   )
 
 import .types
-import cppfuncs (cAddOne)
-import pyfuncs (pUnwrapOr)
+import .cppfuncs (cAddOne)
+import .pyfuncs (pUnwrapOr)
 
 -- C++ returns Int, Python expects ?Int via coercion at cross-pool boundary.
 -- cAddOne returns Int (=42), pUnwrapOr's 2nd arg expects ?Int.

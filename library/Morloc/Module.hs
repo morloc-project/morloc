@@ -20,6 +20,7 @@ module Morloc.Module
   ( findModule
   , findLocalModuleAt
   , findBareModuleMaybe
+  , bareLocalMatch
   , isLocalImport
   , autoInstallDep
   , loadSnapshot
@@ -365,10 +366,11 @@ isLocalImport :: MVar -> Bool
 isLocalImport (MV x) = "." `MT.isPrefixOf` x
 
 -- | Look for a morloc module: local (.dot-prefixed) or bare (system/plane).
-findModule :: (Maybe Path, MVar) -> MVar -> MorlocMonad Path
-findModule (_, currentModule) importModule
+-- @localRoot@ is the root of the importing module's package (MOD-6).
+findModule :: Maybe Path -> MVar -> MVar -> MorlocMonad Path
+findModule localRoot currentModule importModule
   | isLocalImport importModule = findLocalModule currentModule importModule
-  | otherwise = findBareModule currentModule importModule
+  | otherwise = findBareModule localRoot currentModule importModule
 
 -- | Resolve a local import from the project root.
 -- e.g., .foo.bar -> <root>/foo/bar.loc or <root>/foo/bar/main.loc
@@ -408,112 +410,85 @@ findLocalModuleAt currentModule root importModule = do
             <> "\nThe following paths were searched:\n"
             <+> indent 4 (vsep (map pretty candidates))
 
--- | Compute the candidate filesystem paths for a bare/namespaced import,
--- split into system (installed plane) and local (project-relative) search
--- lists. Shared by the throwing resolver and the non-throwing probe so the
--- two can never drift.
-bareModulePaths :: Config.Config -> Maybe Path -> Bool -> MVar -> ([Path], [Path])
-bareModulePaths config projectRoot allowLocal importModule =
-  (systemPaths, localPaths)
+-- | The installed paths a bare or namespaced import may name (MOD-7).
+systemModulePaths :: Config.Config -> MVar -> [Path]
+systemModulePaths config importModule
+  | isNamespaced =
+      -- Namespaced import: the explicit namespace path (where the registry
+      -- installs "owner/name"), then the flat repo-name path where a
+      -- classic git install of "owner/name" actually lands (libpath/<repo>).
+      [ MS.joinPath ([lib, plane] <> namespacedPath <> ["main.loc"])
+      , MS.joinPath ([lib, plane] <> init namespacedPath <> [last namespacedPath <> ".loc"])
+      , MS.joinPath ([lib, plane, last namespacedPath] <> ["main.loc"])
+      , MS.joinPath ([lib, plane] <> [last namespacedPath <> ".loc"])
+      ]
+  | otherwise =
+      -- Bare import: search core org namespace first, then flat paths
+      [ MS.joinPath ([lib, plane, planeCore] <> namePath <> ["main.loc"])
+      , MS.joinPath ([lib, plane, planeCore] <> init namePath <> [last namePath <> ".loc"])
+      , MS.joinPath ([lib, plane] <> init namePath <> [last namePath <> ".loc"])
+      , MS.joinPath ([lib, plane] <> namePath <> ["main.loc"])
+      , MS.joinPath (lib : init namePath <> [last namePath <> ".loc"])
+      , MS.joinPath (lib : namePath <> ["main.loc"])
+      ]
   where
     lib = Config.configLibrary config
     plane = Config.configPlane config
     planeCore = Config.configPlaneCore config
     namePath = splitModuleName importModule
-    -- Check if this is a namespaced import (contains "/")
     MV importText = importModule
     isNamespaced = "/" `MT.isInfixOf` importText
-    -- For namespaced: "owner/name" -> [owner, name] as filesystem path
-    -- For bare: "foo" -> search morloclib/foo first, then foo
     namespacedPath = case MT.splitOn "/" importText of
       [owner, name] -> [MT.unpack owner, MT.unpack name]
-      _ -> namePath  -- fallback
-    systemPaths
-      | isNamespaced =
-          -- Namespaced import: the explicit namespace path (where the registry
-          -- installs "owner/name"), then the flat repo-name path where a
-          -- classic git install of "owner/name" actually lands (libpath/<repo>).
-          [ MS.joinPath ([lib, plane] <> namespacedPath <> ["main.loc"])
-          , MS.joinPath ([lib, plane] <> init namespacedPath <> [last namespacedPath <> ".loc"])
-          , MS.joinPath ([lib, plane, last namespacedPath] <> ["main.loc"])
-          , MS.joinPath ([lib, plane] <> [last namespacedPath <> ".loc"])
-          ]
-      | otherwise =
-          -- Bare import: search core org namespace first, then flat paths
-          [ MS.joinPath ([lib, plane, planeCore] <> namePath <> ["main.loc"])
-          , MS.joinPath ([lib, plane, planeCore] <> init namePath <> [last namePath <> ".loc"])
-          , MS.joinPath ([lib, plane] <> init namePath <> [last namePath <> ".loc"])
-          , MS.joinPath ([lib, plane] <> namePath <> ["main.loc"])
-          , MS.joinPath (lib : init namePath <> [last namePath <> ".loc"])
-          , MS.joinPath (lib : namePath <> ["main.loc"])
-          ]
-    localPaths
-      | not allowLocal = []  -- eval mode: installed modules only
-      | isNamespaced = []  -- namespaced imports are never local
-      | otherwise = case projectRoot of
-          Just root ->
-            [ MS.joinPath (root : init namePath <> [last namePath <> ".loc"])
-            , MS.joinPath (root : namePath <> ["main.loc"])
-            ]
-          Nothing ->
-            [ MS.joinPath (init namePath <> [last namePath <> ".loc"])
-            , MS.joinPath (namePath <> ["main.loc"])
-            ]
+      _ -> namePath
 
--- | Presence probe for a bare/namespaced import: returns a candidate path if
--- one exists, or Nothing if none does. This is only used to decide whether a
--- missing dependency should be auto-downloaded; it does NOT enforce the
--- system-vs-local ambiguity error or emit the local-resolution warning.
--- Authoritative resolution (with those diagnostics) always goes through
--- 'findBareModule'/'findModule'.
+-- | The installed module a bare or namespaced import names, if present.
 findBareModuleMaybe :: MVar -> MorlocMonad (Maybe Path)
 findBareModuleMaybe importModule = do
   config <- MM.ask
-  projectRoot <- MM.gets stateProjectRoot
-  allowLocal <- MM.gets stateAllowLocalModules
-  let (systemPaths, localPaths) = bareModulePaths config projectRoot allowLocal importModule
-  existingSystem <- liftIO . fmap catMaybes . mapM getFile $ systemPaths
-  existingLocal <- liftIO . fmap catMaybes . mapM getFile $ localPaths
-  return $ case (existingSystem, existingLocal) of
-    (x : _, _) -> Just x
-    ([], x : _) -> Just x
-    ([], []) -> Nothing
+  listToMaybe <$> liftIO (catMaybes <$> mapM getFile (systemModulePaths config importModule))
 
--- | Resolve a bare (non-dot-prefixed) import: search system/plane paths, with
--- deprecated fallback to local paths (project root). Supports namespaced
--- imports ("owner/name"). Throws on an ambiguous (system + local) match and
--- warns when a bare import resolves only locally.
-findBareModule :: MVar -> MVar -> MorlocMonad Path
-findBareModule currentModule importModule = do
-  config <- MM.ask
-  projectRoot <- MM.gets stateProjectRoot
+-- | The local module a bare import's name would reach under @localRoot@,
+-- where local imports are allowed.
+bareLocalMatch :: Maybe Path -> MVar -> MorlocMonad (Maybe Path)
+bareLocalMatch localRoot importModule@(MV importText) = do
   allowLocal <- MM.gets stateAllowLocalModules
-  let (systemPaths, localPaths) = bareModulePaths config projectRoot allowLocal importModule
+  case localRoot of
+    Just root | allowLocal, not ("/" `MT.isInfixOf` importText) -> do
+      let namePath = splitModuleName importModule
+      listToMaybe . catMaybes <$> liftIO (mapM getFile
+        [ MS.joinPath (root : init namePath <> [last namePath <> ".loc"])
+        , MS.joinPath (root : namePath <> ["main.loc"])
+        ])
+    _ -> return Nothing
+
+-- | Resolve a bare import to an installed module (MOD-7). Supports
+-- namespaced imports ("owner/name"). A local module of the same name under
+-- @localRoot@ is never used; when no installed module exists, it is named
+-- in the error.
+findBareModule :: Maybe Path -> MVar -> MVar -> MorlocMonad Path
+findBareModule localRoot currentModule importModule = do
+  config <- MM.ask
+  let systemPaths = systemModulePaths config importModule
       lib = Config.configLibrary config
       plane = Config.configPlane config
       namePath = splitModuleName importModule
   existingSystem <- liftIO . fmap catMaybes . mapM getFile $ systemPaths
-  existingLocal <- liftIO . fmap catMaybes . mapM getFile $ localPaths
-  case (existingSystem, existingLocal) of
-    (s:_, l:_) ->
+  local <- bareLocalMatch localRoot importModule
+  case (existingSystem, local) of
+    (x:_, _) -> return x
+    ([], Just l) ->
       MM.throwRejected $
-        "Ambiguous import" <+> squotes (pretty importModule)
-          <+> "from module" <+> squotes (pretty currentModule)
-          <> "\nFound in system:" <+> pretty s
-          <> "\nFound locally:" <+> pretty l
-          <> "\nUse" <+> squotes (pretty ("import ." <> unMVar importModule))
-          <+> "for local or ensure the system module is installed"
-    (x:_, []) -> return x
-    ([], x:_) -> do
-      MM.say $
-        "WARNING: bare import" <+> squotes (pretty importModule)
-          <+> "resolved locally."
-          <+> "Use" <+> squotes (pretty ("import ." <> unMVar importModule))
-          <+> "for explicit local imports."
-      return x
-    ([], []) -> do
-      let allPaths = systemPaths <> localPaths
-          nameNameLoc = namePath <> [last namePath <> ".loc"]
+        "Within module" <+> squotes (pretty currentModule)
+          <> "," <+> "no installed module" <+> squotes (pretty importModule)
+          <+> "exists, and none is downloaded while the local module"
+          <+> squotes (pretty l) <+> "has its name."
+          <+> "A dotless import names an installed module: write"
+          <+> squotes (pretty ("import ." <> unMVar importModule))
+          <+> "for the local module, or run" <+> squotes ("morloc install" <+> pretty importModule)
+          <+> "for the installed one"
+    ([], Nothing) -> do
+      let nameNameLoc = namePath <> [last namePath <> ".loc"]
           hintPaths =
             map
               MS.joinPath
@@ -540,7 +515,7 @@ findBareModule currentModule importModule = do
             <+> squotes (pretty importModule)
           <> "\n"
           <> "The following paths were searched:\n"
-            <+> indent 4 (vsep (map pretty allPaths))
+            <+> indent 4 (vsep (map pretty systemPaths))
           <> "\nMaybe try running: morloc install" <+> pretty importModule
           <> hintMsg
 

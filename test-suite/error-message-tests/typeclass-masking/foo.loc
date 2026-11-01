@@ -3,5 +3,5 @@ module foo (*)
 instance Marcy a where
   source Py ("foo")
 
-import foo2 (Marcy)
-import foo3 (Marcy)
+import .foo2 (Marcy)
+import .foo3 (Marcy)

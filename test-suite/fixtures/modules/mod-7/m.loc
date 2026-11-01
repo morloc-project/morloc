@@ -1,0 +1,4 @@
+module m (localValue)
+
+localValue :: Int
+localValue = 3

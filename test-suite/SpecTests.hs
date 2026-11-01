@@ -112,11 +112,47 @@ modelCheck = testCase "model/check.sh passes" $ do
     ExitSuccess -> return ()
     ExitFailure _ -> assertFailure (out <> err)
 
+-- | The frontend on a program under test-suite/fixtures/modules, with that
+-- directory's library standing for the installed modules.
+runFixture :: Bool -> FilePath -> IO (Either MorlocError [AnnoS (Indexed TypeU) Many Int])
+runFixture autoInstall rel = do
+  root <- SD.makeAbsolute "test-suite/fixtures/modules"
+  config <- emptyConfig
+  let path = root <> "/" <> rel
+  code <- MT.pack <$> readFile path
+  ((x, _), _) <-
+    MM.runMorlocMonad Nothing 0 config {configLibrary = root <> "/library"} defaultValue
+      (MM.modify (\st -> st {stateAutoInstall = autoInstall}) >> typecheckFrontend (Just path) (Code code))
+  return x
+
+acceptFixture :: String -> FilePath -> TestTree
+acceptFixture name rel =
+  testCase name $
+    runFixture False rel >>= \case
+      Right _ -> return ()
+      Left e -> assertFailure $ "expected acceptance, got: " <> show e
+
+-- | A user rejection whose diagnostic contains @needle@, with or without
+-- the installation of missing modules.
+rejectFixture :: String -> Bool -> MT.Text -> FilePath -> TestTree
+rejectFixture name autoInstall needle rel =
+  testCase name $
+    runFixture autoInstall rel >>= \case
+      Right _ -> assertFailure "expected rejection"
+      Left (Rejected _ d) ->
+        assertBool ("diagnostic lacks " <> MT.unpack needle <> ": " <> MT.unpack (render d)) (needle `MT.isInfixOf` render d)
+      Left e -> assertFailure $ "expected a user error, got: " <> show e
+
 modTests :: TestTree
 modTests =
   testGroup
     "MOD"
-    [ accept
+    [ acceptFixture "spec-mod-6-1" "mod-6/main.loc"
+    , acceptFixture "spec-mod-7-1" "mod-7/system.loc"
+    , acceptFixture "spec-mod-7-2" "mod-7/local.loc"
+    , rejectFixture "spec-mod-7-3" False "import .mloc" "mod-7/missing.loc"
+    , rejectFixture "spec-mod-7-4" True "import .mloc" "mod-7/missing.loc"
+    , accept
         "spec-mod-14-1"
         [r|
         module lib (mkP)

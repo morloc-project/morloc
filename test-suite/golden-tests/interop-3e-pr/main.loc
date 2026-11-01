@@ -1,7 +1,7 @@
 module main (foo)
 
-import foo
-import foopy (pzipWith, pmul)
-import foor (radd, rmul)
+import .foo
+import .foopy (pzipWith, pmul)
+import .foor (radd, rmul)
 
 foo x ys zs = pzipWith (\y z -> radd (pmul x y) (rmul y z)) ys zs

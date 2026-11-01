@@ -1,6 +1,5 @@
 module pkg (pkgValue)
 
-import root-py
 import .lib.types (innerValue)
 
 pkgValue :: Int

@@ -16,8 +16,8 @@ module main
   )
 
 import .types
-import cppfuncs
-import pyfuncs
+import .cppfuncs
+import .pyfuncs
 
 -- Bool is 1 byte; crossing languages forces serialization through shared memory
 testBoolChain :: Bool

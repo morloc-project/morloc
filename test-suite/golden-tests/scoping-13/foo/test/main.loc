@@ -1,7 +1,7 @@
 module foo.test (test)
 
 -- import everything from foo (functions this module tests)
-import foo
+import .foo
 
 type Py => Int = "int"
 type Py => Bool = "bool"

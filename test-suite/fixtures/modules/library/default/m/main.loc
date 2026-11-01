@@ -1,0 +1,4 @@
+module m (systemValue)
+
+systemValue :: Int
+systemValue = 1

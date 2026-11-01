@@ -1,7 +1,7 @@
 module main (foo)
 
-import foo (List, Int)
-import foopy (padd)
-import fooc (cmap)
+import .foo (List, Int)
+import .foopy (padd)
+import .fooc (cmap)
 
 foo xs = cmap (\x -> padd 1 x) xs

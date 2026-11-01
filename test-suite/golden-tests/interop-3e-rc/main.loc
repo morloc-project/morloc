@@ -1,8 +1,8 @@
 module main (foo)
 
-import foo
-import foor (rzipWith, rmul)
-import fooc (cadd)
+import .foo
+import .foor (rzipWith, rmul)
+import .fooc (cadd)
 
 add3 x y z = cadd x (cadd y z)
 

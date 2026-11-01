@@ -1,8 +1,8 @@
 module main (foo)
 
-import foo (List, Int)
-import foopy (pmap, padd)
-import foor (rfold)
+import .foo (List, Int)
+import .foopy (pmap, padd)
+import .foor (rfold)
 
 -- yes, this is an odd definition of `sum`
 sum xs b = rfold padd b xs

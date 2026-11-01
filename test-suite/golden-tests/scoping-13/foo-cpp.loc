@@ -1,6 +1,6 @@
 module foo-cpp (*)
 
-import foo 
+import .foo 
 
 type Cpp => Unit = "mlc::Unit" -- this is an enum with a single element, NOT `void`, which corresponds to bottom
 type Cpp => Real = "double"

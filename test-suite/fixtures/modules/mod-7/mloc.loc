@@ -1,0 +1,4 @@
+module mloc (localValue)
+
+localValue :: Int
+localValue = 3

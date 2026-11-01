@@ -146,24 +146,24 @@ parse f (Code code) = do
     -- Resolve an import to a file path. Local (.dot) imports are project
     -- files and are never downloaded. A missing bare/namespaced import is
     -- auto-downloaded only when stateAutoInstall is set (make, unless
-    -- --offline) and we are not in eval mode. Resolution itself always goes
-    -- through findModule, which reports ambiguity errors and the
-    -- local-resolution warning; findBareModuleMaybe is only a presence probe
-    -- that decides whether an install is needed.
+    -- --offline), we are not in eval mode, and the importing module's
+    -- package holds no local module of that name (MOD-7: findModule then
+    -- names it rather than install a registry package in its place).
     resolveImport :: Maybe Path -> MVar -> MVar -> MorlocMonad Path
-    resolveImport mainPath mainModule importedModule
+    resolveImport localRoot mainModule importedModule
       | Mod.isLocalImport importedModule =
-          Mod.findModule (mainPath, mainModule) importedModule
+          Mod.findModule localRoot mainModule importedModule
       | otherwise = do
           present <- Mod.findBareModuleMaybe importedModule
           case present of
-            Just _ -> Mod.findModule (mainPath, mainModule) importedModule
+            Just path -> return path
             Nothing -> do
               autoInstall <- MM.gets stateAutoInstall
               evalMode <- MM.gets stateEvalMode
-              when (autoInstall && not evalMode) $
+              local <- Mod.bareLocalMatch localRoot importedModule
+              when (autoInstall && not evalMode && isNothing local) $
                 Mod.autoInstallDep importedModule
-              Mod.findModule (mainPath, mainModule) importedModule
+              Mod.findModule localRoot mainModule importedModule
 
     -- descend recursively into imports
     --
@@ -202,7 +202,11 @@ parse f (Code code) = do
       ((mainModule, importedModule) : _) -> do
         importPath <- case Map.lookup importedModule rw of
           Just (root, written) -> Mod.findLocalModuleAt mainModule root written
-          Nothing -> resolveImport (Map.lookup mainModule m) mainModule importedModule
+          Nothing -> do
+            localRoot <- case Map.lookup mainModule pkgs of
+              Just (_, root) -> return (Just root)
+              Nothing -> MM.gets stateProjectRoot
+            resolveImport localRoot mainModule importedModule
 
         -- Every loaded module is reached from the entry file, so importing
         -- the entry file closes a cycle.

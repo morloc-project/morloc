@@ -1,7 +1,7 @@
 module main (test_a, test_b)
 
-import ops-a ((&~))
-import ops-b ((&))
+import .ops-a ((&~))
+import .ops-b ((&))
 
 type Py => Int = "int"
 

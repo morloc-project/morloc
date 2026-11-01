@@ -1,6 +1,6 @@
 module ops-cpp (*)
 
-import ops
+import .ops
 
 type Cpp => Int = "int"
 

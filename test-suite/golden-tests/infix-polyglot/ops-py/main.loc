@@ -1,6 +1,6 @@
 module ops-py (*)
 
-import ops
+import .ops
 
 type Py => Int = "int"
 

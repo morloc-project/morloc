@@ -1,5 +1,5 @@
 module foopy (foo)
 
-import fooroot
+import .fooroot
 
 source Py from "foo.py" ("foo")
