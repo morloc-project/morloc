@@ -156,7 +156,7 @@ import qualified Morloc.BaseTypes as BT
 -- Program
 --------------------------------------------------------------------
 
-program :: { ([Loc CstExpr], Bool) }
+program :: { ([Loc CstDecl], Bool) }
   : modules EOF             { ($1, False) }
   | top_body EOF            { ($1, True) }
 
@@ -167,42 +167,42 @@ type_eof :: { TypeU }
 expr_eof :: { Loc CstExpr }
   : expr EOF                { $1 }
 
-modules :: { [Loc CstExpr] }
+modules :: { [Loc CstDecl] }
   : module                   { [$1] }
   | modules module           { $1 ++ [$2] }
 
-module :: { Loc CstExpr }
+module :: { Loc CstDecl }
   : 'module' module_name '(' exports ')' top_body
       { at $1 (CModE (Just $2) $4 $6) }
   | 'module' '(' exports ')' top_body
       { at $1 (CModE Nothing $3 $5) }
 
-top_body :: { [Loc CstExpr] }
+top_body :: { [Loc CstDecl] }
   : VLBRACE top_decls VRBRACE   { $2 }
   | VLBRACE VRBRACE              { [] }
   | '{' top_decls_explicit '}'   { $2 }
   | '{' '}'                      { [] }
 
-top_decls :: { [Loc CstExpr] }
+top_decls :: { [Loc CstDecl] }
   : top_decl                     { $1 }
   | top_decls VSEMI top_decl     { $1 ++ $3 }
 
-top_decls_explicit :: { [Loc CstExpr] }
+top_decls_explicit :: { [Loc CstDecl] }
   : top_decl                           { $1 }
   | top_decls_explicit ';' top_decl    { $1 ++ $3 }
 
-top_decl :: { [Loc CstExpr] }
+top_decl :: { [Loc CstDecl] }
   : import_decl       { [$1] }
   | typedef_decl      { [$1] }
   | typeclass_decl    { [$1] }
   | effect_decl       { $1 }
   | instance_decl     { $1 }
   | fixity_decl       { [$1] }
-  | source_decl       { $1 }
-  | '%inline' source_decl { map (\(Loc sp e) -> Loc sp (CInlineE (Loc sp e))) $2 }
+  | source_decl       { $1 False }
+  | '%inline' source_decl { $2 True }
   | sig_or_ass        { $1 }
 
-sig_or_ass :: { [Loc CstExpr] }
+sig_or_ass :: { [Loc CstDecl] }
   : evar_or_op '::' sig_type
       { [at $1 (CSigE (toEVar $1) $3)] }
   | evar_or_op atom_exprs '=' expr opt_where_decls
@@ -293,7 +293,7 @@ symbol :: { Located }
 -- Imports
 --------------------------------------------------------------------
 
-import_decl :: { Loc CstExpr }
+import_decl :: { Loc CstDecl }
   : 'import' import_module_name opt_import_list
       { at $1 (CImpE (Import (MV $2) $3 [] Nothing)) }
   | 'import' import_module_name 'as' LOWER opt_import_list
@@ -333,7 +333,7 @@ import_item :: { AliasedSymbol }
 -- Type definitions
 --------------------------------------------------------------------
 
-typedef_decl :: { Loc CstExpr }
+typedef_decl :: { Loc CstDecl }
   : 'type' UPPER '=>' typedef_term '=' concrete_rhs
       { at $1 (CTypE (CstTypeAlias (Just $2) $4 $6)) }
   | 'type' LOWER '=>' typedef_term '=' concrete_rhs
@@ -524,7 +524,7 @@ non_string_atom :: { TypeU }
 -- Typeclasses
 --------------------------------------------------------------------
 
-typeclass_decl :: { Loc CstExpr }
+typeclass_decl :: { Loc CstDecl }
   : 'class' class_head 'where' VLBRACE sig_list VRBRACE
       { at $1 (CClsE $2 $5) }
   | 'class' class_head
@@ -538,7 +538,7 @@ typeclass_decl :: { Loc CstExpr }
 -- Multiple effects may be declared on one line, comma-separated:
 -- `effect IO, Err` desugars to `effect IO` followed by `effect Err`.
 -- The `escapable` prefix applies to every name in the list.
-effect_decl :: { [Loc CstExpr] }
+effect_decl :: { [Loc CstDecl] }
   : 'effect' effect_name_list
       { map (\n -> at $1 (CEffE (getName n) False)) $2 }
   | 'escapable' 'effect' effect_name_list
@@ -578,7 +578,7 @@ signature :: { CstSigItem }
 -- Instances
 --------------------------------------------------------------------
 
-instance_decl :: { [Loc CstExpr] }
+instance_decl :: { [Loc CstDecl] }
   : 'instance' instance_context instance_heads 'where' VLBRACE instance_items VRBRACE
       { [at $1 (CIstE $2 cn ts (concat $6)) | (cn, ts) <- $3] }
   | 'instance' instance_context instance_heads
@@ -597,20 +597,20 @@ instance_heads :: { [(ClassName, [TypeU])] }
   : UPPER types1                              { [(ClassName (getName $1), $2)] }
   | instance_heads ',' UPPER types1           { $1 ++ [(ClassName (getName $3), $4)] }
 
-instance_items :: { [[Loc CstExpr]] }
+instance_items :: { [[Loc CstDecl]] }
   : instance_item                        { [$1] }
   | instance_items VSEMI instance_item   { $1 ++ [$3] }
 
-instance_item :: { [Loc CstExpr] }
-  : source_decl             { $1 }
-  | '%inline' source_decl   { map (\(Loc sp e) -> Loc sp (CInlineE (Loc sp e))) $2 }
+instance_item :: { [Loc CstDecl] }
+  : source_decl             { $1 False }
+  | '%inline' source_decl   { $2 True }
   | sig_or_ass              { $1 }
 
 --------------------------------------------------------------------
 -- Fixity declarations
 --------------------------------------------------------------------
 
-fixity_decl :: { Loc CstExpr }
+fixity_decl :: { Loc CstDecl }
   : 'infixl' INTEGER operator_names
       {% checkFixityPrecedence $2 >> return (at $1 (CFixE InfixL (fromInteger (getInt $2)) $3)) }
   | 'infixr' INTEGER operator_names
@@ -635,11 +635,12 @@ operator_ref :: { EVar }
 -- Source declarations
 --------------------------------------------------------------------
 
-source_decl :: { [Loc CstExpr] }
+-- Applied to whether the declaration is marked `%inline`.
+source_decl :: { Bool -> [Loc CstDecl] }
   : 'source' lang_token opt_from '(' source_items ')'
-      { [at $1 (CSrcOldE $2 $3 (leadItem (locPos $4) $5))] }
+      { \inl -> [at $1 (CSrcOldE $2 $3 (map (inlineItem inl) (leadItem (locPos $4) $5)))] }
   | 'source' lang_token opt_from 'where' VLBRACE source_new_items VRBRACE
-      { [at $1 (CSrcNewE $2 $3 $6)] }
+      { \inl -> [at $1 (CSrcNewE $2 $3 (map (inlineItem inl) $6))] }
 
 opt_from :: { Maybe Text }
   : {- empty -}                    { Nothing }
@@ -1104,20 +1105,20 @@ evar_or_op :: { Located }
   | '(' '-' ')'               { $2 { locPos = locPos $1 } }
   | '(' '.' ')'               { $2 { locPos = locPos $1 } }
 
-opt_where_decls :: { [Loc CstExpr] }
+opt_where_decls :: { [Loc CstDecl] }
   : {- empty -}                               { [] }
   | 'where' VLBRACE where_items VRBRACE       { $3 }
   | 'where' '{' where_items_explicit '}'      { $3 }
 
-where_items :: { [Loc CstExpr] }
+where_items :: { [Loc CstDecl] }
   : where_item                      { $1 }
   | where_items VSEMI where_item    { $1 ++ $3 }
 
-where_items_explicit :: { [Loc CstExpr] }
+where_items_explicit :: { [Loc CstDecl] }
   : where_item                             { $1 }
   | where_items_explicit ';' where_item    { $1 ++ $3 }
 
-where_item :: { [Loc CstExpr] }
+where_item :: { [Loc CstDecl] }
   : sig_or_ass                { $1 }
 
 -- Zero-or-more atom_expr for function-def / declaration parameter lists.
@@ -1228,6 +1229,9 @@ mkConstraint name ts = Constraint (ClassName name) ts
 
 listItem :: Pos -> Bool -> Text -> Maybe Text -> CstSrcItem
 listItem p isBacktick name alias = CstSrcItem [] p False isBacktick name alias
+
+inlineItem :: Bool -> CstSrcItem -> CstSrcItem
+inlineItem inl x = x {srcItemInline = inl || srcItemInline x}
 
 leadItem :: Pos -> [CstSrcItem] -> [CstSrcItem]
 leadItem p (x : rest) = x {srcItemLeadPos = p : srcItemLeadPos x} : rest

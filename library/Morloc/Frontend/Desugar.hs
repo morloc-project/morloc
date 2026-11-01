@@ -2874,21 +2874,6 @@ desugarExpr (Loc sp (CInterpE startText exprs mids endText)) = do
 desugarExpr (Loc sp (CGuardExprE guards defaultExpr)) = desugarGuards sp guards defaultExpr
 desugarExpr (Loc sp (CMatchE scrutinee clauses)) = desugarMatch sp scrutinee clauses
 
--- Top-level declarations should not appear inside expressions
-desugarExpr (Loc _ CModE{}) = error "desugarExpr: unexpected CModE in expression position"
-desugarExpr (Loc _ (CImpE {})) = error "desugarExpr: unexpected CImpE in expression position"
-desugarExpr (Loc _ (CSigE {})) = error "desugarExpr: unexpected CSigE in expression position"
-desugarExpr (Loc _ (CAssE {})) = error "desugarExpr: unexpected CAssE in expression position"
-desugarExpr (Loc _ (CTypE {})) = error "desugarExpr: unexpected CTypE in expression position"
-desugarExpr (Loc _ (CClsE {})) = error "desugarExpr: unexpected CClsE in expression position"
-desugarExpr (Loc _ (CIstE {})) = error "desugarExpr: unexpected CIstE in expression position"
-desugarExpr (Loc _ (CEffE {})) = error "desugarExpr: unexpected CEffE in expression position"
-desugarExpr (Loc _ (CFixE {})) = error "desugarExpr: unexpected CFixE in expression position"
-desugarExpr (Loc _ (CSrcOldE {})) = error "desugarExpr: unexpected CSrcOldE in expression position"
-desugarExpr (Loc _ (CSrcNewE {})) = error "desugarExpr: unexpected CSrcNewE in expression position"
-desugarExpr (Loc _ (CGuardedAssE {})) = error "desugarExpr: unexpected CGuardedAssE in expression position"
-desugarExpr (Loc _ (CRefutAssE {})) = error "desugarExpr: unexpected CRefutAssE in expression position"
-desugarExpr (Loc _ (CInlineE {})) = error "desugarExpr: unexpected CInlineE in expression position"
 desugarExpr (Loc sp CUnderscoreE) =
   dfail (startPos sp) "'_' is only valid in a binding position (let / do-bind / lambda / function-def arg)"
 -- Hook / labeled variable: `label@name` in expression position. The parser
@@ -3075,7 +3060,7 @@ inferModuleName projectRoot filePath =
         xs -> xs
   in "." <> T.intercalate "." (map T.pack stripped)
 
-desugarTopLevel :: Loc CstExpr -> D [ExprI]
+desugarTopLevel :: Loc CstDecl -> D [ExprI]
 desugarTopLevel (Loc sp (CModE maybeName export body)) = do
   name <- case maybeName of
     Just n -> return n
@@ -3094,12 +3079,7 @@ desugarTopLevel (Loc sp (CModE maybeName export body)) = do
     , dsModuleEpilogues = epis
     }
   expExprI <- desugarExport sp export
-  State.modify $ \s -> s
-    { dsNamespaces = Set.fromList
-        [ unEVar ns | Loc _ (CImpE (Import _ _ _ (Just ns))) <- body ]
-    }
-  bodyExprs <- concatMapM desugarTopLevel body
-  checkCtorUniqueness body
+  bodyExprs <- desugarModuleBody body
   modI <- freshIdSpan sp
   return [ExprI modI (ModE (MV name) (expExprI : bodyExprs))]
 desugarTopLevel (Loc sp (CImpE imp)) = do
@@ -3181,17 +3161,6 @@ desugarTopLevel (Loc sp (CSrcNewE langTok srcFile nameTuples)) = do
   modPath <- State.gets dsModulePath
   let path = resolveSourceFile modPath srcFile
   mapM (mkSource sp lang path False) nameTuples
-desugarTopLevel (Loc _ (CInlineE inner)) = do
-  exprs <- desugarTopLevel inner
-  return (map markSourceInline exprs)
-  where
-    markSourceInline (ExprI i (SrcE src)) = ExprI i (SrcE src { srcInline = True })
-    markSourceInline e = e -- %inline on non-source definitions is not yet implemented
-
--- Expression-level CST nodes should not appear at top level
-desugarTopLevel node = do
-  e <- desugarExpr node
-  return [e]
 
 -- | Build a definition's lambda and where-block from its pattern parameters.
 -- A name bound by a parameter pattern is in scope wherever a plain parameter
@@ -3236,12 +3205,12 @@ bodyLambdaParams _ = return []
 -- Reject where-clause bindings that shadow a function parameter or
 -- duplicate a sibling where-binding, and a second signature for one name
 -- (SIG-6). A signature and a binding of one name are expected.
-checkWhereScope :: [Loc CstIrrefPat] -> [Loc CstExpr] -> D ()
+checkWhereScope :: [Loc CstIrrefPat] -> [Loc CstDecl] -> D ()
 checkWhereScope params decls = do
   go (Set.fromList (map fst (concatMap irrefPatBoundNames params))) Set.empty decls
   sigs Set.empty decls
   where
-    sigs :: Set.Set Text -> [Loc CstExpr] -> D ()
+    sigs :: Set.Set Text -> [Loc CstDecl] -> D ()
     sigs _ [] = return ()
     sigs seen (d@(Loc _ (CSigE (EV n) _)) : rest)
       | Set.member n seen =
@@ -3249,7 +3218,7 @@ checkWhereScope params decls = do
       | otherwise = sigs (Set.insert n seen) rest
     sigs seen (_ : rest) = sigs seen rest
 
-    go :: Set.Set Text -> Set.Set Text -> [Loc CstExpr] -> D ()
+    go :: Set.Set Text -> Set.Set Text -> [Loc CstDecl] -> D ()
     go _ _ [] = return ()
     go ps seen (d : rest) = case bindingName d of
       Nothing -> go ps seen rest
@@ -3260,7 +3229,7 @@ checkWhereScope params decls = do
             dfail pos ("duplicate binding in where-clause: " ++ T.unpack n)
         | otherwise -> go ps (Set.insert n seen) rest
 
-    bindingName :: Loc CstExpr -> Maybe (Text, Pos)
+    bindingName :: Loc CstDecl -> Maybe (Text, Pos)
     bindingName d@(Loc _ (CAssE (EV n) _ _ _)) = Just (n, startPos d)
     bindingName d@(Loc _ (CGuardedAssE (EV n) _ _ _ _)) = Just (n, startPos d)
     bindingName d@(Loc _ (CRefutAssE (EV n) _ _)) = Just (n, startPos d)
@@ -3345,7 +3314,7 @@ isVacuousAlias v vs = go
 -- The rule is deliberately the strict direction: relaxing it later (scoped
 -- or qualified constructors) is easy, and tightening it after code depends
 -- on shadowing is not.
-checkCtorUniqueness :: [Loc CstExpr] -> D ()
+checkCtorUniqueness :: [Loc CstDecl] -> D ()
 checkCtorUniqueness body =
   case firstRepeatedName (concatMap declCtors body) of
     Nothing -> return ()
@@ -3701,15 +3670,25 @@ isOperatorName t = case T.uncons t of
 -- Program entry point
 --------------------------------------------------------------------
 
+-- | The declarations of one module, with or without a `module` header.
+desugarModuleBody :: [Loc CstDecl] -> D [ExprI]
+desugarModuleBody body = do
+  State.modify $ \s -> s
+    { dsNamespaces = Set.fromList
+        [ unEVar ns | Loc _ (CImpE (Import _ _ _ (Just ns))) <- body ]
+    }
+  bodyExprs <- concatMapM desugarTopLevel body
+  checkCtorUniqueness body
+  return bodyExprs
+
 {- | Desugar a list of CST nodes into ExprI nodes.
 Handles implicit main wrapping for bare declarations.
 -}
-desugarProgram :: Bool -> [Loc CstExpr] -> D [ExprI]
+desugarProgram :: Bool -> [Loc CstDecl] -> D [ExprI]
 desugarProgram isImplicitMain cstNodes = do
-  exprIs <- concatMapM desugarTopLevel cstNodes
   exprIs' <- if isImplicitMain
-               then mkImplicitMain exprIs
-               else return exprIs
+               then desugarModuleBody cstNodes >>= mkImplicitMain
+               else concatMapM desugarTopLevel cstNodes
   warnUnreadDocs
   -- Terminal-action synthesis and @collect expansion run later, in
   -- 'Morloc.Frontend.TerminalActions'.

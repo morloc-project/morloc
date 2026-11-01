@@ -13,6 +13,7 @@ Fields are positional and unnamed; matching is the only way to read them.
 
 ### SUM-2 A constructor determines its type
 Intent: proposed
+Tests: spec-sum-2-1, spec-sum-2-2
 Code: conforms 2026-10-21
 
 A constructor name belongs to one `data` type, so a constructor in an

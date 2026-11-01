@@ -15,6 +15,7 @@ module Morloc.Frontend.CST
   ( Span (..)
   , Loc (..)
   , HasPos (..)
+  , CstDecl (..)
   , CstExpr (..)
   , CstExport (..)
   , CstSigType (..)
@@ -87,28 +88,31 @@ infixl 5 <->
 -- CST node types
 --------------------------------------------------------------------
 
-data CstExpr
-  = -- Top-level declarations
-    CModE (Maybe Text) CstExport [Loc CstExpr]
+-- | A declaration: what a module body, a where-block or an instance body
+-- holds.
+data CstDecl
+  = CModE (Maybe Text) CstExport [Loc CstDecl]
   | CImpE Import
   | CSigE EVar CstSigType
-  | CAssE EVar [Loc CstExpr] (Loc CstExpr) [Loc CstExpr]
-  | CGuardedAssE EVar [Loc CstExpr] [(Loc CstExpr, Loc CstExpr)] (Loc CstExpr) [Loc CstExpr]
+  | CAssE EVar [Loc CstExpr] (Loc CstExpr) [Loc CstDecl]
+  | CGuardedAssE EVar [Loc CstExpr] [(Loc CstExpr, Loc CstExpr)] (Loc CstExpr) [Loc CstDecl]
   -- Refutable-pattern definition: name, one clause per `|` (each a list of
   -- argument-pattern expressions and a body), shared where-decls. The
   -- patterns are parsed as expressions and narrowed by 'exprToRefutPat'.
-  | CRefutAssE EVar [([Loc CstExpr], Loc CstExpr)] [Loc CstExpr]
+  | CRefutAssE EVar [([Loc CstExpr], Loc CstExpr)] [Loc CstDecl]
   | CTypE CstTypeDef
   | CClsE CstClassHead [CstSigItem]
-  | CIstE [Constraint] ClassName [TypeU] [Loc CstExpr]
+  | CIstE [Constraint] ClassName [TypeU] [Loc CstDecl]
   | CEffE Text Bool  -- ^ effect declaration: label, isEscapable (True = escapable)
   | CFixE Associativity Int [EVar]
   -- A `source` list, whose items name their foreign function
   | CSrcOldE Located (Maybe Text) [CstSrcItem]
   -- A `source` block, whose items may rename theirs with `@name`
   | CSrcNewE Located (Maybe Text) [CstSrcItem]
-  | -- Expressions
-    CAppE (Loc CstExpr) [Loc CstExpr]
+  deriving (Show, Eq)
+
+data CstExpr
+  = CAppE (Loc CstExpr) [Loc CstExpr]
   | CLamE [Loc CstExpr] (Loc CstExpr)
   | CLetE [(Loc CstExpr, Loc CstExpr)] (Loc CstExpr)
   | CBopE (Loc CstExpr) Located (Loc CstExpr)
@@ -139,7 +143,6 @@ data CstExpr
   -- Operator sections (Haskell naming: left = left operand given, right = right operand given)
   | CLeftSecE !(Loc CstExpr) !Located  -- ^ (expr op) left section: \x -> expr op x
   | CRightSecE !Located !(Loc CstExpr)  -- ^ (op expr) right section: \x -> x op expr
-  | CInlineE (Loc CstExpr) -- ^ %inline wrapper for source declarations
   | CForceE !(Loc CstExpr) -- ^ '!' e -- eval sugar; hoisted to a fresh do-bind by hoistEvals
   deriving (Show, Eq)
 

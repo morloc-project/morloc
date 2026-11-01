@@ -47,6 +47,7 @@ specTests =
     , localOption (mkTimeout 2000000) patTests
     , localOption (mkTimeout 2000000) recTests
     , localOption (mkTimeout 2000000) collTests
+    , localOption (mkTimeout 2000000) sumTests
     , localOption (mkTimeout 2000000) lexTests
     , localOption (mkTimeout 2000000) sigTests
     , localOption (mkTimeout 2000000) baseTests
@@ -2658,6 +2659,30 @@ collTests =
         h t = (.0 = "a") t
         g :: (Int, Int) -> (Str, Int)
         g p = h p
+        |]
+    ]
+
+sumTests :: TestTree
+sumTests =
+  testGroup
+    "SUM"
+    [ rejectNaming
+        "spec-sum-2-1"
+        ["Constructor", "X", "unique"]
+        []
+        [r|
+        data A = X
+        data B = X | Y
+        f :: B -> Int
+        f b = 1
+        |]
+    , accept
+        "spec-sum-2-2"
+        [r|
+        data A = X
+        data B = Z | Y
+        f :: B -> Int
+        f b = 1
         |]
     ]
 
