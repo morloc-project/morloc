@@ -7,10 +7,13 @@ re-checked.
 
 ## Rulings needed
 
-- **IFACE-17 (`check.path` on every interface) is proposed.** The resolver
-  does not apply argument checks off the CLI until it is ruled. Open with
-  it: a failed check is bad-request; a supplied `IFile` that does not exist
-  is bad-request; a default file that does not exist is a call failure.
+- **IFACE-1, IFACE-2 and IFACE-20..23 (every interface calls the same
+  function) are proposed.**
+- **IFACE-17 (argument checks on every command interface) is
+  proposed.** The resolver does not apply argument checks off the CLI
+  until it is ruled. Open with it: a failed check is bad-request; a
+  supplied `IFile` that does not exist is bad-request; a default file that
+  does not exist is a call failure.
 
 ## Commands (IFACE-3, IFACE-16)
 
@@ -44,10 +47,11 @@ re-checked.
 - **The socket protocol is unspecified.** Gap in model/runtime/network.md:
   NET-4..NET-7 cover the transport, but nothing states the LP request and
   response (methods, fields, `media`, packet mode, error kinds).
-- **An `IFile` given as JSON skips the existence and `"-"` checks.** [read]
-  morloc-nexus/src/dispatch.rs `check_ifile_arg` runs only for
+- **An `IFile` given as JSON skips the existence check.** [read] Violates
+  IFACE-17. morloc-nexus/src/dispatch.rs `check_ifile_arg` runs only for
   `ArgValue::Value` (a bare `-` is refused); a test asserts a JSON `"-"`
-  passes (~l.1969).
+  passes (~l.1969). IFACE-17 makes a JSON `"-"` a path named `-`; whether
+  the pool then opens that file or standard input is unchecked.
 - **Internal argument errors are classed bad-request.** [read]
   morloc-runtime/src/daemon_ffi.rs: any `call_arg_packet` or
   `make_call_packet` error, SHM exhaustion included, answers 400
@@ -97,26 +101,28 @@ re-checked.
   "@stdout already open in this nexus" (morloc-runtime/src/stream.rs:
   2437-2446).
 
-## Front end and its children (IFACE-1, IFACE-2)
+## Front end and its children (IFACE-2, IFACE-20, IFACE-23)
 
 - **The front end drops the `action` field of a successful call.** [read,
   reproduced 2026-10-13] A daemon's HTTP reply is
   `{"status":"ok","action":"raw","result":...}`; the front end's `/call`
   rebuilds the envelope as `{"status":"ok","result":...}`
   (morloc-nexus/src/mcp.rs `frontend_call_api`), so a caller cannot see
-  which output action ran. Violates IFACE-2.
+  which output action ran. Violates IFACE-23 and IFACE-2.
 - **The router starts a child daemon from whatever `morloc-nexus` it
   finds.** [read] `find_morloc_nexus` (morloc-runtime/src/router_ffi.rs:
   331-383) searches `$MORLOC_NEXUS`, `$MORLOC_HOME/bin`, `$PATH`,
   `~/.local/bin`, never the front end's own binary, and children start
   lazily and after each crash. A child of another build can ignore request
-  fields the front end relies on.
+  fields the front end relies on, or run another build's code. Violates
+  IFACE-20.
 - **The front end's tool list goes stale against a rebuilt manifest.**
   [read] `tools/list` comes from shapes cached at startup (`mcp_by_name`);
   a child started later reads the current manifest. A call names its
   arguments, so it is refused (unknown or missing argument) rather than
   misbound, but the advertised tools are wrong until the front end
-  restarts. ART-5 compares only the morloc version string.
+  restarts. ART-5 compares only the morloc version string. Violates
+  IFACE-11.
 ## Eval (IFACE-13)
 
 - **The manual says loopback eval needs no token; the code locks it.**

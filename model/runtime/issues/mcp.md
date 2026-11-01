@@ -7,7 +7,8 @@ test-suite/golden-tests/multi-output-stream (streaming commands). Paths are
 under data/rust/.
 
 - **A call that streams its output is refused off the CLI.** Violates
-  IFACE-6 and IFACE-8 (the output must reach the caller); refused before it
+  IFACE-6 and IFACE-8 (the output must reach the caller), and IFACE-21
+  where the refusal comes partway through the run; refused before it
   runs when the manifest shows it (a streaming command's own value, a
   stream-kind action: daemon_ffi.rs `resolve_render_target`), and by
   DAEMON-15 at the `@stdout` open otherwise (`<IO> ()` producers such as
@@ -43,3 +44,5 @@ under data/rust/.
 - **The daemon's HTTP parser truncates path and query at 255 bytes.**
   [read, 2026-10-21] http_ffi.rs:213-218 copies into 256-byte arrays, so a
   longer `/call/<cmd>` or `?render=` is routed by its prefix, not refused.
+  Violates IFACE-22: where another command or action has that prefix, it
+  runs and succeeds.
