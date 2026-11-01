@@ -12,8 +12,14 @@ New features
    Vector (m * n) a)`
  * `morloc make --debug` also checks the lengths of values passed between
    pools; other builds no longer do
+ * `morloc make -X py:check=on` compiles each sourced Python file and fails
+   the build on a syntax error
 
 Changed
+ * A program refuses to run when a Python or R file it sources has changed
+   or gone since it was built, naming the file; rebuild it with `morloc
+   make`. This includes the files of an installed module reinstalled after
+   the build
  * A label inside a type other than a whole signature argument or a newtype
    header is an error; it was silently ignored
  * The length of a run-time value, or a label whose argument is not a
@@ -61,6 +67,11 @@ Diagnostics
    are no longer reported as compiler bugs
  * A duplicate constructor in a file with no `module` header is reported as
    one
+
+Fixes
+ * A sourced Python file edited within a second of its last run, keeping its
+   size, no longer runs as its old version after a rebuild, and no longer
+   caches the old version's results under the new build
 
 0.111.1 [2026-10-27]
 --------------------

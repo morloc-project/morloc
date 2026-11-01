@@ -1,0 +1,14 @@
+-- SRC-7: a language may declare build steps for each file it sources.
+--
+-- Python declares a `check` that compiles each sourced file. It runs only
+-- under `-X py:check=on`: without it, a syntax error in a sourced file still
+-- builds; with it, the build fails and reports the error. Any other value of
+-- `py:check` is refused. A file that compiles builds under the check, which
+-- writes no bytecode.
+module main (inc)
+
+import root-py
+
+source Py from "inc.py" ("inc")
+
+inc :: Real -> Real

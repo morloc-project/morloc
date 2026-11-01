@@ -27,7 +27,7 @@ import qualified Data.Aeson.Key as AesonKey
 import qualified Data.Aeson.KeyMap as KM
 import qualified Data.ByteString.Lazy as BSL
 import Data.Int (Int64)
-import Data.Word (Word8)
+import Data.Word (Word64, Word8)
 import qualified Data.Map as Map
 import qualified Data.Scientific as DS
 import Data.Set (Set)
@@ -56,6 +56,8 @@ import qualified Morloc.Config as MC
 import Morloc.Data.Doc (concatWith, hardline, indent, line, pretty, render, squotes, vcat, (<+>))
 import Morloc.Data.Json
 import qualified Morloc.LangRegistry as LR
+import qualified Morloc.Data.GMap as GMap
+import qualified Morloc.Data.PoolHash as PoolHash
 import qualified Morloc.Language as ML
 import qualified Morloc.Monad as MM
 import qualified Morloc.TypeEval as TE
@@ -2831,6 +2833,9 @@ data ManifestInputs = ManifestInputs
   , miInlineSize          :: !(Maybe Int64)
   , miNoShm               :: !Bool
   , miTmpdir              :: !(Maybe Path)
+  , miSourceHashes        :: !(Map.Map Lang [(FilePath, Word64)])
+    -- ^ Per pool language that loads its sources at run time, each sourced
+    -- file's absolute path and content hash (SRC-8).
   , miBuildParams         :: !Text
     -- ^ Fingerprint of the resolved build parameters (@-X lang:key=value@),
     -- recorded so a built program carries a record of how it was compiled.
@@ -2912,6 +2917,12 @@ buildManifest ManifestInputs{..} =
         -- on spawn; the pool's cache wrap mixes it into every cache key
         -- so a source edit invalidates stale entries.
         , ("pool_hash", jsonStr ("<MORLOC_POOL_HASH:" <> ML.showLangName lang <> ">"))
+        -- Files the pool loads at run time, with their content hashes; the
+        -- nexus refuses to start the pool if any has changed (SRC-8).
+        , ("sources", jsonArr
+            [ jsonObj [("path", jsonStr (MT.pack path)), ("hash", jsonStr (PoolHash.poolHashHex h))]
+            | (path, h) <- Map.findWithDefault [] lang miSourceHashes
+            ])
         , ("allow_string_null",
             jsonBool (LR.registryAllowStringNull miRegistry (ML.langName lang)))
         , ("metadata", metadataEmpty)
@@ -3341,6 +3352,14 @@ generate cs rASTs helperRASTs = do
   noShm <- MM.gets stateNoShm
   tmpdir <- MM.gets stateTmpdir
   buildParams <- MM.gets (BP.renderSalt . stateLangParams)
+  allSources <- MM.gets (concat . GMap.elems . stateSources)
+  sourceHashes <- fmap Map.fromList . CM.forM daemonSets $ \(lang, _) ->
+    if LR.registryIsCompiled registry (ML.langName lang)
+      then return (lang, [])
+      else do
+        let paths = Set.toAscList (Set.fromList [p | src <- allSources, srcLang src == lang, Just p <- [srcPath src]])
+        hs <- liftIO (PoolHash.computeSourceHashes paths)
+        return (lang, hs)
   runLog <- renderRunLogTemplate
   debugTrace <- MM.gets stateDebugTrace
   -- Capability strings advertise optional codegen features baked into
@@ -3398,6 +3417,7 @@ generate cs rASTs helperRASTs = do
             , miInlineSize          = inlineSize
             , miNoShm               = noShm
             , miTmpdir              = tmpdir
+            , miSourceHashes        = sourceHashes
             , miBuildParams         = buildParams
             , miRunLog              = runLog
             , miPackerInstances     = packerInstances

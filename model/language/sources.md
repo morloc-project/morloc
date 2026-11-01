@@ -62,3 +62,35 @@ manifolds as global `.__mm_<id>`; an R source that defines, replaces or
 removes one of these fails to load, and so does a call that assigns one.
 The helpers user R files call, `.morloc.source`, `.morloc.pooldir` and
 `.morloc.libdir`, are bound globally.
+
+### SRC-7 A language may declare build steps for each file it sources
+Intent: proposed
+Code: conforms 2026-11-01
+Tests: spec-src-7-1
+
+A language's `lang.yaml` may list steps under `build: per_source:`, which
+`morloc make` runs for every file the pool sources, after the pool is
+written and before the program is swapped in. A step is `remove: PATTERN`,
+which deletes the files matching the pattern (`*` only in its last path
+component), or `check: COMMAND`, a shell command run only under
+`-X <lang>:check=on` that fails the build on a non-zero exit with its
+error output. `{{path}}`, `{{dir}}` and `{{stem}}` name the sourced file,
+its directory and its name without extension; in a `check` command they are
+shell-quoted. A `<lang>:check` value other than `on` or `off` is a build
+error. A file that matches a `remove` pattern but cannot be removed fails
+the build.
+
+### SRC-8 A program refuses to run a sourced file that changed after its build
+Intent: ruled 2026-11-01
+Code: conforms 2026-11-01
+Tests: spec-src-8-1, spec-src-8-2
+
+A pool of a language that loads its sources when it starts (Python, R)
+records in the manifest each file it sources, by absolute path, with a
+hash of its contents at build. Before the nexus starts any pool, it checks
+every pool it is about to start; if a file is missing or its contents
+differ, nothing starts and the run fails with exit status 1, naming the
+file and saying to rebuild. A result is then never computed, or cached,
+from code other than what was built. A compiled language's sources are
+fixed into its build and are not checked. Files that a sourced file loads
+in turn are not covered (../runtime/issues/cache.md).

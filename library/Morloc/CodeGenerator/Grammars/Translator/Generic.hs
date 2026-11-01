@@ -51,6 +51,7 @@ import qualified Morloc.CodeGenerator.Serial as Serial
 import Morloc.CodeGenerator.LogTemplate (RenderedTemplate (..), collectRenderedTemplates)
 import Morloc.CodeGenerator.Namespace
 import qualified Data.Map.Strict as Map
+import qualified Morloc.Build.Params as BP
 import qualified Morloc.Config as MC
 import Morloc.Data.Doc
 import qualified Morloc.Data.Text as MT
@@ -62,7 +63,7 @@ import Morloc.Monad (asks, gets, newIndex, runIndex, getSchemaTable, registerSch
 import qualified Morloc.Monad as MM
 import Morloc.Quasi
 import qualified System.Directory as Dir
-import System.FilePath (isAbsolute, splitDirectories)
+import System.FilePath (isAbsolute, splitDirectories, takeBaseName, takeDirectory)
 import qualified System.Exit as Exit
 import System.IO (hClose, openBinaryTempFile)
 import qualified System.Process as Proc
@@ -132,13 +133,14 @@ translateBuiltin lang desc srcs es = do
   let rendered = T.replace "__MORLOC_VERSION__" (MT.pack MV.versionStr) (render code)
 
   let poolSubdir = getPoolSubdir lang
+  hooks <- sourceHookCommands lang desc srcs
 
   return $
     Script
       { scriptBase = "pool"
       , scriptLang = lang
       , scriptCode = "." :/ Dir "pools" [Dir poolSubdir [File exefile (Code rendered)]]
-      , scriptMake = []
+      , scriptMake = hooks
       }
   where
     substitutePreamble :: MDoc -> Text -> Text -> MDoc -> Path -> Text -> MDoc
@@ -149,6 +151,38 @@ translateBuiltin lang desc srcs es = do
         . T.replace "{{state}}" stateText
         . T.replace "{{opt}}" (render optDoc)
         $ t
+
+-- | The build commands of the language's per-source hooks (SRC-7), for each
+-- file the pool sources. @check@ hooks run only under @<lang>:check=on@.
+sourceHookCommands :: Lang -> LangDescriptor -> [Source] -> MorlocMonad [SysCommand]
+sourceHookCommands lang desc srcs = do
+  let langKey = ML.langName lang
+  params <- gets stateLangParams
+  checkOn <- case BP.lookupParam langKey "check" params of
+    Nothing -> return False
+    Just "off" -> return False
+    Just "on" -> return True
+    Just v ->
+      MM.throwRejected . pretty $
+        "unknown " <> langKey <> ":check value '" <> v <> "'; expected one of on, off"
+  paths <- liftIO $ mapM Dir.makeAbsolute (unique (mapMaybe srcPath srcs))
+  return
+    [ cmd
+    | path <- paths
+    , hook <- ldSourceHooks desc
+    , cmd <- case hook of
+        HookRemove pat -> [SysRemoveMatching (T.unpack (fill id path pat))]
+        HookCheck c -> [SysRun (Code (fill shellQuote path c)) | checkOn]
+    ]
+  where
+    fill q path t =
+      substituteT
+        t
+        [ ("path", q (T.pack path))
+        , ("dir", q (T.pack (takeDirectory path)))
+        , ("stem", q (T.pack (takeBaseName path)))
+        ]
+    shellQuote t = "'" <> T.replace "'" "'\\''" t <> "'"
 
 -- | Translate using an external codegen tool.
 translateExternal ::
@@ -228,12 +262,13 @@ translateExternal cmd lang desc srcs es = do
               poolContent = T.replace "__MORLOC_VERSION__" (MT.pack MV.versionStr) (cgmPoolCode m)
               buildCmds = map (SysRun . Code) (cgmBuildCommands m)
               poolSubdir = getPoolSubdir lang
+          hooks <- sourceHookCommands lang desc srcs
           return $
             Script
               { scriptBase = "pool"
               , scriptLang = lang
               , scriptCode = "." :/ Dir "pools" [Dir poolSubdir [File exefile (Code poolContent)]]
-              , scriptMake = buildCmds
+              , scriptMake = hooks <> buildCmds
               }
 
 -- | Manifest returned by an external codegen tool on stdout.

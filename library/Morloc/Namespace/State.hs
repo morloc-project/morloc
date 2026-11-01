@@ -1045,11 +1045,10 @@ data Socket = Socket
   deriving (Show)
 
 data SysCommand
-  = SysExe Path
-  | SysMove Path Path
-  | SysRun Code
-  | SysInstall Path
-  | SysUnlink Path
+  = SysRun Code
+  | -- | Delete every file matching a path whose last component may hold @*@
+    -- wildcards (a language's @remove@ build hook, see SRC-7).
+    SysRemoveMatching Path
   | -- | Merge a freshly built Rust pool's Cargo.lock into the environment
     -- lock: @SysMergeCargoLock base env pool@ rewrites @env@ as @base@ plus
     -- the crates in @env@ and @pool@ that @base@ lacks (see

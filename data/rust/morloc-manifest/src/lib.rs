@@ -231,6 +231,12 @@ pub struct Pool {
     /// dependency) changes. Empty string when absent (older manifests).
     #[serde(default)]
     pub pool_hash: String,
+    /// Files the pool loads when it starts, each with the XXH64 (16-char
+    /// lowercase hex) of the contents it was built from. The nexus refuses to
+    /// start the pool if any differs (SRC-8). Empty for a compiled language
+    /// and for older manifests.
+    #[serde(default)]
+    pub sources: Vec<SourceFile>,
     /// **Reserved.** Per-pool metadata. Future slots: `resource`
     /// (cpu/memory limits), `env` (environment variables),
     /// `startup_timeout`, `health_check`.
@@ -239,6 +245,15 @@ pub struct Pool {
 }
 
 fn default_allow_string_null() -> bool { true }
+
+/// A file a pool sources, as recorded at build.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SourceFile {
+    /// Absolute path.
+    pub path: String,
+    /// XXH64 of the file's contents, as 16 lowercase hex characters.
+    pub hash: String,
+}
 
 // -- Commands -----------------------------------------------------------------
 

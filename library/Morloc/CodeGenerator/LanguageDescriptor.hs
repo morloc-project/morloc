@@ -20,6 +20,7 @@ module Morloc.CodeGenerator.LanguageDescriptor
   , MapStyle (..)
   , ListStyle (..)
   , PatternStyle (..)
+  , SourceHook (..)
   , loadLangDescriptor
   , loadLangDescriptorFromText
   , defaultLangDescriptor
@@ -80,6 +81,24 @@ data PatternStyle
   = FStringPattern -- f"prefix{var}suffix"
   | ConcatCall -- paste0("prefix", var, "suffix") or string(...)
   deriving (Eq, Show, Generic)
+
+-- | A build step run for each file the language sources (SRC-7). In both,
+-- @{{path}}@, @{{dir}}@ and @{{stem}}@ name the file, its directory and its
+-- name without extension.
+data SourceHook
+  = -- | Delete the files matching a path; @*@ is allowed in its last component.
+    HookRemove Text
+  | -- | A shell command that fails the build on a non-zero exit, run only when
+    -- the build parameter @<lang>:check=on@ is given.
+    HookCheck Text
+  deriving (Eq, Show, Generic)
+
+instance Y.FromJSON SourceHook where
+  parseJSON = Y.withObject "SourceHook" $ \obj -> case KM.toList obj of
+    [(k, Y.String v)]
+      | k == AesonKey.fromText "remove" -> pure (HookRemove v)
+      | k == AesonKey.fromText "check" -> pure (HookCheck v)
+    _ -> fail "a build hook is one of {remove: PATH} or {check: COMMAND}"
 
 -- | Complete language descriptor
 data LangDescriptor = LangDescriptor
@@ -179,6 +198,8 @@ data LangDescriptor = LangDescriptor
     ldCodegenCommand :: !(Maybe Text) -- e.g. "morloc-codegen-generic"
   , -- Converter from an Arrow record batch to a module's mapped table type
     ldTableImportFn :: !(Maybe Text) -- e.g. "mlc_table_import"
+  , -- Build steps run per sourced file (lang.yaml @build: per_source:@)
+    ldSourceHooks :: ![SourceHook]
   , -- == Template fields (Layer 1 & 2) ==
 
     -- Assignment
@@ -326,6 +347,9 @@ instance Y.FromJSON LangDescriptor where
         runCmdVal = KM.lookup (AesonKey.fromText "run_command") obj
         isCompiledVal = KM.lookup (AesonKey.fromText "is_compiled") obj
         allowNullVal = KM.lookup (AesonKey.fromText "allow_string_null") obj
+        sourceHooksVal = case KM.lookup (AesonKey.fromText "build") obj of
+          Just (Y.Object b) -> KM.lookup (AesonKey.fromText "per_source") b
+          _ -> Nothing
         -- ins keeps old value if key exists, so insert specific overrides first
         withDefaults =
           maybe id (ins "ldName") nameVal
@@ -333,6 +357,8 @@ instance Y.FromJSON LangDescriptor where
             . maybe id (ins "ldRunCommand") runCmdVal
             . maybe id (ins "ldIsCompiled") isCompiledVal
             . maybe id (setK "ldAllowStringNull") allowNullVal
+            . maybe id (setK "ldSourceHooks") sourceHooksVal
+            . ins "ldSourceHooks" (Y.Array mempty)
             . ins "ldAllowStringNull" (Y.Bool True)
             . ins "ldLazyArgs" (Y.Bool False)
             . ins "ldCodegenCommand" Y.Null
@@ -463,6 +489,7 @@ defaultLangDescriptor name ext =
     , ldLazyArgs = False
     , ldCodegenCommand = Nothing
     , ldTableImportFn = Nothing
+    , ldSourceHooks = []
     , -- Template fields
       ldAssignOp = "="
     , ldLambdaTemplate = "({{args}}) -> {{body}}"

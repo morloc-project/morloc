@@ -1,0 +1,6 @@
+app/
+__pycache__/
+*.ref
+bump.py
+copy.py
+bumper.py

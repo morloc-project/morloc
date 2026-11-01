@@ -25,8 +25,10 @@ module Morloc.Data.PoolHash
   , hashText
   , hashFiles
   , computePoolHashes
+  , computeSourceHashes
   , patchManifestPoolHashes
   ) where
+
 
 import qualified Data.ByteString as BS
 import Data.Map.Strict (Map)
@@ -36,7 +38,7 @@ import qualified Data.Text.Encoding as TE
 import Data.Word (Word64)
 import Control.Monad (filterM)
 import Data.List (sort)
-import System.Directory (doesDirectoryExist, doesFileExist, listDirectory, pathIsSymbolicLink)
+import System.Directory (doesDirectoryExist, doesFileExist, listDirectory, makeAbsolute, pathIsSymbolicLink)
 import System.FilePath ((</>))
 import System.Directory.Tree (AnchoredDirTree ((:/)), DirTree (Dir, File))
 import Text.Printf (printf)
@@ -109,6 +111,13 @@ computePoolHashes salt includes sourcedFiles pools =
         walk (File _ (Code t)) = [t]
         walk (Dir _ children) = concatMap walk children
         walk _ = []
+
+-- | The absolute path and content hash of each of the given sourced files
+-- that exists (SRC-8).
+computeSourceHashes :: [FilePath] -> IO [(FilePath, Word64)]
+computeSourceHashes paths = do
+  files <- concat <$> mapM filesUnder paths
+  mapM (\f -> (,) <$> makeAbsolute f <*> foldFilesFrom 0 [f]) files
 
 -- | A file, or every file under a directory in a fixed order. A link to a
 -- directory is not followed, so a link cycle cannot loop.

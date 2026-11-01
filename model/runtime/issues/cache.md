@@ -7,6 +7,13 @@ There is no cache spec yet; these are gaps until one is written.
   the files its language sources, `hash-include` files and the compiler
   version; a header or module those files load in turn is covered only when
   it is listed under `hash-include`.
+- **A Python or R pool finds a sourced file by searching, not by the path
+  that was hashed.** [read] data/lang/py/lang.yaml:22-26 searches the
+  program dir, then `.`, then `{{lib}}`; the R pool's `.morloc.source` does
+  the same. SRC-8 checks the absolute path recorded at build, which refuses
+  the run when that file is missing; but if the recorded path is not the
+  first match of the search (a build run from another directory), the pool
+  can load a file that was never hashed.
 - **A stream handle argument is keyed by its path, not its file.** [read]
   cache.rs ~730 folds the path bytes of an `IFile`/`IStream` argument into
   the key, so a file rewritten in place at the same path returns the

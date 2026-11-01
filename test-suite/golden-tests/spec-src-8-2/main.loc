@@ -1,0 +1,15 @@
+-- SRC-8: a program refuses to run a sourced file that changed after its build.
+--
+-- The program is built, then its sourced file is edited without a rebuild:
+-- the run fails, names the file and says to rebuild, and nothing is cached.
+-- Restoring the original contents lets it run again, and the cached results
+-- are those of the built code. A deleted sourced file is refused the same way.
+module main (foo)
+
+import root-r
+
+source R from "bump.R" ("bump")
+bump :: Real -> Real
+
+foo :: Real -> Real
+foo x = a@bump x

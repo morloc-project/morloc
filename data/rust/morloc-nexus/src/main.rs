@@ -20,6 +20,7 @@ mod phase2;
 mod process;
 mod runlog;
 mod schemas;
+mod sources;
 mod serve_help;
 mod parse_arg;
 mod sigrm;

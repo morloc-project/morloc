@@ -10,6 +10,14 @@ run_command: ["python3"]
 serial_type: "str"
 # Python's str natively supports interior NUL bytes.
 allow_string_null: true
+# Python reuses a pyc whose whole-second mtime and size match its source, so
+# a same-size edit in the same second would run the old code; the build
+# removes the bytecode of every file it sources (PY-3). The check compiles a
+# file without writing bytecode.
+build:
+  per_source:
+    - remove: "{{dir}}/__pycache__/{{stem}}.*.pyc"
+    - check: "python3 -I -c 'import sys; compile(open(sys.argv[1], \"rb\").read(), sys.argv[1], \"exec\")' {{path}}"
 preamble:
   # The morloc-owned directories go on the front of sys.path before the runtime
   # is imported, so `import pymorloc` cannot be answered by a user source file

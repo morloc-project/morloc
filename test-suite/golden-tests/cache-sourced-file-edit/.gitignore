@@ -1,2 +1,4 @@
 bump.py
+bump.ref
 cache/
+__pycache__/
