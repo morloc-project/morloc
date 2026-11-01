@@ -176,3 +176,21 @@ literal and record gaps. Reproduced on 0.109.0 unless marked.
   "Invalid function application of type: [Int -> Int -> a] -> Int -> a",
   while `apply1 (first2 [d3] x) 7` builds and runs. With `c = Int -> Int`
   the three-argument application is well typed.
+- **Silent drops left in existential merging.** [read, 2026-11-01] Gaps
+  under REC-5, COLL-7 and PAT-1, found reviewing 2617a9e4d; none reproduced
+  as a wrong result. In Typecheck/Internal.hs:
+  - the ExistU/ExistU `instantiate` rule returns its input unchanged when
+    neither existential is in the context (both `access2` probes fail), so
+    a merge with a cut or trimmed existential records nothing;
+  - the two rules for a bare existential against a record-bearing one
+    (above InstLAllR) solve the older bare existential to the newer one,
+    breaking context order; only the ExistU/ExistU rule articulates;
+  - `apply` on a solved ExistU drops the expression's own slots and keys
+    (the FIXME in `instance Applicable TypeU`); `subtype` now checks a
+    structured copy against its solution first, but other callers of
+    `apply` do not;
+  - `solveExist ... >>= maybe (return g) return` in the FunU, EffectU and
+    OptionalU articulation rules drops the constraint when the existential
+    is already solved;
+  - the comment on `accumulatedRecords`' short circuit says merges write
+    keys into the ExistG entry; no code does.

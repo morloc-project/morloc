@@ -40,15 +40,6 @@ Reproduced on 0.109.0 unless marked.
   Spec gap: no item says whether trailing blank docstring lines belong to
   the description. `--' Search notes` / `--'` / `--' @epilogue` on a module
   gives `--json-help` `program.description` `["Search notes", ""]`.
-- **A dotless import collides with a same-named local module.**
-  [reproduced, 2026-10-21] Violates MOD-7. With a local `math.loc`,
-  `import math (sqrt)` fails "Ambiguous import 'math' ... Found in system
-  ... Found locally: ./math.loc". Module.hs:415 `bareModulePaths` adds
-  local paths whenever `stateAllowLocalModules` (default True,
-  Namespace/State.hs); `findBareModule` (Module.hs:489-505) throws on
-  both. The user ruled 2026-10-29 that a dotless import is system-only;
-  the change and the migration of the goldens that rely on local bare
-  imports are pending. Repro: /work/plans/model-audit-2026-10-21/repro/A/mod/m7.
 - **Module rules with no item.** [read, 2026-10-21] Gaps in module-names.md.
   No item covers namespaced imports (`import m as n`, `n.f`, the `f.g`
   composition ambiguity in Lexer.hs:476-498) though `namespace-*` goldens
@@ -106,3 +97,8 @@ Reproduced on 0.109.0 unless marked.
   reached under two names is loaded as two modules; importing the entry
   file is now rejected as a cycle, but no other identity question is
   settled.
+- **Example programs still use dotless imports of local files.** [read,
+  2026-11-01] Violates MOD-7 in a separate repo: usage/examples (e.g.
+  demos/fasta, flu-case-study) writes `import x` for a local `x.loc`, which
+  now names an installed module only. The repo is documented as outdated;
+  migrate to `import .x` when it is next updated.
