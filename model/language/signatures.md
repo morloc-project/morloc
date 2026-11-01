@@ -97,3 +97,16 @@ This is how a language module adds implementations to a language-agnostic
 module's terms. A definition the author meant as a new term, under a name
 the module imports, silently joins the imported term instead; giving every
 new term a signature avoids it.
+
+### SIG-10 Every type in a built program is known and checked statically
+Intent: ruled 2026-11-01
+Code: conforms 2026-11-01
+
+Every term in a program that `morloc make` builds has a type fixed at
+compile time, declared by a signature or inferred. A program in which a
+term's type cannot be determined, or in which a term does not check
+against its type, is rejected before any code is generated. A module may
+hold generic terms whose types are not yet resolved; no generic type
+remains in the exported commands of a built program (CMD-2). The check
+covers morloc code; that a sourced function matches its declared type is
+trusted (SRC-3).
