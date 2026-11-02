@@ -478,14 +478,15 @@ data FieldRead = FieldTake | FieldBorrow | FieldCopy
   deriving (Eq, Show)
 
 -- | A sourced binary operator written between its operands.
-infixOperator :: Source -> MDoc -> MDoc -> MDoc
-infixOperator src l r = parens (l <+> pretty (unSrcName (srcName src)) <+> r)
+infixOperator :: Source -> (TypeM, IOwnership, MDoc) -> (TypeM, IOwnership, MDoc) -> MDoc
+infixOperator src (_, _, l) (_, _, r) = parens (l <+> pretty (unSrcName (srcName src)) <+> r)
 
 -- | Per-language configuration for lowering
 data LowerConfig m = LowerConfig
   { lcSrcName :: Source -> MDoc
-  , lcOperator :: Source -> MDoc -> MDoc -> MDoc
-  -- ^ Apply a sourced binary operator to its two operands.
+  , lcOperator :: Source -> (TypeM, IOwnership, MDoc) -> (TypeM, IOwnership, MDoc) -> MDoc
+  -- ^ Apply a sourced binary operator to its two operands, each with its
+  -- type and ownership.
   , lcApplySrcGroup :: MDoc -> [MDoc] -> MDoc
   -- ^ Apply one CONTINUATION group of a curried source call (@f(a)(b)@, the
   -- groups a source statement's @\@rsize@ declares). The first group is the
@@ -2379,9 +2380,13 @@ lowerNativeExprRaw ::
   m PoolDocs
 -- Binary operator: emit (lhs op rhs) instead of function call
 lowerNativeExprRaw cfg origExpr (AppExeN_ _ (SrcCallP _ src) es0@[_, _])
-  | srcOperator src =
+  | srcOperator src = do
+      owns <- argOwnerships cfg origExpr
       let operands = map snd (constArgs cfg (Just (map fst es0)) origExpr es0)
-       in return $ mergePoolDocs (\xs -> case xs of [l, r] -> lcOperator cfg src l r; _ -> error "binary operator requires exactly 2 args") operands
+      case (map fst es0, owns) of
+        ([tl, tr], [ol, or']) ->
+          return $ mergePoolDocs (\xs -> case xs of [l, r] -> lcOperator cfg src (tl, ol, l) (tr, or', r); _ -> error "binary operator requires exactly 2 args") operands
+        _ -> error "binary operator requires exactly 2 args"
 lowerNativeExprRaw cfg origExpr (AppExeN_ resT (SrcCallP _ src) es1) = do
   es <- bindCallArgs cfg origExpr (constArgs cfg Nothing origExpr es1)
   owns <- argOwnerships cfg origExpr

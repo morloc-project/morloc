@@ -1639,11 +1639,16 @@ rustReply e = case T.stripPrefix (render RP.putValueFn <> "(") (render e) of
   Just rest -> "::rustmorloc::put_reply(" <> pretty rest
   Nothing -> e
 
-rustOperator :: Source -> MDoc -> MDoc -> MDoc
-rustOperator src l r = case lookup (unSrcName (srcName src)) rustOperatorShims of
-  Just (shim, _, True) -> "__morloc_user_ops::" <> pretty shim <> tupled ["&(" <> l <> ")", "&(" <> r <> ")"]
-  Just (shim, _, False) -> "__morloc_user_ops::" <> pretty shim <> tupled [l, r]
-  Nothing -> infixOperator src l r
+-- | A comparison shim takes references; an arithmetic shim and a bare
+-- operator take values.
+rustOperator :: Source -> (TypeM, IOwnership, MDoc) -> (TypeM, IOwnership, MDoc) -> MDoc
+rustOperator src (lt, lo, l) (rt, ro, r) = case lookup (unSrcName (srcName src)) rustOperatorShims of
+  Just (shim, _, True) -> "__morloc_user_ops::" <> pretty shim <> tupled [rustRef lo l, rustRef ro r]
+  Just (shim, _, False) -> "__morloc_user_ops::" <> pretty shim <> tupled [owned lt lo l, owned rt ro r]
+  Nothing -> infixOperator src (lt, lo, owned lt lo l) (rt, ro, owned rt ro r)
+  where
+    owned (Native tf) o x = rustOwn o tf x
+    owned _ _ x = x
 
 rustUserOps :: Text
 rustUserOps = render . vsep $ "#![allow(dead_code)]" : map shimDoc rustOperatorShims

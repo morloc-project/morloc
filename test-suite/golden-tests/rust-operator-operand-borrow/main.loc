@@ -1,0 +1,54 @@
+-- A natively sourced Rust operator takes each operand in the form it needs,
+-- whatever the operand's ownership: a comparison takes references, a bare
+-- operator takes values. Operands are literals (owned), bound strings and
+-- closure parameters (references, Copy or not) and a field of a borrowed
+-- record (a place).
+module main (eqLit, eqVars, cmpAll, countStr, countInt, eqField, allTrue)
+
+import root-rust
+
+class Cmp a where
+  same :: a -> a -> Bool
+  differ :: a -> a -> Bool
+  before :: a -> a -> Bool
+  after :: a -> a -> Bool
+  upTo :: a -> a -> Bool
+  atLeast :: a -> a -> Bool
+
+instance Cmp Str where
+  source Rust ("==" as same, "!=" as differ, "<" as before, ">" as after, "<=" as upTo, ">=" as atLeast)
+
+instance Cmp Int where
+  source Rust ("==" as same, "!=" as differ, "<" as before, ">" as after, "<=" as upTo, ">=" as atLeast)
+
+source Rust ("&&" as both)
+both :: Bool -> Bool -> Bool
+
+record Named where
+  name :: Str
+  size :: Int
+record Rust => Named = "Named"
+
+source Rust from "named.rs" ("mkNamed")
+mkNamed :: Str -> Named
+
+eqLit :: Str -> Bool
+eqLit x = same "b" x
+
+eqVars :: Str -> Str -> Bool
+eqVars x y = same x y
+
+cmpAll :: Str -> [Bool]
+cmpAll x = [differ x "m", before x "m", after x "m", upTo x "m", atLeast x "m"]
+
+countStr :: [Str] -> Int
+countStr xs = length (filter (same "b") xs)
+
+countInt :: [Int] -> Int
+countInt xs = length (filter (\x -> differ x 1) xs)
+
+eqField :: Str -> Bool
+eqField s = same (.name (mkNamed s)) "b"
+
+allTrue :: [Bool] -> Int
+allTrue xs = length (filter (\x -> both x True) xs)
