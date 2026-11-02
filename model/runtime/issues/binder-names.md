@@ -45,19 +45,6 @@ may use.
   user source may have redefined them, as R's own code would see them.
   Needs a ruling: the user's responsibility, a load-time check that none
   is redefined, or reserved aliases.
-- [reproduced, 2026-11-02] Python: a builtin source (no `from` path) is
-  emitted as a bare name in pool.py's module scope, which holds the pool's
-  own names (`dispatch`, `global_state`, `run_job`, `mlc_*`, `os`, `sys`,
-  ...), so `source Py ("dispatch" as d)` binds d to the pool's dispatch
-  table rather than failing, and `source Py ("run_job" as rj)` calls the
-  pool's `run_job(3)`, which takes 3 as a client socket. Repro:
-  /work/plans/error-clusters/briefs/A3-A4.md (Bn-1).
-- [reproduced, 2026-11-02] Desugar.hs `isOperatorName` calls any name whose
-  first character is not a letter or `_` an operator, in every language, so
-  an R source named `.helper` (legal by R's name pattern) is refused as an
-  invalid operator (SRC-1: patterns are per-language data). It also hides
-  the R reserved-name gap above: `.morloc.pooldir` fails as an operator,
-  not as reserved. Fix both together (briefs/A3-A4.md, Bn-3).
 - [reproduced, 2026-10-21] R's JIT compiles a small function only where
   its environment is the global one, so the R runtime's functions in
   `.__morloc` run interpreted (about 0.5 us more per call than compiled)
@@ -73,6 +60,19 @@ may use.
   `MLC_INTERNAL_ABORT`, `MLC_CATCH_FORCED_UNWIND`) expand a sourced function
   of the same name. Clean part: rename C++ manifolds to `__mm_<N>`, list the
   pool's prefixes and names, and extend ManifoldNameTests to C++ with a
-  check that every global the pool templates define is covered. The R list
-  misses `.morloc.source`, `.morloc.pooldir`, `.morloc.libdir` (`.morloc_`
-  does not match `.morloc.`).
+  check that every global the pool templates define is covered.
+
+  A C++ source with no file resolves to pool.cpp's own functions
+  (`interweave_strings`, ...); Python qualifies such a source through
+  `builtins` (ldBuiltinQualifier), C++ has no equivalent yet.
+- [reproduced 2026-11-02] SRC-6 checks only the names a program sources, but
+  a C++ header or an `include!`d Rust file puts its whole content in the
+  pool's scope. The 91 morloc.h macros the precompiled header brings in
+  (`FREE`, `ERRMSG`, `BUFFER_SIZE`, ...) break a user header that declares
+  `static const int BUFFER_SIZE = 8;`; a user template `to_voidstar` is
+  called by the pool (better overload match) and aborts it (Bn-5); a
+  crate-root `pub use Strand::*` with a `None` variant breaks every Rust
+  pool (Bn-6); generated C++/Rust locals (`__e`, `__o`, `arm`, `mlc_w`) are
+  outside every reserved prefix. Cpp.hs reads a manifold's id back from its
+  name (`MT.drop 1`, `manifoldIdOf`), so renaming manifolds needs the id
+  passed through first. The C++ prefix needs a ruling (briefs/B14-B15.md).

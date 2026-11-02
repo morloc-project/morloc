@@ -99,10 +99,7 @@ translateBuiltin lang desc srcs es = do
   debugLog (vsep (map pseudocodeSerialManifold es) <> "\n")
 
   -- build src name function
-  let srcNamer =
-        if ldQualifiedImports desc
-          then qualifiedSrcName (sourceNamespacePrefix desc) lib
-          else \src -> pretty (srcName src)
+  let srcNamer = qualifiedSrcName desc lib
 
   -- add language-specific preamble from registry
   registry <- gets stateLangRegistry
@@ -198,10 +195,7 @@ translateExternal cmd lang desc srcs es = do
 
   debugLog (vsep (map pseudocodeSerialManifold es) <> "\n")
 
-  let srcNamer =
-        if ldQualifiedImports desc
-          then qualifiedSrcName (sourceNamespacePrefix desc) lib
-          else \src -> pretty (srcName src)
+  let srcNamer = qualifiedSrcName desc lib
 
   debugInfo <- makeManifoldDebugInfoLookup
   traceInfo <- makeTraceLabelLookup
@@ -396,11 +390,18 @@ translateSource desc p = do
 sourceNamespacePrefix :: LangDescriptor -> Text
 sourceNamespacePrefix desc = ldHelperVarPrefix desc <> "src_"
 
--- | Qualify a source function name with its module path.
-qualifiedSrcName :: Text -> Text -> Source -> MDoc
-qualifiedSrcName prefix lib src = case srcPath src of
-  Nothing -> pretty $ srcName src
-  (Just path) -> makeNamespace prefix lib path <> "." <> pretty (srcName src)
+-- | The name a call emits for a source: a source with no file is a builtin,
+-- qualified by the language's builtin qualifier unless it is an operator; a
+-- file's source is qualified by the file's namespace where the language
+-- imports files as namespaces.
+qualifiedSrcName :: LangDescriptor -> Text -> Source -> MDoc
+qualifiedSrcName desc lib src = case srcPath src of
+  Nothing
+    | srcOperator src -> pretty (srcName src)
+    | otherwise -> pretty (ldBuiltinQualifier desc) <> pretty (srcName src)
+  Just path
+    | ldQualifiedImports desc -> makeNamespace (sourceNamespacePrefix desc) lib path <> "." <> pretty (srcName src)
+    | otherwise -> pretty (srcName src)
 
 makeNamespace :: Text -> Text -> Path -> MDoc
 makeNamespace prefix lib =

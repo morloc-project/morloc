@@ -29,6 +29,8 @@ module Morloc.CodeGenerator.LanguageDescriptor
   , declaredReservedPrefixes
   , declaredReservedNames
   , declaredManifoldPrefix
+  , SourceRules (..)
+  , declaredSourceRules
   ) where
 
 import qualified Data.Aeson as Aeson
@@ -233,6 +235,12 @@ data LangDescriptor = LangDescriptor
   , ldPoolQualifier :: !Text
     -- ^ Prepended to a name the pool runtime defines where generated code
     -- refers to it (R: the runtime's environment).
+  , ldBuiltinQualifier :: !Text
+    -- ^ Prepended to a source with no file (a builtin), so it cannot resolve
+    -- to a name the pool defines (Python: its `builtins` module).
+  , ldKeywords :: ![Text]
+    -- ^ Words of the language that are not names; no source may be named
+    -- by one.
   , ldBlockStyle :: !BlockStyle
   , -- Error wrapping
     ldErrorWrapOpen :: !Text -- "try:" for Python, "" for others
@@ -419,6 +427,8 @@ instance Y.FromJSON LangDescriptor where
             . ins "ldLogWrap" (Y.String "")
             . ins "ldManifoldPrefix" (Y.String "m")
             . ins "ldPoolQualifier" (Y.String "")
+            . ins "ldBuiltinQualifier" (Y.String "")
+            . ins "ldKeywords" (Y.Array mempty)
             . ins "ldClosureRegisterEntry" (Y.String "")
             . ins "ldClosureTableHeader" (Y.String "")
             . ins "ldClosureTableEntry" (Y.String "")
@@ -524,6 +534,8 @@ defaultLangDescriptor name ext =
     , ldLogWrap = ""
     , ldManifoldPrefix = "m"
     , ldPoolQualifier = ""
+    , ldBuiltinQualifier = ""
+    , ldKeywords = []
     , ldClosureRegisterEntry = ""
     , ldClosureTableHeader = ""
     , ldClosureTableEntry = ""
@@ -573,6 +585,38 @@ declaredReservedNames content = do
   AesonTypes.parseEither
     (Aeson.withObject "lang.yaml" $ \o -> fmap (maybe [] id) (o Aeson..:? "ldReservedNames"))
     (v :: Aeson.Value)
+
+-- | What a lang.yaml says a sourced symbol may be, read in one decode: its
+-- name and operator patterns (both required and valid), the prefixes and
+-- names its pool reserves, and its keywords, which are not names.
+data SourceRules = SourceRules
+  { srNamePattern :: Text
+  , srOperatorPattern :: Text
+  , srReservedPrefixes :: [Text]
+  , srReservedNames :: [Text]
+  , srKeywords :: [Text]
+  }
+
+declaredSourceRules :: Text -> Either String SourceRules
+declaredSourceRules content = do
+  v <- either (Left . Y.prettyPrintParseException) Right (Y.decodeEither' (TE.encodeUtf8 content))
+  rules <-
+    AesonTypes.parseEither
+      ( Aeson.withObject "lang.yaml" $ \o ->
+          SourceRules
+            <$> o Aeson..: "ldNamePattern"
+            <*> o Aeson..: "ldOperatorPattern"
+            <*> (maybe [] id <$> o Aeson..:? "ldReservedPrefixes")
+            <*> (maybe [] id <$> o Aeson..:? "ldReservedNames")
+            <*> (maybe [] id <$> o Aeson..:? "ldKeywords")
+      )
+      (v :: Aeson.Value)
+  mapM_ validPattern [("ldNamePattern", srNamePattern rules), ("ldOperatorPattern", srOperatorPattern rules)]
+  return rules
+  where
+    validPattern (key, pat)
+      | T.null pat = Left (key <> " is empty")
+      | otherwise = either (\e -> Left (key <> ": " <> e)) (const (Right ())) (matchNamePattern pat "")
 
 -- Anchored regex-subset matcher. The pattern lives entirely in the
 -- language descriptor (lang.yaml); no language-specific identifier rule

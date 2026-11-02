@@ -29,6 +29,7 @@ preamble:
   # process with a user file that happens to share the name.
   - 'sys.path = [os.path.expanduser("{{opt}}"), os.path.expanduser("{{lib}}"), os.path.expanduser("{{state}}/modules/python")] + sys.path'
   - "import importlib"
+  - "import builtins as __morloc_builtins"
   - "import pymorloc as morloc"
   - '_mlc_source_roots = [os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..")), os.path.expanduser("."), os.path.expanduser("{{lib}}")]'
   - 'sys.path = sys.path + _mlc_source_roots[:2]'
@@ -93,6 +94,8 @@ ldResourcePackTemplate: "struct.pack('iiii', {{mem}}, {{time}}, {{cpus}}, {{gpus
 ldReturnTemplate: "return({{expr}})"
 ldReservedPrefixes: ["__mm_", "__morloc"]
 ldManifoldPrefix: "__mm_"
+ldBuiltinQualifier: "__morloc_builtins."
+ldKeywords: ["False", "None", "True", "and", "as", "assert", "async", "await", "break", "class", "continue", "def", "del", "elif", "else", "except", "finally", "for", "from", "global", "if", "import", "in", "is", "lambda", "nonlocal", "not", "or", "pass", "raise", "return", "try", "while", "with", "yield"]
 ldFuncDefHeader: "def {{name}}({{args}}):"
 ldBlockStyle: indent
 ldErrorWrapOpen: "try:"

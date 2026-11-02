@@ -1,0 +1,26 @@
+--' A Python builtin source names the builtin, never a name of the pool's own
+--'
+--' `run_job` and `dispatch` are functions of the generated pool, not Python
+--' builtins: sourcing them must fail at the call as a missing builtin, not
+--' call into the pool. `len`, `str` and the dotted `str.upper` are real
+--' builtins and must work.
+module main (count, render, shout, job, table)
+
+import root-py (Str, Int)
+
+source Py ("len" as count, "str" as render, "str.upper" as shout, "run_job" as job, "dispatch" as table)
+
+--' Length of a string
+count :: Str -> Int
+
+--' A number as text
+render :: Int -> Str
+
+--' Upper case
+shout :: Str -> Str
+
+--' Not a builtin
+job :: Int -> Int
+
+--' Not a builtin
+table :: Int -> Int

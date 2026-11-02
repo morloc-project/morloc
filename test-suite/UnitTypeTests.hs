@@ -11861,6 +11861,55 @@ sourceNameTests =
           g :: Int -> Int
           f x = g x
         |]
+    , expectPass "Python: a dotted builtin is a source name"
+          [r|
+          module main (f)
+          source Py ("str.upper" as g)
+          g :: Str -> Str
+          f x = g x
+        |]
+    , expectError "Python: a keyword is not a source name"
+          [r|
+          module main (f)
+          source Py ("yield" as g)
+          g :: Int -> Int
+          f x = g x
+        |]
+    , expectError "Python: a keyword is not a segment of a source name"
+          [r|
+          module main (f)
+          source Py from "m.py" ("ns.class" as g)
+          g :: Int -> Int
+          f x = g x
+        |]
+    , expectPass "Python: a dotted name from a file is a source name"
+          [r|
+          module main (f)
+          source Py from "m.py" ("helpers.basename" as g)
+          g :: Str -> Str
+          f x = g x
+        |]
+    , expectPass "R: a name with a leading dot is a source name"
+          [r|
+          module main (f)
+          source R from "m.R" (".helper" as g)
+          g :: Int -> Int
+          f x = g x
+        |]
+    , expectError "R: a helper the pool binds for user files is not a source name"
+          [r|
+          module main (f)
+          source R from "m.R" (".morloc.pooldir" as g)
+          g :: Int -> Int
+          f x = g x
+        |]
+    , expectPass "R: an operator named by a string is an operator"
+          [r|
+          module main (f)
+          source R from "m.R" ("+" as (<+>))
+          (<+>) :: Int -> Int -> Int
+          f x = x <+> x
+        |]
     , expectError "Rust: a name the pool reserves is not a source name"
           [r|
           module main (f)

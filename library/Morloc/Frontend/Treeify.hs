@@ -41,8 +41,8 @@ import qualified Data.Text.Encoding as TE
 import System.Directory (doesFileExist)
 import System.FilePath ((</>))
 import qualified Morloc.Language as ML
-import Morloc.CodeGenerator.LanguageDescriptor
-  (declaredNamePatterns, declaredReservedNames, declaredReservedPrefixes, matchNamePattern)
+import Morloc.CodeGenerator.LanguageDescriptor (SourceRules (..), declaredSourceRules, matchNamePattern)
+import Data.IORef (IORef, modifyIORef', newIORef, readIORef)
 
 -- | Every term must either be sourced or declared.
 data TermOrigin = Declared ExprI | Sourced Source
@@ -101,7 +101,12 @@ treeify d
           -- if the key is not in the DAG, then something is dreadfully wrong codewise
           Nothing -> MM.throwCompilerBug $ "module DAG is missing key" <+> pretty k
           (Just (AST.findExport -> ExportMany symbols groups)) -> do
-            d' <- DAG.mapNodeM (linkAndRemoveAnnotations >=> renameLocals) d
+            -- every sourced symbol must be a name or operator of its language
+            -- (lang.yaml patterns, never hardcoded here): the name is emitted
+            -- verbatim, so code in this position would be injected into the
+            -- pool
+            sourceRules <- liftIO (newIORef Map.empty)
+            d' <- DAG.mapNodeM (linkAndRemoveAnnotations >=> renameLocals >=> checkSources sourceRules) d
 
             -- move all to state, after this the DAG will no longer be needed
             _ <- MFL.link d'
@@ -110,12 +115,6 @@ treeify d
             -- (the compiler hardcodes none); checked after link populates
             -- the effect registry
             checkDeclaredEffects d'
-
-            -- every sourced symbol name must match the foreign language's
-            -- name pattern (declared in lang.yaml, never hardcoded here);
-            -- the name is emitted verbatim, so code in this position would
-            -- be injected into the pool
-            checkSourceNames d'
 
             -- PatternAccessible dispatches the pattern-accessor syntax
             -- (`.foo`, `.[i]`, `.[s:e:p]`) at codegen; Indexable /
@@ -268,93 +267,66 @@ rootCompanions d root exports = do
          in [(i, v) | (i, TermSymbol v) <- allSs]
       _ -> []
 
--- | Two signature-level effect checks, run after 'MFL.link' has
--- populated 'stateEffects':
---
---  1. Every concrete effect label in a `<...>` row of a signature,
---     annotation, typedef body, or class-method type must be declared
---     with `effect` / `escapable effect`. The compiler hardcodes no
---     effect names, so an undeclared label is always a user error.
---
---  2. Inescapable-propagation: every *inescapable* concrete label that
---     appears in a parameter's effect row must also appear in the
---     result row. This holds for all functions, sourced or defined --
---     a sourced handler may discharge an *escapable* effect, but no
---     function (not even a sourced one) may silently consume an
---     inescapable one. Effect variables always propagate (they appear
---     in the result), so they satisfy the rule automatically.
--- | Reject a sourced symbol whose name does not match its language's
--- identifier or operator pattern. Both patterns live only in lang.yaml
--- (ldNamePattern / ldOperatorPattern); the compiler hardcodes no
--- foreign-language naming rule. Operator vs identifier is decided by the
--- symbol itself (srcOperator), so "foo" and "+" are valid but "foo+"
--- matches neither. The name is emitted verbatim into the pool, so a
--- non-name here is a code-injection vector: a language whose patterns
--- cannot be read is an error, never a pass.
-checkSourceNames :: DAG MVar [AliasedSymbol] ExprI -> MorlocMonad ()
-checkSourceNames d = mapM_ (AST.checkExprI checkNode) (DAG.nodes d)
+-- | Check every sourced symbol against its language's rules (lang.yaml,
+-- read once per language through the shared cache) and mark whether it is
+-- an operator (called infix): backtick-quoted, or a symbol its language's
+-- name pattern refuses and its operator pattern accepts. A symbol neither
+-- accepts is refused, since it is emitted verbatim; so is one with a
+-- segment the pool reserves or the language keeps as a keyword.
+checkSources :: IORef (Map.Map MT.Text (Either String SourceRules)) -> ExprI -> MorlocMonad ExprI
+checkSources cache = go
   where
-    checkNode :: ExprI -> MorlocMonad ()
-    -- Backtick-quoted names bypass the language-descriptor patterns
-    -- entirely: they are the user's explicit "trust me, emit this string
-    -- verbatim as an infix operator" opt-out for keyword-shaped foreign
-    -- operators (Python `and`, R `%in%`, etc.).
-    checkNode (ExprI i (SrcE src)) | srcBacktick src = do
-      yamlText <- languageDescriptorText (ML.langName (srcLang src))
-      checkReserved i src yamlText
-    checkNode (ExprI i (SrcE src)) = do
+    go (ExprI i e) = descend e >>= fmap (ExprI i) . node i
+    descend (ModE v es) = ModE v <$> mapM go es
+    descend (AssE v x es) = AssE v <$> go x <*> mapM go es
+    descend (IstE a b c d es) = IstE a b c d <$> mapM go es
+    descend x = AST.mapExprIChildrenM go x
+    node i (SrcE src) = do
       let lang = ML.langName (srcLang src)
-          nm = unSrcName (srcName src)
-          isOp = srcOperator src
-          kind = if isOp then "operator" else "name" :: MT.Text
-          refuse :: String -> MorlocMonad ()
-          refuse why =
-            MM.throwSourcedError i $
-              "Cannot check" <+> pretty lang <+> "source" <+> pretty kind
-                <+> squotes (pretty nm) <> ":" <+> pretty why
-      yamlText <- languageDescriptorText lang
-      checkReserved i src yamlText
-      case yamlText >>= declaredNamePatterns of
-        Left why -> refuse why
-        Right (namePat, opPat) -> do
-          let pat = if isOp then opPat else namePat
-          case matchNamePattern pat nm of
-            Left why -> refuse why
-            Right True -> return ()
-            Right False ->
-              MM.throwSourcedError i $
-                "Invalid"
-                  <+> pretty lang
-                  <+> "source"
-                  <+> pretty kind
-                  <+> squotes (pretty nm) <> "."
-                  <+> "A sourced symbol is emitted verbatim, so it"
-                  <+> "must be a valid"
-                  <+> pretty lang
-                  <+> pretty kind <> ", not code."
-                  <+> "Expected pattern"
-                  <+> squotes (pretty pat) <> "."
-    checkNode _ = return ()
+      known <- liftIO (readIORef cache)
+      rules <- case Map.lookup lang known of
+        Just r -> return r
+        Nothing -> do
+          r <- (>>= declaredSourceRules) <$> languageDescriptorText lang
+          liftIO (modifyIORef' cache (Map.insert lang r))
+          return r
+      SrcE <$> checkSource i rules src
+    node _ e = return e
 
-    -- A sourced name may not take a name the pool defines for itself.
-    checkReserved :: Int -> Source -> Either String MT.Text -> MorlocMonad ()
-    checkReserved i src yamlText = do
-      let lang = ML.langName (srcLang src)
-          nm = unSrcName (srcName src)
-          -- each segment of a path, so `crate::x` is checked as `x`
-          segments = nm : MT.splitOn "::" nm
-          taken prefixes names s = s `elem` names || any (`MT.isPrefixOf` s) prefixes
-      case (,) <$> (yamlText >>= declaredReservedPrefixes) <*> (yamlText >>= declaredReservedNames) of
-        Left why ->
-          MM.throwSourcedError i $
-            "Cannot check" <+> pretty lang <+> "source" <+> squotes (pretty nm) <> ":" <+> pretty why
-        Right (prefixes, names) -> case filter (taken prefixes names) segments of
-          (s : _) ->
-            MM.throwSourcedError i $
-              "The" <+> pretty lang <+> "source" <+> squotes (pretty nm) <+> "uses"
-                <+> squotes (pretty s) <> ","
-                <+> "a name reserved for what the" <+> pretty lang <+> "pool defines."
-          [] -> return ()
+checkSource :: Int -> Either String SourceRules -> Source -> MorlocMonad Source
+checkSource i rules src = do
+  let lang = ML.langName (srcLang src)
+      nm = unSrcName (srcName src)
+      cannot :: String -> MorlocMonad a
+      cannot why =
+        MM.throwSourcedError i $
+          "Cannot check" <+> pretty lang <+> "source" <+> squotes (pretty nm) <> ":" <+> pretty why
+      refuse :: MDoc -> MorlocMonad ()
+      refuse why = MM.throwSourcedError i $ "The" <+> pretty lang <+> "source" <+> squotes (pretty nm) <+> why
+  sr <- either cannot return rules
+  let segments = nm : concatMap (MT.splitOn ".") (MT.splitOn "::" nm)
+      reserved s = s `elem` srReservedNames sr || any (`MT.isPrefixOf` s) (srReservedPrefixes sr)
+  case filter reserved (nm : MT.splitOn "::" nm) of
+    (s : _) -> refuse $ "uses" <+> squotes (pretty s) <> ", a name reserved for what the" <+> pretty lang <+> "pool defines."
+    [] -> return ()
+  -- Backtick-quoted names bypass the patterns and keywords: they are the
+  -- user's explicit "emit this verbatim as an infix operator" for
+  -- keyword-shaped operators (Python `and`, R `%in%`).
+  if srcBacktick src
+    then return src {srcOperator = True}
+    else do
+      case filter (`elem` srKeywords sr) segments of
+        (k : _) -> refuse $ "uses" <+> squotes (pretty k) <> ", a" <+> pretty lang <+> "keyword, not a name."
+        [] -> return ()
+      isName <- either cannot return (matchNamePattern (srNamePattern sr) nm)
+      isOp <- if isName then return False else either cannot return (matchNamePattern (srOperatorPattern sr) nm)
+      unless (isName || isOp) $
+        refuse $
+          "is not a valid" <+> pretty lang <+> "name or operator. A sourced symbol is emitted"
+            <+> "verbatim, so it must not be code. Expected pattern"
+            <+> squotes (pretty (srNamePattern sr)) <+> "or"
+            <+> squotes (pretty (srOperatorPattern sr)) <> "."
+      return src {srcOperator = isOp}
 
 -- | A language's lang.yaml: the embedded one, else a plugin's under the
 -- morloc home, as the code generator finds it.
@@ -370,6 +342,21 @@ languageDescriptorText lang =
         then Right . TE.decodeUtf8 <$> liftIO (BS.readFile path)
         else return (Left ("no language descriptor at " <> path))
 
+-- | Two signature-level effect checks, run after 'MFL.link' has
+-- populated 'stateEffects':
+--
+--  1. Every concrete effect label in a `<...>` row of a signature,
+--     annotation, typedef body, or class-method type must be declared
+--     with `effect` / `escapable effect`. The compiler hardcodes no
+--     effect names, so an undeclared label is always a user error.
+--
+--  2. Inescapable-propagation: every *inescapable* concrete label that
+--     appears in a parameter's effect row must also appear in the
+--     result row. This holds for all functions, sourced or defined --
+--     a sourced handler may discharge an *escapable* effect, but no
+--     function (not even a sourced one) may silently consume an
+--     inescapable one. Effect variables always propagate (they appear
+--     in the result), so they satisfy the rule automatically.
 checkDeclaredEffects :: DAG MVar [AliasedSymbol] ExprI -> MorlocMonad ()
 checkDeclaredEffects d = do
   declared <- MM.gets stateEffects

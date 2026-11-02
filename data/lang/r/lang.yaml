@@ -95,6 +95,7 @@ ldSocketPathTemplate: "paste0(.__morloc$global_state$tmpdir, \"/\", {{socket}})"
 ldResourcePackTemplate: "list(memory={{mem}}L, time={{time}}L, cpus={{cpus}}L, gpus={{gpus}}L)"
 ldReturnTemplate: "return({{expr}})"
 ldReservedPrefixes: [".__mm_", ".__morloc", ".morloc_"]
+ldReservedNames: [".morloc.source", ".morloc.pooldir", ".morloc.libdir"]
 ldManifoldPrefix: ".__mm_"
 ldPoolQualifier: ".__morloc$"
 ldFuncDefHeader: "{{name}} <- function({{args}})"

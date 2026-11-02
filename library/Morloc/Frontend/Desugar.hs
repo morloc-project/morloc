@@ -3658,13 +3658,8 @@ mkSource sp lang path isList item = do
     dfail docPos . T.unpack $
       "`@name` cannot rename the foreign function '" <> name
         <> "': an item of a `source` list, or a backtick-quoted item, already names it"
-  -- whether the call is infix follows the foreign name, which `@name` may set
-  freshExprSpan sp (SrcE src {srcOperator = srcItemBacktick item || isOperatorName foreignName})
-
-isOperatorName :: Text -> Bool
-isOperatorName t = case T.uncons t of
-  Just (c, _) -> not (isLower c) && not (isUpper c) && c /= '_'
-  Nothing -> False
+  -- whether a call is infix is decided by Treeify `checkSources`
+  freshExprSpan sp (SrcE src)
 
 --------------------------------------------------------------------
 -- Program entry point

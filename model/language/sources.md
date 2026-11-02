@@ -61,7 +61,10 @@ R pool keeps its runtime in one environment, `.__morloc`, and its
 manifolds as global `.__mm_<id>`; an R source that defines, replaces or
 removes one of these fails to load, and so does a call that assigns one.
 The helpers user R files call, `.morloc.source`, `.morloc.pooldir` and
-`.morloc.libdir`, are bound globally.
+`.morloc.libdir`, are bound globally. A source with no file names the
+language's builtin of that name, never a name the pool defines (lang.yaml
+`ldBuiltinQualifier`; Python reaches it through its `builtins` module), so
+sourcing a pool function such as Python's `dispatch` fails at the call.
 
 ### SRC-7 A language may declare build steps for each file it sources
 Intent: proposed
