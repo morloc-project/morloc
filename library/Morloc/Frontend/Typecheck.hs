@@ -501,6 +501,15 @@ resolveInstances g (AnnoS gi@(Idx _ gt) ci e0) = do
       MorlocMonad (Gamma, ExprS (Indexed TypeU) Many Int)
 
     f scope g0 (VarS v (PolymorphicExpr clsName _ _ rss)) = do
+      -- Whether an instance implements the method, read from the term
+      -- rather than from the candidates, which a shallow collection leaves
+      -- empty.
+      GMap idmap sigmap <- MM.gets stateSignatures
+      implemented <- case Map.lookup ci idmap >>= (`Map.lookup` sigmap) of
+        Just (Polymorphic _ _ _ ts) ->
+          return (Set.fromList [t | tt <- ts, Just t <- [termGeneral tt], not (null (termConcrete tt) && null (termDecl tt))])
+        _ -> MM.throwCompilerBug $ "resolveInstances: no class term for the use of" <+> pretty v
+      let implements t rs = not (null rs) || Set.member t implemented
       let gtEval = case TE.evaluateType scope gt of
             Right et -> et
             Left _ -> gt
@@ -516,10 +525,10 @@ resolveInstances g (AnnoS gi@(Idx _ gt) ci e0) = do
           -- it to the most specific more general instance that does: answer
           -- (b) of the open CLS-12.
           implementedMoreGeneral h =
-            let general = [et | (t, rs) <- rssMatching, not (null rs), let et = etype t, generalizes True et h]
+            let general = [et | (t, rs) <- rssMatching, implements t rs, let et = etype t, generalizes True et h]
              in mostSpecific general
           hasFallback h = not (null (implementedMoreGeneral h))
-          rssSubtypes = [x | x@(t, rs) <- rssMatching, not (null rs && hasFallback (etype t))]
+          rssSubtypes = [x | x@(t, rs) <- rssMatching, implements t rs || not (hasFallback (etype t))]
 
 
       -- Every most specific candidate is kept; Morloc.CodeGenerator.Realize
@@ -548,7 +557,13 @@ resolveInstances g (AnnoS gi@(Idx _ gt) ci e0) = do
               explicitGroups = nubBy (\t1 t2 -> eval t1 == eval t2)
                 [etype t | (t, rs) <- rssSubtypes, chosen t, not (all isRepresentationCast rs)]
               singleGroup = length explicitGroups <= 1
-          g1 <- connectInstance singleGroup g0 es0
+          -- Collected shallowly, the candidates carry no implementations:
+          -- the instance types solve what the implementations' types would.
+          let shallow = null es0 && or [implements t rs | (t, rs) <- rssSubtypes, chosen t]
+          g1 <-
+            if shallow
+              then connectInstanceTypes (length deduped <= 1) g0 [etype t | (t, _) <- rssSubtypes, chosen t]
+              else connectInstance singleGroup g0 es0
           return (g1, es0)
 
       (g3, es2) <- statefulMapM resolveInstances g2 es1
@@ -607,14 +622,23 @@ resolveInstances g (AnnoS gi@(Idx _ gt) ci e0) = do
     -- alias-equivalent group; otherwise solving to one would exclude the
     -- others (e.g. Integral Int and Integral Real).
     connectInstance :: Bool -> Gamma -> [AnnoS (Indexed TypeU) f c] -> MorlocMonad Gamma
-    connectInstance _ g0 [] = return g0
-    connectInstance singleGroup g0 (AnnoS (Idx _ t) _ _ : es) = do
+    connectInstance singleGroup g0 es = connectTypes singleGroup g0 [t | AnnoS (Idx _ t) _ _ <- es]
+
+    -- An instance's type, each of its variables a fresh existential.
+    connectInstanceTypes :: Bool -> Gamma -> [TypeU] -> MorlocMonad Gamma
+    connectInstanceTypes singleGroup g0 ts =
+      let (g1, ts') = statefulMap (\g t -> let (g', t') = rename g t in toExistential g' t') g0 ts
+       in connectTypes singleGroup g1 ts'
+
+    connectTypes :: Bool -> Gamma -> [TypeU] -> MorlocMonad Gamma
+    connectTypes _ g0 [] = return g0
+    connectTypes singleGroup g0 (t : ts) = do
       scope <- MM.getGeneralScope
       case subtype scope (stripCoercionWrappers gt) t g0 of
-        (Left _) -> connectInstance singleGroup g0 es
+        (Left _) -> connectTypes singleGroup g0 ts
         (Right g1)
-          | singleGroup -> connectInstance singleGroup g1 es
-          | otherwise   -> connectInstance singleGroup g0 es
+          | singleGroup -> connectTypes singleGroup g1 ts
+          | otherwise   -> connectTypes singleGroup g0 ts
 
 -- | PAT-5: a bracket step's receiver is a list or an IFile, which every
 -- back end brackets natively, or reaches some instance of the step's

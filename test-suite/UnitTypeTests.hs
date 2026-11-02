@@ -5224,7 +5224,45 @@ complexityRegressionTests =
         localOption (mkTimeout 5000000) $
           testCase "nested function arguments are scored once"
             (assertGenerates (nestedComposeChain 25))
+      , -- A use whose type only a sole instance determines is solved while
+        -- the export is checked with its references left as signatures, so
+        -- the export is specialized use by use rather than expanded in place.
+        localOption (mkTimeout 10000000) $
+          assertGeneralType
+            "a use solved by its sole instance keeps the export shallow"
+            (soleInstanceComparisons 150)
+            (fun [lst (VarU (TV "Tag")), int])
       ]
+
+-- | A comparison class with container instances whose bodies use the class
+-- again, over a two-parameter class with one instance.
+classComparisons :: MT.Text
+classComparisons =
+  "module main (f)\n"
+    <> "class Cmp a where\n  lt :: a -> a -> Bool\n  le :: a -> a -> Bool\n"
+    <> "instance Cmp Int, Cmp Real, Cmp Str, Cmp Bool where\n  lt x y = False\n  le x y = True\n"
+    <> "pick :: Bool -> Int -> Int -> Int\npick b x y\n  ? b = x\n  : y\n"
+    <> "cmpC :: Cmp a => a -> a -> Int\ncmpC x y = pick (lt x y) 0 (pick (le x y) 1 2)\n"
+    <> "instance Cmp a => Cmp [a] where\n  lt xs ys = lt (cmpC xs ys) 0\n  le xs ys = le (cmpC xs ys) 0\n"
+    <> "instance (Cmp a, Cmp b) => Cmp (a, b) where\n"
+    <> "  lt x y = lt (pick (lt (cmpC (.0 x) (.0 y)) 0) 0 (cmpC (.1 x) (.1 y))) 0\n"
+    <> "  le x y = le (pick (lt (cmpC (.0 x) (.0 y)) 0) 0 (cmpC (.1 x) (.1 y))) 0\n"
+    <> "instance (Cmp a, Cmp b, Cmp c) => Cmp (a, b, c) where\n"
+    <> "  lt x y = lt (pick (lt (cmpC (.0 x) (.0 y)) 0) 0 (pick (lt (cmpC (.1 x) (.1 y)) 0) 0 (cmpC (.2 x) (.2 y)))) 0\n"
+    <> "  le x y = le (pick (lt (cmpC (.0 x) (.0 y)) 0) 0 (pick (lt (cmpC (.1 x) (.1 y)) 0) 0 (cmpC (.2 x) (.2 y)))) 0\n"
+    <> "class Conv a b where\n  conv :: a -> b\n"
+    <> "newtype Tag = Int\n"
+    <> "instance Conv Tag Int where\n  conv x = 1\n"
+    <> "mapL :: (a -> b) -> [a] -> [b]\nmapL g xs = []\n"
+    <> "sizeL :: [a] -> Int\nsizeL xs = 0\n"
+
+-- | @k@ tuple comparisons and a use whose result type only the sole
+-- @Conv@ instance determines.
+soleInstanceComparisons :: Int -> MT.Text
+soleInstanceComparisons k =
+  classComparisons
+    <> "f :: [Tag] -> Int\n"
+    <> "f ts = " <> foldr (\i e -> "(pick (lt (" <> MT.pack (show i) <> ", 2.0, \"a\") (3, 4.0, \"b\")) 1 " <> e <> ")") "(sizeL (mapL conv ts))" [1 .. k] <> "\n"
 
 -- | @(inc . inc . ... . inc) x@, @k@ compositions deep, with @(.)@ defined
 -- in morloc and @inc@ sourced in Python and C++ so the realizer has a

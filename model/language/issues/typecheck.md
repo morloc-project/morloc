@@ -116,6 +116,11 @@ literal and record gaps. Reproduced on 0.109.0 unless marked.
     builds silently.
   CLS-18 (ruled 2026-10-29) makes this an error at the signature, naming
   the variable; the code deviates. Re-reproduced 2026-10-31 (`count`).
+  The mechanism: resolution solves a use's open type from the one matching
+  instance group (Frontend/Typecheck.hs `resolveInstances`, from the
+  implementations or, in a shallow pass, the instance types). The same
+  step fixes a newtype's representation in `map unpack ts`, which needs a
+  ruling on whether a Packable instance determines its packed type.
 - **A method use nothing determines is accepted inside a concrete
   export.** [reproduced, 2026-11-02] Violates the second sentence of
   CLS-18. With `instance Monoid Str` and `instance Monoid (List a)`,
