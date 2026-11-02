@@ -16,6 +16,12 @@
 - Contradicts TAB-1: only the row count is erased; columns travel and are
   checked. TAB-5/TAB-6 open: `morloc typecheck` accepts a list column that
   `make` rejects; row counts are never checked.
+  [reproduced 2026-11-02] A `?(?Int)` column, or `?O` with `type O = ?Int`,
+  passes typecheck and make and fails at run time ("Unsupported column type
+  ... Optional"): Serial.hs `isArrowColumn` recurses through optionals.
+  What a column may hold is decided in four places that disagree
+  (`isArrowColumn`, Nexus.hs `tableFormProblem`, arrow_shm.rs `declared_*`,
+  delimited.rs `ColType`); briefs/B12-B13.md.
 - [read] Arrow block doc (arrow_shm.rs) describes a metadata section never
   written.
 - [speculative] pymorloc.c:2591-2593 leaks a moved schema on failure.

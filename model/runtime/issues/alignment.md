@@ -31,6 +31,14 @@ for primitive numeric elements. Deferred by the user 2026-10-12.
   whether the field offsets of a tuple or record are packed without
   padding, or the buffer base itself is misaligned. Fix: read wire fields
   with `memcpy` (or `std::bit_cast`), or align the layout.
+  [reproduced 2026-11-02, briefs/S4-steps3-5.md] Cause: a call packet
+  concatenates its argument packets with no padding and the pool reads them
+  in place, so argument k is misaligned whenever the earlier arguments'
+  lengths do not sum to a multiple of 8 (typeclasses-1 `foo a b` stops,
+  `foo aaaaaaaa b` passes). The RPTR relptr reads through borrowed argument
+  packets are misaligned the same way [read]. Landing checks a relptr's
+  range but not its alignment, so an outside file with an odd interior
+  relptr lands and later walkers load through it misaligned [read].
 - [read] What it costs today: each writer's sizing pass reserves 63 bytes
   per numeric array and pads up to 63, which dominates for many small
   arrays (`[[Int8]]` rows of a few bytes).

@@ -95,3 +95,19 @@ Generated code that a language's own tools refuse.
   data/lang/py/lang.yaml `ldErrorWrapOpen`/`ldErrorWrapClose`, applied by
   Grammars/Translator/Generic.hs `lcMakeFunction` `wrapError`.
   spec-emit-3-1 covers only C++ and Rust. Repro: /work/plans/model-audit-2026-10-21/repro/H/rec/.
+  [reproduced 2026-11-02, wrong result] A Python `except ValueError` in user
+  code around a morloc callback never fires: the per-function `try`
+  re-raises everything as RuntimeError. Fix: R's `ldFrameLabelStmt`
+  mechanism, the trace built from `e.__traceback__` at dispatch and in
+  `mlc_try` (briefs/B7-G4.md, prototype gives identical trace text).
+- **A record field named by a C++ or Rust keyword breaks the native build.**
+  [reproduced 2026-11-02] A C++ "struct" record with a field `new` or
+  `this` builds a pool g++ rejects ("expected unqualified-id before
+  'new'"); a Rust `self`/`super`/`crate`/`Self` field reaches a raw
+  `error`. Field names are neither escaped nor refused: one per-language
+  field-name rule in lang.yaml, checked at the record declaration
+  (briefs/B8-B9.md).
+- **A native-form template with a `$` not followed by a digit crashes the
+  compiler.** [read 2026-11-02] e.g. Rust `$crate`: Grammars/Macro.hs
+  `error (show err')`. A check when the template is declared covers it with
+  the `$0` and missing-argument cases.

@@ -194,3 +194,10 @@ literal and record gaps. Reproduced on 0.109.0 unless marked.
     is already solved;
   - the comment on `accumulatedRecords`' short circuit says merges write
     keys into the ExistG entry; no code does.
+- **UNSOUND: a native type form's argument order is ignored.** [reproduced
+  2026-11-02] A form `"std::tuple<$2,$1>" b a` builds a value whose fields
+  are swapped: `sndp '[3,2.75]'` prints `2`. Infer.hs `appArgsCorrespond`.
+  Analysis in /work/plans/source-type-forms.md.
+- **`{x=?Int}` does not parse.** [reproduced 2026-11-02] `=?` lexes as one
+  operator ("expected one of: '=', '::'"), and the typecheck printer writes
+  `{x=?Int}`, which cannot be read back.

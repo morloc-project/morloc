@@ -11,9 +11,15 @@ preference, then size).
   .name g, .biotype g, .txs g)) (geneRows roots)` compared with `@show` to a
   literal) fails `morloc typecheck --realize` with "Could not resolve type
   applied variable 'Tuple4'" (TypeEval.hs) in convert-cpp and convert-rust,
-  although root-cpp and root-rust map Tuple4. A small program with the same
-  lambda and comparison realizes. Repro: `cd lib/biolib/convert-cpp &&
-  morloc typecheck --realize test.loc` with convert installed.
+  although root-cpp and root-rust map Tuple4. [traced 2026-11-02,
+  briefs/A7-deep.md] The missing mapping is Python's: Serialize.hs
+  `serializeHosted'`, local `prepareArg`, types an argument the head only
+  forwards with the relaying pool's native type and no `holds` check
+  (`contextArg` and `inferHeld` have the guard; `prepareArg`, `boundArg`,
+  `MonoBndVar` and `MonoLetVar` do not). A 15-line program with no root-py
+  reproduces it. The error names no language and points at the producer.
+  `letWrap.wrapAsNeeded` silently drops a native request on a Passthrough
+  slot [read].
 - **A function argument is priced by where it is called, so a term
   with both morloc and sourced implementations prices it twice for the
   morloc one.** [read, 2026-10-24] The `AppS` clause of `scoreExpr` leaves
@@ -65,7 +71,10 @@ preference, then size).
   pyBoxValue (walk n g (pyMkBox 0)))`; should print 60 for `run 3`.
 - **A copy of a recursive function given a host-made function is built in
   the host's language without checking that it can hold its values.**
-  [read, 2026-10-26] HostProvenance.hs `makeCopy` (`relangRoot`) sets the
+  [reproduced 2026-11-02: a tail recursion copied into C++, carrying a
+  Python-only record, emits C++ naming an undeclared `Box` (g++ fails);
+  `inferType` in a compiled language resolves an undeclared record to its
+  morloc name instead of failing; briefs/A7-deep.md] [read, 2026-10-26] HostProvenance.hs `makeCopy` (`relangRoot`) sets the
   copy's manifold to the host's language; a parameter or body value of a
   type the host's language cannot hold (a record mapped only to Python, in
   C++) then fails at the pool's compile or as a compiler bug at `pinTable`,

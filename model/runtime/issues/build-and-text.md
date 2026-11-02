@@ -146,3 +146,9 @@
   (malloc_cstr), but a CSchema is Box/CString/Vec. Manifest expression
   strings (manifest_ffi.rs ~815, ~1048, ~1277) are never freed (the nexus
   is short-lived).
+- **ABI checks compare size, not members.** [read 2026-11-02]
+  `expression_union_is_wide_enough` checks only size and alignment, so the
+  missing union members `ctor_field_expr` and `ctor_make_expr` pass; morloc.h
+  also lacks metadata kind 0x09 PROGRAM_FILE; neither side tests MLC_KIND.
+  ipc.rs is dead code (its `offset - 32` underflow is in `read_packet`).
+  About 60 safe `pub fn`s in morloc-runtime take raw pointers (heuristic).

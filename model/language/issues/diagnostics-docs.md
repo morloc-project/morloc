@@ -135,3 +135,7 @@
   7 with attached error: No implementation found for '<*>'": the error is
   raised at a node with no source location, so the user error is labelled a
   compiler bug.
+- **A DIAG-5 trace lists a function passed as a value twice per call.**
+  [reproduced 2026-11-02] `safe down 0` makes one call of the named
+  recursive `down` and prints two `at down` lines: the closure wrapper
+  manifold takes the named function's trace label (traceInfo).

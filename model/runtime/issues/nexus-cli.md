@@ -123,3 +123,20 @@
   2026-11-02] WRITE_BEHIND_DEPTH, WRITE_BUFFER_BYTES, IFILE_CACHE_BYTES,
   CHANNEL_DEPTH, REGISTRY_SLOT_COUNT, FRAME_WORKERS. Warn or refuse needs a
   ruling (existing code warns elsewhere).
+- **A scalar enum argument given as a packet file is parsed as JSON.**
+  [reproduced 2026-11-02] A `DNA` or `?DNA` argument from a `-f packet` file
+  fails "JSON parse error: expected value at line 1 column 1", while a
+  `[DNA]` argument reads the same kind of file as a packet (CLI-1, proposed).
+- **UNSOUND: `@form list` splices lines and cells into one document.**
+  [reproduced 2026-11-02] cli.rs `try_list_with_config` and
+  `format_field_as_json` join unchecked line and cell text into one JSON
+  document: for `[Int]` the input `1,2\n3\n` returns `[1,2,3]`; one line
+  `[1,2],[3,4]` gives two tuples; an injected `"name":...` in a cell is
+  stopped only by the loader's duplicate-field check.
+- **UNSOUND: `@form list` chooses the delimiter by which parse typechecks.**
+  [reproduced 2026-11-02] For `{n::Int, s::Str}` the TSV `5,6\thello`
+  returns `{"n":5,"s":"6\thello"}`; for `{label::Str, v::Real}`, `p,q 5`
+  returns `{"label":"p,q","v":5}`. Fix with the splicing entry: parse each
+  line and cell alone, choose the delimiter once from the first line, never
+  retry after a type error (briefs/B12-B13.md). Whether `@form list` cells
+  follow CLI-16/17/18 needs a ruling.

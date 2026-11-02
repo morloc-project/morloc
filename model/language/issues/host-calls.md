@@ -11,7 +11,13 @@
   `readE path = mapReader gffEntries readGff3 path`, a lambda-defined
   reader, `mapReader (\xs -> xs)` in place of `gffEntries`, and the same
   body with no Python. biolib's bio defines its readers with the path
-  argument for this reason.
+  argument for this reason. [traced 2026-11-02, briefs/A7-deep.md] The
+  refusal follows the term's use count, not placement: with two uses
+  Share.hs binds the function-valued constant once, HostProvenance sees an
+  application of a let binder, and its `AppS` arm reports a stray before
+  looking at the head and never passes the demand on. Fix there (pass a
+  positional demand to the let binder), not by eta-expanding, which would
+  undo the sharing EVAL-3 requires.
 
 - **A point-free source built from a list of sources stops the build when a
   Python call follows its use.** [reproduced, compiler 4443cc47] Internal

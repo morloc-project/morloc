@@ -10,12 +10,18 @@ dispatch beyond ANN-9, ANN-10 and ANN-12. Goldens `spec-ann-9-1` and
   sbatch exports the caller's environment by default, so the job's nexus
   sees MORLOC_LIFELINE, MORLOC_NEXUS_STDIO_SOCK and MORLOC_BENCH_RECORDS of
   the run that submitted it. Harm beyond a job's benchmark rows going to the
-  parent's tmpdir is unverified.
+  parent's tmpdir is unverified. [reproduced 2026-11-02] Also
+  MORLOC_POOL_HASH, MORLOC_MANIFEST_PATH, MORLOC_NEXUS_PATH and
+  MORLOC_PROG_NAME; one shared list of private names should drive both
+  this and the pool environment filter.
 - **An empty sacct answer polls forever.** [read] slurm_job_end_state
   treats no output as not finished, so a missing `sacct` or a job purged
   from accounting makes remote_call sleep forever. Empty output is also
   normal for a few seconds after submission, so the fix needs a rule for
-  how long "unknown" may last.
+  how long "unknown" may last. [reproduced 2026-11-02] With sacct missing
+  the shell prints `sh: 1: sacct: not found` every second; spawn it
+  directly and treat a spawn failure as an error. The SLURM bridge path
+  also polls forever if the bridge dies after submission [read].
 - **Job directories outlive a killed parent.** [read] Each job's files sit
   in their own directory under the cache base's `_remote/` and are removed
   by the parent after it reads the result (ANN-12). A parent killed while

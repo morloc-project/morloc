@@ -84,3 +84,14 @@
   same offsets. `test_enum_roundtrips_through_render` skips any case that
   does not parse (`if let Ok`), so its `e1` and
   `e21Aa_long_constructor_name` cases test nothing.
+- **R drops an out-of-range enum element without an error.** [reproduced
+  2026-11-02] A `[DNA]` packet file with its last byte set to 4 (one past
+  the last arm): an R function returns `["A"]` with exit 0; another R
+  function fails "malformed factor"; Python runs on the bad value and fails
+  only at output ("enum tag 18446744073709551615 is out of range"). Landing
+  checks no enum ordinal (voidstar.rs, fixed-width array regions are not
+  walked). Repro: /work/plans/error-clusters/briefs/S4-steps3-5.md.
+- **Safe Rust functions dereference raw pointers.** [read, 2026-11-02]
+  json.rs `write_json`, `voidstar_to_json_string`, `print_voidstar_raw` and
+  `voidstar_raw_to_bytes` are safe `pub fn`s that dereference an `AbsPtr`
+  their caller passes.
