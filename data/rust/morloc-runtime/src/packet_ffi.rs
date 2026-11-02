@@ -885,6 +885,63 @@ pub(crate) unsafe fn make_morloc_remote_call_packet(
 
 // ── Call packet reading ──────────────────────────────────────────────────────
 
+/// The argument packets of a call packet, as byte ranges within it. Each
+/// argument's header is checked and its extent kept inside the call packet's
+/// declared size.
+pub(crate) struct CallArgs<'a> {
+    bytes: &'a [u8],
+    pos: usize,
+    index: usize,
+}
+
+impl<'a> CallArgs<'a> {
+    pub(crate) unsafe fn new(packet: *const u8, header: *const PacketHeader) -> Self {
+        CallArgs {
+            bytes: std::slice::from_raw_parts(packet, morloc_packet_size_from_header(header)),
+            pos: 32 + (*header).offset as usize,
+            index: 0,
+        }
+    }
+}
+
+impl Iterator for CallArgs<'_> {
+    type Item = Result<std::ops::Range<usize>, MorlocError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let end = self.bytes.len();
+        if self.pos >= end {
+            return None;
+        }
+        let past_end = MorlocError::Packet(format!(
+            "argument #{} of a call packet runs past the packet's end", self.index
+        ));
+        let rest = &self.bytes[self.pos..];
+        let size = if rest.len() < 32 {
+            Err(past_end)
+        } else {
+            PacketHeader::from_prefix(rest).and_then(|arg| {
+                32usize
+                    .checked_add({ arg.offset } as usize)
+                    .and_then(|n| n.checked_add(usize::try_from(arg.length).ok()?))
+                    .filter(|&n| n <= rest.len())
+                    .ok_or(past_end)
+            })
+        };
+        Some(match size {
+            Ok(n) => {
+                let span = self.pos..self.pos + n;
+                self.pos += n;
+                self.index += 1;
+                Ok(span)
+            }
+            Err(e) => {
+                self.pos = end;
+                Err(e)
+            }
+        })
+    }
+}
+
 pub(crate) unsafe fn read_morloc_call_packet(
     packet: *const u8,
     errmsg: *mut *mut c_char,
@@ -913,52 +970,40 @@ pub(crate) unsafe fn read_morloc_call_packet(
     (*call).args = ptr::null_mut();
     (*call).owns_args = 0; // borrowing pointers into packet
 
-    let start_pos = 32 + (*header).offset as usize;
-    let end_pos = morloc_packet_size_from_header(header);
-
-    let mut pos = start_pos;
-    while pos < end_pos {
-        let arg_size = if end_pos - pos < 32 {
-            0
-        } else {
-            morloc_packet_size(packet.add(pos), errmsg)
-        };
-        if arg_size == 0 || arg_size > end_pos - pos {
-            if !errmsg.is_null() && (*errmsg).is_null() {
-                set_errmsg(errmsg, &MorlocError::Packet(format!(
-                    "argument #{} of a call packet runs past the packet's end", (*call).nargs
-                )));
-            }
-            free_morloc_call(call);
+    let nargs = match CallArgs::new(packet, header).try_fold(0usize, |n, a| a.map(|_| n + 1)) {
+        Ok(n) => n,
+        Err(e) => {
+            set_errmsg(errmsg, &e);
+            libc::free(call as *mut c_void);
             return ptr::null_mut();
         }
-        pos += arg_size;
-        (*call).nargs += 1;
-    }
-
-    (*call).args = libc::calloc((*call).nargs, std::mem::size_of::<*mut u8>()) as *mut *mut u8;
+    };
+    (*call).nargs = nargs;
+    (*call).args = libc::calloc(nargs, std::mem::size_of::<*mut u8>()) as *mut *mut u8;
     if (*call).args.is_null() {
         set_errmsg(errmsg, &MorlocError::Other("calloc failed for args".into()));
         libc::free(call as *mut c_void);
         return ptr::null_mut();
     }
 
-    pos = start_pos;
-    for i in 0..(*call).nargs {
-        let arg_header = read_morloc_packet_header(packet.add(pos), errmsg);
-        if arg_header.is_null() {
-            free_morloc_call(call);
-            return ptr::null_mut();
-        }
-        if (*arg_header).command_type() != PACKET_TYPE_DATA {
+    for (i, span) in CallArgs::new(packet, header).enumerate() {
+        let span = match span {
+            Ok(s) => s,
+            Err(e) => {
+                set_errmsg(errmsg, &e);
+                free_morloc_call(call);
+                return ptr::null_mut();
+            }
+        };
+        let arg_header = &*(packet.add(span.start) as *const PacketHeader);
+        if arg_header.command_type() != PACKET_TYPE_DATA {
             set_errmsg(errmsg, &MorlocError::Packet(
-                format!("Argument #{} is not a DATA packet (type={})", i, (*arg_header).command_type())
+                format!("Argument #{} is not a DATA packet (type={})", i, arg_header.command_type())
             ));
             free_morloc_call(call);
             return ptr::null_mut();
         }
-        *(*call).args.add(i) = packet.add(pos) as *mut u8;
-        pos += morloc_packet_size_from_header(arg_header);
+        *(*call).args.add(i) = packet.add(span.start) as *mut u8;
     }
 
     call
@@ -2654,6 +2699,24 @@ mod call_packet_bounds_tests {
             let arg_length_at = arg_start + 24;
             bytes[arg_length_at..arg_length_at + 8].copy_from_slice(&(1u64 << 20).to_le_bytes());
             let msg = read_call(&bytes).unwrap_err();
+            assert!(msg.contains("runs past the packet's end"), "{msg}");
+        }
+    }
+
+    /// The cache key of a call packet is built over the same checked walk.
+    #[test]
+    fn hashing_refuses_an_argument_past_the_call_packets_end() {
+        unsafe {
+            let mut bytes = call_with_one_arg();
+            let arg_start = 32 + u32::from_le_bytes(bytes[20..24].try_into().unwrap()) as usize;
+            let arg_length_at = arg_start + 24;
+            bytes[arg_length_at..arg_length_at + 8].copy_from_slice(&(1u64 << 20).to_le_bytes());
+            let mut err: *mut c_char = ptr::null_mut();
+            let mut h = 0u64;
+            let ok = crate::cache::hash_morloc_packet(bytes.as_ptr(), ptr::null(), 0, &mut h, &mut err);
+            assert!(!ok);
+            let msg = CStr::from_ptr(err).to_string_lossy().into_owned();
+            libc::free(err as *mut c_void);
             assert!(msg.contains("runs past the packet's end"), "{msg}");
         }
     }

@@ -406,11 +406,23 @@ flushed when the reader opened it (SLOT-15).
 
 ### SLOT-30 An indexed file opens only with a final footer
 Status: implemented
-Checked by: ifile_rejects_footerless_stream
+Checked by: ifile_rejects_footerless_stream, an_index_out_of_order_is_not_trusted, index_counts_that_disagree_with_the_footer_are_not_trusted, an_ifile_refuses_permuted_counts, an_ifile_refuses_an_index_that_skips_the_first_sub_packet, a_writer_cannot_build_a_footer_whose_counts_disagree_with_its_total, concat_refuses_a_source_without_a_final_footer
 
 `@open` as an IFile needs the per-sub-packet element counts that only a
 final footer records, so it refuses a file in the temporary-footer or
 no-footer state. It does not consult the status: a FAILED file opens.
+
+The index is checked at open without reading the sub-packets (ruled
+2026-11-02): its entries lie in order inside the body, at least a header
+apart, the last sub-packet ends before the footer, and the counts add up
+to the footer's total. A file that fails this reads as one without a final
+footer. In a debug build (one with code checks), or with
+`MORLOC_VERIFY_INDEX=1`, the open also walks the sub-packets and refuses a
+file whose footer's index differs from them. `@concat` and `@append`, which
+write a new footer, always walk, and refuse a damaged footer or one that
+differs from the sub-packets; `@concat` also refuses a source without a
+final footer. A writer refuses to write a final footer whose counts do not
+add up or whose entries are out of order.
 
 ### SLOT-31 What a reader reports at an ending that is not a clean close
 Status: draft

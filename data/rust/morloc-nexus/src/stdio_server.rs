@@ -1023,6 +1023,7 @@ fn finish_logical_packet(slot: &mut StdioSlot) -> Result<(), crate::stdio_bridge
     slot.diag = None;
     slot.schema = None;
     slot.bytes_out = 0;
+    let footer = footer.map_err(|e| br::WriteError::Other(e.to_string()))?;
     unsafe { br::write_bytes_to_fd(slot.fd, &footer) }
 }
 

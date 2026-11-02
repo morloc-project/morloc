@@ -751,7 +751,7 @@ fn classify_stream_packet<R: Read + Seek>(
     let footer_result = if file_size < 32 + metadata_offset + STREAM_TAIL_SIZE as u64 {
         FooterInfo::Missing { walk: None }
     } else {
-        match read_stream_footer(f, file_size) {
+        match read_stream_footer(f, file_size, 32 + metadata_offset) {
             Ok(info) => info,
             Err(e) => return Classification::Error(e),
         }
@@ -840,7 +840,7 @@ fn forward_scan_stream_body<R: Read + Seek>(
             Some(t) => t,
             None => return Err("forward-scan sub-packet size overflow".into()),
         };
-        if cur + total > file_size {
+        if cur.checked_add(total).map_or(true, |end| end > file_size) {
             out.partial = true;
             break;
         }
@@ -876,6 +876,7 @@ fn forward_scan_stream_body<R: Read + Seek>(
 fn read_stream_footer<R: Read + Seek>(
     f: &mut R,
     file_size: u64,
+    body_start: u64,
 ) -> Result<FooterInfo, String> {
     let tail_off = file_size - STREAM_TAIL_SIZE as u64;
     f.seek(SeekFrom::Start(tail_off))
@@ -960,6 +961,23 @@ fn read_stream_footer<R: Read + Seek>(
         diag.subpacket_count = entries.len() as u64;
     }
     if is_final {
+        morloc_runtime_types::packet::check_subpacket_index(
+            &entries,
+            body_start,
+            footer_off,
+            diag.element_count,
+            |off| {
+                let mut hdr = [0u8; 32];
+                f.seek(SeekFrom::Start(off))
+                    .and_then(|_| f.read_exact(&mut hdr))
+                    .map_err(morloc_runtime_types::error::MorlocError::Io)?;
+                let h = PacketHeader::from_bytes(&hdr)?;
+                { h.length }.checked_add(32 + { h.offset } as u64).ok_or_else(|| {
+                    morloc_runtime_types::error::MorlocError::Packet("sub-packet length overflows".into())
+                })
+            },
+        )
+        .map_err(|e| format!("stream footer subpacket index invalid: {}", e))?;
         Ok(FooterInfo::Final { diag, status, entries })
     } else {
         Ok(FooterInfo::Temp { diag })

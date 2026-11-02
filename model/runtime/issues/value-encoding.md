@@ -11,7 +11,7 @@
   an optional becomes pointer 0 (volume 0) instead of null. (Python raises
   a KeyError.)
 - [read] morloc-runtime/src/mpack.rs:413-414: Int limbs copied to an
-  unaligned cursor; json.rs:1462 reads them as `*const u64`.
+  unaligned cursor.
 - [read] mpack.rs:398-416: an 8-byte `bin` Int stores size 1 and a relptr,
   which readers take as the inline value.
 - [read] voidstar.rs `headers` (~486): a shared-memory rebase sets an empty

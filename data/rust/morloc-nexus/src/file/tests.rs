@@ -1075,17 +1075,14 @@ fn stream_packet_temp_footer_reports_diag() {
 #[test]
 fn stream_packet_final_footer_reports_index_count_and_status() {
     let mut file = build_stream_header("u4");
+    let mut entries = Vec::new();
     for _ in 0..3 {
+        entries.push(SubpacketEntry { offset: file.len() as u64, elem_count: 1 });
         file.extend_from_slice(&build_stream_subpacket(32));
     }
     let diag = diag_with(3, 3, 96, 96);
-    let entries = [
-        SubpacketEntry { offset: 0,   elem_count: 1 },
-        SubpacketEntry { offset: 100, elem_count: 1 },
-        SubpacketEntry { offset: 200, elem_count: 1 },
-    ];
     file.extend_from_slice(
-        &make_final_footer_packet(&diag, &entries, FOOTER_STATUS_FAILED),
+        &make_final_footer_packet(&diag, &entries, FOOTER_STATUS_FAILED).unwrap(),
     );
     let total = file.len() as u64;
     match classify_reader(&mut Cursor::new(&file), total, None, 1024) {
@@ -1096,7 +1093,7 @@ fn stream_packet_final_footer_reports_index_count_and_status() {
                     assert_eq!(v.subpacket_count, entries.len() as u64);
                     assert_eq!(status, FOOTER_STATUS_FAILED);
                     assert_eq!(v.element_count, 3);
-                    assert_eq!(e, entries.to_vec());
+                    assert_eq!(e, entries);
                 }
                 other => panic!("expected final footer, got {:?}", other),
             }
@@ -1317,4 +1314,24 @@ fn stream_command_type_constant_present() {
     // Guard: if PACKET_TYPE_STREAM ever moves values, the dispatch arm
     // in `classify_morloc_packet` needs to be revisited.
     assert_eq!(PACKET_TYPE_STREAM, 3);
+}
+
+#[test]
+fn stream_packet_with_a_corrupt_index_is_reported() {
+    let mut file = build_stream_header("u4");
+    let mut entries = Vec::new();
+    for _ in 0..2 {
+        entries.push(SubpacketEntry { offset: file.len() as u64, elem_count: 1 });
+        file.extend_from_slice(&build_stream_subpacket(32));
+    }
+    entries.swap(0, 1);
+    let diag = diag_with(2, 2, 64, 64);
+    file.extend_from_slice(
+        &morloc_runtime_types::packet::final_footer_packet_as_given(&diag, &entries, FOOTER_STATUS_CLOSED).unwrap(),
+    );
+    let total = file.len() as u64;
+    match classify_reader(&mut Cursor::new(&file), total, None, 1024) {
+        Classification::Error(msg) => assert!(msg.contains("corrupt sub-packet index"), "{msg}"),
+        other => panic!("expected an error, got {:?}", other),
+    }
 }

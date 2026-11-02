@@ -1457,9 +1457,10 @@ impl<'a, 'r> Walker<Pretty> for JsonWalk<'a, 'r> {
                     map_io(write!(w, "{}", r.read_val::<i64>(8)))?;
                 } else {
                     let relptr = r.read_val::<shm::RelPtr>(8);
-                    let data_ptr = shm::rel2abs(relptr)?;
-                    let limbs: Vec<u64> = (0..size)
-                        .map(|i| unsafe { *((data_ptr as *const u64).add(i)) })
+                    let bytes = unsafe { crate::voidstar::int_limb_bytes(size, relptr)? };
+                    let limbs: Vec<u64> = bytes
+                        .chunks_exact(8)
+                        .map(|c| u64::from_ne_bytes(c.try_into().unwrap()))
                         .collect();
                     let s = crate::eval_ffi::limbs_to_decimal(&limbs);
                     map_io(w.write_all(s.as_bytes()))?;

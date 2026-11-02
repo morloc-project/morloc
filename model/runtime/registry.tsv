@@ -166,6 +166,7 @@ morloc-runtime/log.rs::-::BENCH_FILE	held	14
 morloc-runtime/manifest_ffi.rs::-::NAMED_FUNCTIONS	thread		
 morloc-runtime/packet.rs::-::INLINE_THRESHOLD	startup		
 morloc-runtime/packet.rs::-::SHM_ENABLED	startup		
+morloc-runtime/packet.rs::-::VERIFY_INDEX	startup		
 morloc-runtime/packet.rs::-::TEST_CONFIG_LOCK	test-only		
 morloc-runtime/packet.rs::-::TMPDIR	held	12	
 morloc-runtime/packet.rs::-::CONFIG_LOADED	counter		

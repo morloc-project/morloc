@@ -1379,20 +1379,20 @@ mod tests {
 /// the array length its payload begins with. A compressed payload is
 /// decoded only as far as those first bytes.
 pub fn subpacket_elem_count(file: &[u8], off: u64) -> Result<u64, MorlocError> {
+    let header = usize::try_from(off).ok()
+        .and_then(|off| file.get(off..))
+        .ok_or_else(|| MorlocError::Packet("sub-packet header past the end of the file".into()))
+        .and_then(crate::packet::PacketHeader::from_prefix)?;
     let off = off as usize;
-    let header_bytes: &[u8; 32] = file
-        .get(off..off + 32)
-        .and_then(|b| b.try_into().ok())
-        .ok_or_else(|| MorlocError::Packet("sub-packet header past the end of the file".into()))?;
-    let header = crate::packet::PacketHeader::from_bytes(header_bytes)?;
     if !header.is_data() {
         return Err(MorlocError::Packet("expected a data sub-packet".into()));
     }
     // SAFETY: is_data() implies the data variant of the command union.
     let compression = unsafe { header.command.data.compression };
     let start = off + 32 + header.offset as usize;
-    let payload = file
-        .get(start..start + header.length as usize)
+    let payload = usize::try_from(header.length).ok()
+        .and_then(|len| start.checked_add(len))
+        .and_then(|end| file.get(start..end))
         .ok_or_else(|| MorlocError::Packet("sub-packet payload past the end of the file".into()))?;
     let mut first = [0u8; 8];
     match compression {
@@ -1413,4 +1413,19 @@ pub fn subpacket_elem_count(file: &[u8], off: u64) -> Result<u64, MorlocError> {
         }
     }
     Ok(u64::from_le_bytes(first))
+}
+
+#[cfg(test)]
+mod elem_count_bounds_tests {
+    use super::*;
+
+    #[test]
+    fn a_sub_packet_claiming_more_bytes_than_memory_is_refused() {
+        let h = crate::packet::PacketHeader::data_mesg(crate::packet::PACKET_FORMAT_VOIDSTAR, u64::MAX);
+        let mut file = vec![0u8; 8];
+        file.extend_from_slice(&h.to_bytes());
+        file.extend_from_slice(&[0u8; 16]);
+        assert!(subpacket_elem_count(&file, 8).is_err());
+        assert!(subpacket_elem_count(&file, u64::MAX).is_err());
+    }
 }

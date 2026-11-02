@@ -148,6 +148,13 @@ pub(crate) fn region_len(n: usize, width: usize) -> Result<usize, MorlocError> {
     })
 }
 
+/// The limbs of a multi-limb `Int` (`size` > 1) as bytes, checked to lie
+/// inside the volume its relptr names.
+pub(crate) unsafe fn int_limb_bytes<'a>(size: usize, limbs: RelPtr) -> Result<&'a [u8], MorlocError> {
+    let total = region_len(size, std::mem::size_of::<u64>())?;
+    Ok(std::slice::from_raw_parts(shm::rel2abs_extent(limbs, total)?, total))
+}
+
 /// The relptr range `[lo, hi)` of one block. A block lies inside one
 /// volume, so its relptrs are contiguous, and bounds are checked on relptrs
 /// directly without resolving each one to an address.
@@ -1576,11 +1583,11 @@ impl<'a, 'r> Walker<usize> for FlattenWalk<'a, 'r> {
                     let size = *(data as *const usize);
                     if size > 1 {
                         let relptr = *(data.add(std::mem::size_of::<usize>()) as *const RelPtr);
-                        let limbs = shm::rel2abs(relptr)?;
+                        let limbs = int_limb_bytes(size, relptr)?;
                         self.align(std::mem::align_of::<u64>())?;
-                        let total = size * std::mem::size_of::<u64>();
+                        let total = limbs.len();
                         let here = self.cursor;
-                        self.region(here, total)?.copy_from_slice(std::slice::from_raw_parts(limbs, total));
+                        self.region(here, total)?.copy_from_slice(limbs);
                         self.region(at + std::mem::size_of::<usize>(), std::mem::size_of::<RelPtr>())?
                             .copy_from_slice(&(here as RelPtr).to_ne_bytes());
                         self.cursor += total;
@@ -2021,9 +2028,8 @@ impl<'a, 'r> Walker<usize> for FlatEmit<'a, 'r> {
                         let pos = shm::align_up(self.cursor, std::mem::align_of::<u64>());
                         self.set(base, pos as u64 | self.vol_mask);
                         self.pad_to(pos)?;
-                        let limbs = shm::rel2abs(*(data.add(std::mem::size_of::<usize>()) as *const RelPtr))?;
-                        let total = size * std::mem::size_of::<u64>();
-                        self.write_bytes(std::slice::from_raw_parts(limbs, total))?;
+                        let limbs = int_limb_bytes(size, *(data.add(std::mem::size_of::<usize>()) as *const RelPtr))?;
+                        self.write_bytes(limbs)?;
                     }
                 }
                 SerialType::String | SerialType::Array => {

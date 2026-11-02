@@ -199,7 +199,27 @@ here touch locks and ownership: model first.
   SLOT-23 (one per processor): stream.rs:1098 `idle_slots_kept` clamps to
   16. Speed only.
 - **SLOT-29 is silent on a present but corrupt footer.** [read,
-  2026-10-21] stream_format.rs:112 treats `Ok(None) | Err(_)` alike, so a
-  damaged footer silently falls back to a forward scan. Belongs with the
+  2026-10-21] stream_format.rs `parse_stream_file` treats `Ok(None) |
+  Err(_)` alike, so a damaged footer, or a final footer whose sub-packet
+  index fails `check_subpacket_index`, silently falls back to a forward
+  scan; `@open` as an IFile then refuses it as unindexed, without the
+  reason. Belongs with the
   SLOT-31 ruling. `MORLOC_WRITE_BEHIND_DEPTH=0` is clamped to 1 silently
   (custody.rs:191).
+- **The index walk reads every sub-packet.** [read, 2026-11-01] `@concat`,
+  `@append`, and `@open` as an IFile in a debug build or with
+  `MORLOC_VERIFY_INDEX=1` (SLOT-30), check a final footer's index against
+  the sub-packets (stream_format.rs `verified_index`), at O(sub-packets):
+  one header page each, and for a zstd sub-packet a fresh decoder
+  (compression.rs `subpacket_elem_count`) that decodes up to a 128 KiB
+  block for 8 bytes (estimated 50-100 us each, not measured). Candidates:
+  reuse one decoder; a writer that ends the first block after the array
+  header; a cache of verified (dev, ino, size, ctime). Unmeasured.
+- **A footerless compressed stream's scanned element count is short.**
+  [read, 2026-11-01] `parse_stream_file`'s fallback takes `element_count`
+  from `forward_scan_subpackets`, which counts compressed sub-packets only
+  in `compressed_uncounted`. Readers of that count are not traced.
+- **`@concat` writes CLOSED whatever its sources' status.** [read,
+  2026-11-02] A source whose final footer says FAILED or PAUSED is merged
+  into a file whose footer says CLOSED, so the failure is lost. Which status
+  a merge of mixed statuses carries needs a ruling (with SLOT-31).

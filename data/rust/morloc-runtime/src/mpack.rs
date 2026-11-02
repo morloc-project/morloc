@@ -132,8 +132,7 @@ impl<'r, 'b> Walker<()> for PackWalk<'r, 'b> {
                         .map_err(|e| MorlocError::Serialization(format!("msgpack bigint: {}", e)))?;
                 } else {
                     let relptr = *(data.add(std::mem::size_of::<usize>()) as *const shm::RelPtr);
-                    let data = shm::rel2abs(relptr)?;
-                    let bytes = std::slice::from_raw_parts(data, size * 8);
+                    let bytes = crate::voidstar::int_limb_bytes(size, relptr)?;
                     rmp::encode::write_bin_len(buf, msgpack_len(bytes.len())?)
                         .map_err(|e| MorlocError::Serialization(format!("msgpack bigint: {}", e)))?;
                     buf.extend_from_slice(bytes);

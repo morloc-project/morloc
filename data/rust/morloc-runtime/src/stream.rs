@@ -2200,14 +2200,15 @@ pub fn shared_open_ifile(path: &str) -> Result<i64, MorlocError> {
             return Err(e);
         }
     };
-    // Enforce the IFile-on-clean-footer contract (matches the
-    // process-local `open_file_as` check for IFile).
     if !parsed.is_data_packet && !parsed.final_footer {
         return Err(MorlocError::Other(format!(
             "@open IFile '{}': file is not cleanly closed (no final footer). \
              Open it as IStream to drain forward, or repair it with morloc-nexus.",
             path,
         )));
+    }
+    if !parsed.is_data_packet && crate::packet::verify_index_on_open() {
+        crate::stream_format::verified_index(path, &parsed, mmap_ptr, mmap_size)?;
     }
 
     // Allocate a slot.
@@ -5574,18 +5575,11 @@ fn host_append(path: &str, expected_schema_str: &str, opener: (u32, u64, u64)) -
             "@append: '{}' holds a single value (written by @save), not a stream", path,
         ))));
     }
-    // Resume where every reader stops, so none of them is cut short. Only a
-    // final footer indexes the sub-packets; otherwise the index is rebuilt
-    // from the file, or the resumed stream's index would lose them.
-    let resume_off = parsed.data_end;
-    let (entries, element_count) = if parsed.final_footer {
-        (parsed.subpacket_entries.clone(), parsed.element_count)
-    } else {
-        match index_unclosed_stream(mmap_ptr, mmap_size, parsed.body_start, resume_off) {
-            Ok(rebuilt) => rebuilt,
+    let (entries, element_count, resume_off) =
+        match crate::stream_format::verified_index(path, &parsed, mmap_ptr, mmap_size) {
+            Ok(w) => (w.entries, w.element_count, w.end),
             Err(e) => return Err(unmap_and(e)),
-        }
-    };
+        };
     let body_start = parsed.body_start;
     let schema_str = parsed.schema_str.clone();
     let value_schema = parsed.value_schema.clone();
@@ -6471,10 +6465,8 @@ pub fn concat_files(paths: &[&str], dest: &str) -> Result<(), MorlocError> {
     let mut reference_schema: Option<String> = None;
 
     for (i, &p) in paths.iter().enumerate() {
-        // Parse via mmap (cheap: we only touch the header + footer +
-        // sub-packet index). The bulk byte copy below uses sendfile()
-        // against a separate fd so the kernel moves the data without
-        // crossing into userspace.
+        // The index is read through the mapping; the bulk copy below uses
+        // sendfile() on a separate fd.
         let (mmap_ptr, mmap_size) = mmap_file_readonly(p)?;
         let mapping = crate::stream_format::Mapping::new(mmap_ptr, mmap_size);
         let parsed = match parse_stream_file(p, mmap_ptr, mmap_size) {
@@ -6506,22 +6498,15 @@ pub fn concat_files(paths: &[&str], dest: &str) -> Result<(), MorlocError> {
             }
         };
 
-        // First sub-packet's body start = stream header end.
         let body_start = hdr.body_start;
-        // Last sub-packet's end: take the largest start offset from the
-        // index and read its size, OR if no index, body_start (empty
-        // source contributes nothing).
-        let body_end = if let Some(last_entry) = parsed.subpacket_entries.last() {
-            let last_off = last_entry.offset;
-            match read_subpacket_size(mmap_ptr, mmap_size, last_off) {
-                Ok(sz) => last_off + sz,
-                Err(e) => {
-                    return Err(e);
-                }
-            }
-        } else {
-            body_start
-        };
+        if !parsed.final_footer && !parsed.footer_damaged {
+            return Err(MorlocError::Other(format!(
+                "@concat: '{p}' is not cleanly closed (no final footer); its writer is still \
+                 running, failed or was discarded"
+            )));
+        }
+        let walked = crate::stream_format::verified_index(p, &parsed, mmap_ptr, mmap_size)?;
+        let (entries, elements, body_end) = (walked.entries, walked.element_count, walked.end);
 
         // Done with mmap (parsing complete); release it before sendfile.
         drop(mapping);
@@ -6556,7 +6541,7 @@ pub fn concat_files(paths: &[&str], dest: &str) -> Result<(), MorlocError> {
         }
 
         // Remap each source's entries into the dest cursor space.
-        for entry in &parsed.subpacket_entries {
+        for entry in &entries {
             let delta = entry.offset - body_start;
             merged_entries.push(morloc_runtime_types::packet::SubpacketEntry {
                 offset: dest_cursor + delta,
@@ -6572,7 +6557,9 @@ pub fn concat_files(paths: &[&str], dest: &str) -> Result<(), MorlocError> {
             dest_cursor += body_len;
         }
         unsafe { libc::close(src_fd); }
-        total_element_count += parsed.element_count;
+        total_element_count = total_element_count.checked_add(elements).ok_or_else(|| {
+            MorlocError::Other("@concat: the sources' element counts overflow".into())
+        })?;
     }
 
     // Write the merged final footer (small, fine to pwrite from userspace).
@@ -6583,7 +6570,7 @@ pub fn concat_files(paths: &[&str], dest: &str) -> Result<(), MorlocError> {
         &diag,
         &merged_entries,
         morloc_runtime_types::packet::FOOTER_STATUS_CLOSED,
-    );
+    )?;
     pwrite_all_fd(dest_fd, &footer, dest_cursor)?;
     staged.commit().map_err(MorlocError::Io)
 }
@@ -7725,23 +7712,27 @@ pub fn shared_open_ifile_recovered(
         }
     };
 
-    // If the file has a clean final footer, honour it and dispose of
-    // the caller-supplied offsets. This keeps the "cleanly closed
-    // file is authoritative" invariant.
     if parsed.is_data_packet || parsed.final_footer {
         drop(mapping);
         return shared_open_ifile(path);
     }
 
-    // Choose the entries to publish. Prefer caller's if non-empty
-    // (nexus's forward-scan may have counted better than the runtime's).
-    // Caller must pass a counts slice of matching length (or empty for
-    // the delegated path).
     if !caller_offsets.is_empty() && caller_offsets.len() != caller_counts.len() {
         return Err(MorlocError::Other(format!(
             "shared_open_ifile_recovered: caller_offsets has {} entries but \
              caller_counts has {} entries; they must match",
             caller_offsets.len(), caller_counts.len(),
+        )));
+    }
+    if !caller_offsets.is_empty()
+        && (caller_offsets.windows(2).any(|w| w[1].checked_sub(w[0]).is_none_or(|gap| gap < 32))
+            || caller_offsets[0] < parsed.body_start
+            || caller_offsets[caller_offsets.len() - 1].saturating_add(32) > parsed.data_end
+            || caller_counts.iter().try_fold(0u64, |n, &c| n.checked_add(c)) != Some(caller_element_count))
+    {
+        return Err(MorlocError::Other(format!(
+            "shared_open_ifile_recovered: the index given for '{path}' is not a list of \
+             sub-packets inside its body whose counts add up to its element count"
         )));
     }
     let (subpacket_entries, element_count): (Vec<morloc_runtime_types::packet::SubpacketEntry>, u64) =
@@ -7753,7 +7744,8 @@ pub fn shared_open_ifile_recovered(
                 caller_element_count,
             )
         } else {
-            (parsed.subpacket_entries.clone(), parsed.element_count)
+            let walked = crate::stream_format::walked_index(path, &parsed, mmap_ptr, mmap_size)?;
+            (walked.entries, walked.element_count)
         };
 
     // Allocate a slot and publish (mirrors shared_open_ifile).
@@ -7992,6 +7984,28 @@ mod tests {
         )
         .expect("a destination that is also a source must be supported");
         assert_eq!(stream_len(&a), 5);
+    }
+
+    #[test]
+    fn concat_refuses_a_source_without_a_final_footer() {
+        let _shm = crate::own_test_registry();
+        let dir = concat_test_dir("temp_footer");
+        let a = dir.join("a.idx");
+        let d = dir.join("d.idx");
+        let elem = TSchema::primitive(TSerialType::Sint64);
+        let mut bytes = make_stream_header_block(&list_schema(&elem));
+        for values in [&[1i64, 2][..], &[3i64][..]] {
+            bytes.extend_from_slice(&build_int_voidstar_subpacket(values));
+        }
+        let mut diag = TStreamDiag::new();
+        diag.subpacket_count = 2;
+        diag.element_count = 3;
+        bytes.extend_from_slice(&morloc_runtime_types::packet::make_temp_footer_packet(&diag));
+        std::fs::write(&a, bytes).unwrap();
+
+        let msg = concat_files(&[a.to_str().unwrap()], d.to_str().unwrap()).unwrap_err().to_string();
+        assert!(msg.contains("not cleanly closed"), "{msg}");
+        assert!(!d.exists());
     }
 
     #[test]
@@ -10032,7 +10046,7 @@ mod tests {
         diag.element_count = element_count;
         out.extend_from_slice(&make_final_footer_packet(
             &diag, &entries, morloc_runtime_types::packet::FOOTER_STATUS_CLOSED,
-        ));
+        ).unwrap());
         out
     }
 
@@ -10061,9 +10075,147 @@ mod tests {
         let footer = make_final_footer_packet(
             &diag, &subpacket_entries,
             morloc_runtime_types::packet::FOOTER_STATUS_CLOSED,
-        );
+        ).unwrap();
         out.extend_from_slice(&footer);
         out
+    }
+
+    fn stream_file_with_index(
+        edit: impl FnOnce(&mut Vec<morloc_runtime_types::packet::SubpacketEntry>, &mut u64),
+    ) -> Vec<u8> {
+        let elem_schema = parse_schema("i8").unwrap();
+        let mut out = make_stream_header_block(&list_schema(&elem_schema));
+        let mut entries = Vec::new();
+        let mut element_count = 0u64;
+        for values in [&[1i64, 2][..], &[3i64][..]] {
+            entries.push(morloc_runtime_types::packet::SubpacketEntry {
+                offset: out.len() as u64,
+                elem_count: values.len() as u64,
+            });
+            out.extend_from_slice(&build_int_voidstar_subpacket(values));
+            element_count += values.len() as u64;
+        }
+        edit(&mut entries, &mut element_count);
+        let mut diag = TStreamDiag::new();
+        diag.subpacket_count = entries.len() as u64;
+        diag.element_count = element_count;
+        out.extend_from_slice(&morloc_runtime_types::packet::final_footer_packet_as_given(
+            &diag, &entries, morloc_runtime_types::packet::FOOTER_STATUS_CLOSED,
+        ).unwrap());
+        out
+    }
+
+    fn parse_bytes(mut bytes: Vec<u8>) -> Result<ParsedStreamFile, MorlocError> {
+        let size = bytes.len() as u64;
+        parse_stream_file("t.idx", bytes.as_mut_ptr(), size)
+    }
+
+    #[test]
+    fn a_well_formed_index_opens() {
+        let parsed = parse_bytes(stream_file_with_index(|_, _| {})).unwrap();
+        assert!(parsed.final_footer);
+        assert_eq!(parsed.element_count, 3);
+        assert_eq!(parsed.subpacket_entries.len(), 2);
+    }
+
+    fn assert_read_by_scan(bytes: Vec<u8>) {
+        let parsed = parse_bytes(bytes).ok().unwrap();
+        assert!(!parsed.final_footer, "a corrupt index was trusted");
+        assert_eq!(parsed.subpacket_entries.len(), 2);
+        assert_eq!(parsed.element_count, 3);
+    }
+
+    #[test]
+    fn an_index_out_of_order_is_not_trusted() {
+        assert_read_by_scan(stream_file_with_index(|e, _| e.swap(0, 1)));
+    }
+
+    #[test]
+    fn an_index_entry_before_the_body_is_not_trusted() {
+        assert_read_by_scan(stream_file_with_index(|e, _| e[0].offset = 0));
+    }
+
+    #[test]
+    fn an_index_entry_past_the_footer_is_not_trusted() {
+        assert_read_by_scan(stream_file_with_index(|e, _| e[1].offset = 1 << 40));
+    }
+
+    #[test]
+    fn an_index_entry_inside_the_previous_sub_packet_is_not_trusted() {
+        assert_read_by_scan(stream_file_with_index(|e, _| e[1].offset = e[0].offset + 40));
+    }
+
+    fn ifile_open_error(bytes: Vec<u8>, tag: &str) -> String {
+        let _shm = crate::own_test_registry();
+        let path = concat_test_dir(tag).join("f.idx");
+        std::fs::write(&path, bytes).unwrap();
+        match open_ifile(path.to_str().unwrap()) {
+            Ok(h) => {
+                shared_close_handle(h).unwrap();
+                String::new()
+            }
+            Err(e) => e.to_string(),
+        }
+    }
+
+    #[test]
+    fn concat_refuses_a_damaged_index_and_one_that_differs_from_the_sub_packets() {
+        let _shm = crate::own_test_registry();
+        let dir = concat_test_dir("idx_concat");
+        for (name, bytes) in [
+            ("swapped", stream_file_with_index(|e, _| e.swap(0, 1))),
+            ("permuted", stream_file_with_index(|e, _| {
+                let c = e[0].elem_count;
+                e[0].elem_count = e[1].elem_count;
+                e[1].elem_count = c;
+            })),
+        ] {
+            let src = dir.join(format!("{name}.idx"));
+            let dest = dir.join(format!("{name}-out.idx"));
+            std::fs::write(&src, bytes).unwrap();
+            let msg = concat_files(&[src.to_str().unwrap()], dest.to_str().unwrap())
+                .unwrap_err()
+                .to_string();
+            assert!(msg.contains("corrupt sub-packet index"), "{name}: {msg}");
+        }
+    }
+
+    #[test]
+    fn an_ifile_opens_over_an_index_that_matches_its_sub_packets() {
+        assert_eq!(ifile_open_error(stream_file_with_index(|_, _| {}), "idx_ok"), "");
+    }
+
+    #[test]
+    fn an_ifile_refuses_permuted_counts() {
+        let msg = ifile_open_error(stream_file_with_index(|e, _| {
+            let c = e[0].elem_count;
+            e[0].elem_count = e[1].elem_count;
+            e[1].elem_count = c;
+        }), "idx_perm");
+        assert!(msg.contains("corrupt sub-packet index"), "{msg}");
+    }
+
+    #[test]
+    fn an_ifile_refuses_an_index_that_skips_the_first_sub_packet() {
+        let msg = ifile_open_error(stream_file_with_index(|e, n| {
+            *n -= e[0].elem_count;
+            e.remove(0);
+        }), "idx_skip_first");
+        assert!(msg.contains("corrupt sub-packet index"), "{msg}");
+    }
+
+    #[test]
+    fn an_ifile_refuses_an_index_that_skips_the_last_sub_packet() {
+        let msg = ifile_open_error(stream_file_with_index(|e, n| {
+            *n -= e[1].elem_count;
+            e.pop();
+        }), "idx_skip_last");
+        assert!(msg.contains("corrupt sub-packet index"), "{msg}");
+    }
+
+    #[test]
+    fn index_counts_that_disagree_with_the_footer_are_not_trusted() {
+        assert_read_by_scan(stream_file_with_index(|_, n| *n += 1));
     }
 
     /// Live SHM blocks right now.
@@ -10528,8 +10680,9 @@ mod tests {
         let w = shared_open_ostream_with_schema(&p, "ai8").unwrap();
         let list = parse_schema("ai8").unwrap();
         let level = crate::compression::CompressionLevel::from_u8(3).unwrap();
-        for json in ["[1, 2, 3]", "[4, 5, 6]"] {
-            let v = crate::json::read_json_with_schema(json, &list).unwrap();
+        let big = format!("[{}]", (0..40_000).map(|i| i.to_string()).collect::<Vec<_>>().join(","));
+        for json in ["[1, 2, 3]".to_string(), big] {
+            let v = crate::json::read_json_with_schema(&json, &list).unwrap();
             shared_write_subpacket(w, level, v).unwrap();
             shm::shfree(v).unwrap();
             shared_flush_buffer(w).unwrap();
@@ -10540,13 +10693,20 @@ mod tests {
         let frames: Vec<usize> = bytes.windows(4).enumerate()
             .filter(|(_, w)| *w == [0x28, 0xb5, 0x2f, 0xfd]).map(|(i, _)| i).collect();
         assert!(frames.len() >= 2, "expected two compressed sub-packets, found {}", frames.len());
-        for b in &mut bytes[frames[1] + 4..frames[1] + 12] {
-            *b ^= 0xff;
-        }
+        let f0 = frames[1];
+        let fhd = bytes[f0 + 4];
+        let single_segment = (fhd >> 5) & 1 == 1;
+        let fcs = match fhd >> 6 { 0 => single_segment as usize, 1 => 2, 2 => 4, _ => 8 };
+        let dict = [0, 1, 2, 4][(fhd & 3) as usize];
+        let first_block = f0 + 5 + (!single_segment) as usize + dict + fcs;
+        let h = u32::from_le_bytes([bytes[first_block], bytes[first_block + 1], bytes[first_block + 2], 0]);
+        assert_eq!(h & 1, 0, "the sub-packet has one block");
+        let second_block = first_block + 3 + (h >> 3) as usize;
+        bytes[second_block] |= 0b110;
         std::fs::write(&path, &bytes).unwrap();
 
         let f = open_ifile(&p).unwrap();
-        let r = ifile_bracket_slice(f, Some(0), Some(6), Some(2));
+        let r = ifile_bracket_slice(f, Some(0), Some(40_003), Some(2));
         assert!(r.is_err(), "a corrupt sub-packet was read");
         let first = with_process_local_slot(f, |local, _| {
             Ok(local.cache.entries.iter().find(|e| e.subpacket_idx == 0).map(|e| e.shm_packet))

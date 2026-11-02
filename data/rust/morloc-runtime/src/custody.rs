@@ -829,8 +829,9 @@ impl Writer {
     // SLOT-14: a failed or discarded stream keeps its temporary footer.
     fn close(&mut self, status: u32) {
         if !self.failed && status != STATUS_DISCARD {
-            let footer = morloc_runtime_types::packet::make_final_footer_packet(&self.diag, &self.entries, status as u8);
-            let res = match self.out {
+            let res = morloc_runtime_types::packet::make_final_footer_packet(&self.diag, &self.entries, status as u8)
+                .map_err(|e| (FAILED_IO, e.to_string()))
+                .and_then(|footer| match self.out {
                 Out::File(fd) => crate::stream_format::pwrite_all_fd(fd, &footer, self.cursor)
                     .map_err(|e| (FAILED_IO, e.to_string()))
                     .and_then(|_| {
@@ -842,7 +843,7 @@ impl Writer {
                         }
                     }),
                 Out::Stdio => self.send_stdio(&[&footer]),
-            };
+            });
             if let Err((kind, msg)) = res {
                 self.fail(kind, &msg);
             }
