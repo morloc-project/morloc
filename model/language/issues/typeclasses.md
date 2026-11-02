@@ -156,3 +156,19 @@
   [read, 2026-11-01] `matchTypeU` (Frontend/Typecheck.hs ~3590), used by
   `covers`, never binds a Nat variable, so a head such as `Eq (Vector n
   a)` does not cover a use at `Vector 3 a`; and `<E> T` matches `<F> T`.
+- **UNSOUND: an instance at a literal Nat head serves a generic use.**
+  [reproduced 2026-11-02] With only `instance Sz (Vec 3 Int)` and
+  `g :: Vec n Int -> Int; g x = sz x`, the program builds and `g` returns 3
+  for every length: validate skips the Nat-only obligation (`free` drops
+  KVarU, so `mentionsRigid` never sees it) and `compatibleTypeU` matches
+  any two Nats. CLS-16/17. Repro: briefs/S2-steps1-3.md (h7).
+- **A superclass with no methods rejects every instance of its subclass.**
+  [reproduced 2026-11-02] "Instance Sz Int requires Marker Int but no such
+  instance exists": Link `checkSuperclassConstraints` looks only for
+  per-method entries. CLS-5.
+- **The superclass check depends on declaration order.** [reproduced
+  2026-11-02] A superclass instance declared later in the same module is
+  reported missing. CLS-5.
+- **`findPackableWireForm` keeps only type-variable parameters.** [read,
+  2026-11-02] A native with a Nat parameter gets no tier-2 wire form; the
+  first match wins, with no specificity and no check on repeated variables.

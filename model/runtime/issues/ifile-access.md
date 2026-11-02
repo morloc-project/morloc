@@ -21,6 +21,12 @@
   1.75 GB peak and one header 0.8 GB. Gap in model/runtime/streams.md: no
   item says what an IFile accessor decodes.
 
+  [reproduced 2026-11-02, briefs/B18-B19.md] Of four access shapes over a
+  100 MB file (two 50 MB sequences), only `.[:].header` inside a Python
+  pool is fused (17 MiB peak); on the nexus `.[:].header` and `.[1].header`
+  peak at 202 MiB, and `.[1].header` in a Python pool at 252 MiB: the
+  nexus `IntrMap` arm has no fusion, and neither path looks through a
+  `.[i]` result.
 - **`@open` of a missing file does not name it.** [reproduced, 2026-10-15]
   `@open p :: <IO> (Try Str (IStream a))` on a path that does not exist
   returns `Err "IO error: No such file or directory (os error 2)"`; the

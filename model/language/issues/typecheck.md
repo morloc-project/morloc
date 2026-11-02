@@ -201,3 +201,19 @@ literal and record gaps. Reproduced on 0.109.0 unless marked.
 - **`{x=?Int}` does not parse.** [reproduced 2026-11-02] `=?` lexes as one
   operator ("expected one of: '=', '::'"), and the typecheck printer writes
   `{x=?Int}`, which cannot be read back.
+- **A do-block's literal final ignores the expected payload type.**
+  [reproduced 2026-11-02] `f :: <IO> Real; f = do 2` fails "inferred <>
+  Int"; `do 1 + 2` too, while `do [1,2]` passes: a bare literal is
+  synthesized at once and there is no single-layer check rule for a do
+  block (briefs/B16-B17.md).
+- **A do-block final of unsolved type is not run.** [reproduced
+  2026-11-02] `f = (\h -> do h 2) pyLog` against `<IO> ()` fails "inferred
+  <> (<IO> Unit)": the block is built as a nested suspension. Same class as
+  the EFF-8 entry: an existential's shape is decided before it is solved.
+- **A record literal against a record alias fails.** [reproduced
+  2026-11-02] `f :: Int -> R; f n = {x = n}` fails: `instantiate`'s alias
+  arms recurse into `instantiate`, skipping the closed-row bridge only
+  `subtype` applies. ALIAS-11's "Code: conforms" is stale.
+- **A curried head under `@collect` loses a type.** [reproduced
+  2026-11-02, Python only] `score x = @collect (prod inc x)` fails
+  "cannot serialize unknown type variable: b"; the `\k ->` form builds.

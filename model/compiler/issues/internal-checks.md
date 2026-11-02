@@ -64,3 +64,8 @@ changes that remove each class are in /work/plans/gadt/type-audit.md. All
 - **Closure capture types filtered, then zipped.** Rust.hs and Cpp.hs build
   `ctxTs` by filtering captures with a native type, then zip it with the
   closure table's schemas; one untyped capture misaligns the rest.
+- **Parameterize can hang zipping against an infinite list.** [read,
+  2026-11-02] Parameterize.hs `safeZipWith Arg ids (map EV (freshVarsAZ
+  []))`: `safeZipWith` checks both lengths, so forcing the result never
+  terminates. Reached only by a root that is a bare function-typed `BndS`,
+  which no tree has today. Use `zipWith`.

@@ -26,3 +26,12 @@ morloc-runtime-types/src/packet.rs, FFI = morloc-runtime/src/packet_ffi.rs.
   have.min(packet_length)` drops bytes past the first packet from one
   4096-byte head read; a pipelined peer would lose its second packet. The
   declared length is malloc'd before any byte arrives (NET-10).
+- [reproduced 2026-11-02] `morloc-nexus view -` trusts a stdin sub-packet's
+  length: an unchecked sum (a wrapping length panics, exit 70) and a buffer
+  of the claimed size allocated before data arrives (a 1 TiB claim aborts,
+  exit 134). `@stdin` IStream does the same through
+  `stdio_bridge::read_into_shm`: a 69-byte input claiming 2^40 bytes makes
+  a 1 TiB file-backed volume before failing. Do not rerun at that size.
+- [read 2026-11-02] daemon_ffi.rs `reply_reference` reads the data source
+  byte without checking the packet type or magic; compression.rs
+  `new_meta.len() as u32` (bounded) was missed by the cast sweep.

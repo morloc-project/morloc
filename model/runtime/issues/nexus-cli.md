@@ -140,3 +140,8 @@
   line and cell alone, choose the delimiter once from the first line, never
   retry after a type error (briefs/B12-B13.md). Whether `@form list` cells
   follow CLI-16/17/18 needs a ruling.
+- **IFile checks skip `@many` tokens and record fields.** [reproduced
+  2026-11-02] The existence check and the `-` refusal (dispatch.rs
+  `check_ifile_arg`) match only a plain value: `count data.mlc /no/such`,
+  `count -` and a record given `{"f":"/no/such"}` fail late with "IO
+  error: No such file or directory", naming neither argument nor path.

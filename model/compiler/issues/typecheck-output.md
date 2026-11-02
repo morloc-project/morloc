@@ -32,4 +32,6 @@ model/language/issues/typecheck.md.
   (`ProjectField r f`), so a sourced signature such as table's `getCol ::
   f@Str -> Table n r -> Vector n (ProjectField r f)`, read by EffectBoundary
   and the Rust members, carries a value type that `kindOfT` calls a Nat.
-
+- **A Nat variable is printed as `a`.** [reproduced 2026-11-02] `typecheck`
+  shows `g :: Vec a Int -> Int` for `Vec n Int`; the no-instance message
+  does the same.

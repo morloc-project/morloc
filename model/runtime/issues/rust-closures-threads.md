@@ -80,8 +80,10 @@ measured.
 `addTo s xs = seqMap (\x -> x + sharedGet s) xs` fails with
 "Cannot find constructor in VarF \"Shared\"  finalType=Shared" pointing at
 the lambda. The same message appears for a Rust function taking a type
-mapped only in Python (`go :: Blob -> [Int] -> [Int]`). Either is a
-missing case or an unrealizable program; the message names neither.
+mapped only in Python (`go :: Blob -> [Int] -> [Int]`) [now 2026-11-02 a
+located "Could not resolve type for variable 'Blob'"]. The capture case is
+a missing case or an unrealizable program; the message names neither, and
+it reproduces in C++ too (compiler/issues/opaque-types.md).
 
 ## A failed call on a persistent host thread leaves tracked state [read]
 

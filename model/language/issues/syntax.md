@@ -35,3 +35,7 @@
   constructor argument grammar (Parser.y) has no `()` alternative, though
   `()` is a type elsewhere (`f :: () -> Int`). Spec gap: sum-types.md does
   not say whether a constructor argument may be `()`.
+- **A kind annotation on a newtype parameter with `deriving` does not
+  parse.** [reproduced 2026-11-02] `newtype Vec (n :: Nat) a = List a
+  deriving (Packable)` fails "unexpected '='" at the next declaration;
+  without the annotation it parses.

@@ -187,3 +187,9 @@ on 0.109.0 unless marked.
   literal `@datafile` path with the program's source root, installed or
   not, so a built program reads its data file from any working directory.
   The item's wording needs updating to that, or the code to the wording.
+- **A newtype with its own C++ form and no C++ packer builds, then fails
+  when it crosses.** [reproduced 2026-11-02] `newtype Box = Int`, `type Cpp
+  => Box = "BoxT"`, a C++ `mk` and a Python `use`: `./nx go 3` fails "no
+  marshaller for a value of this C++ type (schema type 18)"; an export
+  returning it from a C++ root fails the same way. Violates REAL-3 and
+  NEWT-7; the build should refuse it (briefs/S5-steps3-6.md).
