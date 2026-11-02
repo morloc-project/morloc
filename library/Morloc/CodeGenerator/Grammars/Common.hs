@@ -327,12 +327,6 @@ sealLoop body = case body of
       _ -> fallback
     native (i, Right ne) = Just (i, ne)
     native (_, Left _) = Nothing
-    nubOrdOn key = go Set.empty
-      where
-        go _ [] = []
-        go seen (x : xs)
-          | Set.member (key x) seen = go seen xs
-          | otherwise = x : go (Set.insert (key x) seen) xs
 
 class Dependable a where
   weave :: D a -> a
@@ -407,7 +401,18 @@ serialTrivialVar _ = Nothing
 
 -- | Substitute variable index [old/new] throughout a NativeExpr.
 renameNE :: Int -> Int -> NativeExpr -> NativeExpr
-renameNE old new = go where
+renameNE = renameNEWith False
+
+-- | Substitute variable index [old/new] throughout a SerialExpr.
+renameSE :: Int -> Int -> SerialExpr -> SerialExpr
+renameSE = renameSEWith False
+
+-- | The substitution; with 'True', a manifold whose caller variables become
+-- one takes that variable once ('renameFormWith').
+renameNEWith :: Bool -> Int -> Int -> NativeExpr -> NativeExpr
+renameNEWith m old new = go where
+  renameSE = renameSEWith m
+  renameNM = renameNMWith m
   ri i = if i == old then new else i
   go (ManN nm) = ManN (renameNM old new nm)
   go (AppExeN t exe args) = AppExeN t (renameExe old new exe) (map goA args)
@@ -440,9 +445,10 @@ renameNE old new = go where
   goA (NativeArgManifold nm) = NativeArgManifold (renameNM old new nm)
   goA (NativeArgExpr ne) = NativeArgExpr (go ne)
 
--- | Substitute variable index [old/new] throughout a SerialExpr.
-renameSE :: Int -> Int -> SerialExpr -> SerialExpr
-renameSE old new = go where
+renameSEWith :: Bool -> Int -> Int -> SerialExpr -> SerialExpr
+renameSEWith m old new = go where
+  renameNE = renameNEWith m
+  renameSM = renameSMWith m
   ri i = if i == old then new else i
   go (ManS sm) = ManS (renameSM old new sm)
   go (AppPoolS t p args) = AppPoolS t (renamePoolCall old new p) (map goA args)
@@ -461,21 +467,34 @@ renameSE old new = go where
   goA (SerialArgExpr se) = SerialArgExpr (go se)
   raPair (Arg i t, sa) = (Arg (ri i) t, sa)
 
-renameNM :: Int -> Int -> NativeManifold -> NativeManifold
-renameNM old new (NativeManifold m lang form body) =
-  NativeManifold m lang (renameForm old new form) (renameNE old new body)
+renameNMWith :: Bool -> Int -> Int -> NativeManifold -> NativeManifold
+renameNMWith merge old new (NativeManifold m lang form body) =
+  NativeManifold m lang (renameFormWith merge old new form) (renameNEWith merge old new body)
 
-renameSM :: Int -> Int -> SerialManifold -> SerialManifold
-renameSM old new (SerialManifold m lang form hf body) =
-  SerialManifold m lang (renameForm old new form) hf (renameSE old new body)
+renameSMWith :: Bool -> Int -> Int -> SerialManifold -> SerialManifold
+renameSMWith merge old new (SerialManifold m lang form hf body) =
+  SerialManifold m lang (renameFormWith merge old new form) hf (renameSEWith merge old new body)
 
-renameForm :: Int -> Int -> ManifoldForm a b -> ManifoldForm a b
-renameForm old new form = case form of
+-- | Rename one variable in a manifold's form. With 'True', caller variables
+-- (a full form's arguments, a partial form's context) that become one are
+-- passed once, in both the forms either had: they are passed by id, so the
+-- callers follow. Bound and passed parameters are positional and fixed by
+-- the function's type, so they are left for 'checkDistinctParameters'.
+renameFormWith :: Bool -> Int -> Int -> ManifoldForm (Or a b) c -> ManifoldForm (Or a b) c
+renameFormWith merge old new form = case form of
   ManifoldPass args -> ManifoldPass (map ra args)
-  ManifoldFull args -> ManifoldFull (map ra args)
-  ManifoldPart ctx bnd -> ManifoldPart (map ra ctx) (map ra bnd)
+  ManifoldFull args -> ManifoldFull (callers (map ra args))
+  ManifoldPart ctx bnd -> ManifoldPart (callers (map ra ctx)) (map ra bnd)
   where
     ra (Arg i t) = Arg (if i == old then new else i) t
+    callers args
+      | merge = [Arg i (foldr1 mergeOr [t | Arg j t <- args, j == i]) | i <- nubOrd [i | Arg i _ <- args]]
+      | otherwise = args
+    mergeOr (LR a b) _ = LR a b
+    mergeOr _ (LR a b) = LR a b
+    mergeOr (L a) (R b) = LR a b
+    mergeOr (R b) (L a) = LR a b
+    mergeOr x _ = x
 
 renamePoolCall :: Int -> Int -> PoolCall -> PoolCall
 renamePoolCall old new (PoolCall mid sock rform args) =
@@ -492,8 +511,8 @@ renameDeps :: Int -> Int -> [(Int, Either SerialExpr NativeExpr)]
            -> [(Int, Either SerialExpr NativeExpr)]
 renameDeps old new = map f where
   ri i = if i == old then new else i
-  f (i, Left se) = (ri i, Left (renameSE old new se))
-  f (i, Right ne) = (ri i, Right (renameNE old new ne))
+  f (i, Left se) = (ri i, Left (renameSEWith True old new se))
+  f (i, Right ne) = (ri i, Right (renameNEWith True old new ne))
 
 -- | Tag every serial variable that names one of its manifold's arguments as
 -- 'BndVarS'. A foreign call's body, and a trivial let renamed to an
@@ -707,12 +726,12 @@ invertSerialManifold sm0 =
     invertSerialExprM (ReturnS_ (D se lets)) = return $ D (ReturnS se) lets
     invertSerialExprM (SerialLetS_ i (D se1 lets1) (D se2 lets2))
       | Just j <- serialTrivialVar se1 =
-          return $ D (renameSE i j se2) (renameDeps i j lets2 <> lets1)
+          return $ D (renameSEWith True i j se2) (renameDeps i j lets2 <> lets1)
       | otherwise =
           return $ D se2 (lets2 <> ((i, Left se1) : lets1))
     invertSerialExprM (NativeLetS_ i (D ne1 lets1) (D se2 lets2))
       | Just j <- nativeTrivialVar ne1 =
-          return $ D (renameSE i j se2) (renameDeps i j lets2 <> lets1)
+          return $ D (renameSEWith True i j se2) (renameDeps i j lets2 <> lets1)
       | otherwise =
           return $ D se2 (lets2 <> ((i, Right ne1) : lets1))
     invertSerialExprM (LetVarS_ t i) = atomize (LetVarS t i) []
@@ -764,12 +783,12 @@ invertSerialManifold sm0 =
     -- This avoids redundant assignments like "n7 = n8" in generated code.
     invertNativeExprM (SerialLetN_ i (D se1 lets1) (D ne2 lets2))
       | Just j <- serialTrivialVar se1 =
-          return $ D (renameNE i j ne2) (renameDeps i j lets2 <> lets1)
+          return $ D (renameNEWith True i j ne2) (renameDeps i j lets2 <> lets1)
       | otherwise =
           return $ D ne2 (lets2 <> ((i, Left se1) : lets1))
     invertNativeExprM (NativeLetN_ i (D ne1 lets1) (D ne2 lets2))
       | Just j <- nativeTrivialVar ne1 =
-          return $ D (renameNE i j ne2) (renameDeps i j lets2 <> lets1)
+          return $ D (renameNEWith True i j ne2) (renameDeps i j lets2 <> lets1)
       | otherwise =
           return $ D ne2 (lets2 <> ((i, Right ne1) : lets1))
     invertNativeExprM (LetVarN_ t i r) = atomize (LetVarN t i r) []

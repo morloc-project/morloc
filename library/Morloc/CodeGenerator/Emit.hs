@@ -74,7 +74,32 @@ emit ::
 emit translateFn lang xs = do
   srcs' <- findSources xs
   let xs' = map invertSerialManifold xs
+  checkDistinctParameters xs'
   translateFn lang srcs' xs'
+
+-- | Each generated function's parameters are distinct variables: one
+-- variable bound twice is a function no language accepts.
+checkDistinctParameters :: [SerialManifold] -> MorlocMonad ()
+checkDistinctParameters ms =
+  case [(i, dups) | (i, ids) <- concatMap forms ms, dups@(_ : _) <- [duplicates ids]] of
+    [] -> return ()
+    ((i, dups) : _) ->
+      MM.throwCompilerBug $
+        "manifold" <+> pretty i <+> "binds the variables" <+> pretty dups <+> "as more than one parameter"
+  where
+    forms = runIdentity . foldWithSerialManifoldM ops
+    ops =
+      defaultValue
+        { opFoldWithSerialManifoldM = \_ folded@(SerialManifold_ i _ form _ _) ->
+            return ((i, formIds form) : foldlSM mappend mempty folded)
+        , opFoldWithNativeManifoldM = \_ folded@(NativeManifold_ i _ form _) ->
+            return ((i, formIds form) : foldlNM mappend mempty folded)
+        }
+    formIds :: ManifoldForm a b -> [Int]
+    formIds form = case form of
+      ManifoldPass args -> [j | Arg j _ <- args]
+      ManifoldFull args -> [j | Arg j _ <- args]
+      ManifoldPart ctx bnd -> [j | Arg j _ <- ctx] <> [j | Arg j _ <- bnd]
 
 findSources :: [SerialManifold] -> MorlocMonad [Source]
 findSources ms = unique <$> concatMapM (foldSerialManifoldM fm) ms

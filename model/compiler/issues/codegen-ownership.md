@@ -32,28 +32,6 @@ same name sees what was taken.
   `match t | (Ok v) = lenCpp v | (Err _) = lenCpp (match t | (Ok w) = w | ...)`
   keeps both projections copies; cause not traced.
 
-- **A function called with one variable for two parameters gets a
-  duplicate parameter in Python.** [reproduced, 2026-10-15, c4da6cf3]
-  `two xs xs`, where `two :: [Str] -> [Str] -> <IO> Str` is a morloc
-  do-block that calls a Python source twice with both parameters, generates
-  `def m..(n6, n6)`; the Python pool dies at load with "SyntaxError:
-  duplicate argument". Repro:
-
-      source Py from "h.py" ("show2", "tmp")
-      show2 :: [Str] -> [Str] -> <IO> Str
-      tmp :: Str -> <IO> Str
-      two :: [Str] -> [Str] -> <IO> Str
-      two a b = do
-        p <- tmp "x"
-        x <- show2 a b
-        y <- show2 a b
-        p <> x <> y
-      go :: <IO> Str
-      go = do
-        let xs = ["a", "b"]
-        two xs xs
-
-  Met in biolib's biocoverage test (`writeKeys "small" contigs contigs ...`).
 - **A record field passed to a by-reference parameter is cloned first.**
   [read] Cost, not correctness. In a Rust pool, `f (.models r)` where `f`
   takes its argument by reference generates `let n: T = r.models.clone();`
