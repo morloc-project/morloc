@@ -1377,9 +1377,11 @@ rustReflectClosureAssembler _ = error "rustReflectClosureAssembler: expected Ser
 rustReflectClosureParsed :: MDoc -> SerialAST -> RustM MDoc
 rustReflectClosureParsed tup s = ($ tup) <$> rustReflectClosureAssembler s
 
--- | Per sourced Rust function, the per-parameter "is a bare type variable"
--- mask from the DECLARED morloc signature. A concrete parameter (Int, Str,
--- [a], record) is False; a bare @a@ is True. Read from 'stateSignatures'
+-- | Per sourced Rust function, the per-parameter "is generic over its
+-- Copy-ness" mask from the DECLARED morloc signature. A bare @a@ is True, and
+-- so is an optional or tuple holding one (@?a@, @(a, Int)@): whether it is
+-- Copy depends on the instantiation, so host code can only take it by
+-- reference. A concrete parameter (Int, Str, [a], record) is False. Read from 'stateSignatures'
 -- (still live at codegen): a plain sourced function is 'Monomorphic' with its
 -- type variables 'ForallU'-quantified; a typeclass method is 'Polymorphic',
 -- whose per-instance 'termGeneral' has been monomorphized, so the class-level
@@ -1388,11 +1390,14 @@ buildSrcTypeVarMask :: MorlocMonad (Map.Map SrcName [(Bool, Bool)])
 buildSrcTypeVarMask = Map.fromList <$> fromSourceSignatures paramMask
   where
     paramMask scope qs t = case declaredFun scope t of
-      FunT ps _ -> map (\a -> (isBareVar qs a, isFunParam scope a)) ps
+      FunT ps _ -> map (\a -> (isGenericSink scope qs a, isFunParam scope a)) ps
       _ -> []
 
-    isBareVar qs (VarT v) = Set.member v qs
-    isBareVar _ _ = False
+    isGenericSink scope qs a = case expandT scope a of
+      VarT v -> Set.member v qs
+      OptionalT t -> isGenericSink scope qs t
+      AppT (VarT (TV n)) ts | isTupleName n -> any (isGenericSink scope qs) ts
+      _ -> False
 
     -- A suspension is a function value of no arguments; the host takes it
     -- through the same trait as any other callable.

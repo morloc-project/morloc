@@ -1,0 +1,38 @@
+-- A sourced Rust parameter whose type holds a type variable inside an
+-- optional or a tuple is taken by reference, whatever it is instantiated at:
+-- generic host code cannot take a Copy instantiation by value.
+module main (optInt, optStr, pairInt, pairStr, nested, aliased)
+
+import root-rust
+
+type Opt a = ?a
+
+isNone :: ?a -> Bool
+isNoneA :: Opt a -> Bool
+firstOf :: (a, b) -> a
+firstIsNone :: (?a, Int) -> Bool
+
+source Rust from "gp.rs"
+  ( "is_none" as isNone
+  , "is_none" as isNoneA
+  , "first_of" as firstOf
+  , "first_is_none" as firstIsNone
+  )
+
+optInt :: ?Int -> Bool
+optInt x = isNone x
+
+optStr :: ?Str -> Bool
+optStr x = isNone x
+
+pairInt :: Int -> Int
+pairInt x = firstOf (x, 2)
+
+pairStr :: Str -> Str
+pairStr x = firstOf (x, 2)
+
+nested :: ?Int -> Bool
+nested x = firstIsNone (x, 1)
+
+aliased :: ?Int -> Bool
+aliased x = isNoneA x

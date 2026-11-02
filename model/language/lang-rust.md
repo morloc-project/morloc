@@ -14,7 +14,10 @@ Intent: ruled 2026-10-18
 Code: conforms 2026-10-21
 
 Morloc passes a `Copy` argument by value and any other value as `&T`,
-so a parameter of type `&mut T` does not build. A type with interior
+so a parameter of type `&mut T` does not build. A parameter whose type in
+the morloc signature is a type variable, or an optional or tuple holding
+one, is `&T` at every instantiation, since generic host code cannot depend
+on whether its instantiation is `Copy`. A type with interior
 mutability (`Cell`, `RefCell`, `Mutex`, atomics) is not changed through an
 argument either; rustc does not detect that, and it is the program's error.
 This is EVAL-7's rule that sourced code never changes an argument, and it
