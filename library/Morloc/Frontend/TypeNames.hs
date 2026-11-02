@@ -48,7 +48,7 @@ reservedTypeNames =
 
 isReservedTypeName :: Text -> Bool
 isReservedTypeName t =
-  Set.member t reservedTypeNames || numbered "Tuple" || numbered "Tensor"
+  Set.member t reservedTypeNames || isTupleName t || numbered "Tensor"
   where
     numbered p = case T.stripPrefix p t of
       Just n -> not (T.null n) && T.all (`elem` ['0' .. '9']) n

@@ -65,6 +65,7 @@ module Morloc.Namespace.Type
   , extractKey
   , collectExtends
   , isTupleName
+  , tupleArity
   , type2typeu
   , splitFunAt
   , EType (..)
@@ -1751,11 +1752,16 @@ containsUnk (StrConcatT a b) = containsUnk a || containsUnk b
 instance Pretty NamType where
   pretty _ = mempty
 
--- | The name of a tuple constructor, @Tuple2@ through @Tuple8@.
+-- | The arity of a tuple constructor name: exactly @"Tuple" <> show k@.
+tupleArity :: Text -> Maybe Int
+tupleArity n = case DT.stripPrefix "Tuple" n of
+  Just ds
+    | not (DT.null ds) && DT.all C.isDigit ds && (DT.length ds == 1 || DT.head ds /= '0') ->
+        Just (DT.foldl' (\acc c -> acc * 10 + C.digitToInt c) 0 ds)
+  _ -> Nothing
+
 isTupleName :: Text -> Bool
-isTupleName n = case DT.stripPrefix "Tuple" n of
-  Just k -> not (DT.null k) && DT.all C.isDigit k
-  Nothing -> False
+isTupleName = isJust . tupleArity
 
 instance Pretty Type where
   pretty t0 = f True t0

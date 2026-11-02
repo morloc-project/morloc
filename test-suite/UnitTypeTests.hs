@@ -69,6 +69,7 @@ module UnitTypeTests
   , evalSandboxTests
   , typeRenderParenTests
   , sourceNameTests
+  , tupleNameTests
   , suspensionLawTests
   , datafileTests
   ) where
@@ -12323,3 +12324,48 @@ holds (ND.Holds _) = True
 holds _ = False
 refuted (ND.Refuted _) = True
 refuted _ = False
+
+tupleNameTests :: TestTree
+tupleNameTests =
+  testGroup "a tuple is Tuple<k> applied to k types, and nothing else"
+    [ expectPass "a class named like a tuple is a class"
+          [r|
+          module main (f)
+          class TupleLike a where
+            tl :: a -> a
+          instance TupleLike Int where
+            source Py from "x.py" ("tl")
+          f :: TupleLike a => a -> a
+          f x = tl x
+        |]
+    , expectPass "an index selector reads a tuple"
+          [r|
+          module main (g)
+          source Py from "m.py" ("mkpair")
+          mkpair :: Int -> (Int, Int)
+          g x = .0 (mkpair x)
+        |]
+    , expectError "a type named like a tuple has no tuple fields"
+          [r|
+          module main (g)
+          newtype TupleBox a = (a, a)
+          source Py from "m.py" ("mkbox")
+          mkbox :: Int -> TupleBox Int
+          g x = .0 (mkbox x)
+        |]
+    , expectError "a tuple type cannot be declared"
+          [r|
+          module main (g)
+          newtype Tuple3 a = [a]
+          source Py from "m.py" ("mk")
+          mk :: Int -> Tuple3 Int
+          g x = mk x
+        |]
+    , expectError "a tuple type is applied to its arity"
+          [r|
+          module main (g)
+          source Py from "m.py" ("mk")
+          mk :: Int -> Tuple3 Int Int
+          g x = .1 (mk x)
+        |]
+    ]

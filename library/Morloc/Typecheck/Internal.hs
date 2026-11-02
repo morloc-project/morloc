@@ -2272,7 +2272,7 @@ classifyTupleShape scope = go (0 :: Int)
       | fuel > 100 = UndecidedTuple
       | otherwise = case t of
           AppU (VarU (TV nm)) args
-            | MT.isPrefixOf "Tuple" nm -> IsTuple args
+            | isTupleName nm -> IsTuple args
             | Map.member (TV nm) scope -> reduced fuel t
             | otherwise -> NotTuple
           VarU (TV nm)

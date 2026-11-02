@@ -578,9 +578,7 @@ isBuiltinBaseType v = v `elem`
   , BT.int, BT.i8, BT.i16, BT.i32, BT.i64
   , BT.uint, BT.u8, BT.u16, BT.u32, BT.u64
   , BT.list
-  ] || isTupleBaseType v
-  where
-    isTupleBaseType (TV name) = any (\k -> BT.tuple k == TV name) [2 .. 12]
+  ] || isTupleName (unTVar v)
 
 -- | get only the toplevel type
 --

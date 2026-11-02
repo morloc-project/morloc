@@ -113,6 +113,7 @@ unitTests =
   , evalSandboxTests
   , typeRenderParenTests
   , sourceNameTests
+  , tupleNameTests
   , suspensionLawTests
   , datafileTests
   , morlocDepsTests

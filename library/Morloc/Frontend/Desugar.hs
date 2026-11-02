@@ -1382,7 +1382,7 @@ getName' (Located _ _ t) = t
 extractConstraints :: TypeU -> D [Constraint]
 -- a parenthesized list of constraints is parsed as a tuple type
 extractConstraints (AppU (VarU (TV name)) args)
-  | T.isPrefixOf "Tuple" name =
+  | isTupleName name =
       case mapM typeToConstraint args of
         Just cs -> return cs
         Nothing -> dfail (Pos 0 0 "") "invalid constraint syntax"
@@ -1409,7 +1409,7 @@ mkPrimOrClass name ts = Constraint (ClassName name) ts
 
 flattenTupleConstraint :: TypeU -> Maybe [Constraint]
 flattenTupleConstraint (AppU (VarU (TV name)) args)
-  | T.isPrefixOf "Tuple" name = mapM typeToConstraint args
+  | isTupleName name = mapM typeToConstraint args
   | otherwise = Just [mkPrimOrClass name args]
 flattenTupleConstraint (VarU (TV name)) =
   Just [mkPrimOrClass name []]

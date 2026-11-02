@@ -1280,7 +1280,12 @@ paramPattern ps = St.evalState (mapM norm ps) Map.empty
 -- | A name the compiler defines is one type: every declaration of it in the
 -- program must say the same thing.
 checkReservedDeclarations :: Scope -> MorlocMonad ()
-checkReservedDeclarations scope =
+checkReservedDeclarations scope = do
+  case [v | (v@(TV n), _) <- Map.toList scope, isTupleName n] of
+    [] -> return ()
+    (v : _) ->
+      MM.throwRejected $
+        "The tuple type" <+> squotes (pretty v) <+> "is built in and cannot be declared"
   case [v | (v@(TV n), _ : _ : _) <- Map.toList scope, isReservedTypeName n] of
     [] -> return ()
     vs ->
@@ -2628,9 +2633,10 @@ checkTypeApplications dag scope = do
       VarU (TV n) -> isTypeVariableName n
       KVarU _ -> True
       _ -> False
-    arities v = case Map.lookup v scope of
+    arities v@(TV n) = case Map.lookup v scope of
       Just entries@(_ : _) | not (any (\(_, _, _, _, k) -> k == TypedefAlias) entries) ->
         Just [length ps | (ps, _, _, _, _) <- entries]
+      Nothing | Just k <- tupleArity n -> Just [k]
       _ -> Nothing
     -- The application at the head of a type, for the arity check.
     headApplication t = case TE.flattenApp t of
@@ -2677,12 +2683,12 @@ checkTypeApplications dag scope = do
         LitU (LRec fs) -> concatMap (valuePositions . snd) fs
         RecExtendU _ x rest | isRecordType t -> valuePositions x <> fieldPositions rest
         _ -> case TE.flattenApp t of
-          AppU (VarU v@(TV n)) args
+          AppU (VarU v) args
             | Just entries <- Map.lookup v scope ->
                 case [ps | (ps, _, _, _, _) <- entries, length ps == length args] of
                   (ps : _) -> concat [valuePositions a | (Left (_, KindType), a) <- zip ps args]
                   [] -> []
-            | v == BT.list || (T.isPrefixOf "Tuple" n && v == BT.tuple (length args)) -> concatMap valuePositions args
+            | v == BT.list || v == BT.tuple (length args) -> concatMap valuePositions args
           _ -> []
     fieldPositions r = case r of
       RecExtendU _ x rest -> valuePositions x <> fieldPositions rest

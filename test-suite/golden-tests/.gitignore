@@ -12,6 +12,7 @@ log
 *.err
 main
 nexus
+where-lexical-scope/shadow
 *.pkt
 *-build/
 *build.tmp*/
