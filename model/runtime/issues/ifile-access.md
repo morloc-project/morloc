@@ -8,7 +8,9 @@
   passes the index unwrapped, which the nexus walker accepts, so the golden
   test `rust-ifile-walk` (evaluated on the nexus) does not see it. Repro: a
   Rust-pool function `firstLen g = size (.bases (.[0] g))` with
-  `g :: IFile [FastaEntry]` (bio).
+  `g :: IFile [FastaEntry]` (bio). [reproduced 2026-11-02] A second
+  site: `.[1].y f` on `IFile [Point]` (Express.hs `dispatchPatternStruct`)
+  also passes bare bounds.
 
 - **A projection after an IFile bracket decodes whole elements.** [reproduced,
   2026-10-15] `.[:].header g` lowers to a walk of `.[:]` (every element

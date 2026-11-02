@@ -86,14 +86,20 @@
   RPTR+ARROW one, and a FILE-source one, unchanged; the file names memory
   or a temporary file gone after the run, and reading it back is refused.
   Needs the Arrow IPC bytes written in place of the reference.
+  [reproduced 2026-11-02] `-f packet` of the same Table round-trips: three
+  writers each keep their own list of forms they can write. With SHM
+  disabled, `-f voidstar` of a large value writes a temporary file's path
+  [read]. Briefs/B5-B6.md (N-3, N-5).
 
 - **Output-path defects found reading dispatch.rs.** [read, 2026-10-29]
-  - `run_pure_command` passes `is_arrow = false` whatever the return type,
-    so a pool-free command returning a `Table` may print wrongly
-    (speculative).
+  - `run_pure_command` passes `is_arrow = false` whatever the return type.
+    [reproduced 2026-11-02] A pool-free `idT t = t` over a Table fails in
+    every output form ("Cannot render a Table to generic JSON"; "Arrow SHM
+    header describes ranges outside the block").
   - `run_remote_command` neither checks nor frees the errmsg
     `morloc_packet_size` sets, and the MessagePack output branch drops its
-    errmsg on failure.
+    errmsg on failure; the same unchecked errmsgs at two more
+    `morloc_packet_size` calls and one `abs2rel` in dispatch.rs [read].
 - **Stream output can fail after writing part of a packet.** [read,
   2026-10-29] packet_ffi.rs `normalize_data_packet_to_fd` lets a FILE+ARROW
   or FILE+DATA packet onto the streaming path, whose payload readers refuse
@@ -101,3 +107,19 @@
   `estimate_payload_size` bounds a value by its one block's size; a value
   spread over several blocks can exceed it, and a compressed stream then
   fails "frame index exceeds reserved space" (speculative).
+- **`-o` empties its target before anything can fail.** [reproduced
+  2026-11-02, data loss] `view t.packet -f json -o t.packet` emptied the
+  input, and `./nexus -o in.pk --output-form packet @ echo in.pk` destroyed
+  in.pk; a failing run leaves an existing file empty. Fix: write a sibling
+  temporary file and rename it on success (process.rs); whether a failed
+  command must leave the target unchanged needs a ruling.
+- **The view pattern checker accepts what the walker refuses.**
+  [reproduced 2026-11-02] `.[i]` and `.[i:j]` on a Str pass pattern.rs and
+  fail in the walker; one function (`infer_chain_schema`) should decide.
+- **Whether an `@open` error names the path depends on the entry point.**
+  [reproduced 2026-11-02] Nexus IFile names it; nexus IStream gives a bare
+  "IO error: No such file or directory".
+- **Numeric MORLOC_* settings ignore or clamp bad values silently.** [read,
+  2026-11-02] WRITE_BEHIND_DEPTH, WRITE_BUFFER_BYTES, IFILE_CACHE_BYTES,
+  CHANNEL_DEPTH, REGISTRY_SLOT_COUNT, FRAME_WORKERS. Warn or refuse needs a
+  ruling (existing code warns elsewhere).

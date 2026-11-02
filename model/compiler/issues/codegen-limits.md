@@ -28,8 +28,13 @@ Generated code that a language's own tools refuse.
   constructor Link: (Counted, Chain) and (int, Chain)"
   (Grammars/Common.hs mergeVariantOccurrences). A non-recursive
   `wrap k acc = Link (one k) acc` builds. `[Counted]` fails the same way
-  with `std::vector<int>`. Cause not traced; the recursive manifold's
-  serial entry seems to see the packed form.
+  with `std::vector<int>`. [traced 2026-11-02, briefs/A5-B4.md] Recursion
+  is not the cause: exporting a plain `mkC`/`lenC` fails the same way, and
+  Rust too ("... (Counted, Chain) and (i64, Chain)"). The variant
+  collectors read the wire type (`serialAstToType`) under the native
+  type's name, and `wireField` converts a field between its two forms only
+  for closures. Fix: the collectors use the native type; `wireField` also
+  converts a field that contains a pack.
 - [reproduced, 2026-10-17, 9f24abe4] A function called from several sites
   is emitted once per site: a Rust pool held 19 identical loop bodies for
   `count`, a C++ pool about 9 for `build`. Code size and build time only.
@@ -62,7 +67,13 @@ Generated code that a language's own tools refuse.
   not descend into a `data` type's parameters, where the Rust one does. With
   `data Tag a = Tag Int` used as `Tag Color`, Color an argument-free `data`
   reached nowhere else, the C++ pool renders `Tag<Color>` without declaring
-  Color. Not reproduced.
+  Color. [reproduced 2026-11-02] Only when the `data` is user-mapped to a
+  template (`data Cpp => (Tag a) = "MyTag<$1>" a`); unmapped it renders as
+  `Tag_<hash>`. A record's phantom parameter is missed the same way, in
+  C++ and in Rust (`collectRustEnums`): `record Box a` mapped to
+  `"MyBox<$1>"`, used as `Box Color`, fails "Color not declared" / "cannot
+  find type `Color`". Root fix: one shared child walk for the six `seek`
+  collectors in Cpp.hs and Rust.hs (briefs/A5-B4.md).
 - **Python and C++ write a `&&`/`||` chain as nested conditionals; a
   Python chain of ~100 operands fails to load.** [reproduced, 2026-10-21]
   Violates EMIT-4 and EMIT-1. `noneOf x = x != 0 && x != 1 && ... && x !=

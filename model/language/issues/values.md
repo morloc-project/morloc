@@ -35,6 +35,13 @@ on 0.109.0 unless marked.
   leaves a set of tuples or records in the order it was built, since R has
   no ordering of them that matches C++ and Python, so `@hash` and `@eq` of
   equal `Set (Int, Str)` values built in different orders can differ.
+  [reproduced 2026-11-02, briefs/A5-B4.md] Also `Set ?Int` with a NULL.
+  Needs a ruling beyond the set-r sort: `Set (Set Int)` (the outer unpack
+  runs before the inner ones, so it sorts unsorted lists) and `Set Color`
+  from an R source returning the enum as character (sorted by name, not
+  tag) cannot be ordered without the element schema. Options: give
+  Packable functions the element schema, unpack inner-first, or refuse
+  these element types in R sets at compile time.
 - **A recursive record with a Packable field is rebuilt at its top level
   only.** [read, 2026-10-28] Violates NATIVE-9. A back-reference
   (`SerialRec`) counts as serializable, so `record Tree where tags :: Set

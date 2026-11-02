@@ -93,7 +93,12 @@
   source-type-forms, which owns per-file scope. Python binds each file to
   `__morloc_src_<name>`, where `makeNamespace` (Generic.hs) maps `/`, `-`
   and `.` to `_` and lowercases, so `a-b.py` and `a_b.py`, or `Foo.py` and
-  `foo.py`, share a binding and the later import wins. Rust dedups source
+  `foo.py`, share a binding and the later import wins. [reproduced,
+  2026-11-02] Worse: the module path is lowercased too, so a Python file
+  whose name has an uppercase letter (`Foo.py`) never loads ("No module
+  named 'foo'"); a `.` in a directory name (`dir.v2/x.py`) becomes a module
+  path the runtime splits at every dot; an extension-less path gives an
+  empty name (briefs/A3-A4.md, Env-4). Rust dedups source
   paths before canonicalizing them (Rust.hs, the `include!` list), so one
   file reached by two relative paths is included twice; and the Rust
   source type-variable mask is keyed by the bare source name, so two files

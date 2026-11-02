@@ -45,4 +45,6 @@ under data/rust/.
   [read, 2026-10-21] http_ffi.rs:213-218 copies into 256-byte arrays, so a
   longer `/call/<cmd>` or `?render=` is routed by its prefix, not refused.
   Violates IFACE-22: where another command or action has that prefix, it
-  runs and succeeds.
+  runs and succeeds. [read 2026-11-02] A long `DELETE /bindings/<name>` is truncated to 255
+  bytes and then matched by `starts_with`, so it can unbind a different
+  binding. `HttpRequest` never crosses FFI; owned strings remove the limit.

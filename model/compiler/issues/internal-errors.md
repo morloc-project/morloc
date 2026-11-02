@@ -10,7 +10,8 @@ belong to are in /work/plans/gadt/type-audit.md.
   error" at Typecheck.hs synthE (`IntrTry expects 1 arg`). Desugar.hs
   etaExpandIntrinsic keeps every argument when `actual >= arity`, so the
   extra one reaches the per-intrinsic clause. `@write` with four arguments
-  takes the same path to a raw `error` (`IntrWrite expects 3 args`) [read].
+  takes the same path to a raw `error` (`IntrWrite expects 3 args`), with no
+  location [reproduced 2026-11-02].
   `@stream`/`@next` report a type error and `@eq` goes through
   checkIntrinsicArgs, so only some intrinsics are affected. Fix: desugar an
   over-application as an application of the saturated intrinsic to the

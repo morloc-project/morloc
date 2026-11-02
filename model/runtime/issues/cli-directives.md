@@ -1,13 +1,11 @@
 # @collect, @fold, @parse, @render
 
-- **Cross-language @fold fails on stdout.** [reproduced] Violates STRM-4.
-  Python `produce :: [Int] -> ([Int] -> <IO> ()) -> <IO> ()`, C++
-  `addBatchC`, `mergeC`, `showC`; `--' @render -s/--sum=showC
-  @fold=addBatchC @init=zero @combine=mergeC` on `emit xs = @collect
-  (produce xs)`. `./fx emit '[1,2,3,4,5]' -s` -> "mlc_cell_count: no such
-  fold accumulator", exit 1; `--sum=out.txt` (replay path) gives `c=15`.
-  Cells live in one pool process (morloc-runtime/src/cell.rs:68-80) but
-  realization can split `@cellnew` and `@cellreduce` across pools.
+- **Cross-language @fold crosses pools with its cell.** Violates STRM-4.
+  Cells live in one pool process (morloc-runtime/src/cell.rs) but
+  realization can split `@cellnew` and `@cellreduce` across pools (S5 in
+  /work/plans/error-clusters). [2026-11-02] Python `produce`, C++ fold
+  (`-s`) now prints `c=15`, but only because the handle goes cpp -> py ->
+  cpp and returns to the process holding the cell.
   The other direction aborts too [reproduced, 2026-10-29]: a C++
   `produceParallel` calling its sink from four threads, with the `@fold`,
   `@init` and `@combine` functions in Python (or R), kills the C++ pool with
@@ -42,3 +40,11 @@
   `--' @render -o/--out=png` prints `mlcp_draw_out :: Str -> PNG` and
   `mlcr_draw_out :: [U8] -> PNG` after the real exports. Repro:
   web/morloc-studio/public/assets/home-examples/trees.
+
+- **A threaded `@collect` writing to a file aborts the C++ pool.**
+  [reproduced 2026-11-02] The shipped collect-fold-cpp program,
+  `./nexus pstream --parallel=p.txt`, prints a partly interleaved list, then
+  "attach_process_local_slot called on a stdio slot ... missing its stdio
+  RPC short-circuit" (stream.rs), SIGABRT, and writes no p.txt. The
+  Python-fold variant fails the same way; `-p` to stdout passes. Repro:
+  /work/plans/error-clusters/briefs/S5-steps0-2.md.

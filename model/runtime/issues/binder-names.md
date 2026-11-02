@@ -45,10 +45,19 @@ may use.
   user source may have redefined them, as R's own code would see them.
   Needs a ruling: the user's responsibility, a load-time check that none
   is redefined, or reserved aliases.
-- [read] Python: a builtin source (no `from` path) is emitted as a bare
-  name in pool.py's module scope, which holds the pool's own names
-  (`dispatch`, `global_state`, `mlc_*`), so `source Py ("dispatch" as d)`
-  binds d to the pool's dispatch table rather than failing.
+- [reproduced, 2026-11-02] Python: a builtin source (no `from` path) is
+  emitted as a bare name in pool.py's module scope, which holds the pool's
+  own names (`dispatch`, `global_state`, `run_job`, `mlc_*`, `os`, `sys`,
+  ...), so `source Py ("dispatch" as d)` binds d to the pool's dispatch
+  table rather than failing, and `source Py ("run_job" as rj)` calls the
+  pool's `run_job(3)`, which takes 3 as a client socket. Repro:
+  /work/plans/error-clusters/briefs/A3-A4.md (Bn-1).
+- [reproduced, 2026-11-02] Desugar.hs `isOperatorName` calls any name whose
+  first character is not a letter or `_` an operator, in every language, so
+  an R source named `.helper` (legal by R's name pattern) is refused as an
+  invalid operator (SRC-1: patterns are per-language data). It also hides
+  the R reserved-name gap above: `.morloc.pooldir` fails as an operator,
+  not as reserved. Fix both together (briefs/A3-A4.md, Bn-3).
 - [reproduced, 2026-10-21] R's JIT compiles a small function only where
   its environment is the global one, so the R runtime's functions in
   `.__morloc` run interpreted (about 0.5 us more per call than compiled)
