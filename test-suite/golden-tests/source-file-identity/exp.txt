@@ -1,0 +1,7 @@
+"a-b"
+"a_b"
+"Foo"
+"dotted dir"
+"relative import"
+1
+1

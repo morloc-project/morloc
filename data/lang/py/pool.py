@@ -113,7 +113,7 @@ def _mlc_import_source(module_path):
 
 
 def _mlc_load_source_file(module_path, candidate):
-    key = "_mlc_src_" + "".join(c if c.isalnum() else "_" for c in module_path)
+    key = "_mlc_src_" + "".join(c if c.isascii() and c.isalnum() else "_%x_" % ord(c) for c in module_path)
     spec = importlib.util.spec_from_file_location(key, candidate)
     module = importlib.util.module_from_spec(spec)
     sys.modules[key] = module

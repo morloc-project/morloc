@@ -63,7 +63,10 @@ import Morloc.Monad (asks, gets, newIndex, runIndex, getSchemaTable, registerSch
 import qualified Morloc.Monad as MM
 import Morloc.Quasi
 import qualified System.Directory as Dir
-import System.FilePath (isAbsolute, splitDirectories, takeBaseName, takeDirectory)
+import System.FilePath (addTrailingPathSeparator, dropExtension, isAbsolute, normalise, splitDirectories, takeBaseName, takeDirectory)
+import Data.Char (isAsciiLower, isAsciiUpper, isDigit)
+import Data.List (stripPrefix)
+import Numeric (showHex)
 import qualified System.Exit as Exit
 import System.IO (hClose, openBinaryTempFile)
 import qualified System.Process as Proc
@@ -94,7 +97,7 @@ translateBuiltin lang desc srcs es = do
   includeDocs <-
     mapM
       (translateSource desc)
-      (unique . mapMaybe srcPath $ srcs)
+      (nubOrdOn normalise . mapMaybe srcPath $ srcs)
 
   debugLog (vsep (map pseudocodeSerialManifold es) <> "\n")
 
@@ -191,7 +194,7 @@ translateExternal cmd lang desc srcs es = do
   includeDocs <-
     mapM
       (translateSource desc)
-      (unique . mapMaybe srcPath $ srcs)
+      (nubOrdOn normalise . mapMaybe srcPath $ srcs)
 
   debugLog (vsep (map pseudocodeSerialManifold es) <> "\n")
 
@@ -367,8 +370,8 @@ translateSource desc p = do
           ns = render (makeNamespace (sourceNamespacePrefix desc) lib p)
           -- A file outside both the program's tree and the module plane has
           -- no dotted module name, so the pool is given its path.
-          outside = ".." `elem` splitDirectories p
-            || (isAbsolute p && not (lib `T.isPrefixOf` MT.pack p))
+          rel = planeRelative lib p
+          outside = ".." `elem` splitDirectories rel || isAbsolute rel
           modPath = if outside then p' else render (makeImportPath lib p)
       return . pretty $
         substituteT
@@ -403,36 +406,42 @@ qualifiedSrcName desc lib src = case srcPath src of
     | ldQualifiedImports desc -> makeNamespace (sourceNamespacePrefix desc) lib path <> "." <> pretty (srcName src)
     | otherwise -> pretty (srcName src)
 
+-- | The binding a sourced file's module gets in the pool: the prefix and an
+-- injective escape of the file's normalised path relative to the module
+-- plane, without its extension (`_` is doubled, each other character that
+-- cannot appear in an identifier is spelled out, case is kept).
 makeNamespace :: Text -> Text -> Path -> MDoc
-makeNamespace prefix lib =
-  (pretty prefix <>)
-    . pretty
-    . MT.liftToText (map toLower')
-    . MT.replace "/" "_"
-    . MT.replace "-" "_"
-    . MT.replace "." "_"
-    . MT.stripPrefixIfPresent "/"
-    . MT.stripPrefixIfPresent "./"
-    . MT.stripPrefixIfPresent lib
-    . MT.liftToText dropExtensions
-    . MT.pack
+makeNamespace prefix lib p = pretty prefix <> pretty (MT.concatMap escape (MT.pack (dropExtension (planeRelative lib p))))
   where
-    toLower' c = if c >= 'A' && c <= 'Z' then toEnum (fromEnum c + 32) else c
-    dropExtensions = reverse . drop 1 . dropWhile (/= '.') . reverse
+    escape c
+      | c == '_' = "__"
+      | c == '/' = "_s"
+      | c == '-' = "_d"
+      | c == '.' = "_o"
+      | isAsciiAlnum c = MT.singleton c
+      | otherwise = "_x" <> MT.pack (showHex (fromEnum c) "") <> "_"
 
+-- | The dotted module name of a sourced file (case kept, extension dropped),
+-- which the pool imports so package-relative imports work; a file whose
+-- directories have a dot in their names has none, and the pool is given its
+-- path to load by location.
 makeImportPath :: Text -> Path -> MDoc
-makeImportPath lib =
-  pretty
-    . MT.liftToText (map toLower')
-    . MT.replace "/" "."
-    . MT.stripPrefixIfPresent "/"
-    . MT.stripPrefixIfPresent "./"
-    . MT.stripPrefixIfPresent lib
-    . MT.liftToText dropExtensions
-    . MT.pack
+makeImportPath lib p
+  | any ('.' `elem`) dirs = pretty rel
+  | otherwise = pretty (MT.intercalate "." (map MT.pack (splitDirectories (dropExtension rel))))
   where
-    toLower' c = if c >= 'A' && c <= 'Z' then toEnum (fromEnum c + 32) else c
-    dropExtensions = reverse . drop 1 . dropWhile (/= '.') . reverse
+    rel = planeRelative lib p
+    dirs = init (splitDirectories rel)
+
+-- | A sourced path, normalised, relative to the module plane when it lies
+-- under it.
+planeRelative :: Text -> Path -> Path
+planeRelative lib p =
+  let np = normalise p
+   in fromMaybe np (stripPrefix (addTrailingPathSeparator (normalise (MT.unpack lib))) np)
+
+isAsciiAlnum :: Char -> Bool
+isAsciiAlnum c = isAsciiLower c || isAsciiUpper c || isDigit c
 
 translateSegment ::
   LangDescriptor ->

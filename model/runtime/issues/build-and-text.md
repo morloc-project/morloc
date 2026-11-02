@@ -89,21 +89,41 @@
   with a deprecation warning. Proposal and open questions:
   /work/plans/source-type-forms.md.
 
-- **Sourced files are identified loosely.** [read, d352b5d4] For
-  source-type-forms, which owns per-file scope. Python binds each file to
-  `__morloc_src_<name>`, where `makeNamespace` (Generic.hs) maps `/`, `-`
-  and `.` to `_` and lowercases, so `a-b.py` and `a_b.py`, or `Foo.py` and
-  `foo.py`, share a binding and the later import wins. [reproduced,
-  2026-11-02] Worse: the module path is lowercased too, so a Python file
-  whose name has an uppercase letter (`Foo.py`) never loads ("No module
-  named 'foo'"); a `.` in a directory name (`dir.v2/x.py`) becomes a module
-  path the runtime splits at every dot; an extension-less path gives an
-  empty name (briefs/A3-A4.md, Env-4). Rust dedups source
-  paths before canonicalizing them (Rust.hs, the `include!` list), so one
-  file reached by two relative paths is included twice; and the Rust
-  source type-variable mask is keyed by the bare source name, so two files
-  that each define `f` share one mask.
-
+- **The Rust source type-variable mask is keyed by the bare source name.**
+  [read] Two Rust files that each define `f` share one mask (Rust.hs
+  `buildSrcTypeVarMask`). Crate-root `include!` already forbids the two
+  definitions; for source-type-forms, which owns per-file scope.
+- **A sourced file's identity is its spelling, not the file.** [read,
+  2026-11-02; needs a design] Python bindings and import paths are now
+  injective in the written path (case kept, normalised, plane-relative),
+  but identity is still lexical and settled per backend: `sub/../x.py`,
+  a symlink, or an absolute and a relative spelling of one file are two
+  files (loaded twice, or bound under two names); the C++ member includes
+  headers by spelling, source hooks run per spelling, and Nexus source
+  hashes and Realize/EffectBoundary `sameSource` compare raw paths. A
+  Python file with no extension cannot be imported (its path takes the
+  dotted branch). A dotted name resolves under the first source root that
+  has it, so a program `x/h.py` answers for a plane `x/h.py`, and a
+  program file may be found in the run-time working directory. Fixing it
+  needs one identity, settled where a Source is made, and a root model
+  that holds under `morloc install --build` (cwd inside the plane),
+  `--build-dir` and `-o dir/name` builds, and a moved build: an attempt on
+  2026-11-02 that classified roots from the build's working directory made
+  an installed program load from the plane instead of its mirror.
+  [reproduced 2026-11-02, UNSOUND; design in
+  /work/plans/error-clusters/briefs/source-identity-design.md] SRC-8 checks
+  one file while the pool loads another: a `--build-dir` program run from a
+  directory holding a decoy `x.py` loaded the decoy; a `cp -a` copy of a
+  make build loads its own edited `x.py` while SRC-8 checks the original,
+  and refuses to run once the original is moved. By reading, an installed
+  program loads its Python/R code from the plane, not its `exe/<module>`
+  mirror, which SRC-8 records. Python also appends the run-time working
+  directory to `sys.path`, so a sourced file's bare sibling import can be
+  answered from wherever the program runs; R pools have the same
+  fallback. `morloc make -o ../out/prog` with MORLOC_BUILD_HOOK set fails
+  "invalid program name": the `-o` value becomes the program key.
+  `@datafile` paths resolve against the build root, not the declaring
+  module's directory (Reduce.hs).
 - **`cargo clippy` fails on morloc-runtime.** [reproduced 2026-10-15]
   `clippy::not_unsafe_ptr_arg_deref` (deny by default) at
   morloc-runtime/src/stream.rs `shared_write_subpacket` (3956): a safe

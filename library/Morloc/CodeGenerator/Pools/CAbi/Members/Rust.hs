@@ -1438,8 +1438,8 @@ fromSourceSignatures f0 = do
 translate :: [Source] -> [SerialManifold] -> MorlocMonad Script
 translate srcs es0 = do
   let es = map markLastReads es0
-  let rustSrcs = unique $ mapMaybe srcPath [s | s <- srcs, srcLang s == rustLang]
-  absSrcs <- liftIO $ mapM MS.canonicalizePath rustSrcs
+  let rustSrcs = mapMaybe srcPath [s | s <- srcs, srcLang s == rustLang]
+  absSrcs <- unique <$> liftIO (mapM MS.canonicalizePath rustSrcs)
   localCrateDirs <- Map.elems <$> rustLocalDeps
   let userDirs = unique (map takeDirectory absSrcs ++ localCrateDirs)
       includeDocs = map rustSourceInclude absSrcs ++ ["mod __morloc_user_ops;", rustUserFiles absSrcs userDirs]
