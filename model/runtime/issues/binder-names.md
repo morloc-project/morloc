@@ -76,3 +76,15 @@ may use.
   outside every reserved prefix. Cpp.hs reads a manifold's id back from its
   name (`MT.drop 1`, `manifoldIdOf`), so renaming manifolds needs the id
   passed through first. The C++ prefix needs a ruling (briefs/B14-B15.md).
+- [read 2026-11-02] Generated binders outside every reserved prefix, beyond
+  the four namers (`n<N>`, `s<N>`, `helper<N>`, `argNamer`): loop iterators
+  `i<N>` (Imperative.hs, all languages); R `mlc_clo` (lang.yaml
+  `ldPartialTemplate`); Rust `mlc_v<n>`, `mlc_c<n>_<k>`, `mlc_s<n>`,
+  `mlc_<n>_<j>`, `mlc_t<n>`, `__a<i>`, `__tup<u>`, `__arm<u>`, `__mlc_ca_*`
+  (`__mlc_` is not a Rust reserved prefix), `__n/__k/__s`, `_mlc_call`; C++
+  `e`, `mlc_r`, `__a<i>`. Users already source `mlc_*` names (goldens
+  string-encoding, native-morloc-3). The fix is one per-language local
+  namer through LowerConfig and a test that extracts every binder from
+  generated pool text and checks it is reserved; a namer-output test alone
+  misses these. Qualifying sourced calls instead fails in R (root-r sources
+  base `c`, not in the global environment) and for Rust prelude names.
