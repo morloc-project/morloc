@@ -31,7 +31,7 @@ import qualified Data.Text as T
 import System.Directory (canonicalizePath, createDirectoryIfMissing)
 
 import Morloc.CodeGenerator.Guest
-import Morloc.CodeGenerator.Guest.Futhark (FutharkEntry, futharkGuest, hostSigTypes, resolveFutharkBuild)
+import Morloc.CodeGenerator.Guest.Futhark (FutharkEntry, futharkGuest, hostEntryTypes, resolveFutharkBuild)
 import Morloc.CodeGenerator.Namespace
 import Morloc.Data.Doc (pretty, render)
 import qualified Morloc.Data.GMap as GMap
@@ -95,10 +95,9 @@ rewriteFutSource bindings src
         Nothing -> src
   | otherwise = src
 
--- build a GlueEntry by rendering the host (C++) arg/return types from the sig
 toGlueEntry :: (SourcedSig, FutharkEntry) -> GlueEntry FutharkEntry
 toGlueEntry (sig, entry) =
-  let (argTs, retT) = hostSigTypes (ssType sig)
+  let (argTs, retT) = hostEntryTypes entry
    in GlueEntry sig entry argTs retT
 
 -- ---------------------------------------------------------------------------

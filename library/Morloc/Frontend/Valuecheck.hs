@@ -307,10 +307,15 @@ checkPair i e10 e20 = do
       (LstP _ xs, LstP _ ys)
         | length xs /= length ys -> reject "Containers of unequal length"
         | otherwise -> sequence_ (zipWith next xs ys)
-      (TupP _ xs, TupP _ ys) -> sequence_ (zipWith next xs ys)
-      (NamP _ rs1, NamP _ rs2) -> sequence_ [next x y | (k, x) <- rs1, Just y <- [lookup k rs2]]
+      (TupP _ xs, TupP _ ys)
+        | length xs /= length ys -> MM.throwCompilerBug "valuecheck: two alternatives of one type are tuples of different sizes"
+        | otherwise -> sequence_ (zipWith next xs ys)
+      (NamP _ rs1, NamP _ rs2)
+        | sort (map fst rs1) /= sort (map fst rs2) -> MM.throwCompilerBug "valuecheck: two alternatives of one type are records with different fields"
+        | otherwise -> sequence_ [next x y | (k, x) <- rs1, Just y <- [lookup k rs2]]
       (ConP _ c1 xs, ConP _ c2 ys)
         | c1 /= c2 -> reject "Different constructors"
+        | length xs /= length ys -> MM.throwCompilerBug "valuecheck: one constructor applied to different numbers of fields"
         | otherwise -> sequence_ (zipWith next xs ys)
       -- a value made optional is null only if it was itself null
       (CoerceP CoerceToOptional _ x, LitP _ MNull)

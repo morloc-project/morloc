@@ -254,7 +254,7 @@ inferVariantArms
 inferVariantArms lang i gscope vG vC targs = do
   arms0 <- case dataCtorsOfName gscope vG of
     Just as -> return as
-    Nothing -> return []
+    Nothing -> MM.throwCompilerBug $ "no `data` declaration for" <+> pretty vG
   -- Instantiate the declaration's parameters with the applied arguments.
   -- Empty for a bare `data`, in which case this is the identity.
   let params = maybe [] fst (dataDeclOfName gscope vG)

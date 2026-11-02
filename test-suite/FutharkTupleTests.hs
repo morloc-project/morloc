@@ -7,7 +7,7 @@
 --               signature shapes the guest accepts and which it rejects.
 --
 -- These exercise the morloc-side decomposition ('decomposeSig') and the host
--- C++ type rendering ('hostSigTypes'), both of which are pure/monadic and need
+-- C++ type rendering ('hostTypeOfFT', 'hostEntryTypes'), which need
 -- no Futhark toolchain. The accept/reject boundary (non-nested tuples of
 -- scalars, Vector, and Matrix) is enforced here before any manifest comparison.
 module FutharkTupleTests
@@ -21,7 +21,7 @@ import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit
 
 import qualified Morloc.BaseTypes as BT
-import Morloc.CodeGenerator.Guest.Futhark (decomposeSig, hostSigTypes)
+import Morloc.CodeGenerator.Guest.Futhark (FNum (..), FutharkEntry (..), FutharkType (..), TupleOps (..), decomposeSig, hostEntryTypes, hostTypeOfFT)
 import Morloc.CodeGenerator.Namespace (TVar (TV), TypeU (..), pattern NatVarU)
 import Morloc.Data.Doc (render)
 import Morloc.Namespace.Prim (Defaultable (..))
@@ -140,10 +140,20 @@ renderTests =
   testGroup
     "host type rendering"
     [ testCase "tuple arg renders to std::tuple, return to scalar" $ do
-        let (args, ret) = hostSigTypes (fn [tup [sc "F32", vec (sc "F32")]] (sc "F32"))
-        map render args @?= ["std::tuple<float, std::vector<float>>"]
-        render ret @?= "float"
+        Right (args, ret) <- runMM (decomposeSig (fn [tup [sc "F32", vec (sc "F32")]] (sc "F32")))
+        map (render . hostTypeOfFT) args @?= ["std::tuple<float, std::vector<float>>"]
+        render (hostTypeOfFT ret) @?= "float"
     , testCase "tuple return with a matrix field renders nested" $ do
-        let (_, ret) = hostSigTypes (fn [sc "F32"] (tup [sc "F32", mat (sc "F32")]))
-        render ret @?= "std::tuple<float, mlc::Tensor2<float>>"
+        Right (_, ret) <- runMM (decomposeSig (fn [sc "F32"] (tup [sc "F32", mat (sc "F32")])))
+        render (hostTypeOfFT ret) @?= "std::tuple<float, mlc::Tensor2<float>>"
+    , testCase "an entry's host types come from its manifest types" $ do
+        let ops = TupleOps "struct t *" "new_t" "free_t"
+            entry = FutharkEntry "e" "entry_e"
+              [FTTuple ops [("p0", FNum "f32" 0), ("p1", FNum "f32" 1)]] (FTNum (FNum "f64" 2))
+            (args, ret) = hostEntryTypes entry
+        map render args @?= ["std::tuple<float, std::vector<float>>"]
+        render ret @?= "mlc::Tensor2<double>"
+    , testCase "a list of scalars is not a scalar" $ do
+        r <- runMM (decomposeSig (fn [AppU (VarU (TV "List")) [sc "F32"]] (sc "F32")))
+        either (const (return ())) (const (assertFailure "[F32] was accepted")) r
     ]

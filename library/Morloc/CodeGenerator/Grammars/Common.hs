@@ -39,6 +39,7 @@ module Morloc.CodeGenerator.Grammars.Common
   , collectRecords
   , unifyRecords
   , mergeVariantOccurrences
+  , mergeEnumOccurrences
   , structName
 
     -- * Dispatch extraction
@@ -944,39 +945,46 @@ structName i (FV v (CV "struct")) = "mlc_" <> pretty (tvarIdentifier v) <> "_" <
 structName _ (FV _ v) = pretty v
 
 -- | Merge every occurrence of one `data` type in a pool into the one
--- declaration to emit. Each occurrence lists its arms with the field types
--- as written and as the backend renders them. The merge is arm-wise and
--- keeps declaration order: an arm's position is its wire tag, so sorting
--- by name would silently renumber every constructor. The longer occurrence
--- is the more complete view of the type and supplies the order; a
--- constructor literal's type reports its own arm with no fields, so an
--- occurrence with fields supplies them. Two occurrences that both carry an
--- arm's fields must render them alike: the declaration they disagree on
--- cannot serve both sites, and which one is emitted would otherwise be
--- decided by traversal order.
+-- declaration to emit. Each occurrence lists the type's arms in declaration
+-- order (an arm's position is its wire tag), with each arm's field types as
+-- written and as the backend renders them; a recursive type's reference to
+-- itself lists no arms. Occurrences that list arms must list the same ones in
+-- the same order and render each arm's fields alike, or the one declaration
+-- could not serve both sites. The result carries the payload of the first
+-- occurrence that lists arms.
 mergeVariantOccurrences ::
   Text ->
-  [[(Text, ([a], [Text]))]] ->
-  Either Text [(Text, [a])]
-mergeVariantOccurrences _ [] = Right []
-mergeVariantOccurrences name (o : os) = map (\(c, (w, _)) -> (c, w)) <$> foldM mergeOccurrence o os
+  [(b, [(Text, ([a], [Text]))])] ->
+  Either Text (b, [(Text, [a])])
+mergeVariantOccurrences name occs = case filter (not . null . snd) occs of
+  [] -> Left $ "the `data` type " <> name <> " occurs only as a reference to itself"
+  ((b, o) : os) -> (,) b . map (\(c, (w, _)) -> (c, w)) <$> foldM mergeOccurrence o (map snd os)
   where
-    mergeOccurrence as bs = mapM (pick (Map.fromList as) (Map.fromList bs)) order
-      where
-        order = if length as >= length bs then map fst as else map fst bs
-    pick am bm c = case (Map.lookup c am, Map.lookup c bm) of
-      (Just (xs, rx), Just (ys, ry))
-        | null xs -> Right (c, (ys, ry))
-        | null ys -> Right (c, (xs, rx))
-        | rx == ry -> Right (c, (xs, rx))
-        | otherwise ->
-            Left $
-              "the `data` type " <> name <> " is used with two field types for its constructor "
-                <> c <> ": (" <> spell rx <> ") and (" <> spell ry <> ")"
-      (Just x, Nothing) -> Right (c, x)
-      (Nothing, Just y) -> Right (c, y)
-      _ -> Right (c, ([], []))
+    mergeOccurrence as bs
+      | map fst as /= map fst bs =
+          Left $
+            "the `data` type " <> name <> " has occurrences listing different constructors: ("
+              <> spell (map fst as) <> ") and (" <> spell (map fst bs) <> ")"
+      | otherwise = zipWithM pick as bs
+    pick (c, (xs, rx)) (_, (_, ry))
+      | rx == ry = Right (c, (xs, rx))
+      | otherwise =
+          Left $
+            "the `data` type " <> name <> " is used with two field types for its constructor "
+              <> c <> ": (" <> spell rx <> ") and (" <> spell ry <> ")"
     spell = MT.intercalate ", "
+
+-- | The constructor list of one argument-free `data` type, from its
+-- occurrences in a pool, each of which lists the declared constructors in
+-- declaration order (a constructor's position is its wire tag).
+mergeEnumOccurrences :: Text -> [[Text]] -> Either Text [Text]
+mergeEnumOccurrences _ [] = Right []
+mergeEnumOccurrences name (o : os) = case filter (/= o) os of
+  [] -> Right o
+  (other : _) ->
+    Left $
+      "the `data` type " <> name <> " has occurrences listing different constructors: ("
+        <> MT.intercalate ", " o <> ") and (" <> MT.intercalate ", " other <> ")"
 
 unifyField :: [(Key, TypeF)] -> (Key, Maybe TypeF)
 unifyField [] = error "Empty field"

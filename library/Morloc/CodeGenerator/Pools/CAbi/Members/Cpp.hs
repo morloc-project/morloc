@@ -2238,26 +2238,6 @@ walkCppSelectorBrackets =
 typeParams :: [(Maybe TypeF, TypeF)] -> CppTranslator MDoc
 typeParams ts = CP.printRecordTemplate <$> mapM cppTypeOf [t | (Nothing, t) <- ts]
 
--- | Collect every payload-bearing `data` type used in these manifolds with
--- its arms, merging occurrences arm-wise. A constructor literal's type
--- reports only the arm being built, and reports it with no fields, so taking
--- the first occurrence could declare an arm as nullary that the schema says
--- carries a payload.
--- Keep the LONGEST constructor list, not the first seen. A constructor
--- LITERAL reports a type whose table holds only its own arm, so a
--- first-wins merge can define the type from one arm and silently renumber
--- every other constructor -- an arm's position is its wire tag.
-mergeLongest :: [(FVar, [Text])] -> [(FVar, [Text])]
-mergeLongest =
-  Map.elems
-    . Map.fromListWith (\a b -> if length (snd a) >= length (snd b) then a else b)
-    -- Keyed by the CONCRETE name, which is what the declaration is
-    -- called. A parameterized `data` has one concrete type per
-    -- instantiation, so keying by the general name would collapse
-    -- `Try Str ()` and `Try Str (IFile a)` into a single declaration
-    -- and the second use would name a type that was never emitted.
-    . map (\e@(FV _ cv, _) -> (cv, e))
-
 -- | Every native type reachable in this pool that names no type variable,
 -- with each part of it.
 collectCppTypes :: (TVar -> Text -> Bool) -> [SerialManifold] -> [TypeF]
@@ -2334,11 +2314,10 @@ cppValueChecks es = do
             _ -> []
       return $ if isScalarCppType ty || T.isInfixOf "\"" name then [] else valueOf ty (pretty name) : fields <> movable
 
--- | Every argument-free @data@ type reachable in this pool.
+-- | Every occurrence of an argument-free @data@ type in this pool.
 collectCppEnums :: Scope -> [SerialManifold] -> [(FVar, [Text])]
 collectCppEnums gscope =
-  mergeLongest
-    . concatMap (runIdentity . foldWithSerialManifoldM fm)
+  concatMap (runIdentity . foldWithSerialManifoldM fm)
   where
     fm = defaultValue {opFoldWithNativeExprM = ne, opFoldWithSerialExprM = se}
     ne _ (DeserializeN_ t s xs) = return $ xs <> seek t <> seek (serialAstToType s)
@@ -2360,11 +2339,21 @@ collectCppEnums gscope =
 generateCppEnums :: [SerialManifold] -> CppTranslator [MDoc]
 generateCppEnums es = do
   gscope <- CMS.gets translatorGScope
-  concat <$> mapM makeOne (collectCppEnums gscope es)
+  -- Keyed by the concrete name, which is what the declaration is called.
+  let byName = Map.fromListWith Set.union [(cvText, Set.singleton (gv, ns)) | (FV gv (CV cvText), ns) <- collectCppEnums gscope es]
+  concat <$> mapM merged (Map.toList byName)
   where
-    makeOne (FV gv (CV cvText), ctors) = do
-      userMapped <- variantIsUserMapped gv cvText
-      return [CP.printCppEnumDecl (pretty (nativeTypeName cvText)) ctors | not userMapped]
+    merged (cvText, occs) = do
+      let gvs = nubOrd [gv | (gv, _) <- Set.toList occs]
+      unmapped <- filterM (\gv -> not <$> variantIsUserMapped gv cvText) gvs
+      case (unmapped, gvs) of
+        ([], _) -> return []
+        (_, [_]) -> case mergeEnumOccurrences cvText (map snd (Set.toList occs)) of
+          Right ctors -> return [CP.printCppEnumDecl (pretty (nativeTypeName cvText)) ctors]
+          Left msg -> failWith msg
+        _ -> failWith $ "the `data` types " <> MT.intercalate ", " (map unTVar gvs) <> " share the C++ name " <> cvText
+    failWith :: Text -> CppTranslator [MDoc]
+    failWith msg = CMS.modify (\s -> s {translatorErrors = msg : translatorErrors s}) >> return []
 
 -- | Every occurrence of a payload-bearing @data@ type in this pool, with
 -- the arguments it was applied to. Occurrences are not merged here: which
@@ -2417,10 +2406,8 @@ generateCppVariants cfg closureAsts es = do
       n <- cppTypeOf (VariantF v ps as)
       as' <- mapM (\(c, ts) -> (\rs -> (c, (ts, map render rs))) <$> mapM cppTypeOf ts) as
       return (render n, [(v, ps, as')])
-    merged wireArms name occs = case mergeVariantOccurrences name (map (\(_, _, as) -> as) occs) of
-      Right arms -> case occs of
-        ((v, ps, _) : _) -> makeOne (Map.findWithDefault [] name wireArms) (v, ps, arms)
-        [] -> return ([], [], [], [], [])
+    merged wireArms name occs = case mergeVariantOccurrences name [((v, ps), as) | (v, ps, as) <- occs] of
+      Right ((v, ps), arms) -> makeOne (Map.findWithDefault [] name wireArms) (v, ps, arms)
       Left msg -> CMS.modify (\s -> s {translatorErrors = msg : translatorErrors s}) >> return ([], [], [], [], [])
 
     -- A field holding a closure crosses as its wire form, converted by the

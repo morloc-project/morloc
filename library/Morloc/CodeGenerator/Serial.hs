@@ -916,14 +916,11 @@ makeSerialAST m lang t0 = do
         Nothing -> MM.throwSourcedError m "Unsupported language"
         (Just langRegistry) -> return $ CV (lreSerialType langRegistry)
       return $ SerialUnknown (FV gv serialType)
-    -- The constructor table is the wire form, and a constructor LITERAL
-    -- reports a type holding only its own arm. Take the declaration's table
-    -- whenever the scope has it, so the schema cannot be narrowed to
-    -- whichever arm happened to be built here.
+    -- The constructor table is the wire form: take the declaration's.
     makeSerialAST' gscope _ _ (EnumF v@(FV gv _) ps ns) =
       return . SerialEnum v ps $ case TE.enumCtors gscope (TE.whnf gscope (VarU gv)) of
-        Just declared | length declared >= length ns -> declared
-        _ -> ns
+        Just declared -> declared
+        Nothing -> ns
     -- Cycle detection at the VariantF entry, as for NamF. A constructor
     -- field naming the type being lowered is the self-referential back-edge,
     -- and it is representable precisely because the payload sits behind a

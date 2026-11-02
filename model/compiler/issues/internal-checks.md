@@ -10,7 +10,7 @@
   found: Serialize.hs carriedTypes (loop ids), Express.hs lambdaTypeMap
   (missing types become untyped), EffectBoundary.hs adaptCallbackParams
   (extra parameters go unadapted), HostProvenance.hs `zipWith fit (dataKids
-  t) ps` (two sites unguarded, a third guarded), Valuecheck.hs TupP.
+  t) ps` (two sites unguarded, a third guarded).
 
 The entries below are fallbacks that turn an impossible shape into wrong
 output. Spec gap: no item says an internal invariant fails loudly. Type
@@ -35,9 +35,13 @@ changes that remove each class are in /work/plans/gadt/type-audit.md. All
   extractConstraints): /work/plans/error-clusters/repro/tuple-prefix-class.loc fails to
   typecheck, and the same file with the class renamed `PairLike` passes.
   Elsewhere such a type is assumed Copy, sized by schema width,
-  projected with `.0`. A `TupleFoo` alias typechecks and indexes correctly
-  (/work/plans/gadt/repro/idx-TupleFoo.loc); the Rust effects were not
-  built.
+  projected with `.0`. [reproduced 2026-11-02, UNSOUND] A user type named
+  `TupleBox a` (a newtype over `[a]`) accepts `.0`: in Python it returns the
+  list's first element with no error; in Rust it fails to build (taken as
+  Copy, then the `.0` projection); a record holding one segfaults the Rust
+  pool, since isVarWidthF calls it fixed-width and the size step
+  undercounts. The Rust sites fire only on an applied type. Repros:
+  /work/plans/error-clusters/briefs/A6-A8.md.
 - **Intrinsic arguments left unchecked.** Typecheck.hs: the
   checkIntrinsicArgs catch-all `_ -> return g` accepts an intrinsic with no
   listed case, or a listed one at an unlisted arity, without checking its
@@ -46,8 +50,6 @@ changes that remove each class are in /work/plans/gadt/type-audit.md. All
 - **Selector leaf with a missing key is dropped.** Typecheck/Internal.hs
   selectorGetter `maybe [] ...` drops the leaf, so a multi-key selection
   yields a shorter tuple.
-- **Valuecheck record comparison.** NamP checks only that the first
-  record's keys are in the second, so extra keys pass.
 - **Effect variables dropped.** Namespace/Type.hs resolveEffectSet turns an
   unsolved effect variable into no effect when casting to Type.
 - **Unknown type becomes passthrough.** Serialize.hs turns an UnkF argument
@@ -62,8 +64,3 @@ changes that remove each class are in /work/plans/gadt/type-audit.md. All
 - **Closure capture types filtered, then zipped.** Rust.hs and Cpp.hs build
   `ctxTs` by filtering captures with a native type, then zip it with the
   closure table's schemas; one untyped capture misaligns the rest.
-- **Futhark tuple input passed unmarshalled.** Guest/Futhark.hs marshalIn
-  `(FTTuple Nothing _)` returns the host expression unchanged.
-- **Variant merge drops a constructor.** Grammars/Common.hs
-  mergeVariantOccurrences takes the longer occurrence's names, so on equal
-  lengths a constructor present only in the other occurrence is lost.

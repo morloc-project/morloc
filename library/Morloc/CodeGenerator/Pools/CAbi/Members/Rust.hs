@@ -1876,10 +1876,8 @@ generateRustVariants closureAsts es = do
       n <- rustTypeOf (VariantF v ps as)
       as' <- mapM (\(c, ts) -> (\rs -> (c, (ts, map render rs))) <$> mapM rustFieldType ts) as
       return (render n, [(v, ps, as')])
-    merged wireArms name occs = case mergeVariantOccurrences name (map (\(_, _, as) -> as) occs) of
-      Right arms -> case occs of
-        ((v, ps, _) : _) -> makeOne (Map.lookup name wireArms) (v, ps, arms)
-        [] -> return []
+    merged wireArms name occs = case mergeVariantOccurrences name [((v, ps), as) | (v, ps, as) <- occs] of
+      Right ((v, ps), arms) -> makeOne (Map.lookup name wireArms) (v, ps, arms)
       Left msg -> CMS.modify (\s -> s {rsErrors = msg : rsErrors s}) >> return []
 
     -- A type holding a function gets impls only where it crosses: then each
@@ -1936,10 +1934,18 @@ generateRustEnums es = do
   gscope <- CMS.gets rsGScope
   named <- mapM (\(v, ps, ns) -> (\n -> (render n, (v, ps, ns))) <$> rustTypeOf (EnumF v ps ns))
                 (collectRustEnums gscope es)
-  -- The longest constructor list is the complete one.
-  concat <$> mapM makeOne (Map.elems (Map.fromListWith longest named))
+  concat <$> mapM merged (Map.toList (Map.fromListWith (<>) [(n, [o]) | (n, o) <- named]))
   where
-    longest a@(_, _, as) b@(_, _, bs) = if length as >= length bs then a else b
+    -- Each Rust type gets its own impls, so one name serves one `data` type.
+    merged (name, occs@((v, ps, _) : _)) =
+      case nubOrd [gv | (FV gv _, _, _) <- occs] of
+        [_] -> case mergeEnumOccurrences name (nubOrd [ns | (_, _, ns) <- occs]) of
+          Right ctors -> makeOne (v, ps, ctors)
+          Left msg -> failWith msg
+        gvs -> failWith $ "the `data` types " <> MT.intercalate ", " (map unTVar gvs) <> " share the Rust name " <> name
+    merged (_, []) = return []
+    failWith :: Text -> RustM [MDoc]
+    failWith msg = CMS.modify (\s -> s {rsErrors = msg : rsErrors s}) >> return []
 
     makeOne (FV gv (CV cvText), ps, ctors) = do
       userMapped <- cscopeDeclares gv cvText
