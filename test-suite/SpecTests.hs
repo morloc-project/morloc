@@ -2870,7 +2870,74 @@ sigTests =
           bar :: Int -> Int
           bar x = foo x
         |]
+    , testCase "spec-sig-5-1" $ do
+        -- a generic export is checked, but no instance is chosen for it
+        (x, st) <- runFrontWithState sig5Generic
+        case x of
+          Left e -> assertFailure ("expected acceptance, got: " <> show e)
+          Right es -> do
+            let chosen = [v | e <- es, AnnoS _ _ (VarS v (Many (_ : _))) <- annoNodes e, v `elem` [EV "lt", EV "le"]]
+                Specs specs = stateSpecs st
+            assertEqual "method uses given implementations" [] chosen
+            assertEqual "shared specializations" 0 (length specs)
+    , testCase "spec-sig-5-3" $ do
+        -- the generic export is warned about and left out; the concrete one
+        -- is realized
+        config <- emptyConfig
+        ((x, msgs), st) <-
+          MM.runMorlocMonad Nothing 0 config defaultValue . typecheck Nothing . Code $
+            MT.replace "module main (h)" "module main (h, g)" sig5Generic
+              <> "\n    g :: Int -> Int\n    g x = h x 1\n"
+        case x of
+          Left e -> assertFailure ("expected acceptance, got: " <> show e)
+          Right (gasts, rasts) -> do
+            assertBool ("no warning names h: " <> show msgs) (any (MT.isInfixOf "skipping generic export 'h'") msgs)
+            assertBool "g warned about" (not (any (MT.isInfixOf "export 'g'") msgs))
+            assertBool "h not recorded" (DM.member (EV "h") (stateSkippedGeneric st))
+            let types = [t | AnnoS (Idx _ t) _ _ <- gasts] <> [t | AnnoS (Idx _ t) _ _ <- rasts]
+            assertBool "nothing realized" (not (null types))
+            assertBool "a generic tree realized" (not (any containsUnk types))
+    , accept
+        "spec-sig-5-2"
+        [r|
+        module main (x)
+          class Monoid a where
+            mempty :: a
+          instance Monoid Str where
+            mempty = ""
+          instance Monoid (List a) where
+            mempty = []
+          x = mempty
+        |]
     ]
+
+-- | A generic export using a class whose container instances use the class
+-- again.
+sig5Generic :: MT.Text
+sig5Generic =
+  [r|
+  module main (h)
+    class Cmp a where
+      lt :: a -> a -> Bool
+      le :: a -> a -> Bool
+    instance Cmp Int, Cmp Real, Cmp Str, Cmp Bool where
+      lt x y = False
+      le x y = True
+    pick :: Bool -> Int -> Int -> Int
+    pick b x y
+      ? b = x
+      : y
+    cmpC :: Cmp a => a -> a -> Int
+    cmpC x y = pick (lt x y) 0 (pick (le x y) 1 2)
+    instance Cmp a => Cmp [a] where
+      lt xs ys = lt (cmpC xs ys) 0
+      le xs ys = le (cmpC xs ys) 0
+    instance (Cmp a, Cmp b) => Cmp (a, b) where
+      lt x y = lt (pick (lt (.0 x) (.0 y)) (cmpC (.1 x) (.1 y)) 0) 0
+      le x y = le (pick (le (.0 x) (.0 y)) (cmpC (.1 x) (.1 y)) 0) 0
+    h :: Cmp a => a -> a -> Int
+    h x y = pick (lt x y) (pick (le x y) 1 2) (pick (lt y x) (pick (le y x) 3 4) 5)
+  |]
 
 lexTests :: TestTree
 lexTests =

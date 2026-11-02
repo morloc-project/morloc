@@ -39,7 +39,8 @@ its uses needs none?
 
 ### SIG-5 An exported term whose type keeps a class constraint
 Intent: ruled 2026-10-29
-Code: unaudited
+Tests: spec-sig-5-1, spec-sig-5-2, spec-sig-5-3
+Code: deviates (issues/typecheck.md)
 
 An export whose type has a free type variable, constrained or not, cannot
 be given an instance or a representation. It is left out of every generated

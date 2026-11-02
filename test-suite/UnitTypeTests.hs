@@ -3744,7 +3744,7 @@ unitValuecheckTests =
              bar = 5
            instance Foo Int where
              bar = 6
-           f :: Foo a => a
+           f :: Int
            f = bar
       |]
       , valuecheckPass
@@ -6782,19 +6782,6 @@ typeclassTests =
       , -- === NEGATIVE TESTS ===
 
         exprTestBad
-          "ambiguous: multiple instances, no annotation"
-          [r|
-        module main (x)
-        class Monoid a where
-          mempty :: a
-        instance Monoid Str where
-          mempty = ""
-        instance Monoid (List a) where
-          mempty = []
-        x = mempty
-          |]
-
-      , exprTestBad
           "no matching instance for annotated type"
           [r|
         module main (x)

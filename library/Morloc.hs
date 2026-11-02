@@ -57,7 +57,7 @@ import Morloc.Frontend.Link (checkRsize)
 import Morloc.Frontend.PatternCheck (checkPatterns)
 import Morloc.Frontend.Treeify (treeify, Validation (..))
 import Morloc.Frontend.Share (shareBindings)
-import Morloc.Frontend.Specialize (specialize)
+import Morloc.Frontend.Specialize (isGenericExport, specialize)
 import qualified Morloc.Data.PoolHash as PoolHash
 import qualified Morloc.Data.GMap as GMap
 import qualified Morloc.Version
@@ -100,6 +100,7 @@ typecheck ::
     )
 typecheck path code =
   typecheckFrontend path code
+    >>= skipGenericExports
     -- the shared specializations the exports call are trees of their own
     >>= (\es -> MM.gets stateSpecs >>= \(Specs specs) -> return (es <> specs))
     -- lower guest-language sources (e.g. Futhark) into host glue
@@ -116,6 +117,33 @@ typecheck path code =
     -- evaluate each named value once, where its uses need it
     >>= mapM shareBindings
     >>= realityCheck
+
+-- | Set aside the exports whose type keeps a type variable: they are not
+-- commands and are never realized (SIG-5, CMD-2). Each is warned about and
+-- recorded, so a use of one that needs it realized can name it. The
+-- alternatives each export gives directly are still compared (REAL-5); its
+-- references are left as their signatures, so what they reach is not.
+skipGenericExports :: [AnnoS (Indexed TypeU) Many Int] -> MorlocMonad [AnnoS (Indexed TypeU) Many Int]
+skipGenericExports es = do
+  let (generic, concrete) = partition (\(AnnoS (Idx _ t) _ _) -> isGenericExport t) es
+  mapM_ (F.valuecheck . F.resolveTypes) generic
+  mapM_ warnSkippedExport [i | AnnoS (Idx i _) _ _ <- generic]
+  recordSkippedGeneric [(i, typeOf t) | AnnoS (Idx i t) _ _ <- generic]
+  return concrete
+
+warnSkippedExport :: Int -> MorlocMonad ()
+warnSkippedExport i = do
+  name <- MM.metaName i
+  case name of
+    Just (EV n) -> MM.warnAt i $ "skipping generic export" <+> squotes (pretty n) <> ": its type keeps a type variable, so it is not a command"
+    Nothing -> return ()
+
+-- | Record trees left unrealized because their type is generic, keeping the
+-- first entry for a name.
+recordSkippedGeneric :: [(Int, Type)] -> MorlocMonad ()
+recordSkippedGeneric ts = do
+  entries <- catMaybes <$> mapM (\(i, t) -> fmap (\v -> (v, (i, t))) <$> MM.metaName i) ts
+  MM.modify' (\st -> st {stateSkippedGeneric = Map.union (stateSkippedGeneric st) (Map.fromListWith (\_ old -> old) entries)})
 
 -- | Do everything except language specific code generation.
 --
@@ -226,23 +254,19 @@ writeProgram translateFn path code =
     -- generate nexus and pools
     >>= \(gASTs, rASTs) ->
       do
-        -- Filter out generic (polymorphic) exports -- they can't become CLI subcommands
+        -- A tree whose type keeps a type variable has no command form. The
+        -- generic exports were set aside before realization (SIG-5); a
+        -- generic tree here is recorded too, so that a use of it can be
+        -- reported as undetermined.
         exportIds <- Set.fromList <$> MM.gets stateExports
         let isConcreteExport (AnnoS (Idx _ t) _ _, _) = not (containsUnk t)
             (concreteGASTs, genericGASTs) = partition isConcreteExport gASTs
             (concreteRASTs, genericRASTs) = partition isConcreteExport rASTs
-            warnSkip (AnnoS (Idx i _) _ _)
-              | Set.member i exportIds = do
-                  name <- MM.metaName i
-                  case name of
-                    Just (EV n) -> MM.say $ "Warning: skipping generic export '" <> pretty n <> "'"
-                    Nothing -> return ()
-              | otherwise = return ()
-        mapM_ (warnSkip . fst) genericGASTs
-        mapM_ (warnSkip . fst) genericRASTs
-        let skippedEntry (AnnoS (Idx i t) _ _) = fmap (\v -> (v, (i, t))) <$> MM.metaName i
-        skipped <- (<>) <$> mapM (skippedEntry . fst) genericGASTs <*> mapM (skippedEntry . fst) genericRASTs
-        MM.modify' (\st -> st {stateSkippedGeneric = Map.fromListWith (\_ old -> old) (catMaybes skipped)})
+            generic =
+              [(i, t) | (AnnoS (Idx i t) _ _, _) <- genericGASTs]
+                <> [(i, t) | (AnnoS (Idx i t) _ _, _) <- genericRASTs]
+        mapM_ warnSkippedExport (nubOrd [i | (i, _) <- generic, Set.member i exportIds])
+        recordSkippedGeneric generic
         -- Only exports become commands, but helper rASTs also flow to
         -- 'Nexus.generate' so it can see their languages for pool
         -- enumeration -- the export tree ends at a bare 'CallS' back-edge

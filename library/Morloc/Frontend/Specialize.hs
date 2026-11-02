@@ -1,3 +1,4 @@
+{-# LANGUAGE MultiWayIf #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 {- |
@@ -20,13 +21,15 @@ every term was expanded in place, and every later pass is unchanged.
 
 A reference whose key is not fully solved (an existential remains) cannot be
 elaborated on its own: the definition, or export, it occurs in is instead
-checked with every term expanded in place.
+checked with every term expanded in place. A generic export is never realized
+(SIG-5), so it is checked with its references left as their signatures and
+nothing is chosen for it.
 
 Recursion between definitions is found while splicing: a reference to a
 definition already being spliced at the same key becomes a 'CallS' back-edge
 to it, and at a different key is polymorphic recursion, which is rejected.
 -}
-module Morloc.Frontend.Specialize (specialize) where
+module Morloc.Frontend.Specialize (specialize, isGenericExport) where
 
 import Data.IORef
 import qualified Data.List as List
@@ -71,10 +74,10 @@ specialize checks exports = do
 
 specializeExport :: Spec -> (Int, EVar) -> MorlocMonad Typed
 specializeExport spec (gi, v) = do
-  (ground, typed) <- collectElaborable spec typecheckRoot (gi, v)
+  (outcome, typed) <- collectElaborable spec True typecheckRoot (gi, v)
   k0m <- termOf gi
-  if ground
-    then case (k0m, typed) of
+  case outcome of
+    Elaborable -> case (k0m, typed) of
       -- the export is itself a checked definition: a use of it, at its own
       -- type, inside what it reaches is a back-edge to it
       (Just k0, AnnoS (Idx gt t) c (VarS name alts))
@@ -91,33 +94,51 @@ specializeExport spec (gi, v) = do
       _ -> do
         backs <- liftIO (newIORef Set.empty)
         splice spec backs [] typed
-    else return typed
+    _ -> return typed
+
+-- | How far a checked tree was taken.
+data Collected
+  = -- | every reference can be elaborated: ready to splice
+    Elaborable
+  | -- | checked with every term expanded in place
+    InPlace
+  | -- | a generic export (SIG-5), checked with its references left as their
+    -- signatures; it is never realized, so nothing is chosen for it
+    Generic
+
+-- | Whether an export's type keeps a type variable, so that it is not
+-- realized (SIG-5).
+isGenericExport :: TypeU -> Bool
+isGenericExport = containsUnk . typeOf
 
 -- | Collect a tree and check it, expanding in place any term whose reference
--- cannot be elaborated on its own, and leaving the rest to be shared. The
--- 'Bool' says whether every remaining reference can be elaborated, so the
--- caller knows whether the tree is ready to splice.
+-- cannot be elaborated on its own, and leaving the rest to be shared.
 --
 -- Each pass expands at least one more term than the last, so this
 -- terminates. A stuck reference this pass cannot expand (a class method)
--- leaves the set unchanged, and the final pass expands everything.
+-- leaves the set unchanged, and the final pass expands everything. With
+-- @export@ set, an export whose type is still generic once no definition is
+-- left to expand is not taken further.
 collectElaborable
   :: Spec
+  -> Bool
   -> (AnnoS Int ManyPoly Int -> MorlocMonad Typed)
   -> (Int, EVar)
-  -> MorlocMonad (Bool, Typed)
-collectElaborable spec check root = go (Map.keysSet (specDefs spec))
+  -> MorlocMonad (Collected, Typed)
+collectElaborable spec export check root = go (Map.keysSet (specDefs spec))
   where
     go only = do
-      typed <- collectRoot (Just only) root >>= check
+      typed@(AnnoS (Idx _ rootType) _ _) <- collectRoot (Just only) root >>= check
       stuck <- map fst . filter (not . isElaborable . snd) <$> references spec typed
       let only' = Set.difference only (Set.fromList stuck)
-      if null stuck
-        then return (True, typed)
-        else
-          if Set.size only' < Set.size only
-            then go only'
-            else (,) False <$> (collectRoot Nothing root >>= check)
+          -- decided only once no definition is left to expand, since a
+          -- definition's body can fix what its signature leaves open
+          generic = export && isGenericExport rootType
+      if
+        | not (null stuck) && Set.size only' < Set.size only -> go only'
+        | generic -> return (Generic, typed)
+        | null stuck -> return (Elaborable, typed)
+        | otherwise -> (,) InPlace <$> (collectRoot Nothing root >>= check)
 
 -- | The references to checked definitions in a tree, with the type each is
 -- solved at.
@@ -266,7 +287,7 @@ elaborate spec target use key@(k, t) = do
       -- checked at the key; a method's result is still a set of candidate
       -- instances, chosen among in Realize
       let check = typecheckRootAt t
-      e <- snd <$> collectElaborable spec check root
+      e <- snd <$> collectElaborable spec False check root
       -- A body may determine a kind-tagged slot that the key it is filed
       -- under leaves open: a signature's kind variables are not rigid when it
       -- is checked, so @q :: Int -> Table m r@ whose body has type

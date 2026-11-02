@@ -116,6 +116,12 @@ literal and record gaps. Reproduced on 0.109.0 unless marked.
     builds silently.
   CLS-18 (ruled 2026-10-29) makes this an error at the signature, naming
   the variable; the code deviates. Re-reproduced 2026-10-31 (`count`).
+- **A method use nothing determines is accepted inside a concrete
+  export.** [reproduced, 2026-11-02] Violates the second sentence of
+  CLS-18. With `instance Monoid Str` and `instance Monoid (List a)`,
+  `k :: a -> b -> a; x :: Bool; x = k True mempty` typechecks; nothing
+  fixes the type of `mempty`. It also sends `x` to the specializer's
+  in-place fallback (model/compiler/issues/specialization.md).
 - **A newtype over a `type` alias reports a phantom instance.** [reproduced,
   2026-10-21] `type Meters = Int; newtype Wrapped = Meters` fails "Cannot
   declare instance on transparent alias 'Meters'" though no instance is
