@@ -22,6 +22,8 @@ module Morloc.CodeGenerator.Grammars.Common
   , renameNE
   , renameSE
   , PoolDocs (..)
+  , Chain (..)
+  , ChainDocs (..)
   , mergePoolDocs
 
     -- * Naming conventions
@@ -80,6 +82,8 @@ import qualified Control.Monad.State as CMS
 import Data.Binary (Binary)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
+import qualified Data.Sequence as Seq
+import Data.List.NonEmpty (NonEmpty)
 import GHC.Generics (Generic)
 import Morloc.CodeGenerator.Namespace
 import Morloc.CodeGenerator.Serial (containsFunF, serialAstToNativeType, serialAstToType, makeSerialAST, serialAstToMsgpackSchema)
@@ -111,6 +115,35 @@ data PoolDocs = PoolDocs
   , poolBorrowedLocal :: Maybe Text
   -- ^ The name of a local bound by reference, when 'poolExpr' is that
   -- name. Returning it copies its referent.
+  , poolChain :: Maybe ChainDocs
+  -- ^ The chain of one short-circuit operator these docs were lowered from
+  -- (EMIT-4), so that an enclosing operand of the same operator extends it
+  -- rather than nesting it.
+  }
+
+-- | A chain of one short-circuit operator (EMIT-4): the operands of its
+-- first run, then its rungs, each the statements of an operand and the run
+-- of operands that follows them.
+data Chain = Chain
+  { chainAnd :: Bool
+  , chainHead :: NonEmpty MDoc
+  , chainRungs :: Seq.Seq ([MDoc], NonEmpty MDoc)
+  }
+
+-- | A chain and how its docs hold it. 'cdPre' are the statements before
+-- the chain, 'cdPreBound' the lets among them that the rest of the chain
+-- is in the scope of, 'cdRungNames' the locals its rungs read and
+-- 'cdNames' the locals it reads anywhere. Docs whose expression or prior
+-- lines differ from 'cdExpr', 'cdLineCount' and 'cdPre' have been changed
+-- since, and are an ordinary operand.
+data ChainDocs = ChainDocs
+  { cdChain :: Chain
+  , cdPre :: [MDoc]
+  , cdPreBound :: Set.Set Int
+  , cdRungNames :: Set.Set Int
+  , cdNames :: Set.Set Int
+  , cdExpr :: Text
+  , cdLineCount :: Int
   }
 
 instance Defaultable PoolDocs where
@@ -122,6 +155,7 @@ instance Defaultable PoolDocs where
       , poolPriorExprs = []
       , poolReturnFlag = False
       , poolBorrowedLocal = Nothing
+      , poolChain = Nothing
       }
 
 {- | Merge a series of pools, keeping prior lines, expression and manifolds, but
@@ -137,6 +171,7 @@ mergePoolDocs f ms =
     , poolPriorExprs = concatMap poolPriorExprs ms
     , poolReturnFlag = any poolReturnFlag ms
     , poolBorrowedLocal = Nothing
+    , poolChain = Nothing
     }
 
 -- | Split a call's arguments into successive call groups according to the

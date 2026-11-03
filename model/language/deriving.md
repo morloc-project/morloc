@@ -20,7 +20,9 @@ Tests: spec-deriv-2-1, spec-deriv-2-2, spec-deriv-2-3, spec-deriv-2-4, spec-deri
 Code: conforms 2026-10-18
 
 A derived `==` is `@eq`, `<=` is `@le` (INTR-7), `show` is `@show` and
-`hash` is `@hash`, each on the value as it crosses between languages. The
+`hash` is `@hash`, each on the value as it crosses between languages; `!=`
+is the negation of `@eq`, `>=` is `@le` with its arguments swapped, and
+`<` and `>` hold when `@le` holds one way and not the other. The
 instances of the type's components are not used, so the result is the same
 in every language and needs no instance for the type's parameters.
 
@@ -55,14 +57,18 @@ same type are a compile error. A newtype's own `unpack` (NEWT-7) is not a
 deriving clause.
 
 ### DERIV-6 `Eq` and `Ord` are derived where no instance is given
-Intent: ruled 2026-10-29
-Code: deviates (issues/typeclasses.md)
+Intent: ruled 2026-11-03
+Tests: spec-deriv-6-1, spec-deriv-6-2, spec-deriv-6-3, spec-deriv-6-4, spec-deriv-6-5, spec-deriv-6-6, spec-deriv-6-7, spec-deriv-6-8, spec-deriv-6-9, spec-deriv-6-10
+Code: conforms 2026-11-03
 
 A type with no `Eq` instance has the derived one (DERIV-2), as if it had a
 deriving clause. A type with no `Ord` instance has the derived one only if
 its `Eq` is derived too, so that `==` and `<=` agree; a type with a
-hand-written `Eq` and no `Ord` has no `Ord`. A type whose values cannot
-cross between languages (a function, a suspension) has neither. A
+hand-written `Eq` and no `Ord` has no `Ord`. A type whose values `@eq`
+cannot compare (INTR-7) has neither. "Type" is the ground type of the use:
+with only `instance Eq (Box Int)` written, `Box Str` has the derived `Eq`.
+As DERIV-2 says, the derived instance needs no instance for the type's
+parameters. A
 hand-written instance replaces the derived one, and is how a type gets a
 faster comparison; it is not a DERIV-5 conflict. The primitive types have
 hand-written instances that are the host operators (CLS-19).

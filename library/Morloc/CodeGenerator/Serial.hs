@@ -26,6 +26,7 @@ module Morloc.CodeGenerator.Serial
   , containsEffectT
   , checkReadDataType
   , checkWriteDataType
+  , checkComparable
   , containsFunF
   , serialAstHasString
   , serialKids
@@ -216,6 +217,32 @@ checkWriteDataType i intr holdsClosure tdoc
           <+> tdoc <+> "holds a function or suspension."
           <+> "Run the suspension first (x <- e) and write the value."
   | otherwise = return ()
+
+-- | INTR-7: @eq and @le compare a wire value the runtime can order, of a
+-- type the program determines.
+checkComparable :: Int -> Intrinsic -> MDoc -> SerialAST -> MorlocMonad ()
+checkComparable i intr tdoc ast = case incomparable ast of
+  Nothing -> return ()
+  Just what ->
+    MM.throwSourcedError i $
+      "Values of type" <+> tdoc <+> "cannot be compared on the wire (@" <> pretty (intrinsicName intr)
+        <> "): the type holds" <+> what <> ". Write an Eq or Ord instance for it instead."
+  where
+    incomparable s0 = case s0 of
+      SerialPack _ (_, s) -> incomparable s
+      SerialList _ _ s -> incomparable s
+      SerialOptional _ s -> incomparable s
+      SerialTuple _ ss -> firstOf ss
+      SerialObject NamTable _ _ _ -> Just "a table"
+      SerialObject _ _ _ rs -> firstOf (map snd rs)
+      SerialVariant _ _ arms -> firstOf (concatMap snd arms)
+      SerialIFile {} -> Just "a file handle"
+      SerialOStream {} -> Just "a stream"
+      SerialIStream {} -> Just "a stream"
+      SerialClosure {} -> Just "a function"
+      SerialUnknown _ -> Just "a type the program leaves undetermined"
+      _ -> Nothing
+    firstOf = listToMaybe . mapMaybe incomparable
 
 -- | True when a function appears anywhere in a concrete type. A suspension
 -- is a function of no arguments at this level.

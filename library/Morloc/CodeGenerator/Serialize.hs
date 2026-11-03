@@ -651,9 +651,14 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
                     IntrinsicN innerTf IntrTry Nothing [thunkifyForTry packed]
                 | otherwise = packed
           return wrapped
-    nativeExpr m (MonoIntrinsic t intr es) = do
+    nativeExpr m (MonoIntrinsic t@(Idx tidx _) intr es) = do
       tf <- inferType t
       es' <- mapM (nativeExpr m) es
+      case es' of
+        d : _ | intr `elem` [IntrEq, IntrLe] -> do
+          ast <- Serial.makeSerialAST m lang (typeFof d)
+          Serial.checkComparable tidx intr (pretty (renderTypeFName (typeFof d))) ast
+        _ -> return ()
       es'' <- unpackDataArgIfNeeded m intr es'
       msch <- intrinsicSchema m intr tf es''
       mAst <- resultSerialAst m intr tf

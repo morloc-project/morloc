@@ -577,7 +577,7 @@ genericLowerConfig desc srcNamer debugInfo traceInfo debugMode = cfg
         , lcNewIndex = newIndex
         , lcPrintExpr = genericPrintExpr desc
         , lcPrintStmt = genericPrintStmt desc
-        , lcEvalPattern = \t p xs -> return $ genericEvalPattern desc t p xs
+        , lcEvalPattern = \t _ p xs -> return $ genericEvalPattern desc t p xs
         , lcTakeGetter = \_ _ _ -> return Nothing
         , lcListConstructor = \v _ es -> case ldListStyle desc of
             BracketList -> list es
@@ -623,6 +623,7 @@ genericLowerConfig desc srcNamer debugInfo traceInfo debugMode = cfg
         , lcMakeIf = genericMakeIf desc cfg
         , lcShortCircuit = \isAnd a b ->
             a <+> pretty (if isAnd then ldAndOp desc else ldOrOp desc) <+> b
+        , lcChainLadder = genericChainLadder desc
         , lcMakeLoop = genericMakeLoop desc cfg
         , lcMakeLet = \namer i _ _ e1 e2 -> return $ genericMakeLet desc namer i e1 e2
         , lcReleaseStmt = \v -> pretty (ldReleasePacketFn desc) <> "(" <> pretty v <> ")"
@@ -1012,6 +1013,18 @@ makeGenericSocketPath desc socketFileBasename =
       socketText = render (dquotes socketFileBasename)
    in pretty $ substituteT tmpl [("socket", socketText)]
 
+-- | A chain's ladder (EMIT-4): one flag, and a flat block per rung.
+genericChainLadder :: LangDescriptor -> Bool -> MDoc -> MDoc -> [([MDoc], MDoc)] -> MDoc
+genericChainLadder desc isAnd flag first rungs = vsep ((flag <+> assign <+> first) : map rung rungs)
+  where
+    assign = pretty (ldAssignOp desc)
+    undecided = if isAnd then flag else pretty (ldNotOp desc) <+> flag
+    rung (stmts, e) =
+      let body = stmts <> [flag <+> assign <+> e]
+       in case ldBlockStyle desc of
+            IndentBlock -> nest 4 (vsep (("if" <+> undecided <> ":") : body))
+            BraceBlock -> vsep ["if" <+> parens undecided <+> "{", indent 4 (vsep body), "}"]
+
 -- | Generic if/else rendering for descriptor-driven languages
 genericMakeIf :: LangDescriptor -> LowerConfig IndexM -> NativeExpr -> PoolDocs -> PoolDocs -> PoolDocs -> IndexM PoolDocs
 genericMakeIf desc cfg _ condDocs thenDocs elseDocs = do
@@ -1046,6 +1059,7 @@ genericMakeIf desc cfg _ condDocs thenDocs elseDocs = do
       , poolPriorExprs = poolPriorExprs condDocs <> poolPriorExprs thenDocs <> poolPriorExprs elseDocs
       , poolReturnFlag = poolReturnFlag condDocs || poolReturnFlag thenDocs || poolReturnFlag elseDocs
       , poolBorrowedLocal = Nothing
+      , poolChain = Nothing
       }
 
 -- Native tail-loop assembly. Walks the 'LoopBody' decision tree, emitting
@@ -1083,6 +1097,7 @@ genericMakeLoop desc cfg _ carried _ body = do
       , poolPriorExprs = concatMap poolPriorExprs leaves
       , poolReturnFlag = True
       , poolBorrowedLocal = Nothing
+      , poolChain = Nothing
       }
   where
     assign = pretty (ldAssignOp desc)
@@ -1176,6 +1191,7 @@ genericMakeLet desc namer i p1 p2 =
         , poolPriorExprs = poolPriorExprs p1 <> poolPriorExprs p2
         , poolReturnFlag = poolReturnFlag p1 || poolReturnFlag p2
         , poolBorrowedLocal = Nothing
+        , poolChain = Nothing
         }
 
 -- | Generic expression printer driven by descriptor

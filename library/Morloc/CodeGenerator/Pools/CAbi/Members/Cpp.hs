@@ -1130,9 +1130,9 @@ cppLowerConfig (ClosureGen reifyThunks stageTable papplyHeads) =
     , lcPrintExpr = CP.printExpr
     , lcPrintStmt = CP.printStmt
     , lcTakeGetter = \_ _ _ -> return Nothing
-    , lcEvalPattern = \t p xs -> do
+    , lcEvalPattern = \t argTypes p xs -> do
         state <- CMS.get
-        return $ evaluatePattern state t p xs
+        return $ evaluatePattern state t (listToMaybe argTypes) p xs
     , lcTakeSetter = cppTakeSetter
     , lcListConstructor = \_ _ es -> encloseSep "{" "}" "," es
     , lcTupleConstructor = \_ _ -> ((<>) "std::make_tuple" . tupled)
@@ -1289,8 +1289,14 @@ PROPAGATE_ERROR(errmsg)|]
           , poolPriorExprs = concatMap poolPriorExprs leaves
           , poolReturnFlag = True
           , poolBorrowedLocal = Nothing
+          , poolChain = Nothing
           }
     , lcShortCircuit = \isAnd a b -> a <+> (if isAnd then "&&" else "||") <+> b
+    , lcChainLadder = \isAnd flag first rungs ->
+        let undecided = if isAnd then flag else "!" <> flag
+            rung (stmts, e) =
+              vsep ["if" <+> parens undecided <+> "{", indent 4 (vsep (stmts <> [flag <+> "=" <+> e <> ";"])), "}"]
+         in vsep (("bool" <+> flag <+> "=" <+> first <> ";") : map rung rungs)
     , lcMakeIf = \origExpr condDocs thenDocs elseDocs -> do
         idx <- getCounter
         let v = helperNamer idx
@@ -1338,6 +1344,7 @@ PROPAGATE_ERROR(errmsg)|]
           , poolPriorExprs = poolPriorExprs condDocs <> poolPriorExprs thenDocs <> poolPriorExprs elseDocs
           , poolReturnFlag = poolReturnFlag condDocs || poolReturnFlag thenDocs || poolReturnFlag elseDocs
           , poolBorrowedLocal = Nothing
+          , poolChain = Nothing
           }
     , lcMakeDoBlock = \t stmts expr ->
         let isUnit = case t of
@@ -1688,6 +1695,7 @@ PROPAGATE_ERROR(errmsg)|]
             , poolPriorExprs = poolPriorExprs p1 <> poolPriorExprs p2
             , poolReturnFlag = poolReturnFlag p1 || poolReturnFlag p2
             , poolBorrowedLocal = borrowedLocal
+            , poolChain = Nothing
             }
 
     -- Match only bare 'Unit' -- a suspension of Unit is
@@ -1744,6 +1752,7 @@ serialize v0 s = do
       , poolPriorExprs = []
       , poolReturnFlag = False
       , poolBorrowedLocal = Nothing
+      , poolChain = Nothing
       }
 
 -- | Whether a rendered expression is a call (rather than a variable, a
@@ -1865,6 +1874,7 @@ cppCacheBody resSa lbl midx args bodyPool = do
     , poolPriorExprs = poolPriorExprs bodyPool
     , poolReturnFlag = poolReturnFlag bodyPool
     , poolBorrowedLocal = Nothing
+    , poolChain = Nothing
     }
 
 -- | C++ debug-trace wrap. Wraps the manifold body in @try {...}
@@ -1950,6 +1960,7 @@ cppDebugWrap midx args bodyPool = do
     , poolPriorExprs = poolPriorExprs bodyPool
     , poolReturnFlag = poolReturnFlag bodyPool
     , poolBorrowedLocal = Nothing
+    , poolChain = Nothing
     }
 
 -- | Serialize a single C++ cache arg. Native bindings are routed
@@ -2145,23 +2156,24 @@ translateSegment closureGen m0@(SerialManifold root _ _ _ _) = do
   return $ renderPoolDocs e
 
 -- handle string interpolation
-evaluatePattern :: CppTranslatorState -> TypeF -> Pattern -> [MDoc] -> MDoc
-evaluatePattern _ _ (PatternText s ss) xs = "interweave_strings" <> tupled [fragments, insertions]
+-- | A pattern call, given its result type and its receiver's type.
+evaluatePattern :: CppTranslatorState -> TypeF -> Maybe TypeF -> Pattern -> [MDoc] -> MDoc
+evaluatePattern _ _ _ (PatternText s ss) xs = "interweave_strings" <> tupled [fragments, insertions]
   where
     fragments = encloseSep "{" "}" ", " (map (dquotes . pretty . escapeQuotes "\"" "\\\"" . escapeStringLit) (s : ss))
     insertions = encloseSep "{" "}" ", " xs
 
 -- handle getters
-evaluatePattern _ _ (PatternStruct (ungroup -> [ss])) [m] =
-  writeSelector m ss
-evaluatePattern _ _ (PatternStruct (ungroup -> sss)) [m] =
-  encloseSep "{" "}" "," (map (writeSelector m) sss)
+evaluatePattern _ _ rt (PatternStruct (ungroup -> [ss])) [m] =
+  readSelector rt m ss
+evaluatePattern _ _ rt (PatternStruct (ungroup -> sss)) [m] =
+  encloseSep "{" "}" "," (map (readSelector rt m) sss)
 -- PatternStruct with bracket steps inside the Selector. App args are
 -- [bracket_bounds..., receiver]. Walk the Selector recursively,
 -- emitting C++ source for each step: `.field`, `std::get<N>(...)`,
 -- `morloc_at(idx, value)`, `morloc_slice(...)`. Multi-sibling groups
 -- emit `std::make_tuple(...)`.
-evaluatePattern _ _ (PatternStruct s) args
+evaluatePattern _ _ _ (PatternStruct s) args
   | selectorHasBracket s, length args == bracketArity s + 1 =
       let n = bracketArity s
           (bracketArgs, receivers) = splitAt n args
@@ -2170,19 +2182,19 @@ evaluatePattern _ _ (PatternStruct s) args
             _ -> error $ "evaluatePattern: bracket-in-Selector expected 1 receiver, \
                          \got " <> show (length receivers)
       in fst (walkCppSelectorBrackets receiver bracketArgs s)
-evaluatePattern state0 t0 (PatternStruct s0) (m0 : xs0) = setterOf False state0 t0 s0 m0 xs0
-evaluatePattern _ _ (PatternStruct _) [] = error "Unreachable illegal pattern"
+evaluatePattern state0 t0 _ (PatternStruct s0) (m0 : xs0) = setterOf False state0 t0 s0 m0 xs0
+evaluatePattern _ _ _ (PatternStruct _) [] = error "Unreachable illegal pattern"
 -- C++ bracket index: List and Vector both use std::vector<T> on the wire,
 -- so the same morloc_at helper works for both. Args: [index, receiver].
-evaluatePattern _ _ PatternBracketIndex [i, m] =
+evaluatePattern _ _ _ PatternBracketIndex [i, m] =
   "morloc_at" <> tupled [i, m]
-evaluatePattern _ _ PatternBracketIndex args =
+evaluatePattern _ _ _ PatternBracketIndex args =
   error $ "PatternBracketIndex expects 2 args, got " <> show (length args)
 -- C++ bracket slice: List and Vector share std::vector<T> on the wire,
 -- so morloc_slice works for both. Args: [start, stop, step, receiver].
-evaluatePattern _ _ PatternBracketSlice [start, stop, step, m] =
+evaluatePattern _ _ _ PatternBracketSlice [start, stop, step, m] =
   "morloc_slice" <> tupled [start, stop, step, m]
-evaluatePattern _ _ PatternBracketSlice args =
+evaluatePattern _ _ _ PatternBracketSlice args =
   error $ "PatternBracketSlice expects 4 args, got " <> show (length args)
 
 -- | A setter on receiver @m0@ with values @xs0@: the receiver rebuilt with
@@ -2197,7 +2209,16 @@ setterOf dead state0 t0 s0 m0 xs0 =
        in "std::tuple" <> encloseSep "<" ">" "," tupleTypes <> tupled xs
     makeTuple _ _ = error "Unreachable"
 
-    makeRecord _ xs = encloseSep "{" "}" ", " xs
+    -- A `?T` field may be stored as a pointer (CPP-6): its value is
+    -- converted to the field's own form.
+    makeRecord t xs =
+      let recT = CMS.evalState (cppTypeOf t) state0
+          fields = case t of
+            NamF _ _ _ fs -> map Just fs
+            _ -> map (const Nothing) xs
+          store (Just (Key k, OptionalF _)) x = "mlc::wrap_field<decltype(" <> recT <> "::" <> pretty k <> ")>(" <> x <> ")"
+          store _ x = x
+       in encloseSep "{" "}" ", " (zipWith store fields xs)
 
     accessTuple _ m i = "std::get<" <> pretty i <> ">(" <> m <> ")"
     accessRecord _ d k = d <> "." <> pretty k
@@ -2216,10 +2237,31 @@ cppTakeSetter recv t sel (m : xs) = do
   return (if kept then Just (setterOf True state t sel m xs) else Nothing)
 cppTakeSetter _ _ _ [] = return Nothing
 
-writeSelector :: MDoc -> [Either Int Text] -> MDoc
-writeSelector d [] = d
-writeSelector d (Right k : rs) = writeSelector (d <> "." <> pretty k) rs
-writeSelector d (Left i : rs) = writeSelector ("std::get<" <> pretty i <> ">" <> parens d) rs
+readField :: MDoc -> MDoc
+readField access = "mlc::read_field(" <> access <> ")"
+
+-- | A getter's steps from a receiver of the given type. A `?T` field may be
+-- stored as a pointer (CPP-6), so a field read that may be one goes through
+-- @mlc::read_field@, which gives the std::optional every other `?T` value
+-- is and returns any other field as is.
+readSelector :: Maybe TypeF -> MDoc -> [Either Int Text] -> MDoc
+readSelector _ d [] = d
+readSelector t d (Right k : rs) =
+  let ft = case t of
+        Just (NamF _ _ _ fs) -> lookup (Key k) fs
+        _ -> Nothing
+      access = d <> "." <> pretty k
+      value = case ft of
+        Just (OptionalF _) -> readField access
+        Nothing -> readField access
+        _ -> access
+   in readSelector ft value rs
+readSelector t d (Left i : rs) =
+  let et = case t of
+        Just (AppF _ ts) | i < length ts -> Just (ts !! i)
+        _ -> Nothing
+   in readSelector et ("std::get<" <> pretty i <> ">" <> parens d) rs
+
 
 -- | Walk a 'Selector' that may contain bracket steps, emitting C++
 -- source code per step. Threads the bracket runtime args through
@@ -2229,7 +2271,7 @@ writeSelector d (Left i : rs) = writeSelector ("std::get<" <> pretty i <> ">" <>
 walkCppSelectorBrackets :: MDoc -> [MDoc] -> Selector -> (MDoc, [MDoc])
 walkCppSelectorBrackets =
   walkSelectorBrackets
-    (\rcv k -> rcv <> "." <> pretty k)
+    (\rcv k -> readField (rcv <> "." <> pretty k))
     (\rcv i -> "std::get<" <> pretty i <> ">" <> parens rcv)
     (\idx rcv -> "morloc_at" <> tupled [idx, rcv])
     (\start stop step rcv -> "morloc_slice" <> tupled [start, stop, step, rcv])

@@ -11286,6 +11286,73 @@ variantTests =
         idt :: Expr -> Expr
               |]
 
+      , -- INTR-7: @eq and @le compare the wire form, so what they reject
+        -- is decided there: a function or handle anywhere in it, but not a
+        -- type parameter the wire form does not hold.
+        localOption (mkTimeout 20000000) $
+          testCase "spec-intr-7-6" $ do
+            assertGenerates
+              [r|
+        module main (f)
+        type Py => Int = "int"
+        type Py => Bool = "bool"
+        type Py => (IFile a) = "int" a
+        source Py from "t.py" ("mk", "inc")
+        inc :: Int -> Int
+        record Tag a where
+          n :: Int
+        record Py => Tag = "dict"
+        mk :: Int -> Tag (Int -> Int)
+        f :: Int -> Bool
+        f x = @eq (mk x) (mk 1)
+              |]
+            assertGenerationFails
+              [r|
+        module main (f)
+        type Py => Int = "int"
+        type Py => Bool = "bool"
+        type Py => (IFile a) = "int" a
+        source Py from "t.py" ("mk", "inc")
+        inc :: Int -> Int
+        record R where
+          g :: Int -> Int
+          n :: Int
+        record Py => R = "dict"
+        mkR :: Int -> R
+        mkR x = {g = inc, n = x}
+        f :: Int -> Bool
+        f x = @eq (mkR x) (mkR 1)
+              |]
+            assertGenerationFails
+              [r|
+        module main (f)
+        type Py => Int = "int"
+        type Py => Bool = "bool"
+        type Py => (IFile a) = "int" a
+        source Py from "t.py" ("mk", "inc")
+        inc :: Int -> Int
+        record R where
+          h :: IFile Int
+          n :: Int
+        record Py => R = "dict"
+        mk :: Int -> R
+        f :: Int -> Bool
+        f x = @eq (mk x) (mk 1)
+              |]
+            assertGenerationFails
+              [r|
+        module main (f)
+        type Py => Int = "int"
+        type Py => Bool = "bool"
+        type Py => (IFile a) = "int" a
+        source Py from "t.py" ("mk", "inc")
+        inc :: Int -> Int
+        newtype N = (Int -> Int)
+        mk :: Int -> N
+        f :: Int -> Bool
+        f x = @eq (mk x) (mk 1)
+              |]
+
       , -- A declared table column is checked against the block's Arrow
         -- type at every crossing, and only flat primitives, Str and
         -- optionals of them have an Arrow form the runtime can name. A

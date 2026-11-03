@@ -77,6 +77,7 @@ module Morloc.CodeGenerator.Grammars.Translator.Imperative
   , nativeManifoldsUnder
   , RNode (..)
   , rnodeChildren
+  , namesIn
   , rnodeLet
   , aliasChain
   , isLastRead
@@ -96,6 +97,9 @@ import qualified Control.Monad.State as CMS
 import Data.Binary (Binary)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
+import qualified Data.Sequence as Seq
+import Data.Foldable (toList)
+import Data.List.NonEmpty (NonEmpty (..))
 import Data.Text (Text)
 import Data.Tuple (swap)
 import Data.Char (isAlpha, isAlphaNum)
@@ -104,7 +108,9 @@ import Data.Word (Word8)
 import GHC.Generics (Generic)
 import qualified Morloc.BaseTypes as BT
 import Morloc.CodeGenerator.Grammars.Common
-  ( DispatchEntry (..)
+  ( Chain (..)
+  , ChainDocs (..)
+  , DispatchEntry (..)
   , PoolDocs (..)
   , argNamer
   , collectManifoldIds
@@ -630,7 +636,9 @@ data LowerConfig m = LowerConfig
   , -- expression/arg lowering fields
     lcPrintExpr :: IExpr -> MDoc
   , lcPrintStmt :: IStmt -> MDoc
-  , lcEvalPattern :: TypeF -> Pattern -> [MDoc] -> m MDoc
+  , -- | A pattern call: its result type, its argument types, the pattern
+    -- and the rendered arguments.
+    lcEvalPattern :: TypeF -> [TypeF] -> Pattern -> [MDoc] -> m MDoc
   -- ^ Pattern evaluation (language-specific because patterns use
   -- language-specific constructors for tuples/records)
   , lcTakeSetter :: NativeExpr -> TypeF -> Selector -> [MDoc] -> m (Maybe MDoc)
@@ -762,6 +770,11 @@ data LowerConfig m = LowerConfig
   -- ^ The language's own short-circuit operator applied to two expressions:
   -- @True@ for and, @False@ for or. A conditional with a Bool literal arm
   -- and an arm that needs no statements is written with it (BASE-3).
+  , lcChainLadder :: Bool -> MDoc -> MDoc -> [([MDoc], MDoc)] -> MDoc
+  -- ^ A chain's ladder (EMIT-4): for and (@True@) or or, the flag, the
+  -- first run, and each rung's statements and run. The flag is declared
+  -- with the first run's value; each rung runs while the flag leaves the
+  -- chain undecided and assigns its run to the flag.
   , lcMakeLoop :: LoopResult -> [(Int, Maybe PoolDocs)] -> Maybe (LoopBody NativeExpr SerialExpr ()) -> LoopBody PoolDocs PoolDocs PoolDocs -> m PoolDocs
   -- ^ Tail-loop assembly. Args: what a base leaf yields; each loop-carried
   -- native local id, with the value it starts from when the loop declares
@@ -1284,6 +1297,19 @@ consumableProjectionLets tagAfterMove sms =
     , Map.findWithDefault 0 subjIdx (csUses scan) == 1
     , isJust (moveWalk tagAfterMove subjIdx letIdx False (RS body))
     ]
+
+-- | Every native local named under an expression, the context arguments of
+-- the manifolds under it included.
+namesIn :: NativeExpr -> Set.Set Int
+namesIn = go . RN
+  where
+    go n = here n <> foldMap go (rnodeChildren n)
+    here n = case n of
+      RN (LetVarN _ j _) -> Set.singleton j
+      RN (BndVarN _ j _) -> Set.singleton j
+      RNM (NativeManifold _ _ form _) -> Set.fromList [j | Arg j _ <- manifoldContext form]
+      RSM (SerialManifold _ _ form _ _) -> Set.fromList [j | Arg j _ <- manifoldContext form]
+      _ -> Set.empty
 
 -- | A node of the IR, for walks that cross between its kinds.
 data RNode
@@ -2316,35 +2342,138 @@ isValueArg (NativeArgExpr e) = case e of
 isValueArg (NativeArgManifold _) = False
 
 -- | @if c then b else False@ is @c && b@ and @if c then True else b@ is
--- @c || b@, written with the language's operator when @b@ needs no
--- statements, so its evaluation stays where the conditional put it.
--- An operand that is itself a chain of the same operator is written without
--- its parentheses, so a chain is flat however long it is: both operators are
--- associative and evaluate their operands left to right in every language.
-shortCircuit :: LowerConfig m -> NativeExpr -> NativeExpr -> NativeExpr -> PoolDocs -> PoolDocs -> PoolDocs -> Maybe PoolDocs
+-- @c || b@ (BASE-3). The operands form a chain of the operator (EMIT-4):
+-- runs of operands that need no statements are written with the
+-- language's operator, at most 'chainRunCap' to a run, and an operand that
+-- needs statements starts a rung of the chain's ladder. An operand that is
+-- itself a chain of the same operator extends this one, so a chain is flat
+-- however long it is.
+shortCircuit ::
+  (Monad m) =>
+  LowerConfig m -> NativeExpr -> NativeExpr -> NativeExpr -> PoolDocs -> PoolDocs -> PoolDocs -> Maybe (m PoolDocs)
 shortCircuit cfg condE thenE elseE condDocs thenDocs elseDocs = case (thenE, elseE) of
-  (_, LogN _ False) | null (poolPriorLines thenDocs) -> Just (combine True thenE thenDocs)
-  (LogN _ True, _) | null (poolPriorLines elseDocs) -> Just (combine False elseE elseDocs)
+  (_, LogN _ False) -> Just (combine True thenE thenDocs)
+  (LogN _ True, _) -> Just (combine False elseE elseDocs)
   _ -> Nothing
   where
-    combine isAnd otherE other = PoolDocs
-      { poolCompleteManifolds = poolCompleteManifolds condDocs <> poolCompleteManifolds other
-      , poolExpr = parens (lcShortCircuit cfg isAnd (operand isAnd condE condDocs) (operand isAnd otherE other))
-      , poolPriorLines = poolPriorLines condDocs
-      , poolPriorExprs = poolPriorExprs condDocs <> poolPriorExprs other
-      , poolReturnFlag = poolReturnFlag condDocs || poolReturnFlag other
-      , poolBorrowedLocal = Nothing
-      }
-    -- A chain written by 'combine' is exactly its operator expression in
-    -- parentheses; one that needed statements is a variable instead.
-    operand isAnd e docs
-      | chainOperator e == Just isAnd
-      , Just inner <- T.stripPrefix "(" (render (poolExpr docs)) >>= T.stripSuffix ")" =
-          pretty inner
-      | otherwise = poolExpr docs
-    chainOperator (IfN _ _ _ (LogN _ False)) = Just True
-    chainOperator (IfN _ _ (LogN _ True) _) = Just False
-    chainOperator _ = Nothing
+    combine isAnd otherE other = do
+      let c = chainView isAnd condE condDocs
+          o = chainView isAnd otherE other
+          -- The rest of the other operand's chain lies in the scope of the
+          -- lets before it; it can be a sibling of their rung only if it
+          -- reads none of them.
+          separable = Set.null (Set.intersection (cdPreBound o) (cdRungNames o))
+          rest
+            | separable = cdChain o
+            | otherwise = Chain isAnd (poolExpr other :| []) Seq.empty
+          preO = if separable then cdPre o else poolPriorLines other
+          (chain, inHead) = appendChain (cdChain c) preO rest
+          -- the locals the rungs read: the other operand's, unless its
+          -- first run joined this chain's first run
+          restRungNames
+            | not inHead = cdNames o
+            | separable = cdRungNames o
+            | otherwise = Set.empty
+      docs <-
+        renderChain
+          cfg
+          (cdPre c)
+          (cdPreBound c)
+          (cdRungNames c <> restRungNames)
+          (cdNames c <> cdNames o)
+          chain
+      return
+        docs
+          { poolCompleteManifolds = poolCompleteManifolds condDocs <> poolCompleteManifolds other
+          , poolPriorExprs = poolPriorExprs condDocs <> poolPriorExprs other
+          , poolReturnFlag = poolReturnFlag condDocs || poolReturnFlag other
+          }
+
+-- | The most operands of one run of a chain (EMIT-4). R evaluates a run
+-- recursively, against a depth limit of about 5000.
+chainRunCap :: Int
+chainRunCap = 256
+
+-- | Docs, lowered from the given expression, as a chain of the given
+-- operator. Docs that hold no such chain, or were changed since they did,
+-- are a chain of one operand.
+chainView :: Bool -> NativeExpr -> PoolDocs -> ChainDocs
+chainView isAnd e d = case currentChain d of
+  Just cd | chainAnd (cdChain cd) == isAnd -> cd
+  current ->
+    let names = maybe (namesIn e) cdNames current
+     in ChainDocs
+          { cdChain = Chain isAnd (poolExpr d :| []) Seq.empty
+          , cdPre = poolPriorLines d
+          , cdPreBound = Set.empty
+          , cdRungNames = Set.empty
+          , cdNames = names
+          , cdExpr = render (poolExpr d)
+          , cdLineCount = length (poolPriorLines d)
+          }
+
+-- | The chain docs hold, unless they were changed since it was rendered.
+currentChain :: PoolDocs -> Maybe ChainDocs
+currentChain d = case poolChain d of
+  Just cd
+    | length (poolPriorLines d) == cdLineCount cd
+    , render (poolExpr d) == cdExpr cd
+    , map render (cdPre cd) == map render (take (length (cdPre cd)) (poolPriorLines d)) ->
+        Just cd
+  _ -> Nothing
+
+-- | A chain followed by an operand's statements and a second chain of the
+-- same operator, whose first run follows the statements; and whether that
+-- run joined the first chain's first run.
+appendChain :: Chain -> [MDoc] -> Chain -> (Chain, Bool)
+appendChain a stmts b =
+  let (joined, inHead) = case (stmts, Seq.viewr (chainRungs a)) of
+        ([], Seq.EmptyR)
+          | fits (chainHead a) -> (a {chainHead = chainHead a <> chainHead b}, True)
+        ([], rs Seq.:> (s, run))
+          | fits run -> (a {chainRungs = rs Seq.|> (s, run <> chainHead b)}, False)
+        _ -> (a {chainRungs = chainRungs a Seq.|> (stmts, chainHead b)}, False)
+   in (joined {chainRungs = chainRungs joined <> chainRungs b}, inHead)
+  where
+    fits run = length run + length (chainHead b) <= chainRunCap
+
+renderChain :: (Monad m) => LowerConfig m -> [MDoc] -> Set.Set Int -> Set.Set Int -> Set.Set Int -> Chain -> m PoolDocs
+renderChain cfg pre bound rungNames names ch
+  | Seq.null (chainRungs ch) = return (chainDocs [] (parens (run (chainHead ch))))
+  | otherwise = do
+      idx <- lcNewIndex cfg
+      let flag = helperNamer idx
+          ladder = lcChainLadder cfg (chainAnd ch) flag (run (chainHead ch)) [(s, run os) | (s, os) <- toList (chainRungs ch)]
+      return (chainDocs [ladder] flag)
+  where
+    run (o :| os) = foldl (lcShortCircuit cfg (chainAnd ch)) o os
+    chainDocs ladder e =
+      let lines' = pre <> ladder
+       in defaultValue
+            { poolExpr = e
+            , poolPriorLines = lines'
+            , poolChain = Just (ChainDocs ch pre bound rungNames names (render e) (length lines'))
+            }
+
+-- | A let around a chain keeps the chain: its statements come before it,
+-- and the chain is in its scope.
+keepChain :: Int -> NativeExpr -> PoolDocs -> PoolDocs -> PoolDocs
+keepChain i rhsE body r = case currentChain body of
+  Just cd
+    | render (poolExpr r) == cdExpr cd ->
+        let n = length (poolPriorLines r)
+            ladderLen = cdLineCount cd - length (cdPre cd)
+         in r
+              { poolChain =
+                  Just
+                    cd
+                      { cdPre = take (n - ladderLen) (poolPriorLines r)
+                      , cdPreBound = Set.insert i (cdPreBound cd)
+                      , cdNames = namesIn rhsE <> cdNames cd
+                      , cdLineCount = n
+                      }
+              }
+  _ -> r {poolChain = Nothing}
 
 -- | For each argument of a call, whether it names a value: a variable, a
 -- newtype cast of one, a single-path field of one, or a constructor field or
@@ -2420,7 +2549,10 @@ lowerNativeExprRaw cfg origExpr (AppExeN_ t (PatCallP p) xs) = do
     (PatternStruct sel, AppExeN _ _ (NativeArgExpr recv : _ : _), _)
       | not (selectorHasBracket sel) -> lcTakeSetter cfg recv t sel (map poolExpr es)
     _ -> return Nothing
-  patResult <- maybe (lcEvalPattern cfg t p (map poolExpr es)) return taken
+  let argTypes = case origExpr of
+        AppExeN _ _ as -> map nativeArgTypeF as
+        _ -> []
+  patResult <- maybe (lcEvalPattern cfg t argTypes p (map poolExpr es)) return taken
   return $
     PoolDocs
       { poolCompleteManifolds = concatMap poolCompleteManifolds es
@@ -2429,6 +2561,7 @@ lowerNativeExprRaw cfg origExpr (AppExeN_ t (PatCallP p) xs) = do
       , poolPriorExprs = concatMap poolPriorExprs es
       , poolReturnFlag = any poolReturnFlag es
       , poolBorrowedLocal = Nothing
+      , poolChain = Nothing
       }
   where
     ownedVal (NativeArgExpr e) d = adaptOwnedElem cfg e d
@@ -2520,7 +2653,7 @@ lowerNativeExprRaw cfg _ (SerialLetN_ i x1 x2) = lcMakeLet cfg svarNamer i Nothi
 -- borrowed receiver -- to match the owned binding type; other members unchanged).
 lowerNativeExprRaw cfg (NativeLetN _ rhsE _) (NativeLetN_ i x1 x2) = do
   x1' <- loopBorrowOr cfg i rhsE x1 (adaptOwnedElem cfg rhsE x1 >>= keepRhs cfg rhsE >>= lcLetRhs cfg i rhsE)
-  lcMakeLet cfg nvarNamer i (Just (typeFof rhsE)) (Just rhsE) x1' x2
+  keepChain i rhsE x2 <$> lcMakeLet cfg nvarNamer i (Just (typeFof rhsE)) (Just rhsE) x1' x2
 lowerNativeExprRaw _ _ (NativeLetN_ i _ _) =
   error ("morloc bug: native let " <> show i <> " lowered without its original")
 lowerNativeExprRaw _ _ (LetVarN_ _ i _) = return $ defaultValue {poolExpr = nvarNamer i}
@@ -2639,7 +2772,7 @@ lowerNativeExprRaw cfg origExpr@(IfN _ condE thenE elseE) (IfN_ _ condDocs thenD
   thenDocs' <- adaptOwnedElem cfg thenE thenDocs
   elseDocs' <- adaptOwnedElem cfg elseE elseDocs
   case shortCircuit cfg condE thenE elseE condDocs thenDocs' elseDocs' of
-    Just docs -> return docs
+    Just docs -> docs
     Nothing -> lcMakeIf cfg origExpr condDocs thenDocs' elseDocs'
 lowerNativeExprRaw cfg origExpr (IfN_ _ condDocs thenDocs elseDocs) =
   lcMakeIf cfg origExpr condDocs thenDocs elseDocs
@@ -3136,7 +3269,7 @@ lowerManifold ::
   PoolDocs ->
   m PoolDocs
 lowerManifold cfg m form headForm bodyType bodyPool = do
-  let PoolDocs completeManifolds bodyExpr priorLines priorExprs retFlag borrowed = bodyPool
+  let PoolDocs completeManifolds bodyExpr priorLines priorExprs retFlag borrowed _ = bodyPool
       returned = render bodyExpr
       -- A parameter or a local bound by reference is copied when returned;
       -- any other name is a local the function owns.
@@ -3202,6 +3335,7 @@ lowerManifold cfg m form headForm bodyType bodyPool = do
       , poolPriorExprs = priorExprs
       , poolReturnFlag = False
       , poolBorrowedLocal = Nothing
+      , poolChain = Nothing
       }
 
 -- | Bundle all six fold callbacks into a single FoldWithManifoldM record.

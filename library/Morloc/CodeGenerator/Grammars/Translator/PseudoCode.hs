@@ -165,6 +165,7 @@ prettyFoldManifold =
             , poolPriorExprs = poolPriorExprs p1 <> poolPriorExprs p2
             , poolReturnFlag = poolReturnFlag p1 || poolReturnFlag p2
             , poolBorrowedLocal = Nothing
+            , poolChain = Nothing
             }
 
     letNamerS :: Int -> MDoc
@@ -193,7 +194,7 @@ pseudoManifold ::
   PoolDocs ->
   PoolDocs
 pseudoManifold makeFunc makeLam m form headForm bodyPool =
-  let PoolDocs completeManifolds body priorLines priorExprs _ _ = bodyPool
+  let PoolDocs completeManifolds body priorLines priorExprs _ _ _ = bodyPool
       args = typeMofForm form
       mname = manNamer m
       newManifold = makeFunc mname args priorLines body headForm
@@ -212,6 +213,7 @@ pseudoManifold makeFunc makeLam m form headForm bodyPool =
         , poolPriorExprs = priorExprs
         , poolReturnFlag = False
         , poolBorrowedLocal = Nothing
+        , poolChain = Nothing
         }
 
 prettyThing :: (p -> MI.Identity PoolDocs) -> p -> Doc ()

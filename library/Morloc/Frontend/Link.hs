@@ -451,8 +451,7 @@ linkLocalTerms m0 s0 e0 = linkLocal Set.empty s0 (toCondensedState s0) e0
             unTVar' (ClassName c) = c
             expectedMethods = case unTVar' cls of
               "Packable" -> [EV "pack", EV "unpack"]
-              "Eq" -> [EV "=="]
-              "Ord" -> [EV "<="]
+              c' | Just ms <- derivedComparisons c' -> map (EV . fst) ms
               "Show" -> [EV "show"]
               "Hashable" -> [EV "hash"]
               _ -> []

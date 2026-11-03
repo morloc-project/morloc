@@ -56,11 +56,14 @@ a result, such as logging.
 
 ### INTR-7 `@eq` and `@le` compare wire values
 Intent: ruled 2026-10-18
-Tests: spec-intr-7-1, spec-intr-7-2, spec-intr-7-3, spec-intr-7-4, spec-intr-7-5
-Code: conforms 2026-10-18
+Tests: spec-intr-7-1, spec-intr-7-2, spec-intr-7-3, spec-intr-7-4, spec-intr-7-5, spec-intr-7-6
+Code: conforms 2026-11-03
 
 `@eq a b :: Bool` and `@le a b :: Bool` take two values of one type and
 compare them as DERIV-3 orders them, in whichever language or in the nexus.
+The type must be known where the program is compiled, and its wire form may
+hold no function, suspension, stream, file handle or table; otherwise the
+use is a compile-time error.
 
 ### INTR-8 `@show` and `@hash` depend only on the wire value
 Intent: proposed

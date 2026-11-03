@@ -67,7 +67,7 @@ copying it.
 
 ### CPP-6 A C++ `data` value and a recursive record field are shared and never changed
 Intent: ruled 2026-10-19
-Tests: spec-cpp-6-1
+Tests: spec-cpp-6-1, spec-cpp-6-2
 Code: conforms 2026-10-19
 
 A `data` type with payloads is a struct holding
@@ -75,7 +75,9 @@ A `data` type with payloads is a struct holding
 constructor in declaration order, where `T_C` is the struct for constructor
 `C`. Morloc generates this form, and a mapped `data` type is written the
 same way. A `?R` field that leads back to its own record is a
-`std::shared_ptr<const R>`, with `nullptr` meaning absent. A copy shares the
+`std::shared_ptr<const R>`, with `nullptr` meaning absent; a value read
+from such a field is the `std::optional<R>` every other `?R` value is, so
+the pointer is storage only. A copy shares the
 arm, and nothing changes an arm after it is built: to change a value, copy
 the arm, change the copy, and wrap it in a new `std::make_shared<T_C>`,
 which converts to the const holder. An arm is never itself a const object:

@@ -205,7 +205,9 @@ FieldT wrap_field(Inner&& v) {
         "?T everywhere else expects std::optional<T>; "
         "non-optional fields expect T directly."
     );
-    if constexpr (is_std_optional<InnerBare>::value) {
+    if constexpr (std::is_same_v<InnerBare, FieldT>) {
+        return std::forward<Inner>(v);
+    } else if constexpr (is_std_optional<InnerBare>::value) {
         if (!v.has_value()) return wrap_field_absent<FieldT>();
         if constexpr (is_pointer_shape<FieldT>::value) {
             return pointer_traits<FieldT>::wrap(std::move(*v));
@@ -255,6 +257,23 @@ bool field_has_value(const FieldT& f) {
         return f.has_value();
     } else {
         return true;
+    }
+}
+
+// The value form of a field read (CPP-6): a `?T` stored as a pointer-shape
+// at a recursive-cycle position reads as the std::optional<T> every other
+// `?T` value is. Any other field is passed on as it was given, an lvalue
+// as the same lvalue and an rvalue moved.
+template<typename F>
+decltype(auto) read_field(F&& f) {
+    using FieldT = std::remove_cvref_t<F>;
+    if constexpr (is_pointer_shape<FieldT>::value) {
+        using T = typename pointer_traits<FieldT>::inner;
+        return field_has_value(f) ? std::optional<T>(deref_field(f)) : std::optional<T>();
+    } else if constexpr (std::is_lvalue_reference_v<F>) {
+        return (f);
+    } else {
+        return FieldT(std::move(f));
     }
 }
 

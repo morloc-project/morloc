@@ -68,19 +68,21 @@
   `data` type deriving `Ord`, C++ `sort` fails in g++ (no `operator<` for
   the generated struct) instead of being rejected or using `<=`. The same
   holds for hand-written instances and any other sourced constrained
-  function.
+  function. So a root-* cannot source `!=`, `<`, `>` or `>=` natively:
+  the source would be chosen at every type, and `v < w` on a vector-py
+  Vector would run numpy's `<` (reproduced 2026-11-02: a run failure)
+  instead of the vector instance.
+- **R orders strings by locale collation, Python and C++ by code point.**
+  [reproduced, 2026-11-02] `"B" < "a"` is FALSE in R (under C.UTF-8) and
+  True in Python, so a comparison's result depends on which language it is
+  placed in. Spec gap: DERIV-3 orders a derived instance's strings by
+  UTF-8 bytes, while DERIV-6 makes the primitive instance the host
+  operator; whether `Str`'s host order must agree across languages needs
+  a ruling.
 - **An instance that omits a method is reported as no instance.**
   [reproduced, 2026-10-21] `instance Foo Int` gives `m` but not `n`; using
   `n` at Int says "No instance found for Foo::n at type Int -> Int". It
   should say the instance lacks `n` (CLS-5). Repro: /work/plans/model-audit-2026-10-21/repro/D/cls/c14.
-- **Every type has `Eq` and `Ord` through a catch-all host-operator
-  instance.** [reproduced] Violates DERIV-6. root-py, root-cpp, root-r and
-  root-rust declare `instance Eq a` and `instance Ord a` mapped to the host
-  `==` and `<=`. The typechecker therefore grants `Eq T` for every `T`,
-  including functions, and `==` on a `data` type typechecks and then fails
-  in g++ (`no match for operator==`, root-cpp core.hpp). No `Eq`/`Ord`
-  constraint or instance context can be unmet. Repro:
-  /work/plans/brittleness-2026-10-23/repros/lang/m/datacmp.
 - **Two newtypes over one type deriving `Eq`/`Ord` break comparison of
   unpacked values.** [reproduced, 2026-11-01] Violates CLS-2 and CLS-16.
   Under root-py this is rejected with "No matching implementation found

@@ -124,3 +124,13 @@ records and user-mapped types copy deeply.
   `foreign_call_v` into the C++ pool itself: one self round trip and two
   encode/decode passes per base case. The output is correct; the cost is
   not. The non-debug build calls nothing.
+
+- **A read of a recursive `?R` field copies the node.** [read, 2026-11-03]
+  CPP-6 stores the field as `std::shared_ptr<const R>` and `mlc::read_field`
+  (cppmorloc.hpp) turns it into the `std::optional<R>` a `?R` value is, by
+  copying `*p`: the node's other fields are copied, its own cycle field is
+  shared. `isNull (.tail x)` then `require (.tail x)` copies the node twice
+  per step of a walk; a node holding a large vector copies the vector each
+  time. root-cpp `morloc_isNull` and `morloc_require` take their argument by
+  value and copy it again. A read that only tests for null needs no copy,
+  and a read from an owned receiver could move (`mlc::take_field`, OWN-5).

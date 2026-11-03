@@ -23,7 +23,7 @@ import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as T
-import Morloc.CodeGenerator.Grammars.Translator.Imperative (RNode (..), aliasChain, rnodeChildren)
+import Morloc.CodeGenerator.Grammars.Translator.Imperative (RNode (..), aliasChain, namesIn, rnodeChildren)
 import Morloc.CodeGenerator.Namespace
 import Morloc.CodeGenerator.Ownership (LetMode (..))
 
@@ -247,18 +247,6 @@ heldBy e = case e of
   CoerceN _ _ x -> heldBy x
   _ -> Set.empty
 
--- | Every native local named under an expression, the context arguments of
--- the manifolds under it included.
-namesIn :: NativeExpr -> Set.Set Int
-namesIn = go . RN
-  where
-    go n = here n <> foldMap go (rnodeChildren n)
-    here n = case n of
-      RN (LetVarN _ j _) -> Set.singleton j
-      RN (BndVarN _ j _) -> Set.singleton j
-      RNM (NativeManifold _ _ form _) -> Set.fromList [j | Arg j _ <- manifoldContext form]
-      RSM (SerialManifold _ _ form _ _) -> Set.fromList [j | Arg j _ <- manifoldContext form]
-      _ -> Set.empty
 
 -- | A let's right-hand side: the value it ends in is kept (OWN-2).
 keepValue :: Env -> St -> NativeExpr -> Eval

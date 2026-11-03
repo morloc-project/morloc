@@ -49,6 +49,8 @@ module Morloc.Namespace.Expr
   , saveFormatName
   , intrinsicName
   , intrinsicArity
+  , WireComparison (..)
+  , derivedComparisons
   , InternalApp (..)
   , InternalView (..)
   , viewInternal
@@ -623,6 +625,26 @@ data Intrinsic
                     -- is dynamic (path + handle + 0..n bracket bounds), so
                     -- 'intrinsicArity' is intentionally undefined.
   deriving (Show, Ord, Eq)
+
+-- | A derived comparison method over its two parameters (DERIV-2).
+data WireComparison
+  = -- | the intrinsic applied to the parameters, swapped if True
+    WireCall Intrinsic Bool
+  | WireNot WireComparison
+  deriving (Show, Eq)
+
+-- | The methods a derived @Eq@ or @Ord@ instance gives.
+derivedComparisons :: Text -> Maybe [(Text, WireComparison)]
+derivedComparisons "Eq" = Just [("==", WireCall IntrEq False), ("!=", WireNot (WireCall IntrEq False))]
+derivedComparisons "Ord" =
+  Just
+    [ ("<=", WireCall IntrLe False)
+    , (">=", WireCall IntrLe True)
+    , -- the wire order is total (DERIV-3)
+      ("<", WireNot (WireCall IntrLe True))
+    , (">", WireNot (WireCall IntrLe False))
+    ]
+derivedComparisons _ = Nothing
 
 -- | Map intrinsic to its canonical name
 intrinsicName :: Intrinsic -> Text

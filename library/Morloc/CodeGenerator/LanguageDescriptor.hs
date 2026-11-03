@@ -208,6 +208,7 @@ data LangDescriptor = LangDescriptor
     ldAssignOp :: !Text -- "=" or "<-"
   , ldAndOp :: !Text -- the short-circuit and: "and" or "&&"
   , ldOrOp :: !Text -- the short-circuit or: "or" or "||"
+  , ldNotOp :: !Text -- boolean negation: "not" or "!"
   , -- Lambda
     ldLambdaTemplate :: !Text -- e.g. "lambda {{args}}: {{body}}"
   , -- Do-block (effect wrapper)
@@ -378,6 +379,7 @@ instance Y.FromJSON LangDescriptor where
             . ins "ldIntLiteralSuffix" (Y.String "")
             . ins "ldAndOp" (Y.String "&&")
             . ins "ldOrOp" (Y.String "||")
+            . ins "ldNotOp" (Y.String "!")
             . ins "ldIntLiteralSuffixLimit" Y.Null
             . ins "ldIntLiteralPlainTypes" (Y.Array mempty)
             . ins "ldIntLiteralWide" (Y.Object mempty)
@@ -483,6 +485,7 @@ defaultLangDescriptor name ext =
     , ldIntLiteralSuffix = ""
     , ldAndOp = "&&"
     , ldOrOp = "||"
+    , ldNotOp = "!"
     , ldIntLiteralSuffixLimit = Nothing
     , ldIntLiteralPlainTypes = []
     , ldIntLiteralWide = Map.empty

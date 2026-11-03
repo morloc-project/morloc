@@ -690,6 +690,7 @@ rustCacheBody resSa lbl midx args bodyPool = do
     , poolPriorExprs = poolPriorExprs bodyPool
     , poolReturnFlag = poolReturnFlag bodyPool
     , poolBorrowedLocal = Nothing
+    , poolChain = Nothing
     }
 
 -- | Prepare one cache argument: a native arg is serialized to a packet via
@@ -2492,7 +2493,7 @@ rustLowerConfig mask makers consumed =
     , lcNewIndex = getCounter
     , lcPrintExpr = RP.printExpr
     , lcPrintStmt = RP.printStmt
-    , lcEvalPattern = rustEvalPattern
+    , lcEvalPattern = \t _ -> rustEvalPattern t
     , lcTakeGetter = rustTakeGetter
     , lcListConstructor = \_ _ es -> "vec![" <> hcat (punctuate ", " es) <> "]"
     , lcTupleConstructor = \_ _ es -> tupled es
@@ -2558,6 +2559,11 @@ rustLowerConfig mask makers consumed =
     , lcOwnPacketDecl = \v e -> Just ("let" <+> v <+> "= ::rustmorloc::Packet::new(" <> e <> ");", v <> ".as_ptr()")
     , lcMakeIf = rustMakeIf
     , lcShortCircuit = \isAnd a b -> a <+> (if isAnd then "&&" else "||") <+> b
+    , lcChainLadder = \isAnd flag first rungs ->
+        let undecided = if isAnd then flag else "!" <> flag
+            rung (stmts, e) =
+              vsep ["if" <+> undecided <+> "{", indent 4 (vsep (stmts <> [flag <+> "=" <+> e <> ";"])), "}"]
+         in vsep (("let mut" <+> flag <> ": bool =" <+> first <> ";") : map rung rungs)
     , lcMakeLoop = rustMakeLoop
     -- An effect thunk captures by value only when it can outlive the frame that
     -- builds it. The only such position is a manifold return typed
@@ -2745,6 +2751,7 @@ rustMakeLet namer letIndex mt mrhs p1 p2 = do
       , poolPriorExprs = poolPriorExprs p1 <> poolPriorExprs p2
       , poolReturnFlag = poolReturnFlag p1 || poolReturnFlag p2
       , poolBorrowedLocal = Nothing
+      , poolChain = Nothing
       }
 
 -- | The type annotation of let @letIndex@ of type @mt@ (Nothing: a serial
@@ -2787,6 +2794,7 @@ rustMakeLoop res carried origBody body = do
     , poolPriorExprs = concatMap poolPriorExprs leaves
     , poolReturnFlag = True
     , poolBorrowedLocal = Nothing
+    , poolChain = Nothing
     }
   where
     ids = map fst carried
@@ -2859,6 +2867,7 @@ rustMakeIf origExpr condDocs thenDocs elseDocs = do
       , poolPriorExprs = poolPriorExprs condDocs <> poolPriorExprs thenDocs <> poolPriorExprs elseDocs
       , poolReturnFlag = poolReturnFlag condDocs || poolReturnFlag thenDocs || poolReturnFlag elseDocs
       , poolBorrowedLocal = Nothing
+      , poolChain = Nothing
       }
 
 -- | Emit a manifold function definition (@unsafe fn m{i}(..) -> ..@).

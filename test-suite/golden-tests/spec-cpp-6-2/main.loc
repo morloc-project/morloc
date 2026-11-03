@@ -1,0 +1,64 @@
+-- A `?LL` field of LL is stored as a pointer in C++ (CPP-6), and a value
+-- read from it is an ordinary optional: it can be tested, unwrapped and
+-- passed on like any other `?LL`, read through a value that was itself
+-- read from such a field or through a bracket step, and written back.
+module main (len, total, second, lastIsNull, third, cut, relink, nextOf, keepBoth)
+
+import root-cpp
+
+record LL where
+  head :: Int
+  tail :: ?LL
+record Cpp => LL = "ll_t"
+
+record Node where
+  v :: Int
+  next :: ?Node
+record Cpp => Node = "node_t"
+
+source Cpp from "ll.hpp" ("mkLL", "mkNodes")
+mkLL :: Int -> LL
+mkNodes :: Int -> [Node]
+
+lenLL :: LL -> Int
+lenLL x ? isNull (.tail x) = 1
+        : 1 + lenLL (require (.tail x))
+
+sumLL :: Int -> LL -> Int
+sumLL acc x ? isNull (.tail x) = acc + .head x
+            : sumLL (acc + .head x) (require (.tail x))
+
+len :: Int -> Int
+len n = lenLL (mkLL n)
+
+total :: Int -> Int
+total n = sumLL 0 (mkLL n)
+
+second :: Int -> ?Int
+second n = getHead (.tail (mkLL n))
+
+getHead :: ?LL -> ?Int
+getHead x ? isNull x = Null
+          : .head (require x)
+
+lastIsNull :: Int -> Bool
+lastIsNull n = .tail (mkLL 1) == Null
+
+third :: Int -> ?Int
+third n = getHead (.tail (require (.tail (mkLL n))))
+
+cut :: Int -> Int
+cut n = lenLL (.(.tail = Null) (mkLL n))
+
+relink :: Int -> Int
+relink n = lenLL (.(.tail = .tail (mkLL n)) (mkLL 5))
+
+nextOf :: Int -> ?Int
+nextOf n = getNext (.[0].next (mkNodes n))
+
+getNext :: ?Node -> ?Int
+getNext x ? isNull x = Null
+          : .v (require x)
+
+keepBoth :: Int -> (Int, Int)
+keepBoth n = (\t -> (lenLL (.(.tail = t) (mkLL 3)), lenLL (require t))) (.tail (mkLL n))

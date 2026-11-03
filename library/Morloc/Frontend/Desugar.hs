@@ -3360,18 +3360,38 @@ derivedWireInstances :: Span -> TVar -> [Either (TVar, Kind) TypeU] -> [(Located
 derivedWireInstances sp v vs ders = concat <$> mapM one ders
   where
     one (_, "Packable") = return []
-    one (_, "Eq") = inst "Eq" "==" IntrEq 2
-    one (_, "Ord") = inst "Ord" "<=" IntrLe 2
-    one (_, "Show") = inst "Show" "show" IntrShow 1
-    one (_, "Hashable") = inst "Hashable" "hash" IntrHash 1
+    one (_, cls)
+      | Just methods <- derivedComparisons cls = inst cls [(m, wire w) | (m, w) <- methods]
+    one (_, "Show") = inst1 "Show" "show" IntrShow
+    one (_, "Hashable") = inst1 "Hashable" "hash" IntrHash
     one (tok, cls) = notDerivable tok cls
-    inst :: Text -> Text -> Intrinsic -> Int -> D [ExprI]
-    inst cls method intr arity = do
-      params <- mapM (const (freshIrrefLamParam sp)) [1 .. arity]
-      refs <- mapM (freshExprSpan sp . VarE defaultValue) params
-      body <- freshExprSpan sp (IntrinsicE intr refs)
-      lam <- mkLam sp params body
-      ass <- freshExprSpan sp (AssE (EV method) lam [])
+
+    -- each use of a parameter is a node of its own
+    wire (WireCall intr swap) x y = do
+      args <- sequence (if swap then [y, x] else [x, y])
+      freshExprSpan sp (IntrinsicE intr args)
+    wire (WireNot w) x y = do
+      c <- wire w x y
+      t <- freshExprSpan sp (LogE True)
+      e <- freshExprSpan sp (LogE False)
+      freshExprSpan sp (IfE c e t)
+
+    method2 (name, body) = do
+      p1 <- freshIrrefLamParam sp
+      p2 <- freshIrrefLamParam sp
+      let x = freshExprSpan sp (VarE defaultValue p1)
+          y = freshExprSpan sp (VarE defaultValue p2)
+      lam <- body x y >>= mkLam sp [p1, p2]
+      freshExprSpan sp (AssE (EV name) lam [])
+    inst cls methods = do
+      asses <- mapM method2 methods
+      i <- freshExprSpan sp (IstE Derived (ClassName cls) [] [quantifyType (declHead v vs)] asses)
+      return [i]
+    inst1 cls name intr = do
+      p <- freshIrrefLamParam sp
+      x <- freshExprSpan sp (VarE defaultValue p)
+      lam <- freshExprSpan sp (IntrinsicE intr [x]) >>= mkLam sp [p]
+      ass <- freshExprSpan sp (AssE (EV name) lam [])
       i <- freshExprSpan sp (IstE Derived (ClassName cls) [] [quantifyType (declHead v vs)] [ass])
       return [i]
 

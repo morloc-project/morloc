@@ -501,51 +501,27 @@ resolveInstances g (AnnoS gi@(Idx _ gt) ci e0) = do
       MorlocMonad (Gamma, ExprS (Indexed TypeU) Many Int)
 
     f scope g0 (VarS v (PolymorphicExpr clsName _ _ rss)) = do
-      -- Whether an instance implements the method, read from the term
-      -- rather than from the candidates, which a shallow collection leaves
-      -- empty.
-      GMap idmap sigmap <- MM.gets stateSignatures
-      implemented <- case Map.lookup ci idmap >>= (`Map.lookup` sigmap) of
-        Just (Polymorphic _ _ _ ts) ->
-          return (Set.fromList [t | tt <- ts, Just t <- [termGeneral tt], not (null (termConcrete tt) && null (termDecl tt))])
-        _ -> MM.throwCompilerBug $ "resolveInstances: no class term for the use of" <+> pretty v
-      let implements t rs = not (null rs) || Set.member t implemented
-      let gtEval = case TE.evaluateType scope gt of
-            Right et -> et
-            Left _ -> gt
-          -- Open: the occurrence type may still hold an unsolved
-          -- existential, which an empty gamma cannot instantiate.
-          isCompatible t = isSubtypeOfOpen scope t gtEval
-                        || isJust (tryCoerce scope t gtEval emptyGamma)
-          rssCompat = [x | x@(EType t _ _ _, _) <- rss, isCompatible t]
-          -- Sibling aliases do not share instances: @instance Qux A@ does
-          -- not match @A'@ though both evaluate to the same type.
-          rssMatching = filterByAliasChain scope gt rssCompat
-          -- An instance that gives no implementation of the method leaves
-          -- it to the most specific more general instance that does: answer
-          -- (b) of the open CLS-12.
-          implementedMoreGeneral h =
-            let general = [et | (t, rs) <- rssMatching, implements t rs, let et = etype t, generalizes True et h]
-             in mostSpecific general
-          hasFallback h = not (null (implementedMoreGeneral h))
-          rssSubtypes = [x | x@(t, rs) <- rssMatching, implements t rs || not (hasFallback (etype t))]
-
+      implemented <- implementedAt ci v
+      let gtEval = evalOr scope gt
+          rssSubtypes = instancesAt scope implemented gt rss
+          implements t rs = not (null rs) || Set.member t implemented
 
       -- Every most specific candidate is kept; Morloc.CodeGenerator.Realize
       -- (collapseExpr) picks one by the alias chain of the use's type.
       (g2, es1) <- case mostSpecific [t | (EType t _ _ _, _) <- rssSubtypes] of
         [] ->
-          throwTypeError ci $
-            "No instance found for" <+> pretty clsName
-              <> "::"
-              <> pretty v
-              <+> "at type" <+> prettyTypeU gtEval
-              <> noInstanceAdvice scope clsName v gtEval
+          deriveComparison scope g0 clsName v >>= \derived -> case derived of
+            Just (g1, body) -> return (g1, [body])
+            Nothing ->
+              throwTypeError ci $
+                "No instance found for" <+> pretty clsName
+                  <> "::"
+                  <> pretty v
+                  <+> "at type" <+> prettyTypeU gtEval
+                  <> noInstanceAdvice scope clsName v gtEval
         manyTypes -> do
           -- Without deduplication, N aliases branch exponentially.
-          let eval t = case TE.evaluateType scope t of
-                Right et -> et
-                Left _ -> t
+          let eval = evalOr scope
               deduped = nubBy (\t1 t2 -> eval t1 == eval t2) manyTypes
               chosen t = any (\d -> eval (etype t) == eval d) deduped
               -- A representation cast agrees with every instance of its
@@ -618,6 +594,45 @@ resolveInstances g (AnnoS gi@(Idx _ gt) ci e0) = do
       (g1, es') <- statefulMapM resolveInstances g0 es
       return (g1, IntrinsicS intr es')
 
+    -- DERIV-6: an Eq or Ord method at a type with no instance is the
+    -- derived one. Ord is derived only where Eq is too, and a bare type
+    -- variable has no instance to derive.
+    deriveComparison ::
+      Scope -> Gamma -> ClassName -> EVar -> MorlocMonad (Maybe (Gamma, AnnoS (Indexed TypeU) ManyPoly Int))
+    deriveComparison scope g0 cls (EV method)
+      | Just methods <- derivedComparisons (unClassName cls)
+      , Just w <- lookup method methods
+      , FunU (compared : _) _ <- gt = do
+          derivable <- derivableAt scope cls compared
+          eqWritten <-
+            if unClassName cls == "Ord"
+              then handWrittenEq scope
+              else return False
+          if not derivable || eqWritten
+            then return Nothing
+            else do
+              let (g1, x) = evarname g0 "x"
+                  (g2, y) = evarname g1 "y"
+              body <- derivedBody ci x y w
+              lamIdx <- MM.getCounterWithPos ci
+              (g3, _, typed) <- checkG g2 (AnnoS lamIdx lamIdx (LamS [x, y] body)) gt
+              return (Just (g3, typed))
+      | otherwise = return Nothing
+
+    -- Whether an Eq instance other than the wire one matches the use's
+    -- type, chosen as a use of @==@ there would choose.
+    handWrittenEq :: Scope -> MorlocMonad Bool
+    handWrittenEq scope = do
+      GMap _ sigmap <- MM.gets stateSignatures
+      let terms =
+            [ tt
+            | Polymorphic (ClassName "Eq") (EV "==") _ ts <- Map.elems sigmap
+            , tt <- ts
+            , not (isWireEq tt)
+            ]
+          candidates = [(t, [] :: [()]) | tt <- terms, Just t <- [termGeneral tt]]
+      return . not . null $ instancesAt scope (implementedBy terms) gt candidates
+
     -- Solutions propagate only when every candidate is in one
     -- alias-equivalent group; otherwise solving to one would exclude the
     -- others (e.g. Integral Int and Integral Real).
@@ -639,6 +654,82 @@ resolveInstances g (AnnoS gi@(Idx _ gt) ci e0) = do
         (Right g1)
           | singleGroup -> connectTypes singleGroup g1 ts
           | otherwise   -> connectTypes singleGroup g0 ts
+
+evalOr :: Scope -> TypeU -> TypeU
+evalOr scope t = case TE.evaluateType scope t of
+  Right et -> et
+  Left _ -> t
+
+-- | The instance types of a method's term that give an implementation of
+-- it, read from the term rather than from a use's candidates, which a
+-- shallow collection leaves empty.
+implementedAt :: Int -> EVar -> MorlocMonad (Set.Set EType)
+implementedAt ci v = do
+  GMap idmap sigmap <- MM.gets stateSignatures
+  case Map.lookup ci idmap >>= (`Map.lookup` sigmap) of
+    Just (Polymorphic _ _ _ ts) -> return (implementedBy ts)
+    _ -> MM.throwCompilerBug $ "resolveInstances: no class term for the use of" <+> pretty v
+
+implementedBy :: [TermTypes] -> Set.Set EType
+implementedBy ts =
+  Set.fromList [t | tt <- ts, Just t <- [termGeneral tt], not (null (termConcrete tt) && null (termDecl tt))]
+
+-- | The candidates a method use at @gt@ chooses among: compatible with the
+-- use's type, reached by its alias chain, and, for an instance that gives
+-- no implementation of the method, only where no more general instance
+-- does (answer (b) of the open CLS-12).
+instancesAt :: Scope -> Set.Set EType -> TypeU -> [(EType, [a])] -> [(EType, [a])]
+instancesAt scope implemented gt rss =
+  [x | x@(t, rs) <- rssMatching, implements t rs || not (hasFallback (etype t))]
+  where
+    implements t rs = not (null rs) || Set.member t implemented
+    gtEval = evalOr scope gt
+    -- Open: the occurrence type may still hold an unsolved existential,
+    -- which an empty gamma cannot instantiate.
+    isCompatible t = isSubtypeOfOpen scope t gtEval || isJust (tryCoerce scope t gtEval emptyGamma)
+    rssCompat = [x | x@(EType t _ _ _, _) <- rss, isCompatible t]
+    -- Sibling aliases do not share instances: @instance Qux A@ does not
+    -- match @A'@ though both evaluate to the same type.
+    rssMatching = filterByAliasChain scope gt rssCompat
+    hasFallback h =
+      not . null $ mostSpecific [et | (t, rs) <- rssMatching, implements t rs, let et = etype t, generalizes True et h]
+
+-- | DERIV-6: Eq and Ord, the compiler's classes, are derived at a type that
+-- is not a bare type variable.
+derivableAt :: Scope -> ClassName -> TypeU -> MorlocMonad Bool
+derivableAt scope cls t = case (derivedComparisons (unClassName cls), evalOr scope t) of
+  (Nothing, _) -> return False
+  (_, VarU (TV n)) | isTypeVariableName n -> return False
+  (Just methods, _) -> do
+    GMap _ sigmap <- MM.gets stateSignatures
+    let declared = Set.fromList [v | Polymorphic c v _ _ <- Map.elems sigmap, c == cls]
+    return (declared == Set.fromList [EV m | (m, _) <- methods])
+
+-- | An instance whose @==@ is @eq on its parameters, as a deriving clause
+-- writes it.
+isWireEq :: TermTypes -> Bool
+isWireEq tt = case termDecl tt of
+  [ExprI _ (LamE [x, y] (ExprI _ (IntrinsicE IntrEq [ExprI _ (VarE _ x'), ExprI _ (VarE _ y')])))] ->
+    null (termConcrete tt) && x == x' && y == y'
+  _ -> False
+
+-- | A derived comparison's body over its parameters @x@ and @y@, untyped,
+-- each node at the use's source position.
+derivedBody :: Int -> EVar -> EVar -> WireComparison -> MorlocMonad (AnnoS Int ManyPoly Int)
+derivedBody site x y = go
+  where
+    node e = do
+      i <- MM.getCounterWithPos site
+      return (AnnoS i i e)
+    go (WireCall intr swap) = do
+      a <- node (BndS x)
+      b <- node (BndS y)
+      node (IntrinsicS intr (if swap then [b, a] else [a, b]))
+    go (WireNot w) = do
+      c <- go w
+      t <- node (LogS True)
+      e <- node (LogS False)
+      node (IfS c e t)
 
 -- | PAT-5: a bracket step's receiver is a list or an IFile, which every
 -- back end brackets natively, or reaches some instance of the step's
@@ -3270,13 +3361,19 @@ validate trees instances = do
       checkShapes g1 e1
       closure <- superclassClosure givens
       heads <- instanceHeads
-      mapM_
-        (requireEntailed i closure)
-        [ c
-        | c@(Constraint cls args) <- obligations
-        , any (mentionsRigid rigid) args
-        , not (any (covers args) (Map.findWithDefault [] cls heads))
-        ]
+      scope <- MM.getGeneralScope
+      unmet <-
+        filterM
+          (\(Constraint cls args) -> case args of
+              -- each instantiation is resolved where it is used
+              [t] -> not <$> derivableAt scope cls t
+              _ -> return True)
+          [ c
+          | c@(Constraint cls args) <- obligations
+          , any (mentionsRigid rigid) args
+          , not (any (covers args) (Map.findWithDefault [] cls heads))
+          ]
+      mapM_ (requireEntailed i closure) unmet
 
 -- | PAT-1: each destructuring pattern fits the value it destructures. A
 -- tuple pattern needs a tuple of its width, a record pattern a record with

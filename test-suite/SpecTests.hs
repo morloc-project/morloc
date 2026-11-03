@@ -1310,13 +1310,212 @@ derivTests =
   testGroup
     "DERIV"
     [ accept
+        "spec-deriv-6-1"
+        [r|
+        module main (f)
+        class Eq a where
+          (==) :: a -> a -> Bool
+          (!=) :: a -> a -> Bool
+        class Ord a where
+          (<) :: a -> a -> Bool
+          (<=) :: a -> a -> Bool
+          (>) :: a -> a -> Bool
+          (>=) :: a -> a -> Bool
+        record P where
+          a :: Int
+          b :: Str
+        mkP :: Int -> P
+        f :: Int -> (Bool, Bool, Bool, Bool, Bool, Bool)
+        f n = (mkP n == mkP 1, mkP n != mkP 1, mkP n < mkP 1, mkP n <= mkP 1, mkP n > mkP 1, mkP n >= mkP 1)
+        |]
+    , rejectNaming
+        "spec-deriv-6-2"
+        ["Ord"]
+        []
+        [r|
+        module main (f)
+        class Eq a where
+          (==) :: a -> a -> Bool
+          (!=) :: a -> a -> Bool
+        class Ord a where
+          (<) :: a -> a -> Bool
+          (<=) :: a -> a -> Bool
+          (>) :: a -> a -> Bool
+          (>=) :: a -> a -> Bool
+        record P where
+          a :: Int
+        instance Eq P where
+          (==) x y = True
+          (!=) x y = False
+        mkP :: Int -> P
+        f :: Int -> Bool
+        f n = mkP n < mkP 1
+        |]
+    , rejectNaming
+        "spec-deriv-6-3"
+        ["Ord"]
+        []
+        [r|
+        module main (f)
+        class Eq a where
+          (==) :: a -> a -> Bool
+          (!=) :: a -> a -> Bool
+        class Ord a where
+          (<) :: a -> a -> Bool
+          (<=) :: a -> a -> Bool
+          (>) :: a -> a -> Bool
+          (>=) :: a -> a -> Bool
+        record P where
+          a :: Int
+        instance Eq P where
+          (==) x y = True
+          (!=) x y = False
+        type Q = P
+        mkQ :: Int -> Q
+        f :: Int -> Bool
+        f n = mkQ n < mkQ 1
+        |]
+    , accept
+        "spec-deriv-6-4"
+        [r|
+        module main (f)
+        class Eq a where
+          (==) :: a -> a -> Bool
+          (!=) :: a -> a -> Bool
+        class Ord a where
+          (<) :: a -> a -> Bool
+          (<=) :: a -> a -> Bool
+          (>) :: a -> a -> Bool
+          (>=) :: a -> a -> Bool
+        record P where
+          a :: Int
+        instance Eq P where
+          (==) x y = True
+          (!=) x y = False
+        mkP :: Int -> P
+        f :: Int -> Bool
+        f n = mkP n == mkP 1
+        |]
+    , accept
+        "spec-deriv-6-5"
+        [r|
+        module main (f)
+        class Eq a where
+          (==) :: a -> a -> Bool
+          (!=) :: a -> a -> Bool
+        class Ord a where
+          (<) :: a -> a -> Bool
+          (<=) :: a -> a -> Bool
+          (>) :: a -> a -> Bool
+          (>=) :: a -> a -> Bool
+        record Box a where
+          v :: a
+        instance Eq (Box Int) where
+          (==) x y = True
+          (!=) x y = False
+        mkBox :: a -> Box a
+        f :: Str -> (Bool, Bool)
+        f s = (mkBox s == mkBox "a", mkBox s < mkBox "a")
+        |]
+    , accept
+        "spec-deriv-6-6"
+        [r|
+        module main (f)
+        class Eq a where
+          (==) :: a -> a -> Bool
+          (!=) :: a -> a -> Bool
+        class Ord a where
+          (<) :: a -> a -> Bool
+          (<=) :: a -> a -> Bool
+          (>) :: a -> a -> Bool
+          (>=) :: a -> a -> Bool
+        record Box a where
+          v :: a
+        mkBox :: a -> Box a
+        eqBox :: Box a -> Box a -> Bool
+        eqBox x y = x == y
+        f :: Int -> Bool
+        f n = eqBox (mkBox n) (mkBox 1)
+        |]
+    , accept
+        "spec-deriv-6-8"
+        [r|
+        module main (f)
+        class Eq a where
+          (==) :: a -> a -> Bool
+          (!=) :: a -> a -> Bool
+        class Ord a where
+          (<) :: a -> a -> Bool
+          (<=) :: a -> a -> Bool
+          (>) :: a -> a -> Bool
+          (>=) :: a -> a -> Bool
+        newtype Meters = Real
+        mkM :: Real -> Meters
+        f :: Real -> (Bool, Bool)
+        f x = (mkM x == mkM 1.0, mkM x < mkM 1.0)
+        |]
+    , accept
+        "spec-deriv-6-9"
+        [r|
+        module main (f)
+        class Eq a where
+          (==) :: a -> a -> Bool
+          (!=) :: a -> a -> Bool
+        class Ord a where
+          (<) :: a -> a -> Bool
+          (<=) :: a -> a -> Bool
+          (>) :: a -> a -> Bool
+          (>=) :: a -> a -> Bool
+        newtype Z = Real deriving (Eq)
+        mkZ :: Real -> Z
+        f :: Real -> Bool
+        f x = mkZ x < mkZ 1.0
+        |]
+    , rejectNaming
+        "spec-deriv-6-10"
+        ["Ord"]
+        []
+        [r|
+        module main (f)
+        class Ord a where
+          (<=) :: a -> a -> Bool
+        record P where
+          a :: Int
+        mkP :: Int -> P
+        f :: Int -> Bool
+        f n = mkP n <= mkP 1
+        |]
+    , rejectNaming
+        "spec-deriv-6-7"
+        ["Eq"]
+        []
+        [r|
+        module main (f)
+        class Eq a where
+          (==) :: a -> a -> Bool
+          (!=) :: a -> a -> Bool
+        class Ord a where
+          (<) :: a -> a -> Bool
+          (<=) :: a -> a -> Bool
+          (>) :: a -> a -> Bool
+          (>=) :: a -> a -> Bool
+        eqA :: a -> a -> Bool
+        eqA x y = x == y
+        f :: Int -> Bool
+        f n = eqA n 1
+        |]
+    , accept
         "spec-deriv-1-1"
         [r|
         module main (f)
         class Eq a where
           (==) :: a -> a -> Bool
+          (!=) :: a -> a -> Bool
         class Ord a where
+          (<) :: a -> a -> Bool
           (<=) :: a -> a -> Bool
+          (>) :: a -> a -> Bool
+          (>=) :: a -> a -> Bool
         class Show a where
           show :: a -> Str
         class Hashable a where
@@ -1335,8 +1534,12 @@ derivTests =
         module main (f)
         class Eq a where
           (==) :: a -> a -> Bool
+          (!=) :: a -> a -> Bool
         class Ord a where
+          (<) :: a -> a -> Bool
           (<=) :: a -> a -> Bool
+          (>) :: a -> a -> Bool
+          (>=) :: a -> a -> Bool
         class Show a where
           show :: a -> Str
         class Hashable a where
@@ -1357,8 +1560,12 @@ derivTests =
         module main (f)
         class Eq a where
           (==) :: a -> a -> Bool
+          (!=) :: a -> a -> Bool
         class Ord a where
+          (<) :: a -> a -> Bool
           (<=) :: a -> a -> Bool
+          (>) :: a -> a -> Bool
+          (>=) :: a -> a -> Bool
         class Show a where
           show :: a -> Str
         class Hashable a where
@@ -1373,8 +1580,12 @@ derivTests =
         module main (f)
         class Eq a where
           (==) :: a -> a -> Bool
+          (!=) :: a -> a -> Bool
         class Ord a where
+          (<) :: a -> a -> Bool
           (<=) :: a -> a -> Bool
+          (>) :: a -> a -> Bool
+          (>=) :: a -> a -> Bool
         class Show a where
           show :: a -> Str
         class Hashable a where

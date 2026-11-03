@@ -803,8 +803,9 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
     toNexusExpr (AnnoS (Idx ix t) _ (IntrinsicS IntrRead [arg])) =
       Serial.checkReadDataType ix IntrRead t >>
       withTryResult t (\inner -> ReadX <$> type2schema inner <*> toNexusExpr arg)
-    toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS intr [a@(AnnoS (Idx _ ta) _ _), b]))
+    toNexusExpr (AnnoS (Idx ix t) _ (IntrinsicS intr [a@(AnnoS (Idx _ ta) _ _), b]))
       | intr `elem` [IntrEq, IntrLe] = do
+          generalTypeToSerialAST ix ta >>= Serial.checkComparable ix intr (pretty ta)
           pairSchema <- type2schema (AppT (VarT (MBT.tuple 2)) [ta, ta])
           pair <- TupX pairSchema <$> mapM toNexusExpr [a, b]
           CompareX (intrinsicName intr) <$> type2schema t <*> pure pair

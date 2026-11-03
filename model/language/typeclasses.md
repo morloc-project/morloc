@@ -137,14 +137,20 @@ Implementations of one instance may come from several modules, so either
 check needs the whole program.
 
 ### CLS-15 A class the compiler refers to is declared in `internal`
-Intent: ruled 2026-10-18
+Intent: ruled 2026-11-02
 Code: deviates (issues/typeclasses.md)
 
 `root` is a prelude a program may replace (MOD-18); `internal` is what the
 compiler assumes. A class the compiler names (to decide literal patterns,
 to derive instances, to serialize) is declared in `internal`: `Packable`,
-`Eq`, `Ord`, `Show`, `Hashable` and the indexing classes. The operators
-defined from a class's methods (`<`, `!=`, ...) may stay in `root`.
+`Eq`, `Ord`, `Show`, `Hashable` and the indexing classes. `Eq` declares
+`==` and `!=`, and `Ord` declares `<`, `<=`, `>` and `>=`, so an instance
+chooses the implementation of each, and a language may use its own
+operators where they are right for the instance's type.
+
+Why: defined in `root` from `==` and `<=`, the four were one or two calls
+more in every language, and a native source for them was chosen at every
+type, bypassing the instance (CLS-19).
 
 ### CLS-16 The most specific matching instance is selected
 Intent: ruled 2026-10-29
