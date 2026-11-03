@@ -23,7 +23,9 @@ module Morloc.CodeGenerator.Grammars.Common
   , renameSE
   , PoolDocs (..)
   , Chain (..)
+  , ChainKind (..)
   , ChainDocs (..)
+  , Guards (..)
   , mergePoolDocs
 
     -- * Naming conventions
@@ -116,9 +118,9 @@ data PoolDocs = PoolDocs
   -- ^ The name of a local bound by reference, when 'poolExpr' is that
   -- name. Returning it copies its referent.
   , poolChain :: Maybe ChainDocs
-  -- ^ The chain of one short-circuit operator these docs were lowered from
-  -- (EMIT-4), so that an enclosing operand of the same operator extends it
-  -- rather than nesting it.
+  -- ^ The chain these docs were lowered from, of one short-circuit operator
+  -- (EMIT-4) or of guards (EMIT-5), so that an enclosing chain of the same
+  -- kind extends it rather than nesting it.
   }
 
 -- | A chain of one short-circuit operator (EMIT-4): the operands of its
@@ -130,6 +132,17 @@ data Chain = Chain
   , chainRungs :: Seq.Seq ([MDoc], NonEmpty MDoc)
   }
 
+-- | A chain of guards (EMIT-5): the first test with its arm, then rungs,
+-- each the statements of a test, the test and its arm, and the arm taken
+-- when no test holds.
+data Guards = Guards
+  { guardsFirst :: (MDoc, NativeExpr, PoolDocs)
+  , guardsRungs :: Seq.Seq ([MDoc], MDoc, NativeExpr, PoolDocs)
+  , guardsElse :: (NativeExpr, PoolDocs)
+  }
+
+data ChainKind = ShortChain Chain | GuardChain Guards
+
 -- | A chain and how its docs hold it. 'cdPre' are the statements before
 -- the chain, 'cdPreBound' the lets among them that the rest of the chain
 -- is in the scope of, 'cdRungNames' the locals its rungs read and
@@ -137,7 +150,7 @@ data Chain = Chain
 -- lines differ from 'cdExpr', 'cdLineCount' and 'cdPre' have been changed
 -- since, and are an ordinary operand.
 data ChainDocs = ChainDocs
-  { cdChain :: Chain
+  { cdChain :: ChainKind
   , cdPre :: [MDoc]
   , cdPreBound :: Set.Set Int
   , cdRungNames :: Set.Set Int

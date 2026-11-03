@@ -22,6 +22,7 @@ module Morloc.CodeGenerator.Grammars.Translator.Generic
   , manifoldName
   ) where
 
+import Data.Foldable (toList)
 import qualified Data.Aeson as Aeson
 import qualified Data.Binary as Binary
 import qualified Data.ByteString.Lazy as BL
@@ -621,6 +622,7 @@ genericLowerConfig desc srcNamer debugInfo traceInfo debugMode = cfg
         , lcCacheBody = genericCacheBody desc cfg
         , lcDebugWrap = genericDebugWrap desc cfg debugInfo
         , lcMakeIf = genericMakeIf desc cfg
+        , lcMakeIfLadder = genericMakeIfLadder desc cfg
         , lcShortCircuit = \isAnd a b ->
             a <+> pretty (if isAnd then ldAndOp desc else ldOrOp desc) <+> b
         , lcChainLadder = genericChainLadder desc
@@ -1013,17 +1015,44 @@ makeGenericSocketPath desc socketFileBasename =
       socketText = render (dquotes socketFileBasename)
    in pretty $ substituteT tmpl [("socket", socketText)]
 
+-- | A block that runs when the condition holds.
+renderIfBlock :: LangDescriptor -> MDoc -> [MDoc] -> MDoc
+renderIfBlock desc g body = case ldBlockStyle desc of
+  IndentBlock -> nest 4 (vsep (("if" <+> g <> ":") : body))
+  BraceBlock -> vsep ["if" <+> parens g <+> "{", indent 4 (vsep body), "}"]
+
 -- | A chain's ladder (EMIT-4): one flag, and a flat block per rung.
 genericChainLadder :: LangDescriptor -> Bool -> MDoc -> MDoc -> [([MDoc], MDoc)] -> MDoc
 genericChainLadder desc isAnd flag first rungs = vsep ((flag <+> assign <+> first) : map rung rungs)
   where
     assign = pretty (ldAssignOp desc)
     undecided = if isAnd then flag else pretty (ldNotOp desc) <+> flag
-    rung (stmts, e) =
-      let body = stmts <> [flag <+> assign <+> e]
-       in case ldBlockStyle desc of
-            IndentBlock -> nest 4 (vsep (("if" <+> undecided <> ":") : body))
-            BraceBlock -> vsep ["if" <+> parens undecided <+> "{", indent 4 (vsep body), "}"]
+    rung (stmts, e) = renderIfBlock desc undecided (stmts <> [flag <+> assign <+> e])
+
+-- | A chain of guards as one flat block (EMIT-5): a flag records that an
+-- arm was taken, and each later test runs only while it is unset. The
+-- block holds only conditionals, which add no loop to the nesting Python
+-- counts.
+genericMakeIfLadder :: LangDescriptor -> LowerConfig IndexM -> NativeExpr -> Guards -> IndexM (MDoc, MDoc)
+genericMakeIfLadder desc cfg _ (Guards (c1, _, t1) rungs (_, e)) = do
+  v <- helperNamer <$> lcNewIndex cfg
+  done <- helperNamer <$> lcNewIndex cfg
+  let assign x y = x <+> pretty (ldAssignOp desc) <+> y
+      terminated x = case ldBlockStyle desc of
+        IndentBlock -> x
+        BraceBlock -> x <> ";"
+      arm t = poolPriorLines t <> [assign v (poolExpr t), assign done (pretty (ldBoolTrue desc))]
+      undecided = pretty (ldNotOp desc) <+> done
+      rung (pre, c, _, t) = renderIfBlock desc undecided (pre <> [renderIfBlock desc c (arm t)])
+      ladder =
+        vsep $
+          [ terminated (assign v (pretty (ldNullLiteral desc)))
+          , terminated (assign done (pretty (ldBoolFalse desc)))
+          , renderIfBlock desc c1 (arm t1)
+          ]
+            <> map rung (toList rungs)
+            <> [renderIfBlock desc undecided (poolPriorLines e <> [assign v (poolExpr e)])]
+  return (v, ladder)
 
 -- | Generic if/else rendering for descriptor-driven languages
 genericMakeIf :: LangDescriptor -> LowerConfig IndexM -> NativeExpr -> PoolDocs -> PoolDocs -> PoolDocs -> IndexM PoolDocs
@@ -1121,17 +1150,14 @@ genericMakeLoop desc cfg _ carried _ body = do
         go (LoopSLet i seDocs b) = do
           rest <- go b
           return $ poolPriorLines seDocs <> [svarNamer i <+> assign <+> poolExpr seDocs] <> rest
+        -- Every branch ends the iteration, so the else branch follows the
+        -- guarded one rather than nesting in it (EMIT-5).
         go (LoopIf guardDocs t e) = do
           tLines <- go t
           eLines <- go e
-          return $ poolPriorLines guardDocs <> [renderIf (poolExpr guardDocs) tLines eLines]
+          let next = [pretty (ldContinueStmt desc) | not (loopBodyBreaks t)]
+          return $ poolPriorLines guardDocs <> [renderIfBlock desc (poolExpr guardDocs) (tLines <> next)] <> eLines
         sameLocal i d = null (poolPriorLines d) && render (poolExpr d) == render (nvarNamer i)
-    -- Block-style rendering (IndentBlock=py, BraceBlock=r).
-    renderIf g tLines eLines = case ldBlockStyle desc of
-      IndentBlock ->
-        vsep [nest 4 (vsep (("if" <+> g <> ":") : tLines)), nest 4 (vsep ("else:" : eLines))]
-      BraceBlock ->
-        vsep ["if" <+> parens g <+> "{", indent 4 (vsep tLines), "} else {", indent 4 (vsep eLines), "}"]
     renderWhile bodyLines = case ldBlockStyle desc of
       IndentBlock -> nest 4 (vsep (("while" <+> trueLit <> ":") : bodyLines))
       BraceBlock -> vsep ["while" <+> parens trueLit <+> "{", indent 4 (vsep bodyLines), "}"]

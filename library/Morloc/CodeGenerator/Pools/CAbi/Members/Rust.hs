@@ -32,6 +32,7 @@ module Morloc.CodeGenerator.Pools.CAbi.Members.Rust
   , resolveRustProfile
   ) where
 
+import Data.Foldable (toList)
 import Control.Monad.Identity (Identity, runIdentity)
 import Control.Monad.Reader (ReaderT, asks, local, runReaderT)
 import qualified Control.Monad.State.Strict as CMS
@@ -2558,6 +2559,7 @@ rustLowerConfig mask makers consumed =
     , lcLetRhs = rustConsumeLetRhs
     , lcOwnPacketDecl = \v e -> Just ("let" <+> v <+> "= ::rustmorloc::Packet::new(" <> e <> ");", v <> ".as_ptr()")
     , lcMakeIf = rustMakeIf
+    , lcMakeIfLadder = rustMakeIfLadder
     , lcShortCircuit = \isAnd a b -> a <+> (if isAnd then "&&" else "||") <+> b
     , lcChainLadder = \isAnd flag first rungs ->
         let undecided = if isAnd then flag else "!" <> flag
@@ -2825,14 +2827,27 @@ rustMakeLoop res carried origBody body = do
             _ -> (Nothing, Nothing)
       tLines <- walk ot t
       eLines <- walk oe e
-      let ifBlock = vsep
-            [ "if" <+> poolExpr guardDocs <+> "{"
-            , indent 4 (vsep tLines)
-            , "} else {"
-            , indent 4 (vsep eLines)
-            , "}"
-            ]
-      return $ poolPriorLines guardDocs <> [ifBlock]
+      -- Every branch ends the iteration, so the else branch follows the
+      -- guarded one rather than nesting in it (EMIT-5).
+      let next = ["continue;" | not (loopBodyBreaks t)]
+          ifBlock = vsep ["if" <+> poolExpr guardDocs <+> "{", indent 4 (vsep (tLines <> next)), "}"]
+      return $ poolPriorLines guardDocs <> [ifBlock] <> eLines
+
+-- | A chain of guards as one flat block (EMIT-5): a labeled block that
+-- breaks out with the first arm whose test holds.
+rustMakeIfLadder :: NativeExpr -> Guards -> RustM (MDoc, MDoc)
+rustMakeIfLadder origExpr (Guards (c1, _, t1) rungs (_, eD)) = do
+  idx <- getCounter
+  let v = helperNamer idx
+      label = "'mlc_g" <> pretty idx
+  typeStr <- rustTypeOf (typeFof origExpr)
+  let taken c d = vsep ["if" <+> parens c <+> "{", indent 4 (vsep (poolPriorLines d ++ ["break" <+> label <+> poolExpr d <> ";"])), "}"]
+      body =
+        [taken c1 t1]
+          <> concat [pre <> [taken c d] | (pre, c, _, d) <- toList rungs]
+          <> poolPriorLines eD
+          <> [poolExpr eD]
+  return (v, vsep ["let" <+> v <> ":" <+> typeStr <+> "=" <+> label <> ": {", indent 4 (vsep body), "};"])
 
 -- | Native @if@ expression, bound to a fresh temp so it composes as a value.
 -- The arms are already adapted to the owned result type by the shared 'IfN_'

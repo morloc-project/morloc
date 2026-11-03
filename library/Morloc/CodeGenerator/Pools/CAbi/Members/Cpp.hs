@@ -23,6 +23,7 @@ module Morloc.CodeGenerator.Pools.CAbi.Members.Cpp
   , cppLang
   ) where
 
+import Data.Foldable (toList)
 import Data.Char (isUpper)
 import Control.Monad.Identity (Identity, runIdentity)
 import qualified Control.Monad.State as CMS
@@ -100,6 +101,26 @@ isNativeThrow :: NativeExpr -> Bool
 isNativeThrow (IntrinsicN _ IntrThrow _ _) = True
 isNativeThrow (DoBlockN _ e) = isNativeThrow e
 isNativeThrow _ = False
+
+-- | One arm of a conditional assigning its value to the result variable. A
+-- @throw arm never returns, so it is a bare statement rather than an
+-- assignment: assigning the universal-conversion `_mlc_throw` helper into
+-- a container-typed result is an ambiguous C++ `operator=`.
+cppIfArm :: Bool -> MDoc -> Maybe NativeExpr -> PoolDocs -> [MDoc]
+cppIfArm unit v armE d
+  | maybe False isNativeThrow armE = poolPriorLines d <> [poolExpr d <> ";"]
+  | otherwise = poolPriorLines d <> [v <+> "=" <+> cppMoved unit (maybe False armOwnsResult armE) (poolExpr d) <> ";"]
+
+-- | A conditional's value or an arm's, moved when the arm owns it
+-- ('armOwnsResult') and the result is not Unit, which is emitted as a bare
+-- statement where a discarded std::move is a warning.
+cppMoved :: Bool -> Bool -> MDoc -> MDoc
+cppMoved unit owned e = if owned && not unit then "std::move(" <> e <> ")" else e
+
+cppUnitResult :: NativeExpr -> Bool
+cppUnitResult e = case typeFof e of
+  VarF (FV tv _) -> tv == BT.unit
+  _ -> False
 
 -- | Whether a conditional arm's value is a let bound inside the arm.
 armOwnsResult :: NativeExpr -> Bool
@@ -1033,14 +1054,11 @@ cppWalkLoopBody setResult ids = go
             _ -> (Nothing, Nothing)
       tLines <- go ot t
       eLines <- go oe e
-      let ifBlock = vsep
-            [ "if" <+> parens (poolExpr guardDocs) <+> "{"
-            , indent 4 (vsep tLines)
-            , "} else {"
-            , indent 4 (vsep eLines)
-            , "}"
-            ]
-      return $ poolPriorLines guardDocs <> [ifBlock]
+      -- Every branch ends the iteration, so the else branch follows the
+      -- guarded one rather than nesting in it (EMIT-5).
+      let next = ["continue;" | not (loopBodyBreaks t)]
+          ifBlock = vsep ["if" <+> parens (poolExpr guardDocs) <+> "{", indent 4 (vsep (tLines <> next)), "}"]
+      return $ poolPriorLines guardDocs <> [ifBlock] <> eLines
 
 -- | What lowering a closure needs: per crossing closure manifold name, its
 -- reify thunk and its bound arguments' schemas; the stage table; and the
@@ -1297,37 +1315,31 @@ PROPAGATE_ERROR(errmsg)|]
             rung (stmts, e) =
               vsep ["if" <+> parens undecided <+> "{", indent 4 (vsep (stmts <> [flag <+> "=" <+> e <> ";"])), "}"]
          in vsep (("bool" <+> flag <+> "=" <+> first <> ";") : map rung rungs)
+    -- A chain of guards as one flat block (EMIT-5): a block run once, left
+    -- by the first arm whose test holds. An arm is an expression; a loop's
+    -- own exits are written only by the loop walkers, over a 'LoopBody'.
+    , lcMakeIfLadder = \origExpr (Guards (c1, e1, t1) rungs (eE, eD)) -> do
+        idx <- getCounter
+        let v = helperNamer idx
+        typeStr <- cppTypeOf origExpr
+        let unit = cppUnitResult origExpr
+            taken c armE d = vsep ["if" <+> parens c <+> "{", indent 4 (vsep (cppIfArm unit v (Just armE) d <> ["break;"])), "}"]
+            body =
+              [taken c1 e1 t1]
+                <> concat [pre <> [taken c armE d] | (pre, c, armE, d) <- toList rungs]
+                <> cppIfArm unit v (Just eE) eD
+        return (cppMoved unit True v, vsep [typeStr <+> v <> ";", "do {", indent 4 (vsep body), "} while (false);"])
     , lcMakeIf = \origExpr condDocs thenDocs elseDocs -> do
         idx <- getCounter
         let v = helperNamer idx
         typeStr <- cppTypeOf origExpr
         let condE = poolExpr condDocs
-            thenE = poolExpr thenDocs
-            elseE = poolExpr elseDocs
-            -- A @throw arm never returns, so emit it as a bare statement rather
-            -- than an assignment. Assigning the universal-conversion
-            -- `_mlc_throw` helper into a container-typed result var is an
-            -- ambiguous C++ `operator=` (a scalar result resolves; a
-            -- std::vector, whose initializer_list overload also matches, does
-            -- not). The dead assignment is unnecessary anyway.
-            (thenThrow, elseThrow) = case origExpr of
-              IfN _ _ tn en -> (isNativeThrow tn, isNativeThrow en)
-              _ -> (False, False)
-            (thenOwned, elseOwned) = case origExpr of
-              IfN _ _ tn en -> (armOwnsResult tn, armOwnsResult en)
-              _ -> (False, False)
-            -- Every if is bound by a let ('atomize'), the only reader of this
-            -- result variable, so the result and an arm's own last let are
-            -- both dead once read, and are moved rather than copied. A Unit
-            -- result is emitted as a bare statement, where a discarded
-            -- std::move is a warning, so it is not moved.
-            isUnitResult = case typeFof origExpr of
-              VarF (FV tv _) -> tv == BT.unit
-              _ -> False
-            moved owned e = if owned && not isUnitResult then "std::move(" <> e <> ")" else e
-            armStmt isThrow owned e = if isThrow then e <> ";" else v <+> "=" <+> moved owned e <> ";"
-            thenBlock = poolPriorLines thenDocs <> [armStmt thenThrow thenOwned thenE]
-            elseBlock = poolPriorLines elseDocs <> [armStmt elseThrow elseOwned elseE]
+            (thenE, elseE) = case origExpr of
+              IfN _ _ tn en -> (Just tn, Just en)
+              _ -> (Nothing, Nothing)
+            unit = cppUnitResult origExpr
+            thenBlock = cppIfArm unit v thenE thenDocs
+            elseBlock = cppIfArm unit v elseE elseDocs
             decl = typeStr <+> v <> ";"
             ifStmt = vsep
               [ decl
@@ -1339,7 +1351,7 @@ PROPAGATE_ERROR(errmsg)|]
               ]
         return $ PoolDocs
           { poolCompleteManifolds = poolCompleteManifolds condDocs <> poolCompleteManifolds thenDocs <> poolCompleteManifolds elseDocs
-          , poolExpr = moved True v
+          , poolExpr = cppMoved unit True v
           , poolPriorLines = poolPriorLines condDocs <> [ifStmt]
           , poolPriorExprs = poolPriorExprs condDocs <> poolPriorExprs thenDocs <> poolPriorExprs elseDocs
           , poolReturnFlag = poolReturnFlag condDocs || poolReturnFlag thenDocs || poolReturnFlag elseDocs

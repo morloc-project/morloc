@@ -70,6 +70,7 @@ Why: R's parser refuses about 25 nested blocks, and R evaluates a flat
 
 ### EMIT-5 No sequence adds a block level per element
 Intent: ruled 2026-11-03
+Tests: spec-emit-5-1
 Code: deviates (../issues/codegen-limits.md)
 
 The block depth of generated code is bounded by the nesting of the source

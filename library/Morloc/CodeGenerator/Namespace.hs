@@ -72,6 +72,7 @@ module Morloc.CodeGenerator.Namespace
   , NativeExpr (..)
   , VarRead (..)
   , LoopBody (..)
+  , loopBodyBreaks
   , trimap
   , trimapM
   , firstContinue
@@ -889,6 +890,14 @@ data LoopBody ne se b
     -- ^ a tail back-edge leaf: the new loop-carried values (positional with the
     -- enclosing 'LoopS' ids), reassigned before the next iteration
   deriving (Show)
+
+-- | Whether every path through a loop body leaves the loop at a base leaf.
+loopBodyBreaks :: LoopBody ne se b -> Bool
+loopBodyBreaks (LoopIf _ a b) = loopBodyBreaks a && loopBodyBreaks b
+loopBodyBreaks (LoopNLet _ _ b) = loopBodyBreaks b
+loopBodyBreaks (LoopSLet _ _ b) = loopBodyBreaks b
+loopBodyBreaks (LoopBase _) = True
+loopBodyBreaks (LoopContinue _) = False
 
 -- | Rewrite a 'LoopBody's native, serial and base leaves. The single source of
 -- truth for descending a 'LoopBody'; the rename/map/fold sites derive from

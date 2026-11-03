@@ -2,6 +2,13 @@
 
 Generated code that a language's own tools refuse.
 
+- [speculative, 2026-11-03] A chain of guards is written as one block only
+  where each else arm reaches the lowering as the next conditional, or as a
+  let that binds one only to return it (Imperative.hs `guardChain`); behind
+  any other wrapper (a coercion to an optional, a serial let, an owned
+  copy that changes the arm's expression) it falls back to one nested
+  block per guard, which R refuses past about 25 and Python past 100.
+  Violates EMIT-5 there. Fix direction: recognize the chain in the IR.
 - [reproduced, 2026-11-03] A command the nexus evaluates itself nests its
   manifest expression one level per `&&` operand, and the nexus refuses to
   load a manifest nested past serde_json's recursion limit: `flat a b = a
@@ -9,7 +16,9 @@ Generated code that a language's own tools refuse.
   command of the program fails with "Failed to parse manifest JSON:
   recursion limit exceeded". Violates EMIT-5 (block depth bounded by
   source nesting) in the manifest; the nexus evaluator would also recurse
-  per operand. Fix direction: an n-ary chain node in the nexus expression.
+  per operand. A chain of guards the nexus evaluates likely nests the same
+  way (not reproduced). Fix direction: an n-ary chain node in the nexus
+  expression.
 - [speculative, 2026-11-03] A `?R` stored in pointer form inside R
   other than as a bare field may not build where it is read or built
   (CPP-6). Getters, bracket steps and setters of `?T` fields go through
@@ -26,17 +35,6 @@ Generated code that a language's own tools refuse.
   (a `shared_ptr`, a user-mapped optional), with no build error, so
   `isNull` on such a value is wrong at run time. They should be limited to
   types that cannot be null.
-- [reproduced, measured 2026-11-03] R's parser refuses nested blocks past
-  about 25 levels of `if (..) { .. } else { .. }` (`contextstack
-  overflow`). morloc writes a guard chain (`? c1 = .. : ? c2 = .. : ..`)
-  as nested `if`/`else` blocks, so a chain of a few dozen cases fails to
-  load in an R pool. Whether `if .. else if ..` holds at any length is
-  unmeasured; R evaluates the else arm recursively, so it meets the
-  evaluation-depth cap a flat `&&` meets at about 5000 operands. Violates
-  EMIT-5. Fix: the ladder `&&`/`||` chains use (EMIT-4), with a done flag
-  in C++, Python and R and a labeled block in Rust; the tail-loop guards
-  of Generic.hs `genericMakeLoop` too. Analysis:
-  /work/plans/error-clusters/briefs/da-emit4-nesting.md.
 - [reproduced, 2026-10-17, 9f24abe4] A C++ conditional whose result type
   has no default constructor does not compile: the lowered `? :` declares
   `T helperN;` before assigning an arm (Cpp.hs lcMakeIf). With

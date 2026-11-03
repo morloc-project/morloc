@@ -1,0 +1,68 @@
+py plain 7: 1007
+py plain 199: 1199
+py plain 500: 0
+py stmts [0,1,2,3,4,5,6,7,8,9]: 1
+py stmts [5,5,5,5,5,5,5,5,5,5]: 10
+py stmts [1000,1000,1000,1000,1000,1000,1000,1000,1000,1000]: -1
+py countdown 199 0: 19885
+py countdown 150 7: 11317
+py shared [5]: 10
+py shared [500]: 500
+py countdown 7 0: 28
+py named 7: "n7"
+py named 13: failed
+py named 999: "other"
+py nested 7: 7
+py nested 122: 22
+py nested 105: 0
+r plain 7: 1007
+r plain 199: 1199
+r plain 500: 0
+r stmts [0,1,2,3,4,5,6,7,8,9]: 1
+r stmts [5,5,5,5,5,5,5,5,5,5]: 10
+r stmts [1000,1000,1000,1000,1000,1000,1000,1000,1000,1000]: -1
+r countdown 199 0: 19885
+r countdown 150 7: 11317
+r shared [5]: 10
+r shared [500]: 500
+r countdown 7 0: 28
+r named 7: "n7"
+r named 13: failed
+r named 999: "other"
+r nested 7: 7
+r nested 122: 22
+r nested 105: 0
+cpp plain 7: 1007
+cpp plain 199: 1199
+cpp plain 500: 0
+cpp stmts [0,1,2,3,4,5,6,7,8,9]: 1
+cpp stmts [5,5,5,5,5,5,5,5,5,5]: 10
+cpp stmts [1000,1000,1000,1000,1000,1000,1000,1000,1000,1000]: -1
+cpp countdown 199 0: 19885
+cpp countdown 150 7: 11317
+cpp shared [5]: 10
+cpp shared [500]: 500
+cpp countdown 7 0: 28
+cpp named 7: "n7"
+cpp named 13: failed
+cpp named 999: "other"
+cpp nested 7: 7
+cpp nested 122: 22
+cpp nested 105: 0
+rs plain 7: 1007
+rs plain 199: 1199
+rs plain 500: 0
+rs stmts [0,1,2,3,4,5,6,7,8,9]: 1
+rs stmts [5,5,5,5,5,5,5,5,5,5]: 10
+rs stmts [1000,1000,1000,1000,1000,1000,1000,1000,1000,1000]: -1
+rs countdown 199 0: 19885
+rs countdown 150 7: 11317
+rs shared [5]: 10
+rs shared [500]: 500
+rs countdown 7 0: 28
+rs named 7: "n7"
+rs named 13: failed
+rs named 999: "other"
+rs nested 7: 7
+rs nested 122: 22
+rs nested 105: 0

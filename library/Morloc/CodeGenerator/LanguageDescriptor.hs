@@ -209,6 +209,7 @@ data LangDescriptor = LangDescriptor
   , ldAndOp :: !Text -- the short-circuit and: "and" or "&&"
   , ldOrOp :: !Text -- the short-circuit or: "or" or "||"
   , ldNotOp :: !Text -- boolean negation: "not" or "!"
+  , ldContinueStmt :: !Text -- next iteration of a loop: "continue" or "next"
   , -- Lambda
     ldLambdaTemplate :: !Text -- e.g. "lambda {{args}}: {{body}}"
   , -- Do-block (effect wrapper)
@@ -380,6 +381,7 @@ instance Y.FromJSON LangDescriptor where
             . ins "ldAndOp" (Y.String "&&")
             . ins "ldOrOp" (Y.String "||")
             . ins "ldNotOp" (Y.String "!")
+            . ins "ldContinueStmt" (Y.String "continue")
             . ins "ldIntLiteralSuffixLimit" Y.Null
             . ins "ldIntLiteralPlainTypes" (Y.Array mempty)
             . ins "ldIntLiteralWide" (Y.Object mempty)
@@ -486,6 +488,7 @@ defaultLangDescriptor name ext =
     , ldAndOp = "&&"
     , ldOrOp = "||"
     , ldNotOp = "!"
+    , ldContinueStmt = "continue"
     , ldIntLiteralSuffixLimit = Nothing
     , ldIntLiteralPlainTypes = []
     , ldIntLiteralWide = Map.empty

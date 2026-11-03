@@ -110,6 +110,8 @@ import qualified Morloc.BaseTypes as BT
 import Morloc.CodeGenerator.Grammars.Common
   ( Chain (..)
   , ChainDocs (..)
+  , ChainKind (..)
+  , Guards (..)
   , DispatchEntry (..)
   , PoolDocs (..)
   , argNamer
@@ -766,6 +768,10 @@ data LowerConfig m = LowerConfig
   , lcMakeIf :: NativeExpr -> PoolDocs -> PoolDocs -> PoolDocs -> m PoolDocs
   -- ^ origExpr, condDocs, thenDocs, elseDocs -> result PoolDocs
   -- Produces language-specific if/else structure using a temp result variable
+  , lcMakeIfLadder :: NativeExpr -> Guards -> m (MDoc, MDoc)
+  -- ^ A chain of guards of the conditional's type as one flat block
+  -- (EMIT-5): each test after the first runs, with its statements, only if
+  -- no earlier one held. Gives the result's expression and the block.
   , lcShortCircuit :: Bool -> MDoc -> MDoc -> MDoc
   -- ^ The language's own short-circuit operator applied to two expressions:
   -- @True@ for and, @False@ for or. A conditional with a Bool literal arm
@@ -2357,17 +2363,17 @@ shortCircuit cfg condE thenE elseE condDocs thenDocs elseDocs = case (thenE, els
   _ -> Nothing
   where
     combine isAnd otherE other = do
-      let c = chainView isAnd condE condDocs
-          o = chainView isAnd otherE other
+      let (c, cch) = chainView isAnd condE condDocs
+          (o, och) = chainView isAnd otherE other
           -- The rest of the other operand's chain lies in the scope of the
           -- lets before it; it can be a sibling of their rung only if it
           -- reads none of them.
           separable = Set.null (Set.intersection (cdPreBound o) (cdRungNames o))
           rest
-            | separable = cdChain o
+            | separable = och
             | otherwise = Chain isAnd (poolExpr other :| []) Seq.empty
           preO = if separable then cdPre o else poolPriorLines other
-          (chain, inHead) = appendChain (cdChain c) preO rest
+          (chain, inHead) = appendChain cch preO rest
           -- the locals the rungs read: the other operand's, unless its
           -- first run joined this chain's first run
           restRungNames
@@ -2389,6 +2395,50 @@ shortCircuit cfg condE thenE elseE condDocs thenDocs elseDocs = case (thenE, els
           , poolReturnFlag = poolReturnFlag condDocs || poolReturnFlag other
           }
 
+-- | A conditional whose else arm is itself a chain of guards extends that
+-- chain, so a chain of guards is one flat block however long it is
+-- (EMIT-5). Each language writes the chain as one block, so the statements
+-- of a test stay in scope for the tests after it.
+guardChain ::
+  (Monad m) =>
+  LowerConfig m -> NativeExpr -> NativeExpr -> NativeExpr -> NativeExpr -> PoolDocs -> PoolDocs -> PoolDocs -> m PoolDocs
+guardChain cfg origExpr condE thenE elseE condDocs thenDocs elseDocs = do
+  let first = (poolExpr condDocs, thenE, thenDocs)
+  case currentChain elseDocs of
+    Just cd
+      | GuardChain g <- cdChain cd -> do
+          let (c, e, t) = guardsFirst g
+              chain = Guards first ((cdPre cd, c, e, t) Seq.<| guardsRungs g) (guardsElse g)
+          (e', ladder) <- lcMakeIfLadder cfg origExpr chain
+          let parts = [condDocs, thenDocs, elseDocs]
+          return . attach chain (cdNames cd) $
+            defaultValue
+              { poolExpr = e'
+              , poolPriorLines = poolPriorLines condDocs <> [ladder]
+              , poolCompleteManifolds = concatMap poolCompleteManifolds parts
+              , poolPriorExprs = concatMap poolPriorExprs parts
+              , poolReturnFlag = any poolReturnFlag parts
+              }
+    current -> do
+      docs <- lcMakeIf cfg origExpr condDocs thenDocs elseDocs
+      let elseNames = maybe (namesIn elseE) cdNames current
+      return (attach (Guards first Seq.empty (elseE, elseDocs)) elseNames docs)
+  where
+    attach chain rungNames docs =
+      docs
+        { poolChain =
+            Just
+              ChainDocs
+                { cdChain = GuardChain chain
+                , cdPre = poolPriorLines condDocs
+                , cdPreBound = Set.empty
+                , cdRungNames = rungNames
+                , cdNames = namesIn condE <> namesIn thenE <> rungNames
+                , cdExpr = render (poolExpr docs)
+                , cdLineCount = length (poolPriorLines docs)
+                }
+        }
+
 -- | The most operands of one run of a chain (EMIT-4). R evaluates a run
 -- recursively, against a depth limit of about 5000.
 chainRunCap :: Int
@@ -2397,13 +2447,14 @@ chainRunCap = 256
 -- | Docs, lowered from the given expression, as a chain of the given
 -- operator. Docs that hold no such chain, or were changed since they did,
 -- are a chain of one operand.
-chainView :: Bool -> NativeExpr -> PoolDocs -> ChainDocs
+chainView :: Bool -> NativeExpr -> PoolDocs -> (ChainDocs, Chain)
 chainView isAnd e d = case currentChain d of
-  Just cd | chainAnd (cdChain cd) == isAnd -> cd
+  Just cd | ShortChain ch <- cdChain cd, chainAnd ch == isAnd -> (cd, ch)
   current ->
     let names = maybe (namesIn e) cdNames current
-     in ChainDocs
-          { cdChain = Chain isAnd (poolExpr d :| []) Seq.empty
+        ch = Chain isAnd (poolExpr d :| []) Seq.empty
+     in ( ChainDocs
+          { cdChain = ShortChain ch
           , cdPre = poolPriorLines d
           , cdPreBound = Set.empty
           , cdRungNames = Set.empty
@@ -2411,6 +2462,8 @@ chainView isAnd e d = case currentChain d of
           , cdExpr = render (poolExpr d)
           , cdLineCount = length (poolPriorLines d)
           }
+        , ch
+        )
 
 -- | The chain docs hold, unless they were changed since it was rendered.
 currentChain :: PoolDocs -> Maybe ChainDocs
@@ -2452,7 +2505,7 @@ renderChain cfg pre bound rungNames names ch
        in defaultValue
             { poolExpr = e
             , poolPriorLines = lines'
-            , poolChain = Just (ChainDocs ch pre bound rungNames names (render e) (length lines'))
+            , poolChain = Just (ChainDocs (ShortChain ch) pre bound rungNames names (render e) (length lines'))
             }
 
 -- | A let around a chain keeps the chain: its statements come before it,
@@ -2651,9 +2704,17 @@ lowerNativeExprRaw cfg _ (SerialLetN_ i x1 x2) = lcMakeLet cfg svarNamer i Nothi
 -- A native let binds an owned local, so its RHS is an owned sink: adapt the
 -- bound value (Rust clones a borrowed/place RHS -- e.g. a getter through a
 -- borrowed receiver -- to match the owned binding type; other members unchanged).
-lowerNativeExprRaw cfg (NativeLetN _ rhsE _) (NativeLetN_ i x1 x2) = do
+lowerNativeExprRaw cfg (NativeLetN _ rhsE bodyE) (NativeLetN_ i x1 x2) = do
   x1' <- loopBorrowOr cfg i rhsE x1 (adaptOwnedElem cfg rhsE x1 >>= keepRhs cfg rhsE >>= lcLetRhs cfg i rhsE)
-  keepChain i rhsE x2 <$> lcMakeLet cfg nvarNamer i (Just (typeFof rhsE)) (Just rhsE) x1' x2
+  r <- lcMakeLet cfg nvarNamer i (Just (typeFof rhsE)) (Just rhsE) x1' x2
+  return $ case bodyE of
+    -- A let that binds a chain of guards only to return it is that chain.
+    LetVarN _ j _
+      | j == i
+      , Just cd <- currentChain x1
+      , GuardChain _ <- cdChain cd ->
+          r {poolChain = Just cd {cdExpr = render (poolExpr r), cdLineCount = length (poolPriorLines r)}}
+    _ -> keepChain i rhsE x2 r
 lowerNativeExprRaw _ _ (NativeLetN_ i _ _) =
   error ("morloc bug: native let " <> show i <> " lowered without its original")
 lowerNativeExprRaw _ _ (LetVarN_ _ i _) = return $ defaultValue {poolExpr = nvarNamer i}
@@ -2773,7 +2834,7 @@ lowerNativeExprRaw cfg origExpr@(IfN _ condE thenE elseE) (IfN_ _ condDocs thenD
   elseDocs' <- adaptOwnedElem cfg elseE elseDocs
   case shortCircuit cfg condE thenE elseE condDocs thenDocs' elseDocs' of
     Just docs -> docs
-    Nothing -> lcMakeIf cfg origExpr condDocs thenDocs' elseDocs'
+    Nothing -> guardChain cfg origExpr condE thenE elseE condDocs thenDocs' elseDocs'
 lowerNativeExprRaw cfg origExpr (IfN_ _ condDocs thenDocs elseDocs) =
   lcMakeIf cfg origExpr condDocs thenDocs elseDocs
 lowerNativeExprRaw cfg (IntrinsicN _ _ _ [dataE]) (IntrinsicN_ _ IntrHash (Just schema) [dataDocs]) = do
