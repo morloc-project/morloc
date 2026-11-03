@@ -2439,10 +2439,9 @@ guardChain cfg origExpr condE thenE elseE condDocs thenDocs elseDocs = do
                 }
         }
 
--- | The most operands of one run of a chain (EMIT-4). R evaluates a run
--- recursively, against a depth limit of about 5000.
+-- | The most operands of one run of a chain (EMIT-4).
 chainRunCap :: Int
-chainRunCap = 256
+chainRunCap = 16
 
 -- | Docs, lowered from the given expression, as a chain of the given
 -- operator. Docs that hold no such chain, or were changed since they did,

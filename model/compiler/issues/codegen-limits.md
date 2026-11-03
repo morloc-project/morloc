@@ -2,22 +2,15 @@
 
 Generated code that a language's own tools refuse.
 
-- [reproduced, 2026-11-03] A run of `&&`/`||` operands is up to 256 long
-  (Imperative.hs `chainRunCap`, EMIT-4), which R parses as an expression
-  256 calls deep, and R's byte compiler is superlinear in that depth: the
-  first labeled call after the first of a 250-operand R chain takes 2.7 s,
-  every later one 5 us (bench chains, CHAIN-5). Outside morloc, runs of
-  32/64/128/256 compile in 41 ms/129 ms/505 ms/2.6 s; 1024 operands in
-  runs of 16 in 1.2 s. Python, C++ and Rust are linear at 500. Fix: a run
-  cap of 16; EMIT-4 states 256 and is ruled, so the number needs the
-  user's OK.
 - [read, 2026-11-03] Lowering a chain re-renders its open run at every
   level: Imperative.hs `currentChain` and `keepChain` compare rendered text
   to tell whether docs still hold the chain, and `renderChain` re-folds the
-  head run, so lowering costs O(n x run cap) renders. Linear in n, with a
-  large constant; pool builds cost 1.2-1.8 ms per chain element against
-  0.01-0.12 ms in the nexus (bench chains, CHAIN-1, CHAIN-2, quick run).
-  Candidate: a token in `ChainDocs` compared instead of rendered text.
+  head run, so lowering costs O(n x run cap) renders. Linear in n: with
+  root-py, 2000 `x >= i` operands take 1.2 s past typechecking as a chain
+  and 0.5 s as a list of the same comparisons (measured 2026-11-03). A
+  cheaper check must still see any rewrite of the docs' expression, or a
+  rewritten chain would be reused; a version tag set by the code that
+  builds a chain is not enough, since record updates elsewhere keep it.
 - [speculative, 2026-11-03] A chain of guards, or of `&&`/`||`, is
   written as one block (pools: Imperative.hs `guardChain`, `shortCircuit`)
   or one manifest node (nexus: Nexus.hs `guardArms`, `shortChain`) only

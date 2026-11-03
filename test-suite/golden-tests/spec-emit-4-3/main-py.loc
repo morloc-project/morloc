@@ -3,7 +3,10 @@
 -- own (indexing, list comparison), mixed operators, an operand that must
 -- not run once the chain is decided, an operand chain that reads a value
 -- bound by an earlier operand, and 6000 operands that need no statements.
-module main (allIdx, anyIdx, shortCut, listEq, mixed, scoped, condLet, flat)
+-- `andAt k` and `orAt k` are decided by their k-th of 40 operands, each a
+-- call that raises if it runs after the deciding one, so k on either side
+-- of every run boundary shows that a chain stops where it is decided.
+module main (allIdx, anyIdx, shortCut, listEq, mixed, scoped, condLet, flat, andAt, orAt)
 
 import root-py
 
@@ -469,3 +472,25 @@ flatAt a b = not (a && b && a && b && a && b && a && b && a && b && a && b && a 
   && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
   && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
   && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b)
+
+source Py from "lib.py" ("step", "hit")
+
+--' False at operand k; raises for an operand after k
+step :: Int -> Int -> Bool
+
+--' True at operand k; raises for an operand after k
+hit :: Int -> Int -> Bool
+
+andAt :: Int -> Bool
+andAt k = step k 1 && step k 2 && step k 3 && step k 4 && step k 5 && step k 6 && step k 7 && step k 8
+  && step k 9 && step k 10 && step k 11 && step k 12 && step k 13 && step k 14 && step k 15 && step k 16
+  && step k 17 && step k 18 && step k 19 && step k 20 && step k 21 && step k 22 && step k 23 && step k 24
+  && step k 25 && step k 26 && step k 27 && step k 28 && step k 29 && step k 30 && step k 31 && step k 32
+  && step k 33 && step k 34 && step k 35 && step k 36 && step k 37 && step k 38 && step k 39 && step k 40
+
+orAt :: Int -> Bool
+orAt k = hit k 1 || hit k 2 || hit k 3 || hit k 4 || hit k 5 || hit k 6 || hit k 7 || hit k 8
+  || hit k 9 || hit k 10 || hit k 11 || hit k 12 || hit k 13 || hit k 14 || hit k 15 || hit k 16
+  || hit k 17 || hit k 18 || hit k 19 || hit k 20 || hit k 21 || hit k 22 || hit k 23 || hit k 24
+  || hit k 25 || hit k 26 || hit k 27 || hit k 28 || hit k 29 || hit k 30 || hit k 31 || hit k 32
+  || hit k 33 || hit k 34 || hit k 35 || hit k 36 || hit k 37 || hit k 38 || hit k 39 || hit k 40

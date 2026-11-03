@@ -57,7 +57,7 @@ Code: conforms 2026-11-03
 A chain of operands of one of the two operators loads and runs at any
 length. A run of operands that need no statements is written as the
 language's operator between them, with no parentheses inside the run, and
-at most 256 operands to a run. The chain is a sequence of rungs: one
+at most 16 operands to a run. The chain is a sequence of rungs: one
 boolean holds the chain's value so far, and each later rung, the run or
 the operand with its statements, is a block entered only while that value
 leaves the chain undecided (true for `&&`, false for `||`). An operand that
@@ -65,8 +65,11 @@ reads a value bound in an earlier operand stays inside that operand's
 block. A chain of mixed operators keeps the parentheses its grouping
 needs, and a chain inside a larger expression is parenthesized as a whole.
 
-Why: R's parser refuses about 25 nested blocks, and R evaluates a flat
-`&&` recursively, which fails at about 5000 operands.
+Why: R's parser refuses about 25 nested blocks. R parses a run as nested
+calls, as deep as the run is long: evaluating it fails at about 5000
+operands, and its byte compiler is superlinear in the depth (one run of
+256 operands compiles in 2.6 s, 1024 operands in runs of 16 in 1.1 s;
+CHAIN-5). A rung costs one test of the boolean.
 
 ### EMIT-5 No sequence adds a block level per element
 Intent: ruled 2026-11-03
