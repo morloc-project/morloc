@@ -30,3 +30,18 @@ Limit: all4.wall <= 800 ms
 A run that needs Python, C++, R and Rust pays about R's start, not the sum
 of the four. `pyCpp` and `all4` are the evidence; the note on `all4.wall`
 gives the sum and the maximum of the single-pool starts of the same run.
+
+### START-4 A pool starts in time linear in the length of its code
+Intent: proposed
+Bench: startup
+Model: t(n) = c + b*n; one call of a function written as a run of n lets
+Measured: pending
+Limit: py.k <= 1.3, r.k <= 1.3
+
+`k` is fitted as in CHAIN-1.
+
+Rscript reads a file as the console does, parsing the text read so far
+again after each line of an unfinished expression, so a pool it runs
+directly starts in time quadratic in its longest function: 3.9 s for one
+of 4000 lines, against 0.17 s parsed whole. The R pool is therefore
+launched by an expression that parses it once (2026-11-03).

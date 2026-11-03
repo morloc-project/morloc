@@ -3038,9 +3038,12 @@ buildManifest ManifestInputs{..} =
     makeExecArgs lang =
       let name = ML.langName lang
           isCompiled = LR.registryIsCompiled miRegistry name
-          runCmd = case Map.lookup name (MC.configLangOverrides miConfig) of
-            Just cmd -> map MT.unpack cmd
-            Nothing -> map MT.unpack (LR.registryRunCommand miRegistry name)
+          -- An override names the interpreter; the language's own
+          -- arguments to it are kept.
+          base = LR.registryRunCommand miRegistry name
+          runCmd = map MT.unpack $ case Map.lookup name (MC.configLangOverrides miConfig) of
+            Just cmd -> cmd <> drop 1 base
+            Nothing -> base
           -- Relative to the manifest's own directory (the build dir). The
           -- runtime nexus resolves this against dirname(manifest.json), so
           -- the build directory is position-independent and relocatable.

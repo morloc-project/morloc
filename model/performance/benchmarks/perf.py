@@ -121,6 +121,20 @@ def fit_power(xs, ys):
     return math.exp(lc), k, r2
 
 
+def growth_exponent(xs, ys):
+    """k in t(x) = c + a*x^k, for xs that double at each step. The
+    differences between successive times grow as x^k whatever c is, so k is
+    the power fitted to them. None with fewer than three points or a
+    difference that is not positive. Returns (k, r2)."""
+    if len(xs) < 3:
+        return None
+    ds = [b - a for a, b in zip(ys, ys[1:])]
+    if any(d <= 0 for d in ds):
+        return None
+    _, k, r2 = fit_power(xs[:-1], ds)
+    return k, r2
+
+
 def fit_quadratic(xs, ys):
     """Least squares y = c + b*x + a*x^2. Returns (c, b, a, r2)."""
     s = [sum(x ** k for x in xs) for k in range(5)]

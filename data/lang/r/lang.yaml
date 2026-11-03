@@ -6,7 +6,13 @@ name: r
 extension: R
 aliases: []
 is_compiled: false
-run_command: ["Rscript"]
+# Rscript runs a file as the console does, parsing the text read so far
+# again after each line of an unfinished expression, which is quadratic in
+# the length of a function (START-4). The pool is instead parsed once and
+# its expressions evaluated in order; the pool file is its first
+# argument. Warnings print as they are raised until the last expression,
+# which starts the pool.
+run_command: ["Rscript", "-e", "local({ f <- commandArgs(TRUE)[1]; assign(\".morloc.poolfile\", f, envir = globalenv()); x <- parse(f, keep.source = FALSE); w <- options(warn = 1); for (i in seq_along(x)) { if (i == length(x)) options(w); eval(x[[i]], globalenv()) } })"]
 serial_type: "character"
 # Base R (nchar, paste, regex, jsonlite, etc.) raises "embedded nul in string"
 # on NUL-bearing CHARSXPs. The morloc runtime rejects NULs at the R boundary.
@@ -20,7 +26,7 @@ preamble:
   # printing, coercion) needs the bit64 S3 methods on PATH.
   - 'suppressPackageStartupMessages(library(bit64))'
   - 'dyn.load("{{home}}/lib/librmorloc.so")'
-  - '.morloc.pooldir <- dirname(sub("^--file=", "", grep("^--file=", commandArgs(FALSE), value=TRUE)[1]))'
+  - '.morloc.pooldir <- dirname(get(".morloc.poolfile", envir = globalenv()))'
   - '.morloc.libdir <- "{{state}}/modules/R"'
   # Put the environment's R module library on .libPaths() so an installed
   # package there loads with library(). Guarded so a missing dir adds no noise.
@@ -95,7 +101,7 @@ ldSocketPathTemplate: "paste0(.__morloc$global_state$tmpdir, \"/\", {{socket}})"
 ldResourcePackTemplate: "list(memory={{mem}}L, time={{time}}L, cpus={{cpus}}L, gpus={{gpus}}L)"
 ldReturnTemplate: "return({{expr}})"
 ldReservedPrefixes: [".__mm_", ".__morloc", ".morloc_"]
-ldReservedNames: [".morloc.source", ".morloc.pooldir", ".morloc.libdir"]
+ldReservedNames: [".morloc.source", ".morloc.pooldir", ".morloc.libdir", ".morloc.poolfile"]
 ldManifoldPrefix: ".__mm_"
 ldPoolQualifier: ".__morloc$"
 ldFuncDefHeader: "{{name}} <- function({{args}})"

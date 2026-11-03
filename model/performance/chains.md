@@ -20,7 +20,8 @@ Model: t(n) = c_L + b_L*n; n operands `x >= i` (nexus: `a`), L the language
 Measured: pending
 Limit: and-py.make.k <= 1.3, and-r.make.k <= 1.3, and-cpp.make.k <= 1.3, and-rs.make.k <= 1.3, and-nexus.make.k <= 1.3
 
-`k` is the exponent of t - c against n; 1 is linear. Typechecking the
+`k` is the exponent in t = c + a*n^k, fitted to the differences between
+successive sizes, which double, so c drops out; 1 is linear. Typechecking the
 operands is part of `b` (TYCK-6).
 
 ### CHAIN-2 Building a chain of guards is linear in its length
@@ -61,6 +62,6 @@ R byte-compiles a closure on its second call. Its compiler is superlinear
 in the nesting depth of an expression, and R parses `a && b && c` as
 nested calls: one run of 32, 64, 128 and 256 operands takes 41 ms,
 129 ms, 505 ms and 2.6 s to compile, while 1024 operands in runs of 16,
-each behind a flag, take 1.2 s, and 1024 plain statements 0.7 s
+each behind a flag, take 1.1 s, and 1024 plain statements 0.7 s
 (`compiler::cmpfun`, outside morloc, 2026-11-03).
 Python, C++ and Rust compile ahead of the first call; their `w` is noise.

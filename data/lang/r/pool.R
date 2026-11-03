@@ -7,9 +7,9 @@
 # Every name the pool defines lives in .__morloc, the one global name it
 # reserves besides the manifolds' .__mm_<id>, so a user source can neither
 # replace one nor be shadowed by one (.morloc.source, .morloc.pooldir and
-# .morloc.libdir are also bound globally, for user files). Its parent is the
-# base environment: pool code finds base R and its own names, never a
-# user's. Generated manifolds are global, where R compiles them, so their
+# .morloc.libdir are also bound globally, for user files, and the loader
+# binds .morloc.poolfile). Its parent is the base environment: pool code
+# finds base R and its own names, never a user's. Generated manifolds are global, where R compiles them, so their
 # calls of sourced functions resolve as in user code; they refer to pool
 # names through .__morloc, which is bound inside the environment too. A
 # source that defines, replaces or removes a reserved name fails to load.
@@ -526,7 +526,7 @@ main <- function(socket_path, tmpdir, shm_basename) {
 # The script: the pool serves calls until it is told to stop. A function, so
 # its variables are its own and the environment can be locked first.
 mlc_start <- function() {
-  args <- commandArgs(trailingOnly = TRUE)
+  args <- commandArgs(trailingOnly = TRUE)[-1]
 
   # Health check: confirm sources loaded and print version
   if (length(args) == 1 && args[1] == "--health") {
@@ -542,7 +542,7 @@ mlc_start <- function() {
   }
 
   if (length(args) != 3) {
-    cat("Usage: Rscript pool.R <socket_path> <tmpdir> <shm_basename>\n", file=stderr())
+    cat("Usage: pool.R <socket_path> <tmpdir> <shm_basename>\n", file=stderr())
     quit(status = 1)
   }
 

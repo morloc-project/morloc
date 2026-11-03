@@ -15,7 +15,7 @@ import shutil
 import subprocess
 import tempfile
 
-from perf import fit_linear, fit_power
+from perf import fit_linear, growth_exponent
 
 ROOTS = {"py": "root-py", "r": "root-r", "cpp": "root-cpp", "rs": "root-rust"}
 LANGS = ["nexus", "py", "r", "cpp", "rs"]
@@ -106,8 +106,9 @@ def run(b):
                              reps=2, cwd_of=lambda n: dirs[n])
                 c, slope, r2 = fit_linear(sizes, ys)
                 b.record(item_build, f"{name}.make.b", slope * 1e3, "ms", f"r2={r2:.4f} per element")
-                _, k, r2k = fit_power(sizes, [max(y - c, 1e-4) for y in ys])
-                b.record(item_build, f"{name}.make.k", k, "", f"r2={r2k:.4f}")
+                g = growth_exponent(sizes, ys)
+                if g:
+                    b.record(item_build, f"{name}.make.k", g[0], "", f"r2={g[1]:.4f}")
                 for n in sizes:
                     out = subprocess.run(["./nexus", "g"] + args(lang, shape, n), cwd=dirs[n],
                                          capture_output=True, text=True)
@@ -131,8 +132,9 @@ def run(b):
                     note = f"labeled per-call mean, {CALLS} calls, slowest dropped"
                     _, wslope, wr2 = fit_linear(sizes, firsts)
                     b.record("CHAIN-5", f"{name}.first.b", wslope * 1e6, "us", f"r2={wr2:.4f} per element")
-                    _, wk, wr2k = fit_power(sizes, [max(w, 1e-6) for w in firsts])
-                    b.record("CHAIN-5", f"{name}.first.k", wk, "", f"r2={wr2k:.4f}")
+                    g = growth_exponent(sizes, firsts)
+                    if g:
+                        b.record("CHAIN-5", f"{name}.first.k", g[0], "", f"r2={g[1]:.4f}")
                 _, slope, r2 = fit_linear(sizes, ys)
                 b.record("CHAIN-4", f"{name}.run.b", slope * 1e9, "ns", f"r2={r2:.4f} per element; {note}")
     finally:
