@@ -1,0 +1,1030 @@
+-- Spec EMIT-5: a command the nexus evaluates itself, with no language
+-- pool, holds chains of `&&`, `||` and guards of any length: the manifest
+-- nests no deeper for a longer chain. An operand after the one that
+-- decides a chain does not run, nor does an arm whose test fails.
+module main (allOf, anyOf, pick, stopAnd, stopOr, pickThrow, classify)
+
+allOf :: Bool -> Bool -> Bool
+allOf a b = a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+  && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
+
+anyOf :: Bool -> Bool -> Bool
+anyOf a b = a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+  || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b
+
+pick :: Bool -> Bool -> Int
+pick a b
+  ? a = 0
+  : ? b = 1
+  : ? b = 2
+  : ? a = 3
+  : ? b = 4
+  : ? b = 5
+  : ? a = 6
+  : ? b = 7
+  : ? b = 8
+  : ? a = 9
+  : ? b = 10
+  : ? b = 11
+  : ? a = 12
+  : ? b = 13
+  : ? b = 14
+  : ? a = 15
+  : ? b = 16
+  : ? b = 17
+  : ? a = 18
+  : ? b = 19
+  : ? b = 20
+  : ? a = 21
+  : ? b = 22
+  : ? b = 23
+  : ? a = 24
+  : ? b = 25
+  : ? b = 26
+  : ? a = 27
+  : ? b = 28
+  : ? b = 29
+  : ? a = 30
+  : ? b = 31
+  : ? b = 32
+  : ? a = 33
+  : ? b = 34
+  : ? b = 35
+  : ? a = 36
+  : ? b = 37
+  : ? b = 38
+  : ? a = 39
+  : ? b = 40
+  : ? b = 41
+  : ? a = 42
+  : ? b = 43
+  : ? b = 44
+  : ? a = 45
+  : ? b = 46
+  : ? b = 47
+  : ? a = 48
+  : ? b = 49
+  : ? b = 50
+  : ? a = 51
+  : ? b = 52
+  : ? b = 53
+  : ? a = 54
+  : ? b = 55
+  : ? b = 56
+  : ? a = 57
+  : ? b = 58
+  : ? b = 59
+  : ? a = 60
+  : ? b = 61
+  : ? b = 62
+  : ? a = 63
+  : ? b = 64
+  : ? b = 65
+  : ? a = 66
+  : ? b = 67
+  : ? b = 68
+  : ? a = 69
+  : ? b = 70
+  : ? b = 71
+  : ? a = 72
+  : ? b = 73
+  : ? b = 74
+  : ? a = 75
+  : ? b = 76
+  : ? b = 77
+  : ? a = 78
+  : ? b = 79
+  : ? b = 80
+  : ? a = 81
+  : ? b = 82
+  : ? b = 83
+  : ? a = 84
+  : ? b = 85
+  : ? b = 86
+  : ? a = 87
+  : ? b = 88
+  : ? b = 89
+  : ? a = 90
+  : ? b = 91
+  : ? b = 92
+  : ? a = 93
+  : ? b = 94
+  : ? b = 95
+  : ? a = 96
+  : ? b = 97
+  : ? b = 98
+  : ? a = 99
+  : ? b = 100
+  : ? b = 101
+  : ? a = 102
+  : ? b = 103
+  : ? b = 104
+  : ? a = 105
+  : ? b = 106
+  : ? b = 107
+  : ? a = 108
+  : ? b = 109
+  : ? b = 110
+  : ? a = 111
+  : ? b = 112
+  : ? b = 113
+  : ? a = 114
+  : ? b = 115
+  : ? b = 116
+  : ? a = 117
+  : ? b = 118
+  : ? b = 119
+  : ? a = 120
+  : ? b = 121
+  : ? b = 122
+  : ? a = 123
+  : ? b = 124
+  : ? b = 125
+  : ? a = 126
+  : ? b = 127
+  : ? b = 128
+  : ? a = 129
+  : ? b = 130
+  : ? b = 131
+  : ? a = 132
+  : ? b = 133
+  : ? b = 134
+  : ? a = 135
+  : ? b = 136
+  : ? b = 137
+  : ? a = 138
+  : ? b = 139
+  : ? b = 140
+  : ? a = 141
+  : ? b = 142
+  : ? b = 143
+  : ? a = 144
+  : ? b = 145
+  : ? b = 146
+  : ? a = 147
+  : ? b = 148
+  : ? b = 149
+  : ? a = 150
+  : ? b = 151
+  : ? b = 152
+  : ? a = 153
+  : ? b = 154
+  : ? b = 155
+  : ? a = 156
+  : ? b = 157
+  : ? b = 158
+  : ? a = 159
+  : ? b = 160
+  : ? b = 161
+  : ? a = 162
+  : ? b = 163
+  : ? b = 164
+  : ? a = 165
+  : ? b = 166
+  : ? b = 167
+  : ? a = 168
+  : ? b = 169
+  : ? b = 170
+  : ? a = 171
+  : ? b = 172
+  : ? b = 173
+  : ? a = 174
+  : ? b = 175
+  : ? b = 176
+  : ? a = 177
+  : ? b = 178
+  : ? b = 179
+  : ? a = 180
+  : ? b = 181
+  : ? b = 182
+  : ? a = 183
+  : ? b = 184
+  : ? b = 185
+  : ? a = 186
+  : ? b = 187
+  : ? b = 188
+  : ? a = 189
+  : ? b = 190
+  : ? b = 191
+  : ? a = 192
+  : ? b = 193
+  : ? b = 194
+  : ? a = 195
+  : ? b = 196
+  : ? b = 197
+  : ? a = 198
+  : ? b = 199
+  : ? b = 200
+  : ? a = 201
+  : ? b = 202
+  : ? b = 203
+  : ? a = 204
+  : ? b = 205
+  : ? b = 206
+  : ? a = 207
+  : ? b = 208
+  : ? b = 209
+  : ? a = 210
+  : ? b = 211
+  : ? b = 212
+  : ? a = 213
+  : ? b = 214
+  : ? b = 215
+  : ? a = 216
+  : ? b = 217
+  : ? b = 218
+  : ? a = 219
+  : ? b = 220
+  : ? b = 221
+  : ? a = 222
+  : ? b = 223
+  : ? b = 224
+  : ? a = 225
+  : ? b = 226
+  : ? b = 227
+  : ? a = 228
+  : ? b = 229
+  : ? b = 230
+  : ? a = 231
+  : ? b = 232
+  : ? b = 233
+  : ? a = 234
+  : ? b = 235
+  : ? b = 236
+  : ? a = 237
+  : ? b = 238
+  : ? b = 239
+  : ? a = 240
+  : ? b = 241
+  : ? b = 242
+  : ? a = 243
+  : ? b = 244
+  : ? b = 245
+  : ? a = 246
+  : ? b = 247
+  : ? b = 248
+  : ? a = 249
+  : ? b = 250
+  : ? b = 251
+  : ? a = 252
+  : ? b = 253
+  : ? b = 254
+  : ? a = 255
+  : ? b = 256
+  : ? b = 257
+  : ? a = 258
+  : ? b = 259
+  : ? b = 260
+  : ? a = 261
+  : ? b = 262
+  : ? b = 263
+  : ? a = 264
+  : ? b = 265
+  : ? b = 266
+  : ? a = 267
+  : ? b = 268
+  : ? b = 269
+  : ? a = 270
+  : ? b = 271
+  : ? b = 272
+  : ? a = 273
+  : ? b = 274
+  : ? b = 275
+  : ? a = 276
+  : ? b = 277
+  : ? b = 278
+  : ? a = 279
+  : ? b = 280
+  : ? b = 281
+  : ? a = 282
+  : ? b = 283
+  : ? b = 284
+  : ? a = 285
+  : ? b = 286
+  : ? b = 287
+  : ? a = 288
+  : ? b = 289
+  : ? b = 290
+  : ? a = 291
+  : ? b = 292
+  : ? b = 293
+  : ? a = 294
+  : ? b = 295
+  : ? b = 296
+  : ? a = 297
+  : ? b = 298
+  : ? b = 299
+  : 1000
+
+stopAnd :: Bool -> Bool -> Bool
+stopAnd a b = a && b && a && (@throw "evaluated past a False")
+
+stopOr :: Bool -> Bool -> Bool
+stopOr a b = a || b || a || (@throw "evaluated past a True")
+
+pickThrow :: Bool -> Bool -> Int
+pickThrow a b
+  ? a = 1
+  : ? b = @throw "second arm"
+  : ? a = 2
+  : 3
+
+classify :: Bool -> Bool -> Bool
+classify a b
+  ? a = True
+  : ? b = True
+  : ? a = False
+  : ? b = True
+  : ? a = True
+  : ? b = False
+  : ? a = True
+  : ? b = True
+  : ? a = False
+  : ? b = True
+  : ? a = True
+  : ? b = False
+  : ? a = True
+  : ? b = True
+  : ? a = False
+  : ? b = True
+  : ? a = True
+  : ? b = False
+  : ? a = True
+  : ? b = True
+  : ? a = False
+  : ? b = True
+  : ? a = True
+  : ? b = False
+  : ? a = True
+  : ? b = True
+  : ? a = False
+  : ? b = True
+  : ? a = True
+  : ? b = False
+  : ? a = True
+  : ? b = True
+  : ? a = False
+  : ? b = True
+  : ? a = True
+  : ? b = False
+  : ? a = True
+  : ? b = True
+  : ? a = False
+  : ? b = True
+  : ? a = True
+  : ? b = False
+  : ? a = True
+  : ? b = True
+  : ? a = False
+  : ? b = True
+  : ? a = True
+  : ? b = False
+  : ? a = True
+  : ? b = True
+  : ? a = False
+  : ? b = True
+  : ? a = True
+  : ? b = False
+  : ? a = True
+  : ? b = True
+  : ? a = False
+  : ? b = True
+  : ? a = True
+  : ? b = False
+  : ? a = True
+  : ? b = True
+  : ? a = False
+  : ? b = True
+  : ? a = True
+  : ? b = False
+  : ? a = True
+  : ? b = True
+  : ? a = False
+  : ? b = True
+  : ? a = True
+  : ? b = False
+  : ? a = True
+  : ? b = True
+  : ? a = False
+  : ? b = True
+  : ? a = True
+  : ? b = False
+  : ? a = True
+  : ? b = True
+  : ? a = False
+  : ? b = True
+  : ? a = True
+  : ? b = False
+  : ? a = True
+  : ? b = True
+  : ? a = False
+  : ? b = True
+  : ? a = True
+  : ? b = False
+  : ? a = True
+  : ? b = True
+  : ? a = False
+  : ? b = True
+  : ? a = True
+  : ? b = False
+  : ? a = True
+  : ? b = True
+  : ? a = False
+  : ? b = True
+  : ? a = True
+  : ? b = False
+  : ? a = True
+  : ? b = True
+  : ? a = False
+  : ? b = True
+  : ? a = True
+  : ? b = False
+  : ? a = True
+  : ? b = True
+  : ? a = False
+  : ? b = True
+  : ? a = True
+  : ? b = False
+  : ? a = True
+  : ? b = True
+  : ? a = False
+  : ? b = True
+  : ? a = True
+  : ? b = False
+  : ? a = True
+  : ? b = True
+  : ? a = False
+  : ? b = True
+  : ? a = True
+  : ? b = False
+  : ? a = True
+  : ? b = True
+  : ? a = False
+  : ? b = True
+  : ? a = True
+  : ? b = False
+  : ? a = True
+  : ? b = True
+  : ? a = False
+  : ? b = True
+  : ? a = True
+  : ? b = False
+  : ? a = True
+  : ? b = True
+  : ? a = False
+  : ? b = True
+  : ? a = True
+  : ? b = False
+  : ? a = True
+  : ? b = True
+  : ? a = False
+  : ? b = True
+  : ? a = True
+  : ? b = False
+  : ? a = True
+  : ? b = True
+  : ? a = False
+  : ? b = True
+  : ? a = True
+  : ? b = False
+  : ? a = True
+  : ? b = True
+  : ? a = False
+  : ? b = True
+  : ? a = True
+  : ? b = False
+  : ? a = True
+  : ? b = True
+  : ? a = False
+  : ? b = True
+  : ? a = True
+  : ? b = False
+  : ? a = True
+  : ? b = True
+  : ? a = False
+  : ? b = True
+  : ? a = True
+  : ? b = False
+  : ? a = True
+  : ? b = True
+  : ? a = False
+  : ? b = True
+  : ? a = True
+  : ? b = False
+  : ? a = True
+  : ? b = True
+  : ? a = False
+  : ? b = True
+  : ? a = True
+  : ? b = False
+  : ? a = True
+  : ? b = True
+  : ? a = False
+  : ? b = True
+  : ? a = True
+  : ? b = False
+  : ? a = True
+  : ? b = True
+  : ? a = False
+  : ? b = True
+  : ? a = True
+  : ? b = False
+  : ? a = True
+  : ? b = True
+  : ? a = False
+  : ? b = True
+  : ? a = True
+  : ? b = False
+  : ? a = True
+  : ? b = True
+  : ? a = False
+  : ? b = True
+  : ? a = True
+  : ? b = False
+  : ? a = True
+  : ? b = True
+  : ? a = False
+  : ? b = True
+  : ? a = True
+  : ? b = False
+  : ? a = True
+  : ? b = True
+  : ? a = False
+  : ? b = True
+  : ? a = True
+  : ? b = False
+  : ? a = True
+  : ? b = True
+  : ? a = False
+  : ? b = True
+  : ? a = True
+  : ? b = False
+  : ? a = True
+  : ? b = True
+  : ? a = False
+  : ? b = True
+  : ? a = True
+  : ? b = False
+  : ? a = True
+  : ? b = True
+  : ? a = False
+  : ? b = True
+  : ? a = True
+  : ? b = False
+  : ? a = True
+  : ? b = True
+  : ? a = False
+  : ? b = True
+  : ? a = True
+  : ? b = False
+  : ? a = True
+  : ? b = True
+  : ? a = False
+  : ? b = True
+  : ? a = True
+  : ? b = False
+  : ? a = True
+  : ? b = True
+  : ? a = False
+  : ? b = True
+  : ? a = True
+  : ? b = False
+  : ? a = True
+  : ? b = True
+  : ? a = False
+  : ? b = True
+  : ? a = True
+  : ? b = False
+  : ? a = True
+  : ? b = True
+  : ? a = False
+  : ? b = True
+  : ? a = True
+  : ? b = False
+  : ? a = True
+  : ? b = True
+  : ? a = False
+  : ? b = True
+  : ? a = True
+  : ? b = False
+  : ? a = True
+  : ? b = True
+  : ? a = False
+  : ? b = True
+  : ? a = True
+  : ? b = False
+  : ? a = True
+  : ? b = True
+  : ? a = False
+  : ? b = True
+  : ? a = True
+  : ? b = False
+  : ? a = True
+  : ? b = True
+  : ? a = False
+  : ? b = True
+  : ? a = True
+  : ? b = False
+  : ? a = True
+  : ? b = True
+  : ? a = False
+  : ? b = True
+  : ? a = True
+  : ? b = False
+  : False

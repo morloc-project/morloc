@@ -572,7 +572,9 @@ typedef enum {
     MORLOC_X_LIST_LEN_TEST, // (list) + a length -> Bool. A list pattern's
                             // length test, answered in the nexus.
     MORLOC_X_EQUAL,         // (a, b) -> Bool: the two values are equal (@eq).
-    MORLOC_X_LESS_EQ        // (a, b) -> Bool: a orders before or with b (@le).
+    MORLOC_X_LESS_EQ,       // (a, b) -> Bool: a orders before or with b (@le).
+    MORLOC_X_COND,          // n (test, value) arms + else -> value (EMIT-5)
+    MORLOC_X_CHAIN          // n operands -> Bool: && or || over them (EMIT-5)
 } morloc_expression_type;
 
 typedef enum { APPLY_PATTERN, APPLY_LAMBDA, APPLY_FORMAT } morloc_app_expression_type;
@@ -717,6 +719,19 @@ typedef struct morloc_ifile_walk_expression_s {
     uint64_t n_args;
 } morloc_ifile_walk_expression_t;
 
+typedef struct morloc_cond_expression_s {
+    morloc_expression_t** conds;
+    morloc_expression_t** thens;
+    uint64_t n;
+    morloc_expression_t* else_branch;
+} morloc_cond_expression_t;
+
+typedef struct morloc_chain_expression_s {
+    morloc_expression_t** args;
+    uint64_t n;
+    uint8_t is_and;
+} morloc_chain_expression_t;
+
 typedef struct morloc_expression_s {
     morloc_expression_type type;
     Schema* schema;
@@ -737,6 +752,8 @@ typedef struct morloc_expression_s {
         morloc_open_expression_t* open_expr;
         morloc_ifile_walk_expression_t* ifile_walk_expr;
         morloc_list_len_test_expression_t* list_len_test_expr;
+        morloc_cond_expression_t* cond_expr;
+        morloc_chain_expression_t* chain_expr;
     } expr;
 } morloc_expression_t;
 

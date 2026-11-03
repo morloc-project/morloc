@@ -292,6 +292,13 @@ data NexusExpr
   | TryX      Text NexusExpr
     -- ^ result schema (@Try Str a@), body. Evaluate the body under a
     -- catch and materialize @Ok value@ or @Err message@ into the result.
+  | CondX     Text [(NexusExpr, NexusExpr)] NexusExpr
+    -- ^ result schema, (test, value) arms, else value: a chain of guards
+    -- as one node, so its manifest depth does not grow with its length
+    -- (EMIT-5).
+  | ChainX    Text Bool [NexusExpr]
+    -- ^ Bool schema, and (@True@) or or, operands: a chain of one
+    -- short-circuit operator as one node (EMIT-5).
   | IfX       Text NexusExpr NexusExpr NexusExpr
     -- ^ result schema, condition (Bool), then-branch, else-branch. The
     -- pure-nexus conditional: evaluate the condition and materialize the
@@ -739,11 +746,22 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
       e1X <- toNexusExpr e1
       bodyX <- toNexusExpr body
       return $ AppX schema (LamX [render (pretty v)] bodyX) [e1X]
-    toNexusExpr (AnnoS (Idx _ ift) _ (IfS cond thenB elseB)) =
-      IfX <$> type2schema ift
-          <*> toNexusExpr cond
-          <*> toNexusExpr thenB
-          <*> toNexusExpr elseB
+    -- A chain of three or more operands of one short-circuit operator is
+    -- a chain node; any other chain of conditionals in else position is a
+    -- chain of guards, which every conditional is (EMIT-5).
+    toNexusExpr e@(AnnoS (Idx _ ift) _ (IfS cond thenB elseB)) = case shortChain e of
+      Just (isAnd, operands@(_ : _ : _ : _)) ->
+        ChainX <$> type2schema ift <*> pure isAnd <*> mapM toNexusExpr operands
+      _ -> case guardArms e of
+        (arms@(_ : _ : _), final) ->
+          CondX <$> type2schema ift
+            <*> mapM (\(c, t) -> (,) <$> toNexusExpr c <*> toNexusExpr t) arms
+            <*> toNexusExpr final
+        _ ->
+          IfX <$> type2schema ift
+            <*> toNexusExpr cond
+            <*> toNexusExpr thenB
+            <*> toNexusExpr elseB
     -- The nexus evaluator has no closure values, so it runs a suspension
     -- where it is written. That is the law's own rule at a force, since
     -- running a suspension just built is running its body; every other
@@ -2457,6 +2475,25 @@ flagRevShortJson _ = jsonNull
 -- Expression tree serialization
 -- ======================================================================
 
+-- | The operands of a chain of one short-circuit operator (BASE-3):
+-- @c && rest@ is @if c then rest else False@ and @c || rest@ is
+-- @if c then True else rest@.
+shortChain :: AnnoS (Indexed Type) One () -> Maybe (Bool, [AnnoS (Indexed Type) One ()])
+shortChain e = case e of
+  AnnoS _ _ (IfS c x (AnnoS _ _ (LogS False))) -> Just (True, c : operands True x)
+  AnnoS _ _ (IfS c (AnnoS _ _ (LogS True)) x) -> Just (False, c : operands False x)
+  _ -> Nothing
+  where
+    operands op x = case shortChain x of
+      Just (op', xs) | op' == op -> xs
+      _ -> [x]
+
+-- | The (test, value) arms of a chain of conditionals nested in else
+-- position, and the value when no test holds.
+guardArms :: AnnoS (Indexed Type) One () -> ([(AnnoS (Indexed Type) One (), AnnoS (Indexed Type) One ())], AnnoS (Indexed Type) One ())
+guardArms (AnnoS _ _ (IfS c t x)) = let (arms, final) = guardArms x in ((c, t) : arms, final)
+guardArms e = ([], e)
+
 exprToJson :: NexusExpr -> Text
 exprToJson (LitX lt v) =
   jsonObj
@@ -2702,6 +2739,20 @@ exprToJson (TryX schema body) =
     [ ("tag", jsonStr "try")
     , ("schema", jsonStr schema)
     , ("body", exprToJson body)
+    ]
+exprToJson (CondX schema arms elseX) =
+  jsonObj
+    [ ("tag", jsonStr "cond")
+    , ("schema", jsonStr schema)
+    , ("cases", jsonArr [jsonObj [("cond", exprToJson c), ("then", exprToJson t)] | (c, t) <- arms])
+    , ("else", exprToJson elseX)
+    ]
+exprToJson (ChainX schema isAnd args) =
+  jsonObj
+    [ ("tag", jsonStr "chain")
+    , ("schema", jsonStr schema)
+    , ("and", jsonBool isAnd)
+    , ("args", jsonArr (map exprToJson args))
     ]
 exprToJson (IfX schema cond thenX elseX) =
   jsonObj

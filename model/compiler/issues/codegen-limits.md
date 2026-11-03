@@ -8,17 +8,11 @@ Generated code that a language's own tools refuse.
   any other wrapper (a coercion to an optional, a serial let, an owned
   copy that changes the arm's expression) it falls back to one nested
   block per guard, which R refuses past about 25 and Python past 100.
+  The nexus has the same limit for a command it evaluates itself
+  (Nexus.hs `guardArms`, `shortChain`): a chain behind a let, a do block, a
+  coercion or any node other than the next conditional nests its manifest
+  one level per element, and the nexus refuses a manifest nested past 128.
   Violates EMIT-5 there. Fix direction: recognize the chain in the IR.
-- [reproduced, 2026-11-03] A command the nexus evaluates itself nests its
-  manifest expression one level per `&&` operand, and the nexus refuses to
-  load a manifest nested past serde_json's recursion limit: `flat a b = a
-  && b && ...` with 6000 operands gives a 6002-deep expression and every
-  command of the program fails with "Failed to parse manifest JSON:
-  recursion limit exceeded". Violates EMIT-5 (block depth bounded by
-  source nesting) in the manifest; the nexus evaluator would also recurse
-  per operand. A chain of guards the nexus evaluates likely nests the same
-  way (not reproduced). Fix direction: an n-ary chain node in the nexus
-  expression.
 - [speculative, 2026-11-03] A `?R` stored in pointer form inside R
   other than as a bare field may not build where it is read or built
   (CPP-6). Getters, bracket steps and setters of `?T` fields go through

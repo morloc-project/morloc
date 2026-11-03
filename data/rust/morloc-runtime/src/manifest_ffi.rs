@@ -97,6 +97,10 @@ pub enum MorlocExpressionType {
                        // like TagTest, from the Array header it already holds.
     Equal = 35,        // (a, b) -> Bool: the two values are equal (@eq).
     LessEq = 36,       // (a, b) -> Bool: a orders before or with b (@le).
+    Cond = 37,         // n (test, value) arms + else -> value: the value of
+                       // the first arm whose test holds (EMIT-5).
+    Chain = 38,        // n operands -> Bool: `&&` or `||` over them, each
+                       // evaluated only while the chain is undecided (EMIT-5).
 }
 
 #[repr(C)]
@@ -304,6 +308,32 @@ pub struct MorlocIFileWalkExpression {
     pub n_args: u64,
 }
 
+// An array of `n` expression pointers (at least one slot), zeroed.
+unsafe fn expr_array(n: usize) -> Result<*mut *mut MorlocExpression, MorlocError> {
+    let arr = libc::calloc(n.max(1), std::mem::size_of::<*mut MorlocExpression>()) as *mut *mut MorlocExpression;
+    if arr.is_null() {
+        return Err(MorlocError::Other("out of memory building an expression".into()));
+    }
+    Ok(arr)
+}
+
+// A chain of guards (EMIT-5): `conds[i]` and `thens[i]` are one arm.
+#[repr(C)]
+pub struct MorlocCondExpression {
+    pub conds: *mut *mut MorlocExpression,
+    pub thens: *mut *mut MorlocExpression,
+    pub n: u64,
+    pub else_branch: *mut MorlocExpression,
+}
+
+// A chain of `&&` (is_and = 1) or `||` operands (EMIT-5).
+#[repr(C)]
+pub struct MorlocChainExpression {
+    pub args: *mut *mut MorlocExpression,
+    pub n: u64,
+    pub is_and: u8,
+}
+
 #[repr(C)]
 pub union ExprUnion {
     pub app_expr: *mut MorlocAppExpression,
@@ -324,6 +354,8 @@ pub union ExprUnion {
     // IFile-family expressions.
     pub open_expr: *mut MorlocOpenExpression,
     pub ifile_walk_expr: *mut MorlocIFileWalkExpression,
+    pub cond_expr: *mut MorlocCondExpression,
+    pub chain_expr: *mut MorlocChainExpression,
 }
 
 #[repr(C)]
@@ -1473,6 +1505,61 @@ unsafe fn build_expr(je: &serde_json::Value) -> Result<*mut MorlocExpression, Mo
             let sc = c_schema(schema_str)?;
             (*expr).schema = sc;
             (*expr).expr.if_expr = ifx;
+            Ok(expr)
+        }
+
+        "cond" => {
+            let cases = je.get("cases").and_then(|v| v.as_array()).ok_or_else(|| {
+                MorlocError::Other("cond expression is missing its cases".into())
+            })?;
+            let schema_str = je.get("schema").and_then(|v| v.as_str()).ok_or_else(|| {
+                MorlocError::Other("cond expression is missing its result schema".into())
+            })?;
+            let n = cases.len();
+            let conds = expr_array(n)?;
+            let thens = expr_array(n)?;
+            for (i, case) in cases.iter().enumerate() {
+                *conds.add(i) = build_expr(case.get("cond").unwrap_or(&serde_json::Value::Null))?;
+                *thens.add(i) = build_expr(case.get("then").unwrap_or(&serde_json::Value::Null))?;
+            }
+            let else_branch = build_expr(je.get("else").unwrap_or(&serde_json::Value::Null))?;
+            let cx = libc::calloc(1, std::mem::size_of::<MorlocCondExpression>()) as *mut MorlocCondExpression;
+            (*cx).conds = conds;
+            (*cx).thens = thens;
+            (*cx).n = n as u64;
+            (*cx).else_branch = else_branch;
+            let expr = libc::calloc(1, std::mem::size_of::<MorlocExpression>()) as *mut MorlocExpression;
+            (*expr).etype = MorlocExpressionType::Cond;
+            // The node's own schema, as for "if": an arm that throws has a
+            // width-0 schema.
+            (*expr).schema = c_schema(schema_str)?;
+            (*expr).expr.cond_expr = cx;
+            Ok(expr)
+        }
+
+        "chain" => {
+            let args = je.get("args").and_then(|v| v.as_array()).ok_or_else(|| {
+                MorlocError::Other("chain expression is missing its operands".into())
+            })?;
+            let is_and = je.get("and").and_then(|v| v.as_bool()).ok_or_else(|| {
+                MorlocError::Other("chain expression is missing its operator".into())
+            })?;
+            let schema_str = je.get("schema").and_then(|v| v.as_str()).ok_or_else(|| {
+                MorlocError::Other("chain expression is missing its result schema".into())
+            })?;
+            let n = args.len();
+            let arr = expr_array(n)?;
+            for (i, a) in args.iter().enumerate() {
+                *arr.add(i) = build_expr(a)?;
+            }
+            let chx = libc::calloc(1, std::mem::size_of::<MorlocChainExpression>()) as *mut MorlocChainExpression;
+            (*chx).args = arr;
+            (*chx).n = n as u64;
+            (*chx).is_and = u8::from(is_and);
+            let expr = libc::calloc(1, std::mem::size_of::<MorlocExpression>()) as *mut MorlocExpression;
+            (*expr).etype = MorlocExpressionType::Chain;
+            (*expr).schema = c_schema(schema_str)?;
+            (*expr).expr.chain_expr = chx;
             Ok(expr)
         }
 
