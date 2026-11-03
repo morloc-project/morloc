@@ -55,16 +55,9 @@
   requires a definition), so each comparison copies the instance body it
   resolves to, with every definition and method use inside it. With the
   root container instances, typechecking root-py's test suite takes 1.8 GB
-  and 25 s.
-- **Typechecking one definition is quadratic in its method uses.**
-  [reproduced, 2026-11-03] `f x y = [x > y, x > y, ...]` under root-py:
-  250 uses 1.4 s / 146 MB, 500 uses 5.0 s / 453 MB, 1000 uses 28.9 s /
-  2.5 GB (`morloc typecheck`). The same uses in a `&&` chain cost the
-  same; 1000 operands `b && b ...` with no method take 0.4 s, so the
-  cost is per method use, against something that grows with the
-  definition. A use of `!=` costs about five times one of `==` or `>`
-  (100 uses: 4.3 s against 0.6 s): root's `!=` bodies for tuples
-  (`not (.0 x == .0 y && ...)`) are larger than its `==` bodies, which
-  suggests each use copies or checks every candidate's body. Cause not
-  narrowed. Spec gap: no item bounds the compiler's cost per term.
-
+  and 25 s. Per use under root-py: about 1 ms and 0.15 MB for `x > y`,
+  about 45 ms and 4.5 MB for `x != k` (root's tuple `!=` bodies hold
+  several `==` uses, each checked against every candidate), so a
+  1000-operand `x != k` chain takes 47 s and 4.6 GB to typecheck
+  (measured 2026-11-03). Spec gap: no item bounds the compiler's cost per
+  term.

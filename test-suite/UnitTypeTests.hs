@@ -441,7 +441,8 @@ assertSubtypeBad msg gs a b = testCase msg $ do
     Right _ -> assertFailure $ "Expected subtype rejection for " <> show a <> " <: " <> show b
 
 -- | Every unsolved existential the index names is the entry at its slot,
--- and every cached solution is an entry of the context.
+-- every cached solution is an entry of the context, and the annotation
+-- index holds exactly the annotations of the context, newest first.
 assertSubtypeIndexed :: String -> [GammaIndex] -> TypeU -> TypeU -> TestTree
 assertSubtypeIndexed msg gs a b = testCase msg $
   case MTI.subtype Map.empty a b (listToGamma gs) of
@@ -456,6 +457,8 @@ assertSubtypeIndexed msg gs a b = testCase msg $
       mapM_
         (\v -> assertBool (show v <> " is solved but its entry is gone") (Set.member v solvedInContext))
         (Map.keys (gammaSolved g))
+      let annsInContext = Map.fromListWith (flip (<>)) [(v, [s]) | (s, AnnG v _) <- IntMap.toDescList (gammaContext g)]
+      assertEqual "annotation index" annsInContext (gammaAnn g)
 
 -- | A Gamma holding the given entries at the given slots.
 slotGamma :: [(Int, GammaIndex)] -> Gamma
@@ -464,6 +467,7 @@ slotGamma entries =
     { gammaSlot = MTI.slotSpacing * (1 + maximum (0 : map ((`div` MTI.slotSpacing) . fst) entries))
     , gammaContext = IntMap.fromList entries
     , gammaExist = Map.fromList [(v, s) | (s, ExistG v _ _) <- entries]
+    , gammaAnn = Map.fromListWith (flip (<>)) [(v, [s]) | (s, AnnG v _) <- IntMap.toDescList (IntMap.fromList entries)]
     }
 
 -- | Articulating an existential whose free slots are used up keeps every
@@ -494,10 +498,12 @@ listToGamma gs =
       indexed = zip [spacing * (n - 1), spacing * (n - 2) .. 0] gs
       ctx = IntMap.fromList indexed
       existMap = Map.fromList [(v, s) | (s, ExistG v _ _) <- indexed]
+      annMap = Map.fromListWith (flip (<>)) [(v, [s]) | (s, AnnG v _) <- indexed]
   in Gamma
     { gammaCounter = 0
     , gammaSlot = spacing * n
     , gammaContext = ctx
+    , gammaAnn = annMap
     , gammaExist = existMap
     , gammaSolved = Map.empty
     , gammaDeferred = []
@@ -5232,7 +5238,28 @@ complexityRegressionTests =
             "a use solved by its sole instance keeps the export shallow"
             (soleInstanceComparisons 150)
             (fun [lst (VarU (TV "Tag")), int])
+      , -- Each method use checks every instance of its class and trims the
+        -- context back after each; that trim must not cost the size of
+        -- the context, which grows with the definition.
+        localOption (mkTimeout 10000000) $
+          assertGeneralType
+            "method uses in one definition cost no more as the definition grows"
+            (manyMethodUses 3000)
+            (fun [int, int, lst bool])
       ]
+
+-- | @k@ uses of a method whose class has fourteen sourced instances, in
+-- one definition.
+manyMethodUses :: Int -> MT.Text
+manyMethodUses k =
+  "module main (f)\n"
+    <> "class Gt a where\n  gtm :: a -> a -> Bool\n"
+    <> mconcat
+      [ "instance Gt " <> t <> " where\n  source Py from \"g.py\" (\"gt\" as gtm)\n"
+      | t <- ["Int", "Str", "Real", "Bool", "I8", "I16", "I32", "I64", "U8", "U16", "U32", "U64", "F32", "F64"]
+      ]
+    <> "f :: Int -> Int -> [Bool]\n"
+    <> "f x y = [" <> MT.intercalate ", " (replicate k "gtm x y") <> "]\n"
 
 -- | A comparison class with container instances whose bodies use the class
 -- again, over a two-parameter class with one instance.

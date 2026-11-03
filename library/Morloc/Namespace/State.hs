@@ -928,6 +928,9 @@ data Gamma = Gamma
   , gammaContext :: IntMap.IntMap GammaIndex
   -- | Index: ExistG TVar -> slot number (for O(log N) access1)
   , gammaExist :: Map TVar Int
+  -- | Index: AnnG EVar -> its slots, newest first. A slot is checked
+  -- against the context before it is used (see 'lookupE').
+  , gammaAnn :: Map EVar [Int]
   -- | Cache of solved existential types
   , gammaSolved :: Map TVar TypeU
   -- | Nat constraints that could not be solved (deferred)

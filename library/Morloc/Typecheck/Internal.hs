@@ -125,6 +125,7 @@ module Morloc.Typecheck.Internal
   , seeType
   ) where
 
+import qualified Data.List
 import Data.Functor.Const (Const (..))
 import Data.Functor.Identity (Identity (..))
 import qualified Data.IntMap.Strict as IntMap
@@ -153,7 +154,7 @@ qualify vs t = foldr (\v -> ForallU v) t vs
 emptyGamma :: Gamma
 emptyGamma =
   Gamma
-    { gammaCounter = 0, gammaSlot = 0, gammaContext = IntMap.empty, gammaExist = Map.empty
+    { gammaCounter = 0, gammaSlot = 0, gammaContext = IntMap.empty, gammaExist = Map.empty, gammaAnn = Map.empty
     , gammaSolved = Map.empty, gammaDeferred = [], gammaDeferredAt = Map.empty, gammaKindSubs = Map.empty
     , gammaEffSubs = Map.empty, gammaConstraints = [], gammaAssumedConstraints = Nothing
     , gammaIntVals = Map.empty, gammaPendingNumLits = [], gammaPositionalReceivers = Set.empty
@@ -713,6 +714,7 @@ slotSpacing = 2 ^ (32 :: Int)
        , gammaExist = case gi of
            ExistG v _ _ -> Map.insert v s (gammaExist g)
            _ -> gammaExist g
+       , gammaAnn = indexAnn s gi (gammaAnn g)
        }
 
 -- | Add multiple entries: last element of list becomes newest (highest slot).
@@ -2506,10 +2508,8 @@ solveExistWith v t extras g = case Map.lookup v (gammaExist g) of
             bandStep = slotSpacing `div` (length ordered + 1)
         when (bandStep < 1) $
           Left $ "Too many type variables to infer at once while articulating" <+> pretty v
-        let cleared = g1
-              { gammaContext = foldl' (flip IntMap.delete) (gammaContext g1) (map fst band)
-              , gammaExist = foldl' (flip Map.delete) (gammaExist g1) [ev | (_, ExistG ev _ _) <- band]
-              }
+        let cleared = unindexEntries False band $
+              g1 {gammaContext = foldl' (flip IntMap.delete) (gammaContext g1) (map fst band)}
             g2 = if inBand slot then cleared else placeEntries cleared [(slot, solved)]
         return . Just $ placeEntries g2 (zip [top - bandStep, top - 2 * bandStep ..] ordered)
   where
@@ -2518,18 +2518,43 @@ solveExistWith v t extras g = case Map.lookup v (gammaExist g) of
          , gammaExist = case x of
              ExistG ev _ _ -> Map.insert ev s (gammaExist g')
              _ -> gammaExist g'
+         , gammaAnn = indexAnn s x (gammaAnn g')
          }
 
 -- | Look up a solved existential type variable. O(log N) via gammaSolved.
 lookupU :: TVar -> Gamma -> Maybe TypeU
 lookupU v g = Map.lookup v (gammaSolved g)
 
--- | Look up an annotation type variable. O(N) scan (AnnG entries are rare).
+-- | Look up an annotation type variable: its newest entry in the context.
 lookupE :: EVar -> Gamma -> Maybe TypeU
-lookupE v g = foldr step Nothing (IntMap.toDescList (gammaContext g))
+lookupE v g =
+  listToMaybe
+    [ t
+    | s <- Map.findWithDefault [] v (gammaAnn g)
+    , Just (AnnG v' t) <- [IntMap.lookup s (gammaContext g)]
+    , v' == v
+    ]
+
+-- | Record an annotation's slot in the index, newest (highest) first.
+indexAnn :: Int -> GammaIndex -> Map.Map EVar [Int] -> Map.Map EVar [Int]
+indexAnn s (AnnG v _) = Map.alter (Just . Data.List.insertBy (flip compare) s . fromMaybe []) v
+indexAnn _ _ = id
+
+-- | The side indexes without the given entries, removed from the context;
+-- with @dropSolved@, their cached solutions go too.
+unindexEntries :: Bool -> [(Int, GammaIndex)] -> Gamma -> Gamma
+unindexEntries dropSolved removed g =
+  g
+    { gammaExist = foldl' (flip Map.delete) (gammaExist g) [v | (_, ExistG v _ _) <- removed]
+    , gammaSolved =
+        if dropSolved
+          then foldl' (flip Map.delete) (gammaSolved g) [v | (_, SolvedG v _) <- removed]
+          else gammaSolved g
+    , gammaAnn = foldl' dropAnn (gammaAnn g) removed
+    }
   where
-    step (_, AnnG v' t) _ | v == v' = Just t
-    step _ acc = acc
+    dropAnn m (s, AnnG v _) = Map.update (\ss -> case filter (/= s) ss of [] -> Nothing; ss' -> Just ss') v m
+    dropAnn m _ = m
 
 -- | Remove context entries newer than (and including) a marker. O(N) in
 -- removed entries for cleanup; O(log N) for the IntMap split itself.
@@ -2540,18 +2565,8 @@ cut marker g = do
     (s : _) -> Right s
     [] -> Left $ "Empty cut" <+> pretty marker
   -- Everything with slot < markerSlot is kept (older entries)
-  let kept = fst (IntMap.split markerSlot (gammaContext g))
-      -- Collect removed entries for cleanup
-      removedSlots = IntMap.filterWithKey (\s _ -> s >= markerSlot) (gammaContext g)
-      removedSolvedKeys = [v | (_, SolvedG v _) <- IntMap.toList removedSlots]
-      removedExistKeys = [v | (_, ExistG v _ _) <- IntMap.toList removedSlots]
-      solvedMap' = foldl' (flip Map.delete) (gammaSolved g) removedSolvedKeys
-      existMap' = foldl' (flip Map.delete) (gammaExist g) removedExistKeys
-  return $ g
-    { gammaContext = kept
-    , gammaExist = existMap'
-    , gammaSolved = solvedMap'
-    }
+  let (kept, removed) = IntMap.spanAntitone (< markerSlot) (gammaContext g)
+  return . unindexEntries True (IntMap.toList removed) $ g {gammaContext = kept}
 
 -- | Convert context to a list (newest first) for iteration/debugging.
 gammaContextList :: Gamma -> [GammaIndex]
@@ -2563,17 +2578,8 @@ gammaContextList g = map snd (IntMap.toDescList (gammaContext g))
 -- threshold (see 'solveExistWith').
 gammaTrimAfter :: Int -> Gamma -> Gamma
 gammaTrimAfter slotThreshold g =
-  let (kept, removedSlots) = IntMap.partitionWithKey (\s _ -> s <= slotThreshold - slotSpacing) (gammaContext g)
-      removedSolvedKeys = [v | (_, SolvedG v _) <- IntMap.toList removedSlots]
-      removedExistKeys = [v | (_, ExistG v _ _) <- IntMap.toList removedSlots]
-      solvedMap' = foldl' (flip Map.delete) (gammaSolved g) removedSolvedKeys
-      existMap' = foldl' (flip Map.delete) (gammaExist g) removedExistKeys
-  in g
-    { gammaContext = kept
-    , gammaSlot = slotThreshold
-    , gammaExist = existMap'
-    , gammaSolved = solvedMap'
-    }
+  let (kept, removed) = IntMap.spanAntitone (<= slotThreshold - slotSpacing) (gammaContext g)
+   in unindexEntries True (IntMap.toList removed) g {gammaContext = kept, gammaSlot = slotThreshold}
 
 selectorType :: Gamma -> Selector -> MorlocMonad (Gamma, TypeU)
 selectorType g0 SelectorEnd = do
