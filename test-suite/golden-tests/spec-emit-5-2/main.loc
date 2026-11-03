@@ -1,8 +1,11 @@
 -- Spec EMIT-5: a command the nexus evaluates itself, with no language
 -- pool, holds chains of `&&`, `||` and guards of any length: the manifest
 -- nests no deeper for a longer chain. An operand after the one that
--- decides a chain does not run, nor does an arm whose test fails.
-module main (allOf, anyOf, pick, stopAnd, stopOr, pickThrow, classify)
+-- decides a chain does not run, nor does an arm whose test fails. A let
+-- before every element of a chain, or a long run of lets, nests no deeper
+-- either. A let before an element is seen by every later element and
+-- shadows what it names, and is evaluated only when the chain reaches it.
+module main (allOf, anyOf, pick, stopAnd, stopOr, pickThrow, classify, letGuards, letRun, letChain, scopeA, lazyLet)
 
 allOf :: Bool -> Bool -> Bool
 allOf a b = a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b
@@ -1028,3 +1031,481 @@ classify a b
   : ? a = True
   : ? b = False
   : False
+
+letGuards :: Bool -> Bool -> Int
+letGuards a b = (? a = 0
+  : let v0 = b in (? v0 = 1
+  : let v1 = a in (? v1 = 2
+  : let v2 = b in (? v2 = 3
+  : let v3 = a in (? v3 = 4
+  : let v4 = b in (? v4 = 5
+  : let v5 = a in (? v5 = 6
+  : let v6 = b in (? v6 = 7
+  : let v7 = a in (? v7 = 8
+  : let v8 = b in (? v8 = 9
+  : let v9 = a in (? v9 = 10
+  : let v10 = b in (? v10 = 11
+  : let v11 = a in (? v11 = 12
+  : let v12 = b in (? v12 = 13
+  : let v13 = a in (? v13 = 14
+  : let v14 = b in (? v14 = 15
+  : let v15 = a in (? v15 = 16
+  : let v16 = b in (? v16 = 17
+  : let v17 = a in (? v17 = 18
+  : let v18 = b in (? v18 = 19
+  : let v19 = a in (? v19 = 20
+  : let v20 = b in (? v20 = 21
+  : let v21 = a in (? v21 = 22
+  : let v22 = b in (? v22 = 23
+  : let v23 = a in (? v23 = 24
+  : let v24 = b in (? v24 = 25
+  : let v25 = a in (? v25 = 26
+  : let v26 = b in (? v26 = 27
+  : let v27 = a in (? v27 = 28
+  : let v28 = b in (? v28 = 29
+  : let v29 = a in (? v29 = 30
+  : let v30 = b in (? v30 = 31
+  : let v31 = a in (? v31 = 32
+  : let v32 = b in (? v32 = 33
+  : let v33 = a in (? v33 = 34
+  : let v34 = b in (? v34 = 35
+  : let v35 = a in (? v35 = 36
+  : let v36 = b in (? v36 = 37
+  : let v37 = a in (? v37 = 38
+  : let v38 = b in (? v38 = 39
+  : let v39 = a in (? v39 = 40
+  : let v40 = b in (? v40 = 41
+  : let v41 = a in (? v41 = 42
+  : let v42 = b in (? v42 = 43
+  : let v43 = a in (? v43 = 44
+  : let v44 = b in (? v44 = 45
+  : let v45 = a in (? v45 = 46
+  : let v46 = b in (? v46 = 47
+  : let v47 = a in (? v47 = 48
+  : let v48 = b in (? v48 = 49
+  : let v49 = a in (? v49 = 50
+  : let v50 = b in (? v50 = 51
+  : let v51 = a in (? v51 = 52
+  : let v52 = b in (? v52 = 53
+  : let v53 = a in (? v53 = 54
+  : let v54 = b in (? v54 = 55
+  : let v55 = a in (? v55 = 56
+  : let v56 = b in (? v56 = 57
+  : let v57 = a in (? v57 = 58
+  : let v58 = b in (? v58 = 59
+  : let v59 = a in (? v59 = 60
+  : let v60 = b in (? v60 = 61
+  : let v61 = a in (? v61 = 62
+  : let v62 = b in (? v62 = 63
+  : let v63 = a in (? v63 = 64
+  : let v64 = b in (? v64 = 65
+  : let v65 = a in (? v65 = 66
+  : let v66 = b in (? v66 = 67
+  : let v67 = a in (? v67 = 68
+  : let v68 = b in (? v68 = 69
+  : let v69 = a in (? v69 = 70
+  : let v70 = b in (? v70 = 71
+  : let v71 = a in (? v71 = 72
+  : let v72 = b in (? v72 = 73
+  : let v73 = a in (? v73 = 74
+  : let v74 = b in (? v74 = 75
+  : let v75 = a in (? v75 = 76
+  : let v76 = b in (? v76 = 77
+  : let v77 = a in (? v77 = 78
+  : let v78 = b in (? v78 = 79
+  : let v79 = a in (? v79 = 80
+  : let v80 = b in (? v80 = 81
+  : let v81 = a in (? v81 = 82
+  : let v82 = b in (? v82 = 83
+  : let v83 = a in (? v83 = 84
+  : let v84 = b in (? v84 = 85
+  : let v85 = a in (? v85 = 86
+  : let v86 = b in (? v86 = 87
+  : let v87 = a in (? v87 = 88
+  : let v88 = b in (? v88 = 89
+  : let v89 = a in (? v89 = 90
+  : let v90 = b in (? v90 = 91
+  : let v91 = a in (? v91 = 92
+  : let v92 = b in (? v92 = 93
+  : let v93 = a in (? v93 = 94
+  : let v94 = b in (? v94 = 95
+  : let v95 = a in (? v95 = 96
+  : let v96 = b in (? v96 = 97
+  : let v97 = a in (? v97 = 98
+  : let v98 = b in (? v98 = 99
+  : let v99 = a in (? v99 = 100
+  : let v100 = b in (? v100 = 101
+  : let v101 = a in (? v101 = 102
+  : let v102 = b in (? v102 = 103
+  : let v103 = a in (? v103 = 104
+  : let v104 = b in (? v104 = 105
+  : let v105 = a in (? v105 = 106
+  : let v106 = b in (? v106 = 107
+  : let v107 = a in (? v107 = 108
+  : let v108 = b in (? v108 = 109
+  : let v109 = a in (? v109 = 110
+  : let v110 = b in (? v110 = 111
+  : let v111 = a in (? v111 = 112
+  : let v112 = b in (? v112 = 113
+  : let v113 = a in (? v113 = 114
+  : let v114 = b in (? v114 = 115
+  : let v115 = a in (? v115 = 116
+  : let v116 = b in (? v116 = 117
+  : let v117 = a in (? v117 = 118
+  : let v118 = b in (? v118 = 119
+  : let v119 = a in (? v119 = 120
+  : let v120 = b in (? v120 = 121
+  : let v121 = a in (? v121 = 122
+  : let v122 = b in (? v122 = 123
+  : let v123 = a in (? v123 = 124
+  : let v124 = b in (? v124 = 125
+  : let v125 = a in (? v125 = 126
+  : let v126 = b in (? v126 = 127
+  : let v127 = a in (? v127 = 128
+  : let v128 = b in (? v128 = 129
+  : let v129 = a in (? v129 = 130
+  : let v130 = b in (? v130 = 131
+  : let v131 = a in (? v131 = 132
+  : let v132 = b in (? v132 = 133
+  : let v133 = a in (? v133 = 134
+  : let v134 = b in (? v134 = 135
+  : let v135 = a in (? v135 = 136
+  : let v136 = b in (? v136 = 137
+  : let v137 = a in (? v137 = 138
+  : let v138 = b in (? v138 = 139
+  : let v139 = a in (? v139 = 140
+  : let v140 = b in (? v140 = 141
+  : let v141 = a in (? v141 = 142
+  : let v142 = b in (? v142 = 143
+  : let v143 = a in (? v143 = 144
+  : let v144 = b in (? v144 = 145
+  : let v145 = a in (? v145 = 146
+  : let v146 = b in (? v146 = 147
+  : let v147 = a in (? v147 = 148
+  : let v148 = b in (? v148 = 149
+  : let v149 = a in (? v149 = 150
+  : let v150 = b in (? v150 = 151
+  : let v151 = a in (? v151 = 152
+  : let v152 = b in (? v152 = 153
+  : let v153 = a in (? v153 = 154
+  : let v154 = b in (? v154 = 155
+  : let v155 = a in (? v155 = 156
+  : let v156 = b in (? v156 = 157
+  : let v157 = a in (? v157 = 158
+  : let v158 = b in (? v158 = 159
+  : let v159 = a in (? v159 = 160
+  : let v160 = b in (? v160 = 161
+  : let v161 = a in (? v161 = 162
+  : let v162 = b in (? v162 = 163
+  : let v163 = a in (? v163 = 164
+  : let v164 = b in (? v164 = 165
+  : let v165 = a in (? v165 = 166
+  : let v166 = b in (? v166 = 167
+  : let v167 = a in (? v167 = 168
+  : let v168 = b in (? v168 = 169
+  : let v169 = a in (? v169 = 170
+  : let v170 = b in (? v170 = 171
+  : let v171 = a in (? v171 = 172
+  : let v172 = b in (? v172 = 173
+  : let v173 = a in (? v173 = 174
+  : let v174 = b in (? v174 = 175
+  : let v175 = a in (? v175 = 176
+  : let v176 = b in (? v176 = 177
+  : let v177 = a in (? v177 = 178
+  : let v178 = b in (? v178 = 179
+  : let v179 = a in (? v179 = 180
+  : let v180 = b in (? v180 = 181
+  : let v181 = a in (? v181 = 182
+  : let v182 = b in (? v182 = 183
+  : let v183 = a in (? v183 = 184
+  : let v184 = b in (? v184 = 185
+  : let v185 = a in (? v185 = 186
+  : let v186 = b in (? v186 = 187
+  : let v187 = a in (? v187 = 188
+  : let v188 = b in (? v188 = 189
+  : let v189 = a in (? v189 = 190
+  : let v190 = b in (? v190 = 191
+  : let v191 = a in (? v191 = 192
+  : let v192 = b in (? v192 = 193
+  : let v193 = a in (? v193 = 194
+  : let v194 = b in (? v194 = 195
+  : let v195 = a in (? v195 = 196
+  : let v196 = b in (? v196 = 197
+  : let v197 = a in (? v197 = 198
+  : let v198 = b in (? v198 = 199
+  : let v199 = a in (? v199 = 200
+  : let v200 = b in (? v200 = 201
+  : let v201 = a in (? v201 = 202
+  : let v202 = b in (? v202 = 203
+  : let v203 = a in (? v203 = 204
+  : let v204 = b in (? v204 = 205
+  : let v205 = a in (? v205 = 206
+  : let v206 = b in (? v206 = 207
+  : let v207 = a in (? v207 = 208
+  : let v208 = b in (? v208 = 209
+  : let v209 = a in (? v209 = 210
+  : let v210 = b in (? v210 = 211
+  : let v211 = a in (? v211 = 212
+  : let v212 = b in (? v212 = 213
+  : let v213 = a in (? v213 = 214
+  : let v214 = b in (? v214 = 215
+  : let v215 = a in (? v215 = 216
+  : let v216 = b in (? v216 = 217
+  : let v217 = a in (? v217 = 218
+  : let v218 = b in (? v218 = 219
+  : let v219 = a in (? v219 = 220
+  : let v220 = b in (? v220 = 221
+  : let v221 = a in (? v221 = 222
+  : let v222 = b in (? v222 = 223
+  : let v223 = a in (? v223 = 224
+  : let v224 = b in (? v224 = 225
+  : let v225 = a in (? v225 = 226
+  : let v226 = b in (? v226 = 227
+  : let v227 = a in (? v227 = 228
+  : let v228 = b in (? v228 = 229
+  : let v229 = a in (? v229 = 230
+  : let v230 = b in (? v230 = 231
+  : let v231 = a in (? v231 = 232
+  : let v232 = b in (? v232 = 233
+  : let v233 = a in (? v233 = 234
+  : let v234 = b in (? v234 = 235
+  : let v235 = a in (? v235 = 236
+  : let v236 = b in (? v236 = 237
+  : let v237 = a in (? v237 = 238
+  : let v238 = b in (? v238 = 239
+  : let v239 = a in (? v239 = 240
+  : let v240 = b in (? v240 = 241
+  : let v241 = a in (? v241 = 242
+  : let v242 = b in (? v242 = 243
+  : let v243 = a in (? v243 = 244
+  : let v244 = b in (? v244 = 245
+  : let v245 = a in (? v245 = 246
+  : let v246 = b in (? v246 = 247
+  : let v247 = a in (? v247 = 248
+  : let v248 = b in (? v248 = 249
+  : let v249 = a in (? v249 = 250
+  : let v250 = b in (? v250 = 251
+  : let v251 = a in (? v251 = 252
+  : let v252 = b in (? v252 = 253
+  : let v253 = a in (? v253 = 254
+  : let v254 = b in (? v254 = 255
+  : let v255 = a in (? v255 = 256
+  : let v256 = b in (? v256 = 257
+  : let v257 = a in (? v257 = 258
+  : let v258 = b in (? v258 = 259
+  : let v259 = a in (? v259 = 260
+  : let v260 = b in (? v260 = 261
+  : let v261 = a in (? v261 = 262
+  : let v262 = b in (? v262 = 263
+  : let v263 = a in (? v263 = 264
+  : let v264 = b in (? v264 = 265
+  : let v265 = a in (? v265 = 266
+  : let v266 = b in (? v266 = 267
+  : let v267 = a in (? v267 = 268
+  : let v268 = b in (? v268 = 269
+  : let v269 = a in (? v269 = 270
+  : let v270 = b in (? v270 = 271
+  : let v271 = a in (? v271 = 272
+  : let v272 = b in (? v272 = 273
+  : let v273 = a in (? v273 = 274
+  : let v274 = b in (? v274 = 275
+  : let v275 = a in (? v275 = 276
+  : let v276 = b in (? v276 = 277
+  : let v277 = a in (? v277 = 278
+  : let v278 = b in (? v278 = 279
+  : let v279 = a in (? v279 = 280
+  : let v280 = b in (? v280 = 281
+  : let v281 = a in (? v281 = 282
+  : let v282 = b in (? v282 = 283
+  : let v283 = a in (? v283 = 284
+  : let v284 = b in (? v284 = 285
+  : let v285 = a in (? v285 = 286
+  : let v286 = b in (? v286 = 287
+  : let v287 = a in (? v287 = 288
+  : let v288 = b in (? v288 = 289
+  : let v289 = a in (? v289 = 290
+  : let v290 = b in (? v290 = 291
+  : let v291 = a in (? v291 = 292
+  : let v292 = b in (? v292 = 293
+  : let v293 = a in (? v293 = 294
+  : let v294 = b in (? v294 = 295
+  : let v295 = a in (? v295 = 296
+  : let v296 = b in (? v296 = 297
+  : let v297 = a in (? v297 = 298
+  : let v298 = b in (? v298 = 299
+  : let v299 = a in 1000))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))
+
+letRun :: Bool -> Bool
+letRun a =
+  let v0 = a in
+  let v1 = v0 in
+  let v2 = v1 in
+  let v3 = v2 in
+  let v4 = v3 in
+  let v5 = v4 in
+  let v6 = v5 in
+  let v7 = v6 in
+  let v8 = v7 in
+  let v9 = v8 in
+  let v10 = v9 in
+  let v11 = v10 in
+  let v12 = v11 in
+  let v13 = v12 in
+  let v14 = v13 in
+  let v15 = v14 in
+  let v16 = v15 in
+  let v17 = v16 in
+  let v18 = v17 in
+  let v19 = v18 in
+  let v20 = v19 in
+  let v21 = v20 in
+  let v22 = v21 in
+  let v23 = v22 in
+  let v24 = v23 in
+  let v25 = v24 in
+  let v26 = v25 in
+  let v27 = v26 in
+  let v28 = v27 in
+  let v29 = v28 in
+  let v30 = v29 in
+  let v31 = v30 in
+  let v32 = v31 in
+  let v33 = v32 in
+  let v34 = v33 in
+  let v35 = v34 in
+  let v36 = v35 in
+  let v37 = v36 in
+  let v38 = v37 in
+  let v39 = v38 in
+  let v40 = v39 in
+  let v41 = v40 in
+  let v42 = v41 in
+  let v43 = v42 in
+  let v44 = v43 in
+  let v45 = v44 in
+  let v46 = v45 in
+  let v47 = v46 in
+  let v48 = v47 in
+  let v49 = v48 in
+  let v50 = v49 in
+  let v51 = v50 in
+  let v52 = v51 in
+  let v53 = v52 in
+  let v54 = v53 in
+  let v55 = v54 in
+  let v56 = v55 in
+  let v57 = v56 in
+  let v58 = v57 in
+  let v59 = v58 in
+  let v60 = v59 in
+  let v61 = v60 in
+  let v62 = v61 in
+  let v63 = v62 in
+  let v64 = v63 in
+  let v65 = v64 in
+  let v66 = v65 in
+  let v67 = v66 in
+  let v68 = v67 in
+  let v69 = v68 in
+  let v70 = v69 in
+  let v71 = v70 in
+  let v72 = v71 in
+  let v73 = v72 in
+  let v74 = v73 in
+  let v75 = v74 in
+  let v76 = v75 in
+  let v77 = v76 in
+  let v78 = v77 in
+  let v79 = v78 in
+  let v80 = v79 in
+  let v81 = v80 in
+  let v82 = v81 in
+  let v83 = v82 in
+  let v84 = v83 in
+  let v85 = v84 in
+  let v86 = v85 in
+  let v87 = v86 in
+  let v88 = v87 in
+  let v89 = v88 in
+  let v90 = v89 in
+  let v91 = v90 in
+  let v92 = v91 in
+  let v93 = v92 in
+  let v94 = v93 in
+  let v95 = v94 in
+  let v96 = v95 in
+  let v97 = v96 in
+  let v98 = v97 in
+  let v99 = v98 in
+  let v100 = v99 in
+  let v101 = v100 in
+  let v102 = v101 in
+  let v103 = v102 in
+  let v104 = v103 in
+  let v105 = v104 in
+  let v106 = v105 in
+  let v107 = v106 in
+  let v108 = v107 in
+  let v109 = v108 in
+  let v110 = v109 in
+  let v111 = v110 in
+  let v112 = v111 in
+  let v113 = v112 in
+  let v114 = v113 in
+  let v115 = v114 in
+  let v116 = v115 in
+  let v117 = v116 in
+  let v118 = v117 in
+  let v119 = v118 in
+  let v120 = v119 in
+  let v121 = v120 in
+  let v122 = v121 in
+  let v123 = v122 in
+  let v124 = v123 in
+  let v125 = v124 in
+  let v126 = v125 in
+  let v127 = v126 in
+  let v128 = v127 in
+  let v129 = v128 in
+  let v130 = v129 in
+  let v131 = v130 in
+  let v132 = v131 in
+  let v133 = v132 in
+  let v134 = v133 in
+  let v135 = v134 in
+  let v136 = v135 in
+  let v137 = v136 in
+  let v138 = v137 in
+  let v139 = v138 in
+  let v140 = v139 in
+  let v141 = v140 in
+  let v142 = v141 in
+  let v143 = v142 in
+  let v144 = v143 in
+  let v145 = v144 in
+  let v146 = v145 in
+  let v147 = v146 in
+  let v148 = v147 in
+  let v149 = v148 in
+  v149
+
+letChain :: Bool -> Bool -> Bool
+letChain a b = (let w0 = a in w0 && (let w1 = b in w1 && (let w2 = a in w2 && (let w3 = b in w3 && (let w4 = a in w4 && (let w5 = b in w5 && (let w6 = a in w6 && (let w7 = b in w7 && (let w8 = a in w8 && (let w9 = b in w9 && (let w10 = a in w10 && (let w11 = b in w11 && (let w12 = a in w12 && (let w13 = b in w13 && (let w14 = a in w14 && (let w15 = b in w15 && (let w16 = a in w16 && (let w17 = b in w17 && (let w18 = a in w18 && (let w19 = b in w19 && (let w20 = a in w20 && (let w21 = b in w21 && (let w22 = a in w22 && (let w23 = b in w23 && (let w24 = a in w24 && (let w25 = b in w25 && (let w26 = a in w26 && (let w27 = b in w27 && (let w28 = a in w28 && (let w29 = b in w29 && (let w30 = a in w30 && (let w31 = b in w31 && (let w32 = a in w32 && (let w33 = b in w33 && (let w34 = a in w34 && (let w35 = b in w35 && (let w36 = a in w36 && (let w37 = b in w37 && (let w38 = a in w38 && (let w39 = b in w39 && (let w40 = a in w40 && (let w41 = b in w41 && (let w42 = a in w42 && (let w43 = b in w43 && (let w44 = a in w44 && (let w45 = b in w45 && (let w46 = a in w46 && (let w47 = b in w47 && (let w48 = a in w48 && (let w49 = b in w49 && (let w50 = a in w50 && (let w51 = b in w51 && (let w52 = a in w52 && (let w53 = b in w53 && (let w54 = a in w54 && (let w55 = b in w55 && (let w56 = a in w56 && (let w57 = b in w57 && (let w58 = a in w58 && (let w59 = b in w59 && (let w60 = a in w60 && (let w61 = b in w61 && (let w62 = a in w62 && (let w63 = b in w63 && (let w64 = a in w64 && (let w65 = b in w65 && (let w66 = a in w66 && (let w67 = b in w67 && (let w68 = a in w68 && (let w69 = b in w69 && (let w70 = a in w70 && (let w71 = b in w71 && (let w72 = a in w72 && (let w73 = b in w73 && (let w74 = a in w74 && (let w75 = b in w75 && (let w76 = a in w76 && (let w77 = b in w77 && (let w78 = a in w78 && (let w79 = b in w79 && (let w80 = a in w80 && (let w81 = b in w81 && (let w82 = a in w82 && (let w83 = b in w83 && (let w84 = a in w84 && (let w85 = b in w85 && (let w86 = a in w86 && (let w87 = b in w87 && (let w88 = a in w88 && (let w89 = b in w89 && (let w90 = a in w90 && (let w91 = b in w91 && (let w92 = a in w92 && (let w93 = b in w93 && (let w94 = a in w94 && (let w95 = b in w95 && (let w96 = a in w96 && (let w97 = b in w97 && (let w98 = a in w98 && (let w99 = b in w99 && (let w100 = a in w100 && (let w101 = b in w101 && (let w102 = a in w102 && (let w103 = b in w103 && (let w104 = a in w104 && (let w105 = b in w105 && (let w106 = a in w106 && (let w107 = b in w107 && (let w108 = a in w108 && (let w109 = b in w109 && (let w110 = a in w110 && (let w111 = b in w111 && (let w112 = a in w112 && (let w113 = b in w113 && (let w114 = a in w114 && (let w115 = b in w115 && (let w116 = a in w116 && (let w117 = b in w117 && (let w118 = a in w118 && (let w119 = b in w119 && (let w120 = a in w120 && (let w121 = b in w121 && (let w122 = a in w122 && (let w123 = b in w123 && (let w124 = a in w124 && (let w125 = b in w125 && (let w126 = a in w126 && (let w127 = b in w127 && (let w128 = a in w128 && (let w129 = b in w129 && (let w130 = a in w130 && (let w131 = b in w131 && (let w132 = a in w132 && (let w133 = b in w133 && (let w134 = a in w134 && (let w135 = b in w135 && (let w136 = a in w136 && (let w137 = b in w137 && (let w138 = a in w138 && (let w139 = b in w139 && (let w140 = a in w140 && (let w141 = b in w141 && (let w142 = a in w142 && (let w143 = b in w143 && (let w144 = a in w144 && (let w145 = b in w145 && (let w146 = a in w146 && (let w147 = b in w147 && (let w148 = a in w148 && (let w149 = b in w149 && (let w150 = a in w150 && (let w151 = b in w151 && (let w152 = a in w152 && (let w153 = b in w153 && (let w154 = a in w154 && (let w155 = b in w155 && (let w156 = a in w156 && (let w157 = b in w157 && (let w158 = a in w158 && (let w159 = b in w159 && (let w160 = a in w160 && (let w161 = b in w161 && (let w162 = a in w162 && (let w163 = b in w163 && (let w164 = a in w164 && (let w165 = b in w165 && (let w166 = a in w166 && (let w167 = b in w167 && (let w168 = a in w168 && (let w169 = b in w169 && (let w170 = a in w170 && (let w171 = b in w171 && (let w172 = a in w172 && (let w173 = b in w173 && (let w174 = a in w174 && (let w175 = b in w175 && (let w176 = a in w176 && (let w177 = b in w177 && (let w178 = a in w178 && (let w179 = b in w179 && (let w180 = a in w180 && (let w181 = b in w181 && (let w182 = a in w182 && (let w183 = b in w183 && (let w184 = a in w184 && (let w185 = b in w185 && (let w186 = a in w186 && (let w187 = b in w187 && (let w188 = a in w188 && (let w189 = b in w189 && (let w190 = a in w190 && (let w191 = b in w191 && (let w192 = a in w192 && (let w193 = b in w193 && (let w194 = a in w194 && (let w195 = b in w195 && (let w196 = a in w196 && (let w197 = b in w197 && (let w198 = a in w198 && (let w199 = b in w199 && (let w200 = a in w200 && (let w201 = b in w201 && (let w202 = a in w202 && (let w203 = b in w203 && (let w204 = a in w204 && (let w205 = b in w205 && (let w206 = a in w206 && (let w207 = b in w207 && (let w208 = a in w208 && (let w209 = b in w209 && (let w210 = a in w210 && (let w211 = b in w211 && (let w212 = a in w212 && (let w213 = b in w213 && (let w214 = a in w214 && (let w215 = b in w215 && (let w216 = a in w216 && (let w217 = b in w217 && (let w218 = a in w218 && (let w219 = b in w219 && (let w220 = a in w220 && (let w221 = b in w221 && (let w222 = a in w222 && (let w223 = b in w223 && (let w224 = a in w224 && (let w225 = b in w225 && (let w226 = a in w226 && (let w227 = b in w227 && (let w228 = a in w228 && (let w229 = b in w229 && (let w230 = a in w230 && (let w231 = b in w231 && (let w232 = a in w232 && (let w233 = b in w233 && (let w234 = a in w234 && (let w235 = b in w235 && (let w236 = a in w236 && (let w237 = b in w237 && (let w238 = a in w238 && (let w239 = b in w239 && (let w240 = a in w240 && (let w241 = b in w241 && (let w242 = a in w242 && (let w243 = b in w243 && (let w244 = a in w244 && (let w245 = b in w245 && (let w246 = a in w246 && (let w247 = b in w247 && (let w248 = a in w248 && (let w249 = b in w249 && (let w250 = a in w250 && (let w251 = b in w251 && (let w252 = a in w252 && (let w253 = b in w253 && (let w254 = a in w254 && (let w255 = b in w255 && (let w256 = a in w256 && (let w257 = b in w257 && (let w258 = a in w258 && (let w259 = b in w259 && (let w260 = a in w260 && (let w261 = b in w261 && (let w262 = a in w262 && (let w263 = b in w263 && (let w264 = a in w264 && (let w265 = b in w265 && (let w266 = a in w266 && (let w267 = b in w267 && (let w268 = a in w268 && (let w269 = b in w269 && (let w270 = a in w270 && (let w271 = b in w271 && (let w272 = a in w272 && (let w273 = b in w273 && (let w274 = a in w274 && (let w275 = b in w275 && (let w276 = a in w276 && (let w277 = b in w277 && (let w278 = a in w278 && (let w279 = b in w279 && (let w280 = a in w280 && (let w281 = b in w281 && (let w282 = a in w282 && (let w283 = b in w283 && (let w284 = a in w284 && (let w285 = b in w285 && (let w286 = a in w286 && (let w287 = b in w287 && (let w288 = a in w288 && (let w289 = b in w289 && (let w290 = a in w290 && (let w291 = b in w291 && (let w292 = a in w292 && (let w293 = b in w293 && (let w294 = a in w294 && (let w295 = b in w295 && (let w296 = a in w296 && (let w297 = b in w297 && (let w298 = a in w298 && (let w299 = b in w299 && a))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))
+
+scopeA :: Bool -> Bool -> Int
+scopeA a b
+  ? a = 0
+  : let s = b in
+    (? s = 1
+     : let a = True in
+       (? s = 2
+        : ? a = 3
+        : 4))
+
+lazyLet :: Bool -> Int
+lazyLet a
+  ? a = 0
+  : let t = @throw "let evaluated" in
+    (? t = 1
+     : ? a = 2
+     : 3)

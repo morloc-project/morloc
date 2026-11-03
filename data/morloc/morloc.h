@@ -574,7 +574,8 @@ typedef enum {
     MORLOC_X_EQUAL,         // (a, b) -> Bool: the two values are equal (@eq).
     MORLOC_X_LESS_EQ,       // (a, b) -> Bool: a orders before or with b (@le).
     MORLOC_X_COND,          // n (test, value) arms + else -> value (EMIT-5)
-    MORLOC_X_CHAIN          // n operands -> Bool: && or || over them (EMIT-5)
+    MORLOC_X_CHAIN,         // n operands -> Bool: && or || over them (EMIT-5)
+    MORLOC_X_LETS           // n lets + body -> value (EMIT-5)
 } morloc_expression_type;
 
 typedef enum { APPLY_PATTERN, APPLY_LAMBDA, APPLY_FORMAT } morloc_app_expression_type;
@@ -719,7 +720,14 @@ typedef struct morloc_ifile_walk_expression_s {
     uint64_t n_args;
 } morloc_ifile_walk_expression_t;
 
+typedef struct morloc_binds_s {
+    char** names;
+    morloc_expression_t** values;
+    uint64_t n;
+} morloc_binds_t;
+
 typedef struct morloc_cond_expression_s {
+    morloc_binds_t** binds;
     morloc_expression_t** conds;
     morloc_expression_t** thens;
     uint64_t n;
@@ -727,10 +735,16 @@ typedef struct morloc_cond_expression_s {
 } morloc_cond_expression_t;
 
 typedef struct morloc_chain_expression_s {
+    morloc_binds_t** binds;
     morloc_expression_t** args;
     uint64_t n;
     uint8_t is_and;
 } morloc_chain_expression_t;
+
+typedef struct morloc_lets_expression_s {
+    morloc_binds_t* binds;
+    morloc_expression_t* body;
+} morloc_lets_expression_t;
 
 typedef struct morloc_expression_s {
     morloc_expression_type type;
@@ -754,6 +768,7 @@ typedef struct morloc_expression_s {
         morloc_list_len_test_expression_t* list_len_test_expr;
         morloc_cond_expression_t* cond_expr;
         morloc_chain_expression_t* chain_expr;
+        morloc_lets_expression_t* lets_expr;
     } expr;
 } morloc_expression_t;
 

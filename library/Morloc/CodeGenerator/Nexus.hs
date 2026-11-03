@@ -292,13 +292,18 @@ data NexusExpr
   | TryX      Text NexusExpr
     -- ^ result schema (@Try Str a@), body. Evaluate the body under a
     -- catch and materialize @Ok value@ or @Err message@ into the result.
-  | CondX     Text [(NexusExpr, NexusExpr)] NexusExpr
-    -- ^ result schema, (test, value) arms, else value: a chain of guards
-    -- as one node, so its manifest depth does not grow with its length
+  | CondX     Text [([(Text, NexusExpr)], NexusExpr, NexusExpr)] NexusExpr
+    -- ^ result schema, arms, else value: a chain of guards as one node, so
+    -- its manifest depth does not grow with its length (EMIT-5). An arm is
+    -- the lets written before its test, which scope over the rest of the
+    -- chain, its test and its value.
+  | ChainX    Text Bool [([(Text, NexusExpr)], NexusExpr)]
+    -- ^ Bool schema, and (@True@) or or, operands each with the lets
+    -- written before it: a chain of one short-circuit operator as one node
     -- (EMIT-5).
-  | ChainX    Text Bool [NexusExpr]
-    -- ^ Bool schema, and (@True@) or or, operands: a chain of one
-    -- short-circuit operator as one node (EMIT-5).
+  | LetsX     Text [(Text, NexusExpr)] NexusExpr
+    -- ^ result schema, lets in order, body: a run of nested lets as one
+    -- node (EMIT-5).
   | IfX       Text NexusExpr NexusExpr NexusExpr
     -- ^ result schema, condition (Bool), then-branch, else-branch. The
     -- pure-nexus conditional: evaluate the condition and materialize the
@@ -596,6 +601,9 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
           <+> "Run it first (x <- e), or give the function a language (source) so a pool holds it."
     heldSuspension _ _ = return ()
 
+    letBinds :: [(EVar, AnnoS (Indexed Type) One ())] -> MorlocMonad [(Text, NexusExpr)]
+    letBinds = mapM (\(v, e1) -> heldSuspension "bound with let" e1 >> (,) (render (pretty v)) <$> toNexusExpr e1)
+
     writeCheck :: Int -> Intrinsic -> AnnoS (Indexed Type) One () -> MorlocMonad ()
     writeCheck ix intr (AnnoS (Idx _ vt) _ _) =
       Serial.checkWriteDataType ix intr (Serial.containsEffectT vt || Serial.containsFunT vt) (pretty vt)
@@ -739,23 +747,21 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
       OptionalT _ -> OptNullX <$> type2schema t
       _           -> return $ LitX NullX "0"
     toNexusExpr (AnnoS (Idx _ t) _ (LetBndS v)) = BndX <$> type2schema t <*> pure (render (pretty v))
-    -- Desugar let to lambda application: let x = e1 in e2 -> (\x -> e2) e1
-    toNexusExpr (AnnoS (Idx _ t) _ (LetS v e1 body)) = do
-      heldSuspension "bound with let" e1
-      schema <- type2schema t
-      e1X <- toNexusExpr e1
-      bodyX <- toNexusExpr body
-      return $ AppX schema (LamX [render (pretty v)] bodyX) [e1X]
+    -- A run of lets is one node, however long (EMIT-5).
+    toNexusExpr e@(AnnoS (Idx _ t) _ (LetS _ _ _)) =
+      let (binds, body) = letRun e
+       in LetsX <$> type2schema t <*> letBinds binds <*> toNexusExpr body
     -- A chain of three or more operands of one short-circuit operator is
     -- a chain node; any other chain of conditionals in else position is a
     -- chain of guards, which every conditional is (EMIT-5).
     toNexusExpr e@(AnnoS (Idx _ ift) _ (IfS cond thenB elseB)) = case shortChain e of
       Just (isAnd, operands@(_ : _ : _ : _)) ->
-        ChainX <$> type2schema ift <*> pure isAnd <*> mapM toNexusExpr operands
+        ChainX <$> type2schema ift <*> pure isAnd
+          <*> mapM (\(bs, o) -> (,) <$> letBinds bs <*> toNexusExpr o) operands
       _ -> case guardArms e of
         (arms@(_ : _ : _), final) ->
           CondX <$> type2schema ift
-            <*> mapM (\(c, t) -> (,) <$> toNexusExpr c <*> toNexusExpr t) arms
+            <*> mapM (\(bs, c, t) -> (,,) <$> letBinds bs <*> toNexusExpr c <*> toNexusExpr t) arms
             <*> toNexusExpr final
         _ ->
           IfX <$> type2schema ift
@@ -2475,24 +2481,52 @@ flagRevShortJson _ = jsonNull
 -- Expression tree serialization
 -- ======================================================================
 
--- | The operands of a chain of one short-circuit operator (BASE-3):
--- @c && rest@ is @if c then rest else False@ and @c || rest@ is
--- @if c then True else rest@.
-shortChain :: AnnoS (Indexed Type) One () -> Maybe (Bool, [AnnoS (Indexed Type) One ()])
+bindsJson :: [(Text, NexusExpr)] -> Text
+bindsJson bs = jsonArr [jsonObj [("name", jsonStr n), ("value", exprToJson v)] | (n, v) <- bs]
+
+-- | A chain element's lets, left out when there are none.
+withBinds :: [(Text, NexusExpr)] -> [(Text, Text)] -> Text
+withBinds [] fields = jsonObj fields
+withBinds bs fields = jsonObj (("binds", bindsJson bs) : fields)
+
+-- | The lets at the head of an expression, in order, and what they scope
+-- over.
+letRun :: AnnoS (Indexed Type) One () -> ([(EVar, AnnoS (Indexed Type) One ())], AnnoS (Indexed Type) One ())
+letRun (AnnoS _ _ (LetS v e1 body)) = let (bs, rest) = letRun body in ((v, e1) : bs, rest)
+letRun e = ([], e)
+
+-- | The operands of a chain of one short-circuit operator (BASE-3), each
+-- with the lets written before it: @c && rest@ is
+-- @if c then rest else False@ and @c || rest@ is @if c then True else rest@.
+shortChain ::
+  AnnoS (Indexed Type) One () ->
+  Maybe (Bool, [([(EVar, AnnoS (Indexed Type) One ())], AnnoS (Indexed Type) One ())])
 shortChain e = case e of
-  AnnoS _ _ (IfS c x (AnnoS _ _ (LogS False))) -> Just (True, c : operands True x)
-  AnnoS _ _ (IfS c (AnnoS _ _ (LogS True)) x) -> Just (False, c : operands False x)
+  AnnoS _ _ (IfS c x (AnnoS _ _ (LogS False))) -> Just (True, ([], c) : operands True x)
+  AnnoS _ _ (IfS c (AnnoS _ _ (LogS True)) x) -> Just (False, ([], c) : operands False x)
   _ -> Nothing
   where
-    operands op x = case shortChain x of
-      Just (op', xs) | op' == op -> xs
-      _ -> [x]
+    operands op x =
+      let (bs, x') = letRun x
+       in case shortChain x' of
+            Just (op', (_, c1) : rest) | op' == op -> (bs, c1) : rest
+            _ -> [([], x)]
 
--- | The (test, value) arms of a chain of conditionals nested in else
--- position, and the value when no test holds.
-guardArms :: AnnoS (Indexed Type) One () -> ([(AnnoS (Indexed Type) One (), AnnoS (Indexed Type) One ())], AnnoS (Indexed Type) One ())
-guardArms (AnnoS _ _ (IfS c t x)) = let (arms, final) = guardArms x in ((c, t) : arms, final)
-guardArms e = ([], e)
+-- | The arms of a chain of conditionals nested in else position, each with
+-- the lets written before its test, and the value when no test holds.
+guardArms ::
+  AnnoS (Indexed Type) One () ->
+  ( [([(EVar, AnnoS (Indexed Type) One ())], AnnoS (Indexed Type) One (), AnnoS (Indexed Type) One ())]
+  , AnnoS (Indexed Type) One ()
+  )
+guardArms = go []
+  where
+    go bs (AnnoS _ _ (IfS c t x)) =
+      let (bs', x') = letRun x
+       in case x' of
+            AnnoS _ _ (IfS {}) -> let (arms, final) = go bs' x' in ((bs, c, t) : arms, final)
+            _ -> ([(bs, c, t)], x)
+    go _ e = ([], e)
 
 exprToJson :: NexusExpr -> Text
 exprToJson (LitX lt v) =
@@ -2744,7 +2778,7 @@ exprToJson (CondX schema arms elseX) =
   jsonObj
     [ ("tag", jsonStr "cond")
     , ("schema", jsonStr schema)
-    , ("cases", jsonArr [jsonObj [("cond", exprToJson c), ("then", exprToJson t)] | (c, t) <- arms])
+    , ("cases", jsonArr [withBinds bs [("cond", exprToJson c), ("then", exprToJson t)] | (bs, c, t) <- arms])
     , ("else", exprToJson elseX)
     ]
 exprToJson (ChainX schema isAnd args) =
@@ -2752,7 +2786,14 @@ exprToJson (ChainX schema isAnd args) =
     [ ("tag", jsonStr "chain")
     , ("schema", jsonStr schema)
     , ("and", jsonBool isAnd)
-    , ("args", jsonArr (map exprToJson args))
+    , ("args", jsonArr [withBinds bs [("arg", exprToJson a)] | (bs, a) <- args])
+    ]
+exprToJson (LetsX schema binds body) =
+  jsonObj
+    [ ("tag", jsonStr "lets")
+    , ("schema", jsonStr schema)
+    , ("binds", bindsJson binds)
+    , ("body", exprToJson body)
     ]
 exprToJson (IfX schema cond thenX elseX) =
   jsonObj

@@ -2,17 +2,18 @@
 
 Generated code that a language's own tools refuse.
 
-- [speculative, 2026-11-03] A chain of guards is written as one block only
-  where each else arm reaches the lowering as the next conditional, or as a
-  let that binds one only to return it (Imperative.hs `guardChain`); behind
-  any other wrapper (a coercion to an optional, a serial let, an owned
-  copy that changes the arm's expression) it falls back to one nested
-  block per guard, which R refuses past about 25 and Python past 100.
-  The nexus has the same limit for a command it evaluates itself
-  (Nexus.hs `guardArms`, `shortChain`): a chain behind a let, a do block, a
-  coercion or any node other than the next conditional nests its manifest
-  one level per element, and the nexus refuses a manifest nested past 128.
-  Violates EMIT-5 there. Fix direction: recognize the chain in the IR.
+- [speculative, 2026-11-03] A chain of guards, or of `&&`/`||`, is
+  written as one block (pools: Imperative.hs `guardChain`, `shortCircuit`)
+  or one manifest node (nexus: Nexus.hs `guardArms`, `shortChain`) only
+  where each next element is reached through conditionals and lets. Behind
+  any other node the chain would nest one level per element again: in a
+  pool, a coercion or an owned copy that changes an arm's expression; in
+  the nexus, a do block or a forced suspension, which it treats as the
+  expression inside,
+  which R refuses past about 25 levels, Python past 100 and the nexus past
+  128. Not reproduced, 200 to 300 elements in R, Python and the nexus:
+  optional results with a `Null` arm, a let before every element,
+  effectful arms, tests that call another language. Would violate EMIT-5.
 - [speculative, 2026-11-03] A `?R` stored in pointer form inside R
   other than as a bare field may not build where it is read or built
   (CPP-6). Getters, bracket steps and setters of `?T` fields go through

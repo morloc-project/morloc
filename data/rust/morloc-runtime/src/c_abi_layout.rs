@@ -559,13 +559,24 @@ mod tests {
             then_branch => "then_branch",
             else_branch => "else_branch",
         ]);
+        assert_same_layout!(MorlocBinds, "morloc_binds_s", [
+            names => "names",
+            values => "values",
+            n => "n",
+        ]);
+        assert_same_layout!(MorlocLetsExpression, "morloc_lets_expression_s", [
+            binds => "binds",
+            body => "body",
+        ]);
         assert_same_layout!(MorlocCondExpression, "morloc_cond_expression_s", [
+            binds => "binds",
             conds => "conds",
             thens => "thens",
             n => "n",
             else_branch => "else_branch",
         ]);
         assert_same_layout!(MorlocChainExpression, "morloc_chain_expression_s", [
+            binds => "binds",
             args => "args",
             n => "n",
             is_and => "is_and",
@@ -604,16 +615,16 @@ mod tests {
         let expr = header_enum_variants("morloc_expression_type");
         assert_eq!(
             expr.len(),
-            MorlocExpressionType::Chain as usize + 1,
+            MorlocExpressionType::Lets as usize + 1,
             "morloc.h names {} expression types, the Rust enum has {}: {:?}",
             expr.len(),
-            MorlocExpressionType::Chain as usize + 1,
+            MorlocExpressionType::Lets as usize + 1,
             expr
         );
         assert_eq!(expr.first().map(String::as_str), Some("MORLOC_X_DAT"));
         assert_eq!(
             expr.last().map(String::as_str),
-            Some("MORLOC_X_CHAIN")
+            Some("MORLOC_X_LETS")
         );
 
         let pat = header_enum_variants("morloc_pattern_type");

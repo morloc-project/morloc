@@ -16,6 +16,18 @@ all:
 	./nexus classify true false >> obs.txt 2>> obs.err || echo failed >> obs.txt
 	./nexus classify false true >> obs.txt 2>> obs.err || echo failed >> obs.txt
 	./nexus classify false false >> obs.txt 2>> obs.err || echo failed >> obs.txt
+	./nexus letGuards false true >> obs.txt 2>> obs.err || echo failed >> obs.txt
+	./nexus letGuards false false >> obs.txt 2>> obs.err || echo failed >> obs.txt
+	./nexus letGuards true false >> obs.txt 2>> obs.err || echo failed >> obs.txt
+	./nexus letRun true >> obs.txt 2>> obs.err || echo failed >> obs.txt
+	./nexus letRun false >> obs.txt 2>> obs.err || echo failed >> obs.txt
+	./nexus letChain true true >> obs.txt 2>> obs.err || echo failed >> obs.txt
+	./nexus letChain true false >> obs.txt 2>> obs.err || echo failed >> obs.txt
+	./nexus scopeA true false >> obs.txt 2>> obs.err || echo failed >> obs.txt
+	./nexus scopeA false true >> obs.txt 2>> obs.err || echo failed >> obs.txt
+	./nexus scopeA false false >> obs.txt 2>> obs.err || echo failed >> obs.txt
+	./nexus lazyLet true >> obs.txt 2>> obs.err || echo failed >> obs.txt
+	./nexus lazyLet false >> obs.txt 2>> obs.err || echo failed >> obs.txt
 
 clean:
 	rm -rf nexus pools __pycache__ *-build *build.tmp*

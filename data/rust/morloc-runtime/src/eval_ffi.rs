@@ -1027,12 +1027,7 @@ unsafe fn morloc_eval_r(
                         shadowed.push((var, bndvars.insert(var, arg_results[i])));
                     }
                     let result = morloc_eval_r((*lam).body, dest, width, bndvars);
-                    for (var, prev) in shadowed.into_iter().rev() {
-                        match prev {
-                            Some(p) => { bndvars.insert(var, p); }
-                            None => { bndvars.remove(var); }
-                        }
-                    }
+                    unbind_lets(shadowed, bndvars);
                     result?;
                 }
 
@@ -1907,27 +1902,45 @@ unsafe fn morloc_eval_r(
 
         MorlocExpressionType::Cond => {
             let cx = (*expr).expr.cond_expr;
-            let mut taken = (*cx).else_branch;
-            for i in 0..(*cx).n as usize {
-                if eval_bool(*(*cx).conds.add(i), bndvars)? {
-                    taken = *(*cx).thens.add(i);
-                    break;
+            let mut shadowed = Vec::new();
+            let result = (|| -> Result<(), MorlocError> {
+                let mut taken = (*cx).else_branch;
+                for i in 0..(*cx).n as usize {
+                    bind_lets(*(*cx).binds.add(i), bndvars, &mut shadowed)?;
+                    if eval_bool(*(*cx).conds.add(i), bndvars)? {
+                        taken = *(*cx).thens.add(i);
+                        break;
+                    }
                 }
-            }
-            eval_arm(taken, dest, width, bndvars)?;
+                eval_arm(taken, dest, width, bndvars)
+            })();
+            unbind_lets(shadowed, bndvars);
+            result?;
         }
         MorlocExpressionType::Chain => {
             let chx = (*expr).expr.chain_expr;
             let is_and = (*chx).is_and != 0;
-            let mut result = is_and;
-            for i in 0..(*chx).n as usize {
-                let v = eval_bool(*(*chx).args.add(i), bndvars)?;
-                if v != is_and {
-                    result = v;
-                    break;
+            let mut shadowed = Vec::new();
+            let result = (|| -> Result<bool, MorlocError> {
+                for i in 0..(*chx).n as usize {
+                    bind_lets(*(*chx).binds.add(i), bndvars, &mut shadowed)?;
+                    let v = eval_bool(*(*chx).args.add(i), bndvars)?;
+                    if v != is_and {
+                        return Ok(v);
+                    }
                 }
-            }
-            *dest = u8::from(result);
+                Ok(is_and)
+            })();
+            unbind_lets(shadowed, bndvars);
+            *dest = u8::from(result?);
+        }
+        MorlocExpressionType::Lets => {
+            let lx = (*expr).expr.lets_expr;
+            let mut shadowed = Vec::new();
+            let result = bind_lets((*lx).binds, bndvars, &mut shadowed)
+                .and_then(|_| eval_arm((*lx).body, dest, width, bndvars));
+            unbind_lets(shadowed, bndvars);
+            result?;
         }
 
         other => {
@@ -1944,6 +1957,37 @@ unsafe fn morloc_eval_r(
     }
 
     Ok(dest)
+}
+
+// Evaluate lets in order and bind each, recording the binding of the same
+// name it shadows so that 'unbind_lets' restores it, as a lambda does.
+unsafe fn bind_lets<'a>(
+    binds: *mut MorlocBinds,
+    bndvars: &mut BndVars<'a>,
+    shadowed: &mut Vec<(&'a str, Option<AbsPtr>)>,
+) -> Result<(), MorlocError> {
+    if binds.is_null() {
+        return Ok(());
+    }
+    for i in 0..(*binds).n as usize {
+        let value = morloc_eval_r(*(*binds).values.add(i), ptr::null_mut(), 0, bndvars)?;
+        let var = CStr::from_ptr(*(*binds).names.add(i)).to_str().unwrap_or("");
+        shadowed.push((var, bndvars.insert(var, value)));
+    }
+    Ok(())
+}
+
+unsafe fn unbind_lets<'a>(shadowed: Vec<(&'a str, Option<AbsPtr>)>, bndvars: &mut BndVars<'a>) {
+    for (var, prev) in shadowed.into_iter().rev() {
+        match prev {
+            Some(p) => {
+                bndvars.insert(var, p);
+            }
+            None => {
+                bndvars.remove(var);
+            }
+        }
+    }
 }
 
 // A Bool-valued expression, evaluated into a local byte.

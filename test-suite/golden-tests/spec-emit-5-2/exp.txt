@@ -13,3 +13,15 @@ failed
 true
 true
 false
+1
+1000
+0
+true
+false
+true
+false
+0
+1
+3
+0
+failed
