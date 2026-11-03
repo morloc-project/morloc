@@ -78,8 +78,8 @@ parameterize' args (AnnoS g c (ConS tv n i xs)) = do
 parameterize' args (AnnoS g c (BndS v)) = do
   let args' = [r | r@(Arg _ v') <- args, v' == v]
   return $ AnnoS g (c, args') (BndS v)
-parameterize' _ (AnnoS m c (ExeS (SrcCall src))) =
-  return $ AnnoS m (c, []) (ExeS (SrcCall src))
+parameterize' _ (AnnoS m c (ExeS x@(SrcCall _))) =
+  return $ AnnoS m (c, []) (ExeS x)
 parameterize' _ (AnnoS g c (ExeS (PatCall x))) =
   return (AnnoS g (c, []) (ExeS (PatCall x)))
 parameterize' args (AnnoS g c (LstS xs)) = do

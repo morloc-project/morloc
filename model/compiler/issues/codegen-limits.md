@@ -2,6 +2,18 @@
 
 Generated code that a language's own tools refuse.
 
+- [read, 2026-11-03] A call of an instance method's source takes the
+  class's signature, not the instance's: EffectBoundary.hs `sourceSignature`
+  returns the class-level type of a polymorphic term (`pack :: a -> b`)
+  where the instance declares `List a -> Box a`. Every argument is then a
+  type variable, so `adapt` treats the whole value as opaque and adapts
+  nothing at the host boundary. Harmless for an identity, wrong for an
+  instance whose host function reads a function-typed or effectful part of
+  its argument (`Packable (Int -> <IO> Int) Foo`): it would be handed a
+  function in morloc's form. Calls in user code and calls the compiler
+  builds resolve the same way. Fix: the instance's `termGeneral`; it
+  changes adaptation for every instance method call, so it needs its own
+  test.
 - [read, 2026-11-03] Lowering a chain re-renders its open run at every
   level: Imperative.hs `currentChain` and `keepChain` compare rendered text
   to tell whether docs still hold the chain, and `renderChain` re-folds the
@@ -79,18 +91,6 @@ Generated code that a language's own tools refuse.
   - A loop let bound to a void C++ call would become `auto n = f();`. A
     unit-valued let in a loop body lowers through the ordinary let path
     (`f(n); mlc::Unit n17{};`) in the shape tried.
-- **A compiler-built call of a shared source is a compiler bug.**
-  [reproduced, 2026-10-18] `sourceSignature`
-  (library/Morloc/CodeGenerator/EffectBoundary.hs) needs the signature of
-  the term a call names; a call the compiler builds (a literal's `pack`)
-  carries no term, so it falls back to the host function's signatures and
-  throws when there are several. root-py's `morloc_idpy` is `idpy`, Deque's
-  `pack` and `unpack`, and several `into`s, so building a Python `Deque`
-  literal through its `pack` failed "a call of 'morloc_idpy' names no term,
-  and the host function has more than one signature". No path builds that
-  call today (a Deque's Python form is its representation's, so no pack is
-  inserted); a pack whose source is shared and whose form differs would.
-  Candidate: give a compiler-built call the instance method it implements.
 - [read, 2026-10-21] The C++ enum collector
   (CodeGenerator/Pools/CAbi/Members/Cpp.hs `collectCppEnums`) does
   not descend into a `data` type's parameters, where the Rust one does. With

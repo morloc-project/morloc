@@ -45,7 +45,7 @@ toE (AnnoS (Idx _ t) _ (IntS si x)) = LitP (Idx si t) (MInt x)
 toE (AnnoS g _ (LogS x)) = LitP g (MLog x)
 toE (AnnoS g _ (StrS x)) = LitP g (MStr x)
 toE (AnnoS g _ (ConS _ n _ xs)) = ConP g n (map toE xs)
-toE (AnnoS g _ (ExeS (SrcCall s))) = SrcP g s
+toE (AnnoS g _ (ExeS (SrcCall (Idx _ s)))) = SrcP g s
 toE (AnnoS g _ (ExeS (PatCall (PatternText s ss)))) =
   LitP g (MStr (s <> DT.concat ["#{}" <> s' | s' <- ss]))
 toE (AnnoS g _ (ExeS (PatCall (PatternStruct s)))) = PatP g s

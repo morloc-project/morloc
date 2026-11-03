@@ -27,32 +27,32 @@ import Morloc.Typecheck.Internal (instanceArgHead)
 
 -- | The source of a method in a language, for the instance whose argument at
 -- @pos@ has the given head.
-findInstanceByArgHead :: Int -> EVar -> Lang -> TVar -> MorlocMonad (Maybe Source)
+findInstanceByArgHead :: Int -> EVar -> Lang -> TVar -> MorlocMonad (Maybe (Indexed Source))
 findInstanceByArgHead pos method lang containerTv = do
   sigmap <- MM.gets stateTypeclasses
   case Map.lookup method sigmap of
     Nothing -> return Nothing
     Just inst -> return $ listToMaybe
-      [ src
+      [ isrc
       | TermTypes (Just et) cs _ <- instanceTerms inst
       , instanceArgHead pos et == Just containerTv
-      , (_, Idx _ src) <- cs
+      , (_, isrc@(Idx _ src)) <- cs
       , srcLang src == lang
       ]
 
 -- | The source of @map@ for a container type; the container is argument 1.
-findFunctorMap :: Lang -> TypeU -> MorlocMonad (Maybe Source)
+findFunctorMap :: Lang -> TypeU -> MorlocMonad (Maybe (Indexed Source))
 findFunctorMap lang receiverType =
   findInstanceByArgHead 1 (EV "map") lang (extractKey receiverType)
 
 -- | The first hit of a lookup along a type's alias chain. A type nothing
 -- determined is rejected at @i@ (POLY-6).
 resolveInstanceForType
-  :: (Lang -> TypeU -> MorlocMonad (Maybe Source))
+  :: (Lang -> TypeU -> MorlocMonad (Maybe (Indexed Source)))
   -> Int
   -> Lang
   -> Type
-  -> MorlocMonad (Maybe Source)
+  -> MorlocMonad (Maybe (Indexed Source))
 resolveInstanceForType perTypeLookup i lang originalType = do
   requireDetermined i originalType
   scope <- MM.getGeneralScope

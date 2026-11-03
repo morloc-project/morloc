@@ -110,7 +110,7 @@ collectLang lang = go
   where
     go :: AnnoS (Indexed TypeU) Many Int -> [(Source, TypeU)]
     go (AnnoS (Idx _ t) _ e) = case e of
-      ExeS (SrcCall src)
+      ExeS (SrcCall (Idx _ src))
         | langName (srcLang src) == lang -> [(src, t)]
       _ -> execWriter (mapExprSM (\c -> tell (go c) >> pure c) e)
 
@@ -127,9 +127,9 @@ rewriteSrc bindings = runIdentity . go
   where
     go (AnnoS g c e) = do
       e' <- case e of
-        ExeS (SrcCall src)
+        ExeS (SrcCall (Idx si src))
           | langName (srcLang src) == futharkLangName ->
-              pure $ ExeS (SrcCall (rewriteFutSource bindings src))
+              pure $ ExeS (SrcCall (Idx si (rewriteFutSource bindings src)))
         _ -> mapExprSM go e
       pure (AnnoS g c e')
 

@@ -1208,7 +1208,7 @@ renderReflect (AtClosure ast) = rustReflectClosureAssembler ast
 -- means rebuilding that form first and then packing it.
 renderReflect (AtPack p inner) = do
   f <- maybe (return id) renderReflect inner
-  let packer = pretty (srcName (typePackerForward p))
+  let packer = pretty (srcName (val (typePackerForward p)))
       ref v = if rustIsCopy (typePackerUnpacked p) then v else "&" <> parens v
   return $ \v -> packer <> parens (ref (f v))
 renderReflect (OverList p) = do
@@ -1243,7 +1243,7 @@ renderReify (AtClosure _) = error "renderReify: a closure node is a SerialClosur
 -- The inverse: unpack to the form the wire carries, then reduce that.
 renderReify (AtPack p inner) = do
   f <- maybe (return id) renderReify inner
-  let unpacker = pretty (srcName (typePackerReverse p))
+  let unpacker = pretty (srcName (val (typePackerReverse p)))
       ref v = if rustIsCopy (typePackerPacked p) then v else "&" <> parens v
   return $ \v -> f (unpacker <> parens (ref v))
 renderReify (OverList p) = do

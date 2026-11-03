@@ -756,7 +756,7 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
           -- apart here.
           | langName lang == "cpp" && packedVariant ast -> case ast of
               SerialPack _ (packer, _) ->
-                return [AppExeN (typePackerUnpacked packer) (SrcCallP Nothing (typePackerReverse packer)) [NativeArgExpr dataArg]]
+                return [AppExeN (typePackerUnpacked packer) (builtSrcCall (typePackerReverse packer)) [NativeArgExpr dataArg]]
               _ -> return [dataArg]
           | otherwise -> return [NativeToWireN (Serial.serialAstToType ast) ast dataArg]
 

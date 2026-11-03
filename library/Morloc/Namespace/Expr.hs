@@ -1093,7 +1093,9 @@ applyCoercion CoerceToOptional t = OptionalU t
 applyCoercion (CoerceNewtype _ t) _ = t
 
 
-data ExecutableExpr = SrcCall Source | PatCall Pattern
+-- | A call of a sourced function carries the index the source is declared
+-- under, which names the term it implements and so its signature.
+data ExecutableExpr = SrcCall (Indexed Source) | PatCall Pattern
   deriving (Ord, Eq, Show)
 
 data AnnoS g f c = AnnoS g c (ExprS g f c)
@@ -1610,7 +1612,7 @@ instance (Foldable f) => Pretty (ExprS a f b) where
   pretty (LabelS k e) = "(LabelS" <+> pretty k <+> pretty e <> ")"
 
 instance Pretty ExecutableExpr where
-  pretty (SrcCall src) = pretty src
+  pretty (SrcCall (Idx _ src)) = pretty src
   pretty (PatCall pat) = pretty pat
 
 instance Pretty Signature where

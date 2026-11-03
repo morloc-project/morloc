@@ -62,7 +62,7 @@ nodeKind e = case e of
   BndS v -> unEVar (displayName v)
   LetBndS v -> unEVar (displayName v)
   CallS v -> "call " <> unEVar (displayName v)
-  ExeS (SrcCall src) -> unEVar (displayName (srcAlias src))
+  ExeS (SrcCall (Idx _ src)) -> unEVar (displayName (srcAlias src))
   _ -> "value"
 
 -- | One line per named call of a realized tree, its arguments and body
@@ -88,7 +88,7 @@ placementLinesAt = go
       AppS f@(AnnoS _ (Idx _ headLang) _) xs | Just v <- callName f ->
         listed headLang (name v) : concatMap (go (depth + 1) (Just headLang)) (definition f <> xs)
       VarS v (One body) -> entry (name v) : below (definition' body)
-      ExeS (SrcCall src) -> [entry (name (srcAlias src))]
+      ExeS (SrcCall (Idx _ src)) -> [entry (name (srcAlias src))]
       CallS v -> [entry ("call " <> name v)]
       LetBndS v | moved -> [entry (name v)]
       BndS v | moved -> [entry (name v)]
@@ -106,7 +106,7 @@ placementLinesAt = go
 
     callName :: AnnoS g One c -> Maybe EVar
     callName (AnnoS _ _ (VarS v _)) = Just v
-    callName (AnnoS _ _ (ExeS (SrcCall src))) = Just (srcAlias src)
+    callName (AnnoS _ _ (ExeS (SrcCall (Idx _ src)))) = Just (srcAlias src)
     callName (AnnoS _ _ (CallS v)) = Just (EV ("call " <> unEVar (displayName v)))
     callName _ = Nothing
 
@@ -907,7 +907,7 @@ realizeWithRegistry registry tables pins seedLangs s00 = do
       case Map.lookup v (rBndVars rstat) of
         Just scores -> return (BndS v, Idx i scores)
         Nothing -> return (BndS v, Idx i [])
-    scoreExpr _ (ExeS x@(SrcCall src), i) = return (ExeS x, Idx i [(srcLang src, callScore registry (srcLang src))])
+    scoreExpr _ (ExeS x@(SrcCall (Idx _ src)), i) = return (ExeS x, Idx i [(srcLang src, callScore registry (srcLang src))])
     scoreExpr rstat (ExeS x@(PatCall _), i) = return (ExeS x, zipLang i rstat)
     scoreExpr _ (RealS si x, i) = return (RealS si x, Idx i [])
     scoreExpr _ (IntS si x, i) = return (IntS si x, Idx i [])
@@ -1052,7 +1052,7 @@ realizeWithRegistry registry tables pins seedLangs s00 = do
     -- The sources of a head's implementations.
     headSources :: AnnoS (Indexed Type) Many c -> [Source]
     headSources (AnnoS _ _ e) = case e of
-      ExeS (SrcCall src) -> [src]
+      ExeS (SrcCall (Idx _ src)) -> [src]
       VarS _ (Many ys) -> concatMap headSources ys
       LabelS _ x -> headSources x
       CoerceS _ x -> headSources x
@@ -1311,7 +1311,7 @@ realizeWithRegistry registry tables pins seedLangs s00 = do
         sameImplementation sa sb = srcLang sa == srcLang sb && srcPath sa == srcPath sb && srcName sa == srcName sb
 
         sourceOf :: AnnoS g f c -> Maybe Source
-        sourceOf (AnnoS _ _ (ExeS (SrcCall src))) = Just src
+        sourceOf (AnnoS _ _ (ExeS (SrcCall (Idx _ src)))) = Just src
         sourceOf (AnnoS _ _ (LabelS _ y)) = sourceOf y
         sourceOf _ = Nothing
 
@@ -1463,7 +1463,7 @@ realizeWithRegistry registry tables pins seedLangs s00 = do
       xs' <- mapM (collapseElement heads e lang . snd) rs
       return (NamS (zip (map fst rs) xs'), Idx i lang)
     -- collapse leaf expressions
-    collapseExpr _ _ _ (ExeS x@(SrcCall src), Idx i _) = return (ExeS x, Idx i (Just (srcLang src)))
+    collapseExpr _ _ _ (ExeS x@(SrcCall (Idx _ src)), Idx i _) = return (ExeS x, Idx i (Just (srcLang src)))
     collapseExpr _ _ lang (ExeS x@(PatCall _), Idx i _) = return (ExeS x, Idx i lang)
     collapseExpr _ _ lang (BndS v, Idx i _) = return (BndS v, Idx i lang)
     collapseExpr _ _ lang (UniS, Idx i _) = return (UniS, Idx i lang)
@@ -1851,12 +1851,12 @@ reopenSources :: Map Int HostLimit -> AnnoS (Indexed Type) Many Int -> MorlocMon
 reopenSources limits n@(AnnoS g ci e)
   | Map.null limits = return n
   | otherwise = AnnoS g ci <$> case e of
-      AppS f@(AnnoS fg@(Idx fgi ft) _ (ExeS (SrcCall src))) xs
+      AppS f@(AnnoS fg@(Idx fgi ft) _ (ExeS (SrcCall isrc@(Idx _ src)))) xs
         | Map.member ci limits
         , FunT ins out <- ft
         , not (holdsCallable out)
         , not (any givenFunction ins) -> do
-            others <- sameTermSources src
+            others <- sameTermSources isrc
             alts <- mapM (\s -> (\gi k -> AnnoS (Idx gi ft) k (ExeS (SrcCall s))) <$> newIndex fgi <*> MM.getCounter) others
             xs' <- mapM (reopenSources limits) xs
             hd <-

@@ -125,7 +125,7 @@ findSources ms = unique <$> concatMapM (foldSerialManifoldM fm) ms
     serialASTsources :: SerialAST -> [Source]
     serialASTsources s = here s <> concatMap serialASTsources (serialKids s)
       where
-        here (SerialPack _ (p, _)) = [typePackerForward p, typePackerReverse p]
+        here (SerialPack _ (p, _)) = [val (typePackerForward p), val (typePackerReverse p)]
         here _ = []
 
     nativeManifoldSrcs (NativeManifold_ m lang _ e) = (<>) e <$> lookupConstructors lang m

@@ -661,8 +661,8 @@ shallowType (SerialUnknown v) = UnkF v
 data PackerInstance = PackerInstance
   { piHead :: TypeU
   , piWire :: TypeU
-  , piSources :: Map.Map Lang (Source, Source)
-  , piPacks :: Map.Map Lang Source
+  , piSources :: Map.Map Lang (Indexed Source, Indexed Source)
+  , piPacks :: Map.Map Lang (Indexed Source)
   -- ^ the languages that implement @pack@, whether or not they also
   -- implement @unpack@
   }
@@ -735,7 +735,7 @@ findPackerInstances = do
         { piHead = qualify vs1 b1
         , piWire = qualify vs1 a1
         , piSources = pairByLang packSrcs unpackSrcs
-        , piPacks = Map.fromList [(srcLang p, p) | p <- packSrcs]
+        , piPacks = Map.fromList [(srcLang (val p), p) | p <- packSrcs]
         }
     | ((vs1, FunU [a1] b1), packSrcs) <- packs
     , ((vs2, FunU [a2] b2), unpackSrcs) <- unpacks
@@ -762,22 +762,22 @@ findPackerInstances = do
     rename m (KVarU (v, k)) = KVarU (Map.findWithDefault v v m, k)
     rename m t = mapTypeUChildren (rename m) t
 
-    methodSignatures :: EVar -> Map.Map EVar Instance -> [(([TVar], TypeU), [Source])]
+    methodSignatures :: EVar -> Map.Map EVar Instance -> [(([TVar], TypeU), [Indexed Source])]
     methodSignatures name sigmap = case Map.lookup name sigmap of
       (Just (Instance _ _ _ ts)) -> concatMap sigOf ts
       Nothing -> []
 
-    sigOf :: TermTypes -> [(([TVar], TypeU), [Source])]
-    sigOf (TermTypes (Just et) (map (val . snd) -> srcs) _) =
+    sigOf :: TermTypes -> [(([TVar], TypeU), [Indexed Source])]
+    sigOf (TermTypes (Just et) (map snd -> srcs) _) =
       [(unqualify (etype et), srcs)]
     sigOf (TermTypes Nothing _ _) = []
 
     -- A language declares at most one source per method; two are rejected
     -- earlier as ambiguous source declarations.
-    pairByLang :: [Source] -> [Source] -> Map.Map Lang (Source, Source)
+    pairByLang :: [Indexed Source] -> [Indexed Source] -> Map.Map Lang (Indexed Source, Indexed Source)
     pairByLang ps us =
       Map.fromList
-        [(srcLang p, (p, u)) | p <- ps, u <- us, srcLang p == srcLang u]
+        [(srcLang (val p), (p, u)) | p <- ps, u <- us, srcLang (val p) == srcLang (val u)]
 
 -- Takes a map of packers with concrete type names as keys. A single concrete
 -- type name may map to many single types. For example, the python type "dict"
@@ -1573,7 +1573,7 @@ typeFHead _ = Nothing
 --
 -- The table is filtered to the language before use, so a miss here means the
 -- filter and this lookup have gone out of step.
-packerSources :: Lang -> Int -> PackerInstance -> MorlocMonad (Source, Source)
+packerSources :: Lang -> Int -> PackerInstance -> MorlocMonad (Indexed Source, Indexed Source)
 packerSources lang m0 pin = case Map.lookup lang (piSources pin) of
   (Just srcs) -> return srcs
   Nothing ->
@@ -1583,7 +1583,7 @@ packerSources lang m0 pin = case Map.lookup lang (piSources pin) of
 
 -- | The @pack@ source of the most specific instance whose head covers @t@
 -- and that implements @pack@ in @lang@, or Nothing when none does.
-findCoveringPacker :: Lang -> Int -> Type -> MorlocMonad (Maybe Source)
+findCoveringPacker :: Lang -> Int -> Type -> MorlocMonad (Maybe (Indexed Source))
 findCoveringPacker lang m0 t = do
   instances <- findPackerInstances
   gscope <- MM.getGeneralScope

@@ -314,7 +314,7 @@ groupCallbacks = go
       return (AnnoS g c (AppS f' xs''))
     go (AnnoS g c e) = AnnoS g c <$> mapExprSM go e
 
-    sourceOf (AnnoS _ (Idx ci _) (ExeS (SrcCall src))) = Just (Just ci, src)
+    sourceOf (AnnoS _ _ (ExeS (SrcCall (Idx si src)))) = Just (Written si, src)
     sourceOf (AnnoS _ _ (VarS _ (One x))) = sourceOf x
     sourceOf _ = Nothing
 

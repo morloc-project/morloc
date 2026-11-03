@@ -576,8 +576,8 @@ sourcedCallee (PolyEval _ e) = sourcedCallee e
 sourcedCallee (PolyCoerce _ _ e) = sourcedCallee e
 sourcedCallee (PolyDebugWrap _ _ e) = sourcedCallee e
 sourcedCallee (PolyCacheBody _ _ _ e) = sourcedCallee e
-sourcedCallee (PolyApp (PolyExe _ (SrcCallP (Just _) src)) _) = Just (srcAlias src)
-sourcedCallee (PolyExe _ (SrcCallP (Just _) src)) = Just (srcAlias src)
+sourcedCallee (PolyApp (PolyExe _ (SrcCallP (Written _) src)) _) = Just (srcAlias src)
+sourcedCallee (PolyExe _ (SrcCallP (Written _) src)) = Just (srcAlias src)
 sourcedCallee _ = Nothing
 
 -- | Look up @midx@ in 'stateManifoldConfig'; return its label group
@@ -617,7 +617,7 @@ expressCore :: AnnoS (Indexed Type) One (Indexed Lang, [Arg EVar]) -> MorlocMona
 expressCore (AnnoS (Idx midx c@(FunT inputs _)) (Idx cidx lang, _) (ExeS exe)) = do
   ids <- MM.takeFromCounter (length inputs)
   exe' <- case exe of
-    (SrcCall src) -> checkRsizeArity midx src (length inputs) >> return (SrcCallP (Just cidx) src)
+    (SrcCall (Idx si src)) -> checkRsizeArity midx src (length inputs) >> return (SrcCallP (Written si) src)
     (PatCall pat) -> return $ PatCallP pat
   let lambdaVals = fromJust $ safeZipWith PolyBndVar (map (C . Idx cidx) inputs) ids
   return
@@ -775,16 +775,16 @@ expressPolyArg l pc e = expressPolyExprWrap l pc e
 -- not just its head TVar -- because the stdlib distinguishes
 -- @IndexLike Int@ from @IndexLike (?Int)@, both of which would
 -- collapse to @TVar Int@ under 'extractKey'.
-findIndexLikeToIndex :: Lang -> TypeU -> MorlocMonad (Maybe Source)
+findIndexLikeToIndex :: Lang -> TypeU -> MorlocMonad (Maybe (Indexed Source))
 findIndexLikeToIndex lang inputType = do
   sigmap <- MM.gets stateTypeclasses
   case Map.lookup (EV "__to_index__") sigmap of
     Nothing -> return Nothing
     Just inst -> return $ listToMaybe
-      [ src
+      [ isrc
       | TermTypes (Just et) cs _ <- instanceTerms inst
       , termInputType et == Just inputType
-      , (_, Idx _ src) <- cs
+      , (_, isrc@(Idx _ src)) <- cs
       , srcLang src == lang
       ]
   where
@@ -799,14 +799,14 @@ findIndexLikeToIndex lang inputType = do
 -- argument index 3 (the receiver position). Receivers don't need
 -- Optional discrimination, so head-only matching ('extractKey') is
 -- sufficient.
-findSliceableGetSlice :: Lang -> TypeU -> MorlocMonad (Maybe Source)
+findSliceableGetSlice :: Lang -> TypeU -> MorlocMonad (Maybe (Indexed Source))
 findSliceableGetSlice lang receiverType =
   findInstanceByArgHead 3 (EV "__get_slice__") lang (extractKey receiverType)
 
 -- | Look up the @Indexable@ @__access_index__@ instance for a
 -- container type in language @lang@. The instance method signature is
 -- @?Int64 -> f a -> a@; the container head sits at argument index 1.
-findIndexableAccessIndex :: Lang -> TypeU -> MorlocMonad (Maybe Source)
+findIndexableAccessIndex :: Lang -> TypeU -> MorlocMonad (Maybe (Indexed Source))
 findIndexableAccessIndex lang receiverType =
   findInstanceByArgHead 1 (EV "__access_index__") lang (extractKey receiverType)
 
@@ -814,7 +814,7 @@ findIndexableAccessIndex lang receiverType =
 -- Nat-parameterized container. Argument position of the receiver is
 -- the same as @Sliceable@ (3): @?Int64 -> ?Int64 -> ?Int64 -> f n a ->
 -- f m a@.
-findSliceableDimGetSliceDim :: Lang -> TypeU -> MorlocMonad (Maybe Source)
+findSliceableDimGetSliceDim :: Lang -> TypeU -> MorlocMonad (Maybe (Indexed Source))
 findSliceableDimGetSliceDim lang receiverType =
   findInstanceByArgHead 3 (EV "__get_slice_dim__") lang (extractKey receiverType)
 
@@ -825,7 +825,7 @@ findSliceableDimGetSliceDim lang receiverType =
 -- (the compiler routes it through @IntrIFileWalk@ as a hardcoded
 -- default); any receiver head with a user instance takes precedence
 -- over Sliceable\/Indexable at the pattern-dispatch call sites.
-findPatternAccessibleExtract :: Lang -> TypeU -> MorlocMonad (Maybe Source)
+findPatternAccessibleExtract :: Lang -> TypeU -> MorlocMonad (Maybe (Indexed Source))
 findPatternAccessibleExtract lang receiverType =
   findInstanceByArgHead 2 (EV BT.extractPatternMethod) lang (extractKey receiverType)
 
@@ -876,7 +876,7 @@ expressBracketSlice callLang midx inputs out xsExpr =
               eW <- wrapBoundInToIndex callLang midx eT eE
               pW <- wrapBoundInToIndex callLang midx pT pE
               let fT = FunT [optI64T, optI64T, optI64T, rcvT] out
-              return $ PolyApp (PolyExe (Idx midx fT) (SrcCallP Nothing getSliceSrc)) [sW, eW, pW, rcvE]
+              return $ PolyApp (PolyExe (Idx midx fT) (builtSrcCall getSliceSrc)) [sW, eW, pW, rcvE]
     _ -> MM.throwSourcedError midx "PatternBracketSlice expects 4 arguments"
 
 -- | Run a list of @Maybe@-returning monadic lookups in order, returning
@@ -926,7 +926,7 @@ expressBracketIndex callLang midx inputs out xsExpr =
                 callLang "Indexable.__access_index__" rcvT
               iW <- wrapBoundInToIndex callLang midx iT iE
               let fT = FunT [optI64T, rcvT] out
-              return $ PolyApp (PolyExe (Idx midx fT) (SrcCallP Nothing accessSrc)) [iW, rcvE]
+              return $ PolyApp (PolyExe (Idx midx fT) (builtSrcCall accessSrc)) [iW, rcvE]
     _ -> MM.throwSourcedError midx "PatternBracketIndex expects 2 arguments"
 
 -- | Walk the alias chain and check whether the receiver type's head
@@ -980,7 +980,7 @@ emitPatternAccessibleCall
   :: Lang
   -> Int                       -- midx
   -> Type                      -- result type (the value the user's function produces)
-  -> Source                    -- resolved user __extract_pattern__ source
+  -> Indexed Source            -- resolved user __extract_pattern__ source
   -> [WalkStep]                -- static walk chain
   -> Type                      -- receiver type
   -> [(Type, PolyExpr)]        -- bracket bounds in DFS order: (type, expression)
@@ -999,7 +999,7 @@ emitPatternAccessibleCall callLang midx out src steps rcvT bounds rcvE = do
       -- the wire level, matching the PolyStr argument.
       patternChainT = AppT (VarT BT.patternChainVar) [rcvT, out]
       fT           = FunT [patternChainT, argsListT, rcvT] out
-  return $ PolyApp (PolyExe (Idx midx fT) (SrcCallP Nothing src))
+  return $ PolyApp (PolyExe (Idx midx fT) (builtSrcCall src))
                    [pathPoly, argsListPoly, rcvE]
 
 -- | Try to dispatch a pattern-accessor call through a user-declared
@@ -1109,11 +1109,11 @@ dispatchPatCall callLang midx cidxCall pat inputs out xs fallback = case pat of
 
 requireInstance
   :: Int
-  -> MorlocMonad (Maybe Source)
+  -> MorlocMonad (Maybe (Indexed Source))
   -> Lang
   -> Text
   -> Type
-  -> MorlocMonad Source
+  -> MorlocMonad (Indexed Source)
 requireInstance midx lookup_ lang methodLabel t = do
   mSrc <- lookup_
   case mSrc of
@@ -1164,7 +1164,7 @@ wrapBoundInToIndex lang midx boundType expr = do
   case mSrc of
     Just src ->
       let wrapFT = FunT [boundType] optI64T
-      in return $ PolyApp (PolyExe (Idx midx wrapFT) (SrcCallP Nothing src)) [expr]
+      in return $ PolyApp (PolyExe (Idx midx wrapFT) (builtSrcCall src)) [expr]
     Nothing -> MM.throwSourcedError midx $
       "No IndexLike.__to_index__ instance found for" <+> pretty boundType
       <+> "in language" <+> pretty lang
@@ -1213,7 +1213,7 @@ renderConcreteForm gscope (AppF h args) =
 -- from the wire form's. If a wrap is structurally needed but no
 -- @Packable@ instance exists for this language, throws a sourced
 -- error.
-maybePackableWrap :: Int -> Lang -> Type -> Type -> MorlocMonad (Maybe Source)
+maybePackableWrap :: Int -> Lang -> Type -> Type -> MorlocMonad (Maybe (Indexed Source))
 maybePackableWrap midx lang nativeT wireT = do
   let nativeTv = extractKey (type2typeu nativeT)
       wireTv = extractKey (type2typeu wireT)
@@ -1277,7 +1277,7 @@ maybePackableWrap midx lang nativeT wireT = do
 -- @conform@ builds a literal the same way. R builds every list literal by
 -- its decoder's rule in serialization. A value holding a function has no
 -- schema to decode it by.
-packLiteral :: Int -> Lang -> Type -> Type -> Source -> PolyExpr -> MorlocMonad PolyExpr
+packLiteral :: Int -> Lang -> Type -> Type -> Indexed Source -> PolyExpr -> MorlocMonad PolyExpr
 packLiteral midx lang wireT userT src inner
   | containsFunT userT || not wireIsList = return packed
   | langName' == "py" = do
@@ -1303,7 +1303,7 @@ packLiteral midx lang wireT userT src inner
     wireIsList = case wireT of
       AppT (VarT v) _ -> v == BT.list
       _ -> False
-    packed = PolyApp (PolyExe (Idx midx (FunT [wireT] userT)) (SrcCallP Nothing src)) [inner]
+    packed = PolyApp (PolyExe (Idx midx (FunT [wireT] userT)) (builtSrcCall src)) [inner]
 
 -- | LstS dispatch counterpart to 'dispatchPrimLit'. Computes the
 -- wire-parent root of @userT@, expects it to be list-shaped, and either
@@ -1599,7 +1599,7 @@ expressPolyExpr
   ( AnnoS
       (Idx midx _)
       (_, outerArgs)
-      (AppS f@(AnnoS (Idx _ (FunT inputs _)) (Idx cidxCall callLang, _) (ExeS (SrcCall src))) xs)
+      (AppS f@(AnnoS (Idx _ (FunT inputs _)) (Idx cidxCall callLang, _) (ExeS (SrcCall (Idx _ src)))) xs)
     )
     | srcInline src && isLocal = do
         checkRsizeArity midx src (length inputs)
@@ -2086,7 +2086,7 @@ expressPolyExpr _ parentLang pc (AnnoS (Idx midx t) (Idx cidx lang, args) (Intri
       funcExpr <- expressPolyExprWrap lang (mkIdx funcE funcT) funcE
       listExpr <- expressPolyExprWrap lang (mkIdx listE listT) listE
       let mapFunT = FunT [funcT, listT] t
-          e = PolyApp (PolyExe (Idx midx mapFunT) (SrcCallP Nothing mapSrc)) [funcExpr, listExpr]
+          e = PolyApp (PolyExe (Idx midx mapFunT) (builtSrcCall mapSrc)) [funcExpr, listExpr]
       expressContainer pc (Idx midx parentLang) (Idx cidx lang) args e
 expressPolyExpr _ parentLang pc (AnnoS (Idx midx t) (Idx cidx lang, args) (IntrinsicS intr xs)) = do
   xs' <- mapM (\x@(AnnoS (Idx xi xt) _ _) -> expressPolyExprWrap lang (Idx xi xt) x) xs
@@ -2169,11 +2169,11 @@ expressPolyApp ::
   AnnoS (Indexed Type) One (Indexed Lang, [Arg EVar]) ->
   [PolyExpr] ->
   MorlocMonad PolyExpr
-expressPolyApp _ (AnnoS g@(Idx gi (FunT inputs _)) (Idx ci _, _) (ExeS (SrcCall src))) xs = do
+expressPolyApp _ (AnnoS g@(Idx gi (FunT inputs _)) _ (ExeS (SrcCall (Idx si src)))) xs = do
   checkRsizeArity gi src (length inputs)
-  return . PolyReturn $ PolyApp (PolyExe g (SrcCallP (Just ci) src)) xs
-expressPolyApp _ (AnnoS g (Idx ci _, _) (ExeS (SrcCall src))) xs =
-  return . PolyReturn $ PolyApp (PolyExe g (SrcCallP (Just ci) src)) xs
+  return . PolyReturn $ PolyApp (PolyExe g (SrcCallP (Written si) src)) xs
+expressPolyApp _ (AnnoS g _ (ExeS (SrcCall (Idx si src)))) xs =
+  return . PolyReturn $ PolyApp (PolyExe g (SrcCallP (Written si) src)) xs
 -- Eta-expanded pattern call: fires when a pattern-typed expression
 -- (e.g. @firstOf f = .[0] f@) is used higher-order (e.g. @map firstOf
 -- fs@). The eta-expansion path in 'expressPolyExpr' delegates to

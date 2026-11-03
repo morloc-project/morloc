@@ -281,7 +281,7 @@ analyze cx env dm (AnnoS (Idx gi t) (Idx ci _) e) = case e of
   VarS _ (One x) -> do
     i <- analyze cx env dm x
     done (iProv i) (iFree i) [i]
-  ExeS (SrcCall src) -> do
+  ExeS (SrcCall (Idx _ src)) -> do
     stray
     -- a source as a value: its first call group runs the source; a call
     -- that stops at a group boundary returns a function the host made
@@ -535,7 +535,7 @@ analyze cx env dm (AnnoS (Idx gi t) (Idx ci _) e) = case e of
           else done (mark o t) (frees is) is
 
     sourcedHead (AnnoS _ _ x) = case x of
-      ExeS (SrcCall src) -> Just src
+      ExeS (SrcCall (Idx _ src)) -> Just src
       VarS _ (One y) -> sourcedHead y
       LabelS _ y -> sourcedHead y
       CoerceS _ y -> sourcedHead y
@@ -694,8 +694,8 @@ planWith view target trees00
     rootIdx (AnnoS (Idx i _) _ _) = i
 
     signatures trees0 = do
-      let srcs = [(ci, src) | t <- trees0, AnnoS _ (Idx ci _) (ExeS (SrcCall src)) <- nodes t]
-      pairs <- mapM (\(ci, src) -> fmap ((,) src . etype) <$> sourceSignature (Just ci) src) srcs
+      let srcs = [(si, src) | t <- trees0, AnnoS _ _ (ExeS (SrcCall (Idx si src))) <- nodes t]
+      pairs <- mapM (\(ci, src) -> fmap ((,) src . etype) <$> sourceSignature (Written ci) src) srcs
       return (Map.fromList (catMaybes pairs))
 
     -- the analysis of one tree given what its parameters hold: what it
@@ -909,18 +909,22 @@ implementations (Polymorphic _ _ _ ts) = [[s | (_, Idx _ s) <- termConcrete t] |
 
 -- | The other sources of the term @src@ implements, in other languages, with
 -- the same call groups (HOST-3).
-sameTermSources :: Source -> MorlocMonad [Source]
-sameTermSources src = do
+sameTermSources :: Indexed Source -> MorlocMonad [Indexed Source]
+sameTermSources (Idx _ src) = do
   sigs <- GMap.elems <$> MM.gets stateSignatures
   return $
-    unique
-      [ s
-      | srcs <- concatMap implementations sigs
-      , src `elem` srcs
-      , s <- srcs
+    List.nubBy (\a b -> val a == val b)
+      [ is
+      | srcs <- concatMap indexedImplementations sigs
+      , src `elem` map val srcs
+      , is@(Idx _ s) <- srcs
       , srcLang s /= srcLang src
       , srcRsize s == srcRsize src
       ]
+
+indexedImplementations :: SignatureSet -> [[Indexed Source]]
+indexedImplementations (Monomorphic t) = [map snd (termConcrete t)]
+indexedImplementations (Polymorphic _ _ _ ts) = [map snd (termConcrete t) | t <- ts]
 
 -- | The advice for a function made by @src@: if its term has sources in
 -- other languages, how to have one of those make it instead; otherwise

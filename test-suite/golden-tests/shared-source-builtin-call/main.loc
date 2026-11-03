@@ -1,0 +1,56 @@
+-- One function in each language is the identity `ident` and both `pack` and
+-- `unpack` of the Packable instance of `Box`, so the calls the compiler
+-- builds to pack and unpack a `Box`, in a pool or between pools, name that
+-- function under signatures that differ from each other and from `ident`'s.
+-- Each call must find the signature of the method it implements.
+module main (t, sameBox, roundTrip, viaCpp)
+
+import root-py
+import root-cpp
+
+source Py from "lib.py" ("ident")
+source Cpp from "lib.hpp" ("ident", "box_len" as boxLen)
+
+--' Return the argument unchanged
+ident :: a -> a
+
+newtype Box a = List a
+
+type Py => (Box a) = "list" a
+
+type Cpp => (Box a) = "std::vector<$1>" a
+
+instance Packable (List a) (Box a) where
+  source Py from "lib.py"
+   ( "ident" as pack
+   , "ident" as unpack
+   )
+  source Cpp from "lib.hpp"
+   ( "ident" as pack
+   , "ident" as unpack
+   )
+
+--' Count the elements of a box
+boxLen :: Box Int -> Int
+
+boxList :: Box a -> [a]
+boxList x = unpack x
+
+instance Eq a => Eq (Box a) where
+  (==) x y = boxList x == boxList y
+  (!=) x y = not (boxList x == boxList y)
+
+t :: Bool
+t =
+  let a = ident True
+      b = ([1, 2] :: Box Int) == ([1, 2] :: Box Int)
+   in a && b
+
+sameBox :: [Int] -> [Int] -> Bool
+sameBox xs ys = (pack xs :: Box Int) == pack ys
+
+roundTrip :: [Int] -> [Int]
+roundTrip xs = boxList (pack xs)
+
+viaCpp :: [Int] -> Int
+viaCpp xs = boxLen (ident (pack xs))

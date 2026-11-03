@@ -55,6 +55,9 @@ module Morloc.CodeGenerator.Namespace
 
     -- ** Manifold data types
   , ExecutableExpressionPool (..)
+  , SrcOrigin (..)
+  , srcOriginIndex
+  , builtSrcCall
   , RemoteForm (..)
   , PolyHead (..)
   , PolyExpr (..)
@@ -367,11 +370,23 @@ instance Pretty SerialAST where
     parens ("SerialVariant" <+> pretty v <+> list [pretty n | (n, _) <- as])
   pretty (SerialUnknown v) = parens ("SerialUnknown" <+> pretty v)
 
+-- | Where a call of a sourced function comes from, with the index of the
+-- source it calls: the index a user term links it from, or, for a call the
+-- compiler builds, the index of the implementation it calls (an instance
+-- method's entry), so the source's signature can always be found.
+data SrcOrigin = Written Int | Built Int
+  deriving (Show, Ord, Eq)
+
+srcOriginIndex :: SrcOrigin -> Int
+srcOriginIndex (Written i) = i
+srcOriginIndex (Built i) = i
+
+-- | The executor of a call the compiler builds of an implementation.
+builtSrcCall :: Indexed Source -> ExecutableExpressionPool
+builtSrcCall (Idx i src) = SrcCallP (Built i) src
+
 data ExecutableExpressionPool
-  = SrcCallP (Maybe Int) Source
-  -- ^ A call of a sourced function, with the index of the source expression
-  -- it was linked from when a user term makes it; a call the compiler builds
-  -- itself has none.
+  = SrcCallP SrcOrigin Source
   | PatCallP Pattern -- pattern function
   | LocalCallP Int -- a locally defined function
   | PapplyP Int
@@ -393,8 +408,8 @@ instance Pretty ExecutableExpressionPool where
 data TypePacker = TypePacker
   { typePackerPacked :: TypeF
   , typePackerUnpacked :: TypeF
-  , typePackerForward :: Source
-  , typePackerReverse :: Source
+  , typePackerForward :: Indexed Source
+  , typePackerReverse :: Indexed Source
   }
   deriving (Show, Ord, Eq)
 

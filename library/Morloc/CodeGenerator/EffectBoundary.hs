@@ -597,7 +597,7 @@ flattenFunT t = t
 -- variables it quantifies. The signature is found by the source it
 -- implements, since the call's own index may belong to the definition
 -- around it.
-declaredSignature :: Maybe Int -> Source -> MorlocMonad (Set.Set TVar, Maybe Type)
+declaredSignature :: SrcOrigin -> Source -> MorlocMonad (Set.Set TVar, Maybe Type)
 declaredSignature origin src = do
   sig <- sourceSignature origin src
   return $ case sig of
@@ -606,40 +606,30 @@ declaredSignature origin src = do
        in (Set.fromList vs, Just (typeOf t))
     Nothing -> (Set.empty, Nothing)
 
--- | The signature of the term a source call names. A call a user term makes
--- carries its source expression, which names one term. A call the compiler
--- builds carries none and is known only by its host function, so every
--- signature of that host function must agree.
-sourceSignature :: Maybe Int -> Source -> MorlocMonad (Maybe EType)
+-- | The signature of the term a source call implements, found by the index
+-- the source is declared under, never by its host function: one host
+-- function may implement several terms with different signatures. An index
+-- no term lists is a compiler bug.
+sourceSignature :: SrcOrigin -> Source -> MorlocMonad (Maybe EType)
 sourceSignature origin src = do
-  sgmap <- MM.gets stateSignatures
-  let sigs = GMap.elems sgmap
-      -- the term the index was linked to, or for an instance method (which
-      -- is not in the index map) the term that lists the index among its
-      -- implementations
-      ofTerm = case origin of
-        Just i
-          | GMapJust sg <- GMap.lookup i sgmap, Just e <- signatureOf sameSource sg -> Just e
-          | otherwise -> listToMaybe [e | sg <- sigs, Just e <- [signatureOf (\(Idx j _) -> j == i) sg]]
-        Nothing -> Nothing
-      ofHost = nubBy (\a b -> etype a == etype b) [e | sg <- sigs, Just e <- [signatureOf sameSource sg]]
-  case (ofTerm, ofHost) of
-    (Just e, _) -> return (Just e)
-    (Nothing, []) -> return Nothing
-    (Nothing, [e]) -> return (Just e)
-    (Nothing, _) ->
+  sigs <- GMap.elems <$> MM.gets stateSignatures
+  case [sg | sg <- sigs, listsIndex sg] of
+    sg : _ -> return (signatureOf sg)
+    [] ->
       MM.throwCompilerBug $
-        "a call of" <+> squotes (pretty (srcName src))
-          <+> "names no term, and the host function has more than one signature"
+        "a" <+> kind <+> "call of" <+> squotes (pretty (srcName src)) <+> "has source index"
+          <+> pretty i <> ", which no term lists"
   where
-    signatureOf p (Monomorphic (TermTypes (Just e) srcs _))
-      | any (p . snd) srcs = Just e
-    signatureOf p (Polymorphic _ _ e ts)
-      | any (any (p . snd) . termConcrete) ts = Just e
-    signatureOf _ _ = Nothing
-    -- The host function itself: its name in its language and file, whatever
-    -- alias a module gives it.
-    sameSource (Idx _ s) = srcName s == srcName src && srcPath s == srcPath src && srcLang s == srcLang src
+    i = srcOriginIndex origin
+    kind :: MDoc
+    kind = case origin of
+      Written _ -> "written"
+      Built _ -> "compiler-built"
+    atIndex (_, Idx j _) = j == i
+    listsIndex (Monomorphic t) = any atIndex (termConcrete t)
+    listsIndex (Polymorphic _ _ _ ts) = any (any atIndex . termConcrete) ts
+    signatureOf (Monomorphic t) = termGeneral t
+    signatureOf (Polymorphic _ _ e _) = Just e
 
 -- | The other direction of a callback boundary: a host that receives a
 -- morloc callback may call it with a value of its own making, so each
@@ -1005,7 +995,7 @@ rebuildIn dir lang g hv@(HostView scope _ _ _ _) d t0 e = do
           let da = case declArgs hv 1 d of [x] -> x; _ -> Nothing
               there = case dir of Outbound -> hostType hv d t; Inbound -> t
           (each, aThere) <- element da a
-          return $ PolyApp (PolyExe (Idx g (FunT [FunT [elemHere da a] aThere, here] there)) (SrcCallP Nothing src)) [each, var]
+          return $ PolyApp (PolyExe (Idx g (FunT [FunT [elemHere da a] aThere, here] there)) (builtSrcCall src)) [each, var]
         _ -> packed h ts var here
     _ -> refuse
   return (PolyLet v e body)
@@ -1052,9 +1042,9 @@ rebuildIn dir lang g hv@(HostView scope _ _ _ _) d t0 e = do
               wireHere = case dir of Outbound -> wireT; Inbound -> hostType hv dWire wireT
               wireThere = case dir of Outbound -> hostType hv dWire wireT; Inbound -> wireT
               there = case dir of Outbound -> hostType hv d t; Inbound -> t
-              unpacked = PolyApp (PolyExe (Idx g (FunT [here] wireHere)) (SrcCallP Nothing unpackSrc)) [var]
+              unpacked = PolyApp (PolyExe (Idx g (FunT [here] wireHere)) (builtSrcCall unpackSrc)) [var]
           adapted <- adapt dir lang g hv dWire wireT unpacked
-          return $ PolyApp (PolyExe (Idx g (FunT [wireThere] there)) (SrcCallP Nothing packSrc)) [adapted]
+          return $ PolyApp (PolyExe (Idx g (FunT [wireThere] there)) (builtSrcCall packSrc)) [adapted]
         [] -> refuse
 
     refuse :: MorlocMonad a

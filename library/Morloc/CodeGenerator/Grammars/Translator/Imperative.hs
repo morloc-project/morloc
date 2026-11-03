@@ -931,7 +931,7 @@ nativeToWire cfg = go
       reified <- lcReifyClosure cfg v s
       return ([], IRawExpr (render reified))
     construct v (SerialPack _ (p, s)) =
-      let unpacker = lcUnpackerName cfg (typePackerReverse p)
+      let unpacker = lcUnpackerName cfg (val (typePackerReverse p))
           arg = if lcBorrowPackArg cfg (typePackerPacked p) then "&(" <> v <> ")" else v
        in go (unpacker <> parens arg) s
     construct v lst@(SerialList _ _ s) = do
@@ -1036,7 +1036,7 @@ wireToNative cfg = check
       return (IRawExpr (render reflected), [])
     construct v (SerialPack _ (p, s')) = do
       (x, before) <- check v s'
-      let packer = render $ lcPackerName cfg (typePackerForward p)
+      let packer = render $ lcPackerName cfg (val (typePackerForward p))
           -- Borrow the packer's arg (the wire value) for a non-Copy wire type,
           -- matching a `&T` packer parameter. The common (no-borrow) case keeps
           -- `x` structured; only a borrow needs a rendered `&(..)` wrapper.

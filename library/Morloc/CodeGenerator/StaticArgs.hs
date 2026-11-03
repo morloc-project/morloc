@@ -240,7 +240,7 @@ rewriteSites helpers ref chain self = walk
                    }
               return (Just (name, Just t))
 
-    sourceOf (AnnoS _ _ (ExeS (SrcCall src))) = Just src
+    sourceOf (AnnoS _ _ (ExeS (SrcCall (Idx _ src)))) = Just src
     sourceOf _ = Nothing
 
 -- | A function value that refers to nothing bound around it: a sourced

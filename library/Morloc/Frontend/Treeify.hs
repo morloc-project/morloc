@@ -726,7 +726,7 @@ collectExprS namer0 (ExprI gi0 e0) = f namer0 e0
 
         termtypesToAnnoS :: Int -> Namer -> TermTypes -> MorlocMonad (Namer, [AnnoS Int ManyPoly Int])
         termtypesToAnnoS gi n t = do
-          let calls = [AnnoS gi ci (ExeS (SrcCall src)) | (_, Idx ci src) <- termConcrete t]
+          let calls = [AnnoS gi ci (ExeS (SrcCall isrc)) | (_, isrc@(Idx ci _)) <- termConcrete t]
 
           (n', declarations) <- statefulMapM termExprToAnnoS n (termDecl t)
           return (n', (calls <> declarations))
