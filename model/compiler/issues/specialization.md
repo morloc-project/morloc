@@ -53,11 +53,8 @@
 - **Every use of a method copies its whole elaboration.** [reproduced,
   2026-11-02] Methods are never shared (Specialize.hs `splice`, `closed`
   requires a definition), so each comparison copies the instance body it
-  resolves to, with every definition and method use inside it. With the
-  root container instances, typechecking root-py's test suite takes 1.8 GB
-  and 25 s. Per use under root-py: about 1 ms and 0.15 MB for `x > y`,
-  about 45 ms and 4.5 MB for `x != k` (root's tuple `!=` bodies hold
-  several `==` uses, each checked against every candidate), so a
-  1000-operand `x != k` chain takes 47 s and 4.6 GB to typecheck
-  (measured 2026-11-03). Spec gap: no item bounds the compiler's cost per
-  term.
+  resolves to, with every definition and method use inside it. Per use under
+  root-py, `morloc typecheck`: about 0.65 ms for `x > k` and 0.4 ms for
+  `x != k`, against 0.15 ms for a call to a definition in the same file
+  (bench typechecking, TYCK-3, TYCK-6, TYCK-7, quick run 2026-11-03). The
+  copies also reach code generation.

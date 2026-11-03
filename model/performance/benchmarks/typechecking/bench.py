@@ -36,6 +36,19 @@ def ladder(d):
     return {"main.loc": HEAD + "\n" + "\n".join(defs) + f"\n\ng x = f{d} x\n"}
 
 
+def method_gt(n):
+    """n uses of an Ord method in one definition."""
+    ops = "\n  && ".join(f"x > {i}" for i in range(n))
+    return {"main.loc": HEAD + f"\ng :: Int -> Bool\ng x = {ops}\n"}
+
+
+def method_ne(n):
+    """n uses of `!=`, whose candidate instances include ones whose bodies
+    use `==` again (tuples, lists)."""
+    ops = "\n  && ".join(f"x != {i}" for i in range(n))
+    return {"main.loc": HEAD + f"\ng :: Int -> Bool\ng x = {ops}\n"}
+
+
 def empty(_):
     return {"main.loc": HEAD + "\ng x = x + 1\n"}
 
@@ -62,6 +75,8 @@ def run(b):
             ("TYCK-3", "calls-same", calls_same, [64, 128, 256, 512]),
             ("TYCK-4", "ladder", ladder, [4, 8, 16, 32]),
             ("TYCK-5", "calls-imported", calls_imported, [16, 32, 64, 128]),
+            ("TYCK-6", "method-gt", method_gt, [250, 500, 1000, 2000]),
+            ("TYCK-7", "method-ne", method_ne, [250, 500, 1000, 2000]),
         ]
         for item, name, gen, xs in series:
             if b.quick:

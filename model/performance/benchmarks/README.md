@@ -39,7 +39,8 @@ from different hosts compares the hosts; each run's header names its CPU.
 | compression | ZIP-1..7, ZIP-10 |
 | table-read | TBL-1, TBL-2 |
 | par-scaling | PAR-1, PAR-2 |
-| typechecking | TYCK-1..5 |
+| typechecking | TYCK-1..7 |
 | build | BUILD-1 |
 | recursion-depth | DEPTH-1..3 |
 | copies | COPY-1..6 |
+| chains | CHAIN-1..4 |

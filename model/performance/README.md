@@ -17,6 +17,7 @@ Chapters:
 - `build.md` (BUILD): `morloc make` time per language
 - `recursion.md` (DEPTH): recursion depth in morloc against the native depth in each language
 - `copies.md` (COPY): copy-heavy shapes in generated Rust and C++; time and copies per step
+- `chains.md` (CHAIN): long `&&` and guard chains; build time, depth and per-element run cost
 
 ## Items
 

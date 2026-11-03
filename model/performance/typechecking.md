@@ -46,3 +46,28 @@ Limit: calls-imported.k <= 1.3
 
 Issue #158 reports this as quadratic (256 calls: 15.8 s and 417 MiB,
 against 0.7 s in one file). Until it is fixed this limit fails.
+
+### TYCK-6 Class method uses in one definition are linear in their number
+Intent: proposed
+Bench: typechecking
+Model: t(n) = t0 + b*n; `g x = x > 0 && x > 1 && ...`, n uses of an Ord method in one signed definition
+Measured: pending
+Limit: method-gt.k <= 1.3, method-gt.b <= 2 ms
+
+Each use checks the instances it may resolve to. Before compiler 5ad090eb2
+each check trimmed the whole typing context, which grew with the
+definition, so this was quadratic.
+
+### TYCK-7 A method use costs about what a call does
+Intent: proposed
+Bench: typechecking
+Model: t(n) = t0 + b*n; `g x = x != 0 && x != 1 && ...`, n uses of `!=` in one signed definition
+Measured: pending
+Goal: method-ne.b <= 0.2 ms
+Limit: method-ne.k <= 1.3, method-ne.b <= 2 ms
+
+`!=` has candidate instances whose own bodies use `==` again (tuples,
+lists), so a use that copies and checks every candidate body costs far
+more than one that does not: 36 ms a use while checking a signature
+copied the candidates' bodies, 0.4 ms once it did not (2026-11-03). A
+plain call costs `calls-same.b` (TYCK-3), the goal.

@@ -641,16 +641,17 @@ collectExprS namer0 (ExprI gi0 e0) = f namer0 e0
       sigs@(GMap idmap _) <- MM.gets stateSignatures
       let termId = Map.lookup gi0 idmap
       case (termId, GMap.lookup gi0 sigs) of
-        -- Shallow collection for specialization: a class method is left as
-        -- its instances' types, to be elaborated at the use's type. Here a
+        -- Shallow collection: a class method is left as its instances'
+        -- types. For specialization it is elaborated at the use's type; a
         -- use of a method inside its own expansion is not a back-edge, since
-        -- it may resolve to another instance; in full collection the next
-        -- case makes it one.
+        -- it may resolve to another instance (in full collection the next
+        -- case makes it one). Validation checks a method use as an
+        -- obligation and never reads its instances' bodies (they are
+        -- checked where the use is elaborated), so it never expands one.
         (Just k, GMapJust (Polymorphic cls clsName t ts))
-          | Just _ <- namerShallowOnly namer
-          , Just r <- namerShallow namer
+          | Just r <- namerShallow namer
           , Nothing <- Map.lookup v (namerMap namer)
-          , k /= r || Map.member k (namerExpanding namer) ->
+          , isNothing (namerShallowOnly namer) || k /= r || Map.member k (namerExpanding namer) ->
               return (namer, VarS v (PolymorphicExpr cls clsName t [(et, []) | Just et <- map termGeneral ts]))
         -- A reference to a term that is being expanded is a recursive
         -- back-edge. It is recognized by the term's identity, not its name:

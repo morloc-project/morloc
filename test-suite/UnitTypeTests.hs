@@ -5246,6 +5246,14 @@ complexityRegressionTests =
             "method uses in one definition cost no more as the definition grows"
             (manyMethodUses 3000)
             (fun [int, int, lst bool])
+      , -- Checking a definition against its signature takes a method use as
+        -- an obligation, so it never copies the bodies of the use's
+        -- candidate instances, which here use the class again.
+        localOption (mkTimeout 10000000) $
+          assertGeneralType
+            "a signed definition's method uses do not copy instance bodies"
+            (nestedMethodUses 1000)
+            (fun [int, int, lst bool])
       ]
 
 -- | @k@ uses of a method whose class has fourteen sourced instances, in
@@ -5260,6 +5268,37 @@ manyMethodUses k =
       ]
     <> "f :: Int -> Int -> [Bool]\n"
     <> "f x y = [" <> MT.intercalate ", " (replicate k "gtm x y") <> "]\n"
+
+-- | @k@ uses of a method in one signed definition. The method's class is
+-- the first of three; each has fourteen sourced instances and tuple
+-- instances whose bodies use the next class's method once per component.
+nestedMethodUses :: Int -> MT.Text
+nestedMethodUses k =
+  "module main (f)\n"
+    <> mconcat [classOf l | l <- [0 .. layers - 1]]
+    <> "both :: Bool -> Bool -> Bool\nboth a b = a\n"
+    <> mconcat [tupleInstance l n | l <- [0 .. layers - 1], n <- [2, 3, 4]]
+    <> "f :: Int -> Int -> [Bool]\n"
+    <> "f x y = [" <> MT.intercalate ", " (replicate k "m0 x y") <> "]\n"
+  where
+    layers = 3 :: Int
+    showT = MT.pack . show
+    method l = "m" <> showT l
+    classOf l =
+      "class C" <> showT l <> " a where\n  " <> method l <> " :: a -> a -> Bool\n"
+        <> mconcat
+          [ "instance C" <> showT l <> " " <> t <> " where\n  source Py from \"g.py\" (\"eq\" as " <> method l <> ")\n"
+          | t <- ["Int", "Str", "Real", "Bool", "I8", "I16", "I32", "I64", "U8", "U16", "U32", "U64", "F32", "F64"]
+          ]
+    tupleInstance l n =
+      let vs = take n ["a", "b", "c", "d"]
+          next = if l + 1 < layers then l + 1 else l
+          ctx = MT.intercalate ", " [cls next v | v <- vs]
+          cls c v = "C" <> showT c <> " " <> v
+          use i = method next <> " (." <> showT i <> " x) (." <> showT i <> " y)"
+          body = foldl (\acc i -> "both (" <> use i <> ") (" <> acc <> ")") (use (0 :: Int)) [1 .. n - 1]
+       in "instance (" <> ctx <> ") => C" <> showT l <> " (" <> MT.intercalate ", " vs <> ") where\n  "
+            <> method l <> " x y = " <> body <> "\n"
 
 -- | A comparison class with container instances whose bodies use the class
 -- again, over a two-parameter class with one instance.
