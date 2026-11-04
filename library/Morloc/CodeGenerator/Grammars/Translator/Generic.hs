@@ -102,6 +102,7 @@ translateBuiltin lang desc srcs es = do
 
   debugLog (vsep (map pseudocodeSerialManifold es) <> "\n")
 
+  reservesLocals lang desc
   -- build src name function
   let srcNamer = qualifiedSrcName desc lib
 
@@ -199,6 +200,7 @@ translateExternal cmd lang desc srcs es = do
 
   debugLog (vsep (map pseudocodeSerialManifold es) <> "\n")
 
+  reservesLocals lang desc
   let srcNamer = qualifiedSrcName desc lib
 
   debugInfo <- makeManifoldDebugInfoLookup
@@ -384,6 +386,18 @@ translateSource desc p = do
       let tmpl = ldImportTemplate desc
       return . pretty $ substituteT tmpl [("path", p')]
 
+-- | Generated locals are named under the manifold prefix (Common's namers),
+-- so a language must reserve it: otherwise a sourced function could share a
+-- local's name and be shadowed by it.
+reservesLocals :: Lang -> LangDescriptor -> MorlocMonad ()
+reservesLocals lang desc
+  | any (`MT.isPrefixOf` ldManifoldPrefix desc) (ldReservedPrefixes desc) = return ()
+  | otherwise =
+      MM.throwRejected $
+        "The lang.yaml of" <+> pretty lang <+> "must list its ldManifoldPrefix"
+          <+> squotes (pretty (ldManifoldPrefix desc)) <+> "in ldReservedPrefixes:"
+          <+> "the generated code names its locals under it"
+
 -- | Prefix for the pool-side name a sourced file is bound to.
 --
 -- A source file's name is chosen by the user and must not have to dodge
@@ -480,7 +494,8 @@ genericLowerConfig desc srcNamer debugInfo traceInfo debugMode = cfg
 
     cfg =
       LowerConfig
-        { lcSrcName = srcNamer
+        { lcLocalPrefix = ldManifoldPrefix desc
+        , lcSrcName = srcNamer
         , lcOperator = infixOperator
         , lcApplySrcGroup = \f as -> f <+> tupled as
         , lcSourcedResult = \_ _ _ x -> x
@@ -675,7 +690,7 @@ genericLowerConfig desc srcNamer debugInfo traceInfo debugMode = cfg
             let makeExt (Just HeadManifoldFormRemoteWorker) = "_remote"
                 makeExt _ = ""
                 fullName = render (mname <> makeExt headForm)
-                argsText = render (hsep (punctuate "," (map argNamer args)))
+                argsText = render (hsep (punctuate "," (map (argNamer (ldManifoldPrefix desc)) args)))
                 header =
                   pretty $
                     substituteT
@@ -705,8 +720,8 @@ genericLowerConfig desc srcNamer debugInfo traceInfo debugMode = cfg
               substituteT (ldPassTemplate desc)
                 [("fn", render mname), ("mid", T.pack (show m))]
         , lcMakeLambda = \m _sig _ mname contextArgs boundArgs ->
-            let ctxNames = map argNamer contextArgs
-                bndNames = map argNamer boundArgs
+            let ctxNames = map (argNamer (ldManifoldPrefix desc)) contextArgs
+                bndNames = map (argNamer (ldManifoldPrefix desc)) boundArgs
                 tmpl = ldPartialTemplate desc
                 fnText = render mname
                 allArgsList = ctxNames <> bndNames
@@ -944,9 +959,9 @@ prepareCacheArg desc cfg (a@(Arg _ tm), sa) = do
   case tm of
     Native _ -> do
       -- The packet exists only to key and store the cache entry.
-      pd <- lcSerialize cfg (argNamer a) sa
+      pd <- lcSerialize cfg ((argNamer (ldManifoldPrefix desc)) a) sa
       return (lcOwnedArg cfg (poolExpr pd), schemaRef, poolPriorLines pd)
-    _ -> return (argNamer a, schemaRef, [])
+    _ -> return ((argNamer (ldManifoldPrefix desc)) a, schemaRef, [])
 
 -- | Remote call with template-driven resource packing
 genericRemoteCall :: LangDescriptor -> MDoc -> Int -> RemoteResources -> [MDoc] -> IndexM PoolDocs
@@ -1008,8 +1023,8 @@ genericChainLadder desc isAnd flag first rungs = vsep ((flag <+> assign <+> firs
 -- counts.
 genericMakeIfLadder :: LangDescriptor -> LowerConfig IndexM -> NativeExpr -> Guards -> IndexM (MDoc, MDoc)
 genericMakeIfLadder desc cfg _ (Guards (c1, _, t1) rungs (_, e)) = do
-  v <- helperNamer <$> lcNewIndex cfg
-  done <- helperNamer <$> lcNewIndex cfg
+  v <- (helperNamer (ldManifoldPrefix desc)) <$> lcNewIndex cfg
+  done <- (helperNamer (ldManifoldPrefix desc)) <$> lcNewIndex cfg
   let assign x y = x <+> pretty (ldAssignOp desc) <+> y
       terminated x = case ldBlockStyle desc of
         IndentBlock -> x
@@ -1031,7 +1046,7 @@ genericMakeIfLadder desc cfg _ (Guards (c1, _, t1) rungs (_, e)) = do
 genericMakeIf :: LangDescriptor -> LowerConfig IndexM -> NativeExpr -> PoolDocs -> PoolDocs -> PoolDocs -> IndexM PoolDocs
 genericMakeIf desc cfg _ condDocs thenDocs elseDocs = do
   idx <- lcNewIndex cfg
-  let v = helperNamer idx
+  let v = (helperNamer (ldManifoldPrefix desc)) idx
       condE = poolExpr condDocs
       thenE = poolExpr thenDocs
       elseE = poolExpr elseDocs
@@ -1083,11 +1098,11 @@ genericMakeLoop ::
   IndexM PoolDocs
 genericMakeLoop desc cfg _ carried _ body = do
   resultIdx <- lcNewIndex cfg
-  let resultVar = helperNamer resultIdx
+  let resultVar = (helperNamer (ldManifoldPrefix desc)) resultIdx
       ids = map fst carried
   bodyLines <- walkLB ids resultVar body
   -- A native loop's locals start from their initializers.
-  let initLines = concat [poolPriorLines d <> [nvarNamer i <+> assign <+> poolExpr d] | (i, Just d) <- carried]
+  let initLines = concat [poolPriorLines d <> [(nvarNamer (ldManifoldPrefix desc)) i <+> assign <+> poolExpr d] | (i, Just d) <- carried]
       resultDecl = resultVar <+> assign <+> pretty (ldNullLiteral desc)
       whileDoc = renderWhile bodyLines
       leaves = loopBodyLeaves body <> [d | (_, Just d) <- carried]
@@ -1112,17 +1127,17 @@ genericMakeLoop desc cfg _ carried _ body = do
         -- A slot whose new value is itself is left alone.
         go (LoopContinue contDocs) = do
           let changed = [(i, cd) | (i, cd) <- zip ids contDocs, not (sameLocal i cd)]
-          tmpVars <- map helperNamer <$> mapM (const (lcNewIndex cfg)) changed
+          tmpVars <- map (helperNamer (ldManifoldPrefix desc)) <$> mapM (const (lcNewIndex cfg)) changed
           let priors = concatMap poolPriorLines contDocs
               tmpAssigns = zipWith (\tv (_, cd) -> tv <+> assign <+> poolExpr cd) tmpVars changed
-              reassigns = zipWith (\(i, _) tv -> nvarNamer i <+> assign <+> tv) changed tmpVars
+              reassigns = zipWith (\(i, _) tv -> (nvarNamer (ldManifoldPrefix desc)) i <+> assign <+> tv) changed tmpVars
           return $ priors <> tmpAssigns <> reassigns
         go (LoopNLet i neDocs b) = do
           rest <- go b
-          return $ poolPriorLines neDocs <> [nvarNamer i <+> assign <+> poolExpr neDocs] <> rest
+          return $ poolPriorLines neDocs <> [(nvarNamer (ldManifoldPrefix desc)) i <+> assign <+> poolExpr neDocs] <> rest
         go (LoopSLet i seDocs b) = do
           rest <- go b
-          return $ poolPriorLines seDocs <> [svarNamer i <+> assign <+> poolExpr seDocs] <> rest
+          return $ poolPriorLines seDocs <> [(svarNamer (ldManifoldPrefix desc)) i <+> assign <+> poolExpr seDocs] <> rest
         -- Every branch ends the iteration, so the else branch follows the
         -- guarded one rather than nesting in it (EMIT-5).
         go (LoopIf guardDocs t e) = do
@@ -1130,7 +1145,7 @@ genericMakeLoop desc cfg _ carried _ body = do
           eLines <- go e
           let next = [pretty (ldContinueStmt desc) | not (loopBodyBreaks t)]
           return $ poolPriorLines guardDocs <> [renderIfBlock desc (poolExpr guardDocs) (tLines <> next)] <> eLines
-        sameLocal i d = null (poolPriorLines d) && render (poolExpr d) == render (nvarNamer i)
+        sameLocal i d = null (poolPriorLines d) && render (poolExpr d) == render ((nvarNamer (ldManifoldPrefix desc)) i)
     renderWhile bodyLines = case ldBlockStyle desc of
       IndentBlock -> nest 4 (vsep (("while" <+> trueLit <> ":") : bodyLines))
       BraceBlock -> vsep ["while" <+> parens trueLit <+> "{", indent 4 (vsep bodyLines), "}"]
@@ -1153,7 +1168,7 @@ genericMakeDoBlock desc cfg _ stmts expr
   | null stmts = return ([], exprThunk)
   | otherwise = do
       idx <- lcNewIndex cfg
-      let nm = helperNamer idx
+      let nm = (helperNamer (ldManifoldPrefix desc)) idx
           header =
             pretty $
               substituteT (ldFuncDefHeader desc) [("name", render nm), ("args", "")]

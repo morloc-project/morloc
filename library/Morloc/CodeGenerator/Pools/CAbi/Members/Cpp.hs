@@ -219,10 +219,10 @@ instance HasCppType TypeM where
     typeStr <- cppTypeOf t
     let typeStrQualified = setCallSemantics s typeStr
     return $ case t of
-      (Serial _) -> typeStrQualified <+> svarNamer i
-      (Native _) -> typeStrQualified <+> nvarNamer i
-      Passthrough -> typeStrQualified <+> svarNamer i
-      (Function _ _) -> typeStrQualified <+> nvarNamer i
+      (Serial _) -> typeStrQualified <+> (svarNamer cppLocals) i
+      (Native _) -> typeStrQualified <+> (nvarNamer cppLocals) i
+      Passthrough -> typeStrQualified <+> (svarNamer cppLocals) i
+      (Function _ _) -> typeStrQualified <+> (nvarNamer cppLocals) i
 
 instance HasCppType NativeManifold where
   cppTypeOf = cppTypeOf . typeMof
@@ -413,7 +413,7 @@ instance {-# OVERLAPPABLE #-} (HasTypeF e) => HasCppType e where
 
   cppArgOf s (Arg i t) = do
     t' <- cppTypeOf (typeFof t)
-    return $ setCallSemantics s t' <+> nvarNamer i
+    return $ setCallSemantics s t' <+> (nvarNamer cppLocals) i
 
 data CppTranslatorState = CppTranslatorState
   { translatorCounter :: Int
@@ -697,7 +697,7 @@ makeClosureDispatch closureTable es = do
     one (NativeManifold i _ form _) = do
       let ctxTs = [t | Arg _ o <- manifoldContext form, Just t <- [orNativeType o]]
           bndTs = [t | Arg _ t <- manifoldBound form]
-          ctxNames = map argNamer (typeMofRs (manifoldContext form))
+          ctxNames = map (argNamer cppLocals) (typeMofRs (manifoldContext form))
           -- inTable already guaranteed membership, so this key is present.
           (capAsts, bndAsts, resAst) = closureTable Map.! i
       argTypes <- mapM cppTypeOf (ctxTs <> bndTs)
@@ -905,7 +905,7 @@ cppKeepSlot ids e x = case e of
   _ -> return x
   where
     slot t j
-      | j `elem` ids && render x == render (nvarNamer j) = do
+      | j `elem` ids && render x == render ((nvarNamer cppLocals) j) = do
           cheap <- cppNoMove t
           return (if cheap then x else "std::move(" <> x <> ")")
       | otherwise = return x
@@ -913,7 +913,7 @@ cppKeepSlot ids e x = case e of
 -- | The move of a kept let (OWN-2), when its lowered form is the let itself.
 cppKeptLet :: NativeExpr -> MDoc -> CppTranslatorM (Maybe MDoc)
 cppKeptLet (LetVarN t i LastRead) x
-  | render x == render (nvarNamer i) = do
+  | render x == render ((nvarNamer cppLocals) i) = do
       moves <- CMS.gets translatorMoves
       if Set.member i moves
         then do
@@ -921,7 +921,7 @@ cppKeptLet (LetVarN t i LastRead) x
           return (if cheap then Nothing else Just ("std::move(" <> x <> ")"))
         else return Nothing
 cppKeptLet (BndVarN t i LastRead) x
-  | render x == render (nvarNamer i) = do
+  | render x == render ((nvarNamer cppLocals) i) = do
       params <- CMS.gets translatorParamMoves
       if Set.member i params
         then do
@@ -958,7 +958,7 @@ cppMovesInto m i t = do
 cppKeepContextArg :: Int -> Int -> Int -> TypeF -> MDoc -> CppTranslatorM MDoc
 cppKeepContextArg m j i t x = do
   pp <- CMS.gets translatorPool
-  if Set.member j (Map.findWithDefault Set.empty m (ppByValue pp)) && not (isFunctionValue t) && render x == render (nvarNamer i)
+  if Set.member j (Map.findWithDefault Set.empty m (ppByValue pp)) && not (isFunctionValue t) && render x == render ((nvarNamer cppLocals) i)
     then do
       moves <- cppMovesInto m i t
       return (if moves then "std::move(" <> x <> ")" else x)
@@ -1023,11 +1023,11 @@ cppWalkLoopBody setResult ids = go
       moved <- mapM (\(_, cd, oe) -> maybe (return Nothing) (\e -> cppKeptLet e (poolExpr cd)) oe) changed
       let viaTemp = [(i, cd) | ((i, cd, _), Nothing) <- zip changed moved]
           direct = [(i, x) | ((i, _, _), Just x) <- zip changed moved]
-      tmpVars <- map helperNamer <$> mapM (const getCounter) viaTemp
+      tmpVars <- map (helperNamer cppLocals) <$> mapM (const getCounter) viaTemp
       let priors = concatMap (\(_, cd, _) -> poolPriorLines cd) changed
           tmpAssigns = zipWith (\tv (_, cd) -> "auto" <+> tv <+> "=" <+> poolExpr cd <> ";") tmpVars viaTemp
-          reassigns = zipWith (\(i, _) tv -> nvarNamer i <+> "= std::move(" <> tv <> ");") viaTemp tmpVars
-          moves = [nvarNamer i <+> "=" <+> x <> ";" | (i, x) <- direct]
+          reassigns = zipWith (\(i, _) tv -> (nvarNamer cppLocals) i <+> "= std::move(" <> tv <> ");") viaTemp tmpVars
+          moves = [(nvarNamer cppLocals) i <+> "=" <+> x <> ";" | (i, x) <- direct]
       return $ priors <> tmpAssigns <> reassigns <> moves
     go o (LoopNLet i neDocs b) = do
       let (orhs, ob) = case o of
@@ -1040,14 +1040,14 @@ cppWalkLoopBody setResult ids = go
         _ -> return "auto"
       let decl = if mode == LetBorrow then "const" <+> typestr <> "&" else typestr
           letLine
-            | render typestr == "mlc::Unit" && isIdentifierExpr (poolExpr neDocs) = [typestr <+> nvarNamer i <> "{};"]
-            | render typestr == "mlc::Unit" = [poolExpr neDocs <> ";", typestr <+> nvarNamer i <> "{};"]
-            | otherwise = [decl <+> nvarNamer i <+> "=" <+> poolExpr neDocs <> ";"]
+            | render typestr == "mlc::Unit" && isIdentifierExpr (poolExpr neDocs) = [typestr <+> (nvarNamer cppLocals) i <> "{};"]
+            | render typestr == "mlc::Unit" = [poolExpr neDocs <> ";", typestr <+> (nvarNamer cppLocals) i <> "{};"]
+            | otherwise = [decl <+> (nvarNamer cppLocals) i <+> "=" <+> poolExpr neDocs <> ";"]
       rest <- go ob b
       return $ poolPriorLines neDocs <> letLine <> rest
     go o (LoopSLet i seDocs b) = do
       rest <- go (case o of Just (LoopSLet j _ k) | j == i -> Just k; _ -> Nothing) b
-      return $ poolPriorLines seDocs <> ["auto" <+> svarNamer i <+> "=" <+> poolExpr seDocs <> ";"] <> rest
+      return $ poolPriorLines seDocs <> ["auto" <+> (svarNamer cppLocals) i <+> "=" <+> poolExpr seDocs <> ";"] <> rest
     go o (LoopIf guardDocs t e) = do
       let (ot, oe) = case o of
             Just (LoopIf _ a b) -> (Just a, Just b)
@@ -1071,7 +1071,7 @@ cppTakeField :: NativeExpr -> MDoc
 cppTakeField (IntrinsicN _ IntrCtorField _ [LetVarN t j _, StrN _ n, IntN _ i])
   | VariantF _ _ arms <- t =
       "mlc::take_field(std::get<" <> pretty (armIndex n (map fst arms)) <> ">("
-        <> nvarNamer j <> ".v), [](auto& a) -> auto& { return a.f" <> pretty i <> "; })"
+        <> (nvarNamer cppLocals) j <> ".v), [](auto& a) -> auto& { return a.f" <> pretty i <> "; })"
 cppTakeField e = error $ "cppTakeField: not a constructor field of a let: " <> show e
 
 -- | Operands that are all scalars reach only a built-in operator (CPP-1).
@@ -1087,7 +1087,8 @@ cppConstArg operands _ x
 cppLowerConfig :: ClosureGen -> LowerConfig CppTranslatorM
 cppLowerConfig (ClosureGen reifyThunks stageTable papplyHeads) =
   LowerConfig
-    { lcSrcName = \src -> pretty (srcName src)
+    { lcLocalPrefix = cppLocals
+    , lcSrcName = \src -> pretty (srcName src)
     , lcOperator = infixOperator
     , lcApplySrcGroup = \f as -> f <+> tupled as
     , lcSourcedResult = \_ _ _ x -> x
@@ -1286,9 +1287,9 @@ PROPAGATE_ERROR(errmsg)|]
         -- defined; a native one is an optional, since the value's type need
         -- not be default-constructible.
         resultIdx <- getCounter
-        let resultVar = helperNamer resultIdx
+        let resultVar = (helperNamer cppLocals) resultIdx
             ids = map fst carried
-            initLines = concat [poolPriorLines d <> ["auto" <+> nvarNamer i <+> "=" <+> poolExpr d <> ";"] | (i, Just d) <- carried]
+            initLines = concat [poolPriorLines d <> ["auto" <+> (nvarNamer cppLocals) i <+> "=" <+> poolExpr d <> ";"] | (i, Just d) <- carried]
         (resultDecl, setResult, resultExpr) <- case res of
           LoopResultSerial ->
             return ("uint8_t*" <+> resultVar <+> "= nullptr;", \e -> resultVar <+> "=" <+> e <> ";", resultVar)
@@ -1320,7 +1321,7 @@ PROPAGATE_ERROR(errmsg)|]
     -- own exits are written only by the loop walkers, over a 'LoopBody'.
     , lcMakeIfLadder = \origExpr (Guards (c1, e1, t1) rungs (eE, eD)) -> do
         idx <- getCounter
-        let v = helperNamer idx
+        let v = (helperNamer cppLocals) idx
         typeStr <- cppTypeOf origExpr
         let unit = cppUnitResult origExpr
             taken c armE d = vsep ["if" <+> parens c <+> "{", indent 4 (vsep (cppIfArm unit v (Just armE) d <> ["break;"])), "}"]
@@ -1331,7 +1332,7 @@ PROPAGATE_ERROR(errmsg)|]
         return (cppMoved unit True v, vsep [typeStr <+> v <> ";", "do {", indent 4 (vsep body), "} while (false);"])
     , lcMakeIf = \origExpr condDocs thenDocs elseDocs -> do
         idx <- getCounter
-        let v = helperNamer idx
+        let v = (helperNamer cppLocals) idx
         typeStr <- cppTypeOf origExpr
         let condE = poolExpr condDocs
             (thenE, elseE) = case origExpr of
@@ -1571,7 +1572,7 @@ PROPAGATE_ERROR(errmsg)|]
 
     makeLambda :: MDoc -> MDoc -> [Arg TypeM] -> [Arg TypeM] -> CppTranslatorM MDoc
     makeLambda sig mname contextArgs boundArgs =
-      let ctxNames = map argNamer contextArgs
+      let ctxNames = map (argNamer cppLocals) contextArgs
           vs' = take (length boundArgs) (map (\j -> "std::placeholders::_" <> viaShow j) ([1 ..] :: [Int]))
           bindArgs = cat (punctuate "," (mname : (ctxNames ++ vs')))
           -- manNamer is "m<mid>"; the closure's home-pool dispatch mid is the
@@ -1609,8 +1610,8 @@ PROPAGATE_ERROR(errmsg)|]
         capture a@(Arg i (Native tf))
           | Just m <- readMay (T.unpack (MT.drop 1 (render mname))), not (isFunctionValue tf) = do
               moves <- cppMovesInto m i tf
-              return (if moves then "std::move(" <> argNamer a <> ")" else argNamer a)
-        capture a = return (argNamer a)
+              return (if moves then "std::move(" <> (argNamer cppLocals) a <> ")" else (argNamer cppLocals) a)
+        capture a = return ((argNamer cppLocals) a)
 
     -- The wire-side type of a value being taken apart for sending or rebuilt
     -- after receiving: a record that is taken apart or rebuilt (it holds a
@@ -1992,10 +1993,10 @@ prepareCppCacheArg wrapIdx (j, (a@(Arg _ tm), sa)) = do
       -- owner releases it when the manifold's scope ends.
       let argVar = "__morloc_ca_" <> pretty wrapIdx <> "_" <> pretty j
           decl = "mlc::Packet" <+> argVar <> "_own(_put_value("
-            <> argNamer a <> ", mlc_schema_table[" <> pretty sid <> "]));"
+            <> (argNamer cppLocals) a <> ", mlc_schema_table[" <> pretty sid <> "]));"
             <+> "const uint8_t*" <+> argVar <+> "=" <+> argVar <> "_own.get();"
       return (argVar, schemaStr, [decl])
-    _ -> return (argNamer a, schemaStr, [])
+    _ -> return ((argNamer cppLocals) a, schemaStr, [])
 
 -- | Escape a string for a C++ string literal. Conservative: only
 -- handles characters the morloc msgpack-schema serializer emits
@@ -2016,7 +2017,7 @@ deserialize varname0 typestr0 s0 = do
   if null stmts
     then return (rendered, [])
     else do
-      schemaVar <- helperNamer <$> getCounter
+      schemaVar <- (helperNamer cppLocals) <$> getCounter
       let final = [idoc|#{typestr0} #{schemaVar} = #{rendered};|]
       return (schemaVar, map CP.printStmt stmts ++ [final])
 
@@ -2954,3 +2955,7 @@ getLibraryPaths home state base sofile =
 -- (de)serializer.
 holdsClosure :: Type -> Bool
 holdsClosure t = containsFunT t || containsEffectT t
+
+-- | C++ locals take no prefix: C++ reserves none (model/runtime/issues/binder-names.md).
+cppLocals :: Text
+cppLocals = ""

@@ -234,6 +234,8 @@ data LangDescriptor = LangDescriptor
     ldFuncDefHeader :: !Text -- e.g. "def {{name}}({{args}}):"
   , ldManifoldPrefix :: !Text
     -- ^ A manifold's function is this prefix followed by its id.
+  , ldReservedPrefixes :: ![Text]
+    -- ^ Prefixes no sourced name may start with.
   , ldPoolQualifier :: !Text
     -- ^ Prepended to a name the pool runtime defines where generated code
     -- refers to it (R: the runtime's environment).
@@ -425,6 +427,7 @@ instance Y.FromJSON LangDescriptor where
             . ins "ldDispatchRemoteFooter" (Y.String "")
             . ins "ldLogWrap" (Y.String "")
             . ins "ldManifoldPrefix" (Y.String "m")
+            . ins "ldReservedPrefixes" (Y.Array mempty)
             . ins "ldPoolQualifier" (Y.String "")
             . ins "ldBuiltinQualifier" (Y.String "")
             . ins "ldKeywords" (Y.Array mempty)
@@ -532,6 +535,7 @@ defaultLangDescriptor name ext =
     , ldDispatchRemoteFooter = ""
     , ldLogWrap = ""
     , ldManifoldPrefix = "m"
+    , ldReservedPrefixes = []
     , ldPoolQualifier = ""
     , ldBuiltinQualifier = ""
     , ldKeywords = []

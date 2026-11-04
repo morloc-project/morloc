@@ -33,13 +33,14 @@ may use.
   exporting one is picked by the pool's calls through symbol interposition.
   Needs a ruling: rename the exports to a reserved prefix (an ABI change) or
   list them as reserved names.
-- [read] Manifold locals and sourced names share a frame: a manifold's
-  formals and temporaries are `n<N>`, `s<N>`, `helper<N>` (Grammars/Common.hs
-  argNamer and friends), and R, Python and Rust call sourced functions by
-  their bare or module-qualified name in that frame. An R or Rust sourced
-  function named `n3` is shadowed by a manifold parameter `n3`, silently
-  when it is passed as a value. Needs reserved local names per language, from the same namer
-  machinery as the manifold names.
+- [reproduced, 2026-11-04] C++ manifold locals and sourced names share a
+  frame: C++ locals are still `n<N>`, `s<N>`, `helper<N>`, loop `i<N>`/`u<N>`
+  and fixed binders (`__sock`, `__origin`, `__o`, `__c`, `__mlc_*`, `arm`,
+  `mlc_w`, `mlc_raw`), and C++ calls sources by bare name: sources named
+  `n0`/`n1` give "'n1' cannot be used as a function", silently a call of
+  the local when it is a `std::function` of the same signature. Python, R
+  and Rust locals take their reserved manifold prefix (Cpp.hs `cppLocals`
+  is empty). Waits on ruling R1 (the C++ reserved prefix).
 - [read] Generated R code calls base functions (`c`, `list`, `lapply`,
   `paste0`, `tryCatch`, ...) by name from the global environment, where a
   user source may have redefined them, as R's own code would see them.

@@ -204,19 +204,23 @@ provideClosure src args0 = f (srcRsize src) args0
       | n < length args = take n args : f ns (drop n args)
       | otherwise = [args]
 
-svarNamer :: Int -> MDoc
-svarNamer i = "s" <> viaShow i
+-- | The names of the locals generated code declares, each under the
+-- language's reserved prefix (its manifold prefix), so that no sourced
+-- function can share one; a manifold is the prefix and a number, a local
+-- the prefix and a letter.
+svarNamer :: MT.Text -> Int -> MDoc
+svarNamer p i = pretty p <> "s" <> viaShow i
 
-nvarNamer :: Int -> MDoc
-nvarNamer i = "n" <> viaShow i
+nvarNamer :: MT.Text -> Int -> MDoc
+nvarNamer p i = pretty p <> "n" <> viaShow i
 
-helperNamer :: Int -> MDoc
-helperNamer i = "helper" <> viaShow i
+helperNamer :: MT.Text -> Int -> MDoc
+helperNamer p i = pretty p <> "helper" <> viaShow i
 
-argNamer :: (HasTypeM t) => Arg t -> MDoc
-argNamer (Arg i (typeMof -> Native _)) = nvarNamer i
-argNamer (Arg i (typeMof -> Function _ _)) = nvarNamer i
-argNamer (Arg i _) = svarNamer i
+argNamer :: (HasTypeM t) => MT.Text -> Arg t -> MDoc
+argNamer p (Arg i (typeMof -> Native _)) = nvarNamer p i
+argNamer p (Arg i (typeMof -> Function _ _)) = nvarNamer p i
+argNamer p (Arg i _) = svarNamer p i
 
 -- create a name for a manifold based on a unique id
 manNamer :: Int -> MDoc

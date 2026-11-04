@@ -200,12 +200,12 @@ pseudoManifold makeFunc makeLam m form headForm bodyPool =
       newManifold = makeFunc mname args priorLines body headForm
       call = case form of
         (ManifoldPass _) -> mname
-        (ManifoldFull rs) -> mname <> tupled (map argNamer (typeMofRs rs))
+        (ManifoldFull rs) -> mname <> tupled (map (argNamer "") (typeMofRs rs))
         (ManifoldPart rs vs) ->
           makeLam
             mname
-            (map argNamer (typeMofRs rs))
-            [argNamer (Arg i (typeMof t)) | Arg i t <- vs]
+            (map (argNamer "") (typeMofRs rs))
+            [(argNamer "") (Arg i (typeMof t)) | Arg i t <- vs]
    in PoolDocs
         { poolCompleteManifolds = newManifold : completeManifolds
         , poolExpr = call
