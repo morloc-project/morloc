@@ -54,11 +54,6 @@ module Morloc.Internal
   , statefulMap
   , statefulMapM
   , filterApart
-
-    -- * Length-checked zips (fail on mismatched lengths, indicating compiler bugs)
-  , safeZip
-  , safeZipWith
-  , safeZipWithM
   ) where
 
 import Control.Applicative ((<|>))
@@ -128,24 +123,6 @@ filterApart f (x : xs)
   | f x = (Just x, xs)
   | otherwise = case filterApart f xs of
       (r, xs') -> (r, x : xs')
-
--- | Zip two lists, returning 'Nothing' if lengths differ
-safeZip :: [a] -> [b] -> Maybe [(a, b)]
-safeZip (x : xs) (y : ys) = (:) (x, y) <$> safeZip xs ys
-safeZip [] [] = Just []
-safeZip _ _ = Nothing
-
--- | 'zipWith' returning 'Nothing' if lengths differ
-safeZipWith :: (a -> b -> c) -> [a] -> [b] -> Maybe [c]
-safeZipWith f xs ys
-  | length xs == length ys = Just $ zipWith f xs ys
-  | otherwise = Nothing
-
--- | Monadic 'safeZipWith'
-safeZipWithM :: (Monad m) => (a -> b -> m c) -> [a] -> [b] -> m (Maybe [c])
-safeZipWithM f xs ys
-  | length xs == length ys = zipWithM f xs ys |>> Just
-  | otherwise = return Nothing
 
 -- | Piped fmap: @x |>> f == fmap f x@
 infixl 1 |>>

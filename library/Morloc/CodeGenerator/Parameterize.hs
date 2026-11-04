@@ -32,18 +32,13 @@ parameterize ::
   MorlocMonad (AnnoS (Indexed Type) One (Indexed Lang, [Arg EVar]))
 parameterize (AnnoS m@(Idx midx (FunT inputs _)) c (LamS vs x)) = do
   MM.sayVVV "Entering parameterize LamS"
-  ids <- MM.takeFromCounter (length inputs)
-  recordArgTypes midx ids inputs
-  let args0 = fromJust $ safeZipWith Arg ids vs
+  args0 <- bindParams midx inputs vs
   markHostArgs args0
   x' <- parameterize' args0 x
   return $ AnnoS m (c, args0) (LamS vs x')
 parameterize (AnnoS m@(Idx midx (FunT inputs _)) c@(Idx _ lang) (BndS v)) = do
   MM.sayVVV $ "Entering parameterize VarS function - " <> pretty v <> "@" <> pretty lang
-  ids <- MM.takeFromCounter (length inputs)
-  recordArgTypes midx ids inputs
-  let vs = map EV (freshVarsAZ [])
-      args0 = fromJust $ safeZipWith Arg ids vs
+  args0 <- bindParams midx inputs (take (length inputs) (map EV (freshVarsAZ [unEVar v])))
   return $ AnnoS m (c, args0) (BndS v)
 parameterize x = do
   MM.sayVVV "Entering parameterize Other"
@@ -99,10 +94,8 @@ parameterize' args (AnnoS g@(Idx midx (FunT inputs _)) c (LamS vs x)) = do
   -- than its (right-flattened) function type has inputs when its body returns a
   -- function, e.g. @\y -> mul base y@ at type @Int -> Int -> Int@ -- the surplus
   -- inputs belong to the nested returned closure, not to this lambda.
-  ids <- MM.takeFromCounter (length vs)
-  recordArgTypes midx ids inputs
+  boundArgs <- bindParams midx inputs vs
   let contextArgs = [r | r@(Arg _ v) <- args, v `notElem` vs] -- remove shadowed arguments
-      boundArgs = fromJust $ safeZipWith Arg ids vs
   markHostArgs boundArgs
   x' <- parameterize' (contextArgs <> boundArgs) x
   let contextArgs' = pruneArgs contextArgs [x']
@@ -178,6 +171,15 @@ freshVarsAZ exclude =
   filter
     (`notElem` exclude)
     ([1 ..] >>= flip replicateM ['a' .. 'z'] |>> MT.pack)
+
+-- | Each parameter name with a fresh argument id, the parameter types recorded
+-- against those ids. A lambda may bind fewer parameters than its type has
+-- inputs; the rest belong to the function it returns.
+bindParams :: Int -> [Type] -> [EVar] -> MorlocMonad [Arg EVar]
+bindParams midx inputs vs = do
+  args <- mapM (\v -> (`Arg` v) <$> MM.getCounter) vs
+  recordArgTypes midx [i | Arg i _ <- args] inputs
+  return args
 
 -- | Remember each minted argument's declared type (see 'stateArgTypes').
 recordArgTypes :: Int -> [Int] -> [Type] -> MorlocMonad ()
