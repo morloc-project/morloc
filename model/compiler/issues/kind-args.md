@@ -23,23 +23,9 @@ erased; no item says how the lowered IR marks a ground row's kind.
   it renders a `Type` whose head is the concrete name, so it cannot read
   the declared kinds as the other `$N` sites do. Left for the native-form
   macro refactor.
-- [read] C++ `makeSerial` (Cpp.hs, `isTypeParam`/`templateTerms`) counts a
-  Rec-, List- or Set-kinded parameter as a template slot (`T<r>`) but
-  declares no `template <class>` for it. Left for the macro refactor.
-  [read, 2026-10-29] `isTypeParam (Right t) = True` also counts a Nat or
-  Str binding (`record Cpp => Foo 3`) as a `$N` slot, which showDefType
-  then renders as empty text.
-- [read, 2026-10-29] Kind arguments outside a filtered AppF/NamF list (a
-  FunF argument, an OptionalF payload, a list element) render as empty
-  text: Cpp.hs and Rust.hs cppTypeOf/rustTypeOf NatLitF/NatVoidF/StrLitF/
-  StrVoidF arms, Grammars/Common.hs, and Cpp.hs showDefType including the
-  unreduced NatAddT/NatMulT/NatSubT/NatDivT/StrConcatT.
-- [read, 2026-10-29] Cpp.hs `concrete` sends NatVoidF and StrVoidF to
-  `_ -> False`, so a type with an erased phantom slot (`Vector n a`) is
-  left out of the CPP-3/4/6 build-time checks.
-- [read, 2026-10-29] Namespace/Type.hs unresolvedType2type maps every `OpU`
-  to `NatVoidT`, so a wrong-arity `OpU` (arity is enforced only by the mk*
-  smart constructors) erases silently.
+- [read, 2026-10-29] Namespace/Type.hs `argOf` maps an `OpU` of the wrong
+  arity (arity is enforced only by the mk* smart constructors) to the erased
+  placeholder of its kind, so it erases silently.
 - [read, 2026-10-29] Typecheck/Internal.hs typeUToNatExpr treats any VarU
   or ExistU as a Nat variable, so a deferred pair of two Type-kinded
   variables is classified Nat; isNatExpr misses OpSize, ExistU and

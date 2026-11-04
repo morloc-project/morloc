@@ -2315,16 +2315,12 @@ collectCppTypes mapped =
 
     concrete t = case t of
       VarF (FV (TV v) (CV c)) -> typeName v && (v /= c || mapped (TV v) c)
-      AppF h ts -> concrete h && all concreteArg ts
-      NamF _ (FV (TV v) _) ps _ -> typeName v && all concreteArg ps
+      AppF h ts -> concrete h && all concrete (tyArgs ts)
+      NamF _ (FV (TV v) _) ps _ -> typeName v && all concrete (tyArgs ps)
       OptionalF x -> concrete x
-      VariantF _ ps _ -> all concreteArg ps
+      VariantF _ ps _ -> all concrete (tyArgs ps)
       EnumF {} -> True
       _ -> False
-    concreteArg a = case a of
-      TyA x -> concrete x
-      KiA (VoidK _) -> False
-      KiA _ -> True
     typeName v = case T.uncons (T.takeWhileEnd (/= '.') v) of
       Just (c, _) -> isUpper c
       Nothing -> False
