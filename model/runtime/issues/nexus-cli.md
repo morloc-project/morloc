@@ -6,11 +6,6 @@
   parse: no item says whether a group may hold a group. `.[i]` on a Str is
   accepted by the pattern checker and refused by the walker at run time.
 
-- **A scalar enum argument is never read from a file.** [reproduced
-  2026-11-04] Violates CLI-1 (an argument of any type but a number, `Bool`
-  or `Str` is inline JSON or a file). `./nexus f one.pkt` for `f :: DNA ->
-  DNA`, with one.pkt written by `-f packet`, fails "JSON parse error:
-  expected value at line 1 column 1"; the same file at `[DNA]` reads.
 - **`-f mpk` output read back as an argument file is sniffed.** [read]
   Headerless MessagePack is told apart from JSON and text only by a `.mpk`
   or `.msgpack` name (cli.rs `load_morloc_data_file`); `./prog f -f mpk >
@@ -111,8 +106,10 @@
   [reproduced 2026-11-02] A `DNA` or `?DNA` argument from a `-f packet` file
   fails "JSON parse error: expected value at line 1 column 1", while a
   `[DNA]` argument reads the same kind of file as a packet (CLI-1, proposed).
-- **IFile checks skip `@many` tokens and record fields.** [reproduced
-  2026-11-02] The existence check and the `-` refusal (dispatch.rs
-  `check_ifile_arg`) match only a plain value: `count data.mlc /no/such`,
-  `count -` and a record given `{"f":"/no/such"}` fail late with "IO
-  error: No such file or directory", naming neither argument nor path.
+- **The nexus IFile check sees only existence.** [read 2026-11-04]
+  dispatch.rs `check_ifile_arg` walks every IFile an argument holds and
+  refuses a missing path, a directory and `-`, but passes `/dev/stdin`,
+  `/dev/fd/0`, a FIFO, an unreadable file and a file of another element
+  type; those fail later, in the pool's open, which names the path but
+  not the argument. `link_ifile_arg` links only a bare IFile, so a staged
+  `[IFile a]` argument saves its paths unlinked.

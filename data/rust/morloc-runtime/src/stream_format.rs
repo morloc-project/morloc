@@ -246,14 +246,13 @@ pub(crate) fn mmap_file_readonly(path: &str) -> Result<(AbsPtr, u64), MorlocErro
 
 /// 'mmap_file_readonly', also returning the open file.
 pub(crate) fn mmap_file_readonly_keep(path: &str) -> Result<(std::fs::File, AbsPtr, u64), MorlocError> {
+    let named = |e: std::io::Error| MorlocError::Other(format!("cannot open '{}': {}", path, e));
     let f = OpenOptions::new()
         .read(true)
         .open(Path::new(path))
-        .map_err(|e| MorlocError::Io(e))?;
+        .map_err(named)?;
     let fd = f.as_raw_fd();
-    let size = f.metadata()
-        .map_err(|e| MorlocError::Io(e))?
-        .len();
+    let size = f.metadata().map_err(named)?.len();
     if size == 0 {
         return Err(MorlocError::Packet(format!(
             "file '{}' is empty (cannot be a stream packet)", path

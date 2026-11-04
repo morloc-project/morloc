@@ -1,7 +1,9 @@
 -- An `IFile` command argument accepts a morloc data file and a finished
 -- morloc stream file, and opens either for random access; so does each
--- token of an `@many` list of them.
-module main (writeData, writeStream, second, secondPy, count)
+-- token of an `@many` list of them. An IFile naming no file, or `-`, is
+-- refused before the command runs, naming the path, wherever the
+-- argument holds it: a token, an `@many` token or a record field.
+module main (writeData, writeStream, second, secondPy, count, pick)
 
 import root-py
 
@@ -32,3 +34,10 @@ count ::
   [IFile [Int]] ->
   Int
 count fs = length fs
+
+record Pick where
+  f :: IFile [Int]
+  k :: Int
+
+pick :: Pick -> Int
+pick p = .[1] (.f p)

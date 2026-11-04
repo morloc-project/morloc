@@ -2,6 +2,7 @@
 //! pool (remote command) or by evaluating its expression in-process (pure
 //! command), and print the result.
 
+use morloc_runtime_types::schema::{Schema, SerialType};
 use crate::manifest::{Check, Command, Manifest, SourceAtom};
 pub use morloc_manifest::cli_value::{
     build_list_config_json, is_float_list, is_float_scalar, maybe_float_special_to_json,
@@ -823,14 +824,86 @@ fn is_ifile_schema(schema: &str) -> bool {
     schema.starts_with('F')
 }
 
-/// An `IFile` argument given by path must name an existing file. It is
-/// opened only when the command runs, where an error no longer says which
-/// argument or path it came from.
+/// Every `IFile` in an argument, wherever its type holds one, must name an
+/// existing file. It is opened only when the command runs, where an error
+/// no longer says which argument or path it came from. A value given as raw
+/// JSON is passed as is (IFACE-17).
 fn check_ifile_arg(arg_val: &ArgValue, arg_def: &crate::manifest::Arg) -> Result<(), String> {
-    let (ArgValue::Value(token), Some(_)) = (arg_val, arg_def.general_schema_str().filter(|s| is_ifile_schema(s))) else {
+    use morloc_runtime_types::schema::parse_schema;
+    let Some(schema_str) = arg_def.general_schema_str() else {
         return Ok(());
     };
-    let path = serde_json::from_str::<String>(token).unwrap_or_else(|_| token.clone());
+    if !schema_str.contains('F') {
+        return Ok(());
+    }
+    let Ok(schema) = parse_schema(schema_str) else {
+        return Ok(());
+    };
+    let mut paths = Vec::new();
+    match arg_val {
+        ArgValue::Value(token) => token_ifile_paths(&schema, token, false, &mut paths),
+        ArgValue::Many { tokens, literal } => {
+            if let Some(elem) = schema.parameters.first().filter(|_| schema.serial_type == SerialType::Array) {
+                for t in tokens {
+                    token_ifile_paths(elem, t, *literal, &mut paths);
+                }
+            }
+        }
+        ArgValue::Group { grp_val, fields, .. } => {
+            if let Some(v) = grp_val {
+                token_ifile_paths(&schema, v, false, &mut paths);
+            }
+            for (field, token) in schema.parameters.iter().zip(fields) {
+                if let Some(t) = token {
+                    token_ifile_paths(field, t, false, &mut paths);
+                }
+            }
+        }
+        _ => {}
+    }
+    paths.iter().try_for_each(|p| check_ifile_path(p))
+}
+
+/// The IFile paths of one command-line token of type `s`: a bare IFile is
+/// its path (JSON-quoted unless `literal`), anything else is JSON.
+fn token_ifile_paths(s: &Schema, token: &str, literal: bool, out: &mut Vec<String>) {
+    if s.serial_type == SerialType::IFile {
+        out.push(if literal { token.to_string() } else { serde_json::from_str::<String>(token).unwrap_or_else(|_| token.to_string()) });
+    } else if let Ok(v) = serde_json::from_str::<serde_json::Value>(token) {
+        json_ifile_paths(s, &v, out);
+    }
+}
+
+/// The IFile paths a JSON value of type `s` holds.
+fn json_ifile_paths(s: &Schema, v: &serde_json::Value, out: &mut Vec<String>) {
+    use serde_json::Value;
+    match (s.serial_type, v) {
+        (SerialType::IFile, Value::String(p)) => out.push(p.clone()),
+        (SerialType::Array, Value::Array(xs)) => {
+            if let Some(e) = s.parameters.first() {
+                xs.iter().for_each(|x| json_ifile_paths(e, x, out));
+            }
+        }
+        (SerialType::Optional, x) if !x.is_null() => {
+            if let Some(e) = s.parameters.first() {
+                json_ifile_paths(e, x, out);
+            }
+        }
+        (SerialType::Tuple, Value::Array(xs)) => {
+            s.parameters.iter().zip(xs).for_each(|(p, x)| json_ifile_paths(p, x, out));
+        }
+        (SerialType::Map, Value::Object(m)) => {
+            for (k, p) in s.keys.iter().zip(&s.parameters) {
+                if let Some(x) = m.get(k) {
+                    json_ifile_paths(p, x, out);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn check_ifile_path(path: &str) -> Result<(), String> {
     if path == "-" {
         return Err(
             "an IFile cannot be read from stdin ('-'): it needs a seekable file. \
@@ -838,9 +911,11 @@ fn check_ifile_arg(arg_val: &ArgValue, arg_def: &crate::manifest::Arg) -> Result
                 .to_string(),
         );
     }
-    std::fs::metadata(&path)
-        .map(|_| ())
-        .map_err(|e| format!("cannot open IFile '{}': {}", path, e))
+    match std::fs::metadata(path) {
+        Ok(md) if md.is_dir() => Err(format!("cannot open IFile '{}': it is a directory", path)),
+        Ok(_) => Ok(()),
+        Err(e) => Err(format!("cannot open IFile '{}': {}", path, e)),
+    }
 }
 
 /// Save a parent-layout argument packet at the parent's position `arg`
@@ -1961,6 +2036,34 @@ mod tests {
         let ok = check_ifile_arg(&ArgValue::Value(file.to_string_lossy().into()), &positional("F3af8"));
         std::fs::remove_file(&file).unwrap();
         assert!(ok.is_ok(), "{:?}", ok);
+    }
+
+    #[test]
+    fn each_ifile_of_a_many_list_is_checked() {
+        let list = serde_json::to_string(&["/no/such/a.mlc"]).unwrap();
+        let err = check_ifile_arg(&ArgValue::Value(list), &positional("aF3af8")).unwrap_err();
+        assert!(err.contains("/no/such/a.mlc"), "{}", err);
+        let err = check_ifile_arg(&ArgValue::Value("[\"-\"]".into()), &positional("aF3af8")).unwrap_err();
+        assert!(err.contains("stdin"), "{}", err);
+        assert!(check_ifile_arg(&ArgValue::Value("[\"-\"]".into()), &positional("as")).is_ok());
+        let many = ArgValue::Many { tokens: vec!["/no/such/b.mlc".into()], literal: true };
+        let err = check_ifile_arg(&many, &positional("aF3af8")).unwrap_err();
+        assert!(err.contains("/no/such/b.mlc"), "{}", err);
+    }
+
+    #[test]
+    fn an_ifile_anywhere_in_an_argument_is_checked() {
+        let missing = "\"/no/such/c.mlc\"";
+        assert!(check_ifile_arg(&ArgValue::Value(missing.into()), &positional("?F3af8")).is_err());
+        assert!(check_ifile_arg(&ArgValue::Value("null".into()), &positional("?F3af8")).is_ok());
+        let nested = "[[\"/no/such/d.mlc\"]]";
+        assert!(check_ifile_arg(&ArgValue::Value(nested.into()), &positional("aaF3af8")).is_err());
+        let record = "{\"f\":\"/no/such/e.mlc\",\"k\":1}";
+        let err = check_ifile_arg(&ArgValue::Value(record.into()), &positional("m21fF3af81ki4")).unwrap_err();
+        assert!(err.contains("/no/such/e.mlc"), "{}", err);
+        let dir = std::env::temp_dir();
+        let err = check_ifile_arg(&ArgValue::Value(dir.to_string_lossy().into()), &positional("F3af8")).unwrap_err();
+        assert!(err.contains("directory"), "{}", err);
     }
 
     #[test]

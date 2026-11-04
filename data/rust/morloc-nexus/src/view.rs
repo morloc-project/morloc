@@ -332,7 +332,6 @@ fn stream_stdin_dispatch(
     header_prefix: &[u8; 32],
     stdin: &mut std::io::StdinLock<'_>,
 ) -> ! {
-    use std::io::Read;
     use morloc_runtime_types::packet::{
         iter_metadata, METADATA_TYPE_SCHEMA_STRING, decode_schema_entry,
     };
@@ -470,7 +469,7 @@ fn stream_stdin_dispatch(
         }
         // The declared lengths are only a claim: the body is read as it
         // arrives, so a length past the input ends at its end (NET-10).
-        let body_len = ({ sub_hdr.offset } as u64).checked_add({ sub_hdr.length });
+        let body_len = ({ sub_hdr.offset } as u64).checked_add(sub_hdr.length);
         let Some(body_len) = body_len else {
             eprintln!("Error: sub-packet length overflows");
             process::clean_exit(1);

@@ -3,3 +3,7 @@
 20
 20
 2
+cannot open IFile '/no/such/file.mlc'
+an IFile cannot be read from stdin
+20
+cannot open IFile '/no/such/r.mlc'
