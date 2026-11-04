@@ -73,9 +73,6 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
     -- A use that forwards an argument as a packet records no type; the
     -- declared type recorded when the argument was minted fills the gap, so
     -- a closure capturing such an argument still knows what it holds.
-    -- A use that forwards an argument as a packet records no type; the
-    -- declared type recorded when the argument was minted fills the gap, so
-    -- a closure capturing such an argument still knows what it holds.
     typemap = Map.union (makeTypemap m0 e0) (Map.map Right argTypes)
 
     prepareArg ::
@@ -83,9 +80,10 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
       MorlocMonad (Arg (Or TypeS TypeF))
     prepareArg (Arg i _) = case Map.lookup i typemap of
       Nothing -> return $ Arg i (L PassthroughS)
+      -- A value this pool cannot hold is relayed as the packet it arrived in.
       (Just (Right t)) -> do
-        t' <- inferType t
-        return $ Arg i (L (serialArgType t'))
+        t' <- inferHeld t
+        return $ Arg i (L (case t' of UnkF _ -> PassthroughS; _ -> serialArgType t'))
       (Just (Left t)) -> do
         MM.sayVVV "Warning: using universal inference at prepareArg"
         t' <- inferTypeUniversal t
@@ -111,6 +109,25 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
         headName (AppT h _) = headName h
         headName (NamT _ v _ _) = v
         headName _ = TV "passthrough"
+
+    -- How a let binds its value: a variable naming a value this pool cannot
+    -- hold stays the packet it is.
+    letState :: MonoExpr -> MorlocMonad SerializationState
+    letState e = case e of
+      MonoLetVar t _ -> unlessUnheld t
+      MonoBndVar (C t) _ -> unlessUnheld t
+      _ -> return (inferState e)
+      where
+        unlessUnheld t = maybe Serialized (const (inferState e)) <$> heldSerial t
+
+    -- The type of a serialized variable, or none for a value this pool cannot
+    -- hold, which it carries on as the packet it arrived in.
+    heldSerial :: Indexed Type -> MorlocMonad (Maybe TypeF)
+    heldSerial t = do
+      t' <- inferHeld t
+      return $ case t' of
+        UnkF _ -> Nothing
+        _ -> Just t'
 
     -- Whether this pool can hold a value of a type. A function it cannot
     -- hold (one taking or giving a value it cannot hold) arrived as a closure
@@ -145,7 +162,7 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
     boundArg :: Int -> MorlocMonad TypeF
     boundArg i = case Map.lookup i typemap of
       (Just (Right t)) -> inferType t
-      Nothing -> error "Untyped native arg"
+      Nothing -> MM.throwCompilerBugAt m0 $ "native argument" <+> pretty i <+> "has no type"
       (Just (Left t)) -> do
         MM.sayVVV "Warning: using universal inference at boundArg"
         inferTypeUniversal t
@@ -197,13 +214,14 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
           se <- serializeS "closure value" m ne
           return (if endsInReturn inner then ReturnS se else se)
       | otherwise = serialExpr m inner
-    serialExpr m (MonoLet i e1 e2) =
+    serialExpr m (MonoLet i e1 e2) = do
       let (m1, e1') = unwrapLetDef m e1
-       in case inferState e1 of
-            Serialized -> SerialLetS i <$> serialExpr m1 e1' <*> serialExpr m e2
-            Unserialized -> do
-              ne1 <- nativeExpr m1 e1'
-              NativeLetS i ne1 <$> serialExpr m e2
+      state <- letState e1'
+      case state of
+        Serialized -> SerialLetS i <$> serialExpr m1 e1' <*> serialExpr m e2
+        Unserialized -> do
+          ne1 <- nativeExpr m1 e1'
+          NativeLetS i ne1 <$> serialExpr m e2
     serialExpr _ (MonoLetVar t i) = do
       t' <- inferHeld t
       return $ LetVarS (Just t') i
@@ -221,9 +239,9 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
     serialExpr _ (MonoBndVar (A _) i) = return $ BndVarS Nothing i
     serialExpr _ (MonoBndVar (B _) i) =
       case Map.lookup i typemap of
-        (Just (Right t)) -> BndVarS <$> fmap Just (inferType t) <*> pure i
+        (Just (Right t)) -> BndVarS <$> heldSerial t <*> pure i
         _ -> return $ BndVarS Nothing i
-    serialExpr _ (MonoBndVar (C t) i) = BndVarS <$> fmap Just (inferType t) <*> pure i
+    serialExpr _ (MonoBndVar (C t) i) = BndVarS <$> heldSerial t <*> pure i
     serialExpr m (MonoIf cond thenE elseE) = do
       ne <- nativeExpr m (MonoIf cond thenE elseE)
       serializeS "serialE MonoIf" m ne

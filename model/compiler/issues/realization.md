@@ -5,21 +5,15 @@ found reviewing /work/plans/realization-cost-model.md and since. The
 objective is COST-1 (crossings by depth, then switches, then language
 preference, then size).
 
-- **A 4-tuple built in a do-block is refused at realization.** [reproduced,
-  2026-10-28] Regression after 0.109.0, where the test passed. biolib's
-  convert test (convert/test/main.loc:243, `let gRows = map (\g -> (.id g,
-  .name g, .biotype g, .txs g)) (geneRows roots)` compared with `@show` to a
-  literal) fails `morloc typecheck --realize` with "Could not resolve type
-  applied variable 'Tuple4'" (TypeEval.hs) in convert-cpp and convert-rust,
-  although root-cpp and root-rust map Tuple4. [traced 2026-11-02,
-  briefs/A7-deep.md] The missing mapping is Python's: Serialize.hs
-  `serializeHosted'`, local `prepareArg`, types an argument the head only
-  forwards with the relaying pool's native type and no `holds` check
-  (`contextArg` and `inferHeld` have the guard; `prepareArg`, `boundArg`,
-  `MonoBndVar` and `MonoLetVar` do not). A 15-line program with no root-py
-  reproduces it. The error names no language and points at the producer.
-  `letWrap.wrapAsNeeded` silently drops a native request on a Passthrough
-  slot [read].
+- **Remaining gaps around values a pool cannot hold.** [read 2026-11-04]
+  A value a pool only relays is a packet (Serialize.hs `inferHeld`,
+  `heldSerial`, `letState`), but the universal-inference branches
+  (`prepareArg`, `contextArg`, `boundArg` on a `Left` typemap entry) have
+  no index to check with and still infer the native type. A real native
+  use of an unmapped type fails "Could not resolve type applied variable"
+  (TypeEval.hs) naming no language. `letWrap.wrapAsNeeded` returns the
+  body unchanged for a native request on an untyped serial slot. biolib's
+  convert test (convert/test/main.loc:243, Py Tuple4) was not re-run.
 - **A function argument is priced by where it is called, so a term
   with both morloc and sourced implementations prices it twice for the
   morloc one.** [read, 2026-10-24] The `AppS` clause of `scoreExpr` leaves
