@@ -12,21 +12,6 @@
   x; ./prog g x` reads a one-byte value 48..57 as a JSON digit. Gap in
   CLI-1; MessagePack is slated for deprecation.
 
-- **`@form list` row errors do not say what is wrong.** [reproduced,
-  0.109.0] Same gap. The TAB, comma, whitespace passes
-  (morloc-runtime/src/cli.rs, `try_list_with_config`) keep only the last
-  failure, so every rejected CSV row of a record or tuple reports `form:
-  list whitespace fallback: line 1 has 1 whitespace-separated columns;
-  expected N`: a non-integer cell (`a,b,1,x,0.5,true`), an extra column, a
-  short row on line 2 (still reported as line 1), and a header alike. The
-  header hint also fires on a data row whose bad cell is a word
-  (`a,b,1,x,...`, `...,nan,...`). A type error that reaches the loader is
-  reported against the rebuilt JSON (`expected value at line 1 column
-  10`), not the user's row and field. Wanted: row number, field name,
-  cell text and expected type. Reproduction:
-  test-suite/golden-tests/form-list-record-rows (inputs badint, wide,
-  narrow, header; obs.err).
-
 - **UNSOUND: `@form list` loads a header row as data.** [reproduced,
   0.109.0] Spec gap: no rule tells a header from a row. `record Gene =
   Gene { name :: Str, chrom :: Str }`, `--' @form list [Gene] -> [Gene]`
@@ -36,12 +21,6 @@
   with no error. A header is caught only when a name fails its column's
   type. Headed files now have `@form table` (CLI-13, CLI-14); `@form list`
   still has no rule that tells a header from a row.
-
-- **`@form list` rejects `nan`/`inf` cells for `Real`.** [reproduced,
-  0.109.0] Violates the loader's own non-finite rule (json.rs
-  `parse_nonfinite` accepts `"nan"`, `"inf"`, `"-inf"`): row `a,b,1,2,nan,true`
-  fails because `format_field_as_json` passes non-string cells through
-  verbatim and bare `nan` is not JSON.
 
 - **Empty cell for an optional field is undefined.** [reproduced, 0.109.0]
   Spec gap: no rule for absent values in `@form list` rows. Record
@@ -127,19 +106,6 @@
   [reproduced 2026-11-02] A `DNA` or `?DNA` argument from a `-f packet` file
   fails "JSON parse error: expected value at line 1 column 1", while a
   `[DNA]` argument reads the same kind of file as a packet (CLI-1, proposed).
-- **UNSOUND: `@form list` splices lines and cells into one document.**
-  [reproduced 2026-11-02] cli.rs `try_list_with_config` and
-  `format_field_as_json` join unchecked line and cell text into one JSON
-  document: for `[Int]` the input `1,2\n3\n` returns `[1,2,3]`; one line
-  `[1,2],[3,4]` gives two tuples; an injected `"name":...` in a cell is
-  stopped only by the loader's duplicate-field check.
-- **UNSOUND: `@form list` chooses the delimiter by which parse typechecks.**
-  [reproduced 2026-11-02] For `{n::Int, s::Str}` the TSV `5,6\thello`
-  returns `{"n":5,"s":"6\thello"}`; for `{label::Str, v::Real}`, `p,q 5`
-  returns `{"label":"p,q","v":5}`. Fix with the splicing entry: parse each
-  line and cell alone, choose the delimiter once from the first line, never
-  retry after a type error (briefs/B12-B13.md). Whether `@form list` cells
-  follow CLI-16/17/18 needs a ruling.
 - **IFile checks skip `@many` tokens and record fields.** [reproduced
   2026-11-02] The existence check and the `-` refusal (dispatch.rs
   `check_ifile_arg`) match only a plain value: `count data.mlc /no/such`,

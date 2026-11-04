@@ -11,3 +11,5 @@ OK
 OK
 OK
 OK
+[{"name":"a","tag":"b","x":1,"y":2,"w":"nan","ok":true},{"name":"c","tag":"d","x":3,"y":4,"w":"-inf","ok":false}]
+OK

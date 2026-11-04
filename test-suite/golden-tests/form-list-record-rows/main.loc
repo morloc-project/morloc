@@ -3,8 +3,10 @@
 -- Rows may be comma-, tab- or whitespace-separated, or one JSON object
 -- per line. Each record has two Str and two Int fields so a swap of
 -- same-typed columns shows up in the output. Rows whose cells do not
--- fit the record are rejected before the command runs.
-module main (rows, opts)
+-- fit the record are rejected before the command runs, naming the line and
+-- the field; a row is split by the delimiter its first row decides, never by
+-- whichever reading fits, and `nan`, `inf` and `-inf` are Real cells.
+module main (rows, opts, pairs)
 
 import root-py
 
@@ -30,3 +32,11 @@ opts ::
   --' @form list
   [Opt] -> [Opt]
 opts xs = xs
+
+record Pair = Pair { n :: Int, s :: Str }
+
+--' Return the pairs as read
+pairs ::
+  --' @form list
+  [Pair] -> [Pair]
+pairs xs = xs

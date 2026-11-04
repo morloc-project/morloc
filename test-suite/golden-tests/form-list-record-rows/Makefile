@@ -14,6 +14,8 @@ all:
 	printf 'a,b,1,2,0.5,true,9\n' > wide.csv
 	printf 'a,b,1,2,0.5,true\nc,d,3,4,1\n' > narrow.csv
 	printf 'name,tag,x,y,w,ok\na,b,1,2,0.5,true\n' > header.csv
+	printf 'a,b,1,2,nan,true\nc,d,3,4,-inf,false\n' > nonfinite.csv
+	printf '5,6\thello\n7,8\tworld\n' > misread.tsv
 	./nexus rows rows.csv >> obs.txt 2>> obs.err
 	./nexus rows rows.tsv >> obs.txt 2>> obs.err
 	./nexus rows rows.txt.in >> obs.txt 2>> obs.err
@@ -23,10 +25,12 @@ all:
 	./nexus rows '[{"name":"a","tag":"b","x":1,"y":2,"w":0.5,"ok":true}]' >> obs.txt 2>> obs.err
 	./nexus rows empty.csv >> obs.txt 2>> obs.err
 	./nexus opts opt.csv >> obs.txt 2>> obs.err
-	if ./nexus rows badint.csv > /dev/null 2>> obs.err; then echo UNEXPECTED >> obs.txt; else echo OK >> obs.txt; fi
+	if ./nexus rows badint.csv 2>&1 | grep -qF 'line 1, field `y`'; then echo OK >> obs.txt; else echo UNEXPECTED >> obs.txt; fi
 	if ./nexus rows wide.csv > /dev/null 2>> obs.err; then echo UNEXPECTED >> obs.txt; else echo OK >> obs.txt; fi
-	if ./nexus rows narrow.csv > /dev/null 2>> obs.err; then echo UNEXPECTED >> obs.txt; else echo OK >> obs.txt; fi
-	if ./nexus rows header.csv > /dev/null 2>> obs.err; then echo UNEXPECTED >> obs.txt; else echo OK >> obs.txt; fi
+	if ./nexus rows narrow.csv 2>&1 | grep -qF 'line 2'; then echo OK >> obs.txt; else echo UNEXPECTED >> obs.txt; fi
+	if ./nexus rows header.csv 2>&1 | grep -qF 'column-name header'; then echo OK >> obs.txt; else echo UNEXPECTED >> obs.txt; fi
+	./nexus rows nonfinite.csv >> obs.txt 2>> obs.err
+	if ./nexus pairs misread.tsv 2>&1 | grep -qF 'line 1, field `n`'; then echo OK >> obs.txt; else echo UNEXPECTED >> obs.txt; fi
 
 clean:
 	rm -rf nexus pools __pycache__ *.err *.csv *.tsv *.txt.in
