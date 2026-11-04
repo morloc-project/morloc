@@ -1879,7 +1879,43 @@ newtTests :: TestTree
 newtTests =
   testGroup
     "NEWT"
-    [ rejectUser
+    [ rejectSaying
+        "spec-native-1-1"
+        "out of the declaration's order"
+        [r|
+        module main (f)
+        newtype P a b = (a, b)
+        type Cpp => (P a b) = "std::tuple<$2,$1>" b a
+        f :: P Int Real -> Real
+        |]
+    , rejectSaying
+        "spec-native-1-2"
+        "out of the declaration's order"
+        [r|
+        module main (f)
+        newtype P a b = (a, b)
+        type Cpp => (P a b) = "std::tuple<$1,$2>" b b
+        f :: P Int Real -> Real
+        |]
+    , rejectSaying
+        "spec-native-1-3"
+        "but its list has"
+        [r|
+        module main (f)
+        newtype P a b = (a, b)
+        type Cpp => (P a b) = "std::tuple<$0,$2>" a b
+        f :: P Int Real -> Real
+        |]
+    , rejectSaying
+        "spec-native-1-4"
+        "out of the declaration's order"
+        [r|
+        module main (f)
+        newtype N (n :: Nat) a b = (a, b)
+        type Cpp => (N (n :: Nat) a b) = "std::tuple<$2,$1>" b a
+        f :: N 3 Int Real -> Real
+        |]
+    , rejectUser
         "spec-native-10-2"
         [r|
         module main (f)

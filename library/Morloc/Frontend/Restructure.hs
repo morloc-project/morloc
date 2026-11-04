@@ -1218,10 +1218,54 @@ collectTypes fullDag = do
         Map.map (completeRecords general) $
           Map.unionsWith (Map.unionWith mergeEntries) (map snd found)
   let modules = map fst (Map.elems fullDag)
+  checkFormLists modules
   checkConflictingForms modules Nothing general
   checkReservedDeclarations general
   mapM_ (\(lang, sc) -> checkConflictingForms modules (Just lang) sc) (Map.toList concrete)
   MM.modify' $ \s -> s {stateGeneralTypedefs = general, stateConcreteTypedefs = concrete, stateNewtypeHeaders = headers}
+
+-- | Why a form's list cannot be read (NATIVE-1): every later pass pairs a
+-- form's list with the type's parameters by position, so the parameters it
+-- names must follow the declaration's order, and each `$N` must name an
+-- item of the list.
+formListProblem :: [Either (TVar, Kind) TypeU] -> TypeU -> Maybe MDoc
+formListProblem ps (AppU (VarU (TV tmpl)) items)
+  | not (increasing positions) =
+      Just $
+        "its list names the parameters" <+> hsep (map pretty named)
+          <+> "out of the declaration's order;"
+          <+> "list them in the order the type declares them"
+  | Just n <- find (\k -> k < 1 || k > toInteger (length items)) (macroIndices tmpl) =
+      Just $ "its template names $" <> pretty n <> ", but its list has" <+> pretty (length items) <+> "item(s)"
+  | otherwise = Nothing
+  where
+    params = [v | Left (v, _) <- ps]
+    named = [v | VarU v <- items, v `elem` params]
+    positions = [d | v <- named, Just d <- [lookup v (zip params [0 :: Int ..])]]
+    increasing xs = and (zipWith (<) xs (drop 1 xs))
+formListProblem _ _ = Nothing
+
+-- | The indices of the `$N` macros of a template.
+macroIndices :: Text -> [Integer]
+macroIndices t = case T.breakOn "$" t of
+  (_, rest)
+    | T.null rest -> []
+    | otherwise ->
+        let (digits, after) = T.span (\c -> c >= '0' && c <= '9') (T.drop 1 rest)
+         in if T.null digits then macroIndices (T.drop 1 rest) else read (T.unpack digits) : macroIndices after
+
+-- | Refuse a form whose list cannot be read (NATIVE-1).
+checkFormLists :: [ExprI] -> MorlocMonad ()
+checkFormLists = mapM_ check
+  where
+    check :: ExprI -> MorlocMonad ()
+    check (ExprI _ (ModE _ es)) = mapM_ check es
+    check (ExprI i (TypE (ExprTypeE (Just (lang, _)) v vs t _ _))) = case formListProblem vs t of
+      Just why ->
+        MM.throwSourcedError i $
+          "The" <+> pretty lang <+> "form of" <+> squotes (pretty v) <+> "cannot be read:" <+> why
+      Nothing -> return ()
+    check _ = return ()
 
 -- | Two declarations of one type, or two forms of it in one language, that
 -- apply to the same parameters but say different things.

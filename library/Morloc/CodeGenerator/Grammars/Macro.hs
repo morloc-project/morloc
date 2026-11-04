@@ -69,7 +69,7 @@ pMacro = do
               <> "reference a kind parameter, see the per-language form "
               <> "convention -- only type parameters are valid macro targets."
         else ""
-  if i >= length xs
+  if i < 0 || i >= length xs
     then error $ "expandMacro: macro index $" <> show n
               <> " refers to type-parameter position " <> show n
               <> " but only " <> show (length xs)

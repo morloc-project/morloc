@@ -4,11 +4,15 @@ Per-language type mappings (`type Py => X = ...`, `record Cpp => R`) and their a
 
 ### NATIVE-1 A native form is a template over the type's parameters
 Intent: proposed
+Tests: spec-native-1-1, spec-native-1-2, spec-native-1-3, spec-native-1-4
 Code: unaudited
 
 `type L => C x1 ... xn = "s" x1 ... xn` gives `[[C U1 ... Un]]_L` as the
 text `s` with each `$i` replaced by `[[Ui]]_L`. The text is opaque to morloc
-and is checked only by language `L`.
+and is checked only by language `L`. The list names the parameters in the
+order the type declares them: a list that names them in another order, or
+one twice, is a compile error, and so is a `$i` past the list. Open: may a
+list reorder its parameters (`"std::tuple<$2,$1>" b a`)?
 
 ### NATIVE-2 A type without its own form in a language uses its expansion's
 Intent: proposed
