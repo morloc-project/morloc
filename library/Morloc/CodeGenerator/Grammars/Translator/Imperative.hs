@@ -92,7 +92,7 @@ module Morloc.CodeGenerator.Grammars.Translator.Imperative
   , IndexM
   ) where
 
-import Control.Monad.Identity (Identity)
+import Control.Monad.Identity (Identity, runIdentity)
 import qualified Control.Monad.State as CMS
 import Data.Binary (Binary)
 import qualified Data.Map.Strict as Map
@@ -1144,7 +1144,7 @@ lowerSerialExpr cfg (ReturnS (BndVarS _ _)) (ReturnS_ x) =
   return $ x {poolExpr = lcDupPacket cfg (poolExpr x), poolReturnFlag = True}
 lowerSerialExpr _ _ (ReturnS_ x) = return $ x {poolReturnFlag = True}
 lowerSerialExpr cfg (LoopS _ _ origBody) (LoopS_ _ ids body) = do
-  body' <- adaptLoopBodyOwned cfg (\_ d -> return d) ids origBody body
+  body' <- adaptLoopBodyOwned cfg (\_ d -> return d) (runIdentity . foldSerialExprM serialVarsOf) ids origBody body
   lcMakeLoop cfg LoopResultSerial [(i, Nothing) | i <- ids] (Just (trimap id id (const ()) origBody)) body'
 lowerSerialExpr cfg _ (LoopS_ _ ids body) =
   lcMakeLoop cfg LoopResultSerial [(i, Nothing) | i <- ids] Nothing body
@@ -2149,11 +2149,13 @@ adaptLoopBodyOwned ::
   (Monad m) =>
   LowerConfig m ->
   (b -> PoolDocs -> m PoolDocs) ->
+  -- the serial variables a base leaf reads
+  (b -> Set.Set Int) ->
   [Int] ->
   LoopBody NativeExpr SerialExpr b ->
   LoopBody PoolDocs PoolDocs PoolDocs ->
   m (LoopBody PoolDocs PoolDocs PoolDocs)
-adaptLoopBodyOwned cfg adaptBase ids origBody body = go origBody body
+adaptLoopBodyOwned cfg adaptBase baseVars ids origBody body = go origBody body
   where
     go (LoopIf _ ot oe) (LoopIf c t e) = LoopIf c <$> go ot t <*> go oe e
     -- A let kept only when its original is the same let.
@@ -2161,8 +2163,8 @@ adaptLoopBodyOwned cfg adaptBase ids origBody body = go origBody body
       let keep = if j == i then keepRhs cfg orhs else return
       rhs' <- loopBorrowOr cfg i orhs rhs (adaptOwnedElem cfg orhs rhs >>= keep >>= lcLoopLetRhs cfg i orhs)
       LoopNLet i rhs' <$> go ob b
-    go (LoopSLet _ orhs ob) (LoopSLet i rhs b) = do
-      rhs' <- ownLoopPacket i orhs rhs
+    go (LoopSLet j orhs ob) (LoopSLet i rhs b) = do
+      rhs' <- ownLoopPacket j i orhs rhs
       LoopSLet i rhs' <$> go ob b
     go (LoopContinue ones) (LoopContinue pds)
       | length ones == length pds && length ids == length pds =
@@ -2175,8 +2177,8 @@ adaptLoopBodyOwned cfg adaptBase ids origBody body = go origBody body
     -- iteration ends, rather than when the dispatch does. Only a fresh packet
     -- (made here, or sent back by another pool) is owned, and never one a
     -- base leaf names: that one may be the loop's result.
-    ownLoopPacket i orhs rhs
-      | isFreshPacket orhs && not (any (mentionsVar (render (svarNamer i))) (loopBases body)) = do
+    ownLoopPacket j i orhs rhs
+      | isFreshPacket orhs && j == i && not (Set.member i returned) = do
           ownerIdx <- lcNewIndex cfg
           case lcOwnPacketDecl cfg (helperNamer ownerIdx) (poolExpr rhs) of
             Just (decl, ptr) ->
@@ -2187,15 +2189,44 @@ adaptLoopBodyOwned cfg adaptBase ids origBody body = go origBody body
     isFreshPacket SerializeS {} = True
     isFreshPacket e = isCallResult e
 
+    -- the serial variables some base leaf of the loop reads
+    returned = Set.unions (map baseVars (loopBases origBody))
+
     loopBases (LoopIf _ t e) = loopBases t <> loopBases e
     loopBases (LoopNLet _ _ b) = loopBases b
     loopBases (LoopSLet _ _ b) = loopBases b
     loopBases (LoopBase d) = [d]
     loopBases (LoopContinue _) = []
 
-    -- Whether the rendered leaf uses the variable as a whole word.
-    mentionsVar v d = any (== v) (T.split (not . isIdentChar) (render (vsep (poolPriorLines d <> [poolExpr d]))))
-    isIdentChar c = isAlphaNum c || c == '_'
+-- | Every variable index an expression may read: its serial lets and
+-- arguments, and the context arguments of the closures, remote calls and
+-- wrapped bodies in it, nested manifolds too. A superset only keeps more
+-- packets alive.
+serialVarsOf :: FoldManifoldM Identity (Set.Set Int) (Set.Set Int) (Set.Set Int) (Set.Set Int) (Set.Set Int) (Set.Set Int)
+serialVarsOf =
+  FoldManifoldM
+    { opSerialManifoldM = \m@(SerialManifold_ _ _ form _ _) ->
+        return (Set.fromList (abilist const const form) <> foldlSM Set.union Set.empty m)
+    , opNativeManifoldM = \m@(NativeManifold_ _ _ form _) ->
+        return (Set.fromList (abilist const const form) <> foldlNM Set.union Set.empty m)
+    , opSerialExprM = \e -> return $ case e of
+        LetVarS_ _ i -> Set.singleton i
+        BndVarS_ _ i -> Set.singleton i
+        AppPoolS_ _ (PoolCall _ _ _ ctx) xs -> Set.fromList [i | Arg i _ <- ctx] <> Set.unions xs
+        CacheBodyS_ _ _ _ _ args body -> Set.fromList [i | (Arg i _, _) <- args] <> body
+        DebugWrapS_ _ _ args body -> Set.fromList [i | (Arg i _, _) <- args] <> body
+        _ -> foldlSE Set.union Set.empty e
+    , opNativeExprM = \e -> return $ case e of
+        AppExeN_ _ x xs -> exeVars x <> Set.unions xs
+        ExeN_ _ x -> exeVars x
+        _ -> foldlNE Set.union Set.empty e
+    , opSerialArgM = return . foldlSA Set.union Set.empty
+    , opNativeArgM = return . foldlNA Set.union Set.empty
+    }
+  where
+    exeVars (LocalCallP i) = Set.singleton i
+    exeVars (PapplyP i) = Set.singleton i
+    exeVars _ = Set.empty
 
 -- | Adapt a let's right-hand side through 'lcKeepElem', given its original:
 -- the value a chain of lets ends in is kept.
@@ -3230,7 +3261,7 @@ lowerNativeExprRaw cfg (LoopN t origInits origBody) (LoopN_ _ starts body) = do
   starts' <- zipWithM (\(_, oe) (i, d) -> (,) i . Just <$> loopBorrowOr cfg i oe d (adaptOwnedElem cfg oe d >>= keepOne cfg oe)) origInits starts
   let ids = map fst origInits
       keepBase ob d = adaptOwnedElem cfg ob d >>= \d' -> (\v -> d' {poolExpr = v}) <$> lcKeepSlot cfg ids ob (poolExpr d')
-  body' <- adaptLoopBodyOwned cfg keepBase ids origBody body
+  body' <- adaptLoopBodyOwned cfg keepBase (runIdentity . foldNativeExprM serialVarsOf) ids origBody body
   lcMakeLoop cfg (LoopResultNative t) starts' (Just (trimap id id (const ()) origBody)) body'
 lowerNativeExprRaw _ _ (LoopN_ {}) =
   error "morloc bug: a native loop lowered without its original expression"
