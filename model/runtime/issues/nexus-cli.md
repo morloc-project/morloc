@@ -6,6 +6,11 @@
   parse: no item says whether a group may hold a group. `.[i]` on a Str is
   accepted by the pattern checker and refused by the walker at run time.
 
+- **A scalar enum argument is never read from a file.** [reproduced
+  2026-11-04] Violates CLI-1 (an argument of any type but a number, `Bool`
+  or `Str` is inline JSON or a file). `./nexus f one.pkt` for `f :: DNA ->
+  DNA`, with one.pkt written by `-f packet`, fails "JSON parse error:
+  expected value at line 1 column 1"; the same file at `[DNA]` reads.
 - **`-f mpk` output read back as an argument file is sniffed.** [read]
   Headerless MessagePack is told apart from JSON and text only by a `.mpk`
   or `.msgpack` name (cli.rs `load_morloc_data_file`); `./prog f -f mpk >

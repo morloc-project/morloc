@@ -559,17 +559,28 @@ impl<'a, 'r> Walker<()> for RebaseWalk<'a, 'r> {
                         }
                     }
                     // An empty array points nowhere (its rebased sentinel is
-                    // never read); a flat element region holds no pointers.
-                    if arr.size == 0 || s.parameters.is_empty() || s.parameters[0].is_fixed_width() {
+                    // never read); a flat element region holds no pointers,
+                    // though its enum tags are checked.
+                    if arr.size == 0 || s.parameters.is_empty() {
                         return Ok(());
                     }
                     let elem_schema = &s.parameters[0];
                     let w = elem_schema.width;
+                    let fixed = elem_schema.is_fixed_width();
+                    if fixed && (self.dims.is_none() || !holds_enum(elem_schema)) {
+                        return Ok(());
+                    }
                     let data_rel = if matches!(self.mode, Rebase::Check { .. }) { arr.data + shift } else { arr.data };
                     let elems = self.target(data_rel)?;
+                    if fixed {
+                        if let Some(o) = self.dims {
+                            check_enum_run(elem_schema, elems, arr.size, w, o)?;
+                        }
+                        return Ok(());
+                    }
                     if self.window.is_some() && w == std::mem::size_of::<Array>() {
                         let inner = self.res.resolve(elem_schema)?;
-                        if let Some(ew) = header_elem_width(inner) {
+                        if let Some(ew) = header_elem_width(inner, self.dims.is_some()) {
                             let dim = self.dims.and_then(|o| inner.array_dim().map(|d| (d, o)));
                             return self.headers(elems.add(f.idx * w) as *mut Array, arr.size - f.idx, ew, dim);
                         }
@@ -638,23 +649,95 @@ impl<'a, 'r> Walker<()> for RebaseWalk<'a, 'r> {
                         self.child(st, &f, 0, &s.parameters[0], inner)?;
                     }
                 }
-                SerialType::Nil | SerialType::Bool | SerialType::Sint8 | SerialType::Sint16 | SerialType::Sint32 | SerialType::Sint64 | SerialType::Uint8 | SerialType::Uint16 | SerialType::Uint32 | SerialType::Uint64 | SerialType::Float32 | SerialType::Float64 | SerialType::Table | SerialType::Recur | SerialType::Enum => {} // primitives have no relptrs
+                SerialType::Enum => {
+                    if let Some(o) = self.dims {
+                        check_tag(s, *data, o)?;
+                    }
+                }
+                SerialType::Nil | SerialType::Bool | SerialType::Sint8 | SerialType::Sint16 | SerialType::Sint32 | SerialType::Sint64 | SerialType::Uint8 | SerialType::Uint16 | SerialType::Uint32 | SerialType::Uint64 | SerialType::Float32 | SerialType::Float64 | SerialType::Table | SerialType::Recur => {} // primitives have no relptrs
             }
         }
         Ok(())
     }
 }
 
+/// True when a fixed-width value of `s` holds an enum tag.
+fn holds_enum(s: &Schema) -> bool {
+    match s.serial_type {
+        SerialType::Enum => true,
+        SerialType::Tuple | SerialType::Map => s.parameters.iter().any(holds_enum),
+        SerialType::Nil | SerialType::Bool | SerialType::Sint8 | SerialType::Sint16 | SerialType::Sint32
+        | SerialType::Sint64 | SerialType::Uint8 | SerialType::Uint16 | SerialType::Uint32 | SerialType::Uint64
+        | SerialType::Float32 | SerialType::Float64 | SerialType::String | SerialType::Array | SerialType::Optional
+        | SerialType::Int | SerialType::Table | SerialType::Recur | SerialType::IFile | SerialType::OStream
+        | SerialType::IStream | SerialType::Variant => false,
+    }
+}
+
+/// The offset and schema of every enum in a fixed-width value of `s`.
+fn enum_slots<'s>(s: &'s Schema, base: usize, out: &mut Vec<(usize, &'s Schema)>) {
+    match s.serial_type {
+        SerialType::Enum => out.push((base, s)),
+        SerialType::Tuple | SerialType::Map => {
+            for (p, off) in s.parameters.iter().zip(&s.offsets) {
+                enum_slots(p, base + off, out);
+            }
+        }
+        SerialType::Nil | SerialType::Bool | SerialType::Sint8 | SerialType::Sint16 | SerialType::Sint32
+        | SerialType::Sint64 | SerialType::Uint8 | SerialType::Uint16 | SerialType::Uint32 | SerialType::Uint64
+        | SerialType::Float32 | SerialType::Float64 | SerialType::String | SerialType::Array | SerialType::Optional
+        | SerialType::Int | SerialType::Table | SerialType::Recur | SerialType::IFile | SerialType::OStream
+        | SerialType::IStream | SerialType::Variant => {}
+    }
+}
+
+/// A tag of the enum `s` that names no constructor fails the check (WIRE-10).
+fn check_tag(s: &Schema, tag: u8, o: Origin) -> Result<(), MorlocError> {
+    match width::arm_tag(tag, s.size) {
+        Some(_) => Ok(()),
+        None => Err(o.tag_failure(width::enum_tag_error(tag, &s.keys))),
+    }
+}
+
+/// Check the enum tags of `n` fixed-width values of `s`, `w` bytes apart,
+/// starting at `data`. A run of bare enums is one scan of its bytes.
+///
+/// # Safety
+/// `data` holds `n` such values.
+unsafe fn check_enum_run(s: &Schema, data: *const u8, n: usize, w: usize, o: Origin) -> Result<(), MorlocError> {
+    let mut slots = Vec::new();
+    enum_slots(s, 0, &mut slots);
+    if let [(0, e)] = slots[..] {
+        if w == 1 {
+            let bytes = std::slice::from_raw_parts(data, n);
+            return match bytes.iter().find(|&&b| usize::from(b) >= e.size) {
+                Some(&tag) => check_tag(e, tag, o),
+                None => Ok(()),
+            };
+        }
+    }
+    for i in 0..n {
+        let p = data.add(i * w);
+        for &(off, e) in &slots {
+            check_tag(e, *p.add(off), o)?;
+        }
+    }
+    Ok(())
+}
+
 /// The width of the elements of a string or array whose elements hold no
 /// pointer, when an array of `s` is a run of such headers that
-/// `RebaseWalk::headers` rebases.
-fn header_elem_width(s: &Schema) -> Option<usize> {
+/// `RebaseWalk::headers` rebases. When the walk checks values, elements
+/// holding an enum are walked instead, so their tags are checked.
+fn header_elem_width(s: &Schema, checked: bool) -> Option<usize> {
     if s.width != std::mem::size_of::<Array>() {
         return None;
     }
     match s.serial_type {
         SerialType::String => Some(1),
-        SerialType::Array => s.parameters.first().filter(|e| e.is_fixed_width()).map(|e| e.width),
+        SerialType::Array => {
+            s.parameters.first().filter(|e| e.is_fixed_width() && !(checked && holds_enum(e))).map(|e| e.width)
+        }
         SerialType::Nil | SerialType::Bool | SerialType::Sint8 | SerialType::Sint16 | SerialType::Sint32
         | SerialType::Sint64 | SerialType::Uint8 | SerialType::Uint16 | SerialType::Uint32 | SerialType::Uint64
         | SerialType::Float32 | SerialType::Float64 | SerialType::Tuple | SerialType::Map | SerialType::Optional
@@ -840,7 +923,7 @@ unsafe fn walk_root_array_parallel(
         let mut st = Stack::new();
         let inner = res.resolve(elem_schema).ok();
         let header_w = inner
-            .and_then(header_elem_width)
+            .and_then(|s| header_elem_width(s, dims.is_some()))
             .filter(|_| width == std::mem::size_of::<Array>());
         loop {
             let start = next.fetch_add(chunk, std::sync::atomic::Ordering::Relaxed);
@@ -2928,6 +3011,41 @@ mod header_run_tests {
 
     fn cases() -> Vec<(usize, Option<usize>)> {
         vec![(50, None), (50, Some(20)), (700_000, None), (700_000, Some(650_001))]
+    }
+
+    #[test]
+    fn a_landed_enum_tag_past_its_constructors_is_refused() {
+        use crate::json::read_json_with_schema;
+        let _shm = crate::init_test_shm();
+        let dna = "e41A1C1G1T";
+        let big = format!("[{}]", vec!["\"T\""; 5000].join(","));
+        let big_pair = format!("[{big},{big}]");
+        // Every tag is T (3); no other byte of these values is 3.
+        for (schema_str, json) in [
+            (dna.to_string(), "\"T\""),
+            (format!("a{dna}"), "[\"T\",\"T\"]"),
+            (format!("at2i4{dna}"), "[[7,\"T\"],[7,\"T\"]]"),
+            (format!("aa{dna}"), "[[\"T\",\"T\"],[\"T\"]]"),
+            (format!("?{dna}"), "\"T\""),
+            (format!("t2s{dna}"), "[\"ab\",\"T\"]"),
+            (format!("a?{dna}"), "[\"T\",null]"),
+            (format!("a{dna}"), big.as_str()),
+            (format!("aa{dna}"), big_pair.as_str()),
+            (format!("at3e41A1C1G1Ti4{dna}"), "[[\"T\",7,\"T\"]]"),
+        ] {
+            let schema = parse_schema(&schema_str).unwrap();
+            let value = read_json_with_schema(json, &schema).unwrap();
+            let mut good: Vec<u8> = Vec::new();
+            write_flat_to_writer(&mut good, value, &schema).unwrap();
+            shm::shfree(value).unwrap();
+            assert!(good.contains(&3), "{schema_str}");
+            let bad: Vec<u8> = good.iter().map(|&b| if b == 3 { 4 } else { b }).collect();
+            assert!(check_in_place(&good, &schema, 0, Origin::Outside).is_ok(), "{schema_str}");
+            shm::shfree(read_binary(&good, &schema).unwrap()).unwrap();
+            let e = check_in_place(&bad, &schema, 0, Origin::Outside).expect_err(&schema_str).to_string();
+            assert!(e.contains("enum tag 4 is out of range"), "{schema_str}: {e}");
+            assert!(read_binary(&bad, &schema).is_err(), "{schema_str}");
+        }
     }
 
     #[test]

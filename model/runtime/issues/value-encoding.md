@@ -84,13 +84,13 @@
   same offsets. `test_enum_roundtrips_through_render` skips any case that
   does not parse (`if let Ok`), so its `e1` and
   `e21Aa_long_constructor_name` cases test nothing.
-- **R drops an out-of-range enum element without an error.** [reproduced
-  2026-11-02] A `[DNA]` packet file with its last byte set to 4 (one past
-  the last arm): an R function returns `["A"]` with exit 0; another R
-  function fails "malformed factor"; Python runs on the bad value and fails
-  only at output ("enum tag 18446744073709551615 is out of range"). Landing
-  checks no enum ordinal (voidstar.rs, fixed-width array regions are not
-  walked). Repro: /work/plans/error-clusters/briefs/S4-steps3-5.md.
+- **An enum tag read through an IFile is not checked.** [read 2026-11-04]
+  Violates WIRE-10. Uncompressed, aligned IFile sub-packets are served from
+  the mapping (stream.rs `SubpacketSrc::File`); the bracket and slice paths
+  (`ifile_bracket_index_against_slot`, `slice_runs`/`copy_runs`, which
+  call `adjust_records_within` with no check) never reach the landing
+  check, so an IFile `[DNA]` with a tag of 4 reaches the language. A scalar
+  enum argument is also never read from a file (nexus-cli.md).
 - **Safe Rust functions dereference raw pointers.** [read, 2026-11-02]
   json.rs `write_json`, `voidstar_to_json_string`, `print_voidstar_raw` and
   `voidstar_raw_to_bytes` are safe `pub fn`s that dereference an `AbsPtr`

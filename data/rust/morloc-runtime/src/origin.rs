@@ -27,13 +27,22 @@ impl Origin {
         }
     }
 
-    /// A failed fixed-length check on a value of this origin. In a pool, a
-    /// mismatch in the program's own value ends the pool.
+    /// A failed fixed-length check on a value of this origin.
     pub fn length_failure(self, e: MorlocError) -> MorlocError {
+        self.failure("has the wrong length", e)
+    }
+
+    /// An enum tag of a value of this origin that names no constructor.
+    pub fn tag_failure(self, e: MorlocError) -> MorlocError {
+        self.failure("holds an enum tag no constructor claims", e)
+    }
+
+    /// In a pool, a failed check of the program's own value ends the pool.
+    fn failure(self, what: &str, e: MorlocError) -> MorlocError {
         match self {
             Origin::Outside => e,
             Origin::Program => {
-                let msg = format!("internal error: a value the program built has the wrong length: {e}");
+                let msg = format!("internal error: a value the program built {what}: {e}");
                 if crate::ipc_ffi::is_pool_process() {
                     morloc_runtime_types::panic::fatal(&msg);
                 }

@@ -374,14 +374,7 @@ impl<'r, 'd> Walker<()> for UnpackWalk<'r, 'd> {
                 let tag: i64 = decode::read_int(&mut self.reader).map_err(|e| {
                     MorlocError::Serialization(format!("msgpack enum tag: {}", e))
                 })?;
-                *ptr = arm_tag(tag, s.size).ok_or_else(|| {
-                    MorlocError::Serialization(format!(
-                        "enum tag {} is out of range; the type has {} constructors ({})",
-                        tag,
-                        s.size,
-                        s.keys.join(", ")
-                    ))
-                })?;
+                *ptr = arm_tag(tag, s.size).ok_or_else(|| width::enum_tag_error(tag, &s.keys))?;
             }
             SerialType::Float32 => {
                 let f = read_float(&mut self.reader)?;

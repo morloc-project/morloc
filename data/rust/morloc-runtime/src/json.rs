@@ -1433,12 +1433,7 @@ impl<'a, 'r> Walker<Pretty> for JsonWalk<'a, 'r> {
                 // A tag with no constructor means the value and the schema
                 // disagree. Say so rather than inventing a name.
                 let name = schema.keys.get(tag).ok_or_else(|| {
-                    MorlocError::Serialization(format!(
-                        "enum tag {} is out of range; the type has {} constructors ({})",
-                        tag,
-                        schema.size,
-                        schema.keys.join(", ")
-                    ))
+                    morloc_runtime_types::width::enum_tag_error(tag, &schema.keys)
                 })?;
                 map_io(write!(w, "\"{}\"", name))?
             }
