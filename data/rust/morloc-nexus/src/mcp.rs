@@ -1241,6 +1241,14 @@ where
                 unsafe { morloc_runtime_types::net_limits::linger_close(fd) };
                 return;
             }
+            Ok(ReadOutcome::Bad(why)) => {
+                use morloc_runtime_types::daemon_error::{error_body, http_status, BAD_REQUEST};
+                let body = error_body(BAD_REQUEST, &why);
+                let _ = writer.write_all(&http_json(http_status(BAD_REQUEST, false) as u16, body.as_bytes(), false));
+                let fd = std::os::unix::io::IntoRawFd::into_raw_fd(writer);
+                unsafe { morloc_runtime_types::net_limits::linger_close(fd) };
+                return;
+            }
             _ => break, // EOF, malformed, or IO error -> close
         };
         let keep_alive = header_get(&req.headers, "connection")
@@ -1285,59 +1293,65 @@ pub(crate) struct HttpRequest {
 /// What one read of a connection gave.
 enum ReadOutcome {
     Request(HttpRequest),
-    /// End of file, or a malformed request line.
+    /// End of file before a request began.
     Closed,
     /// Refused for its size (NET-10): an over-long line or body, or too many
     /// headers.
     TooLarge(&'static str),
+    /// Refused as malformed, with the reason.
+    Bad(String),
 }
 
-/// Read one request from the buffered connection. Every line is size-capped and the body is read incrementally up
-/// to Content-Length, so a hostile Content-Length or header flood cannot force
-/// a large up-front allocation.
+/// Read one request from the buffered connection. Every line is size-capped
+/// and the body is read incrementally up to Content-Length, so a hostile
+/// Content-Length or header flood cannot force a large up-front allocation.
+/// The head is parsed as every server parses it (NET-10).
 fn read_http_request<R: BufRead>(reader: &mut R, on_body: impl FnOnce(usize)) -> std::io::Result<ReadOutcome> {
-    let mut line = String::new();
-    match read_capped_line(reader, &mut line)? {
-        LineRead::Eof => return Ok(ReadOutcome::Closed),
-        LineRead::TooLong => return Ok(ReadOutcome::TooLarge("the request line is too long")),
-        LineRead::Ok => {}
-    }
-    let mut it = line.trim_end().split_whitespace();
-    let method = it.next().unwrap_or("").to_string();
-    let path = it.next().unwrap_or("").to_string();
-    if method.is_empty() {
-        return Ok(ReadOutcome::Closed);
-    }
-
-    let mut headers: Vec<(String, String)> = Vec::new();
-    let mut content_length: usize = 0;
+    let mut head: Vec<u8> = Vec::new();
+    let mut lines = 0usize;
     loop {
-        if headers.len() >= MAX_HEADERS {
+        let start = head.len();
+        let n = reader.take(MAX_HEADER_LINE_BYTES).read_until(b'\n', &mut head)?;
+        if n == 0 {
+            if head.is_empty() {
+                return Ok(ReadOutcome::Closed);
+            }
+            return Ok(ReadOutcome::Bad("the connection closed inside the request head".into()));
+        }
+        if head.last() != Some(&b'\n') {
+            if n as u64 >= MAX_HEADER_LINE_BYTES {
+                return Ok(ReadOutcome::TooLarge(if lines == 0 {
+                    "the request line is too long"
+                } else {
+                    "a request header is too long"
+                }));
+            }
+            return Ok(ReadOutcome::Bad("the connection closed inside the request head".into()));
+        }
+        let blank = matches!(&head[start..], b"\r\n" | b"\n");
+        if blank && lines == 0 {
+            // RFC 9112 2.2: an empty line before the request line is ignored.
+            head.clear();
+            continue;
+        }
+        if blank {
+            break;
+        }
+        lines += 1;
+        if lines > MAX_HEADERS {
             return Ok(ReadOutcome::TooLarge("the request has too many headers"));
         }
-        let mut h = String::new();
-        match read_capped_line(reader, &mut h)? {
-            LineRead::Eof => return Ok(ReadOutcome::Closed),
-            LineRead::TooLong => return Ok(ReadOutcome::TooLarge("a request header is too long")),
-            LineRead::Ok => {}
-        }
-        let t = h.trim_end_matches(['\r', '\n']);
-        if t.is_empty() {
-            break; // end of headers
-        }
-        if let Some(i) = t.find(':') {
-            let name = t[..i].trim().to_ascii_lowercase();
-            let val = t[i + 1..].trim().to_string();
-            if name == "content-length" {
-                content_length = val.parse().unwrap_or(0);
-            }
-            headers.push((name, val));
-        }
     }
+    let parsed = match morloc_runtime_types::http_head::parse(&head) {
+        Ok(h) => h,
+        Err(e) if e.too_large => return Ok(ReadOutcome::TooLarge("the request body is larger than this server takes")),
+        Err(e) => return Ok(ReadOutcome::Bad(e.why)),
+    };
 
     // Reject an absurd Content-Length rather than allocate it (same backstop the
     // stdio line cap provides). Read the body incrementally so the buffer grows
     // with the bytes actually received, not the client-declared length.
+    let content_length = parsed.content_length;
     if content_length > MAX_LINE_BYTES {
         return Ok(ReadOutcome::TooLarge("the request body is larger than this server takes"));
     }
@@ -1345,35 +1359,17 @@ fn read_http_request<R: BufRead>(reader: &mut R, on_body: impl FnOnce(usize)) ->
     if content_length > 0 {
         on_body(content_length);
         reader.take(content_length as u64).read_to_end(&mut body)?;
+        if body.len() < content_length {
+            return Ok(ReadOutcome::Bad("the connection closed inside the request body".into()));
+        }
     }
+    let path = if parsed.query.is_empty() { parsed.path } else { format!("{}?{}", parsed.path, parsed.query) };
     Ok(ReadOutcome::Request(HttpRequest {
-        method,
+        method: parsed.method.to_string(),
         path,
-        headers,
+        headers: parsed.headers,
         body,
     }))
-}
-
-/// Outcome of a size-capped line read.
-enum LineRead {
-    Ok,
-    Eof,
-    TooLong,
-}
-
-/// Read one line into `buf`, capping the bytes consumed at MAX_HEADER_LINE_BYTES.
-/// A line that reaches the cap without a newline yields `TooLong` (the caller
-/// closes the connection); this bounds both request-line and header allocation.
-fn read_capped_line<R: BufRead>(reader: &mut R, buf: &mut String) -> std::io::Result<LineRead> {
-    let n = reader.take(MAX_HEADER_LINE_BYTES).read_line(buf)?;
-    if n == 0 {
-        return Ok(LineRead::Eof);
-    }
-    // Hit the cap without terminating the line -> reject.
-    if !buf.ends_with('\n') && n as u64 >= MAX_HEADER_LINE_BYTES {
-        return Ok(LineRead::TooLong);
-    }
-    Ok(LineRead::Ok)
 }
 
 /// Auth-check, route on method+path, and produce the full HTTP response bytes.
@@ -3259,6 +3255,29 @@ mod tests {
         let parsed = match read_http_request(&mut slice, |_| {}).unwrap() { ReadOutcome::Request(r) => r, _ => panic!("no request") };
         assert_eq!(parsed.body, b"HELLO");
         assert_eq!(slice, b"EXTRA"); // remainder preserved
+    }
+
+    #[test]
+    fn read_http_request_refuses_a_head_or_body_it_cannot_read_one_way() {
+        for raw in [
+            &b"POST /mcp HTTP/1.1\r\nContent-Length: 5x\r\n\r\nHELLO"[..],
+            b"POST /mcp HTTP/1.1\r\nContent-Length: 2\r\ncontent-length: 5\r\n\r\nHELLO",
+            b"POST /mcp HTTP/1.1\r\nContent-Length: 9\r\n\r\nHELLO",
+            b"POST /mcp HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nHELLO\r\n0\r\n\r\n",
+            b"GET  /health HTTP/1.1\r\n\r\n",
+            b"GET /health\r\n\r\n",
+            b"GET /health HTTP/1.1\r\nHost",
+        ] {
+            let mut slice = raw;
+            assert!(matches!(read_http_request(&mut slice, |_| {}).unwrap(), ReadOutcome::Bad(_)));
+        }
+    }
+
+    #[test]
+    fn read_http_request_reads_a_header_that_is_not_utf8() {
+        let mut slice = &b"\r\nGET /health?x=1 HTTP/1.1\r\nUser-Agent: \xe9t\xe9\r\n\r\n"[..];
+        let parsed = match read_http_request(&mut slice, |_| {}).unwrap() { ReadOutcome::Request(r) => r, _ => panic!("no request") };
+        assert_eq!((parsed.method.as_str(), parsed.path.as_str()), ("GET", "/health?x=1"));
     }
 
     #[test]

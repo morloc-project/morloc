@@ -175,7 +175,7 @@ worker outlives its coordinator.
 
 ### NET-10 A message past a limit is answered, and no declared length is trusted
 Status: implemented
-Checked by: a_message_past_the_frame_is_refused_unsent, a_request_past_the_daemons_cap_is_refused_as_a_limit, every_kind_survives_its_class_name, read_http_request_rejects_overlong_header_line, read_http_request_rejects_header_flood, the_header_names_every_kind_as_the_runtime_does, a_reply_is_refused_before_it_is_built_only_when_its_payload_is_past_the_frame
+Checked by: a_message_past_the_frame_is_refused_unsent, a_request_past_the_daemons_cap_is_refused_as_a_limit, every_kind_survives_its_class_name, read_http_request_rejects_overlong_header_line, read_http_request_rejects_header_flood, the_header_names_every_kind_as_the_runtime_does, a_reply_is_refused_before_it_is_built_only_when_its_payload_is_past_the_frame, a_content_length_is_digits_and_its_copies_agree, read_http_request_refuses_a_head_or_body_it_cannot_read_one_way, a_request_line_is_three_visible_ascii_parts, a_head_that_could_be_read_two_ways_is_refused
 
 A length-prefixed message carries at most 4 GiB. A daemon takes a request
 of at most 64 MiB on its socket and 4 MiB over HTTP; an MCP server over
@@ -190,4 +190,10 @@ never sent with a wrapped length. A reader of a length-prefixed message
 allocates as its bytes arrive, so a declared length costs memory only as
 it is sent; an HTTP body within its cap is allocated when its length is
 read. A request refused before it is parsed is answered in JSON, as an
-unparsable one is, also to a packet-mode client.
+unparsable one is, also to a packet-mode client. Every HTTP server reads
+a request head by one rule, and refuses as a bad request a head it could
+read two ways: a request line that is not three visible-ASCII parts, a
+malformed header line or name, a `Transfer-Encoding`, or a
+`Content-Length` that is not digits or disagrees with another (RFC 9110
+8.6). A body shorter than its declared length is refused, never served.
+Nothing in a request is truncated.

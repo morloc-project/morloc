@@ -3062,49 +3062,37 @@ unsafe fn handle_http_connection(
     shm_basename: *const c_char,
 ) {
     use crate::http_ffi::http_parse_request;
-    use crate::http_ffi::http_free_request;
     use crate::http_ffi::http_to_daemon_request;
 
-    let mut errmsg: *mut c_char = ptr::null_mut();
-    let mut too_large = false;
-    let http_req = http_parse_request(client_fd, &mut errmsg, &mut too_large);
-    if !errmsg.is_null() {
-        let (status, body) = if too_large {
+    REPLY_WITHOUT_BODY.with(|r| r.set(false));
+    let mut http_req = match http_parse_request(client_fd) {
+        Ok(r) => r,
+        Err(refusal) => {
             // NET-10
-            let why = CStr::from_ptr(errmsg).to_string_lossy();
-            (
-                morloc_runtime_types::daemon_error::http_status(DAEMON_ERROR_LIMIT, false),
-                morloc_runtime_types::daemon_error::error_body(DAEMON_ERROR_LIMIT, &why),
-            )
-        } else {
-            (400, "{\"status\":\"error\",\"class\":\"bad-request\",\"error\":\"Bad request\"}".to_string())
-        };
-        crate::http_ffi::write_response(
-            client_fd,
-            status,
-            c"application/json".as_ptr(),
-            body.as_ptr() as *const c_char,
-            body.len(),
-        );
-        libc::free(errmsg as *mut c_void);
-        if too_large {
+            let kind = if refusal.too_large { DAEMON_ERROR_LIMIT } else { DAEMON_ERROR_BAD_REQUEST };
+            let body = morloc_runtime_types::daemon_error::error_body(kind, &refusal.why);
+            crate::http_ffi::write_response(
+                client_fd,
+                morloc_runtime_types::daemon_error::http_status(kind, false),
+                c"application/json".as_ptr(),
+                body.as_ptr() as *const c_char,
+                body.len(),
+            );
             linger_close(client_fd);
-        } else {
-            libc::close(client_fd);
+            return;
         }
-        return;
-    }
+    };
+    let mut errmsg: *mut c_char = ptr::null_mut();
 
-    let head = (*http_req).method == HttpMethod::Head;
+    let head = http_req.method == HttpMethod::Head;
     REPLY_WITHOUT_BODY.with(|r| r.set(head));
     if head {
-        (*http_req).method = HttpMethod::Get;
+        http_req.method = HttpMethod::Get;
     }
     // NET-1: the liveness probe needs no token.
-    let is_probe = (*http_req).method == HttpMethod::Get
-        && CStr::from_ptr((*http_req).path.as_ptr()).to_bytes()
-            == morloc_runtime_types::bearer::LIVENESS_PATH.as_bytes();
-    if is_probe && !(*http_req).authorized {
+    let is_probe = http_req.method == HttpMethod::Get
+        && http_req.path == morloc_runtime_types::bearer::LIVENESS_PATH;
+    if is_probe && !http_req.authorized {
         let body = morloc_runtime_types::bearer::LIVENESS_BODY;
         crate::http_ffi::write_response(
             client_fd,
@@ -3113,7 +3101,6 @@ unsafe fn handle_http_connection(
             body.as_ptr() as *const c_char,
             body.len(),
         );
-        http_free_request(http_req);
         libc::close(client_fd);
         return;
     }
@@ -3122,7 +3109,7 @@ unsafe fn handle_http_connection(
     // reaching daemon_dispatch (which would otherwise process them
     // through the Health pipeline -- including the recovery gate).
     // NET-1
-    if (*http_req).method != HttpMethod::Options && !(*http_req).authorized {
+    if http_req.method != HttpMethod::Options && !http_req.authorized {
         let body = b"{\"status\":\"error\",\"class\":\"unauthorized\",\"error\":\"unauthorized\"}";
         crate::http_ffi::write_response_ex(
             client_fd,
@@ -3132,12 +3119,11 @@ unsafe fn handle_http_connection(
             body.len(),
             c"WWW-Authenticate: Bearer\r\n".as_ptr(),
         );
-        http_free_request(http_req);
         libc::close(client_fd);
         return;
     }
 
-    if (*http_req).method == HttpMethod::Options {
+    if http_req.method == HttpMethod::Options {
         let ct = b"application/json\0";
         crate::http_ffi::write_response(
             client_fd,
@@ -3146,12 +3132,11 @@ unsafe fn handle_http_connection(
             ptr::null(),
             0,
         );
-        http_free_request(http_req);
         libc::close(client_fd);
         return;
     }
 
-    if let Some(method) = crate::http_ffi::eval_route(http_req) {
+    if let Some(method) = crate::http_ffi::eval_route(&http_req) {
         if let Some((kind, msg)) = eval_refusal(method, Transport::Http) {
             let body = morloc_runtime_types::daemon_error::error_body(kind, msg);
             crate::http_ffi::write_response(
@@ -3161,23 +3146,23 @@ unsafe fn handle_http_connection(
                 body.as_ptr() as *const c_char,
                 body.len(),
             );
-            http_free_request(http_req);
             libc::close(client_fd);
             return;
         }
     }
     let mut route_kind: i32 = DAEMON_ERROR_BAD_REQUEST;
-    let req = http_to_daemon_request(http_req, &mut errmsg, &mut route_kind);
-    if !errmsg.is_null() {
-        // Build the error body from the actual errmsg so unknown-endpoint
-        // and missing-field cases get distinguishable messages, and use
-        // the kind that http_to_daemon_request returned so 404 vs 400
-        // routes correctly.
-        let err_str = CStr::from_ptr(errmsg).to_string_lossy();
+    let req = http_to_daemon_request(&http_req, &mut errmsg, &mut route_kind);
+    drop(http_req);
+    if req.is_null() {
+        let err_str = if errmsg.is_null() {
+            "the request could not be routed".to_string()
+        } else {
+            CStr::from_ptr(errmsg).to_string_lossy().into_owned()
+        };
         let body = format!(
             "{{\"status\":\"error\",\"class\":\"{}\",\"error\":{}}}\n",
             morloc_runtime_types::daemon_error::class_name(route_kind),
-            serde_json::Value::String(err_str.into_owned())
+            serde_json::Value::String(err_str)
         );
         let body_c = CString::new(body.as_str()).unwrap_or_default();
         let status = daemon_error_kind_to_http_status(route_kind, false);
@@ -3189,12 +3174,10 @@ unsafe fn handle_http_connection(
             body_c.as_ptr(),
             body.len(),
         );
-        http_free_request(http_req);
         libc::free(errmsg as *mut c_void);
         libc::close(client_fd);
         return;
     }
-    http_free_request(http_req);
 
     // For the duration of this dispatch, enable HTTP `?render=` resolution and
     // the raw-media response form: a return whose type carries a `@mime` comes

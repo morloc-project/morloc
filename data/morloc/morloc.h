@@ -1076,25 +1076,6 @@ typedef struct daemon_response_s {
     bool result_text;
 } daemon_response_t;
 
-// -- HTTP types --
-
-typedef enum {
-    HTTP_GET,
-    HTTP_POST,
-    HTTP_DELETE,
-    HTTP_OPTIONS,
-    HTTP_HEAD
-} http_method_t;
-
-typedef struct http_request_s {
-    http_method_t method;
-    char path[256];
-    char* body;
-    size_t body_len;
-    char query[256];
-    bool authorized;
-} http_request_t;
-
 // -- Router types --
 
 typedef struct router_program_s {
