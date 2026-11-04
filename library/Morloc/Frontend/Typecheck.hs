@@ -250,9 +250,7 @@ typecheckWith expected = run
       -- part of the command's domain its input is checked against: the
       -- Nat positions over what the input gives (DIM-10, DIM-3, KIND-4).
       let rootType = case e3 of AnnoS (Idx _ t) _ _ -> apply g3 t
-          inputs = case rootType of
-            FunU as _ -> as
-            _ -> []
+          inputs = fst (uncurryU rootType)
           given = Set.union
             (runTimeVars inputs)
             (Set.fromList [v | IntVarU v <- everyType rootType, Set.notMember v (gammaObserved g3)])
@@ -803,14 +801,9 @@ compatibleTypeU = go Set.empty Set.empty
     go b1 b2 t1@(AppU _ _) t2@NamU{} = go b1 b2 t1 (nominal t2)
     go b1 _  (VarU v1) _ = Set.member v1 b1
     go _  b2 _ (VarU v2) = Set.member v2 b2
-    go b1 b2 (FunU as1 r1) (FunU as2 r2)
-      | length as1 == length as2 =
-          all (uncurry (go b1 b2)) (zip as1 as2) && go b1 b2 r1 r2
-      -- APP-1: the surplus parameters of the longer side are its result's
-      | length as1 < length as2 =
-          let (pre, rest) = splitAt (length as1) as2 in go b1 b2 (FunU as1 r1) (FunU pre (FunU rest r2))
-      | otherwise =
-          let (pre, rest) = splitAt (length as2) as1 in go b1 b2 (FunU pre (FunU rest r1)) (FunU as2 r2)
+    go b1 b2 (FunU as1 r1) (FunU as2 r2) = case alignFun (as1, r1) (as2, r2) of
+      Just (ps, (q1, q2)) -> all (uncurry (go b1 b2)) ps && go b1 b2 q1 q2
+      Nothing -> False
     go b1 b2 (AppU h1 ps1) (AppU h2 ps2)
       | length ps1 == length ps2 =
           go b1 b2 h1 h2
@@ -3305,13 +3298,13 @@ resolveNatLabels (AnnoS _ _ (VarS _ (MonomorphicExpr (Just et) _))) funType args
 resolveNatLabels _ _ _ g = g
 
 -- | The Nats of a function type that only its result has, other than the
--- given label variables: lengths the function chooses (DIM-10).
+-- given label variables: lengths the function chooses (DIM-10). Arguments
+-- are read flat (APP-1), so @a -> (b -> c)@ has the arguments @a@ and @b@.
 resultOnlyNats :: TypeU -> [TVar] -> [TVar]
-resultOnlyNats t labelled = case t of
-  FunU args ret ->
-    let inArgs = concatMap collectNatVarNames args
-     in List.nub [v | v <- collectNatVarNames ret, v `notElem` inArgs, v `notElem` labelled]
-  _ -> List.nub [v | v <- collectNatVarNames t, v `notElem` labelled]
+resultOnlyNats t labelled =
+  let (args, ret) = uncurryU t
+      inArgs = concatMap collectNatVarNames args
+   in List.nub [v | v <- collectNatVarNames ret, v `notElem` inArgs, v `notElem` labelled]
 
 -- | At a call, a Nat the called function chooses is a value known only at
 -- run time (DIM-10).

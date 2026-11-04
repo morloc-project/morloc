@@ -2252,7 +2252,31 @@ typeOrderTests =
   localOption (mkTimeout 1000000) $ -- 1 second timeout
     testGroup
       "Tests of type partial ordering (subtype)"
-      [ testFalse
+      [ testTrue
+          "Int -> (Str -> Real) == Int -> Str -> Real (APP-1)"
+          (alphaEq (FunU [int] (FunU [str] real)) (FunU [int, str] real))
+      , testTrue
+          "Int -> (Str -> Real) <: Int -> Str -> Real (APP-1)"
+          (isSubtypeOf (FunU [int] (FunU [str] real)) (FunU [int, str] real))
+      , testFalse
+          "a suspension of Int -> Int is not Int -> Int"
+          (alphaEq (FunU [] (FunU [int] int)) (FunU [int] int))
+      , testFalse
+          "a suspension of Int -> Int !< Int -> Int"
+          (isSubtypeOf (FunU [] (FunU [int] int)) (FunU [int] int))
+      , testFalse
+          "Int -> Int !< a suspension of Int -> Int"
+          (isSubtypeOf (FunU [int] int) (FunU [] (FunU [int] int)))
+      , testTrue
+          "typecheck: Int -> (Str -> Real) <: Int -> Str -> Real (APP-1)"
+          (MTI.isSubtypeOf2 Map.empty (FunU [int] (FunU [str] real)) (FunU [int, str] real))
+      , testFalse
+          "typecheck: a suspension of Int -> Int !< Int -> Int"
+          (MTI.isSubtypeOf2 Map.empty (FunU [] (FunU [int] int)) (FunU [int] int))
+      , testFalse
+          "typecheck: Int -> Int !< a suspension of Int -> Int"
+          (MTI.isSubtypeOf2 Map.empty (FunU [int] int) (FunU [] (FunU [int] int)))
+      , testFalse
           "Str !< Real"
           (isSubtypeOf str real)
       , testFalse

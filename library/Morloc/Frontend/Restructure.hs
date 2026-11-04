@@ -198,8 +198,33 @@ expandStructuralTypes d = do
     expandModule sc e = do
       e' <- AST.mapTypeInExprI (expandStructuralAliases sc) (writtenAliasDocs sc e)
       checkExpandable sc e'
-      let e'' = expandClassSigs sc e'
+      let e'' = flattenSigs (expandClassSigs sc e')
       return e''
+
+    -- APP-1: a result that an alias expands to a function belongs to the
+    -- signature's own argument list (@Int -> F n@ with @type F n = V n ->
+    -- Int@ is @Int -> V n -> Int@), so no reader of a signature sees the
+    -- grouping. The parameters it adds have no docstrings of their own.
+    flattenSigs :: ExprI -> ExprI
+    flattenSigs (ExprI i (ModE m es)) = ExprI i (ModE m (map flattenSigs es))
+    flattenSigs (ExprI i (SigE (Signature v l et))) = ExprI i (SigE (Signature v l (flattenSig et)))
+    flattenSigs (ExprI i (ClsE (Typeclass cs cls vs sigs))) =
+      ExprI i (ClsE (Typeclass cs cls vs [Signature v l (flattenSig et) | Signature v l et <- sigs]))
+    flattenSigs e = e
+
+    flattenSig :: EType -> EType
+    flattenSig et =
+      let t' = flatTop (etype et)
+          arity = length (fst (uncurryU t'))
+          docs = case edocs et of
+            ArgDocSig cmd args ret
+              | arity > length args -> ArgDocSig cmd (args <> replicate (arity - length args) defaultValue) ret
+            d -> d
+       in et {etype = t', edocs = docs}
+
+    flatTop (ForallU v t) = ForallU v (flatTop t)
+    flatTop t@(FunU (_ : _) _) = uncurry FunU (uncurryU t)
+    flatTop t = t
 
     -- DOC-3: a function, effect or optional alias carries its docstring
     -- where a signature names it, and the expansion drops the name.

@@ -87,9 +87,7 @@ contract scope headers name (et, labels)
       ]
   where
     t = snd (unqualify et)
-    args = case t of
-      FunU as _ -> as
-      _ -> []
+    args = fst (uncurryU t)
     labelArgs = Map.fromList [(k, v) | (v, k) <- Map.toList labels]
     binds =
       concat

@@ -155,6 +155,7 @@ module Morloc.Namespace.Type
     -- * Typeclasses
   , Typelike (..)
   , uncurryU
+  , alignFun
 
     -- * kludge
   , newVariable
@@ -1028,7 +1029,7 @@ instance Typelike Type where
   free (StrLitT _) = Set.empty
   free (StrConcatT a b) = Set.union (free a) (free b)
 
-  normalizeType (FunT ts1 (FunT ts2 ft)) = normalizeType $ FunT (ts1 <> ts2) ft
+  normalizeType (FunT ts1@(_ : _) (FunT ts2@(_ : _) ft)) = normalizeType $ FunT (ts1 <> ts2) ft
   normalizeType (AppT (AppT h innerArgs) outerArgs) =
     normalizeType (AppT h (innerArgs ++ outerArgs))
   normalizeType (AppT t ts) = AppT (normalizeType t) (map normalizeType ts)
@@ -1041,6 +1042,21 @@ instance Typelike Type where
   normalizeType (NatDivT a b) = NatDivT (normalizeType a) (normalizeType b)
   normalizeType (StrConcatT a b) = StrConcatT (normalizeType a) (normalizeType b)
   normalizeType t = t
+
+-- | Two function types compared parameter by parameter (APP-1): the
+-- parameters both have, paired, and the two results, the longer side's
+-- surplus parameters belonging to its result. Nothing when exactly one side
+-- is a suspension, which takes no parameters and is not a grouping.
+alignFun :: ([TypeU], TypeU) -> ([TypeU], TypeU) -> Maybe ([(TypeU, TypeU)], (TypeU, TypeU))
+alignFun (as1, r1) (as2, r2)
+  | null as1 /= null as2 = Nothing
+  | otherwise = Just (zip pre1 pre2, (result rest1 r1, result rest2 r2))
+  where
+    n = min (length as1) (length as2)
+    (pre1, rest1) = splitAt n as1
+    (pre2, rest2) = splitAt n as2
+    result [] r = r
+    result rest r = FunU rest r
 
 -- | A function type's arguments and result, spelled flat by the rule
 -- 'typeOf' applies: @a -> (b -> c)@ is @a -> b -> c@, while an effect or an
@@ -1188,7 +1204,8 @@ instance Typelike TypeU where
       sub (LitU (LSet es)) = LitU (LSet (map sub es))
       sub (LabeledU n t) = LabeledU n (sub t)
 
-  normalizeType (FunU ts1 (FunU ts2 ft)) = normalizeType $ FunU (ts1 <> ts2) ft
+  -- APP-1; an empty argument list is a suspension, not a grouping.
+  normalizeType (FunU ts1@(_ : _) (FunU ts2@(_ : _) ft)) = normalizeType $ FunU (ts1 <> ts2) ft
   -- Substituting a partially applied class type into a method's @f a@
   -- yields @AppU (AppU H [n]) [a]@; downstream code matches only the flat
   -- @AppU H [n, a]@.
@@ -1250,13 +1267,9 @@ generalizes kinds t1 t2 = isJust (match flex0 t1 t2 Map.empty)
             pairs flex (zip ts1 ts2) s
               >>= \s' -> pairs flex [(x, y) | (k, x) <- rs1, Just y <- [lookup k rs2]] s'
               >>= \s'' -> guard (all (\(k, _) -> isJust (lookup k rs2)) rs1) s''
-      (FunU ts1 r1, FunU ts2 r2)
-        | length ts1 == length ts2 -> pairs flex (zip (r1 : ts1) (r2 : ts2)) s
-        -- APP-1: the surplus parameters of the longer side are its result's
-        | length ts1 < length ts2 ->
-            let (pre, rest) = splitAt (length ts1) ts2 in match flex a (FunU pre (FunU rest r2)) s
-        | otherwise ->
-            let (pre, rest) = splitAt (length ts2) ts1 in match flex (FunU pre (FunU rest r1)) b s
+      (FunU ts1 r1, FunU ts2 r2) -> do
+        (ps, rs) <- alignFun (ts1, r1) (ts2, r2)
+        pairs flex (rs : ps) s
       (AppU h1 as1, AppU h2 as2) | length as1 == length as2 -> pairs flex (zip (h1 : as1) (h2 : as2)) s
       (NamU o1 n1 ps1 rs1, NamU o2 n2 ps2 rs2)
         | o1 == o2, n1 == n2, length ps1 == length ps2, DL.sort (map fst rs1) == DL.sort (map fst rs2) ->
@@ -1470,7 +1483,9 @@ alphaEq a b =
       (VoidU k1, VoidU k2) | k1 == k2 -> Just bij
       (LitU l1, LitU l2) | l1 == l2 -> Just bij
       (OpU o1 as1, OpU o2 as2) | o1 == o2 -> walkAll flex bij as1 as2
-      (FunU as1 r1, FunU as2 r2) -> walkAll flex bij (r1 : as1) (r2 : as2)
+      (FunU as1 r1, FunU as2 r2) -> do
+        (ps, (q1, q2)) <- alignFun (as1, r1) (as2, r2)
+        walkAll flex bij (q1 : map fst ps) (q2 : map snd ps)
       (AppU f1 as1, AppU f2 as2) -> walkAll flex bij (f1 : as1) (f2 : as2)
       (EffectU e1 u1, EffectU e2 u2) | e1 == e2 -> walk flex bij u1 u2
       (OptionalU u1, OptionalU u2) -> walk flex bij u1 u2

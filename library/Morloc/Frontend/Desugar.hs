@@ -1438,10 +1438,20 @@ typeToTVar _ = dfail (Pos 0 0 "") "expected type variable in class head"
 -- Signature and type construction
 --------------------------------------------------------------------
 
+-- | A signature's written arguments, the parameters of a parenthesized last
+-- group, and its result. The group's parameters belong to the signature's
+-- own argument list (APP-1): @a -> (b -> c)@ is @a -> b -> c@.
+sigParts :: [(Pos, TypeU)] -> Maybe ([TypeU], [TypeU], TypeU)
+sigParts [] = Nothing
+sigParts ts = Just $ case snd (last ts) of
+  FunU more@(_ : _) r -> (map snd (init ts), more, r)
+  r -> (map snd (init ts), [], r)
+
 argsToType :: [(Pos, TypeU)] -> TypeU
-argsToType [] = BT.unitU
-argsToType [(_, t)] = t
-argsToType ts = FunU (map snd (init ts)) (snd (last ts))
+argsToType ts = case sigParts ts of
+  Nothing -> BT.unitU
+  Just ([], [], r) -> r
+  Just (as, more, r) -> FunU (as <> more) r
 
 desugarSigType :: Pos -> CstSigType -> D ([Constraint], [ArgDocVars], TypeU)
 desugarSigType _pos (CstSigType (Just constraintArgs) args) = do
@@ -1452,9 +1462,16 @@ desugarSigType _pos (CstSigType Nothing args) = do
   argDocVars <- sigArgDocs args
   return ([], argDocVars, argsToType args)
 
--- | The docstrings of a signature's arguments and, last, its result.
+-- | The docstrings of a signature's arguments and, last, its result. The
+-- parameters of a parenthesized last group have none; the group's
+-- docstring is the result's.
 sigArgDocs :: [(Pos, TypeU)] -> D [ArgDocVars]
-sigArgDocs args = mapM (\(p, _) -> lookupDocsAt p >>= docLinesD p) args
+sigArgDocs args = do
+  docs <- mapM (\(p, _) -> lookupDocsAt p >>= docLinesD p) args
+  return $ case (sigParts args, reverse docs) of
+    (Just (_, more, _), resultDoc : argDocs) ->
+      reverse argDocs <> map (const defaultValue) more <> [resultDoc]
+    _ -> docs
 
 
 resolveSourceFile :: Maybe Path -> Maybe Text -> Maybe Path

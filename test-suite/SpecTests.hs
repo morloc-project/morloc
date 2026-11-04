@@ -1260,6 +1260,25 @@ dimTests =
         f :: Vector n Real -> Vector n Real
         f v = keep v
         |]
+    , rejectSaying
+        "spec-dim-10-7"
+        "POLY-7"
+        [r|
+        module main (run)
+        newtype V (n :: Nat) = Int
+        g :: V 3 -> Int
+        run :: a -> V n -> Int
+        run k x = g x
+        |]
+    , accept
+        "spec-dim-10-8"
+        [r|
+        module main (run)
+        newtype V (n :: Nat) = Int
+        g :: V n -> Int
+        run :: a -> V n -> Int
+        run k x = g x
+        |]
     ]
 
 teqTests :: TestTree
@@ -1499,6 +1518,55 @@ appTests =
           mk n = mkAdder n
         go :: Int -> Int
         go x = (mk 1) x
+        |]
+    , rejectSaying
+        "spec-app-1-4"
+        "POLY-7"
+        [r|
+        module main (run)
+        newtype V (n :: Nat) = Int
+        g :: V 3 -> Int
+        run :: Int -> (V n -> Int)
+        run k x = g x
+        |]
+    , accept
+        "spec-app-1-5"
+        [r|
+        module main (run)
+        newtype V (n :: Nat) = Int
+        f :: Int -> (V n -> Int)
+        run :: Int -> V 3 -> Int
+        run k xs = f k xs
+        |]
+    , accept
+        "spec-app-1-6"
+        [r|
+        module main (run)
+        newtype V (n :: Nat) = Int
+        type F (n :: Nat) = V n -> Int
+        f :: Int -> F n
+        run :: Int -> V 3 -> Int
+        run k xs = f k xs
+        |]
+    , rejectSaying
+        "spec-app-1-7"
+        "POLY-7"
+        [r|
+        module main (run)
+        newtype V (n :: Nat) = Int
+        type F (n :: Nat) = V n -> Int
+        g :: V 3 -> Int
+        run :: Int -> F n
+        run k x = g x
+        |]
+    , accept
+        "spec-app-1-8"
+        [r|
+        module main (run)
+        newtype V (n :: Nat) = Int
+        g :: V n -> Int
+        run :: Int -> (V n -> Int)
+        run k x = g x
         |]
     , acceptTypecheck
         "spec-app-4-1"

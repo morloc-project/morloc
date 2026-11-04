@@ -21,7 +21,7 @@ solved; one on a rigid variable (POLY-7) is decided by DIM-7.
 
 ### DIM-3 A dimension the compiler cannot see is checked at run time
 Intent: ruled 2026-10-30
-Tests: spec-dim-3-1, spec-dim-3-2, spec-dim-3-3
+Tests: spec-dim-3-1, spec-dim-3-2, spec-dim-3-3, spec-dim-3-4
 Code: deviates (issues/kinds-dimensions.md)
 
 Where a value whose length the compiler cannot see flows into a slot whose
@@ -139,8 +139,8 @@ than on the whole argument (POLY-3).
 
 ### DIM-10 A length or label known only at run time stands for every value
 Intent: ruled 2026-10-31
-Tests: spec-dim-10-1, spec-dim-10-2, spec-dim-10-3, spec-dim-10-4, spec-dim-10-5, spec-dim-10-6
-Code: deviates (issues/kinds-dimensions.md)
+Tests: spec-dim-10-1, spec-dim-10-2, spec-dim-10-3, spec-dim-10-4, spec-dim-10-5, spec-dim-10-6, spec-dim-10-7, spec-dim-10-8
+Code: deviates (issues/kinds-dimensions.md; open ruling in issues/function-types.md)
 
 A label's value at a call is known before run time when its argument is a
 literal or the enclosing signature's own label. Any other label argument,

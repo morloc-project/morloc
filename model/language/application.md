@@ -4,7 +4,7 @@ Application, partial application, arity and arrow grouping. Prefix: APP.
 
 ### APP-1 Arrow grouping is not part of a morloc type
 Intent: ruled 2026-09-24
-Tests: spec-app-1-1, spec-app-1-2, spec-app-1-3
+Tests: spec-app-1-1, spec-app-1-2, spec-app-1-3, spec-app-1-4, spec-app-1-5, spec-app-1-6, spec-app-1-7, spec-app-1-8
 Code: conforms 2026-11-04
 
 `a -> b -> c` and `a -> (b -> c)` are one type. Neither the nesting of a
