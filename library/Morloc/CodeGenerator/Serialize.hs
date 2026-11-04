@@ -20,6 +20,7 @@ module Morloc.CodeGenerator.Serialize
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Morloc.BaseTypes as BT
+import Morloc.CodeGenerator.ValueArgs (argKinds)
 import Morloc.CodeGenerator.Infer
 import Morloc.CodeGenerator.Namespace
 import qualified Morloc.CodeGenerator.Serial as Serial
@@ -522,12 +523,15 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
       TupleN
         <$> inferVar v
         <*> mapM (nativeExpr m . snd) rs
-    nativeExpr m (MonoRecord o v ps rs) =
+    nativeExpr m (MonoRecord o v@(Idx _ name) ps rs) = do
+      -- each parameter at its declared position, as the weave tags it
+      gscope <- MM.getGeneralScope
+      let param sl (Idx i a) = case a of
+            TyA t -> retagArg sl <$> inferType (Idx i t)
+            KiA k -> return (KiA (groundK k))
       RecordN o
         <$> inferVar v
-        <*> mapM (\(Idx i a) -> case a of
-                    TyA t -> TyA <$> inferType (Idx i t)
-                    KiA k -> return (KiA (groundK k))) ps
+        <*> zipWithM param (argKinds gscope name (length ps)) ps
         <*> mapM (secondM (nativeExpr m . snd)) rs
     nativeExpr _ (MonoLog v x) = LogN <$> inferVar v <*> pure x
     nativeExpr _ (MonoReal v x) = RealN <$> inferVar v <*> pure x
@@ -964,6 +968,7 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
         go (FunF args ret) = FunT (map go args) (go ret)
         go (OptionalF t) = OptionalT (go t)
         arg (TyA x) = TyA (go x)
+        arg (KiA (RowK cols)) = TyA (NamT NamRecord anonRecordVar [] [(k, go x) | (k, x) <- cols])
         arg (KiA k) = KiA (kargType k)
 
     lowerCacheBody ::

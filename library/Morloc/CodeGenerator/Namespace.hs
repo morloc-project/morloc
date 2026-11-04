@@ -30,6 +30,7 @@ module Morloc.CodeGenerator.Namespace
   , KArgF (.., NatVoidK)
   , ArgF
   , kargType
+  , kindSplit
   , TypeS (..)
   , FVar (..)
 
@@ -222,6 +223,8 @@ data KArgF
   = NatLitK Integer
   | VoidK Kind
   | StrLitK Text
+  | -- | A ground row filling a Rec parameter: its columns.
+    RowK [(Key, TypeF)]
   deriving (Show, Ord, Eq)
 
 pattern NatVoidK :: KArgF
@@ -229,18 +232,25 @@ pattern NatVoidK = VoidK KindNat
 
 type ArgF = TArg KArgF TypeF
 
--- | A kind argument as a type-level term.
+-- | The type arguments, which the @$N@ of a native form counts, and how many
+-- kind arguments it skips.
+kindSplit :: [ArgF] -> ([TypeF], Int)
+kindSplit as = let ts = tyArgs as in (ts, length as - length ts)
+
+-- | A kind argument as a type-level term; a row erases to its kind.
 kargType :: KArgF -> KTerm
 kargType k = case k of
   NatLitK n -> NatLitT n
   VoidK x -> VoidT x
   StrLitK x -> StrLitT x
+  RowK _ -> VoidT KindRec
 
 kindOfK :: KArgF -> Kind
 kindOfK k = case k of
   NatLitK _ -> KindNat
   StrLitK _ -> KindStr
   VoidK x -> x
+  RowK _ -> KindRec
 data TypeM
   = -- | serialized data that is not deserialized (and may not be representable) in this segment
     Passthrough
@@ -1826,6 +1836,7 @@ instance Pretty KArgF where
   pretty (NatLitK n) = pretty n
   pretty (VoidK _) = "_"
   pretty (StrLitK s) = dquotes (pretty s)
+  pretty (RowK cols) = encloseSep "{" "}" ", " [pretty k <+> "=" <+> pretty t | (k, t) <- cols]
 
 instance Pretty TypeM where
   pretty Passthrough = "Passthrough"

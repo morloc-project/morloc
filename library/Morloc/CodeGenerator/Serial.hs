@@ -1204,6 +1204,18 @@ makeSerialAST m lang t0 = do
           t -> MM.throwSourcedError m $ "malformed stream handle type:" <+> pretty t
 
         dispatchAppF
+          -- Typed `Table n r`: a ground row surfaces as a SerialObject
+          -- NamTable carrying the column schema. The wire encoder emits
+          -- @T:K<entries>@ (or bare @T@ for a polymorphic row); @T@ is itself
+          -- the dispatch token to the Arrow C Data Interface path. Before the
+          -- test for type arguments, since a table has none.
+          | BT.isTableVar generalTypeName = case [cols | KiA (RowK cols) <- ts0] of
+              [recRs] -> do
+                colASTs <- mapM (\(k, tf) -> (,) k <$> makeSerialAST' gscope typepackers anc tf) recRs
+                checkTableColumns m colASTs
+                return $ SerialObject NamTable fv [] colASTs
+              _ ->
+                return $ SerialObject NamTable fv [] []
           | null runtimeTs = makeSerialAST' gscope typepackers anc (VarF fv)
           -- An applied `data` type that arrived unresolved. A record's field
           -- types come out of the pure weave, which cannot expand a `data`
@@ -1223,19 +1235,6 @@ makeSerialAST m lang t0 = do
           | generalTypeName == BT.ifileVar = SerialIFile fv <$> generalStorage
           | generalTypeName == BT.ostreamVar = SerialOStream fv <$> generalStorage
           | generalTypeName == BT.istreamVar = SerialIStream fv <$> generalStorage
-          -- Typed `Table n r`: when the Rec arg lowered to a ground record
-          -- (NamF NamRecord ...), surface it as a SerialObject NamTable
-          -- carrying the column schema. The wire encoder emits @T:K<entries>@
-          -- (or bare @T@ for empty / polymorphic-row); no concrete-type hint
-          -- is needed because @T@ is itself the dispatch token to the Arrow
-          -- C Data Interface path.
-          | BT.isTableVar generalTypeName = case runtimeTs of
-              [NamF _ _ _ recRs] -> do
-                colASTs <- mapM (\(k, tf) -> (,) k <$> makeSerialAST' gscope typepackers anc tf) recRs
-                checkTableColumns m colASTs
-                return $ SerialObject NamTable fv [] colASTs
-              _ ->
-                return $ SerialObject NamTable fv [] []
           | otherwise = case aliasShape of
               -- Outer alias body is list-shaped (`type Deque a = List a`,
               -- `type Vector n a = List a`, user-defined `type MyArr a = [a]`).
@@ -1747,6 +1746,7 @@ unweaveTypeF (VariantF (FV gv cv) _ _) = (VarU gv, VarU (cv2tv cv))
 -- | A kind argument has no concrete/general distinction; it is duplicated.
 unweaveArg :: ArgF -> (TypeU, TypeU)
 unweaveArg (TyA t) = unweaveTypeF t
+unweaveArg (KiA (RowK cols)) = unweaveTypeF (NamF NamRecord (FV anonRecordVar (CV "@REC")) [] cols)
 unweaveArg (KiA k) = let u = ktermU (kargType k) in (u, u)
 
 {- | Given a list of possible ways to (de)serialize data between two languages,

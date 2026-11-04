@@ -1,23 +1,20 @@
 {- |
 Module      : Morloc.CodeGenerator.ValueArgs
-Description : Which arguments of an applied type are runtime values
+Description : The declared kind of each argument of an applied type
 Copyright   : (c) Zebulun Arendsee, 2016-2026
 License     : Apache-2.0
 Maintainer  : z@morloc.io
 
 A type's non-`Type` parameters are erased (KIND-2): a dimension, a label or
-a table's row holds no value of its own. A ground row lowers to the shape of
-an anonymous record, so code that collects the values a pool marshals asks
-here rather than deciding by shape.
+a table's row holds no value of its own. A ground row has the shape of an
+anonymous record, so whether it is a row or a record type is read from the
+parameter it fills.
 -}
 module Morloc.CodeGenerator.ValueArgs
   ( declaredKinds
-  , valueArgsF
+  , argKinds
   , valueArgsT
-  , appValueArgs
   , appValueArgsT
-  , macroArgsF
-  , appMacroArgs
   ) where
 
 import qualified Data.Map as Map
@@ -35,64 +32,28 @@ declaredKinds gscope v n = case [ps | (ps, _, _, _, _) <- Map.findWithDefault []
     paramKind (Left (_, k)) = k
     paramKind (Right _) = KindType
 
--- | The arguments of @v@ that are runtime values. An argument is dropped
--- only when its declared parameter is not `Type`-kinded AND it has the
--- shape of a kind-level argument, so a wire shape that happens to line up
--- with the declaration never loses a value. An argument list that matches
--- no definition's arity drops Nat- and Str-shaped arguments, and a row
--- when the name declares a Rec-kinded parameter. A row under a table head
--- is dropped whatever the declaration says.
-valueArgsF :: Scope -> TVar -> [ArgF] -> [TypeF]
-valueArgsF gscope v = tyArgs . filterArgs gscope v isKind isRow
+-- | For each argument of @v@ applied to @n@ arguments: its declared kind,
+-- Nothing where no definition takes @n@ parameters, and whether a ground row
+-- there fills a Rec parameter rather than standing for a record type. A
+-- table's row is its row whatever the declaration says.
+argKinds :: Scope -> TVar -> Int -> [(Maybe Kind, Bool)]
+argKinds gscope v n = case declaredKinds gscope v n of
+  Just ks -> [(Just k, BT.isTableVar v || k /= KindType) | k <- ks]
+  Nothing -> replicate n (Nothing, BT.isTableVar v || takesRow)
   where
-    isKind (KiA _) = True
-    isKind _ = False
-    isRow (TyA (NamF NamRecord (FV r _) [] _)) = r == anonRecordVar
-    isRow _ = False
+    takesRow = or [k == KindRec | (ps, _, _, _, _) <- Map.findWithDefault [] v gscope, Left (_, k) <- ps]
 
--- | 'valueArgsF' for 'Type'.
+-- | The arguments of @v@ that are runtime values: its type arguments, less a
+-- ground row where 'argKinds' places a row.
 valueArgsT :: Scope -> TVar -> [ArgT] -> [Type]
-valueArgsT gscope v = tyArgs . filterArgs gscope v isKind isRow
+valueArgsT gscope v as =
+  [t | ((_, rowHere), TyA t) <- zip (argKinds gscope v (length as)) as, not (rowHere && isRow t)]
   where
-    isKind (KiA _) = True
-    isKind _ = False
-    isRow (TyA (NamT NamRecord r [] _)) = r == anonRecordVar
+    isRow (NamT NamRecord r [] _) = r == anonRecordVar
     isRow _ = False
 
 -- | The value arguments of an application, by its head; an application
 -- whose head is not a type name keeps every argument.
-appValueArgs :: Scope -> TypeF -> [ArgF] -> [TypeF]
-appValueArgs gscope (VarF (FV v _)) ts = valueArgsF gscope v ts
-appValueArgs _ _ ts = tyArgs ts
-
--- | The arguments a per-language form's @$N@ counts, and the number it
--- skips: no argument whose form fixes a non-Type kind, and no ground row
--- that fills a Rec parameter.
-macroArgsF :: Scope -> TVar -> [ArgF] -> ([TypeF], Int)
-macroArgsF gscope v ts = counted ts (valueArgsF gscope v ts)
-
--- | 'macroArgsF' by the head of an application.
-appMacroArgs :: Scope -> TypeF -> [ArgF] -> ([TypeF], Int)
-appMacroArgs gscope h ts = counted ts (appValueArgs gscope h ts)
-
-counted :: [ArgF] -> [TypeF] -> ([TypeF], Int)
-counted ts vs = (vs, length ts - length vs)
-
--- | 'appValueArgs' for 'Type'.
 appValueArgsT :: Scope -> Type -> [ArgT] -> [Type]
 appValueArgsT gscope (VarT v) ts = valueArgsT gscope v ts
 appValueArgsT _ _ ts = tyArgs ts
-
-filterArgs :: Scope -> TVar -> (a -> Bool) -> (a -> Bool) -> [a] -> [a]
-filterArgs gscope v isKind isRow args = case declaredKinds gscope v (length args) of
-  Just ks -> [a | (a, k) <- zip args ks, keep k a]
-  Nothing -> [a | a <- args, not (isKind a || (takesRow && isRow a))]
-  where
-    keep k a
-      | tableRow a = False
-      | k == KindType = True
-      | otherwise = not (isKind a || isRow a)
-    tableRow a = BT.isTableVar v && isRow a
-    takesRow =
-      BT.isTableVar v
-        || or [k == KindRec | (ps, _, _, _, _) <- Map.findWithDefault [] v gscope, Left (_, k) <- ps]

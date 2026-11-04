@@ -26,6 +26,7 @@ module Morloc.CodeGenerator.Infer
   , evalGeneralStep
   , weave
   , argWith
+  , retagArg
   , groundK
   , kindArgOf
   ) where
@@ -33,7 +34,7 @@ module Morloc.CodeGenerator.Infer
 import qualified Control.Monad.State as CMS
 import Data.Functor.Const (Const (..))
 import Morloc.CodeGenerator.Namespace
-import Morloc.CodeGenerator.ValueArgs (appValueArgsT, declaredKinds, valueArgsT)
+import Morloc.CodeGenerator.ValueArgs (appValueArgsT, argKinds, declaredKinds, valueArgsT)
 import Morloc.Data.Doc
 import qualified Morloc.Data.Map as Map
 import qualified Data.Set as Set
@@ -214,7 +215,7 @@ undeterminedError i0 vs = do
 inferConcreteTypeStructural
   :: Lang -> Int -> Scope -> TypeU -> TypeU -> MorlocMonad TypeF
 inferConcreteTypeStructural lang i gscope g c
-  | Just r <- structuralCompound (inferConcreteTypeStructural lang i gscope) g c = hostConvention lang r
+  | Just r <- structuralCompound gscope (inferConcreteTypeStructural lang i gscope) g c = hostConvention lang r
   | otherwise = case (g, c) of
   -- A payload-bearing `data`. Its arms' field types have to be resolved to
   -- the target language here rather than in 'weave', which is pure and so
@@ -384,7 +385,8 @@ resolveArgs :: Lang -> Int -> (TVar, [TypeU]) -> MorlocMonad [ArgF]
 resolveArgs lang i key@(_, args) = do
   resolving <- CMS.gets stateVariantArgsResolving
   CMS.modify (\st -> st { stateVariantArgsResolving = Set.insert key resolving })
-  ps <- mapM (argWith (argType lang i)) args
+  gscope <- MM.getGeneralScope
+  ps <- argsWith gscope (fst key) (argType lang i) args
   CMS.modify (\st -> st { stateVariantArgsResolving = resolving })
   return ps
 
@@ -427,7 +429,7 @@ inferConcreteTypeStructuralRest lang i gscope g c = case (g, c) of
             <> "\ntype's. A parameter the native macro does not interpolate"
             <> "\nis still listed."
       else do
-        argTfs <- mapM (argWith (inferConcreteType lang . Idx i . typeOf)) ts
+        argTfs <- argsWith gscope vG (inferConcreteType lang . Idx i . typeOf) ts
         return $ AppF (VarF (FV vG (CV vC))) argTfs
   -- AppU/AppU shortcut: weave the head pairwise, recurse on each
   -- (g, c) arg pair so a nested AppU/VarU on the arg side still
@@ -440,8 +442,7 @@ inferConcreteTypeStructuralRest lang i gscope g c = case (g, c) of
   -- 'weave', which steps the alias and re-weaves on the body's head.
   (AppU (VarU vG) ts1, AppU (VarU (TV vC)) ts2)
     | appArgsCorrespond ts1 ts2 -> do
-        argTfs <- zipWithM
-          (argWith2 (inferConcreteTypeStructural lang i gscope)) ts1 ts2
+        argTfs <- argsWith2 gscope vG (inferConcreteTypeStructural lang i gscope) ts1 ts2
         return $ AppF (VarF (FV vG (CV vC))) argTfs
   -- Everything else (VarU/VarU, Nat*, leaves, mismatched shapes) routes
   -- through the pure weave + scope-step fallbacks.
@@ -493,7 +494,7 @@ inferConcreteTypeUniversal lang i t@(type2typeu -> generalType) = do
 inferConcreteTypeUniversalStructural
   :: Lang -> Int -> Scope -> Type -> TypeU -> TypeU -> MorlocMonad TypeF
 inferConcreteTypeUniversalStructural lang i gscopeUni t g c
-  | Just r <- structuralCompound (inferConcreteTypeUniversalStructural lang i gscopeUni t) g c = hostConvention lang r
+  | Just r <- structuralCompound gscopeUni (inferConcreteTypeUniversalStructural lang i gscopeUni t) g c = hostConvention lang r
   | otherwise = case (g, c) of
   -- A `data` type resolves to its arms here exactly as it does in the
   -- module-scoped walk. Without this, the wire form of a parameterized
@@ -517,12 +518,11 @@ inferConcreteTypeUniversalStructural lang i gscopeUni t g c
             <> "\ntype's. A parameter the native macro does not interpolate"
             <> "\nis still listed."
       else do
-        argTfs <- mapM (argWith (inferConcreteTypeUniversal lang i . typeOf)) ts
+        argTfs <- argsWith gscopeUni vG (inferConcreteTypeUniversal lang i . typeOf) ts
         return $ AppF (VarF (FV vG (CV vC))) argTfs
   (AppU (VarU vG) ts1, AppU (VarU (TV vC)) ts2)
     | appArgsCorrespond ts1 ts2 -> do
-        argTfs <- zipWithM
-          (argWith2 (inferConcreteTypeUniversalStructural lang i gscopeUni t)) ts1 ts2
+        argTfs <- argsWith2 gscopeUni vG (inferConcreteTypeUniversalStructural lang i gscopeUni t) ts1 ts2
         return $ AppF (VarF (FV vG (CV vC))) argTfs
   _ | Just g' <- stepTowardCompound gscopeUni g c ->
         inferConcreteTypeUniversalStructural lang i gscopeUni t g' c
@@ -594,9 +594,10 @@ hostConvention lang built = do
 -- keeps its morloc name instead of its instance name.
 structuralCompound
   :: Applicative f
-  => (TypeU -> TypeU -> f TypeF)
+  => Scope
+  -> (TypeU -> TypeU -> f TypeF)
   -> TypeU -> TypeU -> Maybe (f TypeF)
-structuralCompound walk g c = case (g, c) of
+structuralCompound scope walk g c = case (g, c) of
   -- A suspension is a closure of no arguments in every pool.
   (EffectU _ g', EffectU _ c') -> Just $ FunF [] <$> walk g' c'
   (OptionalU g', OptionalU c') -> Just $ OptionalF <$> walk g' c'
@@ -606,7 +607,7 @@ structuralCompound walk g c = case (g, c) of
   (NamU o1 v1 ts1 rs1, NamU o2 v2 ts2 rs2)
     | o1 == o2 && length ts1 == length ts2 && length rs1 == length rs2 ->
         Just $ NamF o1 (FV v1 (CV (unTVar v2)))
-          <$> zipWithM (argWith2 walk) ts1 ts2
+          <$> argsWith2 scope v1 walk ts1 ts2
           <*> zipWithM (\(_, g') (k, c') -> (,) k <$> walk g' c') rs1 rs2
   _ -> Nothing
 
@@ -625,7 +626,7 @@ stepTowardCompound scope g c = case T.evaluateStep scope g of
   _ -> Nothing
   where
     corresponds g' = isJust (dataHeadOf scope g')
-      || isJust (structuralCompound (\_ _ -> Const ()) g' c)
+      || isJust (structuralCompound scope (\_ _ -> Const ()) g' c)
       || case (g', c) of
            (AppU (VarU _) ts1, AppU (VarU _) ts2) ->
              snd (partitionKindArgs kindOfU ts1) == 0 && appArgsCorrespond ts1 ts2
@@ -675,7 +676,7 @@ inferConcreteTypeUUniversal lang generalType = do
 weave :: Scope -> TypeU -> TypeU -> Either MDoc TypeF
 weave gscope = w Set.empty
   where
-    w anc t1 t2 | Just r <- structuralCompound (w anc) t1 t2 = r
+    w anc t1 t2 | Just r <- structuralCompound gscope (w anc) t1 t2 = r
     -- A `data` type weaves to 'EnumF' rather than a plain 'VarF' so the
     -- constructor names reach codegen. Making this the canonical TypeF for
     -- an enum is what lets every backend recognize one structurally --
@@ -710,7 +711,7 @@ weave gscope = w Set.empty
     -- performs for type-level mismatches; we just need to opt the AppU
     -- branch into it on arg-length failure instead of failing outright.
     w anc t1@(AppU h1 ts1) t2@(AppU h2 ts2) =
-      case (AppF <$> w anc h1 h2 <*> weaveArgs anc ts1 ts2) of
+      case (AppF <$> w anc h1 h2 <*> weaveArgs anc (slotsOf h1 (length ts1)) ts1 ts2) of
         r@(Right _) -> r
         Left _ -> wStep anc t1 t2
     w anc (LabeledU _ t1) t2 = w anc t1 t2
@@ -728,15 +729,19 @@ weave gscope = w Set.empty
     -- A kind argument is decided by the general side alone and consumes the
     -- concrete argument of its kind when the concrete form kept one; a
     -- newtype's expansion may have dropped it.
-    weaveArgs :: Set.Set TVar -> [TypeU] -> [TypeU] -> Either MDoc [ArgF]
-    weaveArgs _ [] [] = Right []
-    weaveArgs _ [] cs
+    slotsOf (VarU v) n = argKinds gscope v n
+    slotsOf _ n = replicate n (Nothing, False)
+
+    weaveArgs :: Set.Set TVar -> [(Maybe Kind, Bool)] -> [TypeU] -> [TypeU] -> Either MDoc [ArgF]
+    weaveArgs _ _ [] [] = Right []
+    weaveArgs _ _ [] cs
       | all (isJust . kindOfU) cs = Right []  -- trailing kind args in concrete only
       | otherwise = Left "concrete type has more non-Nat args than general type in weave"
-    weaveArgs anc (g : gs) cs
-      | Just k <- kindArgOf g = (KiA k :) <$> weaveArgs anc gs (dropKindHead (kindOfK k) cs)
-    weaveArgs anc (g:gs) (c:cs) = (:) <$> (TyA <$> w anc g c) <*> weaveArgs anc gs cs
-    weaveArgs _ _ [] = Left "general type has more non-Nat args than concrete type in weave"
+    weaveArgs anc sls (g : gs) cs
+      | Just k <- kindArgOf g = (KiA k :) <$> weaveArgs anc (drop 1 sls) gs (dropKindHead (kindOfK k) cs)
+    weaveArgs anc sls (g:gs) (c:cs) =
+      (:) <$> (retagArg (headSlot sls) <$> w anc g c) <*> weaveArgs anc (drop 1 sls) gs cs
+    weaveArgs _ _ _ [] = Left "general type has more non-Nat args than concrete type in weave"
 
     -- Drop a leading concrete argument of kind @k@, if there is one.
     dropKindHead :: Kind -> [TypeU] -> [TypeU]
@@ -746,12 +751,32 @@ weave gscope = w Set.empty
 -- | An applied argument: a kind argument, decided by the general type alone
 -- (an alias of a kind was expanded before code generation), or the type the
 -- walk gives.
-argWith :: Applicative f => (TypeU -> f TypeF) -> TypeU -> f ArgF
-argWith walk g = maybe (TyA <$> walk g) (pure . KiA) (kindArgOf g)
+argWith :: Applicative f => (Maybe Kind, Bool) -> (TypeU -> f TypeF) -> TypeU -> f ArgF
+argWith sl walk g = maybe (retagArg sl <$> walk g) (pure . KiA) (kindArgOf g)
+
+-- | The arguments of @v@, each at its declared position.
+argsWith :: Applicative f => Scope -> TVar -> (TypeU -> f TypeF) -> [TypeU] -> f [ArgF]
+argsWith scope v walk gs = sequenceA (zipWith (\sl g -> argWith sl walk g) (argKinds scope v (length gs)) gs)
+
+-- | 'argsWith' for a walk over general arguments and their concrete forms.
+argsWith2 :: Applicative f => Scope -> TVar -> (TypeU -> TypeU -> f TypeF) -> [TypeU] -> [TypeU] -> f [ArgF]
+argsWith2 scope v walk gs cs = sequenceA (zipWith3 (argWith2 walk) (argKinds scope v (length gs)) gs cs)
 
 -- | 'argWith' for a walk over a general argument and its concrete form.
-argWith2 :: Applicative f => (TypeU -> TypeU -> f TypeF) -> TypeU -> TypeU -> f ArgF
-argWith2 walk g c = argWith (`walk` c) g
+argWith2 :: Applicative f => (TypeU -> TypeU -> f TypeF) -> (Maybe Kind, Bool) -> TypeU -> TypeU -> f ArgF
+argWith2 walk sl g c = argWith sl (`walk` c) g
+
+-- | A woven argument at a declared position: a ground row that fills a Rec
+-- parameter is that row, and a type nothing determined at a position of
+-- another kind is that kind's erased placeholder.
+retagArg :: (Maybe Kind, Bool) -> TypeF -> ArgF
+retagArg (_, True) (NamF NamRecord (FV r _) [] cols) | r == anonRecordVar = KiA (RowK cols)
+retagArg (Just k, _) (UnkF _) | k /= KindType = KiA (VoidK k)
+retagArg _ t = TyA t
+
+headSlot :: [(Maybe Kind, Bool)] -> (Maybe Kind, Bool)
+headSlot (sl : _) = sl
+headSlot [] = (Nothing, False)
 
 -- | A kind argument as a pool sees it: its value when ground, else the
 -- erased placeholder of its kind.

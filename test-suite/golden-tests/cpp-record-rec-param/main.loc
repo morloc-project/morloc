@@ -1,5 +1,6 @@
---' A C++ record form with a Rec parameter declares only its type parameters
-module main (run)
+--' A C++ record form with a Rec parameter declares only its type parameters,
+--' whether the record comes from C++ or from a record literal
+module main (run, viaLiteral)
 
 import root
 import root-cpp
@@ -15,3 +16,6 @@ getX :: Foo {y = Int} Int -> Int
 
 run :: Int -> Int
 run k = getX (mkFoo k)
+
+viaLiteral :: Int -> Int
+viaLiteral k = getX ({x = k} :: Foo {y = Int} Int)

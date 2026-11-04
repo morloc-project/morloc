@@ -43,7 +43,6 @@ import Morloc.CodeGenerator.LanguageDescriptor (ldAllowStringNull, loadLangDescr
 import qualified Morloc.DataFiles as DF
 import qualified Morloc.Language as ML
 import Morloc.CodeGenerator.Namespace
-import Morloc.CodeGenerator.ValueArgs (appMacroArgs)
 import Morloc.Data.Doc
 import qualified Morloc.Data.Map as Map
 import qualified Morloc.LangRegistry as LR
@@ -1216,8 +1215,8 @@ wrapBoundInToIndex lang midx boundType expr = do
 -- elsewhere uses its own language-specific renderers.
 renderConcreteForm :: Scope -> TypeF -> Text
 renderConcreteForm _ (VarF (FV _ cv)) = unCVar cv
-renderConcreteForm gscope (AppF h@(VarF (FV _ cv)) args) =
-  let (typeArgs, kindCount) = appMacroArgs gscope h args
+renderConcreteForm gscope (AppF (VarF (FV _ cv)) args) =
+  let (typeArgs, kindCount) = kindSplit args
   in Macro.expandMacro (unCVar cv) (map (renderConcreteForm gscope) typeArgs) kindCount
 renderConcreteForm _ (NamF _ (FV _ cv) _ _) = unCVar cv
 renderConcreteForm _ (RecF (FV _ cv)) = unCVar cv
@@ -1228,7 +1227,7 @@ renderConcreteForm gscope (FunF ts t) =
   "(" <> T.intercalate "," (map (renderConcreteForm gscope) ts) <> ")->" <> renderConcreteForm gscope t
 renderConcreteForm _ (UnkF (FV _ cv)) = unCVar cv
 renderConcreteForm gscope (AppF h args) =
-  let (typeArgs, _) = appMacroArgs gscope h args
+  let (typeArgs, _) = kindSplit args
   in renderConcreteForm gscope h <> "<" <> T.intercalate "," (map (renderConcreteForm gscope) typeArgs) <> ">"
 
 -- | Decide whether a literal at native type with outer TVar @nativeTv@
@@ -1263,7 +1262,7 @@ maybePackableWrap midx lang nativeT wireT = do
           -- alike for every argument, so the arguments of a form the type
           -- declares are compared too. A type with no form of its own here
           -- has its representation's (NEWT-2).
-          typeArgs (AppF h args) = Just (map (renderConcreteForm gscope) (fst (appMacroArgs gscope h args)))
+          typeArgs (AppF _ args) = Just (map (renderConcreteForm gscope) (fst (kindSplit args)))
           typeArgs _ = Nothing
       ownForm <- Map.member nativeTv <$> MM.getConcreteScope lang
       let argsAgree = case (typeArgs nativeTF, typeArgs wireTF) of

@@ -8,7 +8,8 @@ module ValueArgsTests (valueArgsTests, kindOfTests) where
 
 import qualified Data.Map as Map
 import Morloc.CodeGenerator.Namespace
-import Morloc.CodeGenerator.ValueArgs (appValueArgs, valueArgsF, valueArgsT, appMacroArgs)
+import Morloc.CodeGenerator.Infer (retagArg)
+import Morloc.CodeGenerator.ValueArgs (argKinds, valueArgsT)
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit
 
@@ -48,35 +49,41 @@ row = NamF NamRecord (FV anonRecordVar (CV "@REC")) [] [(Key "x", int)]
 rowT :: Type
 rowT = NamT NamRecord anonRecordVar [] [(Key "x", VarT (TV "Int"))]
 
+-- | The type arguments the code generator keeps: each argument tagged at its
+-- declared position, as the weave tags it.
+woven :: Scope -> TVar -> [ArgF] -> [TypeF]
+woven g v as = tyArgs (zipWith tag (argKinds g v (length as)) as)
+  where
+    tag sl (TyA t) = retagArg sl t
+    tag _ a = a
+
 valueArgsTests :: TestTree
 valueArgsTests =
   testGroup
     "valueArgs (kind-level arguments are not values, KIND-2)"
     [ testCase "a table's dimension and row are not values" $
-        valueArgsF gscope (TV "Table") [KiA NatVoidK, TyA row] @?= []
+        woven gscope (TV "Table") [KiA NatVoidK, TyA row] @?= []
     , testCase "a ground row is dropped where a polymorphic one would be" $
-        valueArgsF gscope (TV "Frame") [TyA row, TyA real] @?= [real]
+        woven gscope (TV "Frame") [TyA row, TyA real] @?= [real]
     , testCase "a value at a kind-level position is kept (wire shapes do not line up)" $
-        valueArgsF gscope (TV "FixedPair") [TyA int, TyA int] @?= [int, int]
+        woven gscope (TV "FixedPair") [TyA int, TyA int] @?= [int, int]
     , testCase "an argument list matching no declared arity drops kind shapes" $
-        valueArgsF gscope (TV "Frame") [KiA NatVoidK, TyA row, TyA real] @?= [real]
+        woven gscope (TV "Frame") [KiA NatVoidK, TyA row, TyA real] @?= [real]
     , testCase "a row is kept under a mismatched head with no Rec parameter" $
-        valueArgsF gscope (TV "FixedPair") [TyA row, TyA int, TyA int] @?= [row, int, int]
+        woven gscope (TV "FixedPair") [TyA row, TyA int, TyA int] @?= [row, int, int]
     , testCase "a definition is chosen by arity" $
-        valueArgsF overloaded (TV "Frame") [TyA row, TyA real] @?= [real]
+        woven overloaded (TV "Frame") [TyA row, TyA real] @?= [real]
     , testCase "an undeclared head drops only kind-shaped arguments" $
-        valueArgsF gscope (TV "Foo") [KiA (NatLitK 3), TyA row, TyA int] @?= [row, int]
+        woven gscope (TV "Foo") [KiA (NatLitK 3), TyA row, TyA int] @?= [row, int]
     , testCase "an undeclared table head drops its row" $
-        valueArgsF Map.empty (TV "Table") [KiA NatVoidK, TyA row] @?= []
-    , testCase "an application is decided by its head" $
-        appValueArgs gscope (VarF (FV (TV "Table") (CV "arrow"))) [KiA NatVoidK, TyA row] @?= []
+        woven Map.empty (TV "Table") [KiA NatVoidK, TyA row] @?= []
     , testCase "the Type form agrees" $
         valueArgsT gscope (TV "Table") [KiA NatVoidT, TyA rowT] @?= []
     , testCase "a table head declared without parameters still drops its row" $
-        valueArgsF bare (TV "Table") [KiA NatVoidK, TyA row, TyA int] @?= [int]
+        woven bare (TV "Table") [KiA NatVoidK, TyA row, TyA int] @?= [int]
     , testCase "the Type form drops labels as the TypeF form does" $
         ( valueArgsT Map.empty (TV "Foo") [KiA (StrLitT "lbl"), KiA StrVoidT, TyA (VarT (TV "Int"))]
-        , valueArgsF Map.empty (TV "Foo") [KiA (StrLitK "lbl"), KiA (VoidK KindStr), TyA int] )
+        , woven Map.empty (TV "Foo") [KiA (StrLitK "lbl"), KiA (VoidK KindStr), TyA int] )
           @?= ([VarT (TV "Int")], [int])
     ]
 
@@ -92,7 +99,7 @@ kindOfTests =
           @?= [RecVoidU, ListVoidU, SetVoidU]
     , testCase "a Str argument is a kind argument at every level" $
         ( let as = map argOf [StrLitU "id", NatLitU 1, RecVarU (TV "r"), VarU (TV "Real")] in (tyArgs as, length as - length (tyArgs as))
-        , appMacroArgs Map.empty (VarF (FV (TV "Foo") (CV "foo"))) [KiA (StrLitK "id"), KiA (NatLitK 1), KiA (VoidK KindRec), TyA real]
+        , kindSplit [KiA (StrLitK "id"), KiA (NatLitK 1), KiA (VoidK KindRec), TyA real]
         , partitionKindArgs kindOfU [StrLitU "id", NatLitU 1, RecVarU (TV "r"), VarU (TV "Real")] )
           @?= (([VarT (TV "Real")], 3), ([real], 3), ([VarU (TV "Real")], 3))
     , testCase "a ground row's kind depends on its parameter, an open row's does not" $
