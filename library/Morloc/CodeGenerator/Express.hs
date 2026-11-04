@@ -1193,9 +1193,6 @@ renderConcreteForm gscope (AppF h@(VarF (FV _ cv)) args) =
   let (typeArgs, kindCount) = appMacroArgs gscope h args
   in Macro.expandMacro (unCVar cv) (map (renderConcreteForm gscope) typeArgs) kindCount
 renderConcreteForm _ (NamF _ (FV _ cv) _ _) = unCVar cv
-renderConcreteForm _ (NatLitF n) = T.pack (show n)
-renderConcreteForm _ (VoidF _) = "_"
-renderConcreteForm _ (StrLitF s) = s
 renderConcreteForm _ (RecF (FV _ cv)) = unCVar cv
 renderConcreteForm _ (EnumF (FV _ cv) _ _) = unCVar cv
 renderConcreteForm _ (VariantF (FV _ cv) _ _) = unCVar cv
@@ -1958,8 +1955,7 @@ expressPolyExpr _ pl pc (AnnoS (Idx midx t) c e@(LstS _)) = do
 -- user aliases like @FixedPair (n :: Nat) a@ whose type args (NatLit n,
 -- a) are NOT the slot types; the cross-language wrap inside
 -- expressContainer would then use a Nat literal as the foreign call's
--- parent type and surface downstream as @makeSerialAST' error on type:
--- NatLitF n@. Falling through to the reduce-and-retry below expands the
+-- parent type and fail downstream in makeSerialAST'. Falling through to the reduce-and-retry below expands the
 -- alias to its body's tuple constructor.
 expressPolyExpr _ parentLang pc (AnnoS (Idx midx (AppT (VarT v) ts)) (Idx cidx lang, args) (TupS xs))
   | v == BT.tuple (length xs)

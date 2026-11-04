@@ -287,7 +287,7 @@ patternSetter makeTuple makeRecord accessTuple accessRecord finalizeSet dat0 t0 
         (AppF _ ts1) ->
           makeTuple t1
             [ rebuild (accessTuple t1 dat1 i) t (into (Left i) ps)
-            | (i, t) <- zip [0 ..] ts1
+            | (i, t) <- zip [0 ..] (tyArgs ts1)
             ]
         (NamF _ _ _ rs1) ->
           makeRecord t1
@@ -982,13 +982,10 @@ collectRecords e0@(SerialManifold i0 _ _ _ _) =
     seekRecs m (NamF _ v@(FV _ (CV "struct")) _ rs) = [(v, m, rs)] <> concatMap (seekRecs m . snd) rs
     seekRecs m (NamF _ _ _ rs) = concatMap (seekRecs m . snd) rs
     seekRecs m (FunF ts t) = concatMap (seekRecs m) (t : ts)
-    seekRecs m (AppF t ts) = concatMap (seekRecs m) (t : ts)
+    seekRecs m (AppF t ts) = concatMap (seekRecs m) (t : tyArgs ts)
     seekRecs _ (UnkF _) = []
     seekRecs _ (VarF _) = []
     seekRecs m (OptionalF t) = seekRecs m t
-    seekRecs _ (NatLitF _) = []
-    seekRecs _ (VoidF _) = []
-    seekRecs _ (StrLitF _) = []
     -- A back-reference contributes nothing new: the record it names
     -- is already visited at the NamF site that introduced the cycle.
     seekRecs _ (RecF _) = []

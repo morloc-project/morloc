@@ -1747,8 +1747,9 @@ structuralAliasesIn scope t = case structuralAliasHead scope t of
   Just (v, _) -> [v]
   Nothing -> concatMap (structuralAliasesIn scope) (typeUChildren t)
 
--- | The alias heading a type, and the arrow, effect or optional type it
--- names.
+-- | The alias heading a type, and the arrow, effect or optional type, or the
+-- argument of another kind (ALIAS-11: @type D = 3@), it names. Expanded
+-- before code generation, so no later pass sees such an alias.
 structuralAliasHead :: Scope -> TypeU -> Maybe (TVar, TypeU)
 structuralAliasHead scope t = do
   v <- TE.headName t
@@ -1756,6 +1757,7 @@ structuralAliasHead scope t = do
     t'@(FunU _ _) -> Just (v, t')
     t'@(EffectU _ _) -> Just (v, t')
     t'@(OptionalU _) -> Just (v, t')
+    t' | isJust (kindOfU t') -> Just (v, t')
     _ -> Nothing
 
 -- | Apply an action to each immediate child type. An application's head is

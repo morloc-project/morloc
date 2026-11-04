@@ -1,3 +1,4 @@
+{-# LANGUAGE DeriveTraversable #-}
 {-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE OverloadedStrings #-}
@@ -25,7 +26,12 @@ module Morloc.CodeGenerator.Namespace
 
     -- ** Types used in final translations
   , TypeM (..)
-  , TypeF (.., NatVoidF, StrVoidF)
+  , TypeF (..)
+  , TArg (..)
+  , KArgF (.., NatVoidK)
+  , ArgF
+  , tyArgs
+  , kargType
   , TypeS (..)
   , FVar (..)
 
@@ -33,7 +39,7 @@ module Morloc.CodeGenerator.Namespace
     --
     -- The @$N@ index in a per-language form counts Type-kinded arguments
     -- only.
-  , kindOfF
+  , kindOfK
 
     -- ** Typeclasses
   , HasTypeF (..)
@@ -180,8 +186,8 @@ data TypeF
   = UnkF FVar -- this should be parameterized by `Type`, since the general type should be known
   | VarF FVar
   | FunF [TypeF] TypeF
-  | AppF TypeF [TypeF]
-  | NamF NamType FVar [TypeF] [(Key, TypeF)]
+  | AppF TypeF [ArgF]
+  | NamF NamType FVar [ArgF] [(Key, TypeF)]
   -- | Back-reference to a record whose definition appears as a NamF
   -- somewhere on the enclosing TypeF path. Introduced by guarded
   -- self-recursive records (e.g. @record Tree where children :: [Tree]@):
@@ -204,30 +210,49 @@ data TypeF
   -- parameters: a user's per-language form may be a template, and the
   -- template is instantiated with them. A type the compiler generates
   -- has a monomorphic name per instantiation and leaves them unread.
-  | EnumF FVar [TypeF] [T.Text]
+  | EnumF FVar [ArgF] [T.Text]
   -- | A `data` type with at least one payload-bearing constructor: the
   -- type's name, its type arguments, and each arm's name with its field
   -- types. Position in the list is the wire tag.
-  | VariantF FVar [TypeF] [(T.Text, [TypeF])]
+  | VariantF FVar [ArgF] [(T.Text, [TypeF])]
   | OptionalF TypeF
-  | NatLitF Integer
-  | VoidF Kind -- ^ An erased placeholder of a non-Type kind
-  | StrLitF Text
   deriving (Show, Ord, Eq)
 
-pattern NatVoidF :: TypeF
-pattern NatVoidF = VoidF KindNat
+-- | One argument of an applied type: a type, or an argument of another kind
+-- (KIND-2), which holds no value but which a native form's macro skips and a
+-- dimension check reads.
+data TArg k t = TyA t | KiA k
+  deriving (Show, Ord, Eq, Functor, Foldable, Traversable)
 
-pattern StrVoidF :: TypeF
-pattern StrVoidF = VoidF KindStr
+-- | A woven argument that is not a type: a Nat or Str value, or an erased
+-- placeholder of its kind.
+data KArgF
+  = NatLitK Integer
+  | VoidK Kind
+  | StrLitK Text
+  deriving (Show, Ord, Eq)
 
--- | 'kindOfT' for a concrete type.
-kindOfF :: TypeF -> Maybe Kind
-kindOfF t = case t of
-  NatLitF _ -> Just KindNat
-  StrLitF _ -> Just KindStr
-  VoidF k -> Just k
-  _ -> Nothing
+pattern NatVoidK :: KArgF
+pattern NatVoidK = VoidK KindNat
+
+type ArgF = TArg KArgF TypeF
+
+-- | The type arguments, which the @$N@ of a native form counts.
+tyArgs :: [TArg k t] -> [t]
+tyArgs as = [t | TyA t <- as]
+
+-- | A kind argument as a type-level term.
+kargType :: KArgF -> Type
+kargType k = case k of
+  NatLitK n -> NatLitT n
+  VoidK x -> VoidT x
+  StrLitK x -> StrLitT x
+
+kindOfK :: KArgF -> Kind
+kindOfK k = case k of
+  NatLitK _ -> KindNat
+  StrLitK _ -> KindStr
+  VoidK x -> x
 data TypeM
   = -- | serialized data that is not deserialized (and may not be representable) in this segment
     Passthrough
@@ -250,21 +275,19 @@ data TypeS
 data SerialAST
   = -- | use an (un)pack function to simplify an object
     SerialPack FVar (TypePacker, SerialAST)
-  -- The (Maybe TypeF) dim slot distinguishes three cases that all map to a
-  -- list at the wire level but to different C++/Py macro arities:
-  --   Nothing            -- no Nat slot (plain List a)
-  --   Just (NatLitF n)   -- Nat slot with known value (Vector 10 a)
-  --   Just NatVoidF      -- Nat slot, value unknown at this site (Vector n a)
-  -- Both Just forms keep the slot count aligned with the concrete macro
-  -- template's positional `$N` indices; only Nothing emits a single-arg AppF.
-  | SerialList FVar (Maybe TypeF) SerialAST
+  -- The dim slot distinguishes three cases that all map to a list at the
+  -- wire level but to different C++/Py macro arities:
+  --   Nothing             -- no Nat slot (plain List a)
+  --   Just (NatLitK n)    -- Nat slot with known value (Vector 10 a)
+  --   Just NatVoidK       -- Nat slot, value unknown at this site (Vector n a)
+  | SerialList FVar (Maybe KArgF) SerialAST
   | SerialTuple FVar [SerialAST]
   | -- | Make a record, table, or object. The parameters indicate
     --   1) NamType - record/table/object
     --   2) FVar - telling the name of the object (e.g., "Person")
-    --   3) [TypeF] - the types of the parameters (used as parameters in C++ templates, e.g., map<int, map<int,string>>)
+    --   3) [ArgF] - the arguments (used as parameters in C++ templates, e.g., map<int, map<int,string>>)
     --   4) [(FVar, SerialAST)] - entries with keys for concrete and general cases
-    SerialObject NamType FVar [TypeF] [(Key, SerialAST)]
+    SerialObject NamType FVar [ArgF] [(Key, SerialAST)]
   | SerialReal FVar
   | SerialFloat32 FVar
   | SerialFloat64 FVar
@@ -305,12 +328,12 @@ data SerialAST
     -- meant when several nest on the path (an @L Int@ inside an @L Str@
     -- may refer back to either); they are the arguments the ancestor was
     -- built with, and a bare name carries none.
-    SerialRec FVar [TypeF]
+    SerialRec FVar [ArgF]
   | -- | A `data` type with argument-free constructors: one byte on the
     -- wire, tagged by the constructor's position in this list. The names
     -- travel in the schema so JSON renders the constructor rather than
     -- the ordinal and the runtime can reject an out-of-range tag.
-    SerialEnum FVar [TypeF] [T.Text]
+    SerialEnum FVar [ArgF] [T.Text]
   | -- | A `data` type with payload-bearing arms. Sixteen bytes on the
     -- wire -- a tag and a pointer -- with each arm's fields serialized
     -- as the tuple the pointer leads to. The type arguments ride along
@@ -322,7 +345,7 @@ data SerialAST
     -- least one constructor, so nothing else has that shape. It keeps the
     -- arguments because a renderer that declares the type by name needs
     -- them to spell the instantiation.
-    SerialVariant FVar [TypeF] [(T.Text, [SerialAST])]
+    SerialVariant FVar [ArgF] [(T.Text, [SerialAST])]
   | -- | depending on the language, this may or may not raise an error down the
     -- line, the parameter contains the variable name, which is useful only for
     -- source code comments.
@@ -335,7 +358,7 @@ instance Pretty SerialAST where
       "SerialPack"
         <+> pretty v
         <+> braces (vsep [pretty packer, pretty s])
-  pretty (SerialList _ dim ef) = parens $ "SerialList" <+> viaShow dim <+> pretty ef
+  pretty (SerialList _ dim ef) = parens $ "SerialList" <+> maybe "-" pretty dim <+> pretty ef
   pretty (SerialTuple _ efs) = parens $ "SerialTuple" <+> tupled (map pretty efs)
   pretty (SerialObject o _ vs rs) =
     parens $
@@ -824,12 +847,12 @@ data NativeExpr
   | DeserializeN TypeF SerialAST SerialExpr
   | ExeN TypeF ExecutableExpressionPool
   | -- data types
-    -- See PolyList in PolyExpr above. The [TypeF] is the FULL applied
-    -- type args (including NatLitF for phantom Nat dims). 'typeFof'
+    -- See PolyList in PolyExpr above. The arguments are the FULL applied
+    -- arguments (including a phantom Nat dim). 'typeFof'
     -- reconstructs `AppF (VarF v) args` from these.
-    ListN FVar [TypeF] [NativeExpr]
+    ListN FVar [ArgF] [NativeExpr]
   | TupleN FVar [NativeExpr]
-  | RecordN NamType FVar [TypeF] [(Key, NativeExpr)]
+  | RecordN NamType FVar [ArgF] [(Key, NativeExpr)]
   | LogN FVar Bool
   | RealN FVar RealLit
   | IntN FVar Integer
@@ -1285,9 +1308,9 @@ data NativeExpr_ nm se ne sr nr
   | DeserializeN_ TypeF SerialAST se
   | ExeN_ TypeF ExecutableExpressionPool
   | -- data types
-    ListN_ FVar [TypeF] [ne]
+    ListN_ FVar [ArgF] [ne]
   | TupleN_ FVar [ne]
-  | RecordN_ NamType FVar [TypeF] [(Key, ne)]
+  | RecordN_ NamType FVar [ArgF] [(Key, ne)]
   | LogN_ FVar Bool
   | RealN_ FVar RealLit
   | IntN_ FVar Integer
@@ -1555,7 +1578,7 @@ instance HasTypeF NativeExpr where
   typeFof (DeserializeN t _ _) = t
   typeFof (ExeN t _) = t
   typeFof (ListN v args _) = AppF (VarF v) args
-  typeFof (TupleN v (map typeFof -> ps)) = AppF (VarF v) ps
+  typeFof (TupleN v (map typeFof -> ps)) = AppF (VarF v) (map TyA ps)
   typeFof (RecordN o n ps (map (second typeFof) -> rs)) = NamF o n ps rs
   typeFof (LogN v _) = VarF v
   typeFof (RealN v _) = VarF v
@@ -1799,7 +1822,7 @@ instance Pretty TypeF where
   pretty (UnkF v) = "*" <> pretty v
   pretty (VarF v) = pretty v
   pretty (FunF ts t) = parens (hsep (punctuate " ->" (map pretty (ts <> [t]))))
-  pretty (AppF t ts) = parens (hsep (map pretty (t : ts)))
+  pretty (AppF t ts) = parens (hsep (pretty t : map pretty ts))
   pretty (NamF _ v _ rs) =
     pretty v
       <+> encloseSep "{" "}" ", " [pretty k <+> "::" <+> pretty t | (k, t) <- rs]
@@ -1810,9 +1833,15 @@ instance Pretty TypeF where
     pretty v <+> hsep (map pretty ps)
       <+> encloseSep "{" "}" " | " [pretty n <+> hsep (map pretty ts) | (n, ts) <- as]
   pretty (OptionalF t) = "?" <> pretty t
-  pretty (NatLitF n) = pretty n
-  pretty (VoidF _) = "_"
-  pretty (StrLitF s) = dquotes (pretty s)
+
+instance (Pretty k, Pretty t) => Pretty (TArg k t) where
+  pretty (TyA t) = pretty t
+  pretty (KiA k) = pretty k
+
+instance Pretty KArgF where
+  pretty (NatLitK n) = pretty n
+  pretty (VoidK _) = "_"
+  pretty (StrLitK s) = dquotes (pretty s)
 
 instance Pretty TypeM where
   pretty Passthrough = "Passthrough"

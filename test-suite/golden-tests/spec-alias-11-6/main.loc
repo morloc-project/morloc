@@ -1,0 +1,29 @@
+-- Spec ALIAS-11: an alias of a Nat stands for it as an argument of a type,
+-- including the length a command checks its input against.
+module main (len3, len4, lenE, mk)
+
+import root-py
+import vector-py
+
+--' A length
+type D = 3
+
+--' The same length, through another alias
+type E = D
+
+source Py from "src.py" ("mk")
+
+--' Three copies of a number
+mk :: Int -> Vector D Int
+
+--' Length of a vector of length three
+len3 :: Vector D Int -> Int
+len3 xs = 3
+
+--' Length of a vector one longer
+len4 :: Vector (D + 1) Int -> Int
+len4 xs = 4
+
+--' Length of a vector of length three, by another name
+lenE :: Vector E Int -> Int
+lenE xs = 3

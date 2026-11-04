@@ -264,9 +264,6 @@ rustTypeOf = f
       -- The payload is a stored position; a function payload boxes ('rustFieldType').
       t' <- rustFieldType t
       return $ "::std::option::Option<" <> t' <> ">"
-    f (NatLitF _) = return mempty
-    f (VoidF _) = return mempty
-    f (StrLitF _) = return mempty
     -- A function value inside a type (a field, an element, a payload, the
     -- result of a function) is a trait object; only a manifold's own
     -- parameters and return are `impl` ('rustArgType', 'rustReturnType').
@@ -329,7 +326,7 @@ rustIsCopy (OptionalF t) = rustIsCopy t
 -- shape 'printRustEnum' emits.
 rustIsCopy (EnumF _ _ _) = True
 rustIsCopy (AppF (VarF (FV (TV gv) _)) ts)
-  | isTupleName gv = all rustIsCopy ts
+  | isTupleName gv = all rustIsCopy (tyArgs ts)
 -- An applied type whose Rust spelling is a Copy scalar: its arguments are
 -- phantom (no `$n` in the mapping), so it is that scalar. The stream and
 -- cell handles (`IFile a`, `IStream a`, `OStream a`, `Cell a`) are all `u64`
@@ -578,7 +575,7 @@ rustTakeGetter t0 sel0 subj0
     opens t = isJust (tupleArgs t)
 
     tupleArgs (AppF (VarF (FV (TV gv) _)) ts)
-      | isTupleName gv = Just ts
+      | isTupleName gv = Just (tyArgs ts)
     tupleArgs _ = Nothing
 
     -- The value @v@ is owned; each path is a result index and the steps
@@ -1799,7 +1796,7 @@ stageLookupDoc tbl =
 -- one representative field list (from a use site). Unlike the shared recmap
 -- (which only collects @= "struct"@ records), this also collects user-mapped
 -- records (@record Rust => X = "Name"@) so their marshalling impls are emitted.
-collectRustRecords :: Scope -> [SerialManifold] -> [(FVar, [TypeF], [(Key, TypeF)])]
+collectRustRecords :: Scope -> [SerialManifold] -> [(FVar, [ArgF], [(Key, TypeF)])]
 collectRustRecords gscope =
   -- One entry per record; keep the first field list. A generated struct
   -- covers every instantiation with generic parameters, so it is one entry
@@ -1816,7 +1813,7 @@ collectRustRecords gscope =
     se _ (SerializeS_ s xs) = return $ seek (serialAstToType s) <> xs
     se _ e = return $ foldlSE (<>) [] e
 
-    seek :: TypeF -> [(FVar, [TypeF], [(Key, TypeF)])]
+    seek :: TypeF -> [(FVar, [ArgF], [(Key, TypeF)])]
     -- A table is an Arrow record batch with its own marshalling in
     -- rustmorloc, not a struct to generate.
     seek (NamF NamTable _ _ _) = []
@@ -1838,7 +1835,7 @@ bodyName (NamU _ (TV n) _ _) = Just n
 bodyName _ = Nothing
 
 -- | Every argument-free @data@ type used in these manifolds, unmerged.
-collectRustEnums :: Scope -> [SerialManifold] -> [(FVar, [TypeF], [Text])]
+collectRustEnums :: Scope -> [SerialManifold] -> [(FVar, [ArgF], [Text])]
 collectRustEnums gscope = concatMap (runIdentity . foldWithSerialManifoldM fm)
   where
     fm = defaultValue {opFoldWithNativeExprM = ne, opFoldWithSerialExprM = se}
@@ -1847,7 +1844,7 @@ collectRustEnums gscope = concatMap (runIdentity . foldWithSerialManifoldM fm)
     se _ (SerializeS_ s xs) = return $ seek (serialAstToType s) <> xs
     se _ e = return $ foldlSE (<>) [] e
 
-    seek :: TypeF -> [(FVar, [TypeF], [Text])]
+    seek :: TypeF -> [(FVar, [ArgF], [Text])]
     seek (EnumF v@(FV gv _) ps ns) = (v, ps, ns) : concatMap seek (valueArgsF gscope gv ps)
     seek (VariantF (FV gv _) ps as) = concatMap seek (valueArgsF gscope gv ps) <> concatMap (concatMap seek . snd) as
     seek (NamF _ _ _ rs) = concatMap (seek . snd) rs
@@ -1857,7 +1854,7 @@ collectRustEnums gscope = concatMap (runIdentity . foldWithSerialManifoldM fm)
     seek _ = []
 
 -- | Every payload-bearing @data@ type used in these manifolds, unmerged.
-collectRustVariants :: Scope -> [SerialManifold] -> [(FVar, [TypeF], [(Text, [TypeF])])]
+collectRustVariants :: Scope -> [SerialManifold] -> [(FVar, [ArgF], [(Text, [TypeF])])]
 collectRustVariants gscope = concatMap (runIdentity . foldWithSerialManifoldM fm)
   where
     fm = defaultValue {opFoldWithNativeExprM = ne, opFoldWithSerialExprM = se}
@@ -1866,7 +1863,7 @@ collectRustVariants gscope = concatMap (runIdentity . foldWithSerialManifoldM fm
     se _ (SerializeS_ s xs) = return $ seek (serialAstToType s) <> xs
     se _ e = return $ foldlSE (<>) [] e
 
-    seek :: TypeF -> [(FVar, [TypeF], [(Text, [TypeF])])]
+    seek :: TypeF -> [(FVar, [ArgF], [(Text, [TypeF])])]
     seek (VariantF v@(FV gv _) ps as) = (v, ps, as) : concatMap seek (valueArgsF gscope gv ps) <> concatMap (concatMap seek . snd) as
     seek (NamF _ _ _ rs) = concatMap (seek . snd) rs
     seek (AppF t ts) = seek t <> concatMap seek (appValueArgs gscope t ts)
@@ -2053,7 +2050,7 @@ generateRustStructs closureAsts es = do
           _ -> return Nothing
       | otherwise = return Nothing
 
-    makeOne :: (FVar, [TypeF], [(Key, TypeF)]) -> RustM [(Maybe (MDoc, TVar, [(MDoc, MDoc, Bool)]), MDoc)]
+    makeOne :: (FVar, [ArgF], [(Key, TypeF)]) -> RustM [(Maybe (MDoc, TVar, [(MDoc, MDoc, Bool)]), MDoc)]
     makeOne (v@(FV gv _), ps, rs) = case v of
       -- Autogenerated `= "struct"` record: drive from the unified RecEntry so a
       -- field whose native and wire types diverge (a custom-packer field)
@@ -2124,7 +2121,7 @@ generateRustStructs closureAsts es = do
 isVarWidthF :: TypeF -> Bool
 isVarWidthF (VarF (FV (TV gv) _)) = gv == "Str"
 isVarWidthF (AppF (VarF (FV (TV gv) _)) ts)
-  | isTupleName gv = any isVarWidthF ts
+  | isTupleName gv = any isVarWidthF (tyArgs ts)
 isVarWidthF _ = True
 
 -- | Lower a manifold body in its own ownership scope: 'oeCurrent' becomes the

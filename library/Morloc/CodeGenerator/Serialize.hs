@@ -525,7 +525,7 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
     nativeExpr m (MonoRecord o v ps rs) =
       RecordN o
         <$> inferVar v
-        <*> mapM inferType ps
+        <*> mapM (\x@(Idx _ t) -> argWith (const (inferType x)) (type2typeu t)) ps
         <*> mapM (secondM (nativeExpr m . snd)) rs
     nativeExpr _ (MonoLog v x) = LogN <$> inferVar v <*> pure x
     nativeExpr _ (MonoReal v x) = RealN <$> inferVar v <*> pure x
@@ -799,7 +799,7 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
     cellReduceSlots :: Int -> TypeF -> Maybe Text -> [NativeExpr] -> MorlocMonad (Maybe NativeExpr)
     cellReduceSlots m accTf (Just sch) [combine, handle] = do
       listFv <- inferConcreteVar lang (Idx m BT.list)
-      let listTf = AppF (VarF listFv) [accTf]
+      let listTf = AppF (VarF listFv) [TyA accTf]
       listAst <- Serial.makeSerialAST m lang listTf
       let slots
             | Serial.isSerializable listAst = IntrinsicN listTf IntrCellSlots (Just sch) [handle]
@@ -938,7 +938,7 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
     -- the Ok arm before reading the head.
     unwrapHandleHead (VariantF _ _ arms)
       | Just [payload] <- lookup BT.tryOkCtor arms = unwrapHandleHead payload
-    unwrapHandleHead (AppF (VarF (FV v _)) (a : _)) = Just (v, a)
+    unwrapHandleHead (AppF (VarF (FV v _)) (tyArgs -> a : _)) = Just (v, a)
     unwrapHandleHead _ = Nothing
 
     -- Render a TypeF as a user-facing Morloc type string (for @typeof).
@@ -952,18 +952,17 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
       where
         go (UnkF (FV t _)) = UnkT t
         go (VarF (FV t _)) = VarT t
-        go (NamF o (FV t _) params rs) = NamT o t (map go params) [(k, go v) | (k, v) <- rs]
+        go (NamF o (FV t _) params rs) = NamT o t (map arg params) [(k, go v) | (k, v) <- rs]
         go (RecF (FV t _)) = VarT t
         go (EnumF (FV t _) [] _) = VarT t
-        go (EnumF (FV t _) params _) = AppT (VarT t) (map go params)
+        go (EnumF (FV t _) params _) = AppT (VarT t) (map arg params)
         go (VariantF (FV t _) [] _) = VarT t
-        go (VariantF (FV t _) params _) = AppT (VarT t) (map go params)
-        go (AppF con args) = AppT (go con) (map go args)
+        go (VariantF (FV t _) params _) = AppT (VarT t) (map arg params)
+        go (AppF con args) = AppT (go con) (map arg args)
         go (FunF args ret) = FunT (map go args) (go ret)
         go (OptionalF t) = OptionalT (go t)
-        go (NatLitF n) = NatLitT n
-        go (VoidF k) = VoidT k
-        go (StrLitF s) = StrLitT s
+        arg (TyA x) = go x
+        arg (KiA k) = kargType k
 
     lowerCacheBody ::
       SerializationState ->

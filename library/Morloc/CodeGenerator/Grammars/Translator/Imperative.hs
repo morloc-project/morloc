@@ -653,10 +653,9 @@ data LowerConfig m = LowerConfig
   , lcTakeGetter :: TypeF -> Selector -> MDoc -> m (Maybe MDoc)
   -- ^ A getter on a receiver it owns (OWN-5): the receiver's type, the
   -- selector and the receiver. 'Nothing' renders it with 'lcEvalPattern'.
-  , lcListConstructor :: FVar -> [TypeF] -> [MDoc] -> MDoc
+  , lcListConstructor :: FVar -> [ArgF] -> [MDoc] -> MDoc
   -- ^ Build a list literal from rendered elements. R needs FVar to choose c() vs list().
-  -- The [TypeF] is the FULL applied-type arg list (kind positions included).
-  -- Use 'partitionKindArgs' to extract type-args only when needed.
+  -- The arguments are the full applied list, kind arguments included.
   , lcTupleConstructor :: FVar -> [TypeF] -> [MDoc] -> MDoc
   -- ^ Build a tuple literal. The [TypeF] is the per-slot type list
   -- (one entry per element). C++ codegen will use these to dispatch
@@ -664,7 +663,7 @@ data LowerConfig m = LowerConfig
   -- both Python/R and C++ ignore them (Python/R because their tuple
   -- constructors don't need type info, C++ because alias preservation
   -- is not yet plumbed through Express -> Mono -> TupleN's FVar).
-  , lcRecordConstructor :: TypeF -> NamType -> FVar -> [TypeF] -> [(Key, MDoc)] -> m PoolDocs
+  , lcRecordConstructor :: TypeF -> NamType -> FVar -> [ArgF] -> [(Key, MDoc)] -> m PoolDocs
   -- ^ Build a record literal. C++ needs type lookup + counter for temp var.
   , lcKeepContextArg :: Int -> Int -> Int -> TypeF -> MDoc -> m MDoc
   -- ^ Adapt context argument @j@, local @i@ of the given type, of a fully
@@ -2779,7 +2778,7 @@ lowerNativeExprRaw cfg origExpr (ListN_ v t xs) = do
   return $ mergePoolDocs (lcListConstructor cfg v t) xs'
 lowerNativeExprRaw cfg origExpr (TupleN_ v xs) = do
   let slotTypes = case typeFof origExpr of
-        AppF _ ts -> ts
+        AppF _ ts -> tyArgs ts
         _ -> []
       elemEs = case origExpr of TupleN _ es -> es; _ -> []
   xs' <- adaptOwnedElems cfg elemEs xs >>= keepElems cfg elemEs >>= storeElems cfg elemEs
@@ -3190,7 +3189,7 @@ lowerNativeExprRaw cfg (IntrinsicN _ _ _ [handleE, _]) (IntrinsicN_ _ IntrReplay
                                   [handleDocs, fnDocs]) = do
   sid <- lcRegisterSchema cfg schema
   elemType <- case typeFof handleE of
-    AppF _ (e : _) -> lcTypeOf cfg e
+    AppF _ (tyArgs -> e : _) -> lcTypeOf cfg e
     _ -> return Nothing
   let raw d = IRawExpr (render (poolExpr d))
       replayExpr = IIntrinsicReplay sid elemType (raw handleDocs) (raw fnDocs)

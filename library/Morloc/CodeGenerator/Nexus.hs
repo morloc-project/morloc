@@ -1748,7 +1748,7 @@ validateValueAgainstAST loc env0 path ast value = case (ast, value) of
   -- Lists: array, with an optional fixed-length constraint.
   (SerialList _ dim elemAst, Aeson.Array arr) -> do
     case dim of
-      Just (NatLitF n) | fromIntegral (V.length arr) /= n ->
+      Just (NatLitK n) | fromIntegral (V.length arr) /= n ->
         MM.throwRejected $ formatBlock
           [ loc <> ": default" <> pathAt path <> " is an array of length "
               <> pretty (V.length arr) <> ", expected length "
@@ -1922,7 +1922,7 @@ expectedJsonShape = go
     go (SerialUInt64 _)              = "U64"
     go (SerialOptional _ s)          = go s <> " | null"
     go (SerialList _ Nothing s)      = "[" <> go s <> "]"
-    go (SerialList _ (Just (NatLitF n)) s) =
+    go (SerialList _ (Just (NatLitK n)) s) =
       "[" <> go s <> "] of length " <> MT.pack (show n)
     go (SerialList _ _ s)            = "[" <> go s <> "]"
     go (SerialTuple _ ss)            =

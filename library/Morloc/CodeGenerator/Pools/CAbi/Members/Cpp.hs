@@ -283,9 +283,6 @@ instance {-# OVERLAPPABLE #-} (HasTypeF e) => HasCppType e where
         t' <- f t
         ts' <- mapM f ts
         return $ "std::function<" <> t' <> tupled ts' <> ">"
-      f (NatLitF _) = return mempty
-      f (VoidF _) = return mempty
-      f (StrLitF _) = return mempty
       -- Leak guard on the parameterized form (mirror of the VarF
       -- guard above). An unmapped recursive alias appears as
       -- @AppF (VarF (FV gv (CV gv))) [...]@ where the head's CV is
@@ -303,10 +300,9 @@ instance {-# OVERLAPPABLE #-} (HasTypeF e) => HasCppType e where
             declaredApp <- CMS.gets translatorVariantNames
             if Set.member gv declaredApp then return (pretty (nativeTypeName cvText)) else leakError gvText
       f (AppF t ts) = do
-        -- $N in the CV template indexes TYPE args only; kind-kinded
-        -- args (NatLitF, StrLitF, VoidF) are structural
-        -- metadata and skipped. The skipped count is threaded to
-        -- expandMacro for error-message context only.
+        -- $N in the CV template indexes TYPE args only; kind arguments are
+        -- skipped. The skipped count is threaded to expandMacro for
+        -- error-message context only.
         t' <- f t
         gscope <- CMS.gets translatorGScope
         let (typeTs, kindCount) = appMacroArgs gscope t ts
@@ -1633,10 +1629,10 @@ PROPAGATE_ERROR(errmsg)|]
     rawDoc (SerialPack _ (_, s)) = rawDoc s
     rawDoc (SerialList v d e) = do
       inner <- rawDoc e
-      cppTypeOf (AppF (VarF v) (maybe [] pure d ++ [rendered inner]))
+      cppTypeOf (AppF (VarF v) (maybe [] (pure . KiA) d ++ [TyA (rendered inner)]))
     rawDoc (SerialTuple v es) = do
       inners <- mapM rawDoc es
-      cppTypeOf (AppF (VarF v) (map rendered inners))
+      cppTypeOf (AppF (VarF v) (map (TyA . rendered) inners))
     rawDoc (SerialOptional _ e) = do
       inner <- rawDoc e
       cppTypeOf (OptionalF (rendered inner))
@@ -2218,7 +2214,7 @@ setterOf dead state0 t0 s0 m0 xs0 =
   patternSetter makeTuple makeRecord accessTuple accessRecord finalizeSet m0 t0 s0 xs0
   where
     makeTuple (AppF _ ts) xs =
-      let tupleTypes = CMS.evalState (mapM cppTypeOf ts) state0
+      let tupleTypes = CMS.evalState (mapM cppTypeOf (tyArgs ts)) state0
        in "std::tuple" <> encloseSep "<" ">" "," tupleTypes <> tupled xs
     makeTuple _ _ = error "Unreachable"
 
@@ -2271,7 +2267,7 @@ readSelector t d (Right k : rs) =
    in readSelector ft value rs
 readSelector t d (Left i : rs) =
   let et = case t of
-        Just (AppF _ ts) | i < length ts -> Just (ts !! i)
+        Just (AppF _ (tyArgs -> ts)) | i < length ts -> Just (ts !! i)
         _ -> Nothing
    in readSelector et ("std::get<" <> pretty i <> ">" <> parens d) rs
 
@@ -2310,7 +2306,7 @@ collectCppTypes mapped =
     -- A record's or a variant's type parameters are not descended into:
     -- one may be phantom, naming a type no value carries.
     parts t = t : case t of
-      AppF _ ts -> concatMap parts ts
+      AppF _ ts -> concatMap parts (tyArgs ts)
       NamF _ _ _ rs -> concatMap (parts . snd) rs
       OptionalF x -> parts x
       VariantF _ _ as -> concatMap (concatMap parts . snd) as
@@ -2319,14 +2315,16 @@ collectCppTypes mapped =
 
     concrete t = case t of
       VarF (FV (TV v) (CV c)) -> typeName v && (v /= c || mapped (TV v) c)
-      AppF h ts -> concrete h && all concrete ts
-      NamF _ (FV (TV v) _) ps _ -> typeName v && all concrete ps
+      AppF h ts -> concrete h && all concreteArg ts
+      NamF _ (FV (TV v) _) ps _ -> typeName v && all concreteArg ps
       OptionalF x -> concrete x
-      VariantF _ ps _ -> all concrete ps
+      VariantF _ ps _ -> all concreteArg ps
       EnumF {} -> True
-      NatLitF _ -> True
-      StrLitF _ -> True
       _ -> False
+    concreteArg a = case a of
+      TyA x -> concrete x
+      KiA (VoidK _) -> False
+      KiA _ -> True
     typeName v = case T.uncons (T.takeWhileEnd (/= '.') v) of
       Just (c, _) -> isUpper c
       Nothing -> False
@@ -2345,13 +2343,9 @@ cppValueChecks es = do
         AppU (VarU (TV n)) _ -> Just n
         NamU _ (TV n) _ _ -> Just n
         _ -> Nothing
-  docs <- mapM check [t | t <- collectCppTypes mapped es, checked t]
+  docs <- mapM check (collectCppTypes mapped es)
   return (map pretty (unique (map render (concat docs))))
   where
-    checked t = case t of
-      NatLitF _ -> False
-      StrLitF _ -> False
-      _ -> True
     check t = do
       ty <- cppTypeOf t
       let name = render ty
@@ -2416,7 +2410,7 @@ generateCppEnums es = do
 -- a template instantiated twice is two types, a generated type is one per
 -- instantiation whatever it was applied to -- and rendering needs the
 -- translator, so the merge happens in 'generateCppVariants'.
-collectCppVariants :: Scope -> [SerialManifold] -> [(FVar, [TypeF], [(Text, [TypeF])])]
+collectCppVariants :: Scope -> [SerialManifold] -> [(FVar, [ArgF], [(Text, [TypeF])])]
 collectCppVariants gscope = concatMap (runIdentity . foldWithSerialManifoldM fm)
   where
     fm = defaultValue {opFoldWithNativeExprM = ne, opFoldWithSerialExprM = se}
@@ -2425,7 +2419,7 @@ collectCppVariants gscope = concatMap (runIdentity . foldWithSerialManifoldM fm)
     se _ (SerializeS_ s xs) = return $ seek (serialAstToType s) <> xs
     se _ e = return $ foldlSE (<>) [] e
 
-    seek :: TypeF -> [(FVar, [TypeF], [(Text, [TypeF])])]
+    seek :: TypeF -> [(FVar, [ArgF], [(Text, [TypeF])])]
     seek (VariantF v@(FV gv _) ps as) = (v, ps, as) : concatMap seek (valueArgsF gscope gv ps) <> concatMap (concatMap seek . snd) as
     seek (NamF _ _ _ rs) = concatMap (seek . snd) rs
     seek (AppF t ts) = seek t <> concatMap seek (appValueArgs gscope t ts)

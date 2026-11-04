@@ -62,8 +62,7 @@ import Morloc.Data.Doc
 import qualified Morloc.Data.Map as Map
 import qualified Morloc.Monad as MM
 import qualified Morloc.TypeEval as TE
-import Morloc.Typecheck.Internal (apply, emptyGamma, isSubtypeOf2, mapTypeUChildren, qualify, substitute, subtype, typeUChildren, typeUToNatExpr, unqualify)
-import qualified Morloc.Typecheck.NatSolver as NS
+import Morloc.Typecheck.Internal (apply, emptyGamma, isSubtypeOf2, mapTypeUChildren, qualify, substitute, subtype, typeUChildren, unqualify)
 import qualified Data.List as List
 import Morloc.Frontend.TypeNames (isReservedTypeName)
 
@@ -103,9 +102,9 @@ serialAstToTypeWith' ::
 serialAstToTypeWith' onPack onClosure = go
   where
     go (SerialPack _ (p, s)) = onPack p (go s)
-    go (SerialList v (Just d) s) = AppF (VarF v) [d, go s]
-    go (SerialList v Nothing s) = AppF (VarF v) [go s]
-    go (SerialTuple v ss) = AppF (VarF v) (map go ss)
+    go (SerialList v (Just d) s) = AppF (VarF v) [KiA d, TyA (go s)]
+    go (SerialList v Nothing s) = AppF (VarF v) [TyA (go s)]
+    go (SerialTuple v ss) = AppF (VarF v) (map (TyA . go) ss)
     go (SerialObject o n ps rs) = NamF o n ps (zip (map fst rs) (map (go . snd) rs))
     go (SerialRec v _) = RecF v
     go (SerialEnum v ps ns) = EnumF v ps ns
@@ -248,10 +247,10 @@ checkComparable i intr tdoc ast = case incomparable ast of
 -- is a function of no arguments at this level.
 containsFunF :: TypeF -> Bool
 containsFunF (FunF _ _) = True
-containsFunF (AppF t ts) = containsFunF t || any containsFunF ts
-containsFunF (NamF _ _ ts rs) = any containsFunF ts || any (containsFunF . snd) rs
-containsFunF (EnumF _ ts _) = any containsFunF ts
-containsFunF (VariantF _ ts arms) = any containsFunF ts || any (any containsFunF . snd) arms
+containsFunF (AppF t ts) = containsFunF t || any containsFunF (tyArgs ts)
+containsFunF (NamF _ _ ts rs) = any containsFunF (tyArgs ts) || any (containsFunF . snd) rs
+containsFunF (EnumF _ ts _) = any containsFunF (tyArgs ts)
+containsFunF (VariantF _ ts arms) = any containsFunF (tyArgs ts) || any (any containsFunF . snd) arms
 containsFunF (OptionalF t) = containsFunF t
 containsFunF _ = False
 
@@ -333,7 +332,7 @@ serialAstToSchemaWith renderHint ast = emit [] ast
       declare path node name [] $ \p ->
         renderHint v <> "a" <> encodeDim dim <> emit p s
       where
-        encodeDim (Just (NatLitF n)) = ":" <> pretty n
+        encodeDim (Just (NatLitK n)) = ":" <> pretty n
         encodeDim _                  = ""  -- no slot or void-valued slot
     emit path node@(SerialTuple v@(FV name _) ss) =
       declare path node name [] $ \p ->
@@ -403,7 +402,7 @@ serialAstToSchemaWith renderHint ast = emit [] ast
     -- Emit a container node. It goes on the declaration path for its
     -- subtree, and gets the @&<klen><name>@ prefix iff a back-reference
     -- below resolves to it; otherwise the wire form is the unprefixed one.
-    declare :: DeclPath -> SerialAST -> TVar -> [TypeF] -> (DeclPath -> MDoc) -> MDoc
+    declare :: DeclPath -> SerialAST -> TVar -> [ArgF] -> (DeclPath -> MDoc) -> MDoc
     declare path node name ps body =
       let path' = pushDecl path name ps
           wire = declWireName path'
@@ -472,7 +471,7 @@ isFixedWidthShape _ = False
 -- | The container nodes enclosing the node being emitted, innermost
 -- first: each entry is a node's type name, the arguments it was
 -- instantiated with, and the name it declares on the wire.
-type DeclPath = [(TVar, [TypeF], DT.Text)]
+type DeclPath = [(TVar, [ArgF], DT.Text)]
 
 -- | Enter a container node. Two instantiations of one type can nest --
 -- an @L Int@ inside an @L Str@ -- and a back-reference from inside the
@@ -481,7 +480,7 @@ type DeclPath = [(TVar, [TypeF], DT.Text)]
 -- @name#1@, and so on. The runtime resolves a back-reference to the
 -- nearest enclosing declaration with the same wire name, which is then
 -- exactly the node meant.
-pushDecl :: DeclPath -> TVar -> [TypeF] -> DeclPath
+pushDecl :: DeclPath -> TVar -> [ArgF] -> DeclPath
 pushDecl path name ps =
   let k = length [() | (n, _, _) <- path, n == name]
       wire = if k == 0 then unTVar name else unTVar name <> "#" <> DT.pack (show k)
@@ -496,7 +495,7 @@ declWireName [] = ""
 -- that name (a node that carries no arguments, such as a list-shaped
 -- alias, is matched by name alone). A reference with no enclosing node
 -- keeps its bare name; the runtime rejects it as undeclared.
-resolveWireName :: DeclPath -> TVar -> [TypeF] -> DT.Text
+resolveWireName :: DeclPath -> TVar -> [ArgF] -> DT.Text
 resolveWireName path name ps =
   case [w | (n, qs, w) <- path, n == name, qs == ps] of
     (w : _) -> w
@@ -609,13 +608,13 @@ isBuiltinBaseType v = v `elem`
 
 -- | get only the toplevel type
 --
--- See 'serialAstToType' for the dim-as-NatLitF convention used to keep macro
--- indices aligned with concrete-type bodies.
+-- See 'serialAstToType' for the dim convention used to keep macro indices
+-- aligned with concrete-type bodies.
 shallowType :: SerialAST -> TypeF
 shallowType (SerialPack _ (p, _)) = typePackerPacked p
-shallowType (SerialList v (Just d) s) = AppF (VarF v) [d, shallowType s]
-shallowType (SerialList v Nothing s) = AppF (VarF v) [shallowType s]
-shallowType (SerialTuple v ss) = AppF (VarF v) $ map shallowType ss
+shallowType (SerialList v (Just d) s) = AppF (VarF v) [KiA d, TyA (shallowType s)]
+shallowType (SerialList v Nothing s) = AppF (VarF v) [TyA (shallowType s)]
+shallowType (SerialTuple v ss) = AppF (VarF v) $ map (TyA . shallowType) ss
 shallowType (SerialObject o n ps rs) =
   let ts = map (shallowType . snd) rs
    in NamF o n ps (zip (map fst rs) ts)
@@ -1385,20 +1384,20 @@ makeSerialAST m lang t0 = do
             (Left reason) -> Left (piHead pin, reason)
 
         -- A Nat is a length only as Vector's first parameter (DIM-8): it
-        -- annotates the list Vector is, including NatLitF 0 (a real empty
-        -- dimension) and NatVoidF (no check). Any other type's Nats are
-        -- phantoms, or reach a Vector through its representation, which
-        -- carries them itself.
-        dim :: Maybe TypeF
+        -- annotates the list Vector is, including a literal 0 (a real empty
+        -- dimension) and the erased placeholder (no check). Any other type's
+        -- Nats are phantoms, or reach a Vector through its representation,
+        -- which carries them itself.
+        dim :: Maybe KArgF
         dim
-          | generalTypeName == BT.vector = listToMaybe [t | t <- ts0, kindOfF t == Just KindNat]
+          | generalTypeName == BT.vector = listToMaybe [k | KiA k <- ts0, kindOfK k == KindNat]
           | otherwise = Nothing
 
-        applyDimsToList :: Maybe TypeF -> SerialAST -> SerialAST
+        applyDimsToList :: Maybe KArgF -> SerialAST -> SerialAST
         applyDimsToList d@(Just _) (SerialList v _ inner) = SerialList v d inner
         applyDimsToList _ ast = ast
 
-        runtimeTs = filter (isNothing . kindOfF) ts0
+        runtimeTs = tyArgs ts0
 
         basevar :: TypeU -> Maybe TVar
         basevar (VarU v) = Just v
@@ -1726,10 +1725,10 @@ unweaveTypeF (FunF ts t) =
    in (FunU gts gt, FunU cts ct)
 unweaveTypeF (AppF t ts) =
   let (gt, ct) = unweaveTypeF t
-      (gts, cts) = unzip $ map unweaveTypeF ts
+      (gts, cts) = unzip $ map unweaveArg ts
    in (AppU gt gts, AppU ct cts)
 unweaveTypeF (NamF n (FV gv cv) ps rs) =
-  let (psg, psc) = unzip $ map unweaveTypeF ps
+  let (psg, psc) = unzip $ map unweaveArg ps
       keys = map fst rs
       (vsg, vsc) = unzip $ map (unweaveTypeF . snd) rs
    in (NamU n gv psg (zip keys vsg), NamU n (cv2tv cv) psc (zip keys vsc))
@@ -1744,15 +1743,11 @@ unweaveTypeF (RecF (FV gv cv)) = (VarU gv, VarU (cv2tv cv))
 unweaveTypeF (EnumF (FV gv cv) _ _) = (VarU gv, VarU (cv2tv cv))
 unweaveTypeF (VariantF (FV gv cv) _ _) = (VarU gv, VarU (cv2tv cv))
 
--- Nat / Str types have no concrete/general distinction; duplicate as-is
-unweaveTypeF (NatLitF n) = (NatLitU n, NatLitU n)
-unweaveTypeF (VoidF k) = let u = type2typeu (VoidT k) in (u, u)
-unweaveTypeF (StrLitF s) = (StrLitU s, StrLitU s)
 
--- The value of a ground Nat expression; Nothing for one with an unresolved
--- leaf, which callers turn into the NatVoidF sentinel rather than a fake 0.
-reduceNat :: TypeU -> Maybe Integer
-reduceNat t = typeUToNatExpr t >>= NS.evalNat Map.empty
+-- | A kind argument has no concrete/general distinction; it is duplicated.
+unweaveArg :: ArgF -> (TypeU, TypeU)
+unweaveArg (TyA t) = unweaveTypeF t
+unweaveArg (KiA k) = let u = type2typeu (kargType k) in (u, u)
 
 {- | Given a list of possible ways to (de)serialize data between two languages,
 choose one (or none if the list is empty). Currently I just take the first
@@ -1932,7 +1927,7 @@ generalTypeToSerialAST' i anc (VarT v)
           "cannot serialize type" <+> pretty v
             <+> "-- unexpected scope shape" <+> pretty (show x)
 generalTypeToSerialAST' i anc t0@(AppT (VarT v) [t])
-  | Set.member t0 anc = return $ SerialRec (FV v (CV "")) [keyTypeF t]
+  | Set.member t0 anc = return $ SerialRec (FV v (CV "")) [keyArgF t]
   | v == BT.list = SerialList (FV v (CV "")) Nothing <$> generalTypeToSerialAST' i anc t
   | v == BT.ifileVar   = SerialIFile   (FV v (CV "")) <$> handleStorage i anc v t
   | v == BT.ostreamVar = SerialOStream (FV v (CV "")) <$> handleStorage i anc v t
@@ -1942,11 +1937,11 @@ generalTypeToSerialAST' i anc t0@(AppT (VarT v) [t])
 generalTypeToSerialAST' i anc t0@(AppT (VarT v) [n, a])
   | v == BT.vector, not (Set.member t0 anc) = do
       ast <- appliedTypeToSerialAST i anc t0 v [n, a]
-      return $ case (reduceNat (type2typeu n), ast) of
-        (Just k, SerialList x _ inner) -> SerialList x (Just (NatLitF k)) inner
+      return $ case (kindArgOf (type2typeu n), ast) of
+        (Just k@(NatLitK _), SerialList x _ inner) -> SerialList x (Just k) inner
         _ -> ast
 generalTypeToSerialAST' i anc t0@(AppT (VarT v) ts)
-  | Set.member t0 anc = return $ SerialRec (FV v (CV "")) (map keyTypeF ts)
+  | Set.member t0 anc = return $ SerialRec (FV v (CV "")) (map keyArgF ts)
   | v == (BT.tuple (length ts)) =
       SerialTuple (FV v (CV "")) <$> mapM (generalTypeToSerialAST' i anc) ts
   -- A Table lowers to a SerialObject NamTable. The encoder emits the
@@ -1965,7 +1960,7 @@ generalTypeToSerialAST' i anc (OptionalT t) = do
   inner <- generalTypeToSerialAST' i anc t
   return $ SerialOptional (FV (TV "Optional") (CV "")) inner
 generalTypeToSerialAST' i anc t0@(NamT o v ps rs)
-  | Set.member t0 anc = return $ SerialRec (FV v (CV "")) (map keyTypeF ps)
+  | Set.member t0 anc = return $ SerialRec (FV v (CV "")) (map keyArgF ps)
   | otherwise = do
       -- Add the record to the ancestor set before recursing into its
       -- fields: a recursive record (e.g. @record Tree where children ::
@@ -1975,7 +1970,7 @@ generalTypeToSerialAST' i anc t0@(NamT o v ps rs)
       -- they ride along so a back-reference can name this instantiation
       -- apart from another of the same record.
       anc' <- descendT i t0 anc
-      SerialObject o (FV v (CV "")) (map keyTypeF ps)
+      SerialObject o (FV v (CV "")) (map keyArgF ps)
         <$> mapM (secondM (generalTypeToSerialAST' i anc')) rs
 generalTypeToSerialAST' i _ t@(FunT _ _) = MM.throwSourcedError i $
   "A command evaluated without a language pool cannot hold a function value (here of type"
@@ -1988,19 +1983,25 @@ generalTypeToSerialAST' i _ t = MM.throwSourcedError i $
 -- Used only to key a serial AST node's instantiation so a back-reference
 -- can be matched to the node it cuts against; two occurrences of one
 -- type map to equal keys, which is all the matching needs.
+keyArgF :: Type -> ArgF
+keyArgF (NatLitT n) = KiA (NatLitK n)
+keyArgF (VoidT k) = KiA (VoidK k)
+keyArgF (StrLitT t) = KiA (StrLitK t)
+keyArgF t = TyA (keyTypeF t)
+
 keyTypeF :: Type -> TypeF
 keyTypeF (UnkT v) = UnkF (FV v (CV ""))
 keyTypeF (VarT v) = VarF (FV v (CV ""))
 keyTypeF (FunT ts t) = FunF (map keyTypeF ts) (keyTypeF t)
-keyTypeF (AppT t ts) = AppF (keyTypeF t) (map keyTypeF ts)
-keyTypeF (NamT o v ps rs) = NamF o (FV v (CV "")) (map keyTypeF ps) [(k, keyTypeF t) | (k, t) <- rs]
+keyTypeF (AppT t ts) = AppF (keyTypeF t) (map keyArgF ts)
+keyTypeF (NamT o v ps rs) = NamF o (FV v (CV "")) (map keyArgF ps) [(k, keyTypeF t) | (k, t) <- rs]
 keyTypeF (EffectT _ t) = keyTypeF t
 keyTypeF (OptionalT t) = OptionalF (keyTypeF t)
-keyTypeF (NatLitT n) = NatLitF n
-keyTypeF (VoidT k) = VoidF k
-keyTypeF (StrLitT t) = StrLitF t
--- Unevaluated kind arithmetic has no codegen form; it never reaches a
--- serializable type, and as a key any fixed value keeps equal types equal.
+-- A kind term outside an argument, and unevaluated kind arithmetic, have no
+-- codegen form; as a key any fixed value keeps equal types equal.
+keyTypeF t@NatLitT{} = UnkF (FV (TV (DT.pack (show t))) (CV ""))
+keyTypeF t@VoidT{} = UnkF (FV (TV (DT.pack (show t))) (CV ""))
+keyTypeF t@StrLitT{} = UnkF (FV (TV (DT.pack (show t))) (CV ""))
 keyTypeF t@NatAddT{} = UnkF (FV (TV (DT.pack (show t))) (CV ""))
 keyTypeF t@NatMulT{} = UnkF (FV (TV (DT.pack (show t))) (CV ""))
 keyTypeF t@NatSubT{} = UnkF (FV (TV (DT.pack (show t))) (CV ""))
@@ -2052,7 +2053,7 @@ appliedTypeToSerialAST i anc t0 v ts = do
                   (\(n, fts) ->
                      (,) n <$> mapM (generalTypeToSerialAST' i anc' . inst . typeOf) fts)
                   arms
-                return $ SerialVariant (FV v (CV "")) (map keyTypeF ts) arms'
+                return $ SerialVariant (FV v (CV "")) (map keyArgF ts) arms'
     Nothing -> resolveAliasApp i anc t0 v ts
 
 -- The self-recursion cut for an applied alias is made by the caller, which

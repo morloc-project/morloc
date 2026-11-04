@@ -90,7 +90,7 @@ module Morloc.BaseTypes
 
 import Data.Word (Word8)
 import Morloc.Data.Text (Text, pretty)
-import Morloc.CodeGenerator.Namespace (TypeF (..), FVar (..), CVar (..))
+import Morloc.CodeGenerator.Namespace (TypeF (..), TArg (..), FVar (..), CVar (..))
 import Morloc.Namespace.Prim (ClassName (..), TVar (..))
 import Morloc.Namespace.Type (Type (..), TypeU (..), emptyEffectSet)
 import Prelude hiding (log)
@@ -302,7 +302,7 @@ handleStorageType v a
 handleStorageTypeF :: TVar -> TypeF -> TypeF
 handleStorageTypeF v a
   | v == ostreamVar || v == istreamVar =
-      AppF (VarF (FV list (CV ""))) [a]
+      AppF (VarF (FV list (CV ""))) [TyA a]
   | v == ifileVar = a
   | otherwise     = a
 
