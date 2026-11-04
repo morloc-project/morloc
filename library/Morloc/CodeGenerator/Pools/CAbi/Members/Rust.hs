@@ -329,7 +329,7 @@ rustIsCopy (OptionalF t) = rustIsCopy t
 -- shape 'printRustEnum' emits.
 rustIsCopy (EnumF _ _ _) = True
 rustIsCopy (AppF (VarF (FV (TV gv) _)) ts)
-  | isTupleName gv = all rustIsCopy (fst (partitionKindArgs kindOfF ts))
+  | isTupleName gv = all rustIsCopy ts
 -- An applied type whose Rust spelling is a Copy scalar: its arguments are
 -- phantom (no `$n` in the mapping), so it is that scalar. The stream and
 -- cell handles (`IFile a`, `IStream a`, `OStream a`, `Cell a`) are all `u64`
@@ -578,7 +578,7 @@ rustTakeGetter t0 sel0 subj0
     opens t = isJust (tupleArgs t)
 
     tupleArgs (AppF (VarF (FV (TV gv) _)) ts)
-      | isTupleName gv = Just (fst (partitionKindArgs kindOfF ts))
+      | isTupleName gv = Just ts
     tupleArgs _ = Nothing
 
     -- The value @v@ is owned; each path is a result index and the steps
@@ -2124,7 +2124,7 @@ generateRustStructs closureAsts es = do
 isVarWidthF :: TypeF -> Bool
 isVarWidthF (VarF (FV (TV gv) _)) = gv == "Str"
 isVarWidthF (AppF (VarF (FV (TV gv) _)) ts)
-  | isTupleName gv = any isVarWidthF (fst (partitionKindArgs kindOfF ts))
+  | isTupleName gv = any isVarWidthF ts
 isVarWidthF _ = True
 
 -- | Lower a manifold body in its own ownership scope: 'oeCurrent' becomes the

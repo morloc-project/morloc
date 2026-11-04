@@ -1633,6 +1633,7 @@ resolvePacker lang m0 resolvedType@(AppF _ _) pin = do
   unpackedConcreteType <- inferConcreteTypeU lang (Idx m0 unpackedGeneralType)
   maybeUnpackedType <-
     resolveP
+      gscope
       resolvedType
       packedConcreteType
       unpackedConcreteType
@@ -1673,16 +1674,18 @@ resolvePacker lang m0 resolvedType@(AppF _ _) pin = do
     -- the types for each generic variable. The context can be applied to
     -- y_u to get the final desired y_r.
     resolveP ::
+      Scope ->
       TypeF -> -- resolved packed type (e.g., "dict" "str" "int")
       TypeU -> -- unresolved packed type (e.g., "dict" a b)
       TypeU -> -- unresolved unpacked type (e.g., "list" ("list" a b))
       (TypeU, TypeU) -> -- The general unresolved packed and unpacked types
       MorlocMonad (Either MDoc TypeF) -- the resolved unpacked type, or why this instance does not apply
-    resolveP a b c generalTypes = do
+    resolveP gscope a b c generalTypes = do
       let (ga, ca) = unweaveTypeF a
-      -- Both steps are match tests, not assertions. An instance whose head does
-      -- not cover this use site is simply not a candidate here; only the caller
-      -- knows whether some other instance matched, so neither step may abort.
+      -- The two subtype steps are match tests, not assertions. An instance whose
+      -- head does not cover this use site is simply not a candidate here; only
+      -- the caller knows whether some other instance matched, so neither may
+      -- abort. Pairing the forms of an instance that matched may.
       case subtype Map.empty b ca emptyGamma of
         (Left typeErr) ->
           return . Left $
@@ -1698,8 +1701,12 @@ resolvePacker lang m0 resolvedType@(AppF _ _) pin = do
                   return . Left $
                     "its general form" <+> pretty u <+> "does not cover" <+> pretty ga <> ":" <+> typeErr
                 (Right g2) ->
-                  return . Right $
-                    weaveTypeF (apply g2 (existential gc)) unpackedConcreteType
+                  case weave gscope (apply g2 (existential gc)) unpackedConcreteType of
+                    Right t -> return (Right t)
+                    Left e ->
+                      MM.throwSourcedError m0 $
+                        "The unpacked form of a matching Packable instance cannot be paired with its"
+                          <+> pretty lang <+> "form:" <+> e
 
     -- Replaces each generic term with an existential term of the same name
     existential :: TypeU -> TypeU
@@ -1709,9 +1716,6 @@ resolvePacker _ m0 _ _ = MM.throwSourcedError m0 $ "No packer found for this typ
 
 cv2tv :: CVar -> TVar
 cv2tv (CV x) = TV x
-
-tv2cv :: TVar -> CVar
-tv2cv (TV x) = CV x
 
 unweaveTypeF :: TypeF -> (TypeU, TypeU)
 unweaveTypeF (UnkF (FV gv cv)) = (VarU gv, VarU (cv2tv cv))
@@ -1744,90 +1748,6 @@ unweaveTypeF (VariantF (FV gv cv) _ _) = (VarU gv, VarU (cv2tv cv))
 unweaveTypeF (NatLitF n) = (NatLitU n, NatLitU n)
 unweaveTypeF (VoidF k) = let u = type2typeu (VoidT k) in (u, u)
 unweaveTypeF (StrLitF s) = (StrLitU s, StrLitU s)
-
-weaveTypeF :: TypeU -> TypeU -> TypeF
-weaveTypeF (VarU gv) (VarU cv) = VarF (FV gv (tv2cv cv))
-weaveTypeF (FunU tsg tg) (FunU tsc tc) = FunF (zipWith weaveTypeF tsg tsc) (weaveTypeF tg tc)
--- AppU arg-list weaving is arity-aware: the concrete side may be
--- shorter than the general side when @pairEval@ expanded a newtype
--- body whose body has a smaller arity than the outer (e.g.
--- @newtype Vector n a = List a@ where Vector has 2 params but the
--- expanded body has 1). Each general kind arg consumes a concrete
--- kind arg if present, otherwise produces an erased sentinel without
--- advancing the concrete cursor. Mirrors @Infer.weaveArgs@ at the
--- Serial.hs entry point.
-weaveTypeF (AppU tg tsg) (AppU tc tsc) = AppF (weaveTypeF tg tc) (weaveTypeFArgs tsg tsc)
-weaveTypeF (NamU n gv psg rsg) (NamU _ cv psc rsc) =
-  NamF
-    n
-    (FV gv (tv2cv cv))
-    (zipWith weaveTypeF psg psc)
-    ( zip
-        (map fst rsg)
-        (zipWith weaveTypeF (map snd rsg) (map snd rsc))
-    )
--- A suspension is a closure of no arguments in every pool.
-weaveTypeF (EffectU _ gt) (EffectU _ ct) = FunF [] (weaveTypeF gt ct)
-weaveTypeF (OptionalU gt) (OptionalU ct) = OptionalF (weaveTypeF gt ct)
-weaveTypeF ((ExistU gv _ _)) (ExistU cv _ _) = UnkF (FV gv (tv2cv cv))
-weaveTypeF (NatLitU n) (NatLitU _) = NatLitF n
-weaveTypeF (NatLitU n) _ = NatLitF n  -- Nat params may be erased in concrete type
-weaveTypeF NatVoidU _ = NatVoidF
-weaveTypeF (NatVarU _) _ = NatVoidF  -- Nat vars erased in concrete type
-weaveTypeF (IntVarU _) _ = NatVoidF  -- an Int fills only Nat positions
--- Nat arithmetic: try to reduce to a ground Integer. If every leaf is a
--- NatLit, produce a NatLitF; otherwise produce the NatVoidF sentinel
--- (the dimension is symbolic / unresolvable at this site, not 0).
-weaveTypeF nat@(NatAddU _ _) _ = maybe NatVoidF NatLitF (reduceNat nat)
-weaveTypeF nat@(NatMulU _ _) _ = maybe NatVoidF NatLitF (reduceNat nat)
-weaveTypeF nat@(NatSubU _ _) _ = maybe NatVoidF NatLitF (reduceNat nat)
-weaveTypeF nat@(NatDivU _ _) _ = maybe NatVoidF NatLitF (reduceNat nat)
-weaveTypeF g _ | Just k <- kindOfU g, k /= KindNat = kindArgF k g
-weaveTypeF (LabeledU _ gt) ct = weaveTypeF gt ct
-weaveTypeF gt (LabeledU _ ct) = weaveTypeF gt ct
-weaveTypeF gt ct = error . show $ (gt, ct)
-
--- | Weave two arg lists, allowing the concrete list to be SHORTER
--- than the general list when the missing positions are kind arguments
--- (the body's per-language form may have dropped them during newtype
--- expansion). Each general kind argument consumes a concrete head of the
--- same kind if there is one.
-weaveTypeFArgs :: [TypeU] -> [TypeU] -> [TypeF]
-weaveTypeFArgs [] _ = []
-weaveTypeFArgs (NatLitU n : gs) cs = NatLitF n : weaveTypeFArgs gs (dropKindHeadU KindNat cs)
-weaveTypeFArgs (NatVoidU : gs) cs = NatVoidF : weaveTypeFArgs gs (dropKindHeadU KindNat cs)
-weaveTypeFArgs (NatVarU _ : gs) cs = NatVoidF : weaveTypeFArgs gs (dropKindHeadU KindNat cs)
-weaveTypeFArgs (IntVarU _ : gs) cs = NatVoidF : weaveTypeFArgs gs (dropKindHeadU KindNat cs)
-weaveTypeFArgs (nat@(NatAddU _ _) : gs) cs =
-  maybe NatVoidF NatLitF (reduceNat nat) : weaveTypeFArgs gs (dropKindHeadU KindNat cs)
-weaveTypeFArgs (nat@(NatMulU _ _) : gs) cs =
-  maybe NatVoidF NatLitF (reduceNat nat) : weaveTypeFArgs gs (dropKindHeadU KindNat cs)
-weaveTypeFArgs (nat@(NatSubU _ _) : gs) cs =
-  maybe NatVoidF NatLitF (reduceNat nat) : weaveTypeFArgs gs (dropKindHeadU KindNat cs)
-weaveTypeFArgs (nat@(NatDivU _ _) : gs) cs =
-  maybe NatVoidF NatLitF (reduceNat nat) : weaveTypeFArgs gs (dropKindHeadU KindNat cs)
-weaveTypeFArgs (g : gs) cs
-  | Just k <- kindOfU g = kindArgF k g : weaveTypeFArgs gs (dropKindHeadU k cs)
-weaveTypeFArgs (g : gs) (c : cs) = weaveTypeF g c : weaveTypeFArgs gs cs
-weaveTypeFArgs gs [] =
-  error $ "weaveTypeFArgs: concrete arg list exhausted with non-kind general args remaining: " <> show gs
-
--- | Drop a leading concrete argument of kind @k@, if there is one.
-dropKindHeadU :: Kind -> [TypeU] -> [TypeU]
-dropKindHeadU k (c : cs) | kindOfU c == Just k || k == KindNat && maybe False fillsNat (kindOfU c) = cs
-dropKindHeadU _ cs = cs
-
--- | The concrete form of a general kind argument that has no reducible
--- value of its own.
-kindArgF :: Kind -> TypeU -> TypeF
-kindArgF k g = maybe (VoidF k) StrLitF (groundStr g)
-
--- | The value of a ground Str expression.
-groundStr :: TypeU -> Maybe DT.Text
-groundStr (StrLitU s) = Just s
-groundStr (StrConcatU a b) = (<>) <$> groundStr a <*> groundStr b
-groundStr (LabeledU _ t) = groundStr t
-groundStr _ = Nothing
 
 -- The value of a ground Nat expression; Nothing for one with an unresolved
 -- leaf, which callers turn into the NatVoidF sentinel rather than a fake 0.

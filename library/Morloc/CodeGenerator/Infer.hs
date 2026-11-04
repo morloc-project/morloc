@@ -24,6 +24,7 @@ module Morloc.CodeGenerator.Infer
   , recordUndeterminedSites
   , canHoldType
   , evalGeneralStep
+  , weave
   ) where
 
 import qualified Control.Monad.State as CMS
@@ -721,7 +722,7 @@ weave gscope = w Set.empty
     w _ (IntVarU _) _ = return NatVoidF  -- an Int fills only Nat positions
     w _ g _ | Just k <- kindOfU g, k /= KindNat = return (kindArg k g)
     w anc (LabeledU _ t1) t2 = w anc t1 t2
-    w _ (ForallU v (VarU v')) _ | v == v' = return NatVoidF  -- Unresolved variable (UnkT pattern)
+    w _ (ForallU v (VarU v')) _ | v == v' = return $ UnkF (FV v (CV (unTVar v)))
     w anc t1 t2 = wStep anc t1 t2
 
     -- Step the general type one level via @evaluateStep@ and retry.
@@ -750,7 +751,6 @@ weave gscope = w Set.empty
     -- Unresolved nat dimension variable (opaque output dims): treat as erased
     weaveArgs anc (NatVarU _ : gs) cs = (NatVoidF :) <$> weaveArgs anc gs (dropKindHead KindNat cs)
     weaveArgs anc (IntVarU _ : gs) cs = (NatVoidF :) <$> weaveArgs anc gs (dropKindHead KindNat cs)
-    weaveArgs anc (ForallU v (VarU v') : gs) cs | v == v' = (NatVoidF :) <$> weaveArgs anc gs (dropKindHead KindNat cs)
     weaveArgs anc (g : gs) cs
       | Just k <- kindOfU g = (kindArg k g :) <$> weaveArgs anc gs (dropKindHead k cs)
     weaveArgs anc (g:gs) (c:cs) = (:) <$> w anc g c <*> weaveArgs anc gs cs

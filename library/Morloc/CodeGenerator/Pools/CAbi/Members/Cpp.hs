@@ -2654,17 +2654,14 @@ generateSourcedSerializers univeralScopeMap es0 = do
           -- format's relptr-based Optional and sidestepping C++'s
           -- incomplete-type rule for `optional<T>` inside T's body).
           --
-          -- Each TYPE-kinded entry in @ps@ maps to one positional slot
-          -- in the concrete name's @$N@ macro expansion. Kind-kinded
-          -- entries (Nat phantom dims, type-level strings) are skipped:
-          -- @$N@ counts type parameters only. Left positions become
-          -- template type variables (T<a>); Right positions are
-          -- concrete bindings selected by @selectSpecialization@ (e.g.
-          -- a @record Cpp => Foo Int@ entry) and render through
-          -- showDefType to their C++ name.
-          isTypeParam (Left (_, KindNat)) = False
-          isTypeParam (Left (_, KindStr)) = False
-          isTypeParam _ = True
+          -- Each type parameter fills one positional slot of the concrete
+          -- name's @$N@ macro; kind parameters (Nat, Str, Rec, ...) fill
+          -- none. Left positions become template type variables (T<a>);
+          -- Right positions are concrete bindings selected by
+          -- @selectSpecialization@ (e.g. a @record Cpp => Foo Int@ entry)
+          -- and render through showDefType to their C++ name.
+          isTypeParam (Left (_, k)) = k == KindType
+          isTypeParam (Right t) = isNothing (kindOfU t)
           typeParamSlots = filter isTypeParam ps
           kindCount = length ps - length typeParamSlots
           paramAt (Left (p, _)) = "T" <> pretty p

@@ -1,0 +1,17 @@
+--' A C++ record form with a Rec parameter declares only its type parameters
+module main (run)
+
+import root
+import root-cpp
+
+source Cpp from "foo.hpp" ("mkFoo", "getX")
+
+record Foo (r :: Rec) a where
+  x :: a
+record Cpp => Foo (r :: Rec) a = "foo_t"
+
+mkFoo :: Int -> Foo {y = Int} Int
+getX :: Foo {y = Int} Int -> Int
+
+run :: Int -> Int
+run k = getX (mkFoo k)
