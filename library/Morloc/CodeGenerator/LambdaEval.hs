@@ -13,8 +13,8 @@ that the code generator sees only fully-applied function calls or
 unapplied lambdas, never @(\\x -> body) arg@.
 -}
 module Morloc.CodeGenerator.LambdaEval
-  ( applyLambdas
-  , applyPoolLambdas
+  ( applyPoolLambdas
+  , applyNexusLambdas
   , reindexTree
   ) where
 
@@ -124,10 +124,151 @@ import Data.IORef (modifyIORef, newIORef, readIORef, writeIORef)
 applyLambdas :: Bool -> AnnoS (Indexed Type) One a -> MorlocMonad (AnnoS (Indexed Type) One a)
 applyLambdas ai e = reduceRoot ai e >>= saturateAt True ai
 
+-- | 'applyLambdas' for a tree the nexus evaluates.
+applyNexusLambdas :: AnnoS (Indexed Type) One a -> MorlocMonad (AnnoS (Indexed Type) One a)
+applyNexusLambdas e = expandShortCalls return e >>= applyLambdas True >>= splitLongCalls return
+
 -- | 'applyLambdas' for a tree that becomes a pool: each function passed to a
 -- source is also given the grouping the source calls it with.
 applyPoolLambdas :: AnnoS (Indexed Type) One (Indexed Lang) -> MorlocMonad (AnnoS (Indexed Type) One (Indexed Lang))
-applyPoolLambdas e = applyLambdas False e >>= groupCallbacks
+applyPoolLambdas e =
+  expandShortCalls fresh e
+    >>= applyLambdas False
+    >>= splitLongCalls fresh
+    >>= groupCallbacks
+  where
+    fresh (Idx _ l) = (`Idx` l) <$> MM.getCounter
+
+-- | APP-1: a call that gives its head fewer arguments than the head takes is
+-- a partial application, written @\vs -> f xs vs@ as the typechecker writes
+-- one it can see. The typechecker cannot see it where the head's type was a
+-- variable when the call was checked (@apply1 f = f 1@ with @apply1 ::
+-- (Int -> a) -> a@ given a function of two numbers). A source takes the
+-- arguments of its declared signature, up to a type variable or an effect
+-- (HOST-1, HOST-2), at its instance's types for a class method (HOST-10);
+-- any other function takes those of its type. @fresh@ renews a concrete
+-- annotation for a node the expansion adds.
+expandShortCalls ::
+  (a -> MorlocMonad a) ->
+  AnnoS (Indexed Type) One a ->
+  MorlocMonad (AnnoS (Indexed Type) One a)
+expandShortCalls fresh e0 = do
+  scope <- MM.getGeneralScope
+  let go (AnnoS g@(Idx gi t) c e) = do
+        e' <- mapExprSM go e
+        case (e', declaredFun scope t) of
+          (AppS f xs, FunT rest r) -> do
+            k <- headArity scope (length xs) f
+            case k of
+              Just n
+                | n > length xs
+                , length rest >= n - length xs -> do
+                    let (missing, rest') = splitAt (n - length xs) rest
+                        r' = if null rest' then r else FunT rest' r
+                    names <- mapM (\_ -> (\i -> EV ("eta@@" <> MT.show' i)) <$> MM.getCounter) missing
+                    bnds <- mapM (\(v, vt) -> (\i ci -> AnnoS (Idx i vt) ci (BndS v)) <$> newIndex gi <*> fresh c) (zip names missing)
+                    appG <- newIndex gi
+                    appC <- fresh c
+                    return (AnnoS (Idx gi (FunT missing r')) c (LamS names (AnnoS (Idx appG r') appC (AppS f (xs <> bnds)))))
+              _ -> return (AnnoS g c e')
+          _ -> return (AnnoS g c e')
+  go e0
+  where
+    -- the number of arguments a call's head takes, where that is more than
+    -- the call gives it; Nothing where it is not a function or is a pattern,
+    -- whose arguments are its own
+    headArity scope given f@(AnnoS (Idx _ ft) _ _) = case calledHead f of
+      Just (Left ()) -> return Nothing
+      Just (Right isrc) -> case declaredFun scope ft of
+        FunT own _ | length own > given -> sourceArity isrc
+        _ -> return Nothing
+      -- a function's own type: flat, or grouped where it is staged
+      Nothing -> return $ case ft of
+        FunT ins _ -> Just (length ins)
+        _ -> Nothing
+
+-- | HOST-1, HOST-2: a call that gives a source more arguments than its
+-- declared signature takes, as beta reduction leaves one (a function of two
+-- numbers given to a parameter is a source that returns a function), calls
+-- the source with those it takes and applies what it returns to the rest:
+-- @src xs1 xs2@ is @(src xs1) xs2@, the source typed by its declared
+-- groups. Where the rest are exactly the parameters of a lambda around the
+-- call, as 'expandShortCalls' writes one, the lambda is @src xs1@ itself, so
+-- the source runs once, where it is applied (APP-3). @fresh@ renews a
+-- concrete annotation for the call the split adds.
+splitLongCalls ::
+  (a -> MorlocMonad a) ->
+  AnnoS (Indexed Type) One a ->
+  MorlocMonad (AnnoS (Indexed Type) One a)
+splitLongCalls fresh e0 = do
+  scope <- MM.getGeneralScope
+  let split f xs = case (calledHead f, f) of
+        (Just (Right isrc), AnnoS (Idx _ ft) _ _)
+          | length xs >= 2
+          , FunT own out <- declaredFun scope ft
+          , length own >= length xs -> do
+              k <- sourceArity isrc
+              return $ case k of
+                Just n | n > 0, n < length xs ->
+                  Just (n, retype (FunT (take n own) (FunT (drop n own) out)) f, FunT (drop n own) out)
+                _ -> Nothing
+        _ -> return Nothing
+      go (AnnoS g c e) = do
+        e' <- mapExprSM go e
+        case e' of
+          LamS vs (AnnoS _ _ (AppS f xs))
+            | not (null vs)
+            , (pre, post) <- splitAt (length xs - length vs) xs
+            , map bndName post == map Just vs
+            , not (any (mentions vs) pre) -> do
+                r <- split f xs
+                case r of
+                  Just (n, f', _) | n == length pre -> return (AnnoS g c (AppS f' pre))
+                  _ -> splitHere g c e'
+          _ -> splitHere g c e'
+      splitHere g@(Idx gi _) c e' = case e' of
+        AppS f xs -> do
+          r <- split f xs
+          case r of
+            Just (n, f', innerT) -> do
+              let (now, later) = splitAt n xs
+              innerG <- newIndex gi
+              innerC <- fresh c
+              return (AnnoS g c (AppS (AnnoS (Idx innerG innerT) innerC (AppS f' now)) later))
+            Nothing -> return (AnnoS g c e')
+        _ -> return (AnnoS g c e')
+  go e0
+  where
+    bndName (AnnoS _ _ (BndS v)) = Just v
+    bndName _ = Nothing
+    mentions vs x = any (`elem` vs) [v | AnnoS _ _ (BndS v) <- nodesOf x]
+    nodesOf n@(AnnoS _ _ x) = n : foldExprS nodesOf x
+    -- a source head and the wrappers above it take the type of its groups
+    retype t (AnnoS (Idx i _) c x) = AnnoS (Idx i t) c $ case x of
+      VarS v (One y) -> VarS v (One (retype t y))
+      LabelS k y -> LabelS k (retype t y)
+      _ -> x
+
+-- | The callee of a call through the wrappers a reference carries: a
+-- source, a pattern (@Left ()@), or neither.
+calledHead :: AnnoS g One c -> Maybe (Either () (Indexed Source))
+calledHead (AnnoS _ _ x) = case x of
+  VarS _ (One y) -> calledHead y
+  LabelS _ y -> calledHead y
+  ExeS (PatCall _) -> Just (Left ())
+  ExeS (SrcCall isrc) -> Just (Right isrc)
+  _ -> Nothing
+
+-- | The arguments a source takes: those of its declared signature, up to a
+-- type variable or an effect (HOST-1, HOST-2), at its instance's types for
+-- a class method (HOST-10).
+sourceArity :: Indexed Source -> MorlocMonad (Maybe Int)
+sourceArity (Idx si src) = do
+  scope <- MM.getGeneralScope
+  (_, declared) <- declaredSignature (Written si) src
+  return $ case declaredFun scope <$> declared of
+    Just (FunT ins _) -> Just (length ins)
+    _ -> Nothing
 
 -- | Reduce the root of a tree. A root of function type -- a command, a shared
 -- specialization, a recursive helper -- is called with every input of its
@@ -316,6 +457,7 @@ groupCallbacks = go
 
     sourceOf (AnnoS _ _ (ExeS (SrcCall (Idx si src)))) = Just (Written si, src)
     sourceOf (AnnoS _ _ (VarS _ (One x))) = sourceOf x
+    sourceOf (AnnoS _ _ (LabelS _ x)) = sourceOf x
     sourceOf _ = Nothing
 
     -- the function in the written groups: @\a1..an -> g a1..an@, where that

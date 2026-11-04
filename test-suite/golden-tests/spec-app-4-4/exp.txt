@@ -1,0 +1,28 @@
+py line1 7: "a = 7"
+py line3 1 2 3: "abc = 1 2 3"
+py commutes: true
+py subtractionCommutes: false
+py banner Bob: "Hello, Bob!"
+py arityOfInc: 1
+py arityOfAdd: 2
+cpp line1 7: "a = 7"
+cpp line3 1 2 3: "abc = 1 2 3"
+cpp commutes: true
+cpp subtractionCommutes: false
+cpp banner Bob: "Hello, Bob!"
+cpp arityOfInc: 1
+cpp arityOfAdd: 2
+r line1 7: "a = 7"
+r line3 1 2 3: "abc = 1 2 3"
+r commutes: true
+r subtractionCommutes: false
+r banner Bob: "Hello, Bob!"
+r arityOfInc: 1
+r arityOfAdd: 2
+rs line1 7: "a = 7"
+rs line3 1 2 3: "abc = 1 2 3"
+rs commutes: true
+rs subtractionCommutes: false
+rs banner Bob: "Hello, Bob!"
+rs arityOfInc: 1
+rs arityOfAdd: 2

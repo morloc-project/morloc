@@ -123,6 +123,9 @@ treeify d
             -- ambiguous.
             checkPatternAccessibleCoherence
 
+            -- an instance's methods, at its types, are held to the same rule
+            checkInstanceEffects
+
             -- find all term exports (ungrouped + grouped)
             let allSymbols = Set.unions (symbols : [exportGroupMembers g | g <- groups])
                 exports = [(i, v) | (i, TermSymbol v) <- Set.toList allSymbols]
@@ -370,7 +373,12 @@ checkDeclaredEffects d = do
             TypE (ExprTypeE _ _ _ t _ _) -> [t]
             ClsE (Typeclass _ _ _ sigs) -> [etype et | Signature _ _ et <- sigs]
             _ -> []
-          used = Set.unions (map collectEffLabels tys)
+          -- an instance's types name effects too, but are not functions
+          -- whose arguments could leak one
+          heads = case e of
+            IstE _ _ _ ts _ -> ts
+            _ -> []
+          used = Set.unions (map collectEffLabels (tys <> heads))
           undeclared = Set.filter (\l -> not (Map.member l declared)) used
       case Set.toList undeclared of
         (lbl0 : rest) ->
@@ -387,34 +395,60 @@ checkDeclaredEffects d = do
                   <+> "(or `escapable effect"
                   <+> pretty lbl0 <> "`) and import it."
         [] -> do
-          let leaked = Set.unions (map inescapableLeak tys)
+          let leaked = Set.unions (map (inescapableLeak declared) tys)
           if Set.null leaked
             then return ()
-            else
-              MM.throwSourcedError i $
-                "Inescapable effect"
-                  <> (if Set.size leaked > 1 then "s" else "")
-                  <+> hcat
-                    (punctuate ", " (map (squotes . pretty) (Set.toList leaked)))
-                  <+> "appear(s) in an argument but not in the result row."
-                  <+> "An inescapable effect performed via an argument must"
-                  <+> "propagate to the result (only a sourced handler may"
-                  <+> "discharge an escapable effect)."
-      where
-        -- Inescapable concrete labels in any parameter row that are
-        -- absent from the result row.
-        inescapableLeak ty =
-          let (params, ret) = uncurryFun ty
-              paramLabels = Set.unions (map collectEffLabels params)
-              inescapable =
-                Set.filter (\l -> Map.lookup l declared == Just False) paramLabels
-           in Set.difference inescapable (collectEffLabels ret)
+            else MM.throwSourcedError i (leakMessage leaked)
 
-        -- Peel quantifiers and uncurry to (all parameters, final result).
-        uncurryFun (ForallU _ t) = uncurryFun t
-        uncurryFun (FunU ps r) =
-          let (ps', r') = uncurryFun r in (ps ++ ps', r')
-        uncurryFun t = ([], t)
+-- | The inescapable effect labels in a function type's parameters that its
+-- result does not carry.
+inescapableLeak :: Map.Map EffectLabel Bool -> TypeU -> Set.Set EffectLabel
+inescapableLeak declared ty =
+  let (params, ret) = uncurryFun ty
+      paramLabels = Set.unions (map collectEffLabels params)
+      inescapable = Set.filter (\l -> Map.lookup l declared == Just False) paramLabels
+   in Set.difference inescapable (collectEffLabels ret)
+  where
+    -- Peel quantifiers and uncurry to (all parameters, final result).
+    uncurryFun (ForallU _ t) = uncurryFun t
+    uncurryFun (FunU ps r) =
+      let (ps', r') = uncurryFun r in (ps ++ ps', r')
+    uncurryFun t = ([], t)
+
+-- | The diagnostic for inescapable effects an argument performs that the
+-- result does not carry (EFF-13).
+leakMessage :: Set.Set EffectLabel -> MDoc
+leakMessage leaked =
+  "Inescapable effect"
+    <> (if Set.size leaked > 1 then "s" else "")
+    <+> hcat (punctuate ", " (map (squotes . pretty) (Set.toList leaked)))
+    <+> "appear(s) in an argument but not in the result row."
+    <+> "An inescapable effect performed via an argument must"
+    <+> "propagate to the result (only a sourced handler may"
+    <+> "discharge an escapable effect)."
+
+-- | An instance's methods at the instance's types follow the rule
+-- 'checkDeclaredEffects' holds signatures to: a class method whose argument
+-- is a class variable takes, at an instance with an effect there, an
+-- argument that performs the effect, which its result must then carry.
+checkInstanceEffects :: MorlocMonad ()
+checkInstanceEffects = do
+  declared <- MM.gets stateEffects
+  tcls <- MM.gets stateTypeclasses
+  sequence_
+    [ throwAt (listToMaybe ([j | (_, Idx j _) <- cs] <> [j | ExprI j _ <- ds])) $
+        "At its instance of" <+> pretty (className inst) <+> squotes (pretty v)
+          <+> "has the type" <+> pretty (etype et) <> "." <+> leakMessage leaked
+    | (v, inst) <- Map.toList tcls
+    , TermTypes (Just et) cs ds <- instanceTerms inst
+    , let leaked = inescapableLeak declared (etype et)
+    , not (Set.null leaked)
+    ]
+  where
+    -- an instance with no implementation has no index of its own
+    throwAt :: Maybe Int -> MDoc -> MorlocMonad ()
+    throwAt (Just i) msg = MM.throwSourcedError i msg
+    throwAt Nothing msg = MM.throwRejected msg
 
 -- | Reject any receiver head that has both a @PatternAccessible@
 -- instance and a structural (@Indexable@ \/ @Sliceable@ \/

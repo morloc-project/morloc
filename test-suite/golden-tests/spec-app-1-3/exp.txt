@@ -1,0 +1,36 @@
+py srcApply 10: 11
+py defApply 10: 11
+py viaIf true 10: 11
+py viaIf false 10: 11
+py viaList 0 10: 11
+py viaList 1 10: 11
+py curriedApply 10: 11
+py curriedPick true 10: 11
+py curriedPick false 10: 11
+cpp srcApply 10: 11
+cpp defApply 10: 11
+cpp viaIf true 10: 11
+cpp viaIf false 10: 11
+cpp viaList 0 10: 11
+cpp viaList 1 10: 11
+cpp curriedApply 10: 11
+cpp curriedPick true 10: 11
+cpp curriedPick false 10: 11
+r srcApply 10: 11
+r defApply 10: 11
+r viaIf true 10: 11
+r viaIf false 10: 11
+r viaList 0 10: 11
+r viaList 1 10: 11
+r curriedApply 10: 11
+r curriedPick true 10: 11
+r curriedPick false 10: 11
+rs srcApply 10: 11
+rs defApply 10: 11
+rs viaIf true 10: 11
+rs viaIf false 10: 11
+rs viaList 0 10: 11
+rs viaList 1 10: 11
+rs curriedApply 10: 11
+rs curriedPick true 10: 11
+rs curriedPick false 10: 11

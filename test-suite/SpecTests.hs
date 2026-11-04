@@ -44,6 +44,8 @@ specTests =
     , localOption (mkTimeout 5000000) poly7Tests
     , localOption (mkTimeout 2000000) bindTests
     , localOption (mkTimeout 2000000) hostTests
+    , localOption (mkTimeout 2000000) effTests
+    , localOption (mkTimeout 2000000) appTests
     , localOption (mkTimeout 2000000) patTests
     , localOption (mkTimeout 2000000) recTests
     , localOption (mkTimeout 2000000) collTests
@@ -1302,6 +1304,170 @@ instanceAnnotationTests =
           unpack :: b -> a
         f :: Box -> Int
         f b = size b
+        |]
+    ]
+
+-- | A rejection whose message contains @needle@.
+rejectSaying :: String -> MT.Text -> MT.Text -> TestTree
+rejectSaying name needle code =
+  testCase name $
+    runFrontWithState code >>= \case
+      (Right _, _) -> assertFailure "expected rejection"
+      (Left e, st) | MM.isDefect st e -> assertFailure $ "expected a user error, got a compiler error: " <> show e
+      (Left e, _) -> assertBool ("diagnostic lacks " <> MT.unpack needle <> ": " <> show e) (needle `MT.isInfixOf` MT.pack (show e))
+
+appTests :: TestTree
+appTests =
+  testGroup
+    "APP"
+    [ acceptTypecheck
+        "spec-app-1-1"
+        [r|
+        module main (go)
+        source Py from "lib.py" ("make_adder" as mkAdder)
+        mkAdder :: Int -> Int -> Int
+        class Mk a where
+          mk :: Int -> a
+        instance Mk (Int -> Int) where
+          mk n = mkAdder n
+        go :: Int -> Int
+        go x = (mk 1) x
+        |]
+    , acceptTypecheck
+        "spec-app-4-1"
+        [r|
+        module main (go)
+        source Py from "lib.py" ("make_adder" as mkAdder)
+        mkAdder :: Int -> Int -> Int
+        class Mk a where
+          mk :: Int -> a
+        instance Mk (Int -> Int) where
+          mk n = mkAdder n
+        go :: Int -> Int
+        go x = mk 1 x
+        |]
+    , rejectSaying
+        "spec-app-4-2"
+        "Invalid function application"
+        [r|
+        module main (go)
+        apply1 :: (Int -> a) -> a
+        apply1 f = f 1 2
+        go :: Int -> Int
+        go x = x
+        |]
+    , rejectSaying
+        "spec-app-4-3"
+        "Invalid function application"
+        [r|
+        module main (go)
+        effect IO
+        source Py from "lib.py" ("later")
+        later :: Int -> <IO> a
+        go :: Int -> <IO> Int
+        go x = later 1 2
+        |]
+    ]
+
+effTests :: TestTree
+effTests =
+  testGroup
+    "EFF"
+    [ rejectSaying
+        "spec-eff-13-1"
+        "Inescapable effect"
+        [r|
+        module main (f)
+        effect IO
+        source Py from "lib.py" ("tick")
+        tick :: Int -> <IO> Int
+        class Run a where
+          run :: a -> Int
+        instance Run (Int -> <IO> Int) where
+          run g = 1
+        f :: Int -> Int
+        f x = run tick
+        |]
+    , accept
+        "spec-eff-13-2"
+        [r|
+        module main (f)
+        effect IO
+        source Py from "lib.py" ("tick")
+        tick :: Int -> <IO> Int
+        class Run a where
+          run :: a -> <IO> Int
+        instance Run (Int -> <IO> Int) where
+          run g = g 1
+        f :: Int -> <IO> Int
+        f x = run tick
+        |]
+    , rejectSaying
+        "spec-eff-13-3"
+        "Inescapable effect"
+        [r|
+        module main (f)
+        effect IO
+        source Py from "lib.py" ("tick", "run_cb" as runCb)
+        tick :: Int -> <IO> Int
+        runCb :: (Int -> <IO> Int) -> Int
+        f :: Int -> Int
+        f x = runCb tick
+        |]
+    , rejectSaying
+        "spec-eff-13-4"
+        "Inescapable effect"
+        [r|
+        module main (f)
+        effect IO
+        source Py from "lib.py" ("tick")
+        tick :: Int -> <IO> Int
+        class Run a where
+          run :: a -> Int
+        instance Run (<IO> Int) where
+          run g = 1
+        f :: Int -> Int
+        f x = run (tick x)
+        |]
+    , accept
+        "spec-eff-13-5"
+        [r|
+        module main (f)
+        effect IO
+        source Py from "lib.py" ("tick")
+        tick :: Int -> <IO> Int
+        class Run a where
+          run :: a -> <IO> Int
+        instance Run (<IO> Int) where
+          run g = g
+        f :: Int -> <IO> Int
+        f x = run (tick x)
+        |]
+    , rejectSaying
+        "spec-eff-13-6"
+        "Inescapable effect"
+        [r|
+        module main (f)
+        effect IO
+        source Py from "lib.py" ("tick")
+        tick :: Int -> <IO> Int
+        class Run a where
+          run :: a -> Int
+        instance Run (Int -> <IO> Int)
+        f :: Int -> Int
+        f x = run tick
+        |]
+    , rejectSaying
+        "an undeclared effect in an instance head is rejected"
+        "Undeclared effect"
+        [r|
+        module main (f)
+        class Run a where
+          run :: a -> Int
+        instance Run (Int -> <Bogus> Int) where
+          run g = 1
+        f :: Int -> Int
+        f x = 1
         |]
     ]
 

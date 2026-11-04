@@ -1240,7 +1240,13 @@ generalizes kinds t1 t2 = isJust (match flex0 t1 t2 Map.empty)
             pairs flex (zip ts1 ts2) s
               >>= \s' -> pairs flex [(x, y) | (k, x) <- rs1, Just y <- [lookup k rs2]] s'
               >>= \s'' -> guard (all (\(k, _) -> isJust (lookup k rs2)) rs1) s''
-      (FunU ts1 r1, FunU ts2 r2) | length ts1 == length ts2 -> pairs flex (zip (r1 : ts1) (r2 : ts2)) s
+      (FunU ts1 r1, FunU ts2 r2)
+        | length ts1 == length ts2 -> pairs flex (zip (r1 : ts1) (r2 : ts2)) s
+        -- APP-1: the surplus parameters of the longer side are its result's
+        | length ts1 < length ts2 ->
+            let (pre, rest) = splitAt (length ts1) ts2 in match flex a (FunU pre (FunU rest r2)) s
+        | otherwise ->
+            let (pre, rest) = splitAt (length ts2) ts1 in match flex (FunU pre (FunU rest r1)) b s
       (AppU h1 as1, AppU h2 as2) | length as1 == length as2 -> pairs flex (zip (h1 : as1) (h2 : as2)) s
       (NamU o1 n1 ps1 rs1, NamU o2 n2 ps2 rs2)
         | o1 == o2, n1 == n2, length ps1 == length ps2, DL.sort (map fst rs1) == DL.sort (map fst rs2) ->

@@ -35,7 +35,7 @@ import Morloc.CodeGenerator.EffectBoundary (checkEffectBoundaries, insertEffectB
 import Morloc.CodeGenerator.Emit (TranslateFn, checkManifoldIds, emit, pool)
 import Morloc.CodeGenerator.StaticArgs (specializeStaticArgs)
 import Morloc.CodeGenerator.Express (express, addCacheWraps, addDebugWraps, addLoopWraps, addNativeRecEntries, etaReduceForwarders)
-import Morloc.CodeGenerator.LambdaEval (applyLambdas, applyPoolLambdas)
+import Morloc.CodeGenerator.LambdaEval (applyNexusLambdas, applyPoolLambdas)
 import Morloc.CodeGenerator.Namespace (Arg, PolyHead (..), SerialManifold)
 import qualified Morloc.CodeGenerator.Nexus as Nexus
 import Morloc.CodeGenerator.Parameterize (parameterize)
@@ -238,9 +238,9 @@ writeProgram translateFn path code =
     >>= (\asts -> checkPackerCoherence >> return asts)
     -- Evaluate applied lambdas. gASTs run in the pure nexus evaluator, which
     -- cannot hold a native closure, so let-bound lambdas are always inlined
-    -- there (True); rASTs become pools, where a multiply-used lambda is kept
-    -- as a shared native closure to avoid exponential inlining (False).
-    >>= bimapM (mapM (applyLambdas True)) (mapM applyPoolLambdas)
+    -- there; rASTs become pools, where a multiply-used lambda is kept as a
+    -- shared native closure to avoid exponential inlining.
+    >>= bimapM (mapM applyNexusLambdas) (mapM applyPoolLambdas)
     -- Give a recursive helper its own copy for each closed function it is
     -- passed at a position every recursion passes through unchanged, so the
     -- function is referenced directly rather than carried as a closure value.

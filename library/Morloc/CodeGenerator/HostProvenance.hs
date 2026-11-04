@@ -250,7 +250,7 @@ emptyFound :: Found
 emptyFound = Found Map.empty Map.empty Map.empty Set.empty Map.empty [] [] [] []
 
 data Ctx = Ctx
-  { cxSig :: Source -> Maybe TypeU
+  { cxSig :: Int -> Maybe TypeU
   , cxTree :: EVar -> Maybe Int
   , cxArity :: Int -> Int
   , cxSummary :: (Int, [Prov]) -> (Prov, [Origin])
@@ -281,13 +281,13 @@ analyze cx env dm (AnnoS (Idx gi t) (Idx ci _) e) = case e of
   VarS _ (One x) -> do
     i <- analyze cx env dm x
     done (iProv i) (iFree i) [i]
-  ExeS (SrcCall (Idx _ src)) -> do
+  ExeS (SrcCall (Idx si src)) -> do
     stray
     -- a source as a value: its first call group runs the source; a call
     -- that stops at a group boundary returns a function the host made
     let p = case srcRsize src of
           (g1 : _) | g1 < arity t -> PFun Portable g1 (mark (hostOf src) (afterCall t g1))
-          _ -> PFun Portable (arity t) (sourcedResult (hostOf src) (cxSig cx src) [] (afterCall t (arity t)))
+          _ -> PFun Portable (arity t) (sourcedResult (hostOf src) (cxSig cx si) [] (afterCall t (arity t)))
     done p Map.empty []
   ExeS (PatCall _) -> stray >> leaf
   CallS v -> do
@@ -428,7 +428,7 @@ analyze cx env dm (AnnoS (Idx gi t) (Idx ci _) e) = case e of
       | otherwise = modify (\f -> f {fSinks = (gi, o, what) : fSinks f})
 
     app f xs = case sourcedHead f of
-      Just src -> sourcedApp f src xs
+      Just isrc -> sourcedApp f isrc xs
       Nothing -> case calledTree f of
         Just j -> treeApp f j xs
         Nothing -> do
@@ -441,7 +441,7 @@ analyze cx env dm (AnnoS (Idx gi t) (Idx ci _) e) = case e of
           labeled f is r
           done' through (fit t r) (frees (fi : is)) (fi : is)
 
-    sourcedApp f src xs = do
+    sourcedApp f (Idx si src) xs = do
       fi <- analyze cx env Portable f
       let ft = annoType f
           ins = case ft of
@@ -458,7 +458,7 @@ analyze cx env dm (AnnoS (Idx gi t) (Idx ci _) e) = case e of
           k = length xs
           host = hostOf src
           groups = scanl1 (+) (srcRsize src)
-          full = sourcedResult host (cxSig cx src) (map iProv is) (afterCall ft m)
+          full = sourcedResult host (cxSig cx si) (map iProv is) (afterCall ft m)
           (r, through)
             | k < m && k `elem` groups = (mark host (afterCall ft k), Portable)
             | k < m = (PFun (joinsO (map (held . iProv) is)) (m - k) full, Portable)
@@ -535,7 +535,7 @@ analyze cx env dm (AnnoS (Idx gi t) (Idx ci _) e) = case e of
           else done (mark o t) (frees is) is
 
     sourcedHead (AnnoS _ _ x) = case x of
-      ExeS (SrcCall (Idx _ src)) -> Just src
+      ExeS (SrcCall isrc) -> Just isrc
       VarS _ (One y) -> sourcedHead y
       LabelS _ y -> sourcedHead y
       CoerceS _ y -> sourcedHead y
@@ -694,8 +694,8 @@ planWith view target trees00
     rootIdx (AnnoS (Idx i _) _ _) = i
 
     signatures trees0 = do
-      let srcs = [(si, src) | t <- trees0, AnnoS _ _ (ExeS (SrcCall (Idx si src))) <- nodes t]
-      pairs <- mapM (\(ci, src) -> fmap ((,) src . etype) <$> sourceSignature (Written ci) src) srcs
+      let srcs = Map.toList (Map.fromList [(si, src) | t <- trees0, AnnoS _ _ (ExeS (SrcCall (Idx si src))) <- nodes t])
+      pairs <- mapM (\(ci, src) -> fmap ((,) ci . etype) <$> sourceSignature (Written ci) src) srcs
       return (Map.fromList (catMaybes pairs))
 
     -- the analysis of one tree given what its parameters hold: what it

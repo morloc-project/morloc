@@ -1,5 +1,10 @@
 # Typeclass and instance issues
 
+- [speculative, 2026-11-04] An instance whose type extends a method's
+  parameters (`mk :: Int -> a` at `Int -> Int` is `Int -> Int -> Int`,
+  APP-1) keeps the class signature's argument docs, written for fewer
+  parameters (Link.hs `substituteInstanceTypes`, `et {etype = t}`); code
+  pairing docs with inputs would misalign them.
 - **Signature inside an instance body crashes the compiler.** [reproduced]
   Violates DIAG-1. The grammar accepts `m :: T` in an instance body; Link
   has no case for it and calls `error` (Frontend/Link.hs linkInstance,

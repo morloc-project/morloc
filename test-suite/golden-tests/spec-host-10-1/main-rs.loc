@@ -1,0 +1,29 @@
+-- Spec HOST-10: a source that implements a class method is called by the
+-- method's type at the instance's types. The source of `run` at `Int ->
+-- <IO> Int` is given a callback that returns its result (HOST-5), though
+-- the class's own type for `run` leaves its argument a type variable. A
+-- list of suspensions indexed by a compiler-built call still holds
+-- suspensions, which run only when bound.
+module main (viaCb, pick)
+
+import root-rust
+
+effect IO
+
+source Rust from "lib.rs" ("tick")
+
+tick :: Int -> <IO> Int
+
+class Run a where
+  run :: a -> <IO> Int
+
+instance Run (Int -> <IO> Int) where
+  source Rust from "lib.rs" ("run_cb" as run)
+
+viaCb :: <IO> Int
+viaCb = run tick
+
+pick :: Int -> <IO> Int
+pick i = do
+  x <- .[i] [tick 1, tick 2, tick 3]
+  x

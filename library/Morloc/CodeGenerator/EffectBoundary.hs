@@ -608,17 +608,18 @@ declaredSignature origin src = do
 
 -- | The signature of the term a source call implements, found by the index
 -- the source is declared under, never by its host function: one host
--- function may implement several terms with different signatures. An index
--- no term lists is a compiler bug.
+-- function may implement several terms with different signatures. A class
+-- method's source has its instance's signature (HOST-10). An index no term
+-- lists is a compiler bug.
 sourceSignature :: SrcOrigin -> Source -> MorlocMonad (Maybe EType)
 sourceSignature origin src = do
   sigs <- GMap.elems <$> MM.gets stateSignatures
-  case [sg | sg <- sigs, listsIndex sg] of
-    sg : _ -> return (signatureOf sg)
-    [] ->
-      MM.throwCompilerBug $
-        "a" <+> kind <+> "call of" <+> squotes (pretty (srcName src)) <+> "has source index"
-          <+> pretty i <> ", which no term lists"
+  case [(sg, t) | sg <- sigs, t <- termsOf sg, any atIndex (termConcrete t)] of
+    (Monomorphic _, t) : _ -> return (termGeneral t)
+    (Polymorphic {}, t) : _
+      | Just e <- termGeneral t -> return (Just e)
+      | otherwise -> bug "is an instance method with no signature"
+    [] -> bug "is listed by no term"
   where
     i = srcOriginIndex origin
     kind :: MDoc
@@ -626,10 +627,13 @@ sourceSignature origin src = do
       Written _ -> "written"
       Built _ -> "compiler-built"
     atIndex (_, Idx j _) = j == i
-    listsIndex (Monomorphic t) = any atIndex (termConcrete t)
-    listsIndex (Polymorphic _ _ _ ts) = any (any atIndex . termConcrete) ts
-    signatureOf (Monomorphic t) = termGeneral t
-    signatureOf (Polymorphic _ _ e _) = Just e
+    termsOf (Monomorphic t) = [t]
+    termsOf (Polymorphic _ _ _ ts) = ts
+    bug :: MDoc -> MorlocMonad a
+    bug what =
+      MM.throwCompilerBug $
+        "a" <+> kind <+> "call of" <+> squotes (pretty (srcName src)) <+> "has source index"
+          <+> pretty i <> ", which" <+> what
 
 -- | The other direction of a callback boundary: a host that receives a
 -- morloc callback may call it with a value of its own making, so each

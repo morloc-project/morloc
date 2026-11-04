@@ -2,18 +2,6 @@
 
 Generated code that a language's own tools refuse.
 
-- [read, 2026-11-03] A call of an instance method's source takes the
-  class's signature, not the instance's: EffectBoundary.hs `sourceSignature`
-  returns the class-level type of a polymorphic term (`pack :: a -> b`)
-  where the instance declares `List a -> Box a`. Every argument is then a
-  type variable, so `adapt` treats the whole value as opaque and adapts
-  nothing at the host boundary. Harmless for an identity, wrong for an
-  instance whose host function reads a function-typed or effectful part of
-  its argument (`Packable (Int -> <IO> Int) Foo`): it would be handed a
-  function in morloc's form. Calls in user code and calls the compiler
-  builds resolve the same way. Fix: the instance's `termGeneral`; it
-  changes adaptation for every instance method call, so it needs its own
-  test.
 - [read, 2026-11-03] Lowering a chain re-renders its open run at every
   level: Imperative.hs `currentChain` and `keepChain` compare rendered text
   to tell whether docs still hold the chain, and `renderChain` re-folds the

@@ -162,7 +162,10 @@ Instances may overlap. At a use at type `T`, the instances whose heads match
 other candidate's is selected. Candidates with equal heads are one instance
 for this rule (CLS-2, CLS-6). Two candidates with neither more specific than
 the other are a compile error at the use. Which implementations a selected
-instance has for a method it omits is CLS-12.
+instance has for a method it omits is CLS-12. Function types compare as
+APP-1 has them: `a -> b` covers `a -> b -> c`, so at a function of two
+numbers an instance at `a -> b -> c` is more specific than one at `a -> b`
+(spec-app-4-4).
 
 ### CLS-17 An instance is selected by its head alone
 Intent: ruled 2026-10-29

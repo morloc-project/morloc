@@ -705,9 +705,10 @@ substituteInstanceTypes (unzip -> (clsVars, instanceParameters)) clsType = do
       -- do not conflict with parameter qualifiers
       cleanClassType = replaceQualifiers instanceQualifiers (putClassVarsFirst clsType)
 
-      -- substitute in the parameter types
+      -- substitute in the parameter types; a function type substituted for
+      -- a variable that ends a function type extends it (APP-1)
       finalType =
-        qualify instanceQualifiers $
+        normalizeType . qualify instanceQualifiers $
           substituteQualifiers cleanClassType (map (snd . unqualify) instanceParameters)
 
   MM.sayVVV $

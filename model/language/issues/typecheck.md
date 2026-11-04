@@ -3,6 +3,14 @@
 Programs that typecheck and fail later, rejections with no location, and
 literal and record gaps. Reproduced on 0.109.0 unless marked.
 
+- [read, 2026-11-04] An over-application through an unsolved result is
+  checked by rewriting `f xs1 xs2` to `(f xs1) xs2` and checking that from
+  the context before `f` was synthesized (Typecheck.hs `overApplied`, APP-4),
+  so `f` is synthesized twice. A flat chain (`format "a" 1 2 3`) costs one
+  extra synthesis of the head; a head that is itself such an application
+  doubles the work at each level, `2^d` for `d` nested over-applied heads.
+  Candidate: continue from the synthesized head and apply its result to
+  the rest.
 - **Unreduced Rec expression not equal to itself.** [reproduced] Violates
   TEQ-4. `newtype Frame (r :: Rec); select, mySelect :: l@[Str] -> Frame r
   -> Frame (Restrict r l); mySelect l t = select l t` fails "Cannot compare

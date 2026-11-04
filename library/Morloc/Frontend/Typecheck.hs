@@ -803,10 +803,14 @@ compatibleTypeU = go Set.empty Set.empty
     go b1 b2 t1@(AppU _ _) t2@NamU{} = go b1 b2 t1 (nominal t2)
     go b1 _  (VarU v1) _ = Set.member v1 b1
     go _  b2 _ (VarU v2) = Set.member v2 b2
-    go b1 b2 (FunU as1 r1) (FunU as2 r2) =
-      length as1 == length as2
-        && all (uncurry (go b1 b2)) (zip as1 as2)
-        && go b1 b2 r1 r2
+    go b1 b2 (FunU as1 r1) (FunU as2 r2)
+      | length as1 == length as2 =
+          all (uncurry (go b1 b2)) (zip as1 as2) && go b1 b2 r1 r2
+      -- APP-1: the surplus parameters of the longer side are its result's
+      | length as1 < length as2 =
+          let (pre, rest) = splitAt (length as1) as2 in go b1 b2 (FunU as1 r1) (FunU pre (FunU rest r2))
+      | otherwise =
+          let (pre, rest) = splitAt (length as2) as1 in go b1 b2 (FunU pre (FunU rest r1)) (FunU as2 r2)
     go b1 b2 (AppU h1 ps1) (AppU h2 ps2)
       | length ps1 == length ps2 =
           go b1 b2 h1 h2
@@ -1219,11 +1223,11 @@ synthE _ g (AppS f []) = do
 --   -->E
 synthE i g0 (AppS f xs0) = do
   (g1, funType0, funExpr0) <- synthG g0 f
+  overApplied i f xs0 (apply g1 funType0) (synthE i g0) $ do
+    -- Literal arguments solve the variables their labels bind (m@Int).
+    let g1' = observeResultNats f funType0 (resolveNatLabels f funType0 xs0 g1)
+    etaExpandSynthE i g1' funType0 funExpr0 f xs0
 
-  -- Literal arguments solve the variables their labels bind (m@Int).
-  let g1' = observeResultNats f funType0 (resolveNatLabels f funType0 xs0 g1)
-
-  etaExpandSynthE i g1' funType0 funExpr0 f xs0
 
 -- -->I==>
 synthE _ g0 (LamS vs x) = do
@@ -1988,6 +1992,27 @@ coerceLiteralsToOptional (AnnoS (Idx i t) c e) = case (t, e) of
       lit <- coerceLiteralsToOptional (AnnoS (Idx idx inner) i e)
       return (AnnoS (Idx i t) c (CoerceS CoerceToOptional lit))
 
+-- | APP-4: an application with more arguments than its head's type shows,
+-- where that type's result is still open (an existential, or a variable it
+-- quantifies), applies the result to the rest: @f xs1 xs2@ is checked as
+-- @(f xs1) xs2@ from the context before the head was synthesized. A result
+-- that is a rigid variable or a suspension takes no more arguments, and the
+-- application is checked as written.
+overApplied ::
+  Int ->
+  AnnoS Int ManyPoly Int ->
+  [AnnoS Int ManyPoly Int] ->
+  TypeU ->
+  (ExprS Int ManyPoly Int -> MorlocMonad r) ->
+  MorlocMonad r ->
+  MorlocMonad r
+overApplied i f xs funType0 again asWritten = case openResultAfter (normalizeType funType0) of
+  Just n | length xs > n, n > 0 -> do
+    let (now, later) = splitAt n xs
+    k <- MM.getCounterWithPos i
+    again (AppS (AnnoS k k (AppS f now)) later)
+  _ -> asWritten
+
 etaExpandSynthE ::
   Int ->
   Gamma ->
@@ -2058,6 +2083,19 @@ etaExpandSynthE i g1 funType0 funExpr0 _f xs0 = do
             fullType = FunU newTypes retType
         return (g4, fullType, LamS newVars bodyAnno)
     _ -> error "impossible"
+
+-- | The parameters of a function type whose result is still open: an
+-- existential, or a variable the type quantifies (instantiated to one when
+-- applied). 'Nothing' for any other result.
+openResultAfter :: TypeU -> Maybe Int
+openResultAfter = go Set.empty
+  where
+    go bound (ForallU v t) = go (Set.insert v bound) t
+    go bound (FunU ps r) = case r of
+      ExistU _ ([], _) ([], _) -> Just (length ps)
+      VarU v | Set.member v bound -> Just (length ps)
+      _ -> Nothing
+    go _ _ = Nothing
 
 application ::
   Int ->
@@ -2533,35 +2571,36 @@ checkE i g0 e@(AppS _ _) t@(OptionalU _) = checkEFallback i g0 e t
 -- case take the synth-and-subtype path.
 checkE i g0 (AppS f xs) t = do
   (g1, funType0, funExpr0) <- synthG g0 f
-  let g1' = observeResultNats f funType0 (resolveNatLabels f funType0 xs g1)
-      (g2, funType1) = stripForallU g1' (normalizeType funType0)
-      -- Finish from the head already synthesized: synthesizing it again
-      -- would compound once per level of nesting. A nullary application
-      -- has its own synthesis rule, so it takes the fallback.
-      finish
-        | null xs = checkEFallback i g0 (AppS f xs) t
-        | otherwise = do
-            (g', a, e') <- etaExpandSynthE i g1' funType0 funExpr0 f xs
-            reconcileSynth i g' a e' t
-  case funType1 of
-    FunU paramTypes returnType
-      | length xs == length paramTypes
-      , isBareExistU (apply g2 returnType) -> do
-          scope <- MM.getGeneralScope
-          let returnApplied = apply g2 returnType
-              expectedApplied = apply g2 t
-          case subtype scope returnApplied expectedApplied g2 of
-            Right g3 -> do
-              (g4, _, xsAnn, _) <-
-                zipCheck i g3 xs (map (apply g3) paramTypes)
-              -- Again after the arguments, to carry what they solved back
-              -- to the expected type.
-              case subtype scope (apply g4 returnType) (apply g4 t) g4 of
-                Right g5 -> return (g5, apply g5 t, AppS funExpr0 xsAnn)
-                Left _ -> finish
-            Left _ -> finish
-      | otherwise -> finish
-    _ -> finish
+  overApplied i f xs (apply g1 funType0) (\e -> checkE i g0 e t) $ do
+    let g1' = observeResultNats f funType0 (resolveNatLabels f funType0 xs g1)
+        (g2, funType1) = stripForallU g1' (normalizeType funType0)
+        -- Finish from the head already synthesized: synthesizing it again
+        -- would compound once per level of nesting. A nullary application
+        -- has its own synthesis rule, so it takes the fallback.
+        finish
+          | null xs = checkEFallback i g0 (AppS f xs) t
+          | otherwise = do
+              (g', a, e') <- etaExpandSynthE i g1' funType0 funExpr0 f xs
+              reconcileSynth i g' a e' t
+    case funType1 of
+      FunU paramTypes returnType
+        | length xs == length paramTypes
+        , isBareExistU (apply g2 returnType) -> do
+            scope <- MM.getGeneralScope
+            let returnApplied = apply g2 returnType
+                expectedApplied = apply g2 t
+            case subtype scope returnApplied expectedApplied g2 of
+              Right g3 -> do
+                (g4, _, xsAnn, _) <-
+                  zipCheck i g3 xs (map (apply g3) paramTypes)
+                -- Again after the arguments, to carry what they solved back
+                -- to the expected type.
+                case subtype scope (apply g4 returnType) (apply g4 t) g4 of
+                  Right g5 -> return (g5, apply g5 t, AppS funExpr0 xsAnn)
+                  Left _ -> finish
+              Left _ -> finish
+        | otherwise -> finish
+      _ -> finish
   where
     isBareExistU (ExistU _ _ _) = True
     isBareExistU _ = False
