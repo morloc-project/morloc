@@ -16,19 +16,6 @@ belong to are in /work/plans/gadt/type-audit.md.
   checkIntrinsicArgs, so only some intrinsics are affected. Fix: desugar an
   over-application as an application of the saturated intrinsic to the
   rest. Repro: /work/plans/gadt/repro/try.loc.
-- **A declaration overlapping a typeclass term hits `undefined`.** [read]
-  Link.hs linkLocal, the `(Just (_, Just _))` arm of the AssE case. The SrcE
-  case reports the same overlap properly. [reproduced 2026-11-02,
-  UNSOUND] The arm is never reached, and the real effect is wrong output:
-  a top-level `foo x = 1` beside `class Foo` / `instance Foo Int where foo
-  x = 5` makes `bar 3` print 1, the instance silently skipped
-  (`findFreeDefs` gives the unsigned declaration a fresh term index and
-  `Map.union terms classes` prefers it). Fixing it rejects a program the
-  compiler accepts today (briefs/B8-B9.md, D-2).
-- **Alternatives of a term that differ in lambda shape.** [read]
-  Valuecheck.hs raises raw `error` "Illegal empty lambda" when one
-  alternative is a lambda and another is not (e.g. `\x -> f x` vs `f`).
-  Not run.
 - **A missing native mapping crashes through raw `error`.** [read] C++
   `leakError` (Cpp.hs, VarF/AppF/RecF guards), "record missing from recmap"
   (Cpp.hs, Rust.hs), "Recursive record without explicit mapping" (Cpp.hs,

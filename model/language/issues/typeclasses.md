@@ -1,18 +1,47 @@
 # Typeclass and instance issues
 
+- **Term and method names: two open questions.** [reproduced,
+  2026-11-04] Spec incomplete (CLS-3, SIG-9, MOD-12); brief
+  /work/plans/error-clusters/briefs/ruling-term-method-collision.md.
+  (1) An unsigned top-level definition named like a method of an
+  imported class becomes a new term that shadows the method
+  (`import root-py` then `abs x = 7.0`): refuse it, or keep it?
+  (2) Class methods ignore a namespace: with `import root-py as rp`, bare
+  `abs` resolves (Restructure.prefixAlias passes classes through), so two
+  namespaced libraries sharing a method name collide (CLS-3), against
+  SIG-8's "a namespaced import brings `n.f`, not `f`".
+  (3) A method of a class the module declares, named like a term it
+  imports with a whole module, is refused (spec-cls-3-3). Should the
+  method shadow the term (SIG-7 for methods)? Doing so needs every name
+  resolver to agree: Link, the export resolver (Restructure), Treeify
+  `definitionOf` and TerminalActions `visibleSigs`; a Link-only shadow left
+  the module's export of the name pointing at the imported term, and its
+  importers hit a compiler bug. This refusal, and the refusal of an
+  unsigned top-level definition named like a local method (spec-cls-3-1),
+  are where SIG-7 (a method's signature counts, SIG-6) and SIG-9 deviate:
+  sound, but narrower than the ruled text. Before, both silently
+  bypassed the instances.
+- **Import conflicts are reported without a location.** [read 2026-11-04]
+  Violates DIAG-2. Link.hs `mergeLinkStates` ("Illegal masking of type
+  signatures", the term/class conflict) uses `throwInheritanceError`,
+  which names the module but no import line.
+- **Two classes never in one scope may not share a method name.**
+  [reproduced 2026-11-04] Violates CLS-3 ("in scope"). Link.hs
+  `insertWithCheck` checks method names against the global
+  `stateTypeclasses`: `ca` declares `class A a where foo :: a -> Int`,
+  `cb` declares `class B a where foo :: a -> Int`, `main` imports
+  `.ca (bar)` and `.cb (baz)`: "The typeclasses 'A' and 'B' have
+  conflicting definitions of the term 'foo'". Instances are keyed by
+  method name, so the fix keys them by class and method.
 - [speculative, 2026-11-04] An instance whose type extends a method's
   parameters (`mk :: Int -> a` at `Int -> Int` is `Int -> Int -> Int`,
   APP-1) keeps the class signature's argument docs, written for fewer
   parameters (Link.hs `substituteInstanceTypes`, `et {etype = t}`); code
   pairing docs with inputs would misalign them.
-- **Signature inside an instance body crashes the compiler.** [reproduced]
-  Violates DIAG-1. The grammar accepts `m :: T` in an instance body; Link
-  has no case for it and calls `error` (Frontend/Link.hs linkInstance,
-  "linkInstance: unexpected declaration in an instance body"). Repro:
-  `class Foo a where foo :: a -> a` and
-  `instance Foo Int where foo :: Int -> Int; foo x = x`, then use `foo`.
-  Open: is the signature legal (checked against the instance type) or a
-  located rejection?
+- **A signature inside an instance body is refused.** [2026-11-04] Spec
+  incomplete. The grammar accepts `m :: T` in an instance body and Link
+  refuses it with a located error (it crashed before). Open: should it be
+  legal, checked against the instance type, as Haskell's InstanceSigs?
 
 - **An omitted method falls through to a more general instance.** [read]
   Spec gap: CLS-12 (open). Typecheck.resolveInstances chooses the most

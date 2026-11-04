@@ -62,7 +62,7 @@ block is its own scope.
 ### SIG-7 A signature shadows a term imported with its whole module
 Intent: ruled 2026-10-14
 Tests: spec-sig-7-1, spec-sig-7-2, spec-sig-7-3
-Code: conforms 2026-10-14
+Code: deviates (issues/typeclasses.md)
 
 If a module imports `m` without an import list, and `m` exports `f`, a
 signature `f :: T` in the module declares a new term `f`, which replaces the
@@ -77,7 +77,7 @@ library gains a name the module already uses.
 
 ### SIG-8 A signature for a term imported by name is a compile error
 Intent: ruled 2026-10-14
-Tests: spec-sig-8-1, spec-sig-8-2, spec-sig-8-3, spec-sig-8-4, spec-sig-8-5
+Tests: spec-sig-8-1, spec-sig-8-2, spec-sig-8-3, spec-sig-8-4, spec-sig-8-5, spec-sig-8-6
 Code: conforms 2026-10-14
 
 If a module names `f` in an import list (`import m (f)`), or names a class
@@ -90,7 +90,7 @@ it out of the list.
 ### SIG-9 A definition without a signature adds an implementation
 Intent: ruled 2026-10-14
 Tests: spec-sig-9-1, spec-sig-9-2
-Code: conforms 2026-10-14
+Code: deviates (issues/typeclasses.md)
 
 A definition `f = e` with no signature for `f` in the module is one more
 implementation of the term `f` in scope (SIG-1, SIG-2), imported or local.

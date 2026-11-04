@@ -20,10 +20,19 @@ of SIG-2.
 
 ### CLS-3 A method name belongs to one class
 Intent: proposed
-Code: conforms 2026-10-21
+Tests: spec-cls-3-1, spec-cls-3-2, spec-cls-3-3, spec-cls-3-4, spec-cls-3-5, spec-cls-3-6
+Code: deviates (issues/typeclasses.md)
 
 Two classes in scope that declare the same method name are a compile error.
-Methods are not importable by name (MOD-10).
+Methods are not importable by name (MOD-10). A top-level declaration with
+no signature named like a method of a class the module declares is a
+compile error: a method is implemented in an instance. A local definition
+of that name (in `where`) shadows the method as any local name does. A
+method of a class the module declares, named like a term the module
+imports with its whole module, is a compile error. Open: should either
+name shadow the other instead (SIG-7)? And an unsigned declaration beside
+a method of an imported class is today a new term that shadows the method
+(issues/typeclasses.md). An instance defines only methods of its class.
 
 ### CLS-4 A constraint with no argument is a compile error
 Intent: ruled 2026-09-23

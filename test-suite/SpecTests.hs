@@ -46,6 +46,8 @@ specTests =
     , localOption (mkTimeout 2000000) hostTests
     , localOption (mkTimeout 2000000) effTests
     , localOption (mkTimeout 2000000) appTests
+    , localOption (mkTimeout 2000000) cls3Tests
+    , localOption (mkTimeout 2000000) diagTests
     , localOption (mkTimeout 2000000) patTests
     , localOption (mkTimeout 2000000) recTests
     , localOption (mkTimeout 2000000) collTests
@@ -1315,6 +1317,117 @@ rejectSaying name needle code =
       (Right _, _) -> assertFailure "expected rejection"
       (Left e, st) | MM.isDefect st e -> assertFailure $ "expected a user error, got a compiler error: " <> show e
       (Left e, _) -> assertBool ("diagnostic lacks " <> MT.unpack needle <> ": " <> show e) (needle `MT.isInfixOf` MT.pack (show e))
+
+cls3Tests :: TestTree
+cls3Tests =
+  testGroup
+    "CLS-3"
+    [ rejectSaying
+        "spec-cls-3-1"
+        "define it in an instance of"
+        [r|
+        module main (bar)
+        class Foo a where
+          foo :: a -> Int
+        instance Foo Int where
+          foo x = 5
+        foo x = 1
+        bar :: Int -> Int
+        bar x = foo x
+        |]
+    , accept
+        "spec-cls-3-2"
+        [r|
+        module main (bar)
+        class Foo a where
+          foo :: a -> Int
+        instance Foo Int where
+          foo x = 5
+        bar :: Int -> Int
+        bar x = foo x
+          where
+            foo y = 1
+        |]
+    , rejectSaying
+        "spec-cls-3-3"
+        "has the name of a term this module imports"
+        [r|
+        module lib (foo)
+          foo :: Int -> Int
+        module main (bar)
+          import lib
+          class Foo a where
+            foo :: a -> Int
+          instance Foo Int where
+            foo x = 5
+          bar :: Int -> Int
+          bar x = foo x
+        |]
+    , rejectSaying
+        "spec-cls-3-4"
+        "has the name of a term this module imports"
+        [r|
+        module liba (foo)
+          foo :: Int -> Int
+        module libb (foo)
+          foo :: Int -> Str
+        module main (bar)
+          import liba
+          import libb
+          class Foo a where
+            foo :: a -> Int
+          bar :: Int -> Int
+          bar x = foo x
+        |]
+    , accept
+        "spec-cls-3-5"
+        [r|
+        module lib (foo, one)
+          foo :: Int -> Int
+          one :: Int
+        module main (bar)
+          import lib as l
+          import lib (one)
+          class Foo a where
+            foo :: a -> Int
+          instance Foo Int where
+            foo x = 5
+          bar :: Int -> Int
+          bar x = foo (l.foo x)
+        |]
+    , rejectSaying
+        "spec-cls-3-6"
+        "which is not a method of"
+        [r|
+        module main (bar)
+        class Foo a where
+          foo :: a -> Int
+        instance Foo Int where
+          foo x = 5
+          goo x = 6
+        bar :: Int -> Int
+        bar x = foo x
+        |]
+    ]
+
+diagTests :: TestTree
+diagTests =
+  testGroup
+    "DIAG"
+    [ rejectSaying
+        "spec-diag-1-1"
+        "inside an instance of"
+        [r|
+        module main (bar)
+        class Foo a where
+          foo :: a -> a
+        instance Foo Int where
+          foo :: Int -> Int
+          foo x = x
+        bar :: Int -> Int
+        bar x = foo x
+        |]
+    ]
 
 appTests :: TestTree
 appTests =
@@ -3222,6 +3335,18 @@ sigTests =
         module main (bar)
           import lib (C)
           foo :: Int -> Int
+          bar :: Int -> Int
+          bar x = foo x
+        |]
+    , rejectUser
+        "spec-sig-8-6"
+        [r|
+        module lib (foo)
+          foo :: Int -> Int
+        module main (bar)
+          import lib (foo)
+          class Foo a where
+            foo :: a -> Int
           bar :: Int -> Int
           bar x = foo x
         |]

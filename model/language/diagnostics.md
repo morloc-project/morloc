@@ -4,6 +4,7 @@ The compiler's error contract: never crash, every rejection located, warnings. P
 
 ### DIAG-1 The compiler never crashes
 Intent: proposed
+Tests: spec-diag-1-1
 Code: deviates (issues/diagnostics-docs.md)
 
 On any input, the compiler either builds the program or rejects it with a

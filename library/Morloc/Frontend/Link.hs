@@ -63,9 +63,10 @@ synth ::
   [(MVar, [AliasedSymbol], LinkState)] ->
   MorlocMonad LinkState
 synth k0 e0 edges = do
-  inheritedState <- mapM (realiasLinkState k0) edges >>= mergeLinkStates k0 (localSignatureNames e0)
+  let methods = localClassMethods e0
+  inheritedState <- mapM (realiasLinkState k0) edges >>= mergeLinkStates k0 (localSignatureNames e0 <> methods)
   checkOneSignature inheritedState e0
-  finalState <- addLocalState k0 e0 inheritedState
+  finalState <- addLocalState k0 methods e0 inheritedState
   _ <- linkLocalTerms k0 finalState e0
   return finalState
 
@@ -73,16 +74,17 @@ synth k0 e0 edges = do
 -- method signatures. A signature for a term the module imports by name
 -- contradicts the import (SIG-8); one for a term that came in with a whole
 -- module declares a new term in its place (SIG-7), since the link of the
--- module's own terms starts from its own signatures.
+-- module's own terms starts from its own signatures. A class method named
+-- like a term imported with a whole module is refused (CLS-3).
 checkOneSignature :: LinkState -> ExprI -> MorlocMonad ()
 checkOneSignature imported (ExprI _ (ModE _ es)) = go Set.empty sigs
   where
     sigs =
-      [ (i, v)
+      [ (i, v, isMethod)
       | ExprI i e <- es
-      , v <- case e of
-          SigE (Signature v' _ _) -> [v']
-          ClsE (Typeclass _ _ _ ms) -> [v' | Signature v' _ _ <- ms]
+      , (v, isMethod) <- case e of
+          SigE (Signature v' _ _) -> [(v', False)]
+          ClsE (Typeclass _ _ _ ms) -> [(v', True) | Signature v' _ _ <- ms]
           _ -> []
       ]
     -- names an un-namespaced import list brings into scope, with the name
@@ -102,9 +104,9 @@ checkOneSignature imported (ExprI _ (ModE _ es)) = go Set.empty sigs
     className (AliasedClass c) = [c]
     className (AliasedType (TV t) _) = [ClassName t]
     className _ = []
-    go :: Set.Set EVar -> [(Int, EVar)] -> MorlocMonad ()
+    go :: Set.Set EVar -> [(Int, EVar, Bool)] -> MorlocMonad ()
     go _ [] = return ()
-    go seen ((i, v) : rest)
+    go seen ((i, v, isMethod) : rest)
       | Just orig <- Map.lookup v named =
           MM.throwSourcedError i $
             "A signature for" <+> squotes (pretty v)
@@ -115,13 +117,25 @@ checkOneSignature imported (ExprI _ (ModE _ es)) = go Set.empty sigs
           MM.throwSourcedError i $
             "A second signature for" <+> squotes (pretty v)
               <> ": a term has one signature, though it may have many implementations."
+      | isMethod && Map.member v (linkTerms imported) =
+          MM.throwSourcedError i $
+            "The class method" <+> squotes (pretty v)
+              <+> "has the name of a term this module imports with its whole module."
+              <+> "Import that module with a list that leaves out" <+> squotes (pretty v)
+              <> ", or rename the method."
       | otherwise = go (Set.insert v seen) rest
 checkOneSignature _ _ = return ()
 
--- | The names a module gives its own signatures (SIG-7).
+-- | The names a module gives its own top-level signatures (SIG-7).
 localSignatureNames :: ExprI -> Set.Set EVar
 localSignatureNames (ExprI _ (ModE _ es)) = Set.fromList [v | ExprI _ (SigE (Signature v _ _)) <- es]
 localSignatureNames _ = Set.empty
+
+-- | The methods of the classes a module declares.
+localClassMethods :: ExprI -> Set.Set EVar
+localClassMethods (ExprI _ (ModE _ es)) =
+  Set.fromList [v | ExprI _ (ClsE (Typeclass _ _ _ sigs)) <- es, Signature v _ _ <- sigs]
+localClassMethods _ = Set.empty
 
 -- Will raise error if any import term is absent in the linkstate list
 realiasLinkState ::
@@ -137,7 +151,7 @@ realiasLinkState m1 (m2, ss, s) = do
     mergeValues :: (Ord k, Show k) => String -> [(k, Maybe v)] -> MorlocMonad (Map k v)
     mergeValues msg xs = case [v | (v, Nothing) <- xs] of
       [] -> return $ Map.fromList [(v, i) | (v, Just i) <- xs]
-      missing -> error $ "Undefined " <> msg <> " imports:" <> show missing <> "\n  ss = " <> show ss
+      missing -> MM.throwCompilerBug $ "undefined" <+> pretty msg <+> "imports:" <+> viaShow missing
 
 throwInheritanceError :: MVar -> MDoc -> MorlocMonad a
 throwInheritanceError m msg = MM.throwRejected $ "In module" <+> squotes (pretty m) <> ":" <+> msg
@@ -177,7 +191,7 @@ mergeLinkStates m0 shadowed imps = do
   return $ LinkState termmap classmap
   where
     mergeTerms :: EVar -> [(MVar, MVar, Int)] -> MorlocMonad Int
-    mergeTerms _ [] = error "Compiler bug: This cannot be empty"
+    mergeTerms v [] = MM.throwCompilerBug $ "no import of term" <+> squotes (pretty v)
     mergeTerms _ [(_, _, i)] = return i
     mergeTerms v ((m1, importMod1, i) : (_, importMod2, j) : xs)
       | i == j = mergeTerms v ((m1, importMod1, j) : xs)
@@ -194,7 +208,7 @@ mergeLinkStates m0 shadowed imps = do
 
     mergeClasses ::
       ClassName -> [(MVar, MVar, (Int, a, Map EVar Int))] -> MorlocMonad (Int, a, Map EVar Int)
-    mergeClasses _ [] = error "This will never be empty"
+    mergeClasses v [] = MM.throwCompilerBug $ "no import of class" <+> squotes (pretty v)
     mergeClasses _ [(_, _, x)] = return x
     mergeClasses v ((_, m1b, (i, _, _)) : (m2a, m2b, y@(j, _, _)) : xs)
       | i == j = mergeClasses v ((m2a, m2b, y) : xs)
@@ -224,12 +238,14 @@ mergeLinkStates m0 shadowed imps = do
       conflicts -> Just (cls, conflicts)
 
 -- updates stateSignature index 2
-addLocalState :: MVar -> ExprI -> LinkState -> MorlocMonad LinkState
-addLocalState m0 e0 s0 = do
+-- | `localMethods` are the methods of the classes the module declares.
+addLocalState :: MVar -> Set.Set EVar -> ExprI -> LinkState -> MorlocMonad LinkState
+addLocalState m0 localMethods e0 s0 = do
   s1 <- findDefs e0 s0
   (_, s2) <- findFreeDefs e0 (Set.empty, s1)
   return s2
   where
+
     -- Iterate through the expression and add signatures and typeclasses. This
     -- needs to be done before the sources, declarations, and instances are
     -- added, since these all need to augment code that has already be indexed.
@@ -268,7 +284,6 @@ addLocalState m0 e0 s0 = do
               }
         )
 
-      -- generate the (Map EVar Int) list for LinkedState
       let vmap = Map.fromList [(v, i) | (i, Signature v _ _) <- sigsIdx]
           classes = Map.insert cls (clsIndex, tcls, vmap) (linkClasses lstate)
       return $ lstate {linkClasses = classes}
@@ -304,9 +319,11 @@ addLocalState m0 e0 s0 = do
             <+> squotes (pretty k)
       Nothing -> return $ Map.insert k v m
 
-    -- Handle assignments that do not have signatures
+    -- Handle assignments that do not have signatures. One named like a
+    -- method of a class this module declares gets no term of its own: it is
+    -- linked to the method, where it is refused (CLS-3).
     findFreeDefs (ExprI _ (AssE v _ _)) (terms, lstate)
-      | Set.member v terms || Map.member v (linkTerms lstate) = return (terms, lstate)
+      | Set.member v terms || Map.member v (linkTerms lstate) || Set.member v localMethods = return (terms, lstate)
       | otherwise = do
           -- make new index to use for all definitions of this term
           idx <- MM.getCounter
@@ -353,7 +370,7 @@ linkLocalTerms m0 s0 e0 = linkLocal Set.empty s0 (toCondensedState s0) e0
               , c {linkTerms = foldr Map.delete (linkTerms c) vs}
               )
             _ -> (bnds, c)
-      c'' <- foldrM (addLocalState m0) c' (e : es)
+      c'' <- foldrM (addLocalState m0 Set.empty) c' (e : es)
       let owned = [ w | ExprI _ (AssE w _ _) <- es ]
       MM.modify' $ \ms -> ms
         { stateWhereOwner = foldr
@@ -382,8 +399,7 @@ linkLocalTerms m0 s0 e0 = linkLocal Set.empty s0 (toCondensedState s0) e0
           (GMap idmap sigmap) <- MM.gets stateSignatures
           case Map.lookup termIdx sigmap of
             Nothing ->
-              error
-                "This should be unreachable since there is an associated signature and it should have been loaded"
+              MM.throwCompilerBugAt i $ "the term of source" <+> squotes (pretty (srcAlias src)) <+> "has no signature set"
             (Just (Monomorphic tt)) -> do
               let srcTerm = (m0, Idx i src)
                   tt' = tt {termConcrete = srcTerm : termConcrete tt}
@@ -394,25 +410,24 @@ linkLocalTerms m0 s0 e0 = linkLocal Set.empty s0 (toCondensedState s0) e0
                 , stateDefinitionSite = Map.insertWith (\_ old -> old) termIdx i (stateDefinitionSite s)
                 })
             (Just (Polymorphic cls _ _ _)) ->
-              MM.throwSourcedError i $
-                "Source term"
-                  <+> squotes (pretty (srcAlias src))
-                  <+> " overlaps a term in typeclass"
-                  <+> squotes (pretty cls)
+              MM.throwCompilerBugAt i $
+                "the term of source" <+> squotes (pretty (srcAlias src)) <+> "is a method of" <+> squotes (pretty cls)
 
     -- link a new declaration to its type in morloc state and recurse into its
     -- local where block as needed
     linkLocal bnds c cs (ExprI i (AssE v e es)) = do
       updateName i v
       case Map.lookup v cs of
-        Nothing -> error "Bug: This case should be unreachable"
-        (Just (_, Just _)) -> undefined -- handle error for src that overlaps typeclass term
+        Nothing -> MM.throwCompilerBugAt i $ "the declaration of" <+> squotes (pretty v) <+> "has no term"
+        (Just (_, Just (Typeclass _ cls _ _))) ->
+          MM.throwSourcedError i $
+            "Declared term" <+> squotes (pretty v) <+> "overlaps a term in typeclass" <+> squotes (pretty cls)
+              <> "; define it in an instance of" <+> squotes (pretty cls)
         (Just (termIdx, Nothing)) -> do
           (GMap idmap sigmap) <- MM.gets stateSignatures
           case Map.lookup termIdx sigmap of
             Nothing ->
-              error
-                "Bug: This should be unreachable since there is an associated signature and it should have been loaded"
+              MM.throwCompilerBugAt i $ "the term of" <+> squotes (pretty v) <+> "has no signature set"
             (Just (Monomorphic tt)) -> do
               let tt' = tt {termDecl = e : termDecl tt}
                   sigmap' = Map.insert termIdx (Monomorphic tt') sigmap
@@ -423,8 +438,8 @@ linkLocalTerms m0 s0 e0 = linkLocal Set.empty s0 (toCondensedState s0) e0
                 })
               linkScoped bnds c termIdx e es
             (Just (Polymorphic cls _ _ _)) ->
-              MM.throwSourcedError i $
-                "Declared term" <+> squotes (pretty v) <+> " overlaps a term in typeclass" <+> squotes (pretty cls)
+              MM.throwCompilerBugAt i $
+                "the term of" <+> squotes (pretty v) <+> "is a method of" <+> squotes (pretty cls)
     linkLocal bnds c _ (ExprI i (IstE origin cls _ ts es)) = do
       case Map.lookup cls (linkClasses c) of
         -- The runtime handles' representation is an address, not a value
@@ -509,7 +524,7 @@ linkLocalTerms m0 s0 e0 = linkLocal Set.empty s0 (toCondensedState s0) e0
         -- exported with no signature in scope.
         linkExp (v, _, Nothing) =
           MM.throwSourcedError i $ "Undefined export" <+> squotes (pretty v)
-    linkLocal _ _ _ (ExprI _ (ExpE ExportAll)) = error "Bug: ExportAll should no longer be present"
+    linkLocal _ _ _ (ExprI i (ExpE ExportAll)) = MM.throwCompilerBugAt i "an export of everything is still present at link"
     -- Shadowing is allowed, so here all terms in `s` that are bound by the lambda
     -- need to be removed
     linkLocal bnds c cs (ExprI i (LamE vs e)) = do
@@ -623,13 +638,13 @@ linkInstance origin linker m0 cls0 params0 sigs0 emap0 e0 = linkExpr e0
   where
     linkExpr (ExprI i (SrcE src)) = do
       let v = srcAlias src
-      (Signature _ _ et, stateIdx) <- lookupInfo v
+      (Signature _ _ et, stateIdx) <- lookupInfo i v
       t <- substituteInstanceTypes params0 (etype et)
       let et' = et {etype = t}
       let tt = TermTypes (Just et') [(m0, Idx i src)] []
       linkTermTypes v et tt stateIdx
     linkExpr (ExprI ai (AssE v e es)) = do
-      (Signature _ _ et, stateIdx) <- lookupInfo v
+      (Signature _ _ et, stateIdx) <- lookupInfo ai v
       -- a derived body is not a definition anyone wrote
       when (origin == Declared) $
         MM.modify' (\ms -> ms {stateDefinitionSite = Map.insert stateIdx ai (stateDefinitionSite ms)})
@@ -638,26 +653,28 @@ linkInstance origin linker m0 cls0 params0 sigs0 emap0 e0 = linkExpr e0
       let et' = et {etype = t}
       let tt = TermTypes (Just et') [] [e]
       linkTermTypes v et tt stateIdx
-    linkExpr _ =
-      error
-        "linkInstance: unexpected declaration in an instance body"
+    linkExpr (ExprI i (SigE (Signature v _ _))) =
+      MM.throwSourcedError i $
+        "A signature for" <+> squotes (pretty v) <+> "inside an instance of" <+> squotes (pretty cls0)
+          <> ": an instance gives only implementations; the method's type comes from the class"
+    linkExpr (ExprI i _) =
+      MM.throwSourcedError i $
+        "An instance of" <+> squotes (pretty cls0) <+> "holds a declaration that is not an implementation of a method"
 
-    lookupInfo :: EVar -> MorlocMonad (Signature, Int)
-    lookupInfo v = case ([sig | sig@(Signature v' _ _) <- sigs0, v == v'], Map.lookup v emap0) of
+    lookupInfo :: Int -> EVar -> MorlocMonad (Signature, Int)
+    lookupInfo at v = case ([sig | sig@(Signature v' _ _) <- sigs0, v == v'], Map.lookup v emap0) of
       ([sig], Just i) -> return (sig, i)
       _ ->
-        throwInheritanceError m0 $
-          "\n  Instance of class"
-            <+> squotes (pretty cls0)
-            <+> "contains undefined term"
-            <+> squotes (pretty v)
+        MM.throwSourcedError at $
+          "The instance of" <+> squotes (pretty cls0) <+> "defines" <+> squotes (pretty v)
+            <> ", which is not a method of" <+> squotes (pretty cls0)
 
     linkTermTypes :: EVar -> EType -> TermTypes -> Int -> MorlocMonad ()
     linkTermTypes v et tt stateIdx = do
       (GMap idmap sigmap) <- MM.gets stateSignatures
       tcls <- MM.gets stateTypeclasses
       case Map.lookup stateIdx sigmap of
-        Nothing -> undefined -- should be unreachable
+        Nothing -> MM.throwCompilerBug $ "the method" <+> squotes (pretty v) <+> "has no signature set"
         (Just sigset) -> do
           sigset' <- mergeSignatureSet sigset (Polymorphic cls0 v et [tt])
           let sigmap' = Map.insert stateIdx sigset' sigmap
