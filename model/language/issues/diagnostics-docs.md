@@ -143,3 +143,9 @@
   (`__mm_4134(s3): ... __mm_4766(n3)`) take it too, so a call from another
   pool lists the function twice. Every language labels by the same
   traceInfo; label only the manifold that is the function's body.
+- **An intrinsic's diagnostics underline the wrong span.** [reproduced
+  2026-11-04] Violates DIAG-2. The saturated part of an over-applied
+  intrinsic (INTR-9) takes the whole application's span, so an error in it
+  also underlines the extra arguments; a bare intrinsic eta-expanded with
+  no arguments (`f = @throw`) puts one caret under `@`. Desugar.hs
+  `etaExpandIntrinsic` has only the expression's span.

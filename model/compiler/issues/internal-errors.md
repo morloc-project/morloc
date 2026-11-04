@@ -5,17 +5,6 @@ compiler answers with an internal error, a raw `error` or `undefined`
 instead of a located diagnostic. Type-level fixes for the classes these
 belong to are in /work/plans/gadt/type-audit.md.
 
-- **An over-applied intrinsic is an internal error.** [reproduced,
-  2026-10-29] `f :: Int -> Int; f x = @try x 1` fails "internal compiler
-  error" at Typecheck.hs synthE (`IntrTry expects 1 arg`). Desugar.hs
-  etaExpandIntrinsic keeps every argument when `actual >= arity`, so the
-  extra one reaches the per-intrinsic clause. `@write` with four arguments
-  takes the same path to a raw `error` (`IntrWrite expects 3 args`), with no
-  location [reproduced 2026-11-02].
-  `@stream`/`@next` report a type error and `@eq` goes through
-  checkIntrinsicArgs, so only some intrinsics are affected. Fix: desugar an
-  over-application as an application of the saturated intrinsic to the
-  rest. Repro: /work/plans/gadt/repro/try.loc.
 - **A missing native mapping crashes through raw `error`.** [read] C++
   `leakError` (Cpp.hs, VarF/AppF/RecF guards), "record missing from recmap"
   (Cpp.hs, Rust.hs), "Recursive record without explicit mapping" (Cpp.hs,

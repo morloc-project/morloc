@@ -2896,14 +2896,20 @@ desugarExpr (Loc sp (CAsE (EV label) _)) = do
       else "as-pattern '@' is only valid in a binding position"
 
 -- | Wrap an intrinsic in a lambda if it has fewer args than its arity.
--- Fully applied intrinsics pass through as IntrinsicE nodes. @collect passes
+-- Fully applied intrinsics pass through as IntrinsicE nodes; an
+-- over-applied one is the saturated IntrinsicE applied to the rest (INTR-9). @collect passes
 -- through unchanged here (arity 1) so the terminal-action synthesis can see
 -- and rewrite it; it is expanded later by 'expandCollectE'.
 etaExpandIntrinsic :: Span -> Intrinsic -> [ExprI] -> D ExprI
 etaExpandIntrinsic sp intr args = do
   let arity = intrinsicArity intr
       actual = length args
-  if actual >= arity
+  if actual > arity
+    then do
+      -- INTR-9: the saturated intrinsic is applied to the rest
+      saturated <- freshExprSpan sp (IntrinsicE intr (take arity args))
+      freshExprSpan sp (AppE saturated (drop arity args))
+  else if actual == arity
     then freshExprSpan sp (IntrinsicE intr args)
     else do
       idx <- freshIdSpan sp
@@ -4002,6 +4008,7 @@ endsInCollect :: ExprI -> Bool
 endsInCollect (ExprI _ e) = case e of
   IntrinsicE IntrCollect _ -> True
   IntrinsicE IntrThrow _ -> True
+  AppE (ExprI _ (IntrinsicE IntrThrow _)) _ -> True
   LetE _ b -> endsInCollect b
   DoBlockE b -> endsInCollect b
   EvalE b -> endsInCollect b

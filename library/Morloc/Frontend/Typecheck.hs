@@ -1554,8 +1554,8 @@ synthE _ g (IntrinsicS IntrMap [funcE, listE]) = do
   let funcExpectedT = FunU [apply g4 a] (apply g4 b)
   (g5, _, funcE') <- checkG g4 funcE funcExpectedT
   return (g5, apply g5 resultT, IntrinsicS IntrMap [funcE', listE'])
-synthE _ _ (IntrinsicS IntrMap args) =
-  error $ "IntrMap expects 2 args (lambda, list), got " <> show (length args)
+synthE i _ (IntrinsicS IntrMap args) =
+  MM.throwCompilerBugAt i $ "IntrMap expects 2 args (lambda, list), got " <> pretty (length args)
 -- IntrEq / IntrLe: two values of one type, compared on the wire (INTR-7).
 synthE _ g (IntrinsicS intr [aE, bE])
   | intr `elem` [IntrEq, IntrLe] = do
@@ -1574,8 +1574,8 @@ synthE i g (IntrinsicS IntrNewtypeUnwrap [xE]) = do
     Nothing ->
       MM.throwSourcedError i $
         "Cannot unwrap" <+> squotes (pretty tx') <> ": it is not a newtype with a representation."
-synthE _ _ (IntrinsicS IntrNewtypeUnwrap args) =
-  error $ "IntrNewtypeUnwrap expects one argument, got " <> show (length args)
+synthE i _ (IntrinsicS IntrNewtypeUnwrap args) =
+  MM.throwCompilerBugAt i $ "IntrNewtypeUnwrap expects one argument, got " <> pretty (length args)
 synthE i _ (IntrinsicS IntrNewtypeWrap _) =
   MM.throwSourcedError i "A newtype wrap needs the newtype it builds from its context."
 -- The intrinsics only the compiler writes ('viewInternal').
@@ -1630,8 +1630,8 @@ synthE _ g (IntrinsicS IntrWrite [levelE, handleE, listE]) = do
          , EffectU ioEffectSet (BT.tryU BT.strU BT.unitU)
          , IntrinsicS IntrWrite [levelE', handleE', listE']
          )
-synthE _ _ (IntrinsicS IntrWrite args) =
-  error $ "IntrWrite expects 3 args (level, handle, list), got " <> show (length args)
+synthE i _ (IntrinsicS IntrWrite args) =
+  MM.throwCompilerBugAt i $ "IntrWrite expects 3 args (level, handle, list), got " <> pretty (length args)
 -- The fold accumulator. `Cell b` carries the accumulated type, forcing a
 -- folding handler's init, step and combine to agree; an untyped handle
 -- would be unsound.
@@ -1642,16 +1642,16 @@ synthE _ g (IntrinsicS IntrCellNew [initE]) = do
          , EffectU ioEffectSet (AppU (VarU BT.cellVar) [apply g2 b])
          , IntrinsicS IntrCellNew [initE']
          )
-synthE _ _ (IntrinsicS IntrCellNew args) =
-  error $ "IntrCellNew expects 1 arg (init), got " <> show (length args)
+synthE i _ (IntrinsicS IntrCellNew args) =
+  MM.throwCompilerBugAt i $ "IntrCellNew expects 1 arg (init), got " <> pretty (length args)
 synthE _ g (IntrinsicS IntrCellGet [handleE]) = do
   (g1, b, handleE') <- checkCellHandle g handleE
   return ( g1
          , EffectU ioEffectSet b
          , IntrinsicS IntrCellGet [handleE']
          )
-synthE _ _ (IntrinsicS IntrCellGet args) =
-  error $ "IntrCellGet expects 1 arg (handle), got " <> show (length args)
+synthE i _ (IntrinsicS IntrCellGet args) =
+  MM.throwCompilerBugAt i $ "IntrCellGet expects 1 arg (handle), got " <> pretty (length args)
 synthE _ g (IntrinsicS IntrCellPut [handleE, valE]) = do
   (g2, b, handleE') <- checkCellHandle g handleE
   (g3, _, valE')    <- checkG g2 valE b
@@ -1659,8 +1659,8 @@ synthE _ g (IntrinsicS IntrCellPut [handleE, valE]) = do
          , EffectU ioEffectSet BT.unitU
          , IntrinsicS IntrCellPut [handleE', valE']
          )
-synthE _ _ (IntrinsicS IntrCellPut args) =
-  error $ "IntrCellPut expects 2 args (handle, value), got " <> show (length args)
+synthE i _ (IntrinsicS IntrCellPut args) =
+  MM.throwCompilerBugAt i $ "IntrCellPut expects 2 args (handle, value), got " <> pretty (length args)
 synthE _ g (IntrinsicS IntrCellReduce [combineE, handleE]) = do
   (g2, bT, handleE') <- checkCellHandle g handleE
   (g3, _, combineE') <- checkG g2 combineE (FunU [bT, bT] bT)
@@ -1668,8 +1668,8 @@ synthE _ g (IntrinsicS IntrCellReduce [combineE, handleE]) = do
          , EffectU ioEffectSet (apply g3 bT)
          , IntrinsicS IntrCellReduce [combineE', handleE']
          )
-synthE _ _ (IntrinsicS IntrCellReduce args) =
-  error $ "IntrCellReduce expects 2 args (combine, handle), got " <> show (length args)
+synthE i _ (IntrinsicS IntrCellReduce args) =
+  MM.throwCompilerBugAt i $ "IntrCellReduce expects 2 args (combine, handle), got " <> pretty (length args)
 -- @replay :: IStream a -> ([a] -> <IO> ()) -> <IO> (); each frame is a list.
 synthE _ g (IntrinsicS IntrReplay [handleE, fnE]) = do
   let (g1, a) = newvar "replay_a_" g
@@ -1724,7 +1724,7 @@ synthE _ g (IntrinsicS IntrStream [handleE]) = do
          , IntrinsicS IntrStream [handleE']
          )
 synthE i _ (IntrinsicS IntrStream args) =
-  throwTypeError i $ "@stream expects 1 arguments but got" <+> pretty (length args)
+  MM.throwCompilerBugAt i $ "@stream expects 1 arguments but got" <+> pretty (length args)
 -- @next :: IStream a -> <IO> (Try Str [a]). A mid-stream decode failure is
 -- an Err arm. Typed like @stream, by checking the receiver.
 synthE _ g (IntrinsicS IntrNext [handleE]) = do
@@ -1735,7 +1735,7 @@ synthE _ g (IntrinsicS IntrNext [handleE]) = do
          , IntrinsicS IntrNext [handleE']
          )
 synthE i _ (IntrinsicS IntrNext args) =
-  throwTypeError i $ "@next expects 1 arguments but got" <+> pretty (length args)
+  MM.throwCompilerBugAt i $ "@next expects 1 arguments but got" <+> pretty (length args)
 synthE i _ (IntrinsicS IntrDatafile [pathE])
   | not (isStaticStr pathE) =
       MM.throwSourcedError i
@@ -1911,7 +1911,7 @@ checkIntrinsicArgs i g intr argTypes = do
   let expected = intrinsicArity intr
       actual = length argTypes
   if actual /= expected
-    then throwTypeError i $
+    then MM.throwCompilerBugAt i $
       "@" <> pretty (intrinsicName intr) <+> "expects" <+> pretty expected
         <+> "arguments but got" <+> pretty actual
     else do

@@ -71,3 +71,12 @@ Code: conforms 2026-10-21
 
 A value gives the same `@show` text and the same `@hash` in every language.
 
+### INTR-9 An intrinsic given more arguments than it takes applies its result to the rest
+Intent: proposed
+Tests: spec-intr-9-1, spec-intr-9-2, spec-intr-9-3, spec-intr-9-4, spec-intr-9-5, spec-intr-9-6
+Code: conforms 2026-11-04
+
+`@i x1 ... xn y1 ... ym`, where `@i` takes n arguments, is
+`(@i x1 ... xn) y1 ... ym`: it typechecks only where the intrinsic's
+result is a function of the remaining arguments (APP-4), and is otherwise
+a located type error.
