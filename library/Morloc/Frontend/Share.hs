@@ -397,8 +397,8 @@ isData t = case t of
   FunT _ _ -> False
   EffectT _ _ -> False
   UnkT _ -> False
-  AppT h ts -> all isData (h : ts)
-  NamT _ _ ps rs -> all isData ps && all (isData . snd) rs
+  AppT h ts -> all isData (h : tyArgs ts)
+  NamT _ _ ps rs -> all isData (tyArgs ps) && all (isData . snd) rs
   OptionalT x -> isData x
   _ -> True
 

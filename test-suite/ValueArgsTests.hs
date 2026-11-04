@@ -71,11 +71,11 @@ valueArgsTests =
     , testCase "an application is decided by its head" $
         appValueArgs gscope (VarF (FV (TV "Table") (CV "arrow"))) [KiA NatVoidK, TyA row] @?= []
     , testCase "the Type form agrees" $
-        valueArgsT gscope (TV "Table") [NatVoidT, rowT] @?= []
+        valueArgsT gscope (TV "Table") [KiA NatVoidT, TyA rowT] @?= []
     , testCase "a table head declared without parameters still drops its row" $
         valueArgsF bare (TV "Table") [KiA NatVoidK, TyA row, TyA int] @?= [int]
     , testCase "the Type form drops labels as the TypeF form does" $
-        ( valueArgsT Map.empty (TV "Foo") [StrLitT "lbl", StrVoidT, VarT (TV "Int")]
+        ( valueArgsT Map.empty (TV "Foo") [KiA (StrLitT "lbl"), KiA StrVoidT, TyA (VarT (TV "Int"))]
         , valueArgsF Map.empty (TV "Foo") [KiA (StrLitK "lbl"), KiA (VoidK KindStr), TyA int] )
           @?= ([VarT (TV "Int")], [int])
     ]
@@ -85,13 +85,13 @@ kindOfTests =
   testGroup
     "the kind of an argument is fixed by its form (KIND-1)"
     [ testCase "erasure keeps the kind of a placeholder" $
-        map (kindOfT . typeOf) [RecVarU (TV "r"), ListVarU (TV "l"), SetVarU (TV "s"), StrVarU (TV "t"), NatVarU (TV "n")]
-          @?= map Just [KindRec, KindList KindStr, KindSet KindStr, KindStr, KindNat]
+        map argOf [RecVarU (TV "r"), ListVarU (TV "l"), SetVarU (TV "s"), StrVarU (TV "t"), NatVarU (TV "n")]
+          @?= map (KiA . VoidT) [KindRec, KindList KindStr, KindSet KindStr, KindStr, KindNat]
     , testCase "a placeholder lifts back at its own kind" $
-        map (type2typeu . typeOf) [RecVarU (TV "r"), ListVarU (TV "l"), SetVarU (TV "s")]
+        map (argU . argOf) [RecVarU (TV "r"), ListVarU (TV "l"), SetVarU (TV "s")]
           @?= [RecVoidU, ListVoidU, SetVoidU]
     , testCase "a Str argument is a kind argument at every level" $
-        ( partitionKindArgs kindOfT [StrLitT "id", NatLitT 1, VoidT KindRec, VarT (TV "Real")]
+        ( let as = map argOf [StrLitU "id", NatLitU 1, RecVarU (TV "r"), VarU (TV "Real")] in (tyArgs as, length as - length (tyArgs as))
         , appMacroArgs Map.empty (VarF (FV (TV "Foo") (CV "foo"))) [KiA (StrLitK "id"), KiA (NatLitK 1), KiA (VoidK KindRec), TyA real]
         , partitionKindArgs kindOfU [StrLitU "id", NatLitU 1, RecVarU (TV "r"), VarU (TV "Real")] )
           @?= (([VarT (TV "Real")], 3), ([real], 3), ([VarU (TV "Real")], 3))
@@ -99,6 +99,16 @@ kindOfTests =
         ( kindOfU (RecExtendU "x" (VarU (TV "Int")) RecEmptyU)
         , kindOfU (RecExtendU "x" (VarU (TV "Int")) (RecVarU (TV "r"))) )
           @?= (Nothing, Just KindRec)
+    , testCase "an undetermined Nat inside a dimension stays undetermined" $
+        containsUnk (typeOf (AppU (VarU (TV "Vector")) [NatAddU (ExistU (TV "e") ([], Open) ([], Open)) (NatLitU 1), VarU (TV "Int")]))
+          @? "existential erased from a dimension"
+    , testCase "a quantified Nat inside a dimension stays undetermined" $
+        containsUnk (typeOf (ForallU (TV "m") (AppU (VarU (TV "Vector")) [NatMulU (VarU (TV "m")) (NatLitU 2), VarU (TV "Int")])))
+          @? "bound variable erased from a dimension"
+    , testCase "an unreduced projection is an undetermined type, named by itself" $
+        case argOf (ProjectFieldU (RecVarU (TV "r")) (StrLitU "x")) of
+          TyA (UnkT (TV n)) -> n /= "_" @? "projection named _"
+          a -> assertFailure ("projection tagged " <> show a)
     , testCase "a Rec placeholder is not a Nat" $
-        kindOfT (typeOf (RecVarU (TV "r"))) /= Just KindNat @? "Rec placeholder read as Nat"
+        argOf (RecVarU (TV "r")) /= KiA NatVoidT @? "Rec placeholder read as Nat"
     ]

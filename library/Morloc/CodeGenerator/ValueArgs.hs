@@ -50,13 +50,14 @@ valueArgsF gscope v = tyArgs . filterArgs gscope v isKind isRow
     isRow (TyA (NamF NamRecord (FV r _) [] _)) = r == anonRecordVar
     isRow _ = False
 
-isRowT :: Type -> Bool
-isRowT (NamT NamRecord r [] _) = r == anonRecordVar
-isRowT _ = False
-
 -- | 'valueArgsF' for 'Type'.
-valueArgsT :: Scope -> TVar -> [Type] -> [Type]
-valueArgsT gscope v = filterArgs gscope v (isJust . kindOfT) isRowT
+valueArgsT :: Scope -> TVar -> [ArgT] -> [Type]
+valueArgsT gscope v = tyArgs . filterArgs gscope v isKind isRow
+  where
+    isKind (KiA _) = True
+    isKind _ = False
+    isRow (TyA (NamT NamRecord r [] _)) = r == anonRecordVar
+    isRow _ = False
 
 -- | The value arguments of an application, by its head; an application
 -- whose head is not a type name keeps every argument.
@@ -78,9 +79,9 @@ counted :: [ArgF] -> [TypeF] -> ([TypeF], Int)
 counted ts vs = (vs, length ts - length vs)
 
 -- | 'appValueArgs' for 'Type'.
-appValueArgsT :: Scope -> Type -> [Type] -> [Type]
+appValueArgsT :: Scope -> Type -> [ArgT] -> [Type]
 appValueArgsT gscope (VarT v) ts = valueArgsT gscope v ts
-appValueArgsT _ _ ts = ts
+appValueArgsT _ _ ts = tyArgs ts
 
 filterArgs :: Scope -> TVar -> (a -> Bool) -> (a -> Bool) -> [a] -> [a]
 filterArgs gscope v isKind isRow args = case declaredKinds gscope v (length args) of

@@ -2714,22 +2714,14 @@ generateSourcedSerializers univeralScopeMap es0 = do
     -- `std::shared_ptr<container_t>` (no template args) and the generated
     -- deserializer would fail to compile.
     showDefType self ps (NamT _ (TV v) args _) =
-      let (typeArgs, kindCount) = partitionKindArgs kindOfT args
+      let typeArgs = tyArgs args
           argDocs = [showDefType self ps a | a <- typeArgs]
-      in renderTemplatedType v argDocs kindCount
-    showDefType _ _ (NatLitT _) = mempty
-    showDefType _ _ (VoidT _) = mempty
+      in renderTemplatedType v argDocs (length args - length typeArgs)
     showDefType self ps (AppT (VarT (TV v)) ts) =
-      let (typeTs, kindCount) = partitionKindArgs kindOfT ts
-      in pretty $ expandMacro v (map (render . showDefType self ps) typeTs) kindCount
+      let typeTs = tyArgs ts
+      in pretty $ expandMacro v (map (render . showDefType self ps) typeTs) (length ts - length typeTs)
     showDefType _ _ (AppT _ _) = error "AppT is only OK with VarT, for now"
     showDefType _ _ (EffectT _ _) = error "Cannot serialize suspensions"
-    showDefType _ _ (NatAddT _ _) = mempty
-    showDefType _ _ (NatMulT _ _) = mempty
-    showDefType _ _ (NatSubT _ _) = mempty
-    showDefType _ _ (NatDivT _ _) = mempty
-    showDefType _ _ (StrLitT _) = mempty
-    showDefType _ _ (StrConcatT _ _) = mempty
     showDefType self ps (OptionalT t)
       | isRecursiveRef self t =
           "std::shared_ptr<" <> showDefType self ps t <> ">"

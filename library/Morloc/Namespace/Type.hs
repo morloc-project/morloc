@@ -1,3 +1,4 @@
+{-# LANGUAGE DeriveTraversable #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE ViewPatterns #-}
@@ -21,7 +22,14 @@ means t1 is at least as general as t2 (t1 instantiates to t2), so
 module Morloc.Namespace.Type
   ( -- * Types
     NamType (..)
-  , Type (.., NatVoidT, StrVoidT)
+  , Type (..)
+  , TArg (..)
+  , tyArgs
+  , KTerm (.., NatVoidT, StrVoidT)
+  , ArgT
+  , argOf
+  , ktermU
+  , argU
     -- Pattern synonyms bundled so that @TypeU (..)@ imports them.
   , TypeU
       ( ..
@@ -132,7 +140,6 @@ module Morloc.Namespace.Type
   , replayPlanKind
   , anonRecordVar
   , opKind
-  , kindOfT
   , kindOfU
   , fillsNat
   , partitionKindArgs
@@ -378,27 +385,47 @@ data Type
   = UnkT TVar
   | VarT TVar
   | FunT [Type] Type
-  | AppT Type [Type]
-  | NamT NamType TVar [Type] [(Key, Type)]
+  | AppT Type [ArgT]
+  | NamT NamType TVar [ArgT] [(Key, Type)]
   | EffectT (Set.Set EffectLabel) Type
   | OptionalT Type
-  | NatLitT Integer
-  | NatAddT Type Type
-  | NatMulT Type Type
-  | NatSubT Type Type
-  | NatDivT Type Type
-  | -- | An erased placeholder of a non-Type kind, distinct from a literal
-    -- of that kind (@NatLitT 0@).
-    VoidT Kind
-  | StrLitT Text
-  | StrConcatT Type Type
   deriving (Show, Ord, Eq)
 
-pattern NatVoidT :: Type
+-- | One argument of an applied type: a type, or an argument of another kind
+-- (KIND-2), which holds no value but which a native form's macro skips and a
+-- dimension check reads.
+data TArg k t = TyA t | KiA k
+  deriving (Show, Ord, Eq, Functor, Foldable, Traversable)
+
+-- | The type arguments, which the @$N@ of a native form counts.
+tyArgs :: [TArg k t] -> [t]
+tyArgs as = [t | TyA t <- as]
+
+-- | An argument of a non-Type kind after erasure.
+data KTerm
+  = -- | A variable inside a kind expression that nothing determined.
+    KUnkT TVar
+  | -- | A variable inside a kind expression.
+    KVarT TVar
+  | NatLitT Integer
+  | NatAddT KTerm KTerm
+  | NatMulT KTerm KTerm
+  | NatSubT KTerm KTerm
+  | NatDivT KTerm KTerm
+  | -- | An erased placeholder of its kind, distinct from a literal of that
+    -- kind (@NatLitT 0@).
+    VoidT Kind
+  | StrLitT Text
+  | StrConcatT KTerm KTerm
+  deriving (Show, Ord, Eq)
+
+pattern NatVoidT :: KTerm
 pattern NatVoidT = VoidT KindNat
 
-pattern StrVoidT :: Type
+pattern StrVoidT :: KTerm
 pattern StrVoidT = VoidT KindStr
+
+type ArgT = TArg KTerm Type
 
 data OpenOrClosed = Open | Closed
   deriving (Show, Ord, Eq)
@@ -815,18 +842,6 @@ kindOfU t = case t of
   LabeledU _ x -> kindOfU x
   _ -> Nothing
 
--- | 'kindOfU' for an erased type.
-kindOfT :: Type -> Maybe Kind
-kindOfT t = case t of
-  NatLitT _ -> Just KindNat
-  NatAddT _ _ -> Just KindNat
-  NatMulT _ _ -> Just KindNat
-  NatSubT _ _ -> Just KindNat
-  NatDivT _ _ -> Just KindNat
-  StrLitT _ -> Just KindStr
-  StrConcatT _ _ -> Just KindStr
-  VoidT k -> Just k
-  _ -> Nothing
 
 -- | The arguments whose kind is not fixed by their form, and the number of
 -- the others.
@@ -1000,47 +1015,26 @@ instance Typelike Type where
         | v0 == v = r0
         | otherwise = t
       sub (FunT ts t) = FunT (map sub ts) (sub t)
-      sub (AppT v ts) = AppT (sub v) (map sub ts)
+      sub (AppT v ts) = AppT (sub v) (map (fmap sub) ts)
       sub (NamT r n ps es) = NamT r n ps [(k, sub t) | (k, t) <- es]
       sub (EffectT effs t) = EffectT effs (sub t)
       sub (OptionalT t) = OptionalT (sub t)
-      sub t@(NatLitT _) = t
-      sub (NatAddT a b) = NatAddT (sub a) (sub b)
-      sub (NatMulT a b) = NatMulT (sub a) (sub b)
-      sub (NatSubT a b) = NatSubT (sub a) (sub b)
-      sub (NatDivT a b) = NatDivT (sub a) (sub b)
-      sub t@(VoidT _) = t
-      sub t@(StrLitT _) = t
-      sub (StrConcatT a b) = StrConcatT (sub a) (sub b)
 
   free (UnkT _) = Set.empty
   free v@(VarT _) = Set.singleton v
   free (FunT ts t) = Set.unions (map free (t : ts))
-  free (AppT t ts) = Set.unions (map free (t : ts))
+  free (AppT t ts) = Set.unions (map free (t : tyArgs ts))
   free (NamT _ _ _ es) = Set.unions (map (free . snd) es)
   free (EffectT _ t) = free t
   free (OptionalT t) = free t
-  free (NatLitT _) = Set.empty
-  free (NatAddT a b) = Set.union (free a) (free b)
-  free (NatMulT a b) = Set.union (free a) (free b)
-  free (NatSubT a b) = Set.union (free a) (free b)
-  free (NatDivT a b) = Set.union (free a) (free b)
-  free (VoidT _) = Set.empty
-  free (StrLitT _) = Set.empty
-  free (StrConcatT a b) = Set.union (free a) (free b)
 
   normalizeType (FunT ts1@(_ : _) (FunT ts2@(_ : _) ft)) = normalizeType $ FunT (ts1 <> ts2) ft
   normalizeType (AppT (AppT h innerArgs) outerArgs) =
     normalizeType (AppT h (innerArgs ++ outerArgs))
-  normalizeType (AppT t ts) = AppT (normalizeType t) (map normalizeType ts)
-  normalizeType (NamT n v ds ks) = NamT n v (map normalizeType ds) (zip (map fst ks) (map (normalizeType . snd) ks))
+  normalizeType (AppT t ts) = AppT (normalizeType t) (map (fmap normalizeType) ts)
+  normalizeType (NamT n v ds ks) = NamT n v (map (fmap normalizeType) ds) (zip (map fst ks) (map (normalizeType . snd) ks))
   normalizeType (EffectT effs t) = EffectT effs (normalizeType t)
   normalizeType (OptionalT t) = OptionalT (normalizeType t)
-  normalizeType (NatAddT a b) = NatAddT (normalizeType a) (normalizeType b)
-  normalizeType (NatMulT a b) = NatMulT (normalizeType a) (normalizeType b)
-  normalizeType (NatSubT a b) = NatSubT (normalizeType a) (normalizeType b)
-  normalizeType (NatDivT a b) = NatDivT (normalizeType a) (normalizeType b)
-  normalizeType (StrConcatT a b) = StrConcatT (normalizeType a) (normalizeType b)
   normalizeType t = t
 
 -- | Two function types compared parameter by parameter (APP-1): the
@@ -1058,9 +1052,86 @@ alignFun (as1, r1) (as2, r2)
     result [] r = r
     result rest r = FunU rest r
 
+-- | A type as an applied argument: a type, or a term of another kind.
+argOf :: TypeU -> ArgT
+argOf u = case u of
+  VarU v -> TyA (VarT v)
+  ExistU _ (ps, _) (rs@(_ : _), _) -> TyA (NamT NamRecord (TV "Record") (map argOf ps) (map (second typeOf) rs))
+  ExistU v _ _ -> argOf (ForallU v (VarU v))
+  ForallU v t -> case argOf t of
+    TyA x -> TyA (kindTerms (undetermined v) (substituteTVar v (UnkT v) x))
+    KiA k -> KiA (undetermined v k)
+  -- `a -> (b -> c)` is `a -> b -> c`; grouping is an implementation's choice
+  -- (a source's @rsize@). An effect or an empty argument list is a
+  -- suspension, not a grouping.
+  FunU ts t -> TyA $ case typeOf t of
+    FunT us r | not (null ts), not (null us) -> FunT (map typeOf ts ++ us) r
+    t' -> FunT (map typeOf ts) t'
+  AppU t ts -> TyA (AppT (typeOf t) (map argOf ts))
+  NamU n o ps rs -> TyA (NamT n o (map argOf ps) (zip (map fst rs) (map (typeOf . snd) rs)))
+  EffectU effs t -> TyA (mkEffectT (resolveEffectSet effs) (typeOf t))
+  OptionalU t -> TyA (OptionalT (typeOf t))
+  KVarU (_, KindInt) -> KiA NatVoidT
+  KVarU (_, k) -> KiA (VoidT k)
+  VoidU k -> KiA (VoidT k)
+  -- A ground Rec chain lowers to a record so its column schema survives
+  -- (Arrow tables); a row-polymorphic one erases.
+  RecExtendU {} -> case groundRecFields u of
+    Just fs -> TyA (NamT NamRecord anonRecordVar [] [(Key k, typeOf t) | (k, t) <- fs])
+    Nothing -> KiA (VoidT KindRec)
+  ListVarU _ -> KiA (VoidT (KindList KindStr))
+  ListVoidU -> KiA (VoidT (KindList KindStr))
+  SetVarU _ -> KiA (VoidT (KindSet KindStr))
+  SetVoidU -> KiA (VoidT (KindSet KindStr))
+  OpU OpNatAdd [a, b] -> KiA (NatAddT (operand NatVoidT a) (operand NatVoidT b))
+  OpU OpNatSub [a, b] -> KiA (NatSubT (operand NatVoidT a) (operand NatVoidT b))
+  OpU OpNatMul [a, b] -> KiA (NatMulT (operand NatVoidT a) (operand NatVoidT b))
+  OpU OpNatDiv [a, b] -> KiA (NatDivT (operand NatVoidT a) (operand NatVoidT b))
+  OpU OpStrConcat [a, b] -> KiA (StrConcatT (operand StrVoidT a) (operand StrVoidT b))
+  -- A Type-kinded operator left unreduced (a projection from a row
+  -- variable) is a type nothing determined.
+  OpU op _ -> case opKind op of
+    KindType -> TyA (UnkT (TV (render (pretty u))))
+    k -> KiA (VoidT k)
+  LitU (LNat n) -> KiA (NatLitT n)
+  LitU (LStr x) -> KiA (StrLitT x)
+  LitU (LRec fs) -> TyA (NamT NamRecord anonRecordVar [] [(Key k, typeOf t) | (k, t) <- fs])
+  LitU (LList _) -> KiA (VoidT (KindList KindStr))
+  LitU (LSet _) -> KiA (VoidT (KindSet KindStr))
+  LabeledU _ t -> argOf t
+  where
+    -- a quantified variable inside a kind term is one nothing determined
+    undetermined v x = case x of
+      KVarT w | w == v -> KUnkT w
+      NatAddT a b -> NatAddT (undetermined v a) (undetermined v b)
+      NatMulT a b -> NatMulT (undetermined v a) (undetermined v b)
+      NatSubT a b -> NatSubT (undetermined v a) (undetermined v b)
+      NatDivT a b -> NatDivT (undetermined v a) (undetermined v b)
+      StrConcatT a b -> StrConcatT (undetermined v a) (undetermined v b)
+      _ -> x
+    -- an operand of a kind expression; one that is no kind term is erased
+    operand void x = case argOf x of
+      KiA k -> k
+      TyA (UnkT v) -> KUnkT v
+      TyA (VarT v) -> KVarT v
+      TyA _ -> void
+
 -- | A function type's arguments and result, spelled flat by the rule
 -- 'typeOf' applies: @a -> (b -> c)@ is @a -> b -> c@, while an effect or an
 -- empty argument list is a suspension rather than a grouping.
+-- | Apply a rewrite to every kind term inside a type.
+kindTerms :: (KTerm -> KTerm) -> Type -> Type
+kindTerms f t = case t of
+  FunT ts r -> FunT (map (kindTerms f) ts) (kindTerms f r)
+  AppT h ts -> AppT (kindTerms f h) (map arg ts)
+  NamT o v ps rs -> NamT o v (map arg ps) [(k, kindTerms f x) | (k, x) <- rs]
+  EffectT e x -> EffectT e (kindTerms f x)
+  OptionalT x -> OptionalT (kindTerms f x)
+  _ -> t
+  where
+    arg (TyA x) = TyA (kindTerms f x)
+    arg (KiA k) = KiA (f k)
+
 uncurryU :: TypeU -> ([TypeU], TypeU)
 uncurryU (ForallU _ t) = uncurryU t
 uncurryU t@(FunU [] _) = ([], t)
@@ -1072,46 +1143,11 @@ uncurryU t = ([], t)
 instance Typelike TypeU where
   tvar = VarU
 
-  typeOf (VarU v) = VarT v
-  typeOf (ExistU _ (ps, _) (rs@(_ : _), _)) = NamT NamRecord (TV "Record") (map typeOf ps) (map (second typeOf) rs)
-  typeOf (ExistU v _ _) = typeOf (ForallU v (VarU v))
-  typeOf (ForallU v t) = substituteTVar v (UnkT v) (typeOf t)
-  -- `a -> (b -> c)` is `a -> b -> c`; grouping is an implementation's choice
-  -- (a source's @rsize@). An effect or an empty argument list is a
-  -- suspension, not a grouping.
-  typeOf (FunU ts t) = case typeOf t of
-    FunT us r | not (null ts), not (null us) -> FunT (map typeOf ts ++ us) r
-    t' -> FunT (map typeOf ts) t'
-  typeOf (AppU t ts) = AppT (typeOf t) (map typeOf ts)
-  typeOf (NamU n o ps rs) = NamT n o (map typeOf ps) (zip (map fst rs) (map (typeOf . snd) rs))
-  typeOf (EffectU effs t) = mkEffectT (resolveEffectSet effs) (typeOf t)
-  typeOf (OptionalU t) = OptionalT (typeOf t)
-  typeOf (KVarU (_, KindInt)) = NatVoidT
-  typeOf (KVarU (_, k)) = VoidT k
-  typeOf (VoidU k) = VoidT k
-  -- A ground Rec chain lowers to a record so its column schema survives
-  -- (Arrow tables); a row-polymorphic one erases.
-  typeOf r@(RecExtendU _ _ _) = case groundRecFields r of
-    Just fs -> NamT NamRecord anonRecordVar [] [(Key k, typeOf t) | (k, t) <- fs]
-    Nothing -> VoidT KindRec
-  typeOf (ListVarU _) = VoidT (KindList KindStr)
-  typeOf ListVoidU = VoidT (KindList KindStr)
-  typeOf (SetVarU _) = VoidT (KindSet KindStr)
-  typeOf SetVoidU = VoidT (KindSet KindStr)
-  typeOf (OpU OpNatAdd [a, b]) = NatAddT (typeOf a) (typeOf b)
-  typeOf (OpU OpNatSub [a, b]) = NatSubT (typeOf a) (typeOf b)
-  typeOf (OpU OpNatMul [a, b]) = NatMulT (typeOf a) (typeOf b)
-  typeOf (OpU OpNatDiv [a, b]) = NatDivT (typeOf a) (typeOf b)
-  typeOf (OpU OpStrConcat [a, b]) = StrConcatT (typeOf a) (typeOf b)
-  typeOf (OpU op _) = case opKind op of
-    KindType -> NatVoidT
-    k -> VoidT k
-  typeOf (LitU (LNat n)) = NatLitT n
-  typeOf (LitU (LStr s)) = StrLitT s
-  typeOf (LitU (LRec fs)) = NamT NamRecord anonRecordVar [] [(Key k, typeOf t) | (k, t) <- fs]
-  typeOf (LitU (LList _)) = VoidT (KindList KindStr)
-  typeOf (LitU (LSet _)) = VoidT (KindSet KindStr)
-  typeOf (LabeledU _ t) = typeOf t
+  -- KIND-2: every type a term or a field has is Type-kinded, so a kind term
+  -- reaches here only as an applied argument, which 'argOf' tags.
+  typeOf u = case argOf u of
+    TyA t -> t
+    KiA _ -> UnkT (TV "_")
 
   free v@(VarU _) = Set.singleton v
   free (NatVarU _) = Set.empty
@@ -1704,20 +1740,30 @@ type2typeu (FunT ts t) = FunU (map type2typeu ts) (type2typeu t)
 type2typeu (AppT (AppT h innerArgs) outerArgs) =
   -- Flattened, as in 'normalizeType'.
   type2typeu (AppT h (innerArgs ++ outerArgs))
-type2typeu (AppT v ts) = AppU (type2typeu v) (map type2typeu ts)
-type2typeu (NamT o n ps rs) = NamU o n (map type2typeu ps) [(k, type2typeu x) | (k, x) <- rs]
+type2typeu (AppT v ts) = AppU (type2typeu v) (map argU ts)
+type2typeu (NamT o n ps rs) = NamU o n (map argU ps) [(k, type2typeu x) | (k, x) <- rs]
 type2typeu (EffectT effs t) = mkEffectU (EffectSet effs) (type2typeu t)
 type2typeu (OptionalT t) = OptionalU (type2typeu t)
-type2typeu (NatLitT n) = NatLitU n
-type2typeu (NatAddT a b) = NatAddU (type2typeu a) (type2typeu b)
-type2typeu (NatMulT a b) = NatMulU (type2typeu a) (type2typeu b)
-type2typeu (NatSubT a b) = NatSubU (type2typeu a) (type2typeu b)
-type2typeu (NatDivT a b) = NatDivU (type2typeu a) (type2typeu b)
-type2typeu (VoidT (KindList _)) = ListVoidU
-type2typeu (VoidT (KindSet _)) = SetVoidU
-type2typeu (VoidT k) = VoidU k
-type2typeu (StrLitT s) = StrLitU s
-type2typeu (StrConcatT a b) = StrConcatU (type2typeu a) (type2typeu b)
+
+argU :: ArgT -> TypeU
+argU (TyA t) = type2typeu t
+argU (KiA k) = ktermU k
+
+-- | A kind term as a general type.
+ktermU :: KTerm -> TypeU
+ktermU k = case k of
+  KUnkT v -> ForallU v (VarU v)
+  KVarT v -> VarU v
+  NatLitT n -> NatLitU n
+  NatAddT a b -> NatAddU (ktermU a) (ktermU b)
+  NatMulT a b -> NatMulU (ktermU a) (ktermU b)
+  NatSubT a b -> NatSubU (ktermU a) (ktermU b)
+  NatDivT a b -> NatDivU (ktermU a) (ktermU b)
+  VoidT (KindList _) -> ListVoidU
+  VoidT (KindSet _) -> SetVoidU
+  VoidT x -> VoidU x
+  StrLitT x -> StrLitU x
+  StrConcatT a b -> StrConcatU (ktermU a) (ktermU b)
 
 -- | The first @n@ inputs of a function type and the type left once they are
 -- consumed. Types are flattened (@a -> (b -> c)@ is @a -> b -> c@), so a
@@ -1764,18 +1810,23 @@ containsUnk :: Type -> Bool
 containsUnk (UnkT _) = True
 containsUnk (VarT _) = False
 containsUnk (FunT ts t) = any containsUnk ts || containsUnk t
-containsUnk (AppT t ts) = containsUnk t || any containsUnk ts
-containsUnk (NamT _ _ ps rs) = any containsUnk ps || any (containsUnk . snd) rs
+containsUnk (AppT t ts) = containsUnk t || any argUnk ts
+containsUnk (NamT _ _ ps rs) = any argUnk ps || any (containsUnk . snd) rs
 containsUnk (EffectT _ t) = containsUnk t
 containsUnk (OptionalT t) = containsUnk t
-containsUnk (NatLitT _) = False
-containsUnk (NatAddT a b) = containsUnk a || containsUnk b
-containsUnk (NatMulT a b) = containsUnk a || containsUnk b
-containsUnk (NatSubT a b) = containsUnk a || containsUnk b
-containsUnk (NatDivT a b) = containsUnk a || containsUnk b
-containsUnk (VoidT _) = False
-containsUnk (StrLitT _) = False
-containsUnk (StrConcatT a b) = containsUnk a || containsUnk b
+
+argUnk :: ArgT -> Bool
+argUnk (TyA t) = containsUnk t
+argUnk (KiA k) = ktermUnk k
+  where
+    ktermUnk x = case x of
+      KUnkT _ -> True
+      NatAddT a b -> ktermUnk a || ktermUnk b
+      NatMulT a b -> ktermUnk a || ktermUnk b
+      NatSubT a b -> ktermUnk a || ktermUnk b
+      NatDivT a b -> ktermUnk a || ktermUnk b
+      StrConcatT a b -> ktermUnk a || ktermUnk b
+      _ -> False
 
 ----- Pretty instances -------------------------------------------------------
 
@@ -1794,29 +1845,38 @@ tupleArity n = case DT.stripPrefix "Tuple" n of
 isTupleName :: Text -> Bool
 isTupleName = isJust . tupleArity
 
+instance (Pretty k, Pretty t) => Pretty (TArg k t) where
+  pretty (TyA t) = pretty t
+  pretty (KiA k) = pretty k
+
+instance Pretty KTerm where
+  pretty k = case k of
+    KUnkT v -> pretty v
+    KVarT v -> pretty v
+    NatLitT n -> pretty n
+    NatAddT x y -> "(" <> pretty x <+> "+" <+> pretty y <> ")"
+    NatMulT x y -> "(" <> pretty x <+> "*" <+> pretty y <> ")"
+    NatSubT x y -> "(" <> pretty x <+> "-" <+> pretty y <> ")"
+    NatDivT x y -> "(" <> pretty x <+> "/" <+> pretty y <> ")"
+    VoidT _ -> "_"
+    StrLitT x -> dquotes (pretty x)
+    StrConcatT x y -> "(" <> pretty x <+> "+" <+> pretty y <> ")"
+
 instance Pretty Type where
   pretty t0 = f True t0
     where
       f _ (UnkT v) = pretty v
       f _ (VarT v) = pretty v
-      f _ (AppT (VarT (TV "List")) [t]) = "[" <> f True t <> "]"
+      f _ (AppT (VarT (TV "List")) [TyA t]) = "[" <> f True t <> "]"
       -- A tuple is one line however wide it is: its rendering reaches help
       -- text and manifest fields, where a soft line break would be a
       -- newline inside a type.
-      f _ (AppT (VarT (TV n)) ts) | isTupleName n = "(" <> hcat (punctuate ", " (map (f True) ts)) <> ")"
+      f _ (AppT (VarT (TV n)) ts) | isTupleName n = "(" <> hcat (punctuate ", " (map (a True) ts)) <> ")"
       -- A row over a suspension is a second layer and is parenthesized so
       -- it cannot be read as a row union.
       f True (EffectT effs t) =
         "<" <> hcat (punctuate "," (map pretty (Set.toList effs))) <> ">" <+> layer t
       f _ (OptionalT t) = "?" <> f False t
-      f _ (NatLitT n) = pretty n
-      f _ (NatAddT a b) = "(" <> f True a <+> "+" <+> f True b <> ")"
-      f _ (NatMulT a b) = "(" <> f True a <+> "*" <+> f True b <> ")"
-      f _ (NatSubT a b) = "(" <> f True a <+> "-" <+> f True b <> ")"
-      f _ (NatDivT a b) = "(" <> f True a <+> "/" <+> f True b <> ")"
-      f _ (VoidT _) = "_"
-      f _ (StrLitT s) = dquotes (pretty s)
-      f _ (StrConcatT a b) = "(" <> f True a <+> "+" <+> f True b <> ")"
       -- A named type without parameters is a single token and never needs
       -- parentheses, whatever position it sits in.
       f _ (NamT _ n [] _) = pretty n
@@ -1826,13 +1886,15 @@ instance Pretty Type where
       -- reads unambiguously.
       f _ (FunT [] t) = "() -> " <> f True t
       f _ (FunT ts t) = hsep $ punctuate " ->" (map arrowArg ts <> [f True t])
-      f _ (AppT t ts) = hsep (map (f False) (t : ts))
+      f _ (AppT t ts) = hsep (f False t : map (a False) ts)
       -- A named type renders as its name and parameters, without fields.
       f _ (NamT _ n ps _) =
         let params = if null ps
                      then mempty
-                     else space <> hsep (map (f False) ps)
+                     else space <> hsep (map (a False) ps)
         in pretty n <> params
+      a top (TyA t) = f top t
+      a _ (KiA k) = pretty k
       layer t@(EffectT _ _) = parens (f True t)
       layer t = f False t
       arrowArg t@(FunT _ _) = parens (f True t)

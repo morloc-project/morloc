@@ -525,7 +525,9 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
     nativeExpr m (MonoRecord o v ps rs) =
       RecordN o
         <$> inferVar v
-        <*> mapM (\x@(Idx _ t) -> argWith (const (inferType x)) (type2typeu t)) ps
+        <*> mapM (\(Idx i a) -> case a of
+                    TyA t -> TyA <$> inferType (Idx i t)
+                    KiA k -> return (KiA (groundK k))) ps
         <*> mapM (secondM (nativeExpr m . snd)) rs
     nativeExpr _ (MonoLog v x) = LogN <$> inferVar v <*> pure x
     nativeExpr _ (MonoReal v x) = RealN <$> inferVar v <*> pure x
@@ -961,8 +963,8 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
         go (AppF con args) = AppT (go con) (map arg args)
         go (FunF args ret) = FunT (map go args) (go ret)
         go (OptionalF t) = OptionalT (go t)
-        arg (TyA x) = go x
-        arg (KiA k) = kargType k
+        arg (TyA x) = TyA (go x)
+        arg (KiA k) = KiA (kargType k)
 
     lowerCacheBody ::
       SerializationState ->

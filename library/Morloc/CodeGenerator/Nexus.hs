@@ -568,7 +568,7 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
       Nothing -> build t
       where
         tryInner (EffectT _ inner) = tryInner inner
-        tryInner (AppT (VarT v) [_, a]) | v == MBT.tryVar = Just a
+        tryInner (AppT (VarT v) [_, TyA a]) | v == MBT.tryVar = Just a
         tryInner _ = Nothing
 
     -- PAT-5: the nexus brackets only a value that is a list on the wire.
@@ -830,7 +830,7 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
     toNexusExpr (AnnoS (Idx ix t) _ (IntrinsicS intr [a@(AnnoS (Idx _ ta) _ _), b]))
       | intr `elem` [IntrEq, IntrLe] = do
           generalTypeToSerialAST ix ta >>= Serial.checkComparable ix intr (pretty ta)
-          pairSchema <- type2schema (AppT (VarT (MBT.tuple 2)) [ta, ta])
+          pairSchema <- type2schema (AppT (VarT (MBT.tuple 2)) [TyA ta, TyA ta])
           pair <- TupX pairSchema <$> mapM toNexusExpr [a, b]
           CompareX (intrinsicName intr) <$> type2schema t <*> pure pair
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrHash [arg])) =
@@ -867,7 +867,7 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
           peelHead ot = ot
           head_ = peelHead handleT
           elemT = case handleT of
-            AppT _ (a : _) -> a
+            AppT _ (TyA a : _) -> a
             _ -> handleT
       case head_ of
         VarT v
@@ -1042,7 +1042,7 @@ resolveNumericToLitX litIx t src = do
 -- effect + handle head and delegates to 'MBT.handleStorageType'.
 handleStorageOfResult :: Type -> Type
 handleStorageOfResult t = case stripEffect t of
-  AppT (VarT v) (a : _) -> MBT.handleStorageType v a
+  AppT (VarT v) (TyA a : _) -> MBT.handleStorageType v a
   other -> other
 
 resolveCompileTimeIntrinsic :: Intrinsic -> MorlocMonad Text
@@ -2058,17 +2058,17 @@ cliDisplayType t0 = case t0 of
     VarT (TV ("{" <> MT.intercalate ", "
                      [unKey k <> " = " <> renderCliType ft | (k, ft) <- fields]
                  <> "}"))
-  AppT f ts -> case filter (not . isPhantomSlot) (map cliDisplayType ts) of
+  AppT f ts -> case filter (not . isPhantomSlot) (map (fmap cliDisplayType) ts) of
     []  -> cliDisplayType f
     ts' -> AppT (cliDisplayType f) ts'
   NamT o v ps fields ->
-    NamT o v (map cliDisplayType ps) [(k, cliDisplayType ft) | (k, ft) <- fields]
+    NamT o v (map (fmap cliDisplayType) ps) [(k, cliDisplayType ft) | (k, ft) <- fields]
   FunT ts t -> FunT (map cliDisplayType ts) (cliDisplayType t)
   EffectT es t -> EffectT es (cliDisplayType t)
   OptionalT t -> OptionalT (cliDisplayType t)
   _ -> t0
   where
-    isPhantomSlot (VoidT _) = True
+    isPhantomSlot (KiA (VoidT _)) = True
     isPhantomSlot _ = False
 
 -- | Strip outer wrappers that don't change a type's "name kind" identity
@@ -2365,9 +2365,9 @@ namedTypesJson packedHeads instances recordTypes dataTypes ts =
                 let nm = render (pretty v)
                     seen' = nm : seen
                 in (o, nm, fields)
-                     : concatMap (go seen') ps
+                     : concatMap (go seen') (tyArgs ps)
                      <> concatMap (go seen' . snd) fields
-          AppT f as -> go seen f <> concatMap (go seen) as
+          AppT f as -> go seen f <> concatMap (go seen) (tyArgs as)
           FunT as b -> concatMap (go seen) as <> go seen b
           EffectT _ b -> go seen b
           OptionalT b -> go seen b
@@ -2390,11 +2390,11 @@ namedTypesJson packedHeads instances recordTypes dataTypes ts =
     headNames :: Type -> [TVar]
     headNames t = case t of
       VarT v -> [v]
-      AppT f as -> headNames f <> concatMap headNames as
+      AppT f as -> headNames f <> concatMap headNames (tyArgs as)
       FunT as b -> concatMap headNames as <> headNames b
       EffectT _ b -> headNames b
       OptionalT b -> headNames b
-      NamT _ _ ps fs -> concatMap headNames ps <> concatMap (headNames . snd) fs
+      NamT _ _ ps fs -> concatMap headNames (tyArgs ps) <> concatMap (headNames . snd) fs
       _ -> []
 
     packableEntries :: [Type] -> [Text]

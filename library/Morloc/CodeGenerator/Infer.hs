@@ -26,6 +26,7 @@ module Morloc.CodeGenerator.Infer
   , evalGeneralStep
   , weave
   , argWith
+  , groundK
   , kindArgOf
   ) where
 
@@ -751,6 +752,18 @@ argWith walk g = maybe (TyA <$> walk g) (pure . KiA) (kindArgOf g)
 -- | 'argWith' for a walk over a general argument and its concrete form.
 argWith2 :: Applicative f => (TypeU -> TypeU -> f TypeF) -> TypeU -> TypeU -> f ArgF
 argWith2 walk g c = argWith (`walk` c) g
+
+-- | A kind argument as a pool sees it: its value when ground, else the
+-- erased placeholder of its kind.
+groundK :: KTerm -> KArgF
+groundK k = fromMaybe (VoidK (kindOf k)) (kindArgOf (ktermU k))
+  where
+    -- a variable has no kind of its own here; it stands in a Nat or Str term
+    kindOf x = case x of
+      VoidT kd -> kd
+      StrLitT _ -> KindStr
+      StrConcatT _ _ -> KindStr
+      _ -> KindNat
 
 -- | A general argument that is not a type, as a pool sees it: a ground Nat
 -- or Str value, or the erased placeholder of its kind (KIND-2).

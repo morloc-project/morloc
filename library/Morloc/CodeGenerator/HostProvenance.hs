@@ -88,17 +88,22 @@ deep :: Prov -> Origin
 deep (PFun o _ r) = joinO o (deep r)
 deep (PData o ps) = foldr (joinO . deep) o ps
 
-dataKids :: Type -> [Type]
-dataKids (OptionalT t) = [t]
-dataKids (AppT _ ts) = ts
-dataKids (NamT _ _ _ fs) = map snd fs
+-- | The parts of a data type, by position; a kind argument holds no value.
+dataKids :: Type -> [Maybe Type]
+dataKids (OptionalT t) = [Just t]
+dataKids (AppT _ ts) = [case a of TyA t -> Just t; KiA _ -> Nothing | a <- ts]
+dataKids (NamT _ _ _ fs) = map (Just . snd) fs
 dataKids _ = []
+
+-- | The provenance of a part that holds no value.
+noValue :: Prov
+noValue = PData Portable []
 
 -- | Every function at or under a type made at one origin.
 mark :: Origin -> Type -> Prov
 mark o (FunT ins out) = PFun o (length ins) (mark o out)
 mark o (EffectT _ t) = PFun o 0 (mark o t)
-mark o t = PData (if null (dataKids t) && containsFunT t then o else Portable) (map (mark o) (dataKids t))
+mark o t = PData (if null (dataKids t) && containsFunT t then o else Portable) (map (maybe noValue (mark o)) (dataKids t))
 
 portable :: Type -> Prov
 portable = mark Portable
@@ -119,13 +124,13 @@ fit (EffectT _ t) (PFun o 0 r) = PFun o 0 (fit t r)
 fit t (PData o ps)
   | not (isCallable t)
   , length ps == length (dataKids t) =
-      PData o (zipWith fit (dataKids t) ps)
+      PData o (zipWith (maybe id fit) (dataKids t) ps)
 fit t p = mark (deep p) t
 
 joinP :: Type -> Prov -> Prov -> Prov
 joinP t p q = case (fit t p, fit t q) of
   (PFun a m x, PFun b n y) | m == n -> PFun (joinO a b) m (joinP (afterCall t m) x y)
-  (PData a xs, PData b ys) | length xs == length ys -> PData (joinO a b) (zipWith3 joinP (dataKids t) xs ys)
+  (PData a xs, PData b ys) | length xs == length ys -> PData (joinO a b) (zipWith3 (maybe const joinP) (dataKids t) xs ys)
   (p', q') -> mark (joinO (deep p') (deep q')) t
 
 joinsP :: Type -> [Prov] -> Prov
@@ -188,7 +193,7 @@ sourcedResult host sig args = top (resultU <$> sig)
           gks = case gu of
             Just g | length (kidsU g) == length ks -> map Just (kidsU g)
             _ -> map (const Nothing) ks
-       in PData (if null ks && containsFunT t then host else Portable) (zipWith madeIn gks ks)
+       in PData (if null ks && containsFunT t then host else Portable) (zipWith (\g -> maybe noValue (madeIn g)) gks ks)
 
     relayed v
       | Set.member v foralls = Map.lookup v bound
@@ -322,10 +327,12 @@ analyze cx env dm (AnnoS (Idx gi t) (Idx ci _) e) = case e of
     done (PFun (joinsO (Map.elems fv)) (length vs) (iProv i)) fv [i]
   LstS xs -> do
     is <- mapM (analyze cx env dm) xs
-    let elemT = case dataKids t of
-          [et] -> et
-          _ -> t
-    done (fit t (PData Portable [joinsP elemT (map iProv is)])) (frees is) is
+    -- the elements fill the one type argument; a length holds none
+    let elems et = joinsP et (map iProv is)
+        parts = case dataKids t of
+          ks | [_] <- catMaybes ks -> map (maybe noValue elems) ks
+          _ -> [elems t]
+    done (fit t (PData Portable parts)) (frees is) is
   TupS xs -> do
     is <- mapM (analyze cx env dm) xs
     done (fit t (PData Portable (map iProv is))) (frees is) is
@@ -338,7 +345,7 @@ analyze cx env dm (AnnoS (Idx gi t) (Idx ci _) e) = case e of
     done (fit t (PData Portable parts)) (frees is) is
   ConS _ _ _ xs -> do
     is <- mapM (analyze cx env dm) xs
-    done (PData (joinsO (map (deep . iProv) is)) (map portable (dataKids t))) (frees is) is
+    done (PData (joinsO (map (deep . iProv) is)) (map (maybe noValue portable) (dataKids t))) (frees is) is
   LetS v a b -> do
     -- a binding a host will call with its own functions is known to be one
     -- only once the body is read, so the binding is read again with that
@@ -621,8 +628,8 @@ expandDeep scope = go Set.empty
       _ -> descend seen t
     descend seen t = case t of
       FunT as r -> FunT (map (go seen) as) (go seen r)
-      AppT h ks -> AppT h (map (go seen) ks)
-      NamT o v ps fs -> NamT o v (map (go seen) ps) [(k, go seen x) | (k, x) <- fs]
+      AppT h ks -> AppT h (map (fmap (go seen)) ks)
+      NamT o v ps fs -> NamT o v (map (fmap (go seen)) ps) [(k, go seen x) | (k, x) <- fs]
       EffectT es x -> EffectT es (go seen x)
       OptionalT x -> OptionalT (go seen x)
       _ -> t
@@ -634,8 +641,8 @@ expandDeep scope = go Set.empty
     holdsIn seen t = case t of
       FunT _ _ -> True
       EffectT _ _ -> True
-      AppT _ ks -> any (holdsFun seen) ks
-      NamT _ _ ps fs -> any (holdsFun seen) (ps <> map snd fs)
+      AppT _ ks -> any (holdsFun seen) (tyArgs ks)
+      NamT _ _ ps fs -> any (holdsFun seen) (tyArgs ps <> map snd fs)
       OptionalT x -> holdsFun seen x
       _ -> False
     nameOf t = case t of

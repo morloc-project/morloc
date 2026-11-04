@@ -11522,11 +11522,11 @@ typeRenderParenTests :: TestTree
 typeRenderParenTests =
   testGroup "nullary named types render bare"
     [ testCase "Pretty Type: record argument of an application" $
-        render (pretty (AppT box [todoT])) @?= "Box Todo"
+        render (pretty (AppT box [TyA todoT])) @?= "Box Todo"
     , testCase "Pretty Type: record under an optional" $
         render (pretty (OptionalT todoT)) @?= "?Todo"
     , testCase "Pretty Type: applied record nested in an application" $
-        render (pretty (AppT box [NamT NamRecord (TV "Box") [todoT] []])) @?= "Box (Box Todo)"
+        render (pretty (AppT box [TyA (NamT NamRecord (TV "Box") [TyA todoT] [])])) @?= "Box (Box Todo)"
     , testCase "Pretty TypeU: record argument of an application" $
         render (pretty (AppU boxU [todoU])) @?= "Box Todo"
     , testCase "Pretty TypeU: record under an optional" $
@@ -11536,13 +11536,13 @@ typeRenderParenTests =
     , testCase "prettyTypeU: applied record nested in an application" $
         render (MTI.prettyTypeU (AppU boxU [NamU NamRecord (TV "Box") [todoU] []])) @?= "Box (Box Todo)"
     , testCase "Pretty Type: suspension argument of an application" $
-        render (pretty (AppT box [EffectT ioSet (VarT (TV "Int"))])) @?= "Box (<IO> Int)"
+        render (pretty (AppT box [TyA (EffectT ioSet (VarT (TV "Int")))])) @?= "Box (<IO> Int)"
     , testCase "Pretty TypeU: suspension argument of an application" $
         render (pretty (AppU boxU [EffectU ioEffectSet (VarU (TV "Int"))])) @?= "Box (<IO> Int)"
     , testCase "Pretty Type: arrow with one space each side" $
         render (pretty (FunT [intT] intT)) @?= "Int -> Int"
     , testCase "Pretty Type: application in arrow position" $
-        render (pretty (FunT [todoT, AppT box [todoT]] (AppT box [todoT]))) @?= "Todo -> Box Todo -> Box Todo"
+        render (pretty (FunT [todoT, AppT box [TyA todoT]] (AppT box [TyA todoT]))) @?= "Todo -> Box Todo -> Box Todo"
     , testCase "Pretty Type: function argument keeps its parentheses" $
         render (pretty (FunT [FunT [intT] intT] intT)) @?= "(Int -> Int) -> Int"
     , testCase "Pretty TypeU: application in arrow position" $
@@ -11554,7 +11554,7 @@ typeRenderParenTests =
     , testCase "prettyTypeU: function argument keeps its parentheses" $
         render (MTI.prettyTypeU (FunU [FunU [intU] intU] intU)) @?= "(Int -> Int) -> Int"
     , testCase "Pretty Type: a wide tuple stays on one line" $
-        render (pretty (AppT (VarT (TV "Tuple5")) (replicate 5 longT))) @?= wideTuple
+        render (pretty (AppT (VarT (TV "Tuple5")) (replicate 5 (TyA longT)))) @?= wideTuple
     , testCase "Pretty TypeU: a wide tuple stays on one line" $
         render (pretty (AppU (VarU (TV "Tuple5")) (replicate 5 longU))) @?= wideTuple
     , testCase "prettyTypeU: a wide tuple stays on one line" $

@@ -22,9 +22,16 @@ how kind arguments reach a native form.
   `record Cpp => Foo (r :: Rec) a = "foo_t"`) fails `morloc make` with
   "Failed to infer concrete type for Bar: Could not reduce type in broadest
   scope", with no source location; with `record Foo a` it builds and runs.
-  Past that, Cpp.hs `showDefType` splits field arguments with
-  `partitionKindArgs kindOfT`, which keeps a ground row [read].
+  Past that, Cpp.hs `showDefType` renders every type argument of a field,
+  a ground row included, where the macro path drops a row filling a Rec
+  parameter [read].
   Reproduction: /work/plans/error-clusters/repro/rec-field.
 - [read] Macro.hs `expandMacro` raises a raw `error` (unparsable macro,
   index out of range) instead of a located error; a `$3` template on a
   two-parameter type should reach a user error first, unchecked.
+- [read] Serial.hs `generalTypeToSerialAST'` (data arms, ~:2050): `zip
+  params ts` pairs only the `Left` parameters of a `data` declaration with
+  all its arguments, so a `data` with a specialized parameter misaligns
+  them; and the arms are erased before instantiation, so `data Box (n ::
+  Nat) = Box (Vector n Int)` may lose its dimension on the nexus path
+  (DIM-8), where the alias path substitutes first. Unreproduced.

@@ -1,3 +1,4 @@
+{-# LANGUAGE ViewPatterns #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 {- |
@@ -723,10 +724,10 @@ declaredFun scope = go (64 :: Int) . expandT scope
          in case go (n - 1) (funHead r) of
               FunT more@(_ : _) out -> FunT (ins' <> more) out
               r' -> FunT ins' r'
-      AppT h ks -> AppT h (map (go (n - 1)) ks)
+      AppT h ks -> AppT h (map (fmap (go (n - 1))) ks)
       EffectT e x -> EffectT e (go (n - 1) x)
       OptionalT x -> OptionalT (go (n - 1) x)
-      NamT o v ps rs -> NamT o v (map (go (n - 1)) ps) [(k, go (n - 1) x) | (k, x) <- rs]
+      NamT o v ps rs -> NamT o v (map (fmap (go (n - 1))) ps) [(k, go (n - 1) x) | (k, x) <- rs]
       _ -> t
     funHead t = case expandT scope t of
       e@(FunT (_ : _) _) -> e
@@ -766,10 +767,15 @@ declAt :: HostView -> (Type -> Maybe a) -> Maybe Type -> Maybe a
 declAt (HostView scope _ _ _ _) f (Just d) = f (expandT scope d)
 declAt _ _ Nothing = Nothing
 
-declArgs :: HostView -> Int -> Maybe Type -> [Maybe Type]
+declArgs :: HostView -> Int -> Maybe Type -> [Maybe ArgT]
 declArgs hv n d = case declAt hv (\x -> case x of AppT _ ds | length ds == n -> Just ds; _ -> Nothing) d of
   Just ds -> map Just ds
   Nothing -> replicate n Nothing
+
+-- | The declared type at a type argument's position.
+declType :: Maybe ArgT -> Maybe Type
+declType (Just (TyA t)) = Just t
+declType _ = Nothing
 
 declField :: HostView -> Key -> Maybe Type -> Maybe Type
 declField hv k = declAt hv (\x -> case x of NamT _ _ _ rs -> lookup k rs; _ -> Nothing)
@@ -839,7 +845,9 @@ hostTypeOn hv@(HostView scope _ hostRecs _ _) seen0 d t
               else Just (NamT o v ps [(k, fromMaybe ft ft') | ((k, ft), ft') <- zip rs rs'])
       OptionalT a -> OptionalT <$> hostTypeOn hv seen (declOptional hv d) a
       AppT h ts ->
-        let ts' = zipWith (hostTypeOn hv seen) (declArgs hv (length ts) d) ts
+        let ts' = zipWith hostArg (declArgs hv (length ts) d) ts
+            hostArg dx (TyA x) = TyA <$> hostTypeOn hv seen (declType dx) x
+            hostArg _ (KiA _) = Nothing
          in if all isNothing ts'
               then Nothing
               else Just (AppT h (zipWith fromMaybe ts ts'))
@@ -885,13 +893,13 @@ adapt dir lang g hv@(HostView scope _ _ _ _) d t0 e
             inner' <- adapt dir l g hv' d t0 inner
             return $ PolyApp (PolyRemoteInterface l (Idx i (hostType hv d ti)) ids rf inner') xs
       PolyList v ts xs
-        | AppT _ [a] <- t -> do
-            let da = case declArgs hv 1 d of [x] -> x; _ -> Nothing
+        | AppT _ [TyA a] <- t -> do
+            let da = case declArgs hv 1 d of [x] -> declType x; _ -> Nothing
             xs' <- mapM (adapt dir lang g hv da a) xs
-            return $ PolyList v [Idx i (hostType hv da ty) | Idx i ty <- ts] xs'
+            return $ PolyList v [Idx i (hostType hv da <$> ty) | Idx i ty <- ts] xs'
       PolyTuple v xs
-        | AppT _ ts <- t, length ts == length xs -> do
-            let ds = declArgs hv (length ts) d
+        | AppT _ as <- t, length as == length xs, let ts = tyArgs as, length ts == length xs -> do
+            let ds = map declType (declArgs hv (length as) d)
             xs' <- sequence
               [ (,) (Idx i (hostType hv dx tx)) <$> adapt dir lang g hv dx tx x
               | (dx, tx, (Idx i _, x)) <- zip3 ds ts xs ]
@@ -973,8 +981,8 @@ rebuildIn dir lang g hv@(HostView scope _ _ _ _) d t0 e = do
             return (k, (Idx g there, x))
         | (k, ft) <- fts ]
       return $ PolyRecord o (Idx g name) (map (Idx g) ps) fs
-    AppT (VarT h) ts | h == BT.tuple (length ts) -> do
-      let ds = declArgs hv (length ts) d
+    AppT (VarT h) as | let ts = tyArgs as, h == BT.tuple (length ts) -> do
+      let ds = map declType (declArgs hv (length ts) d)
       xs <- sequence
         [ do
             let here' = case dir of Outbound -> tx; Inbound -> hostType hv dx tx
@@ -995,8 +1003,8 @@ rebuildIn dir lang g hv@(HostView scope _ _ _ _) d t0 e = do
         [_] -> resolveInstanceForType findFunctorMap g lang t
         _ -> return Nothing
       case (mapSrc, ts) of
-        (Just src, [a]) -> do
-          let da = case declArgs hv 1 d of [x] -> x; _ -> Nothing
+        (Just src, [TyA a]) -> do
+          let da = case declArgs hv 1 d of [x] -> declType x; _ -> Nothing
               there = case dir of Outbound -> hostType hv d t; Inbound -> t
           (each, aThere) <- element da a
           return $ PolyApp (PolyExe (Idx g (FunT [FunT [elemHere da a] aThere, here] there)) (builtSrcCall src)) [each, var]
@@ -1035,10 +1043,8 @@ rebuildIn dir lang g hv@(HostView scope _ _ _ _) d t0 e = do
            , let wire = snd (unqualify (piWire pin))
            ] of
         ((_, headArgs, wireU, (packSrc, unpackSrc)) : _) -> do
-          let instantiate args = foldr
-                (\(p, a) w -> case p of VarU pv -> substituteTVar pv a w; _ -> w)
-                (typeOf wireU)
-                (zip headArgs args)
+          let instantiate args =
+                typeOf (instantiateParams [(pv, argU a) | (VarU pv, a) <- zip headArgs args] wireU)
               wireT = instantiate ts
               dWire = case declArgs hv (length ts) d of
                 ds | all isJust ds -> Just (instantiate (catMaybes ds))
@@ -1175,9 +1181,9 @@ subTypes scope = go Set.empty
       | otherwise =
           let seen = foldr Set.insert seen0 (typeKeys scope t0)
            in case expandT scope t0 of
-                t@(NamT _ _ ps rs) -> t : concatMap (go seen) (ps <> map snd rs)
+                t@(NamT _ _ ps rs) -> t : concatMap (go seen) (tyArgs ps <> map snd rs)
                 t@(FunT as r) -> t : concatMap (go seen) (r : as)
-                t@(AppT h as) -> t : concatMap (go seen) (h : as)
+                t@(AppT h as) -> t : concatMap (go seen) (h : tyArgs as)
                 t@(EffectT _ x) -> t : go seen x
                 t@(OptionalT x) -> t : go seen x
                 t -> [t]
@@ -1188,7 +1194,7 @@ readsHostRecord :: HostView -> Selector -> Type -> Bool
 readsHostRecord hv@(HostView scope _ hostRecs _ _) sel t = case (sel, expandT scope t) of
   (SelectorKey (k, rest) [], NamT _ v _ rs) ->
     Set.member v hostRecs || maybe False (readsHostRecord hv rest) (lookup (Key k) rs)
-  (SelectorIdx (i, rest) [], AppT _ ts) | i < length ts -> readsHostRecord hv rest (ts !! i)
+  (SelectorIdx (i, rest) [], AppT _ (tyArgs -> ts)) | i < length ts -> readsHostRecord hv rest (ts !! i)
   _ -> False
 
 -- | 'ForeignCallerReceive' Suspend. A remote call whose result is a

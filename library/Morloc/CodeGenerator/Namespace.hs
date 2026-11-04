@@ -27,10 +27,8 @@ module Morloc.CodeGenerator.Namespace
     -- ** Types used in final translations
   , TypeM (..)
   , TypeF (..)
-  , TArg (..)
   , KArgF (.., NatVoidK)
   , ArgF
-  , tyArgs
   , kargType
   , TypeS (..)
   , FVar (..)
@@ -218,12 +216,6 @@ data TypeF
   | OptionalF TypeF
   deriving (Show, Ord, Eq)
 
--- | One argument of an applied type: a type, or an argument of another kind
--- (KIND-2), which holds no value but which a native form's macro skips and a
--- dimension check reads.
-data TArg k t = TyA t | KiA k
-  deriving (Show, Ord, Eq, Functor, Foldable, Traversable)
-
 -- | A woven argument that is not a type: a Nat or Str value, or an erased
 -- placeholder of its kind.
 data KArgF
@@ -237,12 +229,8 @@ pattern NatVoidK = VoidK KindNat
 
 type ArgF = TArg KArgF TypeF
 
--- | The type arguments, which the @$N@ of a native form counts.
-tyArgs :: [TArg k t] -> [t]
-tyArgs as = [t | TyA t <- as]
-
 -- | A kind argument as a type-level term.
-kargType :: KArgF -> Type
+kargType :: KArgF -> KTerm
 kargType k = case k of
   NatLitK n -> NatLitT n
   VoidK x -> VoidT x
@@ -658,9 +646,9 @@ data PolyExpr
     -- code generators. Use 'partitionKindArgs' to split into type-args
     -- and kind-arg count when feeding macro substitution; the wire-side
     -- @applyDimsToList@ consumes the kind positions directly.
-    PolyList (Indexed TVar) [Indexed Type] [PolyExpr]
+    PolyList (Indexed TVar) [Indexed ArgT] [PolyExpr]
   | PolyTuple (Indexed TVar) [(Indexed Type, PolyExpr)]
-  | PolyRecord NamType (Indexed TVar) [Indexed Type] [(Key, (Indexed Type, PolyExpr))]
+  | PolyRecord NamType (Indexed TVar) [Indexed ArgT] [(Key, (Indexed Type, PolyExpr))]
   | PolyLog (Indexed TVar) Bool
   | PolyReal (Indexed TVar) RealLit
   | PolyInt (Indexed TVar) Integer
@@ -729,9 +717,9 @@ data MonoExpr
     MonoExe (Indexed Type) ExecutableExpressionPool
   | MonoBndVar (Three None Type (Indexed Type)) Int -- (Three Lang Type (Indexed Type)) Int  -- (Maybe (Indexed Type))
   -- data types
-  | MonoRecord NamType (Indexed TVar) [Indexed Type] [(Key, (Indexed Type, MonoExpr))]
-  -- See PolyList above for the meaning of the [Indexed Type] arg list.
-  | MonoList (Indexed TVar) [Indexed Type] [MonoExpr]
+  | MonoRecord NamType (Indexed TVar) [Indexed ArgT] [(Key, (Indexed Type, MonoExpr))]
+  -- See PolyList above for the meaning of the argument list.
+  | MonoList (Indexed TVar) [Indexed ArgT] [MonoExpr]
   | MonoTuple (Indexed TVar) [(Indexed Type, MonoExpr)]
   | MonoLog (Indexed TVar) Bool
   | MonoReal (Indexed TVar) RealLit
@@ -1833,10 +1821,6 @@ instance Pretty TypeF where
     pretty v <+> hsep (map pretty ps)
       <+> encloseSep "{" "}" " | " [pretty n <+> hsep (map pretty ts) | (n, ts) <- as]
   pretty (OptionalF t) = "?" <> pretty t
-
-instance (Pretty k, Pretty t) => Pretty (TArg k t) where
-  pretty (TyA t) = pretty t
-  pretty (KiA k) = pretty k
 
 instance Pretty KArgF where
   pretty (NatLitK n) = pretty n

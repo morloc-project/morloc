@@ -291,7 +291,7 @@ mlcKindOStream = 2
 -- (@reject_non_list_stream_schema@ in @morloc-runtime/stream.rs@).
 handleStorageType :: TVar -> Type -> Type
 handleStorageType v a
-  | v == ostreamVar || v == istreamVar = AppT (VarT list) [a]
+  | v == ostreamVar || v == istreamVar = AppT (VarT list) [TyA a]
   | v == ifileVar                      = a
   | otherwise                          = a
 

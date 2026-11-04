@@ -678,7 +678,7 @@ expressCore (AnnoS (Idx midx c@(FunT inputs out)) (Idx cidx lang, _) (CallS v)) 
 expressCore (AnnoS (Idx midx _) (_, lambdaArgs) (LamS _ (AnnoS (Idx _ applicationType) (c, _) x))) =
   expressCore (AnnoS (Idx midx applicationType) (c, lambdaArgs) x)
 expressCore (AnnoS (Idx midx (AppT (VarT v) ts)) (Idx cidx lang, args) (LstS xs))
-  | [t] <- filter (isNothing . kindOfT) ts = do
+  | [t] <- tyArgs ts = do
       xs' <- mapM (\x -> expressPolyExprWrap lang (mkIdx x t) x) xs
       -- Preserve the FULL applied type args (kind positions included)
       -- so downstream language code generators can see phantom dims at
@@ -700,7 +700,7 @@ expressCore (AnnoS (Idx midx t) (Idx cidx lang, args) (LstS xs)) = do
 -- @type FixedPair (n :: Nat) a = (a, a)@), fall through to the
 -- reduce-and-retry below so the alias body's slot types drive
 -- element-wise expression. See the parallel guard in Typecheck.hs C2.
-expressCore (AnnoS (Idx midx (AppT (VarT v) ts)) (Idx cidx lang, args) (TupS xs))
+expressCore (AnnoS (Idx midx (AppT (VarT v) (tyArgs -> ts))) (Idx cidx lang, args) (TupS xs))
   | v == BT.tuple (length xs)
   , length ts == length xs = do
       xs' <- mapM (expressTyped lang) (zip xs ts)
@@ -1019,12 +1019,12 @@ emitPatternAccessibleCall callLang midx out src steps rcvT bounds rcvE = do
                               (\tv -> PolyStr (Idx midx tv) pathText)
   wrappedBounds <- mapM (\(bT, bE) -> wrapBoundInToIndex callLang midx bT bE) bounds
   let argsElemT    = optI64T
-      argsListPoly = PolyList (Idx midx BT.list) [Idx midx argsElemT] wrappedBounds
-      argsListT    = AppT (VarT BT.list) [argsElemT]
+      argsListPoly = PolyList (Idx midx BT.list) [Idx midx (TyA argsElemT)] wrappedBounds
+      argsListT    = AppT (VarT BT.list) [TyA argsElemT]
       -- PatternChain is a newtype over Str; downstream alias
       -- resolution collapses `PatternChain (rcvT) out` to Str at
       -- the wire level, matching the PolyStr argument.
-      patternChainT = AppT (VarT BT.patternChainVar) [rcvT, out]
+      patternChainT = AppT (VarT BT.patternChainVar) [TyA rcvT, TyA out]
       fT           = FunT [patternChainT, argsListT, rcvT] out
   return $ PolyApp (PolyExe (Idx midx fT) (builtSrcCall src))
                    [pathPoly, argsListPoly, rcvE]
@@ -1342,7 +1342,7 @@ dispatchListLit ::
   Lang ->
   Type ->        -- user-facing type
   TVar ->        -- outer TVar of userT
-  [Type] ->      -- user's annotated args (empty for bare-VarT case)
+  [ArgT] ->      -- user's annotated args (empty for bare-VarT case)
   [PolyExpr] ->  -- already-elaborated children
   MorlocMonad PolyExpr
 dispatchListLit midx cidx lang userT userTV userArgs xs' = do
@@ -1908,7 +1908,7 @@ expressPolyExpr _ _ _ (AnnoS (Idx midx t) (Idx cidx _, _) NullS) =
 -- full args list in PolyList so phantom dims survive into language code
 -- generators (Nat positions render as mempty in macro expansion).
 expressPolyExpr _ parentLang pc (AnnoS (Idx midx userT@(AppT (VarT v) ts)) (Idx cidx lang, args) (LstS xs))
-  | [tElem] <- filter (isNothing . kindOfT) ts = do
+  | [tElem] <- tyArgs ts = do
       xs' <- mapM (\x -> expressPolyExprWrap lang (mkIdx x tElem) x) xs
       e <- dispatchListLit midx cidx lang userT v ts xs'
       expressContainer pc (Idx midx parentLang) (Idx cidx lang) args e
@@ -1922,7 +1922,7 @@ expressPolyExpr _ parentLang pc (AnnoS (Idx midx userT@(VarT v)) (Idx cidx lang,
   let wireT = typeOf (TE.wireParentRoot scope (type2typeu userT))
   case wireT of
     AppT (VarT _) wireArgs
-      | [elemT] <- filter (isNothing . kindOfT) wireArgs -> do
+      | [elemT] <- tyArgs wireArgs -> do
           xs' <- mapM (\x -> expressPolyExprWrap lang (mkIdx x elemT) x) xs
           e <- dispatchListLit midx cidx lang userT v [] xs'
           expressContainer pc (Idx midx parentLang) (Idx cidx lang) args e
@@ -1939,7 +1939,7 @@ expressPolyExpr _ parentLang pc (AnnoS (Idx midx userT@(AppT (VarT _) _)) (Idx c
   case mayWire of
     Just wireTU
       | AppT (VarT wireV) wireArgs <- typeOf wireTU
-      , [elemT] <- filter (isNothing . kindOfT) wireArgs -> do
+      , [elemT] <- tyArgs wireArgs -> do
           xs' <- mapM (\x -> expressPolyExprWrap lang (mkIdx x elemT) x) xs
           let wireT = AppT (VarT wireV) wireArgs
               inner = PolyList (Idx cidx wireV) (map (Idx cidx) wireArgs) xs'
@@ -1975,7 +1975,7 @@ expressPolyExpr _ pl pc (AnnoS (Idx midx t) c e@(LstS _)) = do
 -- expressContainer would then use a Nat literal as the foreign call's
 -- parent type and fail downstream in makeSerialAST'. Falling through to the reduce-and-retry below expands the
 -- alias to its body's tuple constructor.
-expressPolyExpr _ parentLang pc (AnnoS (Idx midx (AppT (VarT v) ts)) (Idx cidx lang, args) (TupS xs))
+expressPolyExpr _ parentLang pc (AnnoS (Idx midx (AppT (VarT v) (tyArgs -> ts))) (Idx cidx lang, args) (TupS xs))
   | v == BT.tuple (length xs)
   , length ts == length xs = do
       xs' <- mapM (expressTyped lang) (zip xs ts)

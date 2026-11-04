@@ -1393,21 +1393,49 @@ realizeWithRegistry registry tables pins seedLangs s00 = do
         compatibleType (AppT h1 ps1) (AppT h2 ps2) =
           compatibleType h1 h2
             && length ps1 == length ps2
-            && all (uncurry compatibleType) (zip ps1 ps2)
+            && all (uncurry compatibleArg) (zip ps1 ps2)
         compatibleType (NamT o1 n1 ps1 rs1) (NamT o2 n2 ps2 rs2) =
           o1 == o2 && n1 == n2
             && length ps1 == length ps2
-            && all (uncurry compatibleType) (zip ps1 ps2)
+            && all (uncurry compatibleArg) (zip ps1 ps2)
             && length rs1 == length rs2
             && all (\((k1,v1),(k2,v2)) -> k1 == k2 && compatibleType v1 v2) (zip rs1 rs2)
         compatibleType (OptionalT t1) (OptionalT t2) = compatibleType t1 t2
         compatibleType (EffectT e1 t1) (EffectT e2 t2) = e1 == e2 && compatibleType t1 t2
-        compatibleType (NatLitT n1) (NatLitT n2) = n1 == n2
-        -- An erased Nat placeholder matches any Nat literal.
-        compatibleType NatVoidT (NatLitT _) = True
-        compatibleType (NatLitT _) NatVoidT = True
-        compatibleType NatVoidT NatVoidT = True
         compatibleType t1 t2 = t1 == t2
+
+        -- An undetermined argument matches any; an erased placeholder
+        -- matches any literal of its kind.
+        compatibleArg :: ArgT -> ArgT -> Bool
+        compatibleArg (TyA (UnkT _)) _ = True
+        compatibleArg _ (TyA (UnkT _)) = True
+        compatibleArg (TyA t1) (TyA t2) = compatibleType t1 t2
+        compatibleArg (KiA k1) (KiA k2) = compatibleK k1 k2
+        compatibleArg _ _ = False
+
+        compatibleK :: KTerm -> KTerm -> Bool
+        compatibleK (KUnkT _) _ = True
+        compatibleK _ (KUnkT _) = True
+        compatibleK (VoidT k) t | kindOfK t == Just k = True
+        compatibleK t (VoidT k) | kindOfK t == Just k = True
+        compatibleK (NatAddT a b) (NatAddT c d) = compatibleK a c && compatibleK b d
+        compatibleK (NatMulT a b) (NatMulT c d) = compatibleK a c && compatibleK b d
+        compatibleK (NatSubT a b) (NatSubT c d) = compatibleK a c && compatibleK b d
+        compatibleK (NatDivT a b) (NatDivT c d) = compatibleK a c && compatibleK b d
+        compatibleK (StrConcatT a b) (StrConcatT c d) = compatibleK a c && compatibleK b d
+        compatibleK k1 k2 = k1 == k2
+
+        kindOfK :: KTerm -> Maybe Kind
+        kindOfK k = case k of
+          NatLitT _ -> Just KindNat
+          NatAddT _ _ -> Just KindNat
+          NatMulT _ _ -> Just KindNat
+          NatSubT _ _ -> Just KindNat
+          NatDivT _ _ -> Just KindNat
+          StrLitT _ -> Just KindStr
+          StrConcatT _ _ -> Just KindStr
+          VoidT x -> Just x
+          _ -> Nothing
 
     ----- NOTE: Some cases are inseperable, the code above does not
     ----- account for this, which may allow incorrect code to be

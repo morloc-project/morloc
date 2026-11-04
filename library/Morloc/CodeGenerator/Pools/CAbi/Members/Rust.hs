@@ -1395,7 +1395,7 @@ buildSrcTypeVarMask = Map.fromList <$> fromSourceSignatures paramMask
     isGenericSink scope qs a = case expandT scope a of
       VarT v -> Set.member v qs
       OptionalT t -> isGenericSink scope qs t
-      AppT (VarT (TV n)) ts | isTupleName n -> any (isGenericSink scope qs) ts
+      AppT (VarT (TV n)) ts | isTupleName n -> any (isGenericSink scope qs) (tyArgs ts)
       _ -> False
 
     -- A suspension is a function value of no arguments; the host takes it

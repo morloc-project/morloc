@@ -7,3 +7,6 @@ Error: failed to parse argument #0: Array length mismatch: expected 4, got 3
 exit 1
 Error: failed to parse argument #0: Array length mismatch: expected 3, got 2
 exit 1
+Error: failed to parse argument #0: Array length mismatch: expected 3, got 2
+exit 1
+['Vector (3 + 1) Int', 'Vector 3 Int', 'Vector 3 Int']

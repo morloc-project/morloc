@@ -168,8 +168,8 @@ wireSerialAstToType wire = serialAstToTypeWith (\_ _ -> wire)
 -- generating a native struct (de)serializer for a record with a function field).
 containsFunT :: Type -> Bool
 containsFunT (FunT _ _) = True
-containsFunT (AppT t ts) = containsFunT t || any containsFunT ts
-containsFunT (NamT _ _ ts rs) = any containsFunT ts || any (containsFunT . snd) rs
+containsFunT (AppT t ts) = containsFunT t || any containsFunT (tyArgs ts)
+containsFunT (NamT _ _ ts rs) = any containsFunT (tyArgs ts) || any (containsFunT . snd) rs
 containsFunT (EffectT _ t) = containsFunT t
 containsFunT (OptionalT t) = containsFunT t
 containsFunT _ = False
@@ -178,8 +178,8 @@ containsFunT _ = False
 containsEffectT :: Type -> Bool
 containsEffectT (EffectT _ _) = True
 containsEffectT (FunT ts t) = any containsEffectT ts || containsEffectT t
-containsEffectT (AppT t ts) = containsEffectT t || any containsEffectT ts
-containsEffectT (NamT _ _ ts rs) = any containsEffectT ts || any (containsEffectT . snd) rs
+containsEffectT (AppT t ts) = containsEffectT t || any containsEffectT (tyArgs ts)
+containsEffectT (NamT _ _ ts rs) = any containsEffectT (tyArgs ts) || any (containsEffectT . snd) rs
 containsEffectT (OptionalT t) = containsEffectT t
 containsEffectT _ = False
 
@@ -1200,7 +1200,7 @@ makeSerialAST m lang t0 = do
         -- A handle's storage schema comes from the general type, so a pool
         -- that only passes a handle on needs no native form of its elements.
         generalStorage = case (typeOf . fst . unweaveTypeF) ft of
-          AppT _ [a] -> handleStorage m Set.empty generalTypeName a
+          AppT _ [TyA a] -> handleStorage m Set.empty generalTypeName a
           t -> MM.throwSourcedError m $ "malformed stream handle type:" <+> pretty t
 
         dispatchAppF
@@ -1545,7 +1545,7 @@ handleStorage i anc v a = do
   case danglingRefs [] s of
     [] -> return s
     (n : _) -> MM.throwSourcedError i $
-      "The element type of" <+> pretty (AppT (VarT v) [a])
+      "The element type of" <+> pretty (AppT (VarT v) [TyA a])
         <+> "refers back to the enclosing type" <+> squotes (pretty n)
         <> "; a stream handle cannot hold the type that holds it"
   where
@@ -1747,7 +1747,7 @@ unweaveTypeF (VariantF (FV gv cv) _ _) = (VarU gv, VarU (cv2tv cv))
 -- | A kind argument has no concrete/general distinction; it is duplicated.
 unweaveArg :: ArgF -> (TypeU, TypeU)
 unweaveArg (TyA t) = unweaveTypeF t
-unweaveArg (KiA k) = let u = type2typeu (kargType k) in (u, u)
+unweaveArg (KiA k) = let u = ktermU (kargType k) in (u, u)
 
 {- | Given a list of possible ways to (de)serialize data between two languages,
 choose one (or none if the list is empty). Currently I just take the first
@@ -1926,31 +1926,31 @@ generalTypeToSerialAST' i anc (VarT v)
         x -> MM.throwSourcedError i $
           "cannot serialize type" <+> pretty v
             <+> "-- unexpected scope shape" <+> pretty (show x)
-generalTypeToSerialAST' i anc t0@(AppT (VarT v) [t])
-  | Set.member t0 anc = return $ SerialRec (FV v (CV "")) [keyArgF t]
+generalTypeToSerialAST' i anc t0@(AppT (VarT v) [TyA t])
+  | Set.member t0 anc = return $ SerialRec (FV v (CV "")) [keyArgF (TyA t)]
   | v == BT.list = SerialList (FV v (CV "")) Nothing <$> generalTypeToSerialAST' i anc t
   | v == BT.ifileVar   = SerialIFile   (FV v (CV "")) <$> handleStorage i anc v t
   | v == BT.ostreamVar = SerialOStream (FV v (CV "")) <$> handleStorage i anc v t
   | v == BT.istreamVar = SerialIStream (FV v (CV "")) <$> handleStorage i anc v t
-  | otherwise = appliedTypeToSerialAST i anc t0 v [t]
+  | otherwise = appliedTypeToSerialAST i anc t0 v [TyA t]
 -- A Vector's literal length annotates the list it lowers to (DIM-8).
 generalTypeToSerialAST' i anc t0@(AppT (VarT v) [n, a])
   | v == BT.vector, not (Set.member t0 anc) = do
       ast <- appliedTypeToSerialAST i anc t0 v [n, a]
-      return $ case (kindArgOf (type2typeu n), ast) of
+      return $ case (kindArgOf (argU n), ast) of
         (Just k@(NatLitK _), SerialList x _ inner) -> SerialList x (Just k) inner
         _ -> ast
 generalTypeToSerialAST' i anc t0@(AppT (VarT v) ts)
   | Set.member t0 anc = return $ SerialRec (FV v (CV "")) (map keyArgF ts)
   | v == (BT.tuple (length ts)) =
-      SerialTuple (FV v (CV "")) <$> mapM (generalTypeToSerialAST' i anc) ts
+      SerialTuple (FV v (CV "")) <$> mapM (generalTypeToSerialAST' i anc) (tyArgs ts)
   -- A Table lowers to a SerialObject NamTable. The encoder emits the
   -- @T@ wire token (or @T:K<entries>@ when the row is concrete), which
   -- is itself the dispatch signal for the Arrow-SHM path; no
   -- concrete-type hint is attached.
   | BT.isTableVar v = do
       let cols = case ts of
-            [_, NamT _ _ _ rs] -> rs
+            [_, TyA (NamT _ _ _ rs)] -> rs
             _                  -> []
       colASTs <- mapM (secondM (generalTypeToSerialAST' i anc)) cols
       checkTableColumns i colASTs
@@ -1983,11 +1983,14 @@ generalTypeToSerialAST' i _ t = MM.throwSourcedError i $
 -- Used only to key a serial AST node's instantiation so a back-reference
 -- can be matched to the node it cuts against; two occurrences of one
 -- type map to equal keys, which is all the matching needs.
-keyArgF :: Type -> ArgF
-keyArgF (NatLitT n) = KiA (NatLitK n)
-keyArgF (VoidT k) = KiA (VoidK k)
-keyArgF (StrLitT t) = KiA (StrLitK t)
-keyArgF t = TyA (keyTypeF t)
+keyArgF :: ArgT -> ArgF
+keyArgF (KiA (NatLitT n)) = KiA (NatLitK n)
+keyArgF (KiA (VoidT k)) = KiA (VoidK k)
+keyArgF (KiA (StrLitT t)) = KiA (StrLitK t)
+-- Unevaluated kind arithmetic has no codegen form; as a key any fixed value
+-- keeps equal types equal and unequal ones apart.
+keyArgF (KiA k) = TyA (UnkF (FV (TV (DT.pack (show k))) (CV "")))
+keyArgF (TyA t) = TyA (keyTypeF t)
 
 keyTypeF :: Type -> TypeF
 keyTypeF (UnkT v) = UnkF (FV v (CV ""))
@@ -1997,16 +2000,6 @@ keyTypeF (AppT t ts) = AppF (keyTypeF t) (map keyArgF ts)
 keyTypeF (NamT o v ps rs) = NamF o (FV v (CV "")) (map keyArgF ps) [(k, keyTypeF t) | (k, t) <- rs]
 keyTypeF (EffectT _ t) = keyTypeF t
 keyTypeF (OptionalT t) = OptionalF (keyTypeF t)
--- A kind term outside an argument, and unevaluated kind arithmetic, have no
--- codegen form; as a key any fixed value keeps equal types equal.
-keyTypeF t@NatLitT{} = UnkF (FV (TV (DT.pack (show t))) (CV ""))
-keyTypeF t@VoidT{} = UnkF (FV (TV (DT.pack (show t))) (CV ""))
-keyTypeF t@StrLitT{} = UnkF (FV (TV (DT.pack (show t))) (CV ""))
-keyTypeF t@NatAddT{} = UnkF (FV (TV (DT.pack (show t))) (CV ""))
-keyTypeF t@NatMulT{} = UnkF (FV (TV (DT.pack (show t))) (CV ""))
-keyTypeF t@NatSubT{} = UnkF (FV (TV (DT.pack (show t))) (CV ""))
-keyTypeF t@NatDivT{} = UnkF (FV (TV (DT.pack (show t))) (CV ""))
-keyTypeF t@StrConcatT{} = UnkF (FV (TV (DT.pack (show t))) (CV ""))
 
 -- | The general name at a type's head, when it has one.
 typeHeadT :: Type -> Maybe TVar
@@ -2039,7 +2032,7 @@ descendT i t anc
 -- is that the declaration's parameters must first be substituted with the
 -- applied arguments, or an arm mentioning a parameter would serialize the
 -- bare variable.
-appliedTypeToSerialAST :: Int -> Set.Set Type -> Type -> TVar -> [Type] -> MorlocMonad SerialAST
+appliedTypeToSerialAST :: Int -> Set.Set Type -> Type -> TVar -> [ArgT] -> MorlocMonad SerialAST
 appliedTypeToSerialAST i anc t0 v ts = do
   scope <- MM.gets stateGeneralTypedefs
   case dataCtorsOfName scope v of
@@ -2047,7 +2040,8 @@ appliedTypeToSerialAST i anc t0 v ts = do
       | all (null . snd) ctors -> return $ SerialEnum (FV v (CV "")) [] (map fst ctors)
     Just arms -> do
                 let params = maybe [] fst (dataDeclOfName scope v)
-                    inst = instantiateParams (zip params ts)
+                    -- each argument against its parameter, then the types
+                    inst = instantiateParams [(p, t) | (p, TyA t) <- zip params ts]
                 anc' <- descendT i t0 anc
                 arms' <- mapM
                   (\(n, fts) ->
@@ -2060,7 +2054,7 @@ appliedTypeToSerialAST i anc t0 v ts = do
 -- tests the whole applied type against the ancestor set: a @^name@
 -- back-reference is emitted for an instantiation already being expanded,
 -- and the runtime resolves it against the enclosing @&name@.
-resolveAliasApp :: Int -> Set.Set Type -> Type -> TVar -> [Type] -> MorlocMonad SerialAST
+resolveAliasApp :: Int -> Set.Set Type -> Type -> TVar -> [ArgT] -> MorlocMonad SerialAST
 resolveAliasApp i anc t0 v ts = do
       scope <- MM.gets stateGeneralTypedefs
       case Map.lookup v scope of
@@ -2068,7 +2062,7 @@ resolveAliasApp i anc t0 v ts = do
         (Just [(params, body, _, False, _)]) -> do
           -- Substituted before erasure, so that a Nat argument reaches the
           -- Vector it sizes (DIM-8); the erased body has none left to fill.
-          let resolved = typeOf (foldl (\acc (tv, arg) -> substituteTVar tv (type2typeu arg) acc) body (paramPairs params ts))
+          let resolved = typeOf (instantiateParams [(tv, argU arg) | (tv, arg) <- paramPairs params ts] body)
           anc' <- descendT i t0 anc
           inner <- generalTypeToSerialAST' i anc' resolved
           -- The expanded body's outer constructor is the alias's

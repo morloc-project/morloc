@@ -136,7 +136,7 @@ autoRequire = go
     -- The error and payload types of a Try, peeling any effect row.
     tryArms :: Type -> Maybe (Type, Type)
     tryArms (EffectT _ t) = tryArms t
-    tryArms (AppT (VarT v) [errT, okT]) | v == BT.tryVar = Just (errT, okT)
+    tryArms (AppT (VarT v) [TyA errT, TyA okT]) | v == BT.tryVar = Just (errT, okT)
     tryArms _ = Nothing
 
     freshGuardVar = do

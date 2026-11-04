@@ -1,6 +1,7 @@
 -- Spec ALIAS-11: an alias of a Nat stands for it as an argument of a type,
--- including the length a command checks its input against.
-module main (len3, len4, lenE, mk)
+-- including the length a command checks its input against and the type its
+-- help shows, also through an alias with a Nat parameter.
+module main (len3, len4, lenE, mk, sum3)
 
 import root-py
 import vector-py
@@ -27,3 +28,10 @@ len4 xs = 4
 --' Length of a vector of length three, by another name
 lenE :: Vector E Int -> Int
 lenE xs = 3
+
+--' A vector of a given length
+type Vec (n :: Nat) = Vector n Int
+
+--' Sum of a vector of three
+sum3 :: Vec 3 -> Int
+sum3 xs = 3

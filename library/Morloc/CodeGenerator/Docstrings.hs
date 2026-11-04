@@ -154,7 +154,7 @@ resolveNestedTypes = go []
               (Just [(_, typeOf -> parent, _, _, TypedefAlias)]) -> go seen' parent
               _ -> return t
       AppT f as -> do
-        as' <- mapM (go seen) as
+        as' <- mapM (traverse (go seen)) as
         entry <- case f of
           VarT v | render (pretty v) `notElem` seen -> lookupName v
           _ -> return Nothing
@@ -164,12 +164,15 @@ resolveNestedTypes = go []
           -- place: `Pair Int` with `type Pair a = (a, a)` is `(Int, Int)`.
           (VarT v, Just [(vs, body, _, _, TypedefAlias)])
             | length vs == length as' ->
-                go (render (pretty v) : seen) (substituteAll (paramPairs vs as') (typeOf body))
+                -- substituted before erasure, so a Nat or Str argument
+                -- reaches the body (DIM-8)
+                go (render (pretty v) : seen)
+                  (typeOf (instantiateParams [(p, argU x) | (p, x) <- paramPairs vs as'] body))
           _ -> bindNamed <$> go seen f <*> pure as'
       FunT as b -> FunT <$> mapM (go seen) as <*> go seen b
       NamT o v ps fields -> do
         let seen' = render (pretty v) : seen
-        ps' <- mapM (go seen') ps
+        ps' <- mapM (traverse (go seen')) ps
         fields' <- mapM (\(k, ft) -> (,) k <$> go seen' ft) fields
         return (NamT o v ps' fields')
       EffectT es b -> EffectT es <$> go seen b
@@ -189,16 +192,6 @@ resolveNestedTypes = go []
     bindNamed (NamT o v ps fields) as
       | length ps == length as = NamT o v as fields
     bindNamed f as = AppT f as
-
-    -- Simultaneous substitution. Each parameter is first renamed to a
-    -- name no written type can carry, then each of those is replaced by
-    -- its argument, so an argument that mentions a later parameter's
-    -- name is not substituted a second time.
-    substituteAll :: [(TVar, Type)] -> Type -> Type
-    substituteAll binds t0 =
-      let fresh = [TV ("$" <> MT.show' i) | i <- [0 :: Int ..]]
-          renamed = foldr (\(p, fv) t -> substituteTVar p (VarT fv) t) t0 (zip (map fst binds) fresh)
-       in foldr (\(fv, a) t -> substituteTVar fv a t) renamed (zip fresh (map snd binds))
 
 -- dispatch docstring info for each argument to `processArgDoc`
 processArgDoc :: Int -> Type -> ArgDoc -> MorlocMonad CmdDocSet
@@ -783,21 +776,6 @@ makeOptMeta (AppT _ _) = "VAL" -- weird stuff, choose your own metadata
 makeOptMeta (NamT _ v _ _) = unTVar v
 makeOptMeta (EffectT _ t) = "<E>" <> makeOptMeta t
 makeOptMeta (OptionalT t) = "?" <> makeOptMeta t
-makeOptMeta (NatLitT n) = MT.show' n
-makeOptMeta (NatAddT _ _) = "NAT"
-makeOptMeta (NatMulT _ _) = "NAT"
-makeOptMeta (NatSubT _ _) = "NAT"
-makeOptMeta (NatDivT _ _) = "NAT"
-makeOptMeta (VoidT k) = case k of
-  KindNat -> "NAT"
-  KindInt -> "INT"
-  KindStr -> "STR"
-  KindRec -> "REC"
-  KindList _ -> "LIST"
-  KindSet _ -> "SET"
-  KindType -> "TYPE"
-makeOptMeta (StrLitT _) = "STR"
-makeOptMeta (StrConcatT _ _) = "STR"
 
 resolvePos :: Type -> ArgDocVars -> MorlocMonad ArgPosDocSet
 resolvePos t r = do
