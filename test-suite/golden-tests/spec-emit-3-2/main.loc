@@ -1,0 +1,28 @@
+-- Spec EMIT-3: a generated Python function adds no handler of its own, so a
+-- failure keeps its exception type: Python code that catches `ValueError`
+-- around a morloc callback (`safe`) catches the `ValueError` raised two
+-- named calls down. The DIAG-5 trace is assembled where the failure is
+-- reported or caught, with the same lines as before. Generated ids are
+-- stripped before comparing.
+module main (deep, guarded, caught)
+
+import root-py
+
+source Py from "f.py" ("boom", "safe")
+
+boom :: Int -> Int
+safe :: (Int -> Int) -> Int -> Int
+
+down :: Int -> Int
+down n
+  ? n == 0 = boom n
+  : 1 + down (n - 1)
+
+deep :: Int -> Int
+deep n = down n
+
+guarded :: Int -> Int
+guarded n = safe down n
+
+caught :: Int -> Try Str Int
+caught n = @try (down n)

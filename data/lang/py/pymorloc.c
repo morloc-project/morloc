@@ -3998,6 +3998,53 @@ error:
     return NULL;
 }
 
+// The pool's function that renders a failure as text with its trace
+// (DIAG-5); NULL until the pool registers it.
+static PyObject* mlc_failure_message_fn = NULL;
+
+static PyObject* pybinding__set_failure_message(PyObject* self, PyObject* args) { MAYFAIL
+    PyObject* fn;
+    PARSE_ARGS_OR_ABORT(args, "O", &fn);
+    if (!PyCallable_Check(fn)) {
+        PyErr_SetString(PyExc_TypeError, "set_failure_message takes a function");
+        return NULL;
+    }
+    Py_INCREF(fn);
+    Py_XSETREF(mlc_failure_message_fn, fn);
+    Py_RETURN_NONE;
+error:
+    return NULL;
+}
+
+// A failure as text: the registered renderer's, else its str(), else a fixed
+// text. Never fails with an exception set; NULL only when out of memory.
+static PyObject* mlc_failure_text(PyObject* evalue) {
+    PyObject* msg = NULL;
+    if (mlc_failure_message_fn != NULL) {
+        msg = PyObject_CallFunctionObjArgs(mlc_failure_message_fn, evalue, NULL);
+        if (msg != NULL && !PyUnicode_Check(msg)) {
+            Py_CLEAR(msg);
+        }
+        PyErr_Clear();
+    }
+    if (msg == NULL) {
+        msg = PyObject_Str(evalue);
+        PyErr_Clear();
+    }
+    if (msg == NULL) {
+        msg = PyUnicode_FromString("a failure whose message cannot be read");
+    }
+    return msg;
+}
+
+static PyObject* pybinding__failure_message(PyObject* self, PyObject* args) { MAYFAIL
+    PyObject* e;
+    PARSE_ARGS_OR_ABORT(args, "O", &e);
+    return mlc_failure_text(e);
+error:
+    return NULL;
+}
+
 // @catch: evaluate fallible; on any Exception subclass, evaluate fallback.
 // Fallible-first order matches the intrinsic type `@catch fallible fallback`.
 // Narrows to Exception (not BaseException) so KeyboardInterrupt / SystemExit
@@ -4024,7 +4071,16 @@ static PyObject* pybinding__mlc_try(PyObject* self, PyObject* args) { MAYFAIL
     PyObject *etype, *evalue, *etrace;
     PyErr_Fetch(&etype, &evalue, &etrace);
     PyErr_NormalizeException(&etype, &evalue, &etrace);
-    PyObject* msg = evalue ? PyObject_Str(evalue) : PyUnicode_FromString("");
+    if (evalue != NULL && etrace != NULL) {
+        PyException_SetTraceback(evalue, etrace);
+    }
+    PyObject* msg;
+    if (evalue == NULL) {
+        msg = PyUnicode_FromString("");
+    } else {
+        msg = mlc_failure_text(evalue);
+        PyException_SetTraceback(evalue, Py_None);
+    }
     Py_XDECREF(etype); Py_XDECREF(evalue); Py_XDECREF(etrace);
     if (msg == NULL) {
         return NULL;
@@ -4765,6 +4821,8 @@ static PyMethodDef Methods[] = {
     {"mlc_replay", pybinding__mlc_replay, METH_VARARGS, "Call a function on every element of an IStream"},
     {"mlc_throw", pybinding__mlc_throw, METH_VARARGS, "Raise a MorlocException with the given message"},
     {"mlc_try", pybinding__mlc_try, METH_VARARGS, "Evaluate body; wrap the value with ok, or a caught message with err"},
+    {"set_failure_message", pybinding__set_failure_message, METH_VARARGS, "Register the function that renders a failure as text"},
+    {"failure_message", pybinding__failure_message, METH_VARARGS, "A failure as text, with its trace"},
     {NULL, NULL, 0, NULL} // this is a sentinel value
 };
 

@@ -33,8 +33,8 @@ of EMIT-4, is a block of its own, so what is inlined there stays there.
 
 ### EMIT-3 A generated function adds no per-call error handler
 Intent: ruled 2026-10-16
-Tests: spec-emit-3-1
-Code: deviates (../issues/codegen-limits.md)
+Tests: spec-emit-3-1, spec-emit-3-2
+Code: conforms 2026-11-04
 
 A generated function that is not a boundary has no handler for a failure
 and no destructor that inspects one. The trace of DIAG-5 is assembled

@@ -91,20 +91,6 @@ Generated code that a language's own tools refuse.
   `"MyBox<$1>"`, used as `Box Color`, fails "Color not declared" / "cannot
   find type `Color`". Root fix: one shared child walk for the six `seek`
   collectors in Cpp.hs and Rust.hs (briefs/A5-B4.md).
-- **Python gives every named function a per-call `try`/`except` that
-  re-raises as `RuntimeError`.** [reproduced in generated code,
-  2026-10-21] Violates EMIT-3. `fib`'s native recursive entry `__mm_1780`
-  wraps its body in `try: ... except Exception as e: raise
-  RuntimeError(f"{e!s}\n  at fib [py] ...")`, so the exception type is lost
-  and a failure at depth d builds O(d^2) message characters. Source:
-  data/lang/py/lang.yaml `ldErrorWrapOpen`/`ldErrorWrapClose`, applied by
-  Grammars/Translator/Generic.hs `lcMakeFunction` `wrapError`.
-  spec-emit-3-1 covers only C++ and Rust. Repro: /work/plans/model-audit-2026-10-21/repro/H/rec/.
-  [reproduced 2026-11-02, wrong result] A Python `except ValueError` in user
-  code around a morloc callback never fires: the per-function `try`
-  re-raises everything as RuntimeError. Fix: R's `ldFrameLabelStmt`
-  mechanism, the trace built from `e.__traceback__` at dispatch and in
-  `mlc_try` (briefs/B7-G4.md, prototype gives identical trace text).
 - **A record field named by a C++ or Rust keyword breaks the native build.**
   [reproduced 2026-11-02] A C++ "struct" record with a field `new` or
   `this` builds a pool g++ rejects ("expected unqualified-id before

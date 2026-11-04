@@ -439,6 +439,27 @@ def mlc_make_closure_dispatch(mid, arg_codecs, res_codec):
     return _wrapper
 
 
+# The trace label (DIAG-5) of each named generated function, keyed by the
+# id of its code object; each function's definition adds its entry (EMIT-3).
+mlc_frame_labels = {}
+
+
+def _mlc_failure_message(e):
+    # A failure as text: its message, then the label of each named generated
+    # function its traceback passes through, innermost first.
+    try:
+        msg = str(e)
+    except Exception:
+        msg = f"a {type(e).__name__} whose message cannot be read"
+    labels = []
+    tb = e.__traceback__
+    while tb is not None:
+        label = mlc_frame_labels.get(id(tb.tb_frame.f_code))
+        if label is not None:
+            labels.append(label)
+        tb = tb.tb_next
+    return msg + "".join("\n  at " + label for label in reversed(labels))
+
 # AUTO include manifolds start
 # <<<BREAK>>>
 # AUTO include manifolds end
@@ -451,11 +472,8 @@ def mlc_make_closure_dispatch(mid, arg_codecs, res_codec):
 
 def _with_debug_trace(msg: str) -> str:
     # Concatenate the morloc debug trace (if --debug was compiled in
-    # and any frames were recorded) with the raised exception's
-    # message. Returns msg unchanged when no trace is present. Each
-    # manifold catch also appends its own "  at <name> [py] (mid=...,
-    # srcloc)" line to the message via string concat, so non-debug
-    # tracebacks still compose across pools.
+    # and any frames were recorded) with the failure's message. Returns
+    # msg unchanged when no trace is present.
     trace = morloc.debug_drain_frames()
     return f"{msg}\n{trace}" if trace else msg
 
@@ -491,7 +509,8 @@ def run_job(client_fd: int) -> None:
             except morloc.MorlocPipeClosed as e:
                 result = morloc.make_pipe_closed_packet(str(e))
             except Exception as e:
-                result = morloc.make_fail_packet(_with_debug_trace(str(e)))
+                result = morloc.make_fail_packet(_with_debug_trace(_mlc_failure_message(e)))
+                e.__traceback__ = None
             # A process forked by user code during this call exits as soon
             # as the call returns in it (FORK-12).
             morloc.exit_if_forked()
@@ -553,6 +572,9 @@ def run_job(client_fd: int) -> None:
 
 
 if __name__ == "__main__":
+    # @try renders a caught failure with the same trace as dispatch (DIAG-5).
+    morloc.set_failure_message(_mlc_failure_message)
+
     # Line-buffer stderr so diagnostic output is not lost when pool is killed.
     # stdout is left fully buffered for performance (genome-scale piping) and
     # flushed explicitly after each job and during shutdown.

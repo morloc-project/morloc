@@ -244,9 +244,6 @@ data LangDescriptor = LangDescriptor
     -- ^ Words of the language that are not names; no source may be named
     -- by one.
   , ldBlockStyle :: !BlockStyle
-  , -- Error wrapping
-    ldErrorWrapOpen :: !Text -- "try:" for Python, "" for others
-  , ldErrorWrapClose :: ![Text] -- Except block lines with {{name}} template var
   , ldFrameLabelStmt :: !Text
     -- ^ Written after a named function's definition, for a language that
     -- reads its trace from the call stack (EMIT-3): {{fname}} the generated
@@ -410,8 +407,6 @@ instance Y.FromJSON LangDescriptor where
             . ins "ldReturnTemplate" (Y.String "return({{expr}})")
             . ins "ldFuncDefHeader" (Y.String "")
             . ins "ldBlockStyle" (Y.String "indent")
-            . ins "ldErrorWrapOpen" (Y.String "")
-            . ins "ldErrorWrapClose" (Y.Array mempty)
             . ins "ldFrameLabelStmt" (Y.String "")
             . ins "ldPatternStyle" (Y.String "fstring")
             . ins "ldConcatFn" (Y.String "")
@@ -519,8 +514,6 @@ defaultLangDescriptor name ext =
     , ldReturnTemplate = "return({{expr}})"
     , ldFuncDefHeader = ""
     , ldBlockStyle = IndentBlock
-    , ldErrorWrapOpen = ""
-    , ldErrorWrapClose = []
     , ldFrameLabelStmt = ""
     , ldPatternStyle = FStringPattern
     , ldConcatFn = ""

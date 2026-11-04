@@ -99,10 +99,7 @@ ldBuiltinQualifier: "__morloc_builtins."
 ldKeywords: ["False", "None", "True", "and", "as", "assert", "async", "await", "break", "class", "continue", "def", "del", "elif", "else", "except", "finally", "for", "from", "global", "if", "import", "in", "is", "lambda", "nonlocal", "not", "or", "pass", "raise", "return", "try", "while", "with", "yield"]
 ldFuncDefHeader: "def {{name}}({{args}}):"
 ldBlockStyle: indent
-ldErrorWrapOpen: "try:"
-ldErrorWrapClose:
-  - "except Exception as e:"
-  - "    raise RuntimeError(f\"{e!s}\\n  at {{name}} [py] (mid={{mid}}{{srcloc_suffix}})\")"
+ldFrameLabelStmt: "mlc_frame_labels[id({{fname}}.__code__)] = \"{{label}}\""
 ldPatternStyle: fstring
 ldQuoteTerminator: '"""'
 ldQuoteTerminatorEsc: '\"\"\"'

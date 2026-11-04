@@ -683,33 +683,6 @@ genericLowerConfig desc srcNamer debugInfo traceInfo debugMode = cfg
                       [ ("name", fullName)
                       , ("args", argsText)
                       ]
-                wrapError [] = []
-                -- In --debug mode DebugWrapS wraps every manifold body
-                -- and the drain provides the traceback; emitting an
-                -- "at" line here too would double every frame.
-                -- Only a call of a named function is a frame of the trace
-                -- (DIAG-5); any other manifold gets no handler.
-                wrapError xs
-                  | debugMode = xs
-                  | Nothing <- traceInfo m = xs
-                  | Just (nameOut, srclocStr) <- traceInfo m =
-                      let openLine = ldErrorWrapOpen desc
-                          closeLines = ldErrorWrapClose desc
-                          srclocSuffix = if T.null srclocStr then "" else ", " <> srclocStr
-                          substs =
-                            [ ("name", nameOut)
-                            , ("mid", MT.pack (show m))
-                            , ("srcloc_suffix", srclocSuffix)
-                            , ("lang", ldName desc)
-                            ]
-                       in if T.null openLine
-                            then xs
-                            else
-                              let tryBlock = nest 4 (vsep (pretty openLine : xs))
-                                  exceptBlock =
-                                    nest 4 . vsep $
-                                      map (\l -> pretty $ substituteT l substs) closeLines
-                               in [vsep [tryBlock, exceptBlock]]
                 -- A language that reads its trace from the call stack labels
                 -- each named function once, where it is defined (EMIT-3).
                 frameLabel = case traceInfo m of
@@ -722,9 +695,9 @@ genericLowerConfig desc srcNamer debugInfo traceInfo debugMode = cfg
                   _ -> []
              in return . Just . vsep . (: frameLabel) $ case ldBlockStyle desc of
                   IndentBlock ->
-                    nest 4 (vsep [header, vsep (wrapError (priorLines <> [body]))])
+                    nest 4 (vsep [header, vsep (priorLines <> [body])])
                   BraceBlock ->
-                    block 4 header (vsep $ wrapError (priorLines <> [body]))
+                    block 4 header (vsep (priorLines <> [body]))
         , lcClosureSig = \_ -> return ""
         , lcManifoldName = manifoldName desc
         , lcMakePass = \m _sig _ mname _ ->

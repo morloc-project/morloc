@@ -138,4 +138,8 @@
 - **A DIAG-5 trace lists a function passed as a value twice per call.**
   [reproduced 2026-11-02] `safe down 0` makes one call of the named
   recursive `down` and prints two `at down` lines: the closure wrapper
-  manifold takes the named function's trace label (traceInfo).
+  manifold takes the named function's trace label (traceInfo). [read
+  2026-11-04] The entry wrappers that decode a remote call's arguments
+  (`__mm_4134(s3): ... __mm_4766(n3)`) take it too, so a call from another
+  pool lists the function twice. Every language labels by the same
+  traceInfo; label only the manifold that is the function's body.
