@@ -1907,6 +1907,16 @@ newtTests =
         f :: P Int Real -> Real
         |]
     , rejectSaying
+        "spec-native-1-6"
+        "out of the declaration's order"
+        [r|
+        module main (f)
+        newtype P a b = (a, b)
+        type Cpp => (P a b) = "std::tuple<$1,$2>" a b
+        type Cpp => (P a Real) = "std::tuple<$1,$2>" Real a
+        f :: P Int Real -> Real
+        |]
+    , rejectSaying
         "spec-native-1-4"
         "out of the declaration's order"
         [r|

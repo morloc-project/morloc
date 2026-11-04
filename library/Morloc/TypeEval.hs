@@ -41,6 +41,7 @@ module Morloc.TypeEval
   , enumCtors
   ) where
 
+import Data.Either (isLeft)
 import qualified Data.Set as Set
 import Morloc.Data.Doc
 import qualified Morloc.Data.Map as Map
@@ -124,10 +125,7 @@ pairEval cscope gscope =
         NamU{} -> Nothing
         _
           | length paramKinds == length ts ->
-              let params = [p | Left (p, _) <- paramKinds]
-              in if length params == length ts
-                   then Just (parsubAll (zip params ts) body)
-                   else Nothing
+              Just (parsubAll (paramPairs paramKinds ts) body)
           | otherwise -> Nothing
       _ -> Nothing
     expandNewtypeBodyOneStep _ _ = Nothing
@@ -344,7 +342,7 @@ generalTransformType bnd0 recurse' resolve' scope = f bnd0
                 -- general name into generated code.
                 (Just (vs, newType, _, isTerminal, kind)) ->
                   let bnd' = if isSelfRecursive v newType then Set.insert v bnd else bnd
-                      substituted = parsubAll (zip vs ts) newType
+                      substituted = parsubAll [(v', t') | (Just v', t') <- zip vs ts] newType
                   in case (kind, isTerminal) of
                        -- Newtype and primitive are nominal for typeclass
                        -- instance lookup, but a record newtype's per-language
@@ -492,23 +490,26 @@ generalTransformType bnd0 recurse' resolve' scope = f bnd0
     terminate bnd (LitU (LSet es)) = LitU . LSet <$> mapM (recurse bnd) es
     terminate bnd (LabeledU n t) = LabeledU n <$> recurse bnd t
 
+    -- A parameter list with one slot per parameter, Nothing for a
+    -- specialized one, so the slots stay aligned with the arguments.
     renameTypedefs ::
-      Set.Set TVar -> ([Either (TVar, Kind) TypeU], TypeU, ArgDoc, Bool, TypedefKind) -> ([TVar], TypeU, ArgDoc, Bool, TypedefKind)
+      Set.Set TVar -> ([Either (TVar, Kind) TypeU], TypeU, ArgDoc, Bool, TypedefKind) -> ([Maybe TVar], TypeU, ArgDoc, Bool, TypedefKind)
     renameTypedefs _ ([], t, d, isTerminal, kind) = ([], t, d, isTerminal, kind)
     renameTypedefs bnd (Left (v@(TV x), _) : vs, t, d, isTerminal, kind)
       | Set.member v bnd =
           let (vs', t', d', isTerminal', kind') = renameTypedefs bnd (vs, t, d, isTerminal, kind)
               v' =
                 head
-                  [ x' | x' <- [TV (MT.show' i <> x) | i <- [(0 :: Int) ..]], not (Set.member x' bnd), x' `notElem` vs'
+                  [ x' | x' <- [TV (MT.show' i <> x) | i <- [(0 :: Int) ..]], not (Set.member x' bnd), Just x' `notElem` vs'
                   ]
               t'' = substituteTVar v (VarU v') t'
-           in (v' : vs', t'', d', isTerminal', kind')
+           in (Just v' : vs', t'', d', isTerminal', kind')
       | otherwise =
           let (vs', t', d', isTerminal', kind') = renameTypedefs bnd (vs, t, d, isTerminal, kind)
-           in (v : vs', t', d', isTerminal', kind')
+           in (Just v : vs', t', d', isTerminal', kind')
     renameTypedefs bnd (Right _ : vs, t, d, isTerminal, kind) =
-      renameTypedefs bnd (vs, t, d, isTerminal, kind)
+      let (vs', t', d', isTerminal', kind') = renameTypedefs bnd (vs, t, d, isTerminal, kind)
+       in (Nothing : vs', t', d', isTerminal', kind')
 
     -- True iff the substituted body contains a back-reference to the
     -- alias's own name (e.g. @record LL where tail :: ?LL@'s body
@@ -733,11 +734,8 @@ expandHeadWith stopAt scope (AppU (VarU v) args) =
     (Just ((paramKinds, body, _, _, kind) : _))
       | stopAt kind -> Nothing
       | length paramKinds == length args ->
-          let params = [p | Left (p, _) <- paramKinds]
-          in if length params == length args
-             then Just $ parsubAll (zip params args) body
-             else Nothing
-      | length args < length paramKinds ->
+          Just $ parsubAll (paramPairs paramKinds args) body
+      | length args < length paramKinds, all isLeft paramKinds ->
           -- Kind-based realignment: bind type-kinded params from `args`
           -- in order, fill kind-kinded params (Nat/Str) with their
           -- void sentinels. This mirrors the macro indexing convention:

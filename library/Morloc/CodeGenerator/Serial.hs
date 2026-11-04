@@ -2147,8 +2147,7 @@ resolveAliasApp i anc t0 v ts = do
         (Just [(params, body, _, False, _)]) -> do
           -- Substituted before erasure, so that a Nat argument reaches the
           -- Vector it sizes (DIM-8); the erased body has none left to fill.
-          let tvars = [tv | Left (tv, _) <- params]
-              resolved = typeOf (foldl (\acc (tv, arg) -> substituteTVar tv (type2typeu arg) acc) body (zip tvars ts))
+          let resolved = typeOf (foldl (\acc (tv, arg) -> substituteTVar tv (type2typeu arg) acc) body (paramPairs params ts))
           anc' <- descendT i t0 anc
           inner <- generalTypeToSerialAST' i anc' resolved
           -- The expanded body's outer constructor is the alias's

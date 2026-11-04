@@ -1239,9 +1239,14 @@ formListProblem ps (AppU (VarU (TV tmpl)) items)
       Just $ "its template names $" <> pretty n <> ", but its list has" <+> pretty (length items) <+> "item(s)"
   | otherwise = Nothing
   where
-    params = [v | Left (v, _) <- ps]
-    named = [v | VarU v <- items, v `elem` params]
-    positions = [d | v <- named, Just d <- [lookup v (zip params [0 :: Int ..])]]
+    named = [item | item <- items, isJust (position item)]
+    positions = mapMaybe position items
+    -- the declaration position an item names: a parameter's variable, or a
+    -- specialized parameter's type
+    position item = listToMaybe [d | (d, p) <- zip [0 :: Int ..] ps, names p item]
+    names (Left (v, _)) (VarU v') = v == v'
+    names (Right t) x = t == x
+    names _ _ = False
     increasing xs = and (zipWith (<) xs (drop 1 xs))
 formListProblem _ _ = Nothing
 

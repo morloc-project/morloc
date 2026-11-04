@@ -163,9 +163,8 @@ resolveNestedTypes = go []
           -- into its body, which is then resolved like a type written in
           -- place: `Pair Int` with `type Pair a = (a, a)` is `(Int, Int)`.
           (VarT v, Just [(vs, body, _, _, TypedefAlias)])
-            | params <- [p | Left (p, _) <- vs]
-            , length params == length as' ->
-                go (render (pretty v) : seen) (substituteAll (zip params as') (typeOf body))
+            | length vs == length as' ->
+                go (render (pretty v) : seen) (substituteAll (paramPairs vs as') (typeOf body))
           _ -> bindNamed <$> go seen f <*> pure as'
       FunT as b -> FunT <$> mapM (go seen) as <*> go seen b
       NamT o v ps fields -> do

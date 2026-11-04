@@ -91,6 +91,11 @@ Generated code that a language's own tools refuse.
   `"MyBox<$1>"`, used as `Box Color`, fails "Color not declared" / "cannot
   find type `Color`". Root fix: one shared child walk for the six `seek`
   collectors in Cpp.hs and Rust.hs (briefs/A5-B4.md).
+- **A C++ schema hint keeps a form's unfilled template.** [read
+  2026-11-04, speculative] For a templated form the pool's schema strings
+  hold `<std::tuple<$1,$2>>` rather than the filled native type
+  (Serial.hs near `evaluatedType`); harmless only if nothing reads the
+  hint's text.
 - **A record field named by a C++ or Rust keyword breaks the native build.**
   [reproduced 2026-11-02] A C++ "struct" record with a field `new` or
   `this` builds a pool g++ rejects ("expected unqualified-id before

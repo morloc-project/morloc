@@ -172,6 +172,7 @@ module Morloc.Namespace.Type
   , mostSpecificSubtypes
   , dataCtorsOfName
   , dataDeclOfName
+  , paramPairs
   , instantiateParams
   , dataBodyCtors
   ) where
@@ -331,6 +332,15 @@ dataDeclOfName scope v = do
     | (ps, body, _, _, TypedefEnum) <- entries
     , Just cs <- [dataBodyCtors body]
     ]
+
+-- | A declaration's variable parameters paired with an application's
+-- arguments. With an argument per parameter, each variable takes the
+-- argument in its own position and a specialized parameter takes none;
+-- with fewer, the variables take the arguments in order.
+paramPairs :: [Either (TVar, Kind) TypeU] -> [a] -> [(TVar, a)]
+paramPairs ps ts
+  | length ps == length ts = [(v, t) | (Left (v, _), t) <- zip ps ts]
+  | otherwise = zip [v | Left (v, _) <- ps] ts
 
 -- | Set each parameter to its argument at once: an argument that names a
 -- parameter is not substituted again, and a binder shadowing a parameter

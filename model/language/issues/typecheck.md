@@ -213,13 +213,6 @@ literal and record gaps. Reproduced on 0.109.0 unless marked.
     is already solved;
   - the comment on `accumulatedRecords`' short circuit says merges write
     keys into the ExistG entry; no code does.
-- **UNSOUND: a specialized parameter before a variable one swaps values.**
-  [reproduced 2026-11-04] Violates NATIVE-1. `newtype P a b = (a, b)`,
-  `type Cpp => (P a b) = "std::tuple<$1,$2>" a b` and `type Cpp =>
-  (P Int b) = "std::tuple<$1,$2>" Int b`: `f :: P Int Real -> Real` on
-  `[3,2.75]` prints `2`; the pool declares `std::tuple<int,int>` and reads
-  `std::tuple<int,double>`. With the specialization last (`(P a Real)`)
-  it is right. Probe: scratchpad fp/ from the 2026-11-04 review.
 - **A form's `$N` past the type-kinded arguments crashes codegen.**
   [reproduced 2026-11-04] Violates DIAG-1. A list counted against the
   form's own kind annotations can name more `$N` than the general
