@@ -66,3 +66,35 @@
   file, but `buildOne` (library/Morloc/CodeGenerator/Guest/Futhark.hs)
   compiles only the emitted C, so the kernels may never be built or linked.
   Needs a reproduction.
+
+The items below moved from mim's issue list (morloc-manager
+model/issues/LIST.md), checked against the code 2026-11-04 [read].
+
+- **`morloc install owner/name` may parse as core module `owner`.**
+  `moduleInstallParser` (library/Morloc/Module.hs:1354) has no `eof`;
+  with no source prefix `parseModname Nothing` (:1402) parses a core
+  module and drops `/name`, on the classic path (:822) and in
+  `extractModuleName` (:765). Registry installs try
+  `tryParseRegistryModule` first (:814). Unreproduced.
+- **The default config file is never read.** `--config` defaults to ""
+  (executable/UI.hs:544), which Subcommands.hs:131 turns into
+  `loadMorlocConfig Nothing`, loading no file (Config.hs:118). So
+  `registry`, `lang_overrides` and `plane` are unreachable without
+  `--config`. The default is named `$MORLOC_HOME/config` (Config.hs:49).
+  See the manual item in spec-and-docs.md.
+- **`installed_hash` records the requested pin.** Module.hs:1111 takes the
+  snapshot, else the pin, else Nothing; the fetched HEAD is never read.
+- **Registry installs and `install --build` disagree on the path.** Install
+  writes `plane/<owner>/<name>` (Module.hs:816); `--build` looks in
+  `plane/<name>` (Subcommands.hs:231).
+- **envspec `modules` is first-wins, the resolver closer-wins.**
+  `dedupFst` in EnvSpec.hs:196 versus `addPin` (Module.hs:127).
+- **A program with only system dependencies builds without a hook.**
+  `packageHasDeps` (ProgramBuilder/Build.hs:271) leaves out
+  `packageDependencies`, so such a program gets a warning, not an error.
+- **An empty `MORLOC_HOME`/`MORLOC_STATE` is unset to Haskell, set to the
+  nexus.** Config.hs:84, :145, :254 treat empty as unset; morloc-nexus
+  main.rs:39 and :51 do not (main.rs:404 does for `MORLOC_STATE`).
+- **`install` writes wrappers and completions under `$MORLOC_HOME`.**
+  Install.hs:70 (`bin`) and :108 (`completions`), and the uninstall side
+  (Subcommands.hs:1285, :1314), use `configHome`, not the state root.

@@ -172,3 +172,17 @@
   also lacks metadata kind 0x09 PROGRAM_FILE; neither side tests MLC_KIND.
   ipc.rs is dead code (its `offset - 32` underflow is in `read_packet`).
   About 60 safe `pub fn`s in morloc-runtime take raw pointers (heuristic).
+- **`morloc init` rebuilds the runtime unless incremental, whatever `-f`
+  says.** [read 2026-11-04, from mim's list] SystemConfig.hs:181 is
+  `force == ForceOverwrite || not runtimeBuilt || not incremental`; the
+  comments at :174-179 and :329-330 describe other behaviour.
+- **Dead C++ search paths.** [read 2026-11-04, from mim's list]
+  CodeGenerator/Pools/CAbi/Members/Cpp.hs:2933 and :2947 search
+  `STATE/src/<base>/...`, which nothing writes.
+- **Stale comments on locations.** [read 2026-11-04, from mim's list]
+  Namespace/State.hs:880-893 and SystemConfig.hs:186-191 place expose
+  targets and include/lib under `$MORLOC_HOME` (now the state root's
+  modules dir, `exposeDirsFor`, Module.hs:289); morloc-nexus cli.rs:330
+  says exe defaults to `$MORLOC_HOME/exe` (it is under STATE,
+  Config.hs:95); Build.hs:225 names the build hook `mim-env`. The router
+  scan path and transport comments in nexus cli.rs/main.rs are unchecked.

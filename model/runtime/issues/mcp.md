@@ -41,10 +41,33 @@ under data/rust/.
   server's identities would have to be shared with pools. Outside a
   server, the race guard on the nexus's own stdio (`reject_dev_stdio_path`,
   `is_stdin_device`, handle_scan.rs:260) still matches literal paths only.
-- **The daemon's HTTP parser truncates path and query at 255 bytes.**
-  [read, 2026-10-21] http_ffi.rs:213-218 copies into 256-byte arrays, so a
-  longer `/call/<cmd>` or `?render=` is routed by its prefix, not refused.
-  Violates IFACE-22: where another command or action has that prefix, it
-  runs and succeeds. [read 2026-11-02] A long `DELETE /bindings/<name>` is truncated to 255
-  bytes and then matched by `starts_with`, so it can unbind a different
-  binding. `HttpRequest` never crosses FFI; owned strings remove the limit.
+- **The daemon ignores a query key it does not know.** [read, 2026-11-04]
+  morloc-runtime-types http_query.rs `render_selection` keeps only
+  `render=` pairs, so `/call/f?rendr=json` or a bare `?render` runs the
+  default output instead of being refused (IFACE-22).
+
+The items below moved from mim's issue list (morloc-manager
+model/issues/LIST.md), checked against the code 2026-11-04 [read].
+
+- **An IPv6 loopback host can never bind.** morloc-nexus/src/mcp.rs:1163
+  (mcp HTTP) and :1947 (front end) build the address as
+  `format!("{}:{}", host, port)`, giving `::1:9000`; IPv6 needs brackets.
+- **`MORLOC_EVAL_ALLOW_NO_AUTH=0` waives the eval lock.** cli.rs:869
+  treats any non-empty value as true.
+- **`/call` reaches commands MCP excludes.** The front end's `/call`
+  (mcp.rs:2545-2580) checks only `api_modules`; the stream-argument and
+  `@stdin` exclusions of `build_tool_shapes` (mcp.rs:315) are not applied.
+- **401 bodies and OPTIONS differ between servers.** The daemon answers
+  `{"status":"error","class":"unauthorized","error":"unauthorized"}`
+  (daemon_ffi.rs:3125); the front end and single-program mcp answer
+  `{"error":"unauthorized"}` (mcp.rs:2063, :1392). Single-program mcp
+  (`build_response`, mcp.rs:1380) has no OPTIONS handling.
+- **MCP `notifications/cancelled` is ignored.** mcp.rs:499 drops unknown
+  notifications, so a cancelled call runs on. A crashed child daemon stays
+  down until the next forward restarts it (mcp.rs:1647).
+- **`GET /eval` with eval off is 405, not 404.** The method check
+  (mcp.rs:2077-2085) runs before `frontend_eval_api`'s not-exposed 404
+  (mcp.rs:2339). Compare the daemon's opposite case under IFACE-10.
+- **A `__` collision in module or command names aborts the front end.**
+  mcp.rs:1849-1860 exits 1 on purpose (fail closed). Needs a ruling: refuse
+  at registration, or abort the whole front end as now.

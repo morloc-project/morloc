@@ -56,3 +56,7 @@ code. Found by the 2026-10-21 audit [read unless marked].
   models; items also cite RunSweep, DaemonShutdown, CrossingConn,
   ForkPool, PanicExit, SlotSeqlock, LocalSweep, QueueHandoff,
   SlotRelease, ChannelWait, QueueWake, AheadJob.
+- **The manual says `registry` is read from `~/.morloc/config.yaml`.**
+  [read 2026-11-04, from mim's list] docs ecosystem.asc:54. The path and
+  file name are wrong, and no default config file is read at all (see
+  environment-deps.md).
