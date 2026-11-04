@@ -570,6 +570,24 @@ pub(crate) unsafe fn get_morloc_data_packet_error_message(
     ptr::null_mut()
 }
 
+/// The path a file packet's payload names, its trailing NULs dropped. A
+/// path past 4096 bytes is refused before it is read, as is one that is not
+/// UTF-8.
+///
+/// # Safety
+/// `payload` holds `len` bytes when `len` is at most 4096.
+pub(crate) unsafe fn file_path<'a>(payload: *const u8, len: usize) -> Result<&'a str, MorlocError> {
+    if len > 4096 {
+        return Err(MorlocError::Packet(format!(
+            "a file packet's path is {len} bytes; a path is at most 4096"
+        )));
+    }
+    match std::str::from_utf8(std::slice::from_raw_parts(payload, len)) {
+        Ok(path) => Ok(path.trim_end_matches('\0')),
+        Err(_) => Err(MorlocError::Packet("a file packet's path is not UTF-8".into())),
+    }
+}
+
 // ── get_morloc_data_packet_value ─────────────────────────────────────────────
 
 pub(crate) unsafe fn get_morloc_data_packet_value(
@@ -661,18 +679,13 @@ pub(crate) unsafe fn get_morloc_data_packet_value_from(
                 let meta = std::slice::from_raw_parts(data.add(32), (*header).offset as usize);
                 if morloc_runtime_types::packet::marks_program_file(meta) { Origin::Program } else { Origin::Outside }
             });
-            if payload_len > 4096 {
-                set_errmsg(errmsg, &MorlocError::Packet(format!(
-                    "a file packet's path is {payload_len} bytes; at most 4096 are read"
-                )));
-                return ptr::null_mut();
-            }
-            let filename_bytes = std::slice::from_raw_parts(data.add(payload_start), payload_len);
-            let Ok(filename) = std::str::from_utf8(filename_bytes) else {
-                set_errmsg(errmsg, &MorlocError::Packet("a file packet's path is not UTF-8".into()));
-                return ptr::null_mut();
+            let filename = match file_path(data.add(payload_start), payload_len) {
+                Ok(f) => f,
+                Err(e) => {
+                    set_errmsg(errmsg, &e);
+                    return ptr::null_mut();
+                }
             };
-            let filename = filename.trim_end_matches('\0');
             if format == PACKET_FORMAT_MSGPACK {
                 match std::fs::read(filename) {
                     Ok(file_data) => {
@@ -1308,12 +1321,13 @@ unsafe fn read_file_payload(
         )));
         return None;
     }
-    let filename_bytes = std::slice::from_raw_parts(
-        packet.add(payload_start),
-        payload_len.min(4096),
-    );
-    let filename = std::str::from_utf8(filename_bytes).unwrap_or("");
-    let filename = filename.trim_end_matches('\0');
+    let filename = match file_path(packet.add(payload_start), payload_len) {
+        Ok(f) => f,
+        Err(e) => {
+            set_errmsg(errmsg, &e);
+            return None;
+        }
+    };
     match std::fs::read(filename) {
         Ok(data) => Some(data),
         Err(e) => {
@@ -1421,7 +1435,7 @@ pub(crate) unsafe fn normalize_data_packet_to_fd(
         && positionally_writable(fd);
 
     if stream_eligible {
-        match estimate_payload_size(packet, source, format, errmsg) {
+        match estimate_payload_size(packet, packet_size, source, format, errmsg) {
             Some(est) if est >= STREAMING_THRESHOLD => {
                 return stream_packet_to_fd(
                     packet, packet_size, compression_level, fd, est, errmsg,
@@ -1547,6 +1561,7 @@ unsafe fn positionally_writable(fd: libc::c_int) -> bool {
 // not resolve; other failures give Some(0), which selects buffering.
 unsafe fn estimate_payload_size(
     packet: *const u8,
+    packet_size: usize,
     source: u8,
     format: u8,
     errmsg: *mut *mut c_char,
@@ -1601,12 +1616,12 @@ unsafe fn estimate_payload_size(
             r
         }
         PACKET_SOURCE_FILE => {
-            let filename_bytes = std::slice::from_raw_parts(
-                packet.add(payload_start),
-                payload_len.min(4096),
-            );
-            let filename = std::str::from_utf8(filename_bytes).unwrap_or("");
-            let filename = filename.trim_end_matches('\0');
+            if payload_start.checked_add(payload_len).map_or(true, |end| end > packet_size) {
+                return Some(0);
+            }
+            let Ok(filename) = file_path(packet.add(payload_start), payload_len) else {
+                return Some(0);
+            };
             match std::fs::metadata(filename) {
                 Ok(md) => Some(md.len()),
                 Err(_) => Some(0),
@@ -1916,12 +1931,10 @@ unsafe fn stream_file_payload(
         )));
         return Err(());
     }
-    let filename_bytes = std::slice::from_raw_parts(
-        packet.add(payload_start),
-        payload_len.min(4096),
-    );
-    let filename = std::str::from_utf8(filename_bytes).unwrap_or("");
-    let filename = filename.trim_end_matches('\0');
+    let filename = match file_path(packet.add(payload_start), payload_len) {
+        Ok(f) => f,
+        Err(e) => { set_errmsg(errmsg, &e); return Err(()); }
+    };
     let mut src = match std::fs::File::open(filename) {
         Ok(f) => f,
         Err(e) => { set_errmsg(errmsg, &MorlocError::Io(e)); return Err(()); }
@@ -2595,6 +2608,18 @@ mod packet_file_tests {
         assert_eq!(std::fs::read(&victim).unwrap(), b"untouched");
         assert_eq!(std::fs::read(&path).unwrap(), b"packet");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_file_packet_path_is_read_whole_or_refused() {
+        let ok = b"/tmp/x.mpk\0\0".to_vec();
+        assert_eq!(unsafe { super::file_path(ok.as_ptr(), ok.len()) }.ok(), Some("/tmp/x.mpk"));
+        let long = vec![b'a'; 4097];
+        assert!(unsafe { super::file_path(long.as_ptr(), long.len()) }.is_err());
+        let full = vec![b'a'; 4096];
+        assert_eq!(unsafe { super::file_path(full.as_ptr(), full.len()) }.map(str::len).ok(), Some(4096));
+        let latin1 = b"/tmp/\xe9.mpk".to_vec();
+        assert!(unsafe { super::file_path(latin1.as_ptr(), latin1.len()) }.is_err());
     }
 }
 

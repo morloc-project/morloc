@@ -317,6 +317,15 @@ fn stdin_stream_should_dispatch(
 /// block (element schema), then loops sub-packets until footer/EOF,
 /// materialising each into a fresh SHM voidstar and handing it to the
 /// appropriate emitter. Never returns.
+/// Fill `b` from `r`: false when the input ends first.
+fn fill_from(r: &mut impl std::io::Read, b: &mut [u8]) -> std::io::Result<bool> {
+    match std::io::Read::read_exact(r, b) {
+        Ok(()) => Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => Ok(false),
+        Err(e) => Err(e),
+    }
+}
+
 fn stream_stdin_dispatch(
     args: &ViewArgs,
     selection: &OutputSelection,
@@ -336,11 +345,17 @@ fn stream_stdin_dispatch(
         }
     };
     // Read the stream header's metadata block.
-    let meta_len = { stream_hdr.offset } as usize;
-    let mut meta = vec![0u8; meta_len];
-    if let Err(e) = stdin.read_exact(&mut meta) {
-        eprintln!("Error: stdin stream header metadata read: {}", e);
-        process::clean_exit(1);
+    let mut meta = Vec::new();
+    match morloc_runtime_types::net_limits::read_declared(&mut meta, { stream_hdr.offset } as u64, |b| fill_from(stdin, b)) {
+        Ok(true) => {}
+        Ok(false) => {
+            eprintln!("Error: stdin ended inside the stream header's metadata");
+            process::clean_exit(1);
+        }
+        Err(e) => {
+            eprintln!("Error: stdin stream header metadata read: {}", e);
+            process::clean_exit(1);
+        }
     }
     // Value schema string from the first SCHEMA_STRING entry. Streams
     // are list-shaped so this is the full `[T]` schema.
@@ -453,16 +468,24 @@ fn stream_stdin_dispatch(
             );
             process::clean_exit(1);
         }
-        let sub_meta_len = { sub_hdr.offset } as usize;
-        let sub_payload_len = { sub_hdr.length } as usize;
-        let sub_total = 32 + sub_meta_len + sub_payload_len;
-        // Assemble the full sub-packet bytes for the materialiser.
-        let mut full = Vec::with_capacity(sub_total);
-        full.extend_from_slice(&hdr_buf);
-        full.resize(sub_total, 0);
-        if let Err(e) = stdin.read_exact(&mut full[32..]) {
-            eprintln!("Error: sub-packet body read: {}", e);
+        // The declared lengths are only a claim: the body is read as it
+        // arrives, so a length past the input ends at its end (NET-10).
+        let body_len = ({ sub_hdr.offset } as u64).checked_add({ sub_hdr.length });
+        let Some(body_len) = body_len else {
+            eprintln!("Error: sub-packet length overflows");
             process::clean_exit(1);
+        };
+        let mut full = hdr_buf.to_vec();
+        match morloc_runtime_types::net_limits::read_declared(&mut full, body_len, |b| fill_from(stdin, b)) {
+            Ok(true) => {}
+            Ok(false) => {
+                eprintln!("Error: stdin ended inside a sub-packet body of {} bytes", body_len);
+                process::clean_exit(1);
+            }
+            Err(e) => {
+                eprintln!("Error: sub-packet body read: {}", e);
+                process::clean_exit(1);
+            }
         }
 
         // Materialise into an SHM Array<T> voidstar. The guard shfrees

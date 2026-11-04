@@ -576,9 +576,8 @@ fn do_next(slot_id: i64) -> Resp {
             ),
         };
         if header.is_stream() {
-            let meta_len = header.offset as usize;
-            let mut meta = vec![0u8; meta_len];
-            if meta_len > 0 && !read_exact_fd(slot.fd, &mut meta).unwrap_or(false) {
+            let mut meta = Vec::new();
+            if !morloc_runtime_types::net_limits::read_declared(&mut meta, header.offset as u64, |b| read_exact_fd(slot.fd, b)).unwrap_or(false) {
                 return Resp::Err("stdin: EOF inside stream metadata block".into());
             }
             if let Err(e) = check_incoming_schema(&meta, &expected_schema, "stdin stream") {
@@ -594,9 +593,8 @@ fn do_next(slot_id: i64) -> Resp {
             // buffer [header][metadata] and present the whole packet as one
             // batch. A pipe can't be rewound, hence the buffering.
             let meta_len = header.offset as usize;
-            let mut prefix = vec![0u8; 32 + meta_len];
-            prefix[..32].copy_from_slice(&hdr);
-            if meta_len > 0 && !read_exact_fd(slot.fd, &mut prefix[32..]).unwrap_or(false) {
+            let mut prefix = hdr.to_vec();
+            if !morloc_runtime_types::net_limits::read_declared(&mut prefix, meta_len as u64, |b| read_exact_fd(slot.fd, b)).unwrap_or(false) {
                 return Resp::Err("stdin: EOF inside data-packet metadata".into());
             }
             if let Err(e) = check_incoming_schema(&prefix[32..], &expected_schema, "stdin data packet") {

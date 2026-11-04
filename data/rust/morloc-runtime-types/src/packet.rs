@@ -676,7 +676,7 @@ pub fn len_u32(n: usize) -> Result<u32, MorlocError> {
 /// from indexes bounded by a payload in memory, where a longer one is a
 /// defect (PANIC-13). The stream footer, whose index grows with the stream,
 /// uses `len_u32`.
-fn meta_len_u32(n: usize) -> u32 {
+pub(crate) fn meta_len_u32(n: usize) -> u32 {
     len_u32(n).expect("packet metadata longer than its 4 GiB length field")
 }
 

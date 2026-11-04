@@ -430,12 +430,8 @@ unsafe fn cache_entry_is_valid(
         libc::unlink(indirection_filename);
         return false;
     }
-    let filename_bytes = std::slice::from_raw_parts(
-        data.add(payload_start),
-        payload_len.min(4096),
-    );
-    let ref_filename_str = match std::str::from_utf8(filename_bytes) {
-        Ok(s) => s.trim_end_matches('\0').to_string(),
+    let ref_filename_str = match crate::packet_ffi::file_path(data.add(payload_start), payload_len) {
+        Ok(s) => s.to_string(),
         Err(_) => { libc::unlink(indirection_filename); return false; }
     };
     let ref_cstring = match CString::new(ref_filename_str.as_bytes()) {

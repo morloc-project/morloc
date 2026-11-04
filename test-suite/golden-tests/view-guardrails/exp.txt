@@ -1,3 +1,7 @@
+lying length exit: 1
+stdin ended inside a sub-packet body
+lying length exit: 1
+sub-packet length overflows
 size gate -f json exit: 1
 size gate -f json msg: pass --force
 size gate -f json --force exit: 0

@@ -888,7 +888,7 @@ pub fn compress_packet(
 
     let mut new_header = header;
     new_header.command.data.compression = PACKET_COMPRESSION_ZSTD;
-    new_header.offset = new_meta.len() as u32;
+    new_header.offset = crate::packet::meta_len_u32(new_meta.len());
     let mut new_hdr_bytes = new_header.to_bytes();
     new_hdr_bytes[24..32].copy_from_slice(&(compressed.len() as u64).to_le_bytes());
 

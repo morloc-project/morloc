@@ -12,10 +12,6 @@ morloc-runtime-types/src/packet.rs, FFI = morloc-runtime/src/packet_ffi.rs.
   change (/work/plans/brittleness-2026-10-23/1-abi-bundle-proposal.md).
 - [read] RT:843-844 (`make_footer_packet`): a footer sets `offset = length = body length`, so the
   generic size counts the body twice. Decide what the fields mean.
-- [read] packet_ffi.rs's other file-source readers (the FILE branches near
-  the voidstar, msgpack and print paths) and cache.rs truncate a path at
-  4096 bytes and read a non-UTF-8 one as ""; `get_morloc_data_packet_value`
-  refuses both.
 - [read] `get_morloc_data_packet_value` rejects inline JSON that
   `packet.rs::get_data_value` accepts.
 - [read] FMT-1: the `version` field is never read, and the header is written
@@ -26,12 +22,29 @@ morloc-runtime-types/src/packet.rs, FFI = morloc-runtime/src/packet_ffi.rs.
   have.min(packet_length)` drops bytes past the first packet from one
   4096-byte head read; a pipelined peer would lose its second packet. The
   declared length is malloc'd before any byte arrives (NET-10).
-- [reproduced 2026-11-02] `morloc-nexus view -` trusts a stdin sub-packet's
-  length: an unchecked sum (a wrapping length panics, exit 70) and a buffer
-  of the claimed size allocated before data arrives (a 1 TiB claim aborts,
-  exit 134). `@stdin` IStream does the same through
-  `stdio_bridge::read_into_shm`: a 69-byte input claiming 2^40 bytes makes
-  a 1 TiB file-backed volume before failing. Do not rerun at that size.
+- [reproduced 2026-11-02] `@stdin` IStream allocates a stdin sub-packet's
+  claimed length before its bytes arrive (`stdio_bridge::read_into_shm`):
+  a 69-byte input claiming 2^40 bytes makes a 1 TiB file-backed volume
+  before failing (exit 1). Do not rerun at that size. The value lands in
+  one SHM block and there is no SHM realloc, so reading first means a
+  copy of every large legitimate packet; needs a choice (bounded direct
+  allocation, then staging past a size?).
 - [read 2026-11-02] daemon_ffi.rs `reply_reference` reads the data source
-  byte without checking the packet type or magic; compression.rs
-  `new_meta.len() as u32` (bounded) was missed by the cast sweep.
+  byte without checking the packet type or magic.
+- [read 2026-11-04] Metadata lengths still cast with `as u32`:
+  packet_ffi.rs `new_metadata_size as u32` and `extended_offset as u32`
+  (original metadata plus a frame index, as compression.rs's now-checked
+  one), compression.rs:965, cache.rs:1069, intrinsics.rs:191,
+  stream_format.rs:895. `meta_len_u32` is crate-private to
+  morloc-runtime-types.
+- [read 2026-11-04] ipc.rs `read_packet` skips `offset - 32` bytes of
+  metadata (offset is the metadata length: offset 0 underflows, offset 64
+  leaves 32 metadata bytes as payload) and `send_and_receive` skips none;
+  both allocate `length` before any byte. Public API, no internal callers.
+- [read 2026-11-04] The FILE-packet writers (`make_data_indirection_packet`,
+  `make_program_file_packet`, `make_table_file_packet`) accept a path of
+  any length; every reader refuses one past 4096 bytes, so the refusal
+  happens in another process, far from where the path was made.
+- [read 2026-11-04] The FILE-source readers take a packet pointer whose
+  size comes from its own header (`read_file_payload`,
+  `stream_file_payload`), so their bounds rest on the caller.
