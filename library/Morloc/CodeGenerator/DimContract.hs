@@ -22,6 +22,7 @@ module Morloc.CodeGenerator.DimContract
   ( dimConstraints
   ) where
 
+import Morloc.Data.Zip (zipPrefix, zipSame)
 import qualified Data.List as List
 import qualified Data.Map as Map
 import qualified Data.Set as Set
@@ -94,7 +95,7 @@ contract scope headers name (et, labels)
         [ case Map.lookup k labelArgs of
             Just v | intLabel a -> [Binding v k [] True Nothing Nothing]
             _ -> lengths scope headers k [] a
-        | (k, a) <- zip [0 ..] args
+        | (k, a) <- zipPrefix [0 ..] args
         ]
     vars = List.nub (map bindVar binds)
     -- A length or header that is an expression with a variable no slot
@@ -323,7 +324,7 @@ representation scope headers t = case t of
         | params <- [p | Left (p, _) <- ps]
         , length params == length ps
         , length params == length ts ->
-            let args = zip params ts
+            let args = zipSame params ts
                 hs =
                   [ (display l <> " in the " <> unTVar v <> " header", fields, n)
                   | (l, fields) <- Map.findWithDefault [] v headers
@@ -364,10 +365,10 @@ lengths scope headers = go (8 :: Int)
       AppU (VarU v) [a]
         | v == MBT.list -> go fuel k (path <> [Each]) a
       AppU (VarU v) ts
-        | v == MBT.tuple (length ts) -> concat [go fuel k (path <> [Field j]) x | (j, x) <- zip [0 ..] ts]
+        | v == MBT.tuple (length ts) -> concat [go fuel k (path <> [Field j]) x | (j, x) <- zipPrefix [0 ..] ts]
       AppU (VarU v) [n, _]
         | MBT.isTableVar v -> rowsOf k path n
-      NamU _ _ _ rs -> concat [go fuel k (path <> [Field j]) x | (j, (_, x)) <- zip [0 ..] rs]
+      NamU _ _ _ rs -> concat [go fuel k (path <> [Field j]) x | (j, (_, x)) <- zipPrefix [0 ..] rs]
       OptionalU a -> go fuel k (path <> [Some]) a
       _ -> case representation scope headers t of
         Just (hs, body) -> concatMap (header k path) hs <> go (fuel - 1) k path body

@@ -22,6 +22,7 @@ module Morloc.CodeGenerator.Grammars.Translator.Generic
   , manifoldName
   ) where
 
+import Morloc.Data.Zip (zipSame, zipWithSame)
 import Data.Foldable (toList)
 import qualified Data.Aeson as Aeson
 import qualified Data.Binary as Binary
@@ -1130,11 +1131,11 @@ genericMakeLoop desc cfg _ carried body0 = do
           return $ poolPriorLines seDocs <> [resultVar <+> assign <+> poolExpr seDocs, "break"]
         -- A slot whose new value is itself is left alone.
         go (LoopContinue contDocs) = do
-          let changed = [(i, cd) | (i, cd) <- zip ids contDocs, not (sameLocal i cd)]
+          let changed = [(i, cd) | (i, cd) <- zipSame ids contDocs, not (sameLocal i cd)]
           tmpVars <- map (helperNamer (ldManifoldPrefix desc)) <$> mapM (const (lcNewIndex cfg)) changed
           let priors = concatMap poolPriorLines contDocs
-              tmpAssigns = zipWith (\tv (_, cd) -> tv <+> assign <+> poolExpr cd) tmpVars changed
-              reassigns = zipWith (\(i, _) tv -> (nvarNamer (ldManifoldPrefix desc)) i <+> assign <+> tv) changed tmpVars
+              tmpAssigns = zipWithSame (\tv (_, cd) -> tv <+> assign <+> poolExpr cd) tmpVars changed
+              reassigns = zipWithSame (\(i, _) tv -> (nvarNamer (ldManifoldPrefix desc)) i <+> assign <+> tv) changed tmpVars
           return $ priors <> tmpAssigns <> reassigns
         go (LoopNLet i neDocs b) = do
           rest <- go b
@@ -1746,13 +1747,13 @@ genericEvalPattern desc _ (PatternText firstStr fragments) xs =
     FStringPattern ->
       let qt = pretty (ldQuoteTerminator desc)
           esc = escapeQuotes (ldQuoteTerminator desc) (ldQuoteTerminatorEsc desc) . escapeStringLit
-      in "f" <> qt <> hcat (pretty (esc firstStr) : [("{" <> x <> "}" <> pretty (esc s)) | (x, s) <- zip xs fragments]) <> qt
+      in "f" <> qt <> hcat (pretty (esc firstStr) : [("{" <> x <> "}" <> pretty (esc s)) | (x, s) <- zipSame xs fragments]) <> qt
     ConcatCall ->
       let qt = ldQuoteTerminator desc
           esc = escapeQuotes qt (ldQuoteTerminatorEsc desc) . escapeStringLit
           wrap t = pretty qt <> pretty t <> pretty qt
       in pretty (ldConcatFn desc)
-        <> tupled (wrap (esc firstStr) : concat [[x, wrap (esc s)] | (x, s) <- zip xs fragments])
+        <> tupled (wrap (esc firstStr) : concat [[x, wrap (esc s)] | (x, s) <- zipSame xs fragments])
 -- getters (always have exactly one argument)
 genericEvalPattern desc _ (PatternStruct (ungroup -> [ss])) [m] =
   hcat (m : map (writeSelector desc) ss)
@@ -1790,7 +1791,7 @@ genericEvalPattern desc t0 (PatternStruct s0) (m0 : xs0) =
     makeRecord (NamF _ _ _ rs) xs =
       pretty (ldRecordConstructor desc)
         <> tupled
-          [pretty k <+> "=" <+> x | (k, x) <- zip (map fst rs) xs]
+          [pretty k <+> "=" <+> x | (k, x) <- zipSame (map fst rs) xs]
     makeRecord _ _ = error "Incorrectly typed record setter"
 
     accessTuple _ m i = case ldIndexStyle desc of

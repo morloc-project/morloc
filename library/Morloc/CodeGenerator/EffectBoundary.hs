@@ -57,6 +57,7 @@ module Morloc.CodeGenerator.EffectBoundary
   , expandT
   ) where
 
+import Morloc.Data.Zip (zip3Indexed, zip3Same, zipSame, zipWithSame, zipWithSameM)
 import Morloc.CodeGenerator.Namespace
 import qualified Morloc.Data.GMap as GMap
 import Morloc.Data.Doc
@@ -466,19 +467,19 @@ sourceCall lang fn@(PolyExe (Idx gidx exeT0) (SrcCallP origin src)) xs = do
             (_, Just dr) -> isEffect (expandT scope dr) && isEffect ret
             _ -> False
       xs' <- sequence
-        [ adapt Outbound lang gidx hv d t x | (d, t, x) <- zip3 dIns ins xs ]
-      let hostIns = zipWith (hostType hv) dIns ins
+        [ adapt Outbound lang gidx hv d t x | (d, t, x) <- zip3Same dIns ins xs ]
+      let hostIns = zipWithSame (hostType hv) dIns ins
           head' r = if null ins then r else FunT hostIns r
       case ret of
         EffectT effs r | suspended -> do
           let dr = peelDecl dRet
               fn' = PolyExe (Idx gidx (head' (hostType hv dr r))) (SrcCallP origin src)
-          (binds, xs'') <- unzip <$> zipWithM bindArg hostIns xs'
+          (binds, xs'') <- unzip <$> zipWithSameM bindArg hostIns xs'
           adapted <- adapt Inbound lang gidx hv dr r (PolyApp fn' xs'')
           let suspendedCall = PolyDoBlock (Idx gidx (EffectT effs r)) adapted
           return $ foldr (\(i, e) body -> PolyLet i e body) suspendedCall (concat binds)
         _
-          | needsAdapt hv dRet ret || or (zipWith (needsAdapt hv) dIns ins) -> do
+          | needsAdapt hv dRet ret || or (zipWithSame (needsAdapt hv) dIns ins) -> do
               let fn' = PolyExe (Idx gidx (head' (hostType hv dRet ret))) (SrcCallP origin src)
               adapt Inbound lang gidx hv dRet ret (PolyApp fn' xs')
           | otherwise -> return (PolyApp fn xs')
@@ -527,7 +528,7 @@ crossPool lang m (PolyRemoteInterface l (Idx ri t) ids rf inner0) xs0 = do
         | PolyManifold _ _ (ManifoldFull as) _ _ <- inner0
         , length as == length xs0 = [Just i | Arg i _ <- as]
         | otherwise = map (const Nothing) xs0
-  args <- mapM (crossArg view) (zip params xs0)
+  args <- mapM (crossArg view) (zipSame params xs0)
   here <- hostRecords lang m [payload]
   there <- hostRecords l m [payload]
   let toHere = Set.difference here there
@@ -644,7 +645,7 @@ sourceSignature origin src = do
 -- value again.
 adaptCallbackParams :: Lang -> Int -> HostView -> [Maybe Type] -> PolyExpr -> MorlocMonad PolyExpr
 adaptCallbackParams lang m hv ds (PolyManifold l mi (ManifoldPart ctx bnd) k body) = do
-  (bnd', body') <- foldM adaptOne (bnd, body) (zip ds bnd)
+  (bnd', body') <- foldM adaptOne (bnd, body) (zipSame ds bnd)
   return (PolyManifold l mi (ManifoldPart ctx bnd') k body')
   where
     adaptOne (bs, b) (d, Arg i (Just t))
@@ -825,7 +826,7 @@ hostTypeOn hv@(HostView scope _ hostRecs _ _) seen0 d t
   | otherwise = case expandT scope t of
       t'@(FunT _ _) | Just (as, r) <- calledAs hv d t' ->
         let (das, dr) = declFun hv (length as) d
-            as' = zipWith (hostTypeOn hv seen) das as
+            as' = zipWithSame (hostTypeOn hv seen) das as
             r' = case r of
               EffectT _ c | runs hv dr -> Just (fromMaybe c (hostTypeOn hv seen (declEffect hv dr) c))
               _ -> hostTypeOn hv seen dr r
@@ -835,22 +836,22 @@ hostTypeOn hv@(HostView scope _ hostRecs _ _) seen0 d t
               _ -> False
          in if not split && all isNothing as' && isNothing r'
               then Nothing
-              else Just (FunT (zipWith fromMaybe as as') (fromMaybe r r'))
+              else Just (FunT (zipWithSame fromMaybe as as') (fromMaybe r r'))
       EffectT effs c -> EffectT effs <$> hostTypeOn hv seen (declEffect hv d) c
       NamT _ v _ _ | Set.member v hostRecs -> Nothing
       NamT o v ps rs ->
         let rs' = [hostTypeOn (withinRecord v hv) seen (declField hv k d) ft | (k, ft) <- rs]
          in if all isNothing rs'
               then Nothing
-              else Just (NamT o v ps [(k, fromMaybe ft ft') | ((k, ft), ft') <- zip rs rs'])
+              else Just (NamT o v ps [(k, fromMaybe ft ft') | ((k, ft), ft') <- zipSame rs rs'])
       OptionalT a -> OptionalT <$> hostTypeOn hv seen (declOptional hv d) a
       AppT h ts ->
-        let ts' = zipWith hostArg (declArgs hv (length ts) d) ts
+        let ts' = zipWithSame hostArg (declArgs hv (length ts) d) ts
             hostArg dx (TyA x) = TyA <$> hostTypeOn hv seen (declType dx) x
             hostArg _ (KiA _) = Nothing
          in if all isNothing ts'
               then Nothing
-              else Just (AppT h (zipWith fromMaybe ts ts'))
+              else Just (AppT h (zipWithSame fromMaybe ts ts'))
       _ -> Nothing
   where
     here = typeKeys scope t
@@ -902,7 +903,7 @@ adapt dir lang g hv@(HostView scope _ _ _ _) d t0 e
             let ds = map declType (declArgs hv (length as) d)
             xs' <- sequence
               [ (,) (Idx i (hostType hv dx tx)) <$> adapt dir lang g hv dx tx x
-              | (dx, tx, (Idx i _, x)) <- zip3 ds ts xs ]
+              | (dx, tx, (Idx i _, x)) <- zip3Same ds ts xs ]
             return $ PolyTuple v xs'
       PolyRecord o v ps rs
         | NamT _ name _ fts <- t -> do
@@ -992,7 +993,7 @@ rebuildIn dir lang g hv@(HostView scope _ _ _ _) d t0 e = do
                   [var]
             x <- adapt dir lang g hv dx tx getter
             return (Idx g there, x)
-        | (i, dx, tx) <- zip3 [0 ..] ds ts ]
+        | (i, dx, tx) <- zip3Indexed 0 ds ts ]
       return $ PolyTuple (Idx g h) xs
     OptionalT a -> do
       let da = declOptional hv d
@@ -1044,7 +1045,7 @@ rebuildIn dir lang g hv@(HostView scope _ _ _ _) d t0 e = do
            ] of
         ((_, headArgs, wireU, (packSrc, unpackSrc)) : _) -> do
           let instantiate args =
-                typeOf (instantiateParams [(pv, argU a) | (VarU pv, a) <- zip headArgs args] wireU)
+                typeOf (instantiateParams [(pv, argU a) | (VarU pv, a) <- zipSame headArgs args] wireU)
               wireT = instantiate ts
               dWire = case declArgs hv (length ts) d of
                 ds | all isJust ds -> Just (instantiate (catMaybes ds))
@@ -1071,7 +1072,7 @@ rebuildIn dir lang g hv@(HostView scope _ _ _ _) d t0 e = do
       m <- MM.freshManifoldIndex g
       args <- sequence
         [ adapt (flipDir dir) lang g hv da a (PolyBndVar (C (Idx g (slotT da a))) i)
-        | (i, da, a) <- zip3 ids das as ]
+        | (i, da, a) <- zip3Same ids das as ]
       -- The host calls a morloc function with the arguments its
       -- declaration ends at (HOST-2), so one taking more is partially
       -- applied to them. A host function that ends there is called with
@@ -1097,11 +1098,11 @@ rebuildIn dir lang g hv@(HostView scope _ _ _ _) d t0 e = do
             | null rest = body0
             | otherwise =
                 PolyLet w body0
-                  (PolyApp (PolyExe (Idx g r) (LocalCallP w)) [PolyBndVar (C (Idx g a)) i | (i, a) <- zip restIds rest])
+                  (PolyApp (PolyExe (Idx g r) (LocalCallP w)) [PolyBndVar (C (Idx g a)) i | (i, a) <- zipSame restIds rest])
       MM.modify' $ \st -> st
         { stateArgTypes =
             foldr (\(i, ty) -> Map.insert i (Idx g ty)) (stateArgTypes st)
-              ((v, calleeT) : (w, r) : [(i, slotT da a) | (i, da, a) <- zip3 ids das as] <> zip restIds rest)
+              ((v, calleeT) : (w, r) : [(i, slotT da a) | (i, da, a) <- zip3Same ids das as] <> zipSame restIds rest)
         -- A host's callable has no identity to send to another pool, and
         -- re-running the call that produced it would run its effects again,
         -- so a closure wrapping one may not cross.
@@ -1110,7 +1111,7 @@ rebuildIn dir lang g hv@(HostView scope _ _ _ _) d t0 e = do
             Outbound -> stateHostOriginClosures st
         }
       return $ PolyManifold lang m
-        (ManifoldPart [Arg v None] ([Arg i (Just (slotT da a)) | (i, da, a) <- zip3 ids das as] <> [Arg i (Just a) | (i, a) <- zip restIds rest]))
+        (ManifoldPart [Arg v None] ([Arg i (Just (slotT da a)) | (i, da, a) <- zip3Same ids das as] <> [Arg i (Just a) | (i, a) <- zipSame restIds rest]))
         Transparent (PolyReturn body)
 
 -- | The function @replay and @spawn call as @f(x)@ in their pool helper,
@@ -1287,7 +1288,7 @@ forceLayers _ _ e = e
 insertExportBoundaries :: Bool -> Int -> Type -> PolyHead -> PolyHead
 insertExportBoundaries isCommand cidx t (PolyHead lang midx args body) =
   let inputTs = case t of FunT inputs _ -> inputs; _ -> []
-      thunkArgIds = [ann a | isCommand, (a, EffectT _ _) <- zip args inputTs]
+      thunkArgIds = [ann a | isCommand, (a, EffectT _ _) <- zipSame args inputTs]
       retT = case t of FunT _ ret -> ret; t' -> t'
       body' = suspendThunkArgs thunkArgIds body
       body'' = forceExportReturn cidx retT body'

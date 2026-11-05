@@ -8,6 +8,7 @@ module Morloc.Frontend.Parser
   , emptyPState
   ) where
 
+import Morloc.Data.Zip (zip3Prefix, zipWithPrefix)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Map.Strict as Map
@@ -1382,10 +1383,10 @@ sigLabels cs args = do
       start = maybe (Pos 0 0 "") fst (listToMaybe (cargs <> args))
       (stray, mine) = List.partition ((< start) . snd) sites
       walk = map (\v -> (v, False)) (concatMap (labelOrder . snd) cargs)
-        <> concat (zipWith rootLabels (map (== length args) [1 ..]) (map snd args))
+        <> concat (zipWithPrefix rootLabels (map (== length args) [1 ..]) (map snd args))
       named = scanl (\acc (v, ok) -> if ok then v : acc else acc) [] walk
       -- each bad site, and whether it repeats a label that binds
-      bad = [(site, bound) | (site@(v, _), (w, ok), seen) <- List.zip3 mine walk named, let bound = ok && v == w, not bound || elem v seen]
+      bad = [(site, bound) | (site@(v, _), (w, ok), seen) <- zip3Prefix mine walk named, let bound = ok && v == w, not bound || elem v seen]
         <> [(site, False) | site <- drop (length walk) mine]
   case (stray, bad) of
     ((v, p) : _, _) -> labelError v p

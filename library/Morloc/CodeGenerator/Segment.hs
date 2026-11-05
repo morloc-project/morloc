@@ -12,6 +12,7 @@ module Morloc.CodeGenerator.Segment
   , checkScopes
   ) where
 
+import Morloc.Data.Zip (zipSame)
 import Morloc.CodeGenerator.Namespace
 import qualified Data.Set as Set
 import qualified Morloc.Config as MC
@@ -113,12 +114,12 @@ segmentExpr m args (PolyList v t es) = do
   return (concat mss, (Nothing, MonoList v t (map snd es')))
 segmentExpr m args (PolyTuple v es) = do
   (mss, es') <- mapM (segmentExpr m args . snd) es |>> unzip
-  return (concat mss, (Nothing, MonoTuple v (zip (map fst es) (map snd es'))))
+  return (concat mss, (Nothing, MonoTuple v (zipSame (map fst es) (map snd es'))))
 segmentExpr m args (PolyRecord o v ps entries) = do
   let entryTypes = map (fst . snd) entries
   (mss, es') <- mapM (segmentExpr m args . snd . snd) entries |>> unzip
   let keys = map fst entries
-  return (concat mss, (Nothing, MonoRecord o v ps (zip keys (zip entryTypes (map snd es')))))
+  return (concat mss, (Nothing, MonoRecord o v ps (zipSame keys (zipSame entryTypes (map snd es')))))
 segmentExpr m args (PolyReturn e) = do
   (ms, (lang, e')) <- segmentExpr m args e
   return (ms, (lang, MonoReturn e'))

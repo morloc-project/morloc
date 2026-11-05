@@ -125,6 +125,7 @@ module Morloc.Typecheck.Internal
   , seeType
   ) where
 
+import Morloc.Data.Zip (zipPrefix, zipSame)
 import qualified Data.List
 import Data.Functor.Const (Const (..))
 import Data.Functor.Identity (Identity (..))
@@ -1193,18 +1194,22 @@ subtype scope t1 t2 g
   | Just (comps, t1') <- solvedStructure t1 = comps g >>= subtype scope t1' t2
   | Just (comps, t2') <- solvedStructure t2 = comps g >>= subtype scope t1 t2'
   where
-    solvedStructure (ExistU v (ps, _) (rs, _))
+    solvedStructure (ExistU v (ps, pc) (rs, _))
       | not (null ps && null rs), isJust (lookupU v g) =
           let sol = apply g (ExistU v ([], Open) ([], Open))
-           in Just (componentsAgainst ps rs sol, sol)
+           in Just (componentsAgainst ps pc rs sol, sol)
     solvedStructure _ = Nothing
-    componentsAgainst ps rs sol g0 = do
+    componentsAgainst ps pc rs sol g0 = do
       let (solPs, solRs) = case sol of
             ExistU _ (ps', _) (rs', _) -> (ps', rs')
             AppU _ ps' -> (ps', [])
             NamU _ _ _ rs' -> ([], rs')
             _ -> ([], [])
-      g1 <- foldM (\gx (p, q) -> subtype scope (apply gx p) (apply gx q) gx) g0 (zip ps solPs)
+      -- An open parameter list names the first of the solution's parameters;
+      -- a closed one names them all.
+      when (length ps > length solPs || (pc == Closed && length ps /= length solPs)) $
+        subtypeError t1 t2 "Parameter type mismatch"
+      g1 <- foldM (\gx (p, q) -> subtype scope (apply gx p) (apply gx q) gx) g0 (zipPrefix ps solPs)
       foldM
         (\gx (k, p) -> case (lookup k solRs, sol) of
             (Just q, _) -> subtype scope (apply gx p) (apply gx q) gx
@@ -1451,7 +1456,7 @@ subtype scope t1@(ExistU v1 (ps1, pc1) rs@([], _)) t2@(AppU _ ps2) g1
       subtypeError t1 t2 "InstantiateL - too many parameters in left existential"
   -- otherwise, do the thing
   | otherwise = do
-      g2 <- foldM (\g (p1, p2) -> subtype scope p1 p2 g) g1 (zip ps1 ps2)
+      g2 <- foldM (\g (p1, p2) -> subtype scope p1 p2 g) g1 (zipSame ps1 ps2)
       solveExist v1 t2 g2 >>= maybe (return g2) return
 
 --  g1,>Ea,Ea |- [Ea/x]A <: B -| g2,>Ea,g3
@@ -1625,7 +1630,7 @@ subtype _ t1 t2 g
 -- given a body in morloc.
 subtype scope t1@(OpU o1 as1) t2@(OpU o2 as2) g
   | o1 == o2 && length as1 == length as2 =
-      foldM (\gAcc (a, b) -> subtype scope a b gAcc) g (zip as1 as2)
+      foldM (\gAcc (a, b) -> subtype scope a b gAcc) g (zipSame as1 as2)
   | otherwise = subtypeError t1 t2 "Type operator mismatch"
 -- An applied alias meeting a type of another shape, such as the record it
 -- names, is compared through its expansion.
@@ -1788,7 +1793,7 @@ headerLabels = go []
     go path t = case t of
       LabeledU l x -> [(l, path, x)]
       AppU (VarU h) ts
-        | h == BT.tuple (length ts) -> concat [go (path <> [j]) x | (j, x) <- zip [0 ..] ts]
+        | h == BT.tuple (length ts) -> concat [go (path <> [j]) x | (j, x) <- zipPrefix [0 ..] ts]
       _ -> []
 
 -- | Every label in a type.
@@ -1818,7 +1823,7 @@ subtypeFields t1 t2 scope rs1 rs2 g0 =
   case RS.groundEq (named rs1) (named rs2) of
     Left (RS.RecContradiction msg) -> subtypeError t1 t2 (pretty msg)
     Left _ -> subtypeError t1 t2 "Record fields differ"
-    Right _ -> foldM step g0 (zip rs1 rs2)
+    Right _ -> foldM step g0 (zipSame rs1 rs2)
   where
     named rs = [(k, t) | (Key k, t) <- rs]
     step g ((_, x1), (_, x2)) = subtype scope (apply g x1) (apply g x2) g
@@ -1882,7 +1887,7 @@ instantiate scope (ExistU v ([], _) _) (FunU as b) g1 = do
       eas = [ExistU v' ([], Open) ([], Open) | v' <- veas]
       eb = ExistU veb ([], Open) ([], Open)
   g4 <- solveExistWith v (FunU eas eb) (index eb : map index eas) g3 >>= maybe (return g3) return
-  g5 <- foldlM (\g (e, t) -> instantiate scope e t g) g4 (zip eas as)
+  g5 <- foldlM (\g (e, t) -> instantiate scope e t g) g4 (zipSame eas as)
   instantiate scope eb (apply g5 b) g5
 
 --  g1[Ea2,Ea1,Ea=Ea1->Ea2] |- Ea1 <=: A1 -| g2
@@ -1895,7 +1900,7 @@ instantiate scope (FunU as b) (ExistU v ([], _) _) g1 = do
       eas = [ExistU v' ([], Open) ([], Open) | v' <- veas]
       eb = ExistU veb ([], Open) ([], Open)
   g4 <- solveExistWith v (FunU eas eb) (index eb : map index eas) g3 >>= maybe (return g3) return
-  g5 <- foldlM (\g (e, t) -> instantiate scope t e g) g4 (zip eas as)
+  g5 <- foldlM (\g (e, t) -> instantiate scope t e g) g4 (zipSame eas as)
   instantiate scope eb (apply g5 b) g5
 
 -- This is terrible kludge, I am not close to having considered all the edge
@@ -1982,7 +1987,7 @@ instantiate scope (ExistU v1 (ps1, pc1) (rs1_expr, rc1)) (ExistU v2 (ps2, pc2) (
     (_, k : _) | rc2 == Closed -> missingField ta tb k
     _ -> extendRec scope g1 rs1 rs2
 
-  g3 <- foldM (\g (t1, t2) -> subtype scope t1 t2 g) g2 (zip ps1 ps2)
+  g3 <- foldM (\g (t1, t2) -> subtype scope t1 t2 g) g2 (zipPrefix ps1 ps2)
   g4 <-
     foldM
       (\g' (t1, t2) -> subtype scope t1 t2 g')
@@ -2026,15 +2031,15 @@ instantiate scope (ExistU v1 (ps1, pc1) (rs1_expr, rc1)) (ExistU v2 (ps2, pc2) (
                 (gC, dvs) = statefulMap (\gx _ -> tvarname gx "merge_key_") gB rsM
                 bare x = ExistU x ([], Open) ([], Open)
                 cs = map bare cvs
-                ds = [(k, bare d) | ((k, _), d) <- zip rsM dvs]
+                ds = [(k, bare d) | ((k, _), d) <- zipSame rsM dvs]
                 wT = ExistU w (cs, pcM) (ds, rcM)
                 fresh = ExistG w (cs, pcM) (ds, rcM) : map index cvs ++ map index dvs
             when (any (\x -> occursIn o x || occursIn n x) (map (apply g) (ps1' <> map snd rsM))) $
               subtypeError ta tb "Infinite type: a value would contain itself"
             gD <- solveExistWith o wT fresh gC
               >>= maybe (Left $ "Cannot articulate an existential missing from the context:" <+> pretty o) return
-            gE <- foldM (\gx (t, c) -> subtype scope (apply gx t) c gx) gD (zip ps1' cs)
-            gF <- foldM (\gx ((_, t), (_, d)) -> subtype scope (apply gx t) d gx) gE (zip rsM ds)
+            gE <- foldM (\gx (t, c) -> subtype scope (apply gx t) c gx) gD (zipSame ps1' cs)
+            gF <- foldM (\gx ((_, t), (_, d)) -> subtype scope (apply gx t) d gx) gE (zipSame rsM ds)
             solveExist n (apply gF wT) gF >>= maybe (return gF) return
 
   -- Check gammaSolved first: if either is already solved, skip access2
@@ -2297,7 +2302,7 @@ propagateExistGPositional scope v t g = case classifyTupleShape scope t of
            else foldM
                   (\g' (slot, elemT) -> subtype scope elemT slot g')
                   gAcc
-                  (zip ps tupleArgs))
+                  (zipPrefix ps tupleArgs))
       g
       (accumulatedPositionalSets v g)
   NotTuple -> case accumulatedPositionalSets v g of
@@ -2487,7 +2492,7 @@ solveExistWith v t extras g = case Map.lookup v (gammaExist g) of
         step = (slot - older) `div` (length extras + 1)
         g1 = cacheSolved v t $ g {gammaExist = Map.delete v (gammaExist g)}
     if step >= 1
-      then return . Just $ placeEntries g1 ((slot, solved) : zip [slot - step, slot - 2 * step ..] extras)
+      then return . Just $ placeEntries g1 ((slot, solved) : zipPrefix [slot - step, slot - 2 * step ..] extras)
       else do
         let band = IntMap.toDescList . fst . IntMap.split top . snd $ IntMap.split bottom (gammaContext g)
             ordered
@@ -2499,7 +2504,7 @@ solveExistWith v t extras g = case Map.lookup v (gammaExist g) of
         let cleared = unindexEntries False band $
               g1 {gammaContext = foldl' (flip IntMap.delete) (gammaContext g1) (map fst band)}
             g2 = if inBand slot then cleared else placeEntries cleared [(slot, solved)]
-        return . Just $ placeEntries g2 (zip [top - bandStep, top - 2 * bandStep ..] ordered)
+        return . Just $ placeEntries g2 (zipPrefix [top - bandStep, top - 2 * bandStep ..] ordered)
   where
     placeEntries = foldl' $ \g' (s, x) ->
       g' { gammaContext = IntMap.insert s x (gammaContext g')
@@ -2591,7 +2596,7 @@ selectorType g0 (SelectorIdx x xs) = do
 selectorType g0 (SelectorKey x xs) = do
   xs' <- mapM (secondM weaveSelectors) (groupSort (x : xs))
   (g1, ss) <- statefulMapM selectorType g0 (map snd xs')
-  return $ newvarRich ([], Closed) (zip (map (Key . fst) xs') ss, Open) "_pattern_" g1
+  return $ newvarRich ([], Closed) (zipSame (map (Key . fst) xs') ss, Open) "_pattern_" g1
 selectorType g0 (SelectorBracketIndex s) = do
   -- The receiver must be a list; bracket-index strips one Array layer
   -- and the inner selector applies to the element type. Produce an
@@ -2794,11 +2799,11 @@ renameWithMap g0 t0 =
             (g3, rvs') = statefulMap (\g (TV s) -> tvarname g (s <> "@r")) g2 rvs
             (g4, lvs') = statefulMap (\g (TV s) -> tvarname g (s <> "@l")) g3 lvs
             (g5, evs') = statefulMap (\g (TV s) -> tvarname g (s <> "@e")) g4 evs
-            natMap = Map.fromList (zip nvs nvs')
-            strMap = Map.fromList (zip svs svs')
-            recMap = Map.fromList (zip rvs rvs')
-            listMap = Map.fromList (zip lvs lvs')
-            effMap = Map.fromList (zip evs evs')
+            natMap = Map.fromList (zipSame nvs nvs')
+            strMap = Map.fromList (zipSame svs svs')
+            recMap = Map.fromList (zipSame rvs rvs')
+            listMap = Map.fromList (zipSame lvs lvs')
+            effMap = Map.fromList (zipSame evs evs')
             rw = renameKindedVars natMap strMap recMap listMap effMap
          in (g5, rw t0, rw)
 
@@ -2899,7 +2904,7 @@ cleanTypeName t0 =
       allGeneric = nub (vs ++ evs ++ nvs ++ svs ++ rvs)
       fixed = collectFixedNames (Set.fromList allGeneric) body
       pool = filter (\(TV n) -> Set.notMember n fixed) letterPool
-      renameMap = Map.fromList (zip allGeneric pool)
+      renameMap = Map.fromList (zipPrefix allGeneric pool)
       renamedBody = applyVarRenaming renameMap body
       renamedVs = map (\v -> Map.findWithDefault v v renameMap) vs
    in simplifyNats $ qualify renamedVs renamedBody
@@ -3574,7 +3579,7 @@ findPackableWireForm nativeT = do
       , let wireSubstituted = foldr
               (\(v, t') acc -> substituteTVar v t' acc)
               wireForm
-              (zip outputParams nativeArgs)
+              (zipSame outputParams nativeArgs)
       ]
 
 -- debugging -------------------

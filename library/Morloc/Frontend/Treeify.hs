@@ -20,6 +20,7 @@ module Morloc.Frontend.Treeify
   , recName
   ) where
 
+import Morloc.Data.Zip (zipSame)
 import qualified Data.Set as Set
 import qualified Morloc.BaseTypes as BT
 import qualified Morloc.Data.DAG as DAG
@@ -530,7 +531,7 @@ linkAndRemoveAnnotations = f
     f (ExprI i (TupE es)) = ExprI i <$> (TupE <$> mapM f es)
     f (ExprI i (NamE rs)) = do
       es' <- mapM (f . snd) rs
-      return . ExprI i $ NamE (zip (map fst rs) es')
+      return . ExprI i $ NamE (zipSame (map fst rs) es')
     f (ExprI i (AppE e es)) = ExprI i <$> (AppE <$> f e <*> mapM f es)
     f (ExprI i (LamE vs e)) = ExprI i <$> (LamE vs <$> f e)
     f (ExprI i (LetE bindings body)) = ExprI i <$> (LetE <$> mapM (\(v, e) -> (,) v <$> f e) bindings <*> f body)
@@ -720,7 +721,7 @@ collectExprS namer0 (ExprI gi0 e0) = f namer0 e0
           (namer', ess) <- expanding k namer (\n -> statefulMapM (termtypesToAnnoS gi0) n ts)
           let etypes = map (fromJust . termGeneral) ts
           v' <- nameIfRecursive namer' k
-          return (namer', VarS v' (PolymorphicExpr cls clsName t (zip etypes ess)))
+          return (namer', VarS v' (PolymorphicExpr cls clsName t (zipSame etypes ess)))
         -- Terms not associated with TermTypes objects must be lambda-bound or let-bound
         -- These terms will be renamed for uniqueness
         _ -> do
@@ -779,7 +780,7 @@ collectExprS namer0 (ExprI gi0 e0) = f namer0 e0
     f namer (NamE rs) = do
       (namer', vals) <- statefulMapM collectAnnoS namer (map snd rs)
       let keys = map fst rs
-      return (namer', NamS (zip keys vals))
+      return (namer', NamS (zipSame keys vals))
     f namer (LamE vs e) = do
       let namer' = foldr (updateRenamer LambdaBound) namer vs
           vs' = map (fst . fromJust . (flip Map.lookup) (namerMap namer')) vs

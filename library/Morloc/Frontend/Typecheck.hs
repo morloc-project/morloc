@@ -15,6 +15,7 @@ segregation in the code generator.
 -}
 module Morloc.Frontend.Typecheck (typecheck, typecheckRoot, typecheckRootAt, validate, resolveTypes, evaluateAnnoSTypes, peakSExpr) where
 
+import Morloc.Data.Zip (zipPrefix, zipSame, zipWithSame)
 import qualified Data.List as List
 import Data.Text (Text)
 import qualified Data.Text as MT
@@ -480,7 +481,7 @@ resolveTypes (AnnoS (Idx i t) ci e) =
     f (LamS vs x) = LamS vs (resolveTypes x)
     f (LstS xs) = LstS (map resolveTypes xs)
     f (TupS xs) = TupS (map resolveTypes xs)
-    f (NamS rs) = NamS (zip (map fst rs) (map (resolveTypes . snd) rs))
+    f (NamS rs) = NamS (zipSame (map fst rs) (map (resolveTypes . snd) rs))
     f (RealS si x) = RealS si x
     f (IntS si x) = IntS si x
     f (LogS x) = LogS x
@@ -567,7 +568,7 @@ resolveInstances g (AnnoS gi@(Idx _ gt) ci e0) = do
     f _ g0 (TupS es) = statefulMapM resolveInstances g0 es |>> second TupS
     f _ g0 (NamS rs) = do
       (g1, es') <- statefulMapM resolveInstances g0 (map snd rs)
-      return (g1, NamS (zip (map fst rs) es'))
+      return (g1, NamS (zipSame (map fst rs) es'))
 
     f _ g0 (LetBndS v) = return (g0, LetBndS v)
     f _ g0 (LetS v e1 e2) = do
@@ -821,25 +822,25 @@ compatibleTypeU = go Set.empty Set.empty
     go b1 b2 (AppU h1 ps1) (AppU h2 ps2)
       | length ps1 == length ps2 =
           go b1 b2 h1 h2
-            && all (uncurry (go b1 b2)) (zip ps1 ps2)
+            && all (uncurry (go b1 b2)) (zipSame ps1 ps2)
       -- Partial application, as in 'subtype': @Vector n a@ matches @f a@.
       | length ps1 > length ps2
       , let k = length ps1 - length ps2
             (ps1prefix, ps1suffix) = splitAt k ps1
       = go b1 b2 (AppU h1 ps1prefix) h2
-          && all (uncurry (go b1 b2)) (zip ps1suffix ps2)
+          && all (uncurry (go b1 b2)) (zipSame ps1suffix ps2)
       | length ps2 > length ps1
       , let k = length ps2 - length ps1
             (ps2prefix, ps2suffix) = splitAt k ps2
       = go b1 b2 h1 (AppU h2 ps2prefix)
-          && all (uncurry (go b1 b2)) (zip ps1 ps2suffix)
+          && all (uncurry (go b1 b2)) (zipSame ps1 ps2suffix)
       | otherwise = False
     go b1 b2 (NamU o1 n1 ps1 rs1) (NamU o2 n2 ps2 rs2) =
       o1 == o2 && n1 == n2
         && length ps1 == length ps2
-        && all (uncurry (go b1 b2)) (zip ps1 ps2)
+        && all (uncurry (go b1 b2)) (zipSame ps1 ps2)
         && length rs1 == length rs2
-        && all (\((k1,v1),(k2,v2)) -> k1 == k2 && go b1 b2 v1 v2) (zip rs1 rs2)
+        && all (\((k1,v1),(k2,v2)) -> k1 == k2 && go b1 b2 v1 v2) (zipSame rs1 rs2)
     go b1 b2 (OptionalU t1) (OptionalU t2) = go b1 b2 t1 t2
     go b1 b2 (EffectU e1 t1) (EffectU e2 t2) = e1 == e2 && go b1 b2 t1 t2
     go _  _  t1 t2 | isNatExprT t1 && isNatExprT t2 = True
@@ -1017,7 +1018,7 @@ synthE i g0 (ConS tv n ord xs) = do
         <+> pretty (length xs)
   (g2, xs') <- statefulMapM (\g (x, t) -> do
                                 (g', _, x') <- checkG g x t
-                                return (g', x')) g1 (zip xs declaredArgs)
+                                return (g', x')) g1 (zipSame xs declaredArgs)
   return (g2, apply g2 resultT, ConS tv n ord xs')
 
 -- A directly applied setter is a redex: reduce it so the setter's own
@@ -1129,7 +1130,7 @@ synthE i g0 (AppS (AnnoS fgidx fcidx (ExeS (PatCall (PatternStruct s)))) (e0 : e
          (g', _, e') <- checkG g e (apply g slotT)
          return (g', e'))
       g3
-      (zip es0 slotVars)
+      (zipSame es0 slotVars)
   let setTypes = map (apply g4) slotVars
       receiverType = apply g4 datType
       -- Built from the receiver, not the selector's structural type, to
@@ -1239,7 +1240,7 @@ synthE i g0 (AppS f xs0) = do
 -- -->I==>
 synthE i g0 (LamS vs x) = do
   let (g1, paramTypes) = statefulMap (\g' v -> newvar (unEVar v <> "_x") g') (enterLambda g0) vs
-      g2 = g1 ++> zipWith AnnG vs paramTypes
+      g2 = g1 ++> zipWithSame AnnG vs paramTypes
 
   (g3, bodyType, bodyExpr) <- synthG g2 x
 
@@ -1279,8 +1280,8 @@ synthE _ g0 (NamS rs) = do
   (g1, xs) <- statefulMapM (\s v -> synthG s v |>> (\(a, b, c) -> (a, (b, c)))) g0 (map snd rs)
   let (ts, es) = unzip xs
       ks = map fst rs
-      (g2, t) = newvarRich ([], Closed) (zip ks ts, Closed) "record_" g1
-      e = NamS (zip ks es)
+      (g2, t) = newvarRich ([], Closed) (zipSame ks ts, Closed) "record_" g1
+      e = NamS (zipSame ks es)
   return (g2, t, e)
 
 -- A signed term referenced by its signature alone is instantiated, its
@@ -1302,8 +1303,8 @@ synthE vi g0 (VarS v (MonomorphicExpr (Just t0) xs0)) = do
   let (g1, t0') = renameEType g0 t0
       t1 = etype t0'
       newCs = Set.toList (econs t0')
-      inScope = Map.union (Map.fromList (zip (fst (unqualify (etype t0))) (fst (unqualify t1)))) (gammaScoped g0)
-      natRen = Map.fromList (zip (List.nub (collectNatVarNames (etype t0))) (List.nub (collectNatVarNames t1)))
+      inScope = Map.union (Map.fromList (zipSame (fst (unqualify (etype t0))) (fst (unqualify t1)))) (gammaScoped g0)
+      natRen = Map.fromList (zipSame (List.nub (collectNatVarNames (etype t0))) (List.nub (collectNatVarNames t1)))
       -- A label whose Nat occurs nowhere else in the type still names one.
       labels =
         [ (x, Map.findWithDefault (TV (unTVar lv <> "@" <> unEVar v)) lv natRen, idx)
@@ -2037,7 +2038,7 @@ etaExpandSynthE i g1 funType0 funExpr0 _f xs0 = do
   let normalType = normalizeType funType0
       numArgs = length xs0
 
-  case normalType of
+  case normalizeType (snd (unqualify (apply g1 funType0))) of
     FunU (length -> numParams) _
       | numArgs > numParams ->
           throwTypeError i $ "Invalid function application of type:\n  " <> prettyTypeU funType0
@@ -2074,7 +2075,7 @@ etaExpandSynthE i g1 funType0 funExpr0 _f xs0 = do
 
         let newVars = map fst newVarsWithTypes
             newTypes = map snd newVarsWithTypes
-            g4 = g3 ++> zipWith AnnG newVars newTypes
+            g4 = g3 ++> zipWithSame AnnG newVars newTypes
 
         newVarExprs <-
           mapM
@@ -2177,7 +2178,8 @@ zipCheck i g0 (x0 : xs0) (t0 : ts0) = do
   return (g2, t1 : ts1, x1 : xs1, remainder)
 -- partial application
 zipCheck _ g0 [] ts = return (g0, [], [], ts)
-zipCheck i _ _ [] = MM.throwCompilerBugAt i "too many arguments in zipCheck"
+zipCheck i _ xs [] =
+  throwTypeError i $ "a function is applied to" <+> pretty (length xs) <+> "more argument" <> (if length xs == 1 then "" else "s") <+> "than it takes"
 
 foldCheck ::
   Gamma ->
@@ -2228,7 +2230,7 @@ checkE i g1 (LstS (e : es)) (AppU (VarU v) [t])
       return (g', t', reverse acc ++ xs')
 checkE i g0 (LamS vs body) t@(FunU as b)
   | length vs == length as = do
-      let g1 = enterLambda g0 ++> zipWith AnnG vs as
+      let g1 = enterLambda g0 ++> zipWithSame AnnG vs as
       (g2, t2, e2) <- checkG g1 body b
 
       let t3 = apply g2 (FunU as t2)
@@ -2240,7 +2242,7 @@ checkE i g0 (LamS vs body) t@(FunU as b)
   -- function it returns.
   | length vs < length as = do
       let (asHere, asRest) = splitAt (length vs) as
-          g1 = enterLambda g0 ++> zipWith AnnG vs asHere
+          g1 = enterLambda g0 ++> zipWithSame AnnG vs asHere
       (g2, t2, e2) <- checkG g1 body (FunU asRest b)
       let t3 = apply g2 (FunU asHere t2)
       noEscapedLengths i g0 g2 t3
@@ -2254,7 +2256,7 @@ checkE i g0 (LamS vs body) t@(FunU as b)
   -- terminates; an eta-expansion here would add parameters and never end.
   | not (null as) = do
       let (vsHere, vsRest) = splitAt (length as) vs
-          g1 = g0 ++> zipWith AnnG vsHere as
+          g1 = g0 ++> zipWithSame AnnG vsHere as
       (g2, t2, e2) <- checkG g1 (AnnoS i i (LamS vsRest body)) b
       let t3 = apply g2 (FunU as t2)
           e3 = applyCon g2 (LamS vsHere e2)
@@ -2563,7 +2565,7 @@ checkE i g0 e@(AppS (AnnoS fgidx fcidx (ExeS (PatCall (PatternStruct s)))) (e0 :
                  (g'', _, e'') <- checkG g e' (apply g slotT)
                  return (g'', e''))
               g4
-              (zip es0 slotVars)
+              (zipSame es0 slotVars)
           let setTypes = map (apply g5) slotVars
               receiverType = apply g5 datType
               resultType =
@@ -2821,7 +2823,7 @@ subtype' i a b g = do
 -- | Conditions grouped so that no two groups share a variable, each group
 -- in input order.
 conditionGroups :: [(Int, ND.Condition, MDoc)] -> [[(Int, ND.Condition, MDoc)]]
-conditionGroups xs = map (map snd . List.sortOn fst) (foldl insert [] (zip [0 :: Int ..] xs))
+conditionGroups xs = map (map snd . List.sortOn fst) (foldl insert [] (zipPrefix [0 :: Int ..] xs))
   where
     vars (_, (_, c, _)) = ND.condVars [c]
     insert groups x =
@@ -2875,7 +2877,7 @@ getNatArgs :: Scope -> TypeU -> [TypeU]
 getNatArgs scope (AppU (VarU v) args) =
   case Map.lookup v scope of
     Just ((params, _, _, _, _) : _) ->
-      let myNatArgs = [arg | (Left (_, KindNat), arg) <- zip params args]
+      let myNatArgs = [arg | (Left (_, KindNat), arg) <- zipSame params args]
       in case TE.reduceType scope (AppU (VarU v) args) of
            Just t' -> case getNatArgs scope t' of
              [] -> myNatArgs   -- the reduction dropped Nat info; keep ours
@@ -3207,7 +3209,7 @@ tryEvalConst g (AppS (AnnoS _ _ (ExeS (PatCall (PatternStruct
 tryEvalConst g (AppS (AnnoS _ _ (LamS vs (AnnoS _ _ body))) args)
   | length vs == length args = do
     vals <- mapM (\(AnnoS _ _ e) -> tryEvalConst g e) args
-    let g' = g { gammaIntVals = foldl (\m (v', val') -> Map.insert v' val' m) (gammaIntVals g) (zip vs vals) }
+    let g' = g { gammaIntVals = foldl (\m (v', val') -> Map.insert v' val' m) (gammaIntVals g) (zipSame vs vals) }
     tryEvalConst g' body
 tryEvalConst g (ShapeS _ _ (AnnoS _ _ e)) = tryEvalConst g e
 tryEvalConst _ _ = Nothing
@@ -3263,7 +3265,7 @@ resolveNatLabels (AnnoS _ _ (VarS _ (MonomorphicExpr (Just et) _))) funType args
     let -- Nat and Int variables: each original name to its renamed one
         origNvs = nub (collectNatVarNames (etype et))
         renamedNvs = nub (collectNatVarNames funType)
-        natRenMap = Map.fromList (zip origNvs renamedNvs)
+        natRenMap = Map.fromList (zipSame origNvs renamedNvs)
         natSolutions = Map.fromList
           [ (renamedVar, n)
           | (origVar, arg) <- labelArguments et args
@@ -3272,7 +3274,7 @@ resolveNatLabels (AnnoS _ _ (VarS _ (MonomorphicExpr (Just et) _))) funType args
           ]
         origSvs = nub (collectStrVarNames (etype et))
         renamedSvs = nub (collectStrVarNames funType)
-        strRenMap = Map.fromList (zip origSvs renamedSvs)
+        strRenMap = Map.fromList (zipSame origSvs renamedSvs)
         strSolutions = Map.fromList
           [ (renamedVar, StrLitU s)
           | (origVar, arg) <- labelArguments et args
@@ -3281,7 +3283,7 @@ resolveNatLabels (AnnoS _ _ (VarS _ (MonomorphicExpr (Just et) _))) funType args
           ]
         origLvs = nub (collectListVarNames (etype et))
         renamedLvs = nub (collectListVarNames funType)
-        listRenMap = Map.fromList (zip origLvs renamedLvs)
+        listRenMap = Map.fromList (zipSame origLvs renamedLvs)
         listSolutions = Map.fromList
           [ (renamedVar, ListLitU (map StrLitU ss))
           | (origVar, arg) <- labelArguments et args
@@ -3460,7 +3462,7 @@ noEscapedLengths i before after t
 observeResultNats :: AnnoS Int ManyPoly Int -> TypeU -> Gamma -> Gamma
 observeResultNats (AnnoS _ _ (VarS _ def)) funType g
   | Just et <- signatureOf def =
-  let renamed = Map.fromList (zip (List.nub (collectNatVarNames (etype et))) (List.nub (collectNatVarNames funType)))
+  let renamed = Map.fromList (zipSame (List.nub (collectNatVarNames (etype et))) (List.nub (collectNatVarNames funType)))
       labelled = [r | v <- Map.keys (enatLabels et), Just r <- [Map.lookup v renamed]]
    in g {gammaObserved = Set.union (Set.fromList (outwardNats funType labelled)) (gammaObserved g)}
 observeResultNats _ _ g = g
@@ -3584,7 +3586,7 @@ checkShapes g e = do
         | FormTuple ss <- form
         , v == BT.tuple (length ts) ->
             if length ts == length ss
-              then foldM (\m (s', t') -> fits scope m s' t') seen (zip ss ts)
+              then foldM (\m (s', t') -> fits scope m s' t') seen (zipSame ss ts)
               else tupleWidthError i (length ss) (pretty (length ts))
       t | FormRecord kss <- form, Just (fs, closed) <- rowFields t -> fields closed fs kss seen
       ExistU v (ps, pc) (rs, rc) -> do
@@ -3594,7 +3596,7 @@ checkShapes g e = do
             | not (null rs) || (pc == Closed && null ps) -> notA "a record"
             | length ps > length ss || (pc == Closed && length ps /= length ss) ->
                 tupleWidthError i (length ss) ((if pc == Closed then "" else "at least ") <> pretty (length ps))
-            | otherwise -> foldM (\m (s', t') -> fits scope m s' t') seen' (zip ss ps)
+            | otherwise -> foldM (\m (s', t') -> fits scope m s' t') seen' (zipPrefix ss ps)
           FormRecord kss
             | not (null ps) -> notA "a tuple"
             | otherwise -> fields (rc == Closed) rs kss seen'
@@ -3782,7 +3784,7 @@ checkSuperclassInstance (i, cls, ts0) = do
   let vars = [classVars inst | inst <- Map.elems tcls, className inst == cls]
       needed = case (Map.lookup cls classDefs, vars) of
         (Just scs, vs : _) | length vs == length ts ->
-          [ (sc, map (substAll (zip vs ts)) sargs) | Constraint sc sargs <- scs ]
+          [ (sc, map (substAll (zipSame vs ts)) sargs) | Constraint sc sargs <- scs ]
         _ -> []
       substAll ps t = foldr (\(v, r) acc -> substituteTVar v r acc) t ps
       methodsOf sc = [inst | inst <- Map.elems tcls, className inst == sc]
@@ -3863,7 +3865,7 @@ superclassClosure cs0 = do
         [] -> Nothing
       supers (Constraint cls args) = case (Map.lookup cls classDefs, varsOf cls) of
         (Just scs, Just vs) | length vs == length args ->
-          [ Constraint sc (map (substAll (zip vs args)) sargs)
+          [ Constraint sc (map (substAll (zipSame vs args)) sargs)
           | Constraint sc sargs <- scs
           ]
         _ -> []

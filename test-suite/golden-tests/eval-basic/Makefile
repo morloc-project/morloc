@@ -3,10 +3,7 @@ MHOME := $${MORLOC_HOME:-$$HOME/.local/share/morloc}
 all:
 	rm -f obs.txt obs.err case5.err
 	@# Pre-clean any leftover --save artifacts so the test is rerunnable.
-	@for n in eval-basic-foo eval-basic-bar; do \
-	  rm -f $(MHOME)/bin/$$n $(MHOME)/fdb/$$n.manifest $(MHOME)/fdb/$$n.eval-meta; \
-	  rm -rf $(MHOME)/exe/$$n; \
-	done
+	@for n in eval-basic-foo eval-basic-bar; do morloc uninstall $$n > /dev/null 2>&1 || true; done
 	printf 'case1: ' >> obs.txt
 	morloc eval -e "import root-py; 1+2" >> obs.txt 2>> obs.err
 	printf 'case2: ' >> obs.txt

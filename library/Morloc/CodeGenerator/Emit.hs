@@ -15,6 +15,7 @@ module Morloc.CodeGenerator.Emit
   , TranslateFn
   ) where
 
+import Morloc.Data.Zip (zipSame)
 import Morloc.CodeGenerator.Grammars.Common (invertSerialManifold)
 import Morloc.CodeGenerator.Serial (serialKids)
 import Morloc.CodeGenerator.Namespace
@@ -37,7 +38,7 @@ pool :: LR.LangRegistry -> [SerialManifold] -> [(Lang, [SerialManifold])]
 pool reg es =
   let (langs, indexedSegments) = unzip . groupSort . map (\x@(SerialManifold i lang _ hf _) -> (LR.poolOf reg lang, (emittedId i hf, x))) $ es
       uniqueSegments = map (Map.elems . Map.fromList) indexedSegments
-   in zip langs uniqueSegments
+   in zipSame langs uniqueSegments
 
 -- | A manifold's name in its pool: its id, and whether it is the job-side
 -- entry of a remote call, which is emitted with a suffix beside the local

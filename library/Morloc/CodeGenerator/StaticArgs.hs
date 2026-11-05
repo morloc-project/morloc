@@ -37,6 +37,7 @@ module Morloc.CodeGenerator.StaticArgs
   ( specializeStaticArgs
   ) where
 
+import Morloc.Data.Zip (zip3Indexed, zipPrefix)
 import Morloc.CodeGenerator.Namespace
 import Morloc.CodeGenerator.LambdaEval (applyPoolLambdas, reindexTree)
 import qualified Morloc.Monad as MM
@@ -157,7 +158,7 @@ staticPositions v vs body = do
     passed rebound xs =
       Set.fromList
         [ i
-        | (i, p, AnnoS _ _ (BndS x)) <- zip3 [0 ..] vs xs
+        | (i, p, AnnoS _ _ (BndS x)) <- zip3Indexed 0 vs xs
         , x == p
         , not (Set.member p rebound)
         ]
@@ -166,7 +167,7 @@ staticPositions v vs body = do
     backEdges rebound (AnnoS _ _ e) = case e of
       AppS (AnnoS _ _ (CallS w)) xs
         | w == v ->
-            if length xs >= n
+            if length xs == n
               then (passed rebound xs :) <$> concatMapM (backEdges rebound) xs
               else Nothing
       CallS w
@@ -319,4 +320,4 @@ dropInputs ds (EffectT effs t) = EffectT effs (dropInputs ds t)
 dropInputs _ t = t
 
 dropAt :: Set.Set Int -> [a] -> [a]
-dropAt ds xs = [x | (i, x) <- zip [0 ..] xs, not (Set.member i ds)]
+dropAt ds xs = [x | (i, x) <- zipPrefix [0 ..] xs, not (Set.member i ds)]

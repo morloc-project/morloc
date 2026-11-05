@@ -32,6 +32,7 @@ module Morloc.CodeGenerator.Pools.CAbi.Members.Rust
   , resolveRustProfile
   ) where
 
+import Morloc.Data.Zip (indexed, zip3Indexed, zip3Same, zip4Same, zipPrefix, zipSame, zipWithPrefix, zipWithPrefixM, zipWithSame, zipWithSameM)
 import Data.Foldable (toList)
 import Control.Monad.Identity (Identity, runIdentity)
 import Control.Monad.Reader (ReaderT, asks, local, runReaderT)
@@ -277,7 +278,7 @@ rustTypeOf = f
           -- A field whose native and wire types diverge (a custom-packer field)
           -- is a generic parameter of the struct; render its concrete type at
           -- THIS occurrence as a type argument: `Name<Ta, Tb>`.
-          params <- mapM f [t | ((_, Nothing), (_, t)) <- zip (recFields rec) rs]
+          params <- mapM f [t | ((_, Nothing), (_, t)) <- zipSame (recFields rec) rs]
           return $ recName rec <> if null params then "" else "<" <> hcat (punctuate ", " params) <> ">"
         Nothing -> error $ "Rust: record missing from recmap: " <> show v
     -- User-mapped record: the concrete struct name is the CVar text, or the
@@ -502,7 +503,7 @@ rustEvalPattern t0 (PatternStruct s0) (m0 : xs0)
           makeTuple _ xs = tupled xs
           makeRecord recType xs = case recType of
             NamF _ _ _ rs ->
-              nameOf recType <+> "{" <+> RP.rustRecordFields (zip (map fst rs) xs) <+> "}"
+              nameOf recType <+> "{" <+> RP.rustRecordFields (zipSame (map fst rs) xs) <+> "}"
             _ -> error "rustEvalPattern: record setter on a non-record type"
           accessTuple _ d i = d <> "." <> pretty i
           accessRecord _ d k = d <> "." <> RP.rustFieldIdent (Key k)
@@ -525,15 +526,15 @@ rustTakeSetter recv t sel (m : xs)
   , typeFof recv == t
   , not (null xs)
   , length paths == length xs
-  , not (any overlaps (zip [0 :: Int ..] paths)) = do
+  , not (any overlaps (zipPrefix [0 :: Int ..] paths)) = do
       own <- rustOwnership recv
       return $
         if own == Owned
-          then Just ("{ let mut __morloc_rec = " <> m <> "; " <> hsep [writeSelectorRust "__morloc_rec" p <+> "=" <+> x <> ";" | (p, x) <- zip paths xs] <+> "__morloc_rec }")
+          then Just ("{ let mut __morloc_rec = " <> m <> "; " <> hsep [writeSelectorRust "__morloc_rec" p <+> "=" <+> x <> ";" | (p, x) <- zipSame paths xs] <+> "__morloc_rec }")
           else Nothing
   where
     paths = ungroup sel
-    overlaps (i, p) = or [q `isPrefixOf` p | (j, q) <- zip [0 ..] paths, j /= i]
+    overlaps (i, p) = or [q `isPrefixOf` p | (j, q) <- zipPrefix [0 ..] paths, j /= i]
 rustTakeSetter _ _ _ _ = return Nothing
 
 -- | Walk a 'Selector' that may contain bracket steps, emitting Rust source per
@@ -564,7 +565,7 @@ writeSelectorRust d (Left i : rs) = writeSelectorRust (d <> "." <> pretty i) rs
 rustTakeGetter :: TypeF -> Selector -> MDoc -> RustM (Maybe MDoc)
 rustTakeGetter t0 sel0 subj0
   | opens t0 = do
-      (stmts, leaves) <- node t0 subj0 (zip [0 :: Int ..] (ungroup sel0))
+      (stmts, leaves) <- node t0 subj0 (zipPrefix [0 :: Int ..] (ungroup sel0))
       let result = case map snd (sortOn fst leaves) of
             [x] -> x
             xs -> tupled xs
@@ -609,12 +610,12 @@ rustTakeGetter t0 sel0 subj0
               locals = map fieldLocal [0 .. length rs - 1]
               open =
                 [ "let" <+> shell <+> "= ::std::mem::ManuallyDrop::<" <> tys <> ">::new(" <> v <> ");"
-                , "let" <+> ctor <+> "{" <+> RP.rustRecordFields (zip (map fst rs) locals) <+> "} = &*" <> shell <> ";"
+                , "let" <+> ctor <+> "{" <+> RP.rustRecordFields (zipSame (map fst rs) locals) <+> "} = &*" <> shell <> ";"
                 , "let" <+> tupleOf locals <+> "= unsafe {" <+> tupleOf ["::std::ptr::read(" <> l <> ")" | l <- locals] <+> "};"
                 ]
           subs <- mapM
             (\(j, (key, ft)) -> node ft (fieldLocal j) [(k, ss) | (k, Right h : ss) <- paths, h == unKey key])
-            [x | x@(_, (key, _)) <- zip [0 :: Int ..] rs, unKey key `elem` heads paths]
+            [x | x@(_, (key, _)) <- zipPrefix [0 :: Int ..] rs, unKey key `elem` heads paths]
           return (open <> concatMap fst subs, concatMap snd subs)
       where
         rs' = [(unKey key, ft) | (key, ft) <- rs]
@@ -658,7 +659,7 @@ rustCacheBody resSa lbl midx args bodyPool = do
       bodyVar = "__morloc_cb_" <> suffix
       labelLit = dquotes (pretty lbl)
       resSchema = render (serialAstToMsgpackSchema resSa)
-  preparedArgs <- mapM (prepareRustCacheArg wrapIdx) (zip [0 :: Int ..] args)
+  preparedArgs <- mapM (prepareRustCacheArg wrapIdx) (zipPrefix [0 :: Int ..] args)
   let argRefs = [r | (r, _, _) <- preparedArgs]
       argSchemas = [s | (_, s, _) <- preparedArgs]
       argSetupLines = concatMap (\(_, _, ss) -> ss) preparedArgs
@@ -763,7 +764,7 @@ thinSinkNames mask es = Set.filter occursOnlyHere sites
     -- Only the first call group is passed to the sourced function itself;
     -- a later group is applied to the function value it returned.
     atSite (AppExeN _ (SrcCallP _ src) args) =
-      let firstGroup = case provideClosure src (zip [(0 :: Int) ..] args) of
+      let firstGroup = case provideClosure src (zipPrefix [(0 :: Int) ..] args) of
             (g : _) -> g
             [] -> []
        in Set.fromList
@@ -933,7 +934,7 @@ rustClosureWrapper mid sig sigType mname ctxArgs boundArgs = do
       -- question 'rustArgIsRef' answers for a manifold parameter, because
       -- that IS the parameter it is being passed to.
       capRef i (Arg _ t) = captureArg t ("__morloc_c." <> pretty (i :: Int))
-      callArgs = zipWith capRef [0 ..] ctxArgs
+      callArgs = zipWithPrefix capRef [0 ..] ctxArgs
                    <> [rustBridgeArg t ((argNamer rustLocals) a) | a@(Arg _ t) <- boundArgs]
       callFn ct =
         "|__morloc_c: &" <> ct <> hcat [", " <> b | b <- boundTyped] <> "|"
@@ -955,7 +956,7 @@ rustClosureWrapper mid sig sigType mname ctxArgs boundArgs = do
           reifiers <- mapM (reifyInPlace . snd) capWire
           let capExprs =
                 [ "unsafe { ::rustmorloc::reify_capture(&" <> maybe fld ($ fld) reify <> ", " <> RP.schemaRef sid <> ") }"
-                | (i, (sid, _), reify) <- zip3 [(0 :: Int) ..] capWire reifiers
+                | (i, (sid, _), reify) <- zip3Indexed 0 capWire reifiers
                 , let fld = "__morloc_c." <> pretty i
                 ]
               mkFn ct =
@@ -1039,7 +1040,7 @@ rustClosureWrapper mid sig sigType mname ctxArgs boundArgs = do
               toWire <- reifyInPlace ast
               let v = maybe "__morloc_v" (\f -> "&" <> parens (f "__morloc_v")) toWire
               return $ "Some((|__morloc_v: &" <> bt <> "| unsafe { ::rustmorloc::reify_capture(" <> v <> ", " <> RP.schemaRef sid <> ") }) as fn(&" <> bt <> ") -> Vec<u8>)"
-          | ((sid, ast), bt) <- zip ws bts ]
+          | ((sid, ast), bt) <- zipSame ws bts ]
       let n = length boundArgs
           shared = isJust stage && not (null capInits)
           heldT = if shared then "::std::sync::Arc<" <> capsT <> ">" else capsT
@@ -1048,8 +1049,8 @@ rustClosureWrapper mid sig sigType mname ctxArgs boundArgs = do
           dynT ts = rustFnValueType ts resT
           capRefS i (Arg _ t) = captureArg t ("__morloc_sc." <> pretty (i :: Int))
           stageCall smid kk =
-            let args = zipWith capRefS [0 ..] ctxArgs
-                         <> [rustBridgeArg t ("&__morloc_x" <> pretty j) | (j, Arg _ t) <- zip [(0 :: Int) ..] (take kk boundArgs)]
+            let args = zipWithPrefix capRefS [0 ..] ctxArgs
+                         <> [rustBridgeArg t ("&__morloc_x" <> pretty j) | (j, Arg _ t) <- zipPrefix [(0 :: Int) ..] (take kk boundArgs)]
              in "unsafe {" <+> RP.rustManifoldName smid <> tupled args <+> "}"
           level i fv
             | i >= n = fv
@@ -1225,7 +1226,7 @@ renderReflect (OverTuple ps) = do
   let t = "__morloc_tup" <> pretty u
   return $ \v ->
     "{ let" <+> t <+> "=" <+> v <> ";"
-      <+> tupled [maybe (slot t j) ($ slot t j) mf | (j, mf) <- zip [(0 :: Int) ..] fs]
+      <+> tupled [maybe (slot t j) ($ slot t j) mf | (j, mf) <- zipPrefix [(0 :: Int) ..] fs]
       <+> "}"
   where
     slot v j = v <> "." <> pretty j
@@ -1258,7 +1259,7 @@ renderReify (OverTuple ps) = do
   return $ \v ->
     tupled
       [ maybe (parens (slot v j) <> ".clone()") ($ slot v j) mf
-      | (j, mf) <- zip [(0 :: Int) ..] fs
+      | (j, mf) <- zipPrefix [(0 :: Int) ..] fs
       ]
   where
     slot v j = v <> "." <> pretty j
@@ -1328,9 +1329,9 @@ rustReflectClosureAssembler (SerialClosure ins out) = do
   argSids <- mapM (rustRegisterSchema . render . serialAstToMsgpackSchema) ins
   resSid <- rustRegisterSchema (render (serialAstToMsgpackSchema out))
   resultDoc <- closureResultRead out "::rustmorloc::Packet::new(::rustmorloc::foreign_call(__morloc_sock, __morloc_c.1.1 as u32, &__morloc_pkts)).as_ptr()" resSid
-  pushes <- sequence [closureArgPush i ast sid | (i, ast, sid) <- zip3 [(0 :: Int) ..] ins argSids]
+  pushes <- sequence [closureArgPush i ast sid | (i, ast, sid) <- zip3Indexed 0 ins argSids]
   let n = length ins
-      params = ["__a" <> pretty i <> ": &" <> t | (i, t) <- zip [(0 :: Int) ..] argTs]
+      params = ["__a" <> pretty i <> ": &" <> t | (i, t) <- zipPrefix [(0 :: Int) ..] argTs]
       bodyDoc =
         vsep
           [ "let __morloc_sock = &__morloc_c.0;"
@@ -1625,7 +1626,7 @@ userCallMark = '\x01'
 takeUserCallMarks :: Text -> (Text, [(Int, Int)])
 takeUserCallMarks src =
   let ls = T.splitOn "\n" src
-      perLine = zipWith unmark [1 ..] ls
+      perLine = zipWithPrefix unmark [1 ..] ls
    in (T.intercalate "\n" (map fst perLine), concatMap snd perLine)
   where
     unmark n l =
@@ -1740,13 +1741,13 @@ makeClosureDispatch closureAsts closureTable es = do
         [ if isJust refl
             then rustTypeOf (wireSerialAstToType rustClosureWireLeaf ast)
             else rustTypeOf t
-        | (t, ast, refl) <- zip3 (ctxTs <> bndTs) (capAsts <> bndAsts) argReflects
+        | (t, ast, refl) <- zip3Same (ctxTs <> bndTs) (capAsts <> bndAsts) argReflects
         ]
       let capSids = take (length capScs) argSids
           copies = map rustIsCopy (ctxTs <> bndTs)
           argExprs =
             [ deser t sid copy j refl
-            | (j, (t, sid, copy, refl)) <- zip [(0 :: Int) ..] (zip4 argTs argSids copies argReflects)
+            | (j, (t, sid, copy, refl)) <- indexed (zip4Same argTs argSids copies argReflects)
             ]
           -- Deserialize each argument packet to the closure body's native param
           -- form: a Copy value by value, a non-Copy value by shared reference.
@@ -1774,7 +1775,7 @@ makeClosureDispatch closureAsts closureTable es = do
       -- The wire form of each capture travels with its schema id: the origin
       -- builder reduces the value through the same 'wirePath' the dispatch
       -- wrapper rebuilds it through.
-      return (wrapper, (render (RP.rustManifoldName i), (i, zip capSids capAsts, zip (drop (length capScs) argSids) bndAsts)))
+      return (wrapper, (render (RP.rustManifoldName i), (i, zipPrefix capSids capAsts, zipPrefix (drop (length capScs) argSids) bndAsts)))
 
 -- | The stage table ('StageEntry'), for the reflect proxies of closures from
 -- other pools.
@@ -1903,7 +1904,7 @@ generateRustVariants closureAsts es = do
       wires <- case wireArms of
         Just was | hasFun -> mapM (\(c, ts) -> armWire ts (lookup c was)) arms'
         _ -> return (map (const Nothing) arms')
-      let impls box = [RP.printVariantImpls box name [(c, ts, w) | ((c, ts), w) <- zip arms' wires] | not hasFun || isJust wireArms]
+      let impls box = [RP.printVariantImpls box name [(c, ts, w) | ((c, ts), w) <- zipSame arms' wires] | not hasFun || isJust wireArms]
       return $ if userMapped
                  then impls RP.userBox
                  else RP.printRustVariant name arms' : impls RP.recBox
@@ -1915,12 +1916,12 @@ generateRustVariants closureAsts es = do
       , any (maybe False pathHasClosure) paths = do
           reifies <- mapM (traverse renderReify) paths
           reflects <- mapM (traverse renderReflect) paths
-          wireTs <- zipWithM (\t (s, p) -> maybe (return t) (const (rustTypeOf (wireSerialAstToType rustClosureWireLeaf s))) p)
-                      ts (zip ss paths)
+          wireTs <- zipWithSameM (\t (s, p) -> maybe (return t) (const (rustTypeOf (wireSerialAstToType rustClosureWireLeaf s))) p)
+                      ts (zipSame ss paths)
           u <- getCounter
           let slot v j = v <> "." <> pretty j
               t = "__morloc_arm" <> pretty u
-              idx = zip [(0 :: Int) ..]
+              idx = zipPrefix [(0 :: Int) ..]
           return . Just $
             RP.ArmWire
               { RP.awType = RP.tupled1 wireTs
@@ -2080,10 +2081,10 @@ generateRustStructs closureAsts es = do
         name <- rustTypeOf (NamF NamRecord v ps rs)
         fields <- mapM (oneField gv name . fmap Right) rs
         marshals <- mapM (\(k, ty) -> fieldMarshal gv k ty) rs
-        let fields4 = zipWith (\(fld, ty, w) m -> (fld, ty, w, m)) fields marshals
+        let fields4 = zipWithSame (\(fld, ty, w) m -> (fld, ty, w, m)) fields marshals
             -- Emit the impl only when EVERY function field has a harvested marshal
             -- (a non-function field imposes no requirement); else struct-only.
-            emitImpl = and (zipWith (\(_, ty) m -> not (isFunF ty) || maybe False (const True) m) rs marshals)
+            emitImpl = and (zipWithSame (\(_, ty) m -> not (isFunF ty) || maybe False (const True) m) rs marshals)
         return [(Just (name, gv, fields), RP.printRecordImpls RP.StructFieldTypes name [] fields4) | emitImpl]
 
     -- Number the generic (native/=wire) fields `T1, T2, ...`; concrete fields
@@ -2807,8 +2808,8 @@ rustMakeLoop res carried body = do
       let changed = [(i, v) | (i, v, _) <- changedSlots ids [(o, d) | Low o d <- xs]]
       tmpVars <- map (helperNamer rustLocals) <$> mapM (const getCounter) changed
       let priors = concatMap (poolPriorLines . snd) changed
-          tmpAssigns = zipWith (\tv (_, cd) -> "let" <+> tv <+> "=" <+> poolExpr cd <> ";") tmpVars changed
-          reassigns = zipWith (\(i, _) tv -> (nvarNamer rustLocals) i <+> "=" <+> tv <> ";") changed tmpVars
+          tmpAssigns = zipWithSame (\tv (_, cd) -> "let" <+> tv <+> "=" <+> poolExpr cd <> ";") tmpVars changed
+          reassigns = zipWithSame (\(i, _) tv -> (nvarNamer rustLocals) i <+> "=" <+> tv <> ";") changed tmpVars
       return $ priors <> tmpAssigns <> reassigns
     walk (LoopNLet i (Low r neDocs) b) = do
       ann <- rustLetAnnotation i (Just (typeFof r)) True
@@ -2918,7 +2919,7 @@ rustMakeFunction callIndex mname args manifoldType priorLines body headForm isCl
       retStr <- rustReturnType manifoldType
       kept <- CMS.gets (Map.findWithDefault Set.empty callIndex . ppByValue . rsPool)
       typedArgs <-
-        zipWithM
+        zipWithPrefixM
           (\j a@(Arg _ t) -> if Set.member j kept then (\ts -> (argNamer rustLocals) a <> ":" <+> ts) <$> rustArgType t else rustArgOf a)
           [0 :: Int ..]
           args

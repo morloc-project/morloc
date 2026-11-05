@@ -31,6 +31,7 @@ module Morloc.CodeGenerator.Infer
   , kindArgOf
   ) where
 
+import Morloc.Data.Zip (zipSame, zipWith3Same, zipWithSame, zipWithSameM)
 import qualified Control.Monad.State as CMS
 import Data.Functor.Const (Const (..))
 import Morloc.CodeGenerator.Namespace
@@ -113,7 +114,7 @@ typeChildren :: Scope -> TypeU -> [TypeU]
 typeChildren gscope t = case T.flattenApp t of
   OpU {} -> []
   AppU h@(VarU name) args -> h : case declaredKinds gscope name (length args) of
-    Just ks -> [a | (a, k) <- zip args ks, k == KindType]
+    Just ks -> [a | (a, k) <- zipSame args ks, k == KindType]
     Nothing -> [a | a <- args, isNothing (kindOfU a)]
   t' -> typeUChildren t'
 
@@ -155,7 +156,7 @@ needed gscope = go Set.empty
               else concatMap (go (Set.insert key seen)) (fields name args)
       _ -> concatMap (go seen) (typeChildren gscope t)
     fields name args =
-      [ instantiateParams (zip params args) f
+      [ instantiateParams (zipSame params args) f
       | Just (params, cs) <- [dataDeclOfName gscope name]
       , (_, fs) <- cs
       , f <- fs
@@ -262,7 +263,7 @@ inferVariantArms lang i gscope vG vC targs = do
   -- Instantiate the declaration's parameters with the applied arguments.
   -- Empty for a bare `data`, in which case this is the identity.
   let params = maybe [] fst (dataDeclOfName gscope vG)
-      arms = [(n, map (instantiateParams (zip params targs)) ts) | (n, ts) <- arms0]
+      arms = [(n, map (instantiateParams (zipSame params targs)) ts) | (n, ts) <- arms0]
   -- The applied arguments, resolved to this language, travel on the type:
   -- a user's per-language form may be a template, and these are what it is
   -- instantiated with. They are resolved before the arms so a self-reference
@@ -603,12 +604,12 @@ structuralCompound scope walk g c = case (g, c) of
   (OptionalU g', OptionalU c') -> Just $ OptionalF <$> walk g' c'
   (FunU gs gr, FunU cs cr)
     | length gs == length cs ->
-        Just $ FunF <$> zipWithM walk gs cs <*> walk gr cr
+        Just $ FunF <$> zipWithSameM walk gs cs <*> walk gr cr
   (NamU o1 v1 ts1 rs1, NamU o2 v2 ts2 rs2)
     | o1 == o2 && length ts1 == length ts2 && length rs1 == length rs2 ->
         Just $ NamF o1 (FV v1 (CV (unTVar v2)))
           <$> argsWith2 scope v1 walk ts1 ts2
-          <*> zipWithM (\(_, g') (k, c') -> (,) k <$> walk g' c') rs1 rs2
+          <*> zipWithSameM (\(_, g') (k, c') -> (,) k <$> walk g' c') rs1 rs2
   _ -> Nothing
 
 -- | Expand the general side one step when the expansion's shape
@@ -747,7 +748,7 @@ weave gscope = w Set.empty
           (c : cs')
             | Just cfields <- rowFields c
             , map fst fields == map fst cfields -> do
-                cols <- mapM (\((k, gt), (_, ct)) -> (,) (Key k) <$> w anc gt ct) (zip fields cfields)
+                cols <- mapM (\((k, gt), (_, ct)) -> (,) (Key k) <$> w anc gt ct) (zipSame fields cfields)
                 (KiA (RowK cols) :) <$> weaveArgs anc (drop 1 sls) gs cs'
             | kindOfU c == Just KindRec -> (KiA (VoidK KindRec) :) <$> weaveArgs anc (drop 1 sls) gs cs'
           _ | length cs < length (g : gs) -> (KiA (VoidK KindRec) :) <$> weaveArgs anc (drop 1 sls) gs cs
@@ -778,11 +779,11 @@ rowFields t = groundRecFields t
 
 -- | The arguments of @v@, each at its declared position.
 argsWith :: Applicative f => Scope -> TVar -> (TypeU -> f TypeF) -> [TypeU] -> f [ArgF]
-argsWith scope v walk gs = sequenceA (zipWith (\sl g -> argWith sl walk g) (argKinds scope v (length gs)) gs)
+argsWith scope v walk gs = sequenceA (zipWithSame (\sl g -> argWith sl walk g) (argKinds scope v (length gs)) gs)
 
 -- | 'argsWith' for a walk over general arguments and their concrete forms.
 argsWith2 :: Applicative f => Scope -> TVar -> (TypeU -> TypeU -> f TypeF) -> [TypeU] -> [TypeU] -> f [ArgF]
-argsWith2 scope v walk gs cs = sequenceA (zipWith3 (argWith2 walk) (argKinds scope v (length gs)) gs cs)
+argsWith2 scope v walk gs cs = sequenceA (zipWith3Same (argWith2 walk) (argKinds scope v (length gs)) gs cs)
 
 -- | 'argWith' for a walk over a general argument and its concrete form.
 argWith2 :: Applicative f => (TypeU -> TypeU -> f TypeF) -> (Maybe Kind, Bool) -> TypeU -> TypeU -> f ArgF
@@ -790,7 +791,7 @@ argWith2 walk sl@(_, True) g c
   | Just gs <- rowFields g
   , Just cs <- rowFields c
   , map fst gs == map fst cs =
-      KiA . RowK <$> traverse (\((k, gt), (_, ct)) -> (,) (Key k) <$> walk gt ct) (zip gs cs)
+      KiA . RowK <$> traverse (\((k, gt), (_, ct)) -> (,) (Key k) <$> walk gt ct) (zipSame gs cs)
 argWith2 walk sl g c = maybe (retagArg sl <$> walk g c) (pure . KiA) (kindArgOf g)
 
 -- | A woven argument at a declared position: a ground row that fills a Rec

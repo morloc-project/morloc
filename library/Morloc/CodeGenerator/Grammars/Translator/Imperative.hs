@@ -97,6 +97,7 @@ module Morloc.CodeGenerator.Grammars.Translator.Imperative
   , IndexM
   ) where
 
+import Morloc.Data.Zip (indexed, zip3Indexed, zip3Same, zipPrefix, zipSame, zipWith3Same, zipWithPrefixM, zipWithSame)
 import Control.Monad.Identity (Identity, runIdentity)
 import qualified Control.Monad.State as CMS
 import Data.Binary (Binary)
@@ -944,7 +945,7 @@ nativeToWire cfg = go
       (before, x) <- go (pretty (lcLocalPrefix cfg) <> "i" <> pretty idx) s
       return ([IMapList v' resultType iterVar (IRawExpr (render v)) before x], IVar v')
     construct v tup@(SerialTuple _ ss) = do
-      results <- zipWithM (\i s -> go (lcTupleAccessor cfg i v) s) [0 ..] ss
+      results <- zipWithPrefixM (\i s -> go (lcTupleAccessor cfg i v) s) [0 ..] ss
       let (befores, exprs) = unzip results
       idx <- lcNewIndex cfg
       typeM <- lcSerialAstType cfg tup
@@ -958,7 +959,7 @@ nativeToWire cfg = go
       typeM <- lcSerialAstType cfg obj
       let v' = render $ (helperVar cfg) idx
       return
-        ( concat befores ++ [IAssign v' typeM (IRecordLit namType fv (zip (map fst rs) exprs))]
+        ( concat befores ++ [IAssign v' typeM (IRecordLit namType fv (zipSame (map fst rs) exprs))]
         , IVar v'
         )
     construct v opt@(SerialOptional _ innerS) = do
@@ -983,7 +984,7 @@ nativeToWire cfg = go
       ty <- nominalTypeDoc cfg (serialAstToType var) cv
       resultType <- lcSerialAstType cfg var
       byVariantArm cfg resultType ty v arms $ \n i ss -> do
-        results <- zipWithM (\j s -> go (lcCtorField cfg FieldCopy ty n i j v) s) [0 ..] ss
+        results <- zipWithPrefixM (\j s -> go (lcCtorField cfg FieldCopy ty n i j v) s) [0 ..] ss
         let (befores, exprs) = unzip results
         return (concat befores, IRawExpr (render (lcVariantLit cfg ty n i (map (lcPrintExpr cfg) exprs))))
     construct _ _ = error "Unreachable in nativeToWire"
@@ -1054,20 +1055,20 @@ wireToNative cfg = check
       (x, before) <- check (pretty (lcLocalPrefix cfg) <> "i" <> pretty idx) s
       return (IVar v', [IMapList v' resultType iterVar (IRawExpr (render v)) before x])
     construct v tup@(SerialTuple _ ss) = do
-      results <- zipWithM (\i s -> check (lcTupleAccessor cfg i v) s) [0 ..] ss
+      results <- zipWithPrefixM (\i s -> check (lcTupleAccessor cfg i v) s) [0 ..] ss
       let (exprs, befores) = unzip results
       typeM <- lcDeserialAstType cfg tup
       v' <- (render . (helperVar cfg)) <$> lcNewIndex cfg
       return (IVar v', concat befores ++ [IAssign v' typeM (ITupleLit exprs)])
     construct v (SerialObject namType fv@(FV _ _) _ rs) = do
       let accessor = lcDeserialRecordAccessor cfg
-      results <- zipWithM (\i (k, s) -> check (accessor i k v) s) [0 ..] rs
+      results <- zipWithPrefixM (\i (k, s) -> check (accessor i k v) s) [0 ..] rs
       let (exprs, befores) = unzip results
       typeM <- lcDeserialAstType cfg (SerialObject namType fv [] rs)
       idx <- lcNewIndex cfg
       let v' = render $ (helperVar cfg) idx
       return
-        (IVar v', concat befores ++ [IAssign v' typeM (IRecordLit namType fv (zip (map fst rs) exprs))])
+        (IVar v', concat befores ++ [IAssign v' typeM (IRecordLit namType fv (zipSame (map fst rs) exprs))])
     construct v opt@(SerialOptional _ innerS) = do
       idx <- lcNewIndex cfg
       resultType <- lcDeserialAstType cfg opt
@@ -1083,7 +1084,7 @@ wireToNative cfg = check
       ty <- nominalTypeDoc cfg (serialAstToType var) cv
       resultType <- lcDeserialAstType cfg var
       swap <$> byVariantArm cfg resultType ty v arms (\n i ss -> do
-        results <- zipWithM (\j s -> check (lcCtorField cfg FieldCopy ty n i j v) s) [0 ..] ss
+        results <- zipWithPrefixM (\j s -> check (lcCtorField cfg FieldCopy ty n i j v) s) [0 ..] ss
         let (exprs, befores) = unzip results
         return (concat befores, IRawExpr (render (lcVariantLit cfg ty n i (map (lcPrintExpr cfg) exprs)))))
     construct _ _ = error "Unreachable in wireToNative"
@@ -1099,7 +1100,7 @@ byVariantArm ::
   [(Text, [SerialAST])] ->
   (Text -> Int -> [SerialAST] -> m ([IStmt], IExpr)) ->
   m ([IStmt], IExpr)
-byVariantArm cfg resultType ty v arms rebuild = chain (zip [0 ..] arms)
+byVariantArm cfg resultType ty v arms rebuild = chain (zipPrefix [0 ..] arms)
   where
     pass = return ([], IRawExpr (render v))
     arm (i, (n, ss))
@@ -1807,7 +1808,7 @@ consumedParams listKeeps byValue mayBorrow cands nm@(NativeManifold _ _ _ body) 
       RN (IfN _ c _ _) -> sinks (RN c)
       RN (LoopN _ starts _) -> here n <> mconcat [sinks (RN x) | (_, x) <- starts]
       RN (DoBlockN _ _) -> Set.empty
-      RNM (NativeManifold m _ form@(ManifoldFull _) _) -> Set.fromList [p | (j, Arg p _) <- zip [0 ..] (typeMofForm form), Set.member j (byValue m)]
+      RNM (NativeManifold m _ form@(ManifoldFull _) _) -> Set.fromList [p | (j, Arg p _) <- zipPrefix [0 ..] (typeMofForm form), Set.member j (byValue m)]
       _ -> here n <> mconcat (map sinks (filter (not . isValueManifold) (rnodeChildren n)))
     here (RN e) = case e of
       LoopN _ starts _ -> Set.fromList [p | (s, BndVarN _ p _) <- starts, not (Set.member s borrows)]
@@ -1815,7 +1816,7 @@ consumedParams listKeeps byValue mayBorrow cands nm@(NativeManifold _ _ _ body) 
       ListN _ _ xs | listKeeps -> vars xs
       TupleN _ xs -> vars xs
       RecordN _ _ _ kvs -> vars (map snd kvs)
-      AppExeN _ (RecCallP mid _) args -> Set.fromList [p | (j, NativeArgExpr a) <- zip [0 ..] args, Just p <- [readOf a], Set.member j (byValue mid)]
+      AppExeN _ (RecCallP mid _) args -> Set.fromList [p | (j, NativeArgExpr a) <- zipPrefix [0 ..] args, Just p <- [readOf a], Set.member j (byValue mid)]
       _ -> Set.empty
     here _ = Set.empty
     vars xs = Set.fromList [p | BndVarN _ p _ <- xs]
@@ -1851,7 +1852,7 @@ loopBorrows mayBorrow g reused starts body = settle (Set.fromList [i | (i, s) <-
     scan env (LoopSLet _ _ k) = scan env k
     scan env (LoopIf _ t e) = scan env t <> scan env e
     scan _ (LoopBase _) = (Set.empty, Set.empty)
-    scan env (LoopContinue xs) = (Set.empty, Set.fromList [i | (i, x) <- zip ids xs, not (borrowPart env x)])
+    scan env (LoopContinue xs) = (Set.empty, Set.fromList [i | (i, x) <- zipSame ids xs, not (borrowPart env x)])
 
     borrowPart env e = isJust (borrowPartOf mayBorrow (`Set.member` env) e)
 
@@ -2164,7 +2165,7 @@ adaptLoopBodyOwned cfg adaptBase baseVars ids body = go body
       LoopSLet i (Low orhs rhs') <$> go b
     go (LoopContinue xs)
       | length ids == length xs =
-          LoopContinue <$> sequence (zipWith (\i (Low oe d) -> Low oe <$> loopBorrowOr cfg i oe d (adaptOwnedElem cfg oe d)) ids xs)
+          LoopContinue <$> sequence (zipWithSame (\i (Low oe d) -> Low oe <$> loopBorrowOr cfg i oe d (adaptOwnedElem cfg oe d)) ids xs)
       | otherwise = error "morloc bug: a loop continue whose values do not match its carried locals"
     go (LoopBase d) = LoopBase <$> adaptBase d
 
@@ -2304,7 +2305,7 @@ bodyIsBoundVar cfg i body = render (poolExpr body) == render ((svar cfg) i)
 
 -- | A constructor's 0-based tag within an arm list.
 armTagOf :: T.Text -> [(T.Text, [TypeF])] -> Maybe Int
-armTagOf nm as = lookup nm (zip (map fst as) [0 ..])
+armTagOf nm as = lookup nm (zipPrefix (map fst as) [0 ..])
 
 
 -- | The per-shape lowering rules. Reached through 'lowerNativeExpr'.
@@ -2603,7 +2604,7 @@ lowerNativeExprRaw cfg _ (AppExeN_ resT (SrcCallP _ src) es1) = do
         [] -> []
       site i = if i `elem` firstGroup then SourcedArg src i else ClosureArg
       handleFunctionArgs exprs =
-        case provideClosure src (zipWith (\(i, t, own) e -> lcSourcedArg cfg (site i) own t e) (zip3 [0 ..] argTypes owns) exprs) of
+        case provideClosure src (zipWithSame (\(i, t, own) e -> lcSourcedArg cfg (site i) own t e) (zip3Indexed 0 argTypes owns) exprs) of
           [] -> lcSrcName cfg src
           (g0 : gs) -> foldl (lcApplySrcGroup cfg) (lcSrcName cfg src <> (if null g0 then tupled g0 else tupledNoFold g0)) gs
   return $ mergePoolDocs (lcSourcedResult cfg src (length es) resT . handleFunctionArgs) (map laDocs es)
@@ -2644,21 +2645,21 @@ lowerNativeExprRaw cfg _ (AppExeN_ t (PatCallP p) xs) = do
 lowerNativeExprRaw cfg _ (AppExeN_ _ (LocalCallP idx) xs0) = do
   xs <- bindCallArgs cfg (constArgs cfg Nothing xs0)
   owns <- argOwnerships cfg xs
-  return $ mergePoolDocs (\es -> lcApplyClosure cfg ((nvar cfg) idx) (zipWith3 (\own t e -> lcSourcedArg cfg ClosureArg own t e) owns (map laType xs) es)) (map laDocs xs)
+  return $ mergePoolDocs (\es -> lcApplyClosure cfg ((nvar cfg) idx) (zipWith3Same (\own t e -> lcSourcedArg cfg ClosureArg own t e) owns (map laType xs) es)) (map laDocs xs)
 -- A partial application of a closure: the pool's runtime runs its stage
 -- entry, if it has one, and returns the closure of the remaining arguments.
 lowerNativeExprRaw cfg _ (AppExeN_ t (PapplyP idx) xs0) = do
   xs <- bindCallArgs cfg xs0
   owns <- argOwnerships cfg xs
   let argTypes = map laType xs
-      es = zipWith3 (\own at e -> lcSourcedArg cfg ClosureArg own at e) owns argTypes (map (poolExpr . laDocs) xs)
+      es = zipWith3Same (\own at e -> lcSourcedArg cfg ClosureArg own at e) owns argTypes (map (poolExpr . laDocs) xs)
   call <- lcPapply cfg t argTypes ((nvar cfg) idx) es
   return $ mergePoolDocs (const call) (map laDocs xs)
 lowerNativeExprRaw cfg _ (AppExeN_ _ (RecCallP mid _) xs0) = do
   xs1 <- bindCallArgs cfg xs0
-  xs <- sequence [keepArg j la | (j, la) <- zip [0 ..] xs1]
+  xs <- sequence [keepArg j la | (j, la) <- indexed xs1]
   owns <- argOwnerships cfg xs
-  return $ mergePoolDocs (\es -> lcManifoldName cfg mid <> tupled (zipWith4 (\j own t e -> lcSourcedArg cfg (ManifoldArg mid j) own t e) [0 ..] owns (map laType xs) es)) (map laDocs xs)
+  return $ mergePoolDocs (\es -> lcManifoldName cfg mid <> tupled [lcSourcedArg cfg (ManifoldArg mid j) own t e | (j, (own, t, e)) <- indexed (zip3Same owns (map laType xs) es)]) (map laDocs xs)
   where
     keepArg j la@(LowArg (NativeArgExpr e) _ d) = (\v -> la {laDocs = d {poolExpr = v}}) <$> lcKeepCallArg cfg mid j e (poolExpr d)
     keepArg _ la = return la
@@ -2749,7 +2750,7 @@ lowerNativeExprRaw cfg _ (TupleN_ _ xs) = do
 lowerNativeExprRaw cfg origExpr (RecordN_ o v ps rs) = do
   es <- ownedElems cfg True (map snd rs)
   let recType = typeFof origExpr
-  rec' <- lcRecordConstructor cfg recType o v ps (zip (map fst rs) (map poolExpr es))
+  rec' <- lcRecordConstructor cfg recType o v ps (zipSame (map fst rs) (map poolExpr es))
   return $
     rec'
       { poolCompleteManifolds = concatMap poolCompleteManifolds es <> poolCompleteManifolds rec'
@@ -3362,7 +3363,7 @@ lowerManifold cfg m form headForm bodyType bodyPool = do
           -- variables, so their ownership is read in the caller's scope. A
           -- non-Native (serialized) argument is an owned deserialized value.
           callArgs <- lcWithCallerScope cfg $
-            zipWithM
+            zipWithPrefixM
               ( \j a@(Arg i t) -> do
                   own <- case t of
                     Native tf -> lcOwnership cfg (BndVarN tf i KeptRead)
@@ -3442,7 +3443,7 @@ type IndexM = CMS.StateT IndexState Identity
 -- past-the-end index, which is a tag no arm answers to and would surface as
 -- a wrong branch rather than an error.
 armIndex :: Text -> [Text] -> Int
-armIndex n names = case [i | (i, m) <- zip [0 ..] names, m == n] of
+armIndex n names = case [i | (i, m) <- zipPrefix [0 ..] names, m == n] of
   (i : _) -> i
   [] -> error ("compiler bug: no tag for constructor " <> show n)
 

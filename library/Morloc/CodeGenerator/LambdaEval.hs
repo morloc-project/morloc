@@ -18,6 +18,7 @@ module Morloc.CodeGenerator.LambdaEval
   , reindexTree
   ) where
 
+import Morloc.Data.Zip (zip3Same, zipPrefix, zipSame)
 import Morloc.CodeGenerator.Namespace
 import Morloc.Frontend.Namespace (newIndex)
 import qualified Morloc.Monad as MM
@@ -166,7 +167,7 @@ expandShortCalls fresh e0 = do
                     let (missing, rest') = splitAt (n - length xs) rest
                         r' = if null rest' then r else FunT rest' r
                     names <- mapM (\_ -> (\i -> EV ("eta@@" <> MT.show' i)) <$> MM.getCounter) missing
-                    bnds <- mapM (\(v, vt) -> (\i ci -> AnnoS (Idx i vt) ci (BndS v)) <$> newIndex gi <*> fresh c) (zip names missing)
+                    bnds <- mapM (\(v, vt) -> (\i ci -> AnnoS (Idx i vt) ci (BndS v)) <$> newIndex gi <*> fresh c) (zipSame names missing)
                     appG <- newIndex gi
                     appC <- fresh c
                     return (AnnoS (Idx gi (FunT missing r')) c (LamS names (AnnoS (Idx appG r') appC (AppS f (xs <> bnds)))))
@@ -303,7 +304,7 @@ reduceRoot ai n@(AnnoS g@(Idx gi (FunT ts r)) c e) = case e of
     applyTo ft f ws wts = do
       argIdxs <- mapM (const (newIndex gi)) ws
       appIdx <- newIndex gi
-      let args = [AnnoS (Idx ix wt) c (BndS w) | (ix, w, wt) <- zip3 argIdxs ws wts]
+      let args = [AnnoS (Idx ix wt) c (BndS w) | (ix, w, wt) <- zip3Same argIdxs ws wts]
           AnnoS (Idx fi _) fc fe = f
       return (AnnoS (Idx appIdx r) c (AppS (AnnoS (Idx fi ft) fc fe) args))
 reduceRoot ai n = reduce ai n
@@ -330,7 +331,7 @@ saturateAt top ai (AnnoS g@(Idx gi t@(FunT ts r)) c (LamS vs body))
       body' <- saturate ai body
       argIdxs <- mapM (const (newIndex gi)) extra
       appIdx <- newIndex gi
-      let args = [AnnoS (Idx ix wt) c (BndS w) | (ix, w, wt) <- zip3 argIdxs ws extra]
+      let args = [AnnoS (Idx ix wt) c (BndS w) | (ix, w, wt) <- zip3Same argIdxs ws extra]
           app = AnnoS (Idx appIdx r) c (AppS body' args)
       app' <- reduce ai app
       let flatLam = AnnoS g c (LamS (vs ++ ws) app')
@@ -417,7 +418,7 @@ stagedValue gi c v stageV k caps ts r = do
   letIdx <- newIndex gi
   sIdx <- newIndex gi
   sName <- freshClosureName (EV "stage")
-  let bnds idxs names types = [AnnoS (Idx ix bt) c (BndS x) | (ix, x, bt) <- zip3 idxs names types]
+  let bnds idxs names types = [AnnoS (Idx ix bt) c (BndS x) | (ix, x, bt) <- zip3Same idxs names types]
       stageCall = AnnoS (Idx sApp restT) c (AppS (AnnoS (Idx sHead (FunT (capTs ++ take k ts) restT)) c (CallS stageV)) (capsS ++ bnds aIdxs as (take k ts)))
       flatCall = AnnoS (Idx fApp r) c (AppS (AnnoS (Idx fHead (FunT (capTs ++ ts) r)) c (CallS v)) (capsF ++ bnds yIdxs ys ts))
       stageLam = AnnoS (Idx sIdx (FunT (take k ts) restT)) c (LamS as stageCall)
@@ -451,7 +452,7 @@ groupCallbacks = go
           gss = case declaredFun scope <$> declared of
             Just (FunT ps _) -> map arity ps
             _ -> []
-      xs'' <- sequence [regroup x gs | (x, gs) <- zip xs' (gss ++ repeat [])]
+      xs'' <- sequence [regroup x gs | (x, gs) <- zipPrefix xs' (gss ++ repeat [])]
       return (AnnoS g c (AppS f' xs''))
     go (AnnoS g c e) = AnnoS g c <$> mapExprSM go e
 
@@ -473,7 +474,7 @@ groupCallbacks = go
           appIdx <- newIndex gi
           lamIdx <- newIndex gi
           letIdx <- newIndex gi
-          let args = [AnnoS (Idx ix at) c (BndS a) | (ix, a, at) <- zip3 aIdxs as here]
+          let args = [AnnoS (Idx ix at) c (BndS a) | (ix, a, at) <- zip3Same aIdxs as here]
               call = AnnoS (Idx appIdx restT) c (AppS (AnnoS (Idx headIdx (FunT ins out)) c (LetBndS gName)) args)
           call' <- regroup call rest
           let AnnoS (Idx _ callT) _ _ = call'
@@ -801,7 +802,7 @@ splitFunctionArg x@(AnnoS (Idx gi t) c ex)
             return (Just (bc, AnnoS (Idx gi t) c (IfS cond' th' el')))
       TupS xs -> Just <$> bindAll xs (AnnoS (Idx gi t) c . TupS)
       LstS xs -> Just <$> bindAll xs (AnnoS (Idx gi t) c . LstS)
-      NamS rs -> Just <$> bindAll (map snd rs) (AnnoS (Idx gi t) c . NamS . zip (map fst rs))
+      NamS rs -> Just <$> bindAll (map snd rs) (AnnoS (Idx gi t) c . NamS . zipSame (map fst rs))
       _ -> return Nothing
   where
     bindAll xs rebuildWith = do
@@ -912,7 +913,7 @@ etaCall f t@(FunT ins out) (AnnoS (Idx gi _) c _) = do
   appIx <- newIndex gi
   headIx <- newIndex gi
   argIxs <- mapM (\_ -> newIndex gi) ins
-  let args = [AnnoS (Idx ix ty) c (BndS y) | (ix, ty, y) <- zip3 argIxs ins ys]
+  let args = [AnnoS (Idx ix ty) c (BndS y) | (ix, ty, y) <- zip3Same argIxs ins ys]
       call = AnnoS (Idx appIx out) c (AppS (AnnoS (Idx headIx t) c (LetBndS f)) args)
   return (AnnoS (Idx lamIx t) c (LamS ys call))
 -- not a function type: the closure is referenced directly

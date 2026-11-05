@@ -16,6 +16,7 @@ module Morloc.CodeGenerator.Parameterize
   ( parameterize
   ) where
 
+import Morloc.Data.Zip (zipPrefix, zipSame)
 import Data.Text (Text)
 import Morloc.CodeGenerator.Namespace
 import Morloc.Data.Doc
@@ -88,7 +89,7 @@ parameterize' args (AnnoS g c (TupS xs)) = do
 parameterize' args (AnnoS g c (NamS entries)) = do
   xs' <- mapM (parameterize' args . snd) entries
   let args' = pruneArgs args xs'
-  return $ AnnoS g (c, args') (NamS (zip (map fst entries) xs'))
+  return $ AnnoS g (c, args') (NamS (zipSame (map fst entries) xs'))
 parameterize' args (AnnoS g@(Idx midx (FunT inputs _)) c (LamS vs x)) = do
   -- Bind exactly the lambda's own parameters. A lambda may bind FEWER params
   -- than its (right-flattened) function type has inputs when its body returns a
@@ -186,4 +187,4 @@ bindParams midx inputs vs = do
 -- | Remember each minted argument's declared type (see 'stateArgTypes').
 recordArgTypes :: Int -> [Int] -> [Type] -> MorlocMonad ()
 recordArgTypes midx ids ts =
-  MM.modify' (\st -> st {stateArgTypes = foldr (\(i, t) -> Map.insert i (Idx midx t)) (stateArgTypes st) (zip ids ts)})
+  MM.modify' (\st -> st {stateArgTypes = foldr (\(i, t) -> Map.insert i (Idx midx t)) (stateArgTypes st) (zipPrefix ids ts)})

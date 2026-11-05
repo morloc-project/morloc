@@ -32,6 +32,7 @@ module Morloc.CodeGenerator.Docstrings
   , underOptional
   ) where
 
+import Morloc.Data.Zip (zip3Indexed, zipSame, zipWithSame, zipWithSameM)
 import qualified Data.Map as Map
 import qualified Data.Set as Set
 import Data.Text (Text)
@@ -198,7 +199,7 @@ processArgDoc :: Int -> Type -> ArgDoc -> MorlocMonad CmdDocSet
 processArgDoc i (FunT ts t) (ArgDocSig cmddoc argdocs0 retdoc) = do
   -- one doc per argument of the type: missing ones default, extras are dropped
   let argdocs = take (length ts) (argdocs0 <> repeat defaultValue)
-  (ts0, argdocs') <- zipWithM (reduceArgDoc i) ts (map ArgDocAlias argdocs) |>> unzip
+  (ts0, argdocs') <- zipWithSameM (reduceArgDoc i) ts (map ArgDocAlias argdocs) |>> unzip
   ts' <- mapM resolveNestedTypes ts0
   loc <- argLocPrefix i
   validateCommandLevelDirectives loc cmddoc
@@ -206,7 +207,7 @@ processArgDoc i (FunT ts t) (ArgDocSig cmddoc argdocs0 retdoc) = do
   cmdargs <-
     sequence
       [ makeCmdArg (loc <> "argument #" <> pretty n) t' a'
-      | (n, t', a') <- zip3 [(1 :: Int) ..] ts' argdocs'
+      | (n, t', a') <- zip3Indexed 1 ts' argdocs'
       ]
   validateManyOrdering loc cmdargs
   validateFlagRevCollisions loc cmdargs
@@ -271,7 +272,7 @@ processArgDoc i t r = do
       cmdargs <-
         sequence
           [ makeCmdArg (loc <> "field " <> pretty k) ty (ArgDocAlias dv)
-          | ((k, ty), (_, dv)) <- zip ts entries
+          | ((k, ty), (_, dv)) <- zipSame ts entries
           ]
       return $
         CmdDocSet
@@ -408,12 +409,12 @@ reduceArgDocFrom seen i t@(VarT v) arg
 reduceArgDocFrom seen i (NamT o v ps (map snd -> ts)) (ArgDocRec arg rs) = do
   let args = map (ArgDocAlias . snd) rs
       keys = map fst rs
-  entries <- zipWithM (reduceArgDocFrom (Set.insert v seen) i) ts args
+  entries <- zipWithSameM (reduceArgDocFrom (Set.insert v seen) i) ts args
   -- A field's reduced doc keeps whatever shape its type gave it (a `data`
   -- field carries its constructors, a record field its own fields); the
   -- entry keeps the field-level variables from any of them.
   let args' = map (argDocTop . snd) entries
-  return (NamT o v ps (zip keys (map fst entries)), ArgDocRec arg (zip keys args'))
+  return (NamT o v ps (zipSame keys (map fst entries)), ArgDocRec arg (zipSame keys args'))
 -- An argument that may be omitted is documented as the type it holds.
 reduceArgDocFrom seen i (OptionalT t) arg = do
   (t', arg') <- reduceArgDocFrom seen i t arg
@@ -430,7 +431,7 @@ argDocTop (ArgDocSig r _ _) = r
 makeCmdArg :: MDoc -> Type -> ArgDoc -> MorlocMonad CmdArg
 makeCmdArg loc recType@(NamT _ _ _ rs) (ArgDocRec arg entries) = do
   -- Set the metavar default for groups to the record type name
-  let typedEntries = zipWith (\(k, t) (_, r) -> (k, (t, r))) rs entries
+  let typedEntries = zipWithSame (\(k, t) (_, r) -> (k, (t, r))) rs entries
   resolveArgDocVars loc typedEntries recType arg
 makeCmdArg loc t (ArgDocRec r _) = resolveArgDocVars loc [] t r
 makeCmdArg loc t (ArgDocAlias r) = resolveArgDocVars loc [] t r

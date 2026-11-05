@@ -127,6 +127,8 @@ new comments to it that assert behaviour.
 - avoid non-total functions when possible
 - an unused pattern binding becomes bare `_`, never `_oldname`; if it is truly
   unused, drop the name rather than leaving it visible
+- pair lists through `Morloc.Data.Zip`, not a plain `zip`: `zipSame` where the
+  lengths are equal by construction, `zipPrefix` where truncation is intended
 
 ## ChangeLog
 

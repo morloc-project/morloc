@@ -23,6 +23,7 @@ module Morloc.CodeGenerator.Express
   , polyFreeVars
   ) where
 
+import Morloc.Data.Zip (zipPrefix, zipSame, zipWithSame)
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -618,7 +619,7 @@ checkRsizeArity idx src arity = case srcRsize src of
 -- reported at the expression.
 zipExact :: HasCallStack => Int -> [a] -> [b] -> MorlocMonad [(a, b)]
 zipExact i xs ys
-  | length xs == length ys = return (zip xs ys)
+  | length xs == length ys = return (zipSame xs ys)
   | otherwise =
       withFrozenCallStack
         (MM.throwCompilerBugAt i ("paired lists differ in length (" <> pretty (length xs) <> " and " <> pretty (length ys) <> ")"))
@@ -636,7 +637,7 @@ typedArg (Arg i _, t) = Arg i (Just t)
 -- defect, since over-application is resolved before this stage.
 zipArgs :: HasCallStack => Int -> [a] -> [b] -> MorlocMonad [(a, b)]
 zipArgs i xs ts
-  | length xs <= length ts = return (zip xs ts)
+  | length xs <= length ts = return (zipPrefix xs ts)
   | otherwise =
       withFrozenCallStack
         (MM.throwCompilerBugAt i ("a call has" <+> pretty (length xs) <+> "arguments for" <+> pretty (length ts) <+> "inputs"))
@@ -647,7 +648,7 @@ expressCore (AnnoS (Idx midx c@(FunT inputs _)) (Idx cidx lang, _) (ExeS exe)) =
   exe' <- case exe of
     (SrcCall (Idx si src)) -> checkRsizeArity midx src (length inputs) >> return (SrcCallP (Written si) src)
     (PatCall pat) -> return $ PatCallP pat
-  let lambdaVals = zipWith (PolyBndVar . C . Idx cidx) inputs ids
+  let lambdaVals = zipWithSame (PolyBndVar . C . Idx cidx) inputs ids
   return
     . PolyHead lang midx [Arg i None | i <- ids]
     . PolyReturn
@@ -660,7 +661,7 @@ expressCore (AnnoS (Idx midx c@(FunT inputs _)) (Idx cidx lang, _) (ExeS exe)) =
 expressCore (AnnoS (Idx midx c@(FunT inputs out)) (Idx cidx lang, _) (CallS v)) = do
   (mid, crossLang) <- lookupRecursiveTarget lang v
   ids <- MM.takeFromCounter (length inputs)
-  let lambdaVals = zipWith (PolyBndVar . C . Idx cidx) inputs ids
+  let lambdaVals = zipWithSame (PolyBndVar . C . Idx cidx) inputs ids
       headArgs = [Arg i None | i <- ids]
   case out of
     EffectT effs innerOut ->
@@ -702,7 +703,7 @@ expressCore (AnnoS (Idx midx t) (Idx cidx lang, args) (LstS xs)) = do
 expressCore (AnnoS (Idx midx (AppT (VarT v) (tyArgs -> ts))) (Idx cidx lang, args) (TupS xs))
   | v == BT.tuple (length xs)
   , length ts == length xs = do
-      xs' <- mapM (expressTyped lang) (zip xs ts)
+      xs' <- mapM (expressTyped lang) (zipSame xs ts)
       let x = PolyTuple (Idx cidx v) xs'
       return $ PolyHead lang midx [Arg i None | Arg i _ <- args] (PolyReturn x)
 -- TupS at a non-tuple head (user alias, including phantom-Nat aliases,
@@ -719,8 +720,8 @@ expressCore (AnnoS (Idx midx (NamT o v ps rs)) (Idx cidx lang, args) (NamS entri
   -- declared NamU; if that ever regresses, this assertion catches the
   -- mis-zip at the point where it would corrupt the wire format.
   assertRecordKeyOrder midx entries rs
-  xs' <- mapM (expressTyped lang) (zip (map snd entries) (map snd rs))
-  let x = PolyRecord o (Idx cidx v) (map (Idx cidx) ps) (zip (map fst rs) xs')
+  xs' <- mapM (expressTyped lang) (zipSame (map snd entries) (map snd rs))
+  let x = PolyRecord o (Idx cidx v) (map (Idx cidx) ps) (zipSame (map fst rs) xs')
   return $ PolyHead lang midx [Arg i None | Arg i _ <- args] (PolyReturn x)
 expressCore (AnnoS (Idx midx t) (Idx cidx lang, args) (NamS entries)) = do
   mayT <- evalGeneralStep (type2typeu t)
@@ -1105,7 +1106,7 @@ dispatchPatternStruct callLang midx _cidxCall sel inputs out xsExpr fallback =
         then emitIFileWalk callLang midx out steps rcvE bracketEs
         else do
           mPat <- tryPatternAccessible callLang midx out steps rcvT
-                    (zip bracketTs bracketEs) rcvE
+                    (zipSame bracketTs bracketEs) rcvE
           case mPat of
             Just p -> return p
             Nothing -> fallback
@@ -1517,7 +1518,7 @@ expressPolyExpr
             lets = [PolyLet i e | (_, Just (i, e), _) <- xsInfo]
             passedParentArgs = unique (concat [[r | r <- allParentArgs, r == i] | i <- callArgs])
 
-            lambdaTypeMap = zip vs (map (Idx cidxLam) lamInputTypes)
+            lambdaTypeMap = zipSame vs (map (Idx cidxLam) (take (length vs) lamInputTypes))
             -- The values handed to the interface are exactly the indices the
             -- callee binds, in that order. An argument realized in another
             -- language is computed here and bound to a fresh index, so the
@@ -1755,7 +1756,7 @@ expressPolyExpr
     | not (isComputedValue inner), not (isLocalPartial inner), isLocal = do
         ids <- MM.takeFromCounter (length callInputs)
         let lambdaVals = bindVarIds ids (map (C . Idx cidx) callInputs)
-            lambdaTypedArgs = zipWith annotate ids (map Just callInputs)
+            lambdaTypedArgs = zipWithSame annotate ids (map Just callInputs)
         retapp <- expressEtaApp parentLang e lambdaVals
         -- Implicit eta-abstraction of a function value. Any variables the
         -- wrapped value closes over (e.g. a let-bound closure `f <- ...;
@@ -1977,7 +1978,7 @@ expressPolyExpr _ pl pc (AnnoS (Idx midx t) c e@(LstS _)) = do
 expressPolyExpr _ parentLang pc (AnnoS (Idx midx (AppT (VarT v) (tyArgs -> ts))) (Idx cidx lang, args) (TupS xs))
   | v == BT.tuple (length xs)
   , length ts == length xs = do
-      xs' <- mapM (expressTyped lang) (zip xs ts)
+      xs' <- mapM (expressTyped lang) (zipSame xs ts)
       let e = PolyTuple (Idx cidx v) xs'
       expressContainer pc (Idx midx parentLang) (Idx cidx lang) args e
 -- A tuple literal whose recorded type head is a type-alias or a
@@ -2010,8 +2011,8 @@ expressPolyExpr _ pl pc (AnnoS (Idx midx t) c@(Idx cidx lang, _) e@(TupS _)) = d
 expressPolyExpr _ parentLang pc (AnnoS (Idx midx (NamT o v ps rs)) (Idx cidx lang, args) (NamS entries)) = do
   -- C3 invariant: see comment at expressCore NamT above.
   assertRecordKeyOrder midx entries rs
-  xs' <- mapM (expressTyped lang) (zip (map snd entries) (map snd rs))
-  let e = PolyRecord o (Idx cidx v) (map (Idx cidx) ps) (zip (map fst rs) xs')
+  xs' <- mapM (expressTyped lang) (zipSame (map snd entries) (map snd rs))
+  let e = PolyRecord o (Idx cidx v) (map (Idx cidx) ps) (zipSame (map fst rs) xs')
   expressContainer pc (Idx midx parentLang) (Idx cidx lang) args e
 expressPolyExpr _ pl pc (AnnoS (Idx i t) c e@(NamS _)) = do
   scope <- MM.getGeneralScope

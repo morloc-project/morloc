@@ -31,6 +31,7 @@ to it, and at a different key is polymorphic recursion, which is rejected.
 -}
 module Morloc.Frontend.Specialize (specialize, isGenericExport) where
 
+import Morloc.Data.Zip (zipPrefix, zipSame)
 import Data.IORef
 import qualified Data.List as List
 import qualified Data.Map as Map
@@ -248,7 +249,7 @@ canonical :: TypeU -> TypeU
 canonical t0 = rename t0
   where
     generated = nubOrd (generatedVars t0)
-    table = Map.fromList (zip generated [TV ("v@" <> T.pack (show k)) | k <- [(0 :: Int) ..]])
+    table = Map.fromList (zipPrefix generated [TV ("v@" <> T.pack (show k)) | k <- [(0 :: Int) ..]])
     rename t = case t of
       VarU v | Just v' <- Map.lookup v table -> VarU v'
       KVarU (v, k) | Just v' <- Map.lookup v table -> KVarU (v', k)
@@ -483,7 +484,7 @@ instantiate e0 = do
       expr names e = case e of
         LamS vs body -> do
           vs' <- mapM fresh vs
-          LamS vs' <$> go (Map.union (Map.fromList (zip vs vs')) names) body
+          LamS vs' <$> go (Map.union (Map.fromList (zipSame vs vs')) names) body
         LetS v e1 e2 -> do
           e1' <- go names e1
           v' <- fresh v

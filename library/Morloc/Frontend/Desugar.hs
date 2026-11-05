@@ -24,6 +24,7 @@ module Morloc.Frontend.Desugar
   , showParseError
   ) where
 
+import Morloc.Data.Zip (zipPrefix, zipSame, zipWithPrefix, zipWithSameM)
 import qualified Control.Monad.State.Strict as State
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
@@ -517,7 +518,7 @@ addParseSpec prior spec
         Left ("extension `" <> e <> "` is already claimed by format `" <> owner <> "` on this argument.")
       [] -> Right (prior ++ [spec])
   where
-    dupWithin es = [ (e, psName spec) | (i, e) <- zip [0 :: Int ..] es, e `elem` take i es ]
+    dupWithin es = [ (e, psName spec) | (i, e) <- zipPrefix [0 :: Int ..] es, e `elem` take i es ]
 
 -- | Split @\<handler\>[(args)] [mods]@ into the handler identifier, its parsed
 -- argument list (empty if no parens), and the raw modifier tokens.
@@ -1069,7 +1070,7 @@ namTypeDocs declPos locEntries = do
           rejectDeclDirectivesHere p "a record field" fieldDoc
           return fieldDoc)
       locEntries
-  return (ArgDocRec recDocVars (zip [k | (_, k, _) <- locEntries] fieldDocs))
+  return (ArgDocRec recDocVars (zipSame [k | (_, k, _) <- locEntries] fieldDocs))
 
 -- | Collect the docstrings attached to a `data` declaration: the block
 -- above the keyword, and the block above each constructor. A constructor
@@ -1963,7 +1964,7 @@ walkIrrefPat (Loc _ (CIPatVar v))   sel = [(v, sel)]
 walkIrrefPat (Loc _ CIPatWild)      _   = []
 walkIrrefPat (Loc _ (CIPatAs v p))  sel = (v, sel) : walkIrrefPat p sel
 walkIrrefPat (Loc _ (CIPatTup ps))  sel = concat
-  [ walkIrrefPat p (extendSelIdx i sel) | (i, p) <- zip [0 ..] ps ]
+  [ walkIrrefPat p (extendSelIdx i sel) | (i, p) <- zipPrefix [0 ..] ps ]
 walkIrrefPat (Loc _ (CIPatRec kps)) sel = concat
   [ walkIrrefPat p (extendSelKey k sel) | (Key k, p) <- kps ]
 
@@ -2291,15 +2292,15 @@ walkRefutPat (Loc _ CRPatWild)       _    = []
 walkRefutPat (Loc _ (CRPatLit e))    path = [RTest e path]
 walkRefutPat (Loc _ (CRPatCon v ps)) path =
   RTagTest v path
-    : concat [ walkRefutPat p (path <> [StepField v i]) | (i, p) <- zip [0 ..] ps ]
+    : concat [ walkRefutPat p (path <> [StepField v i]) | (i, p) <- zipPrefix [0 ..] ps ]
 walkRefutPat (Loc _ (CRPatAs v p))   path = RBind v path : walkRefutPat p path
 walkRefutPat (Loc _ (CRPatTup ps))   path = concat
-  [ walkRefutPat p (path <> [StepIdx i]) | (i, p) <- zip [0 ..] ps ]
+  [ walkRefutPat p (path <> [StepIdx i]) | (i, p) <- zipPrefix [0 ..] ps ]
 walkRefutPat (Loc _ (CRPatRec kps))  path = concat
   [ walkRefutPat p (path <> [StepKey k]) | (Key k, p) <- kps ]
 walkRefutPat (Loc _ (CRPatList ps))  path =
   RLenTest (length ps) path
-    : concat [ walkRefutPat p (path <> [StepElem i]) | (i, p) <- zip [0 ..] ps ]
+    : concat [ walkRefutPat p (path <> [StepElem i]) | (i, p) <- zipPrefix [0 ..] ps ]
 
 -- | Build the expression naming the value at a path from the receiver.
 --
@@ -2446,7 +2447,7 @@ buildRefutClauseFrom
   :: [EVar] -> [Loc CstRefutPat] -> Span -> ExprI -> D (ExprI, ExprI)
 buildRefutClauseFrom formals pats bsp body' = do
   let usedNames = freeVarsE body'
-  contribs <- mapM (\(f, p) -> refutClauseArg usedNames f p) (zip formals pats)
+  contribs <- mapM (\(f, p) -> refutClauseArg usedNames f p) (zipSame formals pats)
   let allTests = concatMap fst contribs
       allBinds = concatMap snd contribs
   cond <- conjoinTests bsp allTests
@@ -2493,7 +2494,7 @@ recordSite total sp (EV v : _) rows = case mapM (mapM (mapM id) . snd) rows of
     is <- mapM (freshIdSpan . fst) rows
     cols <- mapM (mapM (\(psp, pat) -> (,) <$> freshIdSpan psp <*> pure pat)) pats
     State.modify' $ \st ->
-      st {dsMatchSites = Map.insert v (MatchSite i (zip is cols) total) (dsMatchSites st)}
+      st {dsMatchSites = Map.insert v (MatchSite i (zipSame is cols) total) (dsMatchSites st)}
 
 clauseSpan :: ([Loc CstRefutPat], Loc CstExpr) -> Span
 clauseSpan (Loc sp _ : _, _) = sp
@@ -3200,7 +3201,7 @@ buildDefWithIrrefPats sp ps body wheres = do
   paramResults <- mapM (desugarIrrefLamParam usedNames) ps
   projections <-
     mapM (\(v, rhs) -> freshExprSpan sp (AssE v rhs [])) (concatMap snd paramResults)
-  shapes <- concat <$> zipWithM shapeBinding ps (map fst paramResults)
+  shapes <- concat <$> zipWithSameM shapeBinding ps (map fst paramResults)
   shaped <- mkLet sp shapes body
   lam <- mkLam sp (map fst paramResults) shaped
   return (lam, projections <> wheres)
@@ -3214,7 +3215,7 @@ buildLamWithIrrefPats sp ps body = do
   let bodyFvs = freeVarsE body
   paramResults <- mapM (desugarIrrefLamParam bodyFvs) ps
   let paramNames = map fst paramResults
-  shapes <- concat <$> zipWithM shapeBinding ps paramNames
+  shapes <- concat <$> zipWithSameM shapeBinding ps paramNames
   wrapped <- mkLet sp (shapes <> concatMap snd paramResults) body
   mkLam sp paramNames wrapped
 
@@ -3443,7 +3444,7 @@ checkHeaderLabels pos (TV n) vs t = do
   mapM_ (\l -> bad l "is not in a tuple field") [l | l <- labelsIn t, l `notElem` placed]
   mapM_ (\l -> bad l ("names no '(" ++ T.unpack (unTVar l) ++ " :: Nat)' parameter")) [l | l <- placed, l `notElem` natParams]
   mapM_ (\(l, _, _) -> bad l "is not on an integer type") [h | h@(_, _, x) <- hs, not (integral x)]
-  mapM_ (\l -> bad l "labels more than one field") (take 1 [l | (l, k) <- zip placed [0 :: Int ..], l `elem` drop (k + 1) placed])
+  mapM_ (\l -> bad l "labels more than one field") (take 1 [l | (l, k) <- zipPrefix placed [0 :: Int ..], l `elem` drop (k + 1) placed])
   where
     natParams = [p | Left (p, KindNat) <- vs]
     bad l msg = dfail pos ("in the representation of '" ++ T.unpack n ++ "': the label '" ++ T.unpack (unTVar l) ++ "@' " ++ msg)
@@ -3575,7 +3576,7 @@ desugarTypeDef sp (CstDataDef (v, vs) ctors ders) = do
   -- Each constructor becomes an ordinary top-level term. Making them real
   -- bindings is what gives uniqueness its teeth: a name already bound
   -- collides through the existing duplicate-binding check.
-  ctorDecls <- concatMapM (mkCtor sp v resultT) (zip [0 ..] entries)
+  ctorDecls <- concatMapM (mkCtor sp v resultT) (zipPrefix [0 ..] entries)
   return (typeDecl : ctorDecls <> wire)
   where
     -- A constructor that takes arguments is a FUNCTION into its type, so it
@@ -4401,7 +4402,7 @@ synthStreamingBinding sp parentName assI sigMap
       where
         pinSpine argTys (ExprI i (LamE params inner)) = do
           let (here, rest) = splitAt (length params) argTys
-              pins = [(p, t) | (p, t) <- zip params here, isConcreteType t]
+              pins = [(p, t) | (p, t) <- zipPrefix params here, isConcreteType t]
           inner' <- pinSpine rest inner
           inner'' <- foldr pin (return inner') pins
           return (ExprI i (LamE params inner''))
@@ -4887,13 +4888,13 @@ expandParseEntries visibleSigs body =
           quantified = forallVars pt
       when (length params /= length argDocs) $
         dfail pos "internal: a `@parse` command's argument docstrings do not match its arguments"
-      kinds <- zipWithM (classifyParseArg pos name quantified) params argDocs
+      kinds <- zipWithSameM (classifyParseArg pos name quantified) params argDocs
       -- The command consumes a streamed argument as it reads it, so an
       -- action cannot be handed the same stream.
       case [ (w, n)
            | w <- docWith cmdDoc
            , ArgPos n <- wsArgs w
-           , (i, Just (ParseStream False _)) <- zip [1 ..] kinds
+           , (i, Just (ParseStream False _)) <- zipPrefix [1 ..] kinds
            , i == n
            ] of
         ((w, n) : _) -> dfail pos . T.unpack $
@@ -4930,13 +4931,13 @@ expandParseEntries visibleSigs body =
             [ n - 1
             | w <- docWith cmdDoc
             , ArgPos n <- wsArgs w
-            , (i, Just k) <- zip [1 ..] kinds
+            , (i, Just k) <- zipPrefix [1 ..] kinds
             , i == n
             , not (isStagedFile k)
             ])
       unless (null slots) $ State.modify $ \st -> st
         { dsParseSlots = Map.insert name (map (+ 1) slots) (dsParseSlots st) }
-      mapM (\t -> synthParseEntry sp name (zip argDocs kinds) (if t == name then slots else []) t) targets
+      mapM (\t -> synthParseEntry sp name (zipSame argDocs kinds) (if t == name then slots else []) t) targets
 
     forallVars (ForallU v t) = v : forallVars t
     forallVars _ = []
@@ -4995,13 +4996,13 @@ classifyParseArg pos (EV cmd) quantified t d
 -- | Synthesize the `@parse` entry for one target.
 synthParseEntry :: Span -> EVar -> [(ArgDocVars, Maybe ParseArgKind)] -> [Int] -> EVar -> D ExprI
 synthParseEntry sp cmd args slots target = do
-  let groups = zipWith paramGroup [0 :: Int ..] args
+  let groups = zipWithPrefix paramGroup [0 :: Int ..] args
   targetRef <- varE target
   argRefs <- mapM (varE . snd) groups
   call0 <- if null argRefs then return targetRef else expr (AppE targetRef argRefs)
   saves <- mapM saveSlot slots
   call <- foldrM (\b acc -> expr (LetE [b] acc)) call0 saves
-  let indexed = zip [0 :: Int ..] args
+  let indexed = zipPrefix [0 :: Int ..] args
       (streams, values) = partition (isChannel . snd) indexed
   -- Value arguments are parsed first, so a failure among them starts no
   -- producer. Each streamed argument's producer then runs concurrently with
@@ -5092,7 +5093,7 @@ synthParseEntry sp cmd args slots target = do
             readE <- readWith i kind k ps
             expr (IfE c readE elseE))
         unpackE
-        (reverse (zip [0 :: Int ..] (docParse d)))
+        (reverse (zipPrefix [0 :: Int ..] (docParse d)))
       forced <- expr (EvalE chain)
       expr (LetE [(var i "v", forced)] rest)
 

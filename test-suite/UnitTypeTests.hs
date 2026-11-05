@@ -2525,7 +2525,23 @@ unitTypeTests =
     testGroup
       "Typechecker unit tests"
       -- instantiating a data type's parameters
-      [ testCase "parameters are set to their arguments at once" $
+      [ -- programs that reach a positional pairing with lists of different
+        -- lengths are refused as the user's error
+        expectError "a definition with more parameters than its @with signature"
+          "module main (streamNums)\nsumFile :: IFile [Int] -> <IO> Int\nproduce :: ([Int] -> <IO> ()) -> <IO> ()\n--' Stream numbers\n--' @with -m/--summary=sumFile\nstreamNums :: Int -> <IO> ()\nstreamNums x y = @collect produce\n"
+      , expectError "a specialized alias applied to too many arguments"
+          "module main (f)\ntype Q Int b = (b, Str)\nf :: Q Int Int Int -> Real\n"
+      , expectError "a specialized alias applied to none"
+          "module main (f)\ntype Q Int b = (b, Str)\nf :: Q -> Real\n"
+      , expectError "a function of a type variable applied to two arguments"
+          "module main (g)\nf :: a -> Int\ng x = f x 2\n"
+      , expectError "a parameter applied with two arities"
+          "module main (g)\nadd :: Int -> Int -> Int\ng f = add (f 1) (f 1 2)\n"
+      , expectPass "a record field applying a parameterized data type"
+          "module main (f)\ndata Opt a = None | Some a\nrecord R where\n  x :: Opt Int\nf :: R -> Int\n"
+      , expectError "a record field naming a parameterized data type bare"
+          "module main (f)\ndata Opt a = None | Some a\nrecord R where\n  x :: Opt\nf :: R -> Int\n"
+      , testCase "parameters are set to their arguments at once" $
           map (instantiateParams [(TV "a", VarU (TV "b")), (TV "b", int)]) [VarU (TV "a"), VarU (TV "b")]
             @?= [VarU (TV "b"), int]
       , testCase "a binder shadowing a parameter is respected" $

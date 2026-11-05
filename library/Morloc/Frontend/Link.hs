@@ -15,6 +15,7 @@ state-based representation consumed by 'Treeify'.
 -}
 module Morloc.Frontend.Link (link, checkRsize) where
 
+import Morloc.Data.Zip (zipSame)
 import Data.Set (Set)
 import qualified Data.Set as Set
 import qualified Morloc.BaseTypes as BT
@@ -491,12 +492,12 @@ linkLocalTerms m0 s0 e0 = linkLocal Set.empty s0 (toCondensedState s0) e0
                     <+> squotes (pretty cls)
                     <+> "differ in number of terms"
             else do
-              checkSuperclassConstraints i cls (zip vs ts) superConstraints
+              checkSuperclassConstraints i cls (zipSame vs ts) superConstraints
               if null es
                 then
-                  linkEmptyInstance m0 cls (zip vs ts) sigs emap
+                  linkEmptyInstance m0 cls (zipSame vs ts) sigs emap
                 else
-                  mapM_ (linkInstance origin (linkScoped bnds c) m0 cls (zip vs ts) sigs emap) es
+                  mapM_ (linkInstance origin (linkScoped bnds c) m0 cls (zipSame vs ts) sigs emap) es
     linkLocal bnds _ cs (ExprI termIdx (VarE _ v))
       | Set.member v bnds = return ()
       | otherwise = case Map.lookup v cs of

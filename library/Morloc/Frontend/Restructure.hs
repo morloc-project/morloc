@@ -18,6 +18,7 @@ type declarations, and collects type definitions and source mappings into
 -}
 module Morloc.Frontend.Restructure (restructure) where
 
+import Morloc.Data.Zip (zipPrefix, zipSame, zipWithPrefix, zipWithSame)
 import qualified Control.Monad.State.Strict as St
 import qualified Data.Graph as Graph
 import Data.Set (Set)
@@ -126,7 +127,7 @@ markConstants e0@(ExprI _ (ModE _ es)) = do
         mapM_ (\(v, a) -> do
                  if constant locals a && Set.member v (referenced body) then mark a else return ()
                  expr locals a)
-          (zip vs args)
+          (zipPrefix vs args)
         expr (Set.union locals (Set.fromList vs)) body
       LamE vs body -> expr (Set.union locals (Set.fromList vs)) body
       LetE binds body -> letChain locals binds body
@@ -239,7 +240,7 @@ expandStructuralTypes d = do
     sigAliasDocs sc et = case (edocs et, unforall (etype et)) of
       (ArgDocSig cmd args ret, FunU ts r)
         | length ts == length args ->
-            et { edocs = ArgDocSig cmd (zipWith (position sc) ts args) (position sc r ret) }
+            et { edocs = ArgDocSig cmd (zipWithSame (position sc) ts args) (position sc r ret) }
       (ArgDocSig cmd args ret, t) ->
         let inherited = position sc t cmd
         in et { edocs = ArgDocSig cmd { docLines = docLines inherited, docReturn = docReturn inherited } args ret }
@@ -860,7 +861,7 @@ handleTypeDeclarations = DAG.mapNode f
     isNotSelfDef :: ExprI -> Bool
     isNotSelfDef (ExprI _ (TypE (ExprTypeE Nothing v [] (VarU v') _ _))) = v /= v'
     isNotSelfDef (ExprI _ (TypE (ExprTypeE Nothing (VarU -> v) (map (either (VarU . fst) id) -> vs) (AppU v' vs') _ _))) =
-      v /= v' || length vs /= length vs' || not (all (uncurry (==)) (zip vs vs'))
+      v /= v' || length vs /= length vs' || not (all (uncurry (==)) (zipSame vs vs'))
     isNotSelfDef _ = True
 
 handleBinops :: DAG MVar [AliasedSymbol] ExprI -> MorlocMonad (DAG MVar [AliasedSymbol] ExprI)
@@ -933,7 +934,7 @@ handleBinops d0 = do
         f (ExprI i (TupE es)) = TupE <$> mapM f es |>> ExprI i
         f (ExprI i (NamE rs)) = do
           es' <- mapM (f . snd) rs
-          return $ ExprI i (NamE (zip (map fst rs) es'))
+          return $ ExprI i (NamE (zipSame (map fst rs) es'))
         f (ExprI i (AppE e es)) = AppE <$> f e <*> mapM f es |>> ExprI i
         f (ExprI i (LamE vs e)) = LamE vs <$> f e |>> ExprI i
         f (ExprI i (AnnE e t)) = AnnE <$> f e <*> pure t |>> ExprI i
@@ -1273,11 +1274,11 @@ formListProblem ps (AppU (VarU (TV tmpl)) items)
     positions = mapMaybe position items
     -- the declaration position an item names: a parameter's variable, or a
     -- specialized parameter's type
-    position item = listToMaybe [d | (d, p) <- zip [0 :: Int ..] ps, names p item]
+    position item = listToMaybe [d | (d, p) <- zipPrefix [0 :: Int ..] ps, names p item]
     names (Left (v, _)) (VarU v') = v == v'
     names (Right t) x = t == x
     names _ _ = False
-    increasing xs = and (zipWith (<) xs (drop 1 xs))
+    increasing xs = and (zipWithPrefix (<) xs (drop 1 xs))
 formListProblem _ _ = Nothing
 
 -- | The indices of the `$N` macros of a template.
@@ -1313,7 +1314,7 @@ checkConflictingForms modules lang scope =
             <+> hsep (punctuate "," (map (squotes . pretty) vs))
             <> "; a type is declared once, and has one form per language for each parameter pattern"
           decls = [(i, paramPattern ps) | (i, ps) <- concatMap (typedefDecls lang v0) modules]
-          repeats = [(i, pat) | (k, (i, pat)) <- zip [0 :: Int ..] decls, pat `elem` map snd (take k decls)]
+          repeats = [(i, pat) | (k, (i, pat)) <- zipPrefix [0 :: Int ..] decls, pat `elem` map snd (take k decls)]
        in case repeats ++ drop 1 decls of
             (i, pat) : _ -> do
               let samePattern = [j | (j, pat') <- decls, j /= i, pat' == pat]
@@ -1760,7 +1761,7 @@ mergeEntries xs0 ys0 = filter (isNovel ys0) xs0 <> ys0
     isNovel [] _ = True
     isNovel ((vs2, t2, _, isTerminal1, kind1) : ys) x@(vs1, t1, _, isTerminal2, kind2)
       | (length vs1 == length vs2)
-          && t1 == foldl (\t (v1, v2) -> rename v2 v1 t) t2 [(fst v1, fst v2) | (Left v1, Left v2) <- zip vs1 vs2]
+          && t1 == foldl (\t (v1, v2) -> rename v2 v1 t) t2 [(fst v1, fst v2) | (Left v1, Left v2) <- zipSame vs1 vs2]
           && isTerminal1 == isTerminal2
           && kind1 == kind2 =
           False
@@ -2025,7 +2026,7 @@ refineKinds dag = do
                (KindList _, _) -> goSlot k a
                (KindSet _, _) -> goSlot k a
                _ -> go a
-            | (k, a) <- zip kinds args]
+            | (k, a) <- zipPrefix kinds args]
             ++ [go a | a <- drop (length kinds) args]
           Nothing -> Map.unions (map go args)
         go (NatVarU v) = Map.singleton v KindNat
@@ -2618,7 +2619,7 @@ checkAliasApplications dag scope = do
       [ (i, v, p, pk, a, ak)
       | (i, v, args) <- applied
       , Just ((ps, _, _, _, TypedefAlias) : _) <- [Map.lookup v scope]
-      , (Left (p, pk), a) <- zip ps args
+      , (Left (p, pk), a) <- zipSame ps args
       , not (isVariable a)
       , Just ak <- [evidentKind scope a]
       , ak /= pk
@@ -2630,8 +2631,7 @@ checkAliasApplications dag scope = do
       _ -> False
     arity v = case Map.lookup v scope of
       Just entries@((ps, _, _, _, _) : _)
-        | all (\(_, _, _, _, k) -> k == TypedefAlias) entries
-        , all isLeft ps ->
+        | all (\(_, _, _, _, k) -> k == TypedefAlias) entries ->
             Just (length ps)
       _ -> Nothing
     bad =
@@ -2663,7 +2663,7 @@ checkTypeApplications dag scope = do
       MM.throwSourcedError i $
         squotes (pretty t) <+> "has kind" <+> pretty k
           <> ", but a type that classifies a value has kind Type"
-  case [(i, v, ns, length args) | (i, v, args) <- valueHeads <> bodyApplications, Just ns <- [arities v], length args `notElem` ns] of
+  case [(i, v, ns, length args) | (i, v, args) <- valueHeads <> bodyApplications <> fieldHeads, Just ns <- [arities v], length args `notElem` ns] of
     [] -> return ()
     ((i, v, ns, k) : _) ->
       MM.throwSourcedError i $
@@ -2698,7 +2698,7 @@ checkTypeApplications dag scope = do
       , Just entries <- [Map.lookup v scope]
       , not (any (\(_, _, _, _, k) -> k == TypedefAlias) entries)
       , (ps : _) <- [[ps | (ps, _, _, _, _) <- entries, length ps == length args]]
-      , (Left (p, pk), a) <- zip ps args
+      , (Left (p, pk), a) <- zipSame ps args
       , not (isVariable a)
       , Just ak <- [kindIn a]
       , ak /= pk
@@ -2745,6 +2745,16 @@ checkTypeApplications dag scope = do
       , ExprI i (TypE (ExprTypeE Nothing _ _ body _ _)) <- everyExpr m
       , (v, args@(_ : _)) <- typeApplications body
       ]
+    -- A record field classifies a value, so it is applied to every parameter.
+    fieldHeads =
+      [ (i, v', args')
+      | (_, (m, _)) <- Map.toList dag
+      , ExprI i (TypE (ExprTypeE Nothing _ _ (NamU _ _ _ rs) _ _)) <- everyExpr m
+      , (_, ft) <- rs
+      , u <- valuePositions ft
+      , (v, args) <- headApplication u
+      , (v', args') <- [throughAliases (64 :: Int) v args]
+      ]
     valueTypes =
       [ (i, u)
       | (_, (m, _)) <- Map.toList dag
@@ -2765,7 +2775,7 @@ checkTypeApplications dag scope = do
           AppU (VarU v) args
             | Just entries <- Map.lookup v scope ->
                 case [ps | (ps, _, _, _, _) <- entries, length ps == length args] of
-                  (ps : _) -> concat [valuePositions a | (Left (_, KindType), a) <- zip ps args]
+                  (ps : _) -> concat [valuePositions a | (Left (_, KindType), a) <- zipSame ps args]
                   [] -> []
             | v == BT.list || v == BT.tuple (length args) -> concatMap valuePositions args
           _ -> []
@@ -2867,7 +2877,7 @@ inferAliasParamKinds dag = do
         | Just (params, b) <- Map.lookup h others
         , Set.notMember h seen
         , length params == length args ->
-            unfoldOthers others (Set.insert h seen) (substituteAll (zip params args) b)
+            unfoldOthers others (Set.insert h seen) (substituteAll (zipSame params args) b)
       VarU h
         | Just ([], b) <- Map.lookup h others
         , Set.notMember h seen ->
@@ -2942,7 +2952,7 @@ inferAliasParamKinds dag = do
       AppU (VarU h) args
         | Just ks <- Map.lookup h km
         , length ks == length args ->
-            concat (zipWith (go . Just) ks args)
+            concat (zipWithSame (go . Just) ks args)
       AppU h args -> go (Just KindType) h ++ concatMap (go (Just KindType)) args
       OpU op args
         | op `elem` [OpNatAdd, OpNatSub, OpNatMul, OpNatDiv] ->
@@ -2953,7 +2963,7 @@ inferAliasParamKinds dag = do
              in case (kind, op, args) of
                   (Just KindRec, OpNatSub, [a, b]) -> go kind a ++ go Nothing b
                   _ -> concatMap (go kind) args
-        | otherwise -> concat (zipWith go (opOperandKinds op (length args)) args)
+        | otherwise -> concat (zipWithSame go (opOperandKinds op (length args)) args)
       LitU (LRec fs) -> concatMap (go (Just KindType) . snd) fs
       LitU _ -> concatMap (go Nothing) (typeUChildren t)
       _ -> concatMap (go (Just KindType)) (typeUChildren t)
@@ -2968,5 +2978,5 @@ inferAliasParamKinds dag = do
       | Just ks <- Map.lookup v km
       , all isLeft ps
       , length ks == length ps =
-          ExprI i (TypE (ExprTypeE Nothing v [Left (p, k) | (Left (p, _), k) <- zip ps ks] body doc TypedefAlias))
+          ExprI i (TypE (ExprTypeE Nothing v [Left (p, k) | (Left (p, _), k) <- zipSame ps ks] body doc TypedefAlias))
     rewrite _ e = e

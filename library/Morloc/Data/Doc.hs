@@ -27,6 +27,7 @@ module Morloc.Data.Doc
   , utf8Length
   ) where
 
+import Morloc.Data.Zip (zipWithSame)
 import qualified Data.ByteString as BS
 import qualified Data.Text as DT
 import qualified Data.Text.Encoding as DTE
@@ -108,4 +109,4 @@ format ::
   Doc ann
 format fmtstr breaker replacements =
   let xs = DT.splitOn breaker fmtstr
-   in foldl (<>) (pretty . head $ xs) $ zipWith (\r x -> r <> pretty x) replacements (tail xs)
+   in foldl (<>) (pretty . head $ xs) $ zipWithSame (\r x -> r <> pretty x) replacements (tail xs)

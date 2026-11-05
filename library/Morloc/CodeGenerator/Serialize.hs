@@ -17,6 +17,7 @@ module Morloc.CodeGenerator.Serialize
   ( serialize
   ) where
 
+import Morloc.Data.Zip (zip3Same, zipSame, zipWithSameM)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Morloc.BaseTypes as BT
@@ -396,8 +397,8 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
         _ -> MM.throwCompilerBug "a native loop has no back-edge to type its locals"
       fresh <- mapM (const MM.getCounter) ids
       let rename b (i, i') = trimap (renameNE i i') (renameSE i i') (renameNE i i') b
-          body1 = foldl rename body0 (zip ids fresh)
-          starts = [(i', BndVarN tf i KeptRead) | (i, i', tf) <- zip3 ids fresh carried]
+          body1 = foldl rename body0 (zipSame ids fresh)
+          starts = [(i', BndVarN tf i KeptRead) | (i, i', tf) <- zip3Same ids fresh carried]
       return (LoopN t' starts body1)
     nativeExpr _ (MonoLoopContinue {}) = error "morloc bug: MonoLoopContinue in native position"
     nativeExpr m (MonoLet i e1 e2) =
@@ -531,7 +532,7 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
             KiA k -> return (KiA (groundK k))
       RecordN o
         <$> inferVar v
-        <*> zipWithM param (argKinds gscope name (length ps)) ps
+        <*> zipWithSameM param (argKinds gscope name (length ps)) ps
         <*> mapM (secondM (nativeExpr m . snd)) rs
     nativeExpr _ (MonoLog v x) = LogN <$> inferVar v <*> pure x
     nativeExpr _ (MonoReal v x) = RealN <$> inferVar v <*> pure x
@@ -1267,7 +1268,7 @@ wireSerial lang sm0@(SerialManifold m0 _ _ _ _) = foldSerialManifoldM fm sm0 |>>
     -- Native types of loop-carried slots, read positionally from the continue
     -- value that reassigns each slot. Requires the wired body (native leaves).
     carriedTypes :: [Int] -> LoopBody NativeExpr se b -> Maybe (Map.Map Int TypeF)
-    carriedTypes ids body = Map.fromList . zip ids . map typeFof <$> firstContinue body
+    carriedTypes ids body = Map.fromList . zipSame ids . map typeFof <$> firstContinue body
 
     -- 'carriedTypes' resolved on a manifold body spine; 'Nothing' if the body has
     -- no native loop. The loop sits on the spine ('addLoopWraps' makes it the

@@ -21,6 +21,7 @@ module Morloc.CodeGenerator.Realize
   , placeNormalized
   ) where
 
+import Morloc.Data.Zip (zip3Same, zipPrefix, zipSame)
 import Morloc.CodeGenerator.Serial (containsEffectT, containsFunT)
 import Morloc.CodeGenerator.Value (etaParts, isValue, isValueWith)
 import Morloc.CodeGenerator.HostProvenance (HostLimit (..), planHostFunctions, sameTermSources)
@@ -860,7 +861,7 @@ realizeWithRegistry registry tables pins seedLangs s00 = do
       return (TupS xs', orAmbient i rstat best)
     scoreExpr rstat (NamS rs, i) = do
       (xs, best) <- componentsOf (NamS rs) rstat (map snd rs)
-      return (NamS (zip (map fst rs) xs), orAmbient i rstat best)
+      return (NamS (zipSame (map fst rs) xs), orAmbient i rstat best)
     scoreExpr rstat (LamS vs x, i) = do
       x' <- scoreAnnoS (updateRState vs rstat) x
       return (LamS vs x', Idx i (scoresOf x'))
@@ -882,7 +883,7 @@ realizeWithRegistry registry tables pins seedLangs s00 = do
           bound = boundArgs f
           pairss =
             [ (if loopsOver f then runsDeeper else id) (kid x')
-            | (k, x'@(AnnoS (Idx _ t) _ _)) <- zip [0 ..] xs'
+            | (k, x'@(AnnoS (Idx _ t) _ _)) <- zipPrefix [0 ..] xs'
             , not (k < bound && isCallableType t)
             ]
       -- A head has no ambient language: it is placed by its own
@@ -1113,7 +1114,7 @@ realizeWithRegistry registry tables pins seedLangs s00 = do
     sourceLangs = unique . map srcLang . headSources
 
     zipLang :: Int -> RState -> Indexed [(Lang, Score)]
-    zipLang i (rLangs -> langs) = Idx i (zip langs (repeat mempty))
+    zipLang i (rLangs -> langs) = Idx i (zipPrefix langs (repeat mempty))
 
     scoresOf :: AnnoS a Many (Indexed [(Lang, Score)]) -> [(Lang, Score)]
     scoresOf (AnnoS _ (Idx _ xs) _) = minPairs xs
@@ -1388,18 +1389,18 @@ realizeWithRegistry registry tables pins seedLangs s00 = do
         compatibleType (VarT v1) (VarT v2) = v1 == v2
         compatibleType (FunT as1 r1) (FunT as2 r2) =
           length as1 == length as2
-            && all (uncurry compatibleType) (zip as1 as2)
+            && all (uncurry compatibleType) (zipSame as1 as2)
             && compatibleType r1 r2
         compatibleType (AppT h1 ps1) (AppT h2 ps2) =
           compatibleType h1 h2
             && length ps1 == length ps2
-            && all (uncurry compatibleArg) (zip ps1 ps2)
+            && all (uncurry compatibleArg) (zipSame ps1 ps2)
         compatibleType (NamT o1 n1 ps1 rs1) (NamT o2 n2 ps2 rs2) =
           o1 == o2 && n1 == n2
             && length ps1 == length ps2
-            && all (uncurry compatibleArg) (zip ps1 ps2)
+            && all (uncurry compatibleArg) (zipSame ps1 ps2)
             && length rs1 == length rs2
-            && all (\((k1,v1),(k2,v2)) -> k1 == k2 && compatibleType v1 v2) (zip rs1 rs2)
+            && all (\((k1,v1),(k2,v2)) -> k1 == k2 && compatibleType v1 v2) (zipSame rs1 rs2)
         compatibleType (OptionalT t1) (OptionalT t2) = compatibleType t1 t2
         compatibleType (EffectT e1 t1) (EffectT e2 t2) = e1 == e2 && compatibleType t1 t2
         compatibleType t1 t2 = t1 == t2
@@ -1489,7 +1490,7 @@ realizeWithRegistry registry tables pins seedLangs s00 = do
     collapseExpr heads _ l1 (e@(NamS rs), Idx i ss) = do
       lang <- if isFunctionalData e then return l1 else pickLanguage heads l1 (map snd rs) ss
       xs' <- mapM (collapseElement heads e lang . snd) rs
-      return (NamS (zip (map fst rs) xs'), Idx i lang)
+      return (NamS (zipSame (map fst rs) xs'), Idx i lang)
     -- collapse leaf expressions
     collapseExpr _ _ _ (ExeS x@(SrcCall (Idx _ src)), Idx i _) = return (ExeS x, Idx i (Just (srcLang src)))
     collapseExpr _ _ lang (ExeS x@(PatCall _), Idx i _) = return (ExeS x, Idx i lang)
@@ -1760,7 +1761,7 @@ realizeWithRegistry registry tables pins seedLangs s00 = do
             (LamS vs x) -> LamS vs <$> f lang x
             (LstS xs) -> LstS <$> mapM (f lang) xs
             (TupS xs) -> TupS <$> mapM (f lang) xs
-            (NamS rs) -> NamS <$> (zip (map fst rs) <$> mapM (f lang . snd) rs)
+            (NamS rs) -> NamS <$> (zipSame (map fst rs) <$> mapM (f lang . snd) rs)
             UniS -> return UniS
             NullS -> return NullS
             (VarS v (One x)) -> VarS v . One <$> f lang x
@@ -1926,7 +1927,7 @@ renameShadowing names (AnnoS g c e) = AnnoS g c <$> case e of
   LetBndS v -> return (LetBndS (Map.findWithDefault v v names))
   LamS vs b -> do
     vs' <- mapM fresh vs
-    LamS vs' <$> renameShadowing (foldr (uncurry Map.insert) names (zip vs vs')) b
+    LamS vs' <$> renameShadowing (foldr (uncurry Map.insert) names (zipSame vs vs')) b
   LetS v a b -> do
     a' <- renameShadowing names a
     v' <- fresh v
@@ -2185,7 +2186,7 @@ extractExpr exports (TupS xs) = do
 extractExpr exports (NamS rs) = do
   results <- mapM (extractFromTree exports . snd) rs
   let (vals', helperLists) = unzip results
-  return (NamS (zip (map fst rs) vals'), concat helperLists)
+  return (NamS (zipSame (map fst rs) vals'), concat helperLists)
 extractExpr exports (LetS v e1 e2) = do
   (e1', h1) <- extractFromTree exports e1
   (e2', h2) <- extractFromTree exports e2
@@ -2407,11 +2408,11 @@ etaExpandCallS isLet gi t c v captured = do
   let widenedT = widenFunType t (map snd captured)
       forwardBnds =
         [ AnnoS (Idx bgi ty) c (BndS n)
-        | (bgi, n, ty) <- zip3 freshBndGis freshNames visibleIns
+        | (bgi, n, ty) <- zip3Same freshBndGis freshNames visibleIns
         ]
       capturedBnds =
         [ AnnoS (Idx cgi ty) c (if isLet n then LetBndS n else BndS n)
-        | (cgi, (n, ty)) <- zip capturedGis captured
+        | (cgi, (n, ty)) <- zipSame capturedGis captured
         ]
       callHead = AnnoS (Idx callGi widenedT) c (CallS v)
       appNode  = AnnoS (Idx appGi (wrapEffect visibleOut)) c

@@ -38,6 +38,7 @@ module Morloc.CodeGenerator.Pools.CAbi.Members.CppPrinter
   , printRecordTemplate
   ) where
 
+import Morloc.Data.Zip (zipPrefix, zipWithPrefix)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Map as Map
@@ -435,7 +436,7 @@ printCppEnumDecl :: MDoc -> [Text] -> MDoc
 printCppEnumDecl name ctors =
   vsep
     [ "enum class" <+> name <+> ": uint8_t {"
-    , indent 4 (vsep [pretty c <+> "=" <+> pretty i <> "," | (i, c) <- zip [0 :: Int ..] ctors])
+    , indent 4 (vsep [pretty c <+> "=" <+> pretty i <> "," | (i, c) <- zipPrefix [0 :: Int ..] ctors])
     , "};"
     ]
 
@@ -457,7 +458,7 @@ printCppVariantArms name arms = vsep [armStruct c ts | (c, ts) <- arms]
     armStruct c ts =
       vsep
         [ "struct" <+> armName name c <+> "{"
-        , indent 4 (vsep [t <+> "f" <> pretty i <> ";" | (i, t) <- zip [(0 :: Int) ..] ts])
+        , indent 4 (vsep [t <+> "f" <> pretty i <> ";" | (i, t) <- zipPrefix [(0 :: Int) ..] ts])
         , "};"
         ]
 
@@ -480,7 +481,7 @@ printCppVariantSerializers :: MDoc -> [(Text, [MDoc])] -> MDoc
 printCppVariantSerializers name arms =
   vsep [sizeFn, "", toFn, "", fromFn]
   where
-    idxArms = zip [(0 :: Int) ..] arms
+    idxArms = zipPrefix [(0 :: Int) ..] arms
 
     armPayload i = "*std::get<" <> pretty i <> ">(obj.v)"
 
@@ -567,7 +568,7 @@ printArmMarshallers rtype fields =
       vsep
         [ "void MlcNode<" <> rtype <> ">::" <> sig <+> rtype <> post
         , "{"
-        , indent 4 (vsep (prelude <> zipWith fieldDoc [0 ..] fields))
+        , indent 4 (vsep (prelude <> zipWithPrefix fieldDoc [0 ..] fields))
         , "}"
         ]
     key i = "f" <> pretty i
@@ -628,7 +629,7 @@ printSerializer params rtype fields =
   [idoc|
 #{memberHeader params}void MlcNode<#{rtype}>::write_step(MlcWriteWalk& w, const Schema* schema, void* dest, const #{rtype}& obj, size_t)
 {
-#{block 4 "" (vsep (zipWith writeField [0 ..] (map fst fields)))}
+#{block 4 "" (vsep (zipWithPrefix writeField [0 ..] (map fst fields)))}
 }
 |]
   where
@@ -646,13 +647,13 @@ printDeserializer params rtype fields =
   [idoc|
 #{memberHeader params}void MlcNode<#{rtype}>::read_step(MlcReadWalk& w, const Schema* schema, const void* data, #{rtype}* out, size_t)
 {
-#{block 4 "" (vsep (zipWith readField [0 ..] (map fst fields)))}
+#{block 4 "" (vsep (zipWithPrefix readField [0 ..] (map fst fields)))}
 }
 
 #{memberHeader params}void MlcNode<#{rtype}>::size_step(MlcSizeWalk& w, const Schema* schema, const #{rtype}& obj, size_t)
 {
     w.total += schema->width;
-#{block 4 "" (vsep (zipWith sizeField [0 ..] (map fst fields)))}
+#{block 4 "" (vsep (zipWithPrefix sizeField [0 ..] (map fst fields)))}
 }
 |]
   where

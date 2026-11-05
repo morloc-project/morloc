@@ -17,6 +17,7 @@ module Morloc.CodeGenerator.ValueArgs
   , appValueArgsT
   ) where
 
+import Morloc.Data.Zip (zipSame)
 import qualified Data.Map as Map
 import qualified Morloc.BaseTypes as BT
 import Morloc.CodeGenerator.Namespace
@@ -47,7 +48,7 @@ argKinds gscope v n = case declaredKinds gscope v n of
 -- ground row where 'argKinds' places a row.
 valueArgsT :: Scope -> TVar -> [ArgT] -> [Type]
 valueArgsT gscope v as =
-  [t | ((_, rowHere), TyA t) <- zip (argKinds gscope v (length as)) as, not (rowHere && isRow t)]
+  [t | ((_, rowHere), TyA t) <- zipSame (argKinds gscope v (length as)) as, not (rowHere && isRow t)]
   where
     isRow (NamT NamRecord r [] _) = r == anonRecordVar
     isRow _ = False

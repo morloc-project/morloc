@@ -79,6 +79,7 @@ module Morloc.CodeGenerator.Grammars.Common
   , makeTraceLabelLookup
   ) where
 
+import Morloc.Data.Zip (zipPrefix, zipSame, zipWithPrefix, zipWithSameM)
 import Morloc.Frontend.Rename (displayName)
 import qualified Control.Monad.State as CMS
 import Data.Binary (Binary)
@@ -261,7 +262,7 @@ patternSetter ::
   [MDoc] -> -- ordered arguments substituted at set sites
   MDoc -- the returned data structure with a new spine that reuses unchanged fields
 patternSetter makeTuple makeRecord accessTuple accessRecord finalizeSet dat0 t0 s0 args0 =
-  setter dat0 t0 (zip (ungroup s0) args0)
+  setter dat0 t0 (zipSame (ungroup s0) args0)
   where
     -- A value belongs to the field the author named it at, not to the next
     -- declared field that happens to be mentioned. 'ungroup' enumerates the
@@ -287,7 +288,7 @@ patternSetter makeTuple makeRecord accessTuple accessRecord finalizeSet dat0 t0 
         (AppF _ ts1) ->
           makeTuple t1
             [ rebuild (accessTuple t1 dat1 i) t (into (Left i) ps)
-            | (i, t) <- zip [0 ..] (tyArgs ts1)
+            | (i, t) <- zipPrefix [0 ..] (tyArgs ts1)
             ]
         (NamF _ _ _ rs1) ->
           makeRecord t1
@@ -1002,7 +1003,7 @@ unifyRecords ::
   ] ->
   RecMap
 unifyRecords xs =
-  zipWith (\i ((v, ks), es) -> ((v, ks), RecEntry (structName i v) es)) [1 ..]
+  zipWithPrefix (\i ((v, ks), es) -> ((v, ks), RecEntry (structName i v) es)) [1 ..]
     . map (\((v, ks), rss) -> ((v, ks), map unifyField (transpose (map snd rss))))
     . groupSort
     . unique
@@ -1033,7 +1034,7 @@ mergeVariantOccurrences name occs = case filter (not . null . snd) occs of
           Left $
             "the `data` type " <> name <> " has occurrences listing different constructors: ("
               <> spell (map fst as) <> ") and (" <> spell (map fst bs) <> ")"
-      | otherwise = zipWithM pick as bs
+      | otherwise = zipWithSameM pick as bs
     pick (c, (xs, rx)) (_, (_, ry))
       | rx == ry = Right (c, (xs, rx))
       | otherwise =

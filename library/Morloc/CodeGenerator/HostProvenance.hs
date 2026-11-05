@@ -22,6 +22,7 @@ module Morloc.CodeGenerator.HostProvenance
   , sameTermSources
   ) where
 
+import Morloc.Data.Zip (zip3Indexed, zipPrefix, zipSame, zipWith3Same, zipWithPrefix, zipWithSame)
 import Control.Monad.State (State, evalStateT, get, gets, lift, modify, put, runState)
 import qualified Data.List as List
 import qualified Data.Set as Set
@@ -124,13 +125,13 @@ fit (EffectT _ t) (PFun o 0 r) = PFun o 0 (fit t r)
 fit t (PData o ps)
   | not (isCallable t)
   , length ps == length (dataKids t) =
-      PData o (zipWith (maybe id fit) (dataKids t) ps)
+      PData o (zipWithSame (maybe id fit) (dataKids t) ps)
 fit t p = mark (deep p) t
 
 joinP :: Type -> Prov -> Prov -> Prov
 joinP t p q = case (fit t p, fit t q) of
   (PFun a m x, PFun b n y) | m == n -> PFun (joinO a b) m (joinP (afterCall t m) x y)
-  (PData a xs, PData b ys) | length xs == length ys -> PData (joinO a b) (zipWith3 (maybe const joinP) (dataKids t) xs ys)
+  (PData a xs, PData b ys) | length xs == length ys -> PData (joinO a b) (zipWith3Same (maybe const joinP) (dataKids t) xs ys)
   (p', q') -> mark (joinO (deep p') (deep q')) t
 
 joinsP :: Type -> [Prov] -> Prov
@@ -178,7 +179,7 @@ sourcedResult host sig args = top (resultU <$> sig)
       Just (FunU _ r) -> r
       Just r -> r
       Nothing -> VarU (TV "")
-    bound = Map.fromListWith (<>) (concat (zipWith bindVars params args))
+    bound = Map.fromListWith (<>) (concat (zipWithPrefix bindVars params args))
     captured = joinsO (map held args)
 
     top (Just (VarU v)) t | Just ps <- relayed v = joinsP t ps
@@ -193,7 +194,7 @@ sourcedResult host sig args = top (resultU <$> sig)
           gks = case gu of
             Just g | length (kidsU g) == length ks -> map Just (kidsU g)
             _ -> map (const Nothing) ks
-       in PData (if null ks && containsFunT t then host else Portable) (zipWith (\g -> maybe noValue (madeIn g)) gks ks)
+       in PData (if null ks && containsFunT t then host else Portable) (zipWithSame (\g -> maybe noValue (madeIn g)) gks ks)
 
     relayed v
       | Set.member v foralls = Map.lookup v bound
@@ -206,7 +207,7 @@ sourcedResult host sig args = top (resultU <$> sig)
       _ -> []
     bindVars (EffectU _ u) (PFun _ 0 r) = bindVars u r
     bindVars u (PData _ ps)
-      | length (kidsU u) == length ps = concat (zipWith bindVars (kidsU u) ps)
+      | length (kidsU u) == length ps = concat (zipWithSame bindVars (kidsU u) ps)
     bindVars _ _ = []
 
     effInner (EffectU _ u) = Just u
@@ -310,7 +311,7 @@ analyze cx env dm (AnnoS (Idx gi t) (Idx ci _) e) = case e of
           _ -> []
         -- a parameter already in scope was bound by the caller (a mapped
         -- element); binder names are unique within a tree
-        bound = [(v, if dm == Portable then fit it (Map.findWithDefault (portable it) v env) else mark dm it) | (v, it) <- zip vs ins]
+        bound = [(v, if dm == Portable then fit it (Map.findWithDefault (portable it) v env) else mark dm it) | (v, it) <- zipSame vs ins]
         env' = foldr (uncurry Map.insert) env bound
     binders [(v, held p) | (v, p) <- bound]
     i <- analyze cx env' Portable b
@@ -338,7 +339,7 @@ analyze cx env dm (AnnoS (Idx gi t) (Idx ci _) e) = case e of
     done (fit t (PData Portable (map iProv is))) (frees is) is
   NamS rs -> do
     is <- mapM (analyze cx env dm . snd) rs
-    let byKey = Map.fromList (zip (map fst rs) (map iProv is))
+    let byKey = Map.fromList (zipSame (map fst rs) (map iProv is))
         parts = case t of
           NamT _ _ _ fs -> [Map.findWithDefault (portable ft) k byKey | (k, ft) <- fs]
           _ -> map iProv is
@@ -459,7 +460,7 @@ analyze cx env dm (AnnoS (Idx gi t) (Idx ci _) e) = case e of
             FunT pins _ -> any (\it -> containsFunT it || isCallable it) pins
             _ -> False
           given = Host (srcLang src) (PassedBy src)
-      is <- sequence [analyze cx env (if passes pt then given else Portable) x | (x, pt) <- zip xs (ins <> repeat t)]
+      is <- sequence [analyze cx env (if passes pt then given else Portable) x | (x, pt) <- zipPrefix xs (ins <> repeat t)]
       floats xs is
       let m = arity ft
           k = length xs
@@ -481,7 +482,7 @@ analyze cx env dm (AnnoS (Idx gi t) (Idx ci _) e) = case e of
       is0 <- mapM (analyze cx env Portable) xs
       let m = cxArity cx j
           pts = cxParamType cx j
-          keyOf is = (j, normalKey pts [fit pt p | (pt, p) <- zip pts (map iProv is <> map portable (drop (length is) pts))])
+          keyOf is = (j, normalKey pts [fit pt p | (pt, p) <- zipPrefix pts (map iProv is <> map portable (drop (length is) pts))])
           (_, demands) = cxSummary cx (keyOf is0)
       is <-
         if all (== Portable) demands
@@ -490,7 +491,7 @@ analyze cx env dm (AnnoS (Idx gi t) (Idx ci _) e) = case e of
             -- the arguments were read without the demand the callee puts on them
             found <- gets fDemand
             put before {fDemand = found}
-            sequence [analyze cx env d x | (x, d) <- zip xs (demands <> repeat Portable)]
+            sequence [analyze cx env d x | (x, d) <- zipPrefix xs (demands <> repeat Portable)]
       floats xs is
       let key = keyOf is
           (res, _) = cxSummary cx key
@@ -504,7 +505,7 @@ analyze cx env dm (AnnoS (Idx gi t) (Idx ci _) e) = case e of
     -- an argument computed from a host-made function, whose value morloc
     -- made, is bound by a let before the call so that only its value crosses
     floats xs is =
-      let sites = [(ci, k) | (k, x, i) <- zip3 [0 :: Int ..] xs is, floatable x, held (iProv i) == Portable, not (Map.null (iFree i))]
+      let sites = [(ci, k) | (k, x, i) <- zip3Indexed 0 xs is, floatable x, held (iProv i) == Portable, not (Map.null (iFree i))]
        in unless (null sites) $ modify (\f -> f {fFloat = foldr Set.insert (fFloat f) sites})
 
     floatable (AnnoS _ _ x) = case x of
@@ -687,7 +688,7 @@ planWith view target trees00
           copied = [key | key <- Set.toList reachable, key `notElem` rootKeys]
       names <- Map.fromList <$> mapM (\key -> (,) key <$> copyName key) copied
       copies <- mapM (\key -> (,) key <$> makeCopy byRoot names key) copied
-      let instances = zip rootKeys trees0 <> copies
+      let instances = zipSame rootKeys trees0 <> copies
           -- a call of a copy reaches the tree it copies
           copyTree = Map.fromList [(name, j) | ((j, _), name) <- Map.toList names]
           cxCopies = cx {cxTree = \v -> maybe (target v) Just (Map.lookup v copyTree)}
@@ -712,9 +713,9 @@ planWith view target trees00
             LamS ws b -> (ws, b)
             _ -> ([], t)
           ret = afterCall ty (length vs)
-          (info, found) = runState (analyze cx (Map.fromList (zip vs pat)) Portable body) emptyFound
+          (info, found) = runState (analyze cx (Map.fromList (zipSame vs pat)) Portable body) emptyFound
           demands = [Map.findWithDefault Portable v (fDemand found) | v <- vs]
-       in (found {fBinders = foldr (\(v, p) -> if held p == Portable then id else Map.insert v (held p)) (fBinders found) (zip vs pat)}, fit ret (iProv info), demands)
+       in (found {fBinders = foldr (\(v, p) -> if held p == Portable then id else Map.insert v (held p)) (fBinders found) (zipSame vs pat)}, fit ret (iProv info), demands)
 
     analyzeKey viewRoot cx (j, pat) = case Map.lookup j viewRoot of
       Just t -> analyzeTree cx pat t
@@ -809,7 +810,7 @@ planWith view target trees00
                   return (AnnoS (Idx ri xt) (Idx rci xl) (LetBndS v), [(v, x)])
                 else return (x, [])
           )
-          (zip [0 :: Int ..] xs)
+          (zipPrefix [0 :: Int ..] xs)
       ci' <- MM.getCounter
       let app = AnnoS g (Idx ci' cl) (AppS f (map fst bound))
           letIn body@(AnnoS (Idx _ bt) _ _) (v, x@(AnnoS _ (Idx _ xl) _)) = do
@@ -894,7 +895,7 @@ uniqueBinders t = evalStateT (go Map.empty t) Set.empty
       LetBndS v -> return (LetBndS (Map.findWithDefault v v ren))
       LamS vs b -> do
         vs' <- mapM fresh vs
-        LamS vs' <$> go (foldr (uncurry Map.insert) ren (zip vs vs')) b
+        LamS vs' <$> go (foldr (uncurry Map.insert) ren (zipSame vs vs')) b
       LetS v a b -> do
         a' <- go ren a
         v' <- fresh v

@@ -43,6 +43,7 @@ module Morloc.CodeGenerator.Guest.Futhark
   , futharkBackends
   ) where
 
+import Morloc.Data.Zip (zipPrefix, zipSame, zipWithPrefixM_, zipWithSameM_)
 import qualified Morloc.BaseTypes as BT
 import Data.Aeson (FromJSON (..), eitherDecodeFileStrict', withObject, (.!=), (.:), (.:?))
 import Data.Map.Strict (Map)
@@ -381,9 +382,9 @@ resolveOpaque name reg key = case Map.lookup key reg of
         MM.throwRejected (badFut name <> "unsupported opaque kind " <> pretty (rtKind rt))
     | otherwise -> case (rtRecord rt, rtCtype rt, rtFree rt) of
         (Just (RawRecord newFn fields), Just ct, Just freeFn) -> do
-          zipWithM_ (checkFieldLabel name) [0 ..] fields
+          zipWithPrefixM_ (checkFieldLabel name) [0 ..] fields
           fts <- mapM (resolveField name reg) fields
-          pure (FTTuple (TupleOps ct newFn freeFn) [(p, ft) | (RawField _ p _, ft) <- zip fields fts])
+          pure (FTTuple (TupleOps ct newFn freeFn) [(p, ft) | (RawField _ p _, ft) <- zipSame fields fts])
         _ -> MM.throwRejected (badFut name <> "opaque type " <> pretty key <> " is not a supported tuple")
 
 -- Futhark labels tuple fields "0","1",...; codegen binds morloc field k to the
@@ -416,7 +417,7 @@ checkOne entries sig = do
           <> pretty (length argTs) <> " arguments but the entry takes "
           <> pretty (length (feInputs entry))
       )
-  zipWithM_ (compareFT entryName) argTs (feInputs entry)
+  zipWithSameM_ (compareFT entryName) argTs (feInputs entry)
   compareFT entryName retT (feOutput entry)
   pure (sig, entry)
 
@@ -656,7 +657,7 @@ renderEntryText ge =
 
     header =
       retTy <> " " <> glueName entry <> "("
-        <> T.intercalate ", " ["const " <> aty <> "& x" <> tshow i | (i, aty) <- zip [0 :: Int ..] argTys]
+        <> T.intercalate ", " ["const " <> aty <> "& x" <> tshow i | (i, aty) <- zipPrefix [0 :: Int ..] argTys]
         <> ") {"
 
 -- Build every entry input in order, threading the running list of frees (all
@@ -731,7 +732,7 @@ renderReturn (FTNum n@(FNum e r)) =
       , "return " <> value <> ";"
       )
 renderReturn (FTTuple ti fields) =
-  let pf = [projectField k proj f | (k, (proj, f)) <- zip [0 ..] fields]
+  let pf = [projectField k proj f | (k, (proj, f)) <- zipPrefix [0 ..] fields]
       decls = concatMap pfDecls pf
       projs = map pfProj pf
       errFrees = concatMap pfErrFree pf

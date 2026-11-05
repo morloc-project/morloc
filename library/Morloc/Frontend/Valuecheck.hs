@@ -14,6 +14,7 @@ contradictory, such as two constants of one type with different values.
 -}
 module Morloc.Frontend.Valuecheck (valuecheck, checkPair, checkRecursion) where
 
+import Morloc.Data.Zip (zipPrefix, zipSame, zipWithSame)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import qualified Data.Text as DT
@@ -123,7 +124,7 @@ checkRecursion specs termOf owners sites = go [] id
     -- the demand of each member on the next, and of the last on the first
     checkCycle :: [Member g] -> (Demand -> Demand) -> MorlocMonad ()
     checkCycle members final =
-      let ring = zip members (map memberIncoming (drop 1 members) <> [final])
+      let ring = zipSame members (map memberIncoming (drop 1 members) <> [final])
           rotations = take (length ring) (iterate rotate ring)
           rotate xs = drop 1 xs <> take 1 xs
        in case [m | r@((m, _) : _) <- rotations, needsItself m r] of
@@ -286,7 +287,7 @@ checkPair i e10 e20 = do
         let k = min (length vs1) (length vs2)
             used = Set.unions [freeTerms b1, freeTerms b2, Set.fromList (vs1 <> vs2), params]
             fresh = take k [v | j <- [(0 :: Int) ..], let v = EV (DT.pack ("x" <> show j)), Set.notMember v used]
-            rename vs body = foldr (\(v, r) acc -> substituteEVar v r acc) body (zip vs fresh)
+            rename vs body = foldr (\(v, r) acc -> substituteEVar v r acc) body (zipPrefix vs fresh)
             rest g vs body = case drop k vs of
               [] -> rename vs body
               more -> LamP g more (rename vs body)
@@ -306,17 +307,17 @@ checkPair i e10 e20 = do
                 <> "b:" <+> pretty y
       (LstP _ xs, LstP _ ys)
         | length xs /= length ys -> reject "Containers of unequal length"
-        | otherwise -> sequence_ (zipWith next xs ys)
+        | otherwise -> sequence_ (zipWithSame next xs ys)
       (TupP _ xs, TupP _ ys)
         | length xs /= length ys -> MM.throwCompilerBug "valuecheck: two alternatives of one type are tuples of different sizes"
-        | otherwise -> sequence_ (zipWith next xs ys)
+        | otherwise -> sequence_ (zipWithSame next xs ys)
       (NamP _ rs1, NamP _ rs2)
         | sort (map fst rs1) /= sort (map fst rs2) -> MM.throwCompilerBug "valuecheck: two alternatives of one type are records with different fields"
         | otherwise -> sequence_ [next x y | (k, x) <- rs1, Just y <- [lookup k rs2]]
       (ConP _ c1 xs, ConP _ c2 ys)
         | c1 /= c2 -> reject "Different constructors"
         | length xs /= length ys -> MM.throwCompilerBug "valuecheck: one constructor applied to different numbers of fields"
-        | otherwise -> sequence_ (zipWith next xs ys)
+        | otherwise -> sequence_ (zipWithSame next xs ys)
       -- a value made optional is null only if it was itself null
       (CoerceP CoerceToOptional _ x, LitP _ MNull)
         | isConstant x && not (isNull x) -> reject "A value is compared with null"
