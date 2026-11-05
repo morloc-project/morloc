@@ -32,13 +32,22 @@ module Morloc.Frontend.Instances
   , instanceDecls
   , resolve
   , methodImpls
+  , superclassObligations
+  , fixOpenVars
+  , couldMatch
+  , fixRigidVars
+  , explainResolveError
+  , keyConstraint
+  , keyNames
+  , renameConstraint
   ) where
 
 import qualified Data.List as DL
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import qualified Data.Text as DT
-import Morloc.Data.Zip (indexed, zipExact)
+import Morloc.Data.Doc
+import Morloc.Data.Zip (indexed, zipExact, zipPrefix)
 import Morloc.Namespace.Expr
 import Morloc.Namespace.Prim
 import Morloc.Namespace.Type
@@ -272,8 +281,12 @@ keyVar hs v = case lookup v (concatMap varForms hs) of
   Just form -> rebuildVar form v
   Nothing -> VarU v
 
+-- | Every variable of the map replaced at once: a value may name a key.
 substituteAll :: Map.Map TVar TypeU -> TypeU -> TypeU
-substituteAll sub t = Map.foldrWithKey substituteTVar t sub
+substituteAll sub t =
+  Map.foldrWithKey substituteTVar (renameVarsU (Map.mapWithKey (\v _ -> placeholder v) sub) t) (Map.mapKeys placeholder sub)
+  where
+    placeholder (TV n) = TV ("#subst." <> n)
 
 mapConstraint :: (TypeU -> TypeU) -> Constraint -> Constraint
 mapConstraint f (Constraint c ts) = Constraint c (map f ts)
@@ -312,7 +325,106 @@ openVars t = here <> concatMap openVars (childrenU t)
       VarU v | generated v -> [v]
       KVarU (v, _) | generated v -> [v]
       _ -> []
-    generated (TV n) = "@q" `DT.isInfixOf` n
+
+generated :: TVar -> Bool
+generated (TV n) = "@q" `DT.isInfixOf` n
+
+-- | The constraints a declaration owes the superclasses of its class, at
+-- its head (CLS-5).
+superclassObligations :: InstanceEnv -> InstanceDecl -> [Constraint]
+superclassObligations env d =
+  let InstanceKey cls (_, hs) = idKey d
+   in case Map.lookup cls (ieClasses env) of
+        Just ci | Just pairs <- zipExact (ciVars ci) hs -> map (mapConstraint (substituteAll (Map.fromList pairs))) (ciSupers ci)
+        _ -> []
+
+-- | A constraint with each variable nothing fixed made a fixed one, and the
+-- fixed names. An existential carrying part of a tuple or record stays
+-- open.
+fixOpenVars :: Constraint -> (Constraint, [TVar])
+fixOpenVars c = (mapConstraint fix c, DL.nub (concatMap fixedIn (constraintTypes c)))
+  where
+    fix t = maybe (mapChildrenU fix t) id (fixable t)
+    fixedIn t = maybe (concatMap fixedIn (childrenU t)) (map fst . varForms) (fixable t)
+    fixable t = case t of
+      ExistU v ([], _) ([], _) -> Just (VarU (fixedName v))
+      VarU v | generated v -> Just (VarU (fixedName v))
+      KVarU (v, k) | generated v -> Just (KVarU (fixedName v, k))
+      _ -> Nothing
+    fixedName (TV n) = TV ("?" <> DT.replace "@q" "" n)
+
+-- | Whether some instance head of the constraint's class unifies with it,
+-- at some link of its alias chain, once its open variables are solved. A
+-- constraint holding an existential with partial fields may yet match.
+couldMatch :: Scope -> InstanceEnv -> Constraint -> Bool
+couldMatch scope env (Constraint cls args0)
+  | any hasPartialExist args0 = True
+  | otherwise = walk fuel (tuple (map (nominal recordNames . flexExist) args0))
+  where
+    recordNames = declaredRecordNames scope
+    decls = instanceDecls env cls
+    open = concatMap openVars args0
+    fuel = Map.size scope + depth (tuple args0) + 1
+    unifies t d =
+      let (vs, hs) = ikHead (idKey d)
+       in isJust (unifyU (vs <> open) (tuple hs) t)
+    walk n t
+      | any (unifies t) decls = True
+      | n <= 0 = False
+      | otherwise = case TE.reduceType scope t of
+          Just t' | t' /= t -> walk (n - 1) t'
+          _ -> case TE.reduceTypeLeaves scope t of
+            Just t' | t' /= t -> walk (n - 1) t'
+            _ -> False
+couldMatch _ _ _ = True
+
+-- | A constraint whose generated variables in @rigid@ (a signature's,
+-- renamed by the checker) no longer read as open.
+fixRigidVars :: Set.Set TVar -> Constraint -> Constraint
+fixRigidVars rigid = mapConstraint fix
+  where
+    fix t = case t of
+      VarU v | Set.member v rigid -> VarU (rigidName v)
+      KVarU (v, k) | Set.member v rigid -> KVarU (rigidName v, k)
+      _ -> mapChildrenU fix t
+    rigidName (TV n) = TV (DT.replace "@q" "@" n)
+
+constraintTypes :: Constraint -> [TypeU]
+constraintTypes (Constraint _ ts) = ts
+constraintTypes (CMember a b) = [a, b]
+constraintTypes (CSubset a b) = [a, b]
+constraintTypes (CDisjoint a b) = [a, b]
+
+-- | An instance as a constraint, its variables named for reading.
+keyConstraint :: InstanceKey -> Constraint
+keyConstraint k@(InstanceKey cls (_, hs)) = renameConstraint (keyNames k) (Constraint cls hs)
+
+-- | Readable names for an instance's variables.
+keyNames :: InstanceKey -> Map.Map TVar TVar
+keyNames (InstanceKey _ (vs, hs)) = Map.fromList (zipPrefix vs fresh)
+  where
+    taken = Set.fromList [v | (v, _) <- concatMap varForms hs, v `notElem` vs]
+    fresh = [v | k <- [0 :: Int ..], let v = TV (letter k), not (Set.member v taken)]
+    letter k = if k < 26 then DT.singleton (toEnum (fromEnum 'a' + k)) else "t" <> DT.pack (show k)
+
+renameConstraint :: Map.Map TVar TVar -> Constraint -> Constraint
+renameConstraint names = mapConstraint (renameVarsU names)
+
+-- | Why a constraint is not met, for a message; @pc@ shows a constraint.
+explainResolveError :: (Constraint -> MDoc) -> ResolveError -> MDoc
+explainResolveError pc e = case e of
+  NoInstance c _ -> "no instance gives" <+> pc c
+  Ambiguous c ks ->
+    "several instances match" <+> pc c <+> "and none is more specific than the others ("
+      <> hsep (punctuate "," (map (pc . keyConstraint) ks)) <> ")"
+  Undetermined c vs ->
+    "nothing fixes" <+> hsep (punctuate "," (map pretty vs)) <+> "in" <+> pc c
+  ContextUnmet k c e' ->
+    "the instance" <+> pc (keyConstraint k) <+> "needs" <+> pc c <> ", and" <+> explainResolveError pc e'
+  ContextLoop cs ->
+    "resolving it does not end:" <+> hsep (punctuate " needs" (map pc cs))
+  NotCrossable c -> pc c <+> "is not derived for a function or a suspension"
+  NotAClass c -> pc c <+> "is not a class constraint"
 
 -- | An existential carrying part of a tuple or record: it is not one type a
 -- variable can stand for.

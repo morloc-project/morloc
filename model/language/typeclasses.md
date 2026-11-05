@@ -42,7 +42,7 @@ Code: conforms 2026-10-21
 
 ### CLS-5 Superclasses and instance contexts are obligations
 Intent: ruled 2026-10-29
-Tests: spec-cls-5-2, spec-cls-5-8, spec-cls-5-9
+Tests: spec-cls-5-1, spec-cls-5-2, spec-cls-5-3, spec-cls-5-4, spec-cls-5-5, spec-cls-5-8, spec-cls-5-9, spec-cls-5-10, spec-cls-5-11
 Code: deviates (issues/typeclasses.md)
 
 `class C a => D a` requires an instance `C T` for every instance `D T`, and
@@ -164,7 +164,7 @@ type, bypassing the instance (CLS-19).
 
 ### CLS-16 The most specific matching instance is selected
 Intent: ruled 2026-10-29
-Tests: spec-cls-16-1, spec-cls-16-2, spec-cls-16-3, spec-cls-16-5
+Tests: spec-cls-16-1, spec-cls-16-2, spec-cls-16-3, spec-cls-16-5, spec-cls-16-6, spec-cls-16-7, spec-cls-16-9
 Code: deviates (issues/typeclasses.md)
 
 Instances may overlap. At a use at type `T`, the instances whose heads match

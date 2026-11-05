@@ -4469,6 +4469,72 @@ cls16Tests =
         f :: (Int, Str) -> Str
         f x = c2 x
         |]
+    , accept
+        "spec-cls-16-6"
+        [r|
+        module main (g)
+        newtype Vec (n :: Nat) a = List a
+        class Sz a where
+          sz :: a -> Str
+        instance Sz (Vec n a) where
+          sz x = "vec"
+        g :: Vec 3 a -> Str
+        g x = sz x
+        |]
+    , reject
+        "spec-cls-16-7"
+        [r|
+        module main (g)
+        newtype Vec (n :: Nat) a = List a
+        class Sz a where
+          sz :: a -> Str
+        instance Sz (Vec 3 Str) where
+          sz x = "three"
+        g :: Vec n Str -> Str
+        g x = sz x
+        |]
+    , accept
+        "spec-cls-16-9"
+        [r|
+        module main (g)
+        newtype Vec (n :: Nat) a = List a
+        class Sz a where
+          sz :: a -> Str
+        class Sz a => Big a where
+          big :: a -> Str
+        instance Sz (Vec n a) where
+          sz x = "vec"
+        instance Big (Vec 3 a) where
+          big x = "big"
+        g :: Vec 3 a -> Str
+        g x = big x
+        |]
+    , accept
+        "spec-cls-5-10"
+        [r|
+        module main (g)
+        newtype Vec (n :: Nat) a = List a
+        class Pk a b where
+          pk :: a -> b
+          unpk :: b -> a
+        instance Pk [a] (Vec n a) where
+          source Py from "lib.py" ("pk", "unpk")
+        g :: Vec n Str -> Vec n Str
+        g t = pk (unpk t)
+        |]
+    , reject
+        "spec-cls-5-11"
+        [r|
+        module main (g)
+        newtype Vec (n :: Nat) a = List a
+        class Pk a b where
+          pk :: a -> b
+          unpk :: b -> a
+        instance Pk [a] (Vec 3 a) where
+          source Py from "lib.py" ("pk", "unpk")
+        g :: Vec n Str -> Vec n Str
+        g t = pk (unpk t)
+        |]
     , testCase "spec-cls-16-3" $
         ( isSubtypeOf (ForallU a (ForallU b (pair (VarU a) (VarU b)))) (ForallU c (pair (VarU c) int))
         , isSubtypeOf (ForallU c (pair (VarU c) int)) (ForallU a (ForallU b (pair (VarU a) (VarU b))))
@@ -4533,6 +4599,50 @@ cls5Tests =
         ident x = x
         f :: Str -> Str
         f x = ident x
+        |]
+    , reject
+        "spec-cls-5-1"
+        [r|
+        module main (g)
+        class Sz a where
+          sz :: a -> Str
+        record W a where
+          val :: a
+        instance Sz Str where
+          sz x = "str"
+        instance Sz a => Sz (W a) where
+          sz w = "w"
+        g :: W a -> Str
+        g w = sz w
+        |]
+    , rejectFixture "spec-cls-5-3" False "Base" "cls-5-3/main.loc"
+    , accept
+        "spec-cls-5-4"
+        [r|
+        module main (f)
+        class Marker a
+        class Marker a => Sz a where
+          sz :: a -> Str
+        instance Marker Str
+        instance Sz Str where
+          sz x = "str"
+        f :: Str -> Str
+        f x = sz x
+        |]
+    , accept
+        "spec-cls-5-5"
+        [r|
+        module main (f)
+        class Base a where
+          base :: a -> Str
+        class Base a => Sz a where
+          sz :: a -> Str
+        instance Sz Str where
+          sz x = "sz"
+        instance Base Str where
+          base x = "base"
+        f :: Str -> Str
+        f x = sz x
         |]
     , instanceTableTest
     ]

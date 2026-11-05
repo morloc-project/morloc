@@ -56,12 +56,6 @@
   `ident :: Numeric a => a -> a; ident x = x` applied at Int builds and
   runs, though root has no `Numeric Int`.
 
-- **Link-time superclass check ignores types.** [read] CLS-5.
-  `matchesSuperInstance` (Link.hs:790) passes when the superclass has an
-  instance at any type. The precise check (`checkSuperclassInstance`,
-  Frontend/Typecheck.hs:3459) covers only instances in the root module
-  (Treeify.hs:575 `rootInstances`), so an imported module's `instance D T` without `C T` is
-  likely accepted. Not reproduced across modules.
 - **An instance on a legacy-form record is not found where its type was
   evaluated.** [read] Violates CLS-2. Instance filtering
   (Frontend/Typecheck.hs `compatibleTypeU`) compares an evaluated record
@@ -143,8 +137,7 @@
 - **Instances are matched four ways.** [read] Violates CLS-16 (one rule).
   Typecheck.resolveInstances keeps every subtype-or-coercion match after
   alias filtering; Realize.collapseExpr picks among them with its own
-  `compatibleType` (UnkT a wildcard); Typecheck.validate's `covers` uses
-  `matchTypeU` with no alias chain; CodeGenerator/Instance.hs, used for
+  `compatibleType` (UnkT a wildcard); CodeGenerator/Instance.hs, used for
   calls the compiler builds (`__get_slice__`, `__access_index__`,
   `__to_index__`, `map` across effects), takes the first sourced match,
   with no specificity and blind to an instance whose body is morloc.
@@ -183,28 +176,12 @@
   (Namespace/State.hs:442) has no field for it. With `instance Sz a => Sz
   (W a)` and no `Sz Str`, `useIt s = sz (mkW s)` typechecks. Repro:
   /work/plans/error-clusters/repro/instance-context-use.loc.
-- **The signature check ignores an instance context.** [reproduced,
-  2026-11-01] Violates CLS-5. `g :: W a -> Int; g w = sz w` (no `Sz a`)
-  typechecks: `covers` (Frontend/Typecheck.hs ~3521) accepts any head that
-  matches without reading its context. Repro:
-  /work/plans/error-clusters/repro/instance-context-signature.loc.
-- **`matchTypeU` binds only type variables and ignores effect rows.**
-  [read, 2026-11-01] `matchTypeU` (Frontend/Typecheck.hs ~3590), used by
-  `covers`, never binds a Nat variable, so a head such as `Eq (Vector n
-  a)` does not cover a use at `Vector 3 a`; and `<E> T` matches `<F> T`.
-- **UNSOUND: an instance at a literal Nat head serves a generic use.**
-  [reproduced 2026-11-02] With only `instance Sz (Vec 3 Int)` and
-  `g :: Vec n Int -> Int; g x = sz x`, the program builds and `g` returns 3
-  for every length: validate skips the Nat-only obligation (`free` drops
-  KVarU, so `mentionsRigid` never sees it) and `compatibleTypeU` matches
-  any two Nats. CLS-16/17. Repro: briefs/S2-steps1-3.md (h7).
-- **A superclass with no methods rejects every instance of its subclass.**
-  [reproduced 2026-11-02] "Instance Sz Int requires Marker Int but no such
-  instance exists": Link `checkSuperclassConstraints` looks only for
-  per-method entries. CLS-5.
-- **The superclass check depends on declaration order.** [reproduced
-  2026-11-02] A superclass instance declared later in the same module is
-  reported missing. CLS-5.
+- **Use-level selection treats any two Nats as equal.** [read,
+  2026-11-05] `compatibleTypeU` (Frontend/Typecheck.hs) matches any two
+  Nat expressions, so `instance Sz (Vec 3 Int)` is a candidate at every
+  `Vec k Int`. The contract check now rejects a use at a signature's Nat
+  variable (spec-cls-16-7), and a literal mismatch is rejected at the use
+  (`Vec 4 Str`); no program is known to reach the wildcard. CLS-16.
 - **`findPackableWireForm` keeps only type-variable parameters.** [read,
   2026-11-02] A native with a Nat parameter gets no tier-2 wire form; the
   first match wins, with no specificity and no check on repeated variables.

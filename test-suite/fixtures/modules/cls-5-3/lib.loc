@@ -1,0 +1,13 @@
+module lib (Base, Sz)
+
+class Base a where
+  base :: a -> Str
+
+class Base a => Sz a where
+  sz :: a -> Str
+
+instance Base Str where
+  base x = "base"
+
+instance Sz Bool where
+  sz x = "sz"

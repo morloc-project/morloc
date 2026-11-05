@@ -23,6 +23,7 @@ import qualified Morloc.BaseTypes as BT
 import Morloc.Data.Doc
 import qualified Morloc.Data.Map as Map
 import qualified Data.Set as Set
+import qualified Morloc.Frontend.Instances as FI
 import Morloc.Frontend.Namespace
 import Morloc.Frontend.Rename (displayName)
 import Morloc.Frontend.PatternCheck (missingKeyError, receiverShape, rowFields, tupleWidthError)
@@ -3516,13 +3517,12 @@ peakSExpr (IntrinsicS intr _) = "@" <> pretty (intrinsicName intr)
 -- signature's type variables are rigid, so the body must work at every
 -- instance of them, and every class method the body uses at a rigid type must
 -- follow from the signature's constraints (a superclass follows from its
--- subclass). The trees are the definitions' own bodies, with references to
--- other signed top-level terms typed by their signatures ('Treeify'). The
--- results are discarded: this only rejects programs.
-validate :: [AnnoS Int ManyPoly Int] -> [(Int, ClassName, [TypeU])] -> MorlocMonad ()
-validate trees instances = do
-  mapM_ one trees
-  mapM_ checkSuperclassInstance instances
+-- subclass) or be met by an instance ('resolve'). The trees are the
+-- definitions' own bodies, with references to other signed top-level terms
+-- typed by their signatures ('Treeify'). The results are discarded: this
+-- only rejects programs.
+validate :: [AnnoS Int ManyPoly Int] -> MorlocMonad ()
+validate = mapM_ one
   where
     one e0@(AnnoS i _ _) = do
       let g0 = emptyGamma {gammaRigid = Just Set.empty}
@@ -3542,21 +3542,32 @@ validate trees instances = do
         [(v, row) | (v, row) <- Map.toList (gammaEffSubs g1), Set.member v rigid]
       checkRigidNats i g1 [(j, t) | AnnoS (Idx j t) _ _ <- annoNodes e1]
       checkShapes g1 e1
-      closure <- superclassClosure givens
-      heads <- instanceHeads
       scope <- MM.getGeneralScope
-      unmet <-
-        filterM
-          (\(Constraint cls args) -> case args of
-              -- each instantiation is resolved where it is used
-              [t] -> not <$> derivableAt scope cls t
-              _ -> return True)
-          [ c
-          | c@(Constraint cls args) <- obligations
-          , any (mentionsRigid rigid) args
-          , not (any (covers args) (Map.findWithDefault [] cls heads))
-          ]
-      mapM_ (requireEntailed i closure) unmet
+      env <- MM.gets stateInstances
+      let fixed = Set.unions [rigid, gammaRigidNats g1, gammaRigidRows g1]
+          mentionsRigid t = any ((`Set.member` fixed) . fst) (varForms t)
+          given = map (FI.fixRigidVars fixed . apply g1) givens
+      -- An obligation over none of the signature's variables is resolved
+      -- at each use.
+      sequence_
+        [ case FI.resolve FI.defaultPolicy scope env given c of
+            Right _ -> return ()
+            -- a head may match once the use fixes the open variables
+            Left (FI.NoInstance _ _)
+              | not (null open), FI.couldMatch scope env c1 -> return ()
+            -- each instantiation is resolved where it is used
+            Left (FI.NoInstance _ _)
+              | [t] <- args -> derivableAt scope cls t >>= \d -> if d then return () else unmet i given open c
+            Left (FI.Undetermined _ _) -> return ()
+            Left (FI.NoInstance _ _) -> unmet i given open c
+            Left e ->
+              MM.throwSourcedError i $
+                "This definition needs" <+> prettyConstraint c <> ":" <+> FI.explainResolveError prettyConstraint e <> "."
+        | c0@(Constraint cls args) <- obligations
+        , any mentionsRigid args
+        , let c1 = FI.fixRigidVars fixed c0
+              (c, open) = FI.fixOpenVars c1
+        ]
 
 -- | PAT-1: each destructuring pattern fits the value it destructures. A
 -- tuple pattern needs a tuple of its width, a record pattern a record with
@@ -3765,89 +3776,21 @@ instantiateObligations g (ForallU v t) cs =
     substC _ c = c
 instantiateObligations g t cs = (g {gammaConstraints = gammaConstraints g ++ cs}, t)
 
--- | An instance exists only where an instance of each of its class's
--- superclasses exists at the same types: @instance Mn Int@ needs
--- @instance Sg Int@ when @class Sg a => Mn a@. A superclass with no methods
--- leaves no trace of its instances and is not checked.
-checkSuperclassInstance :: (Int, ClassName, [TypeU]) -> MorlocMonad ()
-checkSuperclassInstance (i, cls, ts0) = do
-  -- the instance's own type variables are fixed names while matching
-  let ts = map (snd . unqualify) ts0
-  classDefs <- MM.gets stateClassDefs
-  tcls <- MM.gets stateTypeclasses
-  let vars = [classVars inst | inst <- Map.elems tcls, className inst == cls]
-      needed = case (Map.lookup cls classDefs, vars) of
-        (Just scs, vs : _) | length vs == length ts ->
-          [ (sc, map (substAll (zipSame vs ts)) sargs) | Constraint sc sargs <- scs ]
-        _ -> []
-      substAll ps t = foldr (\(v, r) acc -> substituteTVar v r acc) t ps
-      methodsOf sc = [inst | inst <- Map.elems tcls, className inst == sc]
-  mapM_
-    ( \(sc, args) -> case methodsOf sc of
-        [] -> return ()
-        insts ->
-          let heads = [h | inst <- insts, tt <- instanceTerms inst, Just h <- [instanceHeadOf inst tt]]
-           in if any (covers args) heads
-                then return ()
-                else
-                  MM.throwSourcedError i $
-                    "The instance" <+> pretty cls <+> hsep (map (parens . pretty) ts)
-                      <+> "needs an instance" <+> pretty sc <+> hsep (map (parens . pretty) args)
-                      <+> "of its superclass, and there is none."
-    )
-    needed
-
--- | Every instance head of every class, as its quantified variables and head
--- types. An obligation an instance head matches -- e.g. @Eq a@ under a
--- catch-all @instance Eq a@ -- holds without a declared constraint.
-instanceHeads :: MorlocMonad (Map.Map ClassName [([TVar], [TypeU])])
-instanceHeads = do
-  tcls <- MM.gets stateTypeclasses
-  return $
-    Map.fromListWith (<>)
-      [ (className inst, [h])
-      | inst <- Map.elems tcls
-      , tt <- instanceTerms inst
-      , Just h <- [instanceHeadOf inst tt]
-      ]
-
--- | The head of one implementation of a class method: the instance's
--- quantified variables and the types it instantiates the class at.
-instanceHeadOf :: Instance -> TermTypes -> Maybe ([TVar], [TypeU])
-instanceHeadOf inst tt = do
-  et <- termGeneral tt
-  let (instVars, instBody) = unqualify (etype et)
-      (_, classBody) = unqualify (etype (classType inst))
-  sub <- matchTypeU (Set.fromList (classVars inst)) classBody instBody
-  h <- mapM (`Map.lookup` sub) (classVars inst)
-  return (instVars, h)
-
--- | Whether an instance head matches the given class arguments.
-covers :: [TypeU] -> ([TVar], [TypeU]) -> Bool
-covers args (instVars, h) =
-  isJust (matchTypeU (Set.fromList instVars) (headTuple h) (headTuple args))
-  where
-    headTuple xs = AppU (VarU (TV "__instance_head__")) xs
-
-
-mentionsRigid :: Set.Set TVar -> TypeU -> Bool
-mentionsRigid rigid t = any isRigid (Set.toList (free t))
-  where
-    isRigid (VarU v) = Set.member v rigid
-    isRigid _ = False
-
-requireEntailed :: Int -> [Constraint] -> Constraint -> MorlocMonad ()
-requireEntailed defIdx closure c
-  | c `elem` closure = return ()
-  | otherwise =
-      MM.throwSourcedError defIdx $
-        "This definition needs" <+> prettyConstraint c
-          <+> "but its signature does not declare it (the signature's"
-          <+> "constraints and their superclasses give" <+> declared <> ")."
-  where
-    declared = case closure of
-      [] -> "no constraints"
-      cs -> hcat (punctuate ", " (map prettyConstraint cs))
+-- | An obligation neither the signature nor an instance meets. @open@: the
+-- variables of it nothing in the definition fixed.
+unmet :: Int -> [Constraint] -> [TVar] -> Constraint -> MorlocMonad ()
+unmet defIdx givens open c = do
+  closure <- superclassClosure givens
+  let declared = case closure of
+        [] -> "no constraints"
+        cs -> hcat (punctuate ", " (map prettyConstraint cs))
+      undetermined = case open of
+        [] -> mempty
+        vs -> "; nothing in the definition fixes" <+> hsep (punctuate "," (map pretty vs))
+  MM.throwSourcedError defIdx $
+    "This definition needs" <+> prettyConstraint c
+      <+> "but its signature does not declare it (the signature's"
+      <+> "constraints and their superclasses give" <+> declared <> ")" <> undetermined <> "."
 
 -- | Constraints together with every superclass constraint they imply.
 superclassClosure :: [Constraint] -> MorlocMonad [Constraint]
@@ -3890,25 +3833,3 @@ literalAtRigid kind g (VarU v) = case gammaRigid g of
   _ -> False
 literalAtRigid _ _ _ = False
 
--- | One-way matching: bind the pattern's variables (those in @pats@) so the
--- pattern equals the target. Other structure must agree exactly.
-matchTypeU :: Set.Set TVar -> TypeU -> TypeU -> Maybe (Map.Map TVar TypeU)
-matchTypeU pats = go Map.empty
-  where
-    go sub (VarU v) t
-      | Set.member v pats = case Map.lookup v sub of
-          Nothing -> Just (Map.insert v t sub)
-          Just t' -> if t' == t then Just sub else Nothing
-    go sub (FunU as a) (FunU bs b)
-      | length as == length bs = goList sub (a : as) (b : bs)
-    go sub (AppU f as) (AppU h bs)
-      | length as == length bs = goList sub (f : as) (h : bs)
-    go sub (OptionalU a) (OptionalU b) = go sub a b
-    go sub (EffectU _ a) (EffectU _ b) = go sub a b
-    go sub (NamU o1 n1 ps1 rs1) (NamU o2 n2 ps2 rs2)
-      | o1 == o2 && n1 == n2 && length ps1 == length ps2 && map fst rs1 == map fst rs2 =
-          goList sub (ps1 <> map snd rs1) (ps2 <> map snd rs2)
-    go sub a b = if a == b then Just sub else Nothing
-    goList sub [] [] = Just sub
-    goList sub (a : as) (b : bs) = go sub a b >>= \sub' -> goList sub' as bs
-    goList _ _ _ = Nothing

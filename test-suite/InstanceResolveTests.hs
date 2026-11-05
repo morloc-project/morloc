@@ -102,6 +102,24 @@ instanceResolveTests =
     , testCase "declarations of one head merge" $
         map (Map.keys . idMethods) (instanceDecls (env [declWith "Sz" [int] "m1", declWith "Sz" [int] "m2"]) (ClassName "Sz"))
           @?= [[EV "m1", EV "m2"]]
+    , testCase "a context is instantiated at once, a use naming the head's own variables" $
+        let e = env [decl "C2" [sz (VarU b)] [ForallU a (ForallU b (pair (VarU a) (VarU b)))]]
+            k0 = VarU (TV "#0")
+            k1 = VarU (TV "#1")
+         in case run e [sz k0] (Constraint (ClassName "C2") [pair k1 k0]) of
+              Right (EvInstance _ _ ctxEv) -> ctxEv @?= [EvGiven (sz k0)]
+              r -> assertFailure (show r)
+    , testCase "superclass obligations are at the instance's head, its variables fixed" $
+        let e = insertClassInfo (ClassName "Big") (ClassInfo [a] [sz (VarU a)] Map.empty) (env [decl "Big" [] [ForallU a (w (VarU a))]])
+         in map (superclassObligations e) (instanceDecls e (ClassName "Big"))
+              @?= [[sz (w (VarU (TV "#0")))]]
+    , testCase "a signature's generated variables are fixed, an existential is not" $
+        ( fixOpenVars (fixRigidVars (Set.singleton (TV "a@q3")) (sz (pair (VarU (TV "a@q3")) ex)))
+        , isUndetermined (run (env [decl "Sz" [] [ForallU a (VarU a)]]) [] (sz (VarU (TV "a@q3"))))
+        , keyOf (run (env [decl "Sz" [] [ForallU a (VarU a)]]) [] (fixRigidVars (Set.singleton (TV "a@q3")) (sz (VarU (TV "a@q3"))))) )
+          @?= ( (sz (pair (VarU (TV "a@3")) (VarU (TV "?e"))), [TV "?e"])
+              , True
+              , Just (key "Sz" [ForallU a (VarU a)]) )
     , testCase "an omitted method falls through to a more general instance (CLS-12 (b))" $
         let e = env [declWith "Sz" [ForallU a (VarU a)] "m", decl "Sz" [] [int]]
          in case run e [] (sz int) of

@@ -78,7 +78,7 @@ typecheckFrontend path code = do
     _ -> return ()
   (checks, exports) <- restructure dag >>= treeify
   checkRsize
-  F.validate (validationTrees checks) (validationInstances checks)
+  F.validate (validationTrees checks)
   es <- specialize checks exports
   specNames <- MM.gets stateSpecNames
   Specs specTrees <- MM.gets stateSpecs

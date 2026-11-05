@@ -78,11 +78,9 @@ data Namer = Namer
 -- ultimate type annotations. The indices also match terms to their signatures
 -- and locations in source code.
 -- | What 'Morloc.Frontend.Typecheck.validate' checks: each signed top-level
--- definition of the root module as a tree of its own body, and the root
--- module's instance declarations.
+-- definition of the root module as a tree of its own body.
 data Validation = Validation
   { validationTrees :: [AnnoS Int ManyPoly Int]
-  , validationInstances :: [(Int, ClassName, [TypeU])]
   , validationDefs :: Map.Map Int (Int, EVar)
   -- ^ each checked definition by term id: its declaration index and name
   }
@@ -91,7 +89,7 @@ treeify ::
   DAG MVar [AliasedSymbol] ExprI ->
   MorlocMonad (Validation, [(Int, EVar)])
 treeify d
-  | Map.size d == 0 = return (Validation [] [] Map.empty, [])
+  | Map.size d == 0 = return (Validation [] Map.empty, [])
   | otherwise = case DAG.roots d of
       -- if no parentless element exists, then the graph must be empty or cyclic
       [] -> MM.throwCompilerBug "cyclic import dependency in treeify"
@@ -166,13 +164,12 @@ treeify d
                     }
               )
 
-            (checks, instances, defs) <- case DAG.lookupNode k d' of
+            (checks, defs) <- case DAG.lookupNode k d' of
               Just node -> do
                 checkBareClassConstraints node
-                (cs, ds) <- contractRoots node
-                return (cs, rootInstances node, ds)
-              Nothing -> return ([], [], Map.empty)
-            return (Validation checks instances defs, exports')
+                contractRoots node
+              Nothing -> return ([], Map.empty)
+            return (Validation checks defs, exports')
           (Just _) ->
             error "This should not be possible, all ExportAll cases should have been removed in Restructure.hs"
 
@@ -589,11 +586,6 @@ contractRoots (ExprI _ (ModE _ es)) = do
     ]
   return (trees <> instanceTrees, Map.fromList [(termId, (i, v)) | (termId, v, i) <- firstPerTerm])
 contractRoots _ = return ([], Map.empty)
-
--- | The root module's instance declarations: index, class, instance types.
-rootInstances :: ExprI -> [(Int, ClassName, [TypeU])]
-rootInstances (ExprI _ (ModE _ es)) = [(i, cls, ts) | ExprI i (IstE _ cls _ ts _) <- es]
-rootInstances _ = []
 
 -- | A class constraint names the type it constrains: @Ord a =>@, never a
 -- bare @Ord =>@. Checked on the root module's signatures.

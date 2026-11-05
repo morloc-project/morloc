@@ -24,12 +24,24 @@ import Morloc.Data.Doc
 import Morloc.Data.Map (Map)
 import qualified Morloc.Data.Map as Map
 import qualified Morloc.Data.Text as DT
-import Morloc.Frontend.Instances (insertClassInfo, insertInstanceDecl, mkInstanceDecl)
+import Morloc.Frontend.Instances
+  ( ResolveError (..)
+  , defaultPolicy
+  , explainResolveError
+  , insertClassInfo
+  , insertInstanceDecl
+  , keyConstraint
+  , keyNames
+  , mkInstanceDecl
+  , renameConstraint
+  , resolve
+  , superclassObligations
+  )
 import Morloc.Frontend.Merge (mergeSignatureSet, weaveTermTypes)
 import Morloc.Frontend.Namespace
 import qualified Morloc.Monad as MM
 import qualified Morloc.TypeEval as TE
-import Morloc.Typecheck.Internal (qualify, unqualify)
+import Morloc.Typecheck.Internal (prettyConstraint, qualify, unqualify)
 
 -- The following terms are modified in morloc state
 --  * stateSignatures :: GMap Int Int SignatureSet -- links terms to types
@@ -57,7 +69,7 @@ link d0 = do
   mayResult <- DAG.synthesizeNodes synth d0
   case mayResult of
     Nothing -> MM.throwCompilerBug "the module graph has a cycle after loading"
-    (Just _) -> return ()
+    (Just _) -> checkSuperclasses
 
 synth ::
   MVar ->
@@ -488,7 +500,7 @@ linkLocalTerms m0 s0 e0 = linkLocal Set.empty s0 (toCondensedState s0) e0
               <+> squotes (pretty cls)
               <+> "in the scope of module"
               <+> squotes (pretty m0)
-        (Just (_, Typeclass superConstraints _ vs sigs, emap)) ->
+        (Just (_, Typeclass _ _ vs sigs, emap)) ->
           if length vs /= length ts
             then
               MM.throwSourcedError i $
@@ -497,7 +509,6 @@ linkLocalTerms m0 s0 e0 = linkLocal Set.empty s0 (toCondensedState s0) e0
                     <+> squotes (pretty cls)
                     <+> "differ in number of terms"
             else do
-              checkSuperclassConstraints i cls (zipSame vs ts) superConstraints
               let decl = mkInstanceDecl origin cls ctx ts (instanceImpls m0 origin es) i
                   key = idKey decl
               if null es
@@ -787,48 +798,38 @@ substituteInstanceTypes (unzip -> (clsVars, instanceParameters)) clsType = do
     substituteQualifiers (ForallU v t) (r : rs) = substituteQualifiers (substituteTVar v r t) rs
     substituteQualifiers t _ = t
 
--- | For each superclass of an instance's class, require that some instance of
--- the superclass with at least one method has been registered. The
--- instance's type arguments are not compared.
-checkSuperclassConstraints :: Int -> ClassName -> [(TVar, TypeU)] -> [Constraint] -> MorlocMonad ()
-checkSuperclassConstraints _ _ _ [] = return ()
-checkSuperclassConstraints i cls params constraints = do
-  classDefs <- MM.gets stateClassDefs
-  mapM_ (checkOne classDefs) constraints
+-- | CLS-5: each instance has, at its own types and given its own context,
+-- an instance of every superclass of its class. Checked on the whole
+-- program, so neither declaration order nor module matters.
+checkSuperclasses :: MorlocMonad ()
+checkSuperclasses = do
+  env <- MM.gets stateInstances
+  scope <- MM.getGeneralScope
+  sequence_
+    [ checkOne scope env d c
+    | ds <- Map.elems (ieByClass env)
+    , d <- ds
+    , c@(Constraint _ _) <- superclassObligations env d
+    ]
   where
-    checkOne :: Map ClassName [Constraint] -> Constraint -> MorlocMonad ()
-    -- Primitive constraints are checked by the typechecker, not here.
-    checkOne _ (CMember _ _) = return ()
-    checkOne _ (CSubset _ _) = return ()
-    checkOne _ (CDisjoint _ _) = return ()
-    checkOne classDefs (Constraint superCls superTypeArgs) = do
-      let substArgs = applyParams superTypeArgs params
-      case Map.lookup superCls classDefs of
-        Nothing ->
-          MM.throwSourcedError i $
-            "Superclass" <+> squotes (pretty superCls) <+> "is not defined"
-        Just _ -> do
-          tcls <- MM.gets stateTypeclasses
-          let methodsOfSuper = [inst | (_, inst) <- Map.toList tcls, className inst == superCls]
-              hasMatchingInstance = any (matchesSuperInstance substArgs) methodsOfSuper
-          if not hasMatchingInstance
-            then
-              MM.throwSourcedError i $
-                "Instance"
-                  <+> pretty cls
-                  <+> hsep (map pretty (map snd params))
-                  <+> "requires"
-                  <+> pretty superCls
-                  <+> hsep (map pretty substArgs)
-                  <+> "but no such instance exists"
-            else return ()
+    checkOne scope env d c@(Constraint sc _)
+      | Map.notMember sc (ieClasses env) = at d $ "Superclass" <+> squotes (pretty sc) <+> "is not defined"
+      | otherwise = case resolve defaultPolicy scope env (idContext d) c of
+          Right _ -> return ()
+          Left (NoInstance _ _) -> at d $ needs d c <> ", and there is none."
+          Left e -> at d $ needs d c <> ":" <+> explainResolveError (shown d) e <> "."
+    checkOne _ _ _ _ = return ()
 
-    applyParams :: [TypeU] -> [(TVar, TypeU)] -> [TypeU]
-    applyParams ts [] = ts
-    applyParams ts ((v, r) : ps) = applyParams (map (substituteTVar v r) ts) ps
+    needs d c =
+      "The instance" <+> prettyConstraint (keyConstraint (idKey d))
+        <+> "needs an instance" <+> shown d c <+> "of its superclass"
 
-    matchesSuperInstance :: [TypeU] -> Instance -> Bool
-    matchesSuperInstance _ inst = not (null (instanceTerms inst))
+    shown d = prettyConstraint . renameConstraint (keyNames (idKey d))
+
+    at :: InstanceDecl -> MDoc -> MorlocMonad ()
+    at d msg = case idSites d of
+      (i : _) -> MM.throwSourcedError i msg
+      [] -> MM.throwCompilerBug msg
 
 -- | HOST-3: the call groups an @rsize@ declares leave at least one argument
 -- for the last group, counting the arguments of the signature, aliases
