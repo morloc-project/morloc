@@ -59,6 +59,17 @@
   lengths a command's input gives (Frontend/Typecheck.hs `runTimeVars`
   matches only Vector), so the main pass of an unsigned export may solve
   it rather than hold it for every value.
+- [reproduced, 2026-11-05] Violates POLY-3 (a label binds the argument's
+  value): a signed morloc wrapper whose result depends on a Str label
+  cannot be specialized. `colOf :: f@Str -> Table n r -> Vector n
+  (ProjectField r f); colOf f t = getCol f t`, used as `colOf "qual" t`,
+  fails at the definition: "Cannot compare types {chrom=Str, pos=Int,
+  qual=Real}.f@s4 and Real". The definition is checked at the use's type
+  (Frontend/Specialize.hs elaborate, typecheckRootAt), which has lost
+  that `f` is "qual"; an Int label survives because its length equation
+  can be solved back, a field name cannot be recovered from a field type.
+  Candidate: carry literal label arguments in the specialization key.
+  Reproduction: /work/plans/error-clusters/repro/str-label-wrapper.
 - [read, 2026-10-31] Gap in DIM-10: a `f@Str` or `l@[Str]` label whose
   argument is not a literal leaves its variable to the Str and Rec solvers
   (`getCol name t`), which may solve it; only Int labels are observed.
