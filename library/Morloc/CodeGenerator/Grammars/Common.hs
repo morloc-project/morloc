@@ -369,7 +369,7 @@ sealLoop body = case body of
   LoopIf g t e -> LoopIf (weave g) (sealLoop t) (sealLoop e)
   LoopNLet i r k -> LoopNLet i (weave r) (sealLoop k)
   LoopSLet i r k -> LoopSLet i (weave r) (sealLoop k)
-  LoopContinue ds -> floated (concatMap (reverse . getDeps) ds) (LoopContinue (map unD ds)) (LoopContinue (map weave ds))
+  LoopContinue ds -> floated (concatMap (reverse . getDeps . snd) ds) (LoopContinue (map (fmap unD) ds)) (LoopContinue (map (fmap weave) ds))
   LoopBase d -> floated (reverse (getDeps d)) (LoopBase (unD d)) (LoopBase (weave d))
   where
     floated deps leaf fallback = case mapM native deps of
@@ -709,7 +709,7 @@ wrapArgForms = goSM Map.empty
       LoopNLet i ne rest -> LoopNLet i (goN env ne) (goLoop (Map.insert i BoundNative env) base rest)
       LoopSLet i se rest -> LoopSLet i (goS env se) (goLoop (Map.insert i BoundSerial env) base rest)
       LoopBase x -> LoopBase (base env x)
-      LoopContinue nes -> LoopContinue (map (goN env) nes)
+      LoopContinue nes -> LoopContinue (map (fmap (goN env)) nes)
 
     natives ids env = foldr (\i -> Map.insert i BoundNative) env ids
 
@@ -744,7 +744,7 @@ argsBoundLoop a base body = case body of
   LoopNLet i ne rest -> LoopNLet i (argsBoundN a ne) (argsBoundLoop a base rest)
   LoopSLet i se rest -> LoopSLet i (argsBoundS a se) (argsBoundLoop (Set.delete i a) base rest)
   LoopBase x -> LoopBase (base a x)
-  LoopContinue nes -> LoopContinue (map (argsBoundN a) nes)
+  LoopContinue nes -> LoopContinue (map (fmap (argsBoundN a)) nes)
 
 invertSerialManifold :: SerialManifold -> SerialManifold
 invertSerialManifold sm0 =

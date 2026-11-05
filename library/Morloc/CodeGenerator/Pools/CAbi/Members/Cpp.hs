@@ -996,8 +996,8 @@ isFunctionValue _ = False
 -- @resultVar = <base>; break;@; a continue leaf -> compute each new value of
 -- a slot it changes into an @auto@ temp, then move it into the slot. Each
 -- let binds as its IR node decides.
-cppWalkLoopBody :: (MDoc -> MDoc) -> [Int] -> LoopBody LowN LowS PoolDocs -> CppTranslatorM [MDoc]
-cppWalkLoopBody setResult ids = go
+cppWalkLoopBody :: (MDoc -> MDoc) -> LoopBody LowN LowS PoolDocs -> CppTranslatorM [MDoc]
+cppWalkLoopBody setResult = go
   where
     go (LoopBase seDocs) =
       return $ poolPriorLines seDocs <> [setResult (poolExpr seDocs), "break;"]
@@ -1006,7 +1006,7 @@ cppWalkLoopBody setResult ids = go
     -- A let moved into its slot needs no temp, as no slot reassignment
     -- changes it.
     go (LoopContinue xs) = do
-      let changed = changedSlots ids [(o, d) | Low o d <- xs]
+      let changed = changedSlots [(i, o, d) | (i, Low o d) <- xs]
       moved <- mapM (\(_, cd, oe) -> cppKeptLet oe (poolExpr cd)) changed
       let viaTemp = [(i, cd) | ((i, cd, _), Nothing) <- zipSame changed moved]
           direct = [(i, x) | ((i, _, _), Just x) <- zipSame changed moved]
@@ -1277,7 +1277,7 @@ PROPAGATE_ERROR(errmsg)|]
             return ( "std::optional<" <> tStr <> ">" <+> resultVar <> ";"
                    , \e -> resultVar <> ".emplace(" <> e <> ");"
                    , "std::move(*" <> resultVar <> ")" )
-        bodyLines <- cppWalkLoopBody setResult ids body
+        bodyLines <- cppWalkLoopBody setResult body
         let whileDoc = vsep ["while (true) {", indent 4 (vsep bodyLines), "}"]
             leaves = loopBodyDocs body <> [d | (_, Just d) <- carried]
         return $ PoolDocs

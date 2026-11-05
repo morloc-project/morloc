@@ -1104,8 +1104,7 @@ genericMakeLoop desc cfg _ carried body0 = do
   let body = trimap lowDocs lowDocs id body0
   resultIdx <- lcNewIndex cfg
   let resultVar = (helperNamer (ldManifoldPrefix desc)) resultIdx
-      ids = map fst carried
-  bodyLines <- walkLB ids resultVar body
+  bodyLines <- walkLB resultVar body
   -- A native loop's locals start from their initializers.
   let initLines = concat [poolPriorLines d <> [(nvarNamer (ldManifoldPrefix desc)) i <+> assign <+> poolExpr d] | (i, Just d) <- carried]
       resultDecl = resultVar <+> assign <+> pretty (ldNullLiteral desc)
@@ -1125,15 +1124,15 @@ genericMakeLoop desc cfg _ carried body0 = do
     assign = pretty (ldAssignOp desc)
     trueLit = pretty (ldBoolTrue desc)
     -- Emit the statements for one loop-body subtree.
-    walkLB ids resultVar = go
+    walkLB resultVar = go
       where
         go (LoopBase seDocs) =
           return $ poolPriorLines seDocs <> [resultVar <+> assign <+> poolExpr seDocs, "break"]
         -- A slot whose new value is itself is left alone.
         go (LoopContinue contDocs) = do
-          let changed = [(i, cd) | (i, cd) <- zipSame ids contDocs, not (sameLocal i cd)]
+          let changed = [(i, cd) | (i, cd) <- contDocs, not (sameLocal i cd)]
           tmpVars <- map (helperNamer (ldManifoldPrefix desc)) <$> mapM (const (lcNewIndex cfg)) changed
-          let priors = concatMap poolPriorLines contDocs
+          let priors = concatMap (poolPriorLines . snd) contDocs
               tmpAssigns = zipWithSame (\tv (_, cd) -> tv <+> assign <+> poolExpr cd) tmpVars changed
               reassigns = zipWithSame (\(i, _) tv -> (nvarNamer (ldManifoldPrefix desc)) i <+> assign <+> tv) changed tmpVars
           return $ priors <> tmpAssigns <> reassigns

@@ -82,7 +82,7 @@ prettyFoldManifold =
         prettyLB (LoopNLet i ne b) = "n" <> pretty i <+> "=" <+> poolExpr ne <> ";" <+> prettyLB b
         prettyLB (LoopSLet i se b) = "s" <> pretty i <+> "=" <+> poolExpr se <> ";" <+> prettyLB b
         prettyLB (LoopBase se) = "return" <+> poolExpr se
-        prettyLB (LoopContinue nes) = "__continue__" <> list (map poolExpr nes)
+        prettyLB (LoopContinue nes) = "__continue__" <> list (map (poolExpr . snd) nes)
 
     makeNativeExpr ::
       (Monad m) => NativeExpr -> NativeExpr_ PoolDocs PoolDocs PoolDocs PoolDocs PoolDocs -> m PoolDocs

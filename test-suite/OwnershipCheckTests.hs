@@ -11,8 +11,13 @@ import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit
 
 import Morloc.CodeGenerator.Namespace
+import Morloc.Data.Zip (indexedFrom, zipSame)
 import Morloc.CodeGenerator.Ownership (LetMode (..), changedSlots)
 import Morloc.CodeGenerator.OwnershipCheck (checkNative)
+
+-- | A loop continue whose values fill the carried slots 1, 2, ... in order.
+cont :: [ne] -> LoopBody ne se b
+cont xs = LoopContinue (indexedFrom 1 xs)
 
 -- | OWN-1 over the take and borrow decisions a member renders: let 10 takes
 -- a field of 1, let 11 binds a reference to a field of 1.
@@ -25,9 +30,9 @@ slotCases =
   testGroup
     "carried slots a continue changes"
     [ testCase "a slot given itself is left alone" $
-        slots (changedSlots [1, 2] (zip [rd 1, IntN fv 0] "ab")) @?= [(2, 'b')]
+        slots (changedSlots [(1, rd 1, 'a'), (2, IntN fv 0, 'b')]) @?= [(2, 'b')]
     , testCase "a slot given another slot is changed" $
-        slots (changedSlots [1, 2] (zip [rd 2, rd 1] "ab")) @?= [(1, 'a'), (2, 'b')]
+        slots (changedSlots [(1, rd 2, 'a'), (2, rd 1, 'b')]) @?= [(1, 'a'), (2, 'b')]
     ]
   where
     slots xs = [(i, v) | (i, v, _) <- xs]
@@ -56,8 +61,8 @@ takeCases =
         bad (NativeLetN 11 (field 1) (NativeLetN 10 (field 1) (tup [rd 10, rd 11])))
     -- a loop slot taken from is rebound by the back edge
     , testCase "spec-own-1-7" $ do
-        ok (loop [(1, IntN fv 0)] (LoopNLet 10 (field 1) (LoopContinue [rd 10])))
-        bad (loop [(1, IntN fv 0)] (LoopNLet 10 (field 1) (LoopContinue [tup [rd 10, rd 1]])))
+        ok (loop [(1, IntN fv 0)] (LoopNLet 10 (field 1) (cont [rd 10])))
+        bad (loop [(1, IntN fv 0)] (LoopNLet 10 (field 1) (cont [tup [rd 10, rd 1]])))
     -- a body that may run more than once may not take from outside itself
     , testCase "spec-own-1-8" $
         bad (DoBlockN ty (NativeLetN 10 (field 1) (rd 10)))
@@ -95,7 +100,7 @@ takeCases =
         badMoving (NativeLetN 2 (IntN fv 0) (NativeLetN 3 (VariantN ty "Link" 1 [lastRd 2]) (rd 2)))
         badMoving (NativeLetN 2 (IntN fv 0) (NativeLetN 3 (RecordN NamRecord fv [] [(Key "a", lastRd 2)]) (rd 2)))
         badMoving (NativeLetN 2 (IntN fv 0) (NativeLetN 3 (CoerceN CoerceToOptional ty (lastRd 2)) (rd 2)))
-        badMoving (LoopN ty [(1, IntN fv 0)] (LoopNLet 2 (IntN fv 0) (LoopContinue [tup [lastRd 2, rd 2]])))
+        badMoving (LoopN ty [(1, IntN fv 0)] (LoopNLet 2 (IntN fv 0) (cont [tup [lastRd 2, rd 2]])))
     -- a copy of a moved local is its own value; a reference into the copy is
     -- not a reference into what was moved, and the reverse
     , testCase "spec-own-1-19" $ do

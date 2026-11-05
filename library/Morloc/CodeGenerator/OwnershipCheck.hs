@@ -409,5 +409,5 @@ loop env entry ids body base = go entry
          in (rs `andThen` const rk, bk)
       LoopBase x -> (base env' s x, start)
       LoopContinue xs ->
-        let r = step s (map (\x s' -> keepPart env' s' x) xs)
+        let r = step s (map (\(_, x) s' -> keepPart env' s' x) xs)
          in (r, forget (Set.fromList ids) (rSt r))

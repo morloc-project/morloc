@@ -1151,7 +1151,7 @@ lowerSerialExprRaw cfg (ReturnS (BndVarS _ _)) (ReturnS_ (Low _ x)) =
   return $ x {poolExpr = lcDupPacket cfg (poolExpr x), poolReturnFlag = True}
 lowerSerialExprRaw _ _ (ReturnS_ (Low _ x)) = return $ x {poolReturnFlag = True}
 lowerSerialExprRaw cfg _ (LoopS_ _ ids body) = do
-  body' <- adaptLoopBodyOwned cfg (return . lowDocs) (runIdentity . foldSerialExprM serialVarsOf) ids body
+  body' <- adaptLoopBodyOwned cfg (return . lowDocs) (runIdentity . foldSerialExprM serialVarsOf) body
   lcMakeLoop cfg LoopResultSerial [(i, Nothing) | i <- ids] body'
 lowerSerialExprRaw cfg _ (SerialLetS_ i (Low rhsE e1) (Low _ e2)) = case rhsE of
   -- The let RHS is a SerializeS, so the bound variable owns a put_value
@@ -1387,7 +1387,7 @@ loopChildren _ wrap (LoopIf c t f) = [RN c, wrap t, wrap f]
 loopChildren _ wrap (LoopNLet _ a b) = [RN a, wrap b]
 loopChildren _ wrap (LoopSLet _ a b) = [RS a, wrap b]
 loopChildren base _ (LoopBase x) = [base x]
-loopChildren _ _ (LoopContinue xs) = map RN xs
+loopChildren _ _ (LoopContinue xs) = map (RN . snd) xs
 
 -- | The native variable a let binds, its right-hand side and its body.
 rnodeLet :: RNode -> Maybe (Int, RNode, RNode)
@@ -1680,8 +1680,8 @@ markLoopBody env baseNode carried b0 = let (b', (_, caps)) = go (filter (`Set.no
           (x', cx) = markStep here [] x
        in (LoopBase x', (here, cx))
     go owned (LoopContinue xs) =
-      let total = Map.unionsWith (+) (map (stepReads env owned . RN) xs)
-          marked = map (markStep total []) xs
+      let total = Map.unionsWith (+) (map (stepReads env owned . RN . snd) xs)
+          marked = [((i, x'), c) | (i, x) <- xs, let (x', c) = markStep total [] x]
        in (LoopContinue (map fst marked), (total, concatMap snd marked))
     go owned (LoopNLet i x b) =
       let ((x', b'), r) = markLet env owned i (\rest -> markSpineN env owned [rest] x) (\o -> go o b)
@@ -1841,7 +1841,6 @@ nativeManifoldsUnder n = here <> concatMap nativeManifoldsUnder (rnodeChildren n
 loopBorrows :: (TypeF -> Bool) -> Set.Set Int -> Set.Set Int -> [(Int, NativeExpr)] -> LoopBody NativeExpr SerialExpr NativeExpr -> Set.Set Int
 loopBorrows mayBorrow g reused starts body = settle (Set.fromList [i | (i, s) <- starts, borrowVar g s, not (Set.member i reused)])
   where
-    ids = map fst starts
     settle b =
       let (lets, bad) = scan (Set.union g b) body
           b' = Set.difference b bad
@@ -1852,7 +1851,7 @@ loopBorrows mayBorrow g reused starts body = settle (Set.fromList [i | (i, s) <-
     scan env (LoopSLet _ _ k) = scan env k
     scan env (LoopIf _ t e) = scan env t <> scan env e
     scan _ (LoopBase _) = (Set.empty, Set.empty)
-    scan env (LoopContinue xs) = (Set.empty, Set.fromList [i | (i, x) <- zipSame ids xs, not (borrowPart env x)])
+    scan env (LoopContinue xs) = (Set.empty, Set.fromList [i | (i, x) <- xs, not (borrowPart env x)])
 
     borrowPart env e = isJust (borrowPartOf mayBorrow (`Set.member` env) e)
 
@@ -2024,7 +2023,7 @@ scanLoop scanB lbody =
     go (LoopNLet i rhs body) = scanLet i rhs <> scanNE rhs <> go body
     go (LoopSLet _ e body) = scanSE e <> go body
     go (LoopBase e) = scanB e
-    go (LoopContinue es) = mconcat (map scanNE es)
+    go (LoopContinue es) = mconcat (map (scanNE . snd) es)
 
 scanNE :: NativeExpr -> ConsumeScan
 scanNE (ManN nm) = scanNM nm
@@ -2151,10 +2150,9 @@ adaptLoopBodyOwned ::
   (Low b -> m PoolDocs) ->
   -- the serial variables a base leaf reads
   (b -> Set.Set Int) ->
-  [Int] ->
   LoopBody LowN LowS (Low b) ->
   m (LoopBody LowN LowS PoolDocs)
-adaptLoopBodyOwned cfg adaptBase baseVars ids body = go body
+adaptLoopBodyOwned cfg adaptBase baseVars body = go body
   where
     go (LoopIf c t e) = LoopIf c <$> go t <*> go e
     go (LoopNLet i (Low orhs rhs) b) = do
@@ -2163,10 +2161,8 @@ adaptLoopBodyOwned cfg adaptBase baseVars ids body = go body
     go (LoopSLet i rhs@(Low orhs _) b) = do
       rhs' <- ownLoopPacket i rhs
       LoopSLet i (Low orhs rhs') <$> go b
-    go (LoopContinue xs)
-      | length ids == length xs =
-          LoopContinue <$> sequence (zipWithSame (\i (Low oe d) -> Low oe <$> loopBorrowOr cfg i oe d (adaptOwnedElem cfg oe d)) ids xs)
-      | otherwise = error "morloc bug: a loop continue whose values do not match its carried locals"
+    go (LoopContinue xs) =
+      LoopContinue <$> mapM (\(i, Low oe d) -> (,) i . Low oe <$> loopBorrowOr cfg i oe d (adaptOwnedElem cfg oe d)) xs
     go (LoopBase d) = LoopBase <$> adaptBase d
 
     -- A packet a serial let makes each iteration is released when the
@@ -3230,7 +3226,7 @@ lowerNativeExprRaw cfg _ (LoopN_ t starts body) = do
   starts' <- mapM (\(i, Low oe d) -> (,) i . Just <$> loopBorrowOr cfg i oe d (adaptOwnedElem cfg oe d >>= keepOne cfg oe)) starts
   let ids = map fst starts
       keepBase (Low ob d) = adaptOwnedElem cfg ob d >>= \d' -> (\v -> d' {poolExpr = v}) <$> lcKeepSlot cfg ids ob (poolExpr d')
-  body' <- adaptLoopBodyOwned cfg keepBase (runIdentity . foldNativeExprM serialVarsOf) ids body
+  body' <- adaptLoopBodyOwned cfg keepBase (runIdentity . foldNativeExprM serialVarsOf) body
   lcMakeLoop cfg (LoopResultNative t) starts' body'
 lowerNativeExprRaw cfg origExpr (MapOptionalN_ _ wireTf src (Low _ innerDocs)) = do
   idx <- lcNewIndex cfg

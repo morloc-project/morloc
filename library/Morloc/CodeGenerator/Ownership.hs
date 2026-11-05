@@ -25,7 +25,7 @@ module Morloc.CodeGenerator.Ownership
   , nativeLets
   ) where
 
-import Morloc.Data.Zip (indexed, zipSame)
+import Morloc.Data.Zip (indexed)
 import Control.Monad.Identity (Identity, runIdentity)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
@@ -176,12 +176,9 @@ unchangedSlot i e = case e of
   _ -> False
 
 -- | The carried slots a continue reassigns, with their new values and their
--- IR values: every slot, less those whose IR value is the slot itself. The
--- carried slots and the values must match in number.
-changedSlots :: [Int] -> [(NativeExpr, a)] -> [(Int, a, NativeExpr)]
-changedSlots ids vals
-  | length ids /= length vals = error "morloc bug: a loop continue whose values do not match its carried slots"
-  | otherwise = [(i, v, o) | (i, (o, v)) <- zipSame ids vals, not (unchangedSlot i o)]
+-- IR values: every slot, less those whose IR value is the slot itself.
+changedSlots :: [(Int, NativeExpr, a)] -> [(Int, a, NativeExpr)]
+changedSlots slots = [(i, v, o) | (i, o, v) <- slots, not (unchangedSlot i o)]
 
 -- | The decisions within one manifold's body.
 data ManifoldPlan = ManifoldPlan

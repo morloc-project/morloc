@@ -2796,12 +2796,11 @@ rustMakeLoop res carried body = do
     , poolChain = Nothing
     }
   where
-    ids = map fst carried
     walk (LoopBase seDocs) =
       return $ poolPriorLines seDocs <> ["break" <+> poolExpr seDocs <> ";"]
     -- A slot the continue leaves as it is gets no temporary.
     walk (LoopContinue xs) = do
-      let changed = [(i, v) | (i, v, _) <- changedSlots ids [(o, d) | Low o d <- xs]]
+      let changed = [(i, v) | (i, v, _) <- changedSlots [(i, o, d) | (i, Low o d) <- xs]]
       tmpVars <- map (helperNamer rustLocals) <$> mapM (const getCounter) changed
       let priors = concatMap (poolPriorLines . snd) changed
           tmpAssigns = zipWithSame (\tv (_, cd) -> "let" <+> tv <+> "=" <+> poolExpr cd <> ";") tmpVars changed

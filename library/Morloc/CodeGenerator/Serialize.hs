@@ -17,7 +17,7 @@ module Morloc.CodeGenerator.Serialize
   ( serialize
   ) where
 
-import Morloc.Data.Zip (zip3Same, zipSame, zipWithSameM)
+import Morloc.Data.Zip (zip3Same, zipExact, zipSame, zipWithSameM)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Morloc.BaseTypes as BT
@@ -286,7 +286,7 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
           LoopIf condNe <$> go thenB <*> go elseB
         go (MonoReturn e) = go e
         go (MonoLoopContinue args)
-          | length args == length ids = LoopContinue <$> mapM (nativeExpr m) args
+          | Just slots <- zipExact ids args = LoopContinue <$> mapM (traverse (nativeExpr m)) slots
           | otherwise = error $
               "morloc bug: MonoLoopContinue arity " <> show (length args)
                 <> " does not match loop-carried ids " <> show (length ids)
@@ -393,10 +393,10 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
       t' <- inferType t
       body0 <- buildLoopBody m ids (nativeExpr m) body
       carried <- case firstContinue body0 of
-        Just nes | length nes == length ids -> return (map typeFof nes)
+        Just nes | map fst nes == ids -> return (map (typeFof . snd) nes)
         _ -> MM.throwCompilerBug "a native loop has no back-edge to type its locals"
       fresh <- mapM (const MM.getCounter) ids
-      let rename b (i, i') = trimap (renameNE i i') (renameSE i i') (renameNE i i') b
+      let rename b (i, i') = renameSlot i i' (trimap (renameNE i i') (renameSE i i') (renameNE i i') b)
           body1 = foldl rename body0 (zipSame ids fresh)
           starts = [(i', BndVarN tf i KeptRead) | (i, i', tf) <- zip3Same ids fresh carried]
       return (LoopN t' starts body1)
@@ -1267,14 +1267,14 @@ wireSerial lang sm0@(SerialManifold m0 _ _ _ _) = foldSerialManifoldM fm sm0 |>>
 
     -- Native types of loop-carried slots, read positionally from the continue
     -- value that reassigns each slot. Requires the wired body (native leaves).
-    carriedTypes :: [Int] -> LoopBody NativeExpr se b -> Maybe (Map.Map Int TypeF)
-    carriedTypes ids body = Map.fromList . zipSame ids . map typeFof <$> firstContinue body
+    carriedTypes :: LoopBody NativeExpr se b -> Maybe (Map.Map Int TypeF)
+    carriedTypes body = Map.fromList . map (fmap typeFof) <$> firstContinue body
 
     -- 'carriedTypes' resolved on a manifold body spine; 'Nothing' if the body has
     -- no native loop. The loop sits on the spine ('addLoopWraps' makes it the
     -- whole body, possibly under structural wrappers).
     loopCarriedTypes :: SerialExpr -> Maybe (Map.Map Int TypeF)
-    loopCarriedTypes (LoopS _ ids body) = carriedTypes ids body
+    loopCarriedTypes (LoopS _ _ body) = carriedTypes body
     loopCarriedTypes (ReturnS x) = loopCarriedTypes x
     loopCarriedTypes (SerialLetS _ _ x) = loopCarriedTypes x
     loopCarriedTypes (NativeLetS _ _ x) = loopCarriedTypes x
@@ -1374,7 +1374,7 @@ wireSerial lang sm0@(SerialManifold m0 _ _ _ _) = foldSerialManifoldM fm sm0 |>>
     --   (a) force every carried slot 'NativeContent' so 'letWrap' deserializes
     --       each entry packet into that native local.
     wireSerialExpr (LoopS_ t ids body) = do
-      (mergedReq, body') <- wireLoop ids body
+      (mergedReq, body') <- wireLoop body
       -- (a) force every carried slot 'NativeContent' so 'letWrap' deserializes
       -- each entry packet into the native local the continue reassigns.
       let req' = Map.union (Map.fromList [(i, NativeContent) | i <- ids]) mergedReq
@@ -1395,12 +1395,11 @@ wireSerial lang sm0@(SerialManifold m0 _ _ _ _) = foldSerialManifoldM fm sm0 |>>
     --       value that reassigns the slot.
     -- The caller forces the carried slots native where they are bound.
     wireLoop ::
-      [Int] ->
       LoopBody (D NativeExpr) (D SerialExpr) (D b) ->
       MorlocMonad (Map.Map Int Request, LoopBody NativeExpr SerialExpr b)
-    wireLoop ids body = do
+    wireLoop body = do
       (mergedReq, body') <- wireLoopBody body
-      let carriedTM = maybe Map.empty id (carriedTypes ids body')
+      let carriedTM = maybe Map.empty id (carriedTypes body')
           serialUsed = [i | i <- Map.keys carriedTM, serialish (Map.lookup i mergedReq)]
       -- (b) Re-serialize each serially-used carried slot from its CURRENT native
       -- value at the top of every iteration, shadowing the stale entry packet: the
@@ -1469,7 +1468,7 @@ wireSerial lang sm0@(SerialManifold m0 _ _ _ _) = foldSerialManifoldM fm sm0 |>>
           return (Map.unionWith (<>) rs rb, leaf)
         wireLoopBody (LoopBase (rb, x)) = return (rb, LoopBase x)
         wireLoopBody (LoopContinue nes) =
-          return (Map.unionsWith (<>) (map fst nes), LoopContinue (map snd nes))
+          return (Map.unionsWith (<>) (map (fst . snd) nes), LoopContinue (map (fmap snd) nes))
 
     wireNativeExpr ::
       NativeExpr_ (D NativeManifold) (D SerialExpr) (D NativeExpr) (D SerialArg) (D NativeArg) ->
@@ -1516,7 +1515,7 @@ wireSerial lang sm0@(SerialManifold m0 _ _ _ _) = foldSerialManifoldM fm sm0 |>>
     -- is what its initializers read.
     wireNativeExpr (LoopN_ t starts body) = do
       let fresh = map fst starts
-      (mergedReq, body') <- wireLoop fresh body
+      (mergedReq, body') <- wireLoop body
       let initReq = Map.unionsWith (<>) (map (fst . snd) starts)
           req' = Map.unionWith (<>) initReq (foldr Map.delete mergedReq fresh)
       return (req', LoopN t (map (second snd) starts) body')

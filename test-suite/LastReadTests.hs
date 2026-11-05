@@ -16,6 +16,11 @@ import qualified Data.Set as Set
 import Morloc.CodeGenerator.Grammars.Common (D (..), sealLoop)
 import Morloc.CodeGenerator.Grammars.Translator.Imperative (RNode (..), loopBorrowLocals, markLastReads, markLastReadsInBody, markLastReadsInNative, markLastReadsWith)
 import Morloc.CodeGenerator.Namespace
+import Morloc.Data.Zip (indexedFrom, zipSame)
+
+-- | A loop continue whose values fill the carried slots 1, 2, ... in order.
+cont :: [ne] -> LoopBody ne se b
+cont xs = LoopContinue (indexedFrom 1 xs)
 
 lastReadTests :: TestTree
 lastReadTests = testGroup "ownership in native loops" [lastReadCases, borrowCases]
@@ -27,51 +32,51 @@ borrowCases =
     "borrowed loop locals"
     -- a walk into what it was lent carries a borrow
     [ testCase "spec-own-6-2" $
-        borrows [(1, par 5)] (LoopIf (rd 1) (LoopBase (IntN fv 0)) (LoopNLet 10 (field 1) (LoopContinue [rd 10])))
+        borrows [(1, par 5)] (LoopIf (rd 1) (LoopBase (IntN fv 0)) (LoopNLet 10 (field 1) (cont [rd 10])))
           @?= [1, 10]
     -- an alias of a borrow is a borrow
     , testCase "spec-own-6-3" $
-        borrows [(1, par 5)] (LoopNLet 10 (rd 1) (LoopNLet 11 (field 10) (LoopContinue [rd 11])))
+        borrows [(1, par 5)] (LoopNLet 10 (rd 1) (LoopNLet 11 (field 10) (cont [rd 11])))
           @?= [1, 10, 11]
     -- a fresh value in any continue makes the local own its value
     , testCase "spec-own-6-4" $
-        borrows [(1, par 5)] (LoopIf (rd 1) (LoopContinue [field 1]) (LoopContinue [tup [rd 1]]))
+        borrows [(1, par 5)] (LoopIf (rd 1) (cont [field 1]) (cont [tup [rd 1]]))
           @?= []
     -- a local replaced by one that owns its value owns its own
     , testCase "spec-own-6-5" $
-        borrows [(1, par 5), (2, par 5)] (LoopContinue [rd 2, tup [rd 1]])
+        borrows [(1, par 5), (2, par 5)] (cont [rd 2, tup [rd 1]])
           @?= []
     -- a local started from a value it was not lent owns it
     , testCase "spec-own-6-6" $
-        borrows [(1, IntN fv 0)] (LoopContinue [rd 1])
+        borrows [(1, IntN fv 0)] (cont [rd 1])
           @?= []
     -- a let naming part of an owned value owns its value
     , testCase "spec-own-6-7" $
-        borrows [(1, par 5), (2, par 5)] (LoopNLet 10 (field 2) (LoopContinue [rd 1, tup [rd 10]]))
+        borrows [(1, par 5), (2, par 5)] (LoopNLet 10 (field 2) (cont [rd 1, tup [rd 10]]))
           @?= [1]
     -- a part of a type that may not be borrowed is a value
     , testCase "spec-own-6-9" $
-        borrowsIf (/= cheap) [(1, par 5)] (LoopNLet 10 (IntrinsicN cheap IntrCtorField Nothing [rd 1, StrN fv "Link", IntN fv 0]) (LoopNLet 11 (field 1) (LoopContinue [rd 11])))
+        borrowsIf (/= cheap) [(1, par 5)] (LoopNLet 10 (IntrinsicN cheap IntrCtorField Nothing [rd 1, StrN fv "Link", IntN fv 0]) (LoopNLet 11 (field 1) (cont [rd 11])))
           @?= [1, 11]
     -- an index bound twice is never a borrow, nor is a local replaced by it
     , testCase "spec-own-6-8" $
-        borrows [(1, par 5)] (LoopIf (rd 1) (LoopNLet 10 (field 1) (LoopContinue [rd 10])) (LoopNLet 10 (tup [rd 1]) (LoopBase (rd 10))))
+        borrows [(1, par 5)] (LoopIf (rd 1) (LoopNLet 10 (field 1) (cont [rd 10])) (LoopNLet 10 (tup [rd 1]) (LoopBase (rd 10))))
           @?= []
     -- a local bound to a match whose every arm is a part, or fails, is a borrow
     , testCase "spec-own-6-10" $
-        borrows [(1, par 5)] (LoopNLet 10 (IfN ty (tag 1 "End") (rd 1) (IfN ty (tag 1 "Link") (NativeLetN 11 (field 1) (rd 11)) failed)) (LoopContinue [rd 10]))
+        borrows [(1, par 5)] (LoopNLet 10 (IfN ty (tag 1 "End") (rd 1) (IfN ty (tag 1 "Link") (NativeLetN 11 (field 1) (rd 11)) failed)) (cont [rd 10]))
           @?= [1, 10, 11]
     -- a match with an arm that builds a value owns its value
     , testCase "spec-own-6-11" $
-        borrows [(1, par 5)] (LoopNLet 10 (IfN ty (tag 1 "End") (tup [rd 1]) (field 1)) (LoopContinue [rd 10]))
+        borrows [(1, par 5)] (LoopNLet 10 (IfN ty (tag 1 "End") (tup [rd 1]) (field 1)) (cont [rd 10]))
           @?= []
     -- a match whose arm binds a type that may not be borrowed owns its value
     , testCase "spec-own-6-12" $
-        borrowsIf (/= cheap) [(1, par 5)] (LoopNLet 10 (IfN ty (tag 1 "Link") (NativeLetN 11 (IntrinsicN cheap IntrCtorField Nothing [rd 1, StrN fv "Link", IntN fv 0]) (rd 11)) (rd 1)) (LoopContinue [rd 10]))
+        borrowsIf (/= cheap) [(1, par 5)] (LoopNLet 10 (IfN ty (tag 1 "Link") (NativeLetN 11 (IntrinsicN cheap IntrCtorField Nothing [rd 1, StrN fv "Link", IntN fv 0]) (rd 11)) (rd 1)) (cont [rd 10]))
           @?= []
     -- a conditional on anything but constructor tags owns its value
     , testCase "spec-own-6-13" $
-        borrows [(1, par 5)] (LoopNLet 10 (IfN ty (rd 2) (field 1) (rd 1)) (LoopContinue [rd 10]))
+        borrows [(1, par 5)] (LoopNLet 10 (IfN ty (rd 2) (field 1) (rd 1)) (cont [rd 10]))
           @?= []
     -- a let outside a loop naming part of a borrow is a borrow, and so is
     -- one naming part of it
@@ -81,7 +86,7 @@ borrowCases =
     -- a nested pattern: a test of both tags, bound to a local, then a field
     -- of a field
     , testCase "spec-own-6-16" $
-        borrows [(1, par 5)] (LoopContinue [IfN ty (NativeLetN 12 (IfN ty (tag 1 "Link") (IntrinsicN ty IntrTagTest Nothing [field 1, StrN fv "Link"]) (LogN fv False)) (rd 12)) (NativeLetN 11 (IntrinsicN ty IntrCtorField Nothing [field 1, StrN fv "Link", IntN fv 1]) (rd 11)) (rd 1)])
+        borrows [(1, par 5)] (cont [IfN ty (NativeLetN 12 (IfN ty (tag 1 "Link") (IntrinsicN ty IntrTagTest Nothing [field 1, StrN fv "Link"]) (LogN fv False)) (rd 12)) (NativeLetN 11 (IntrinsicN ty IntrCtorField Nothing [field 1, StrN fv "Link", IntN fv 1]) (rd 11)) (rd 1)])
           @?= [1, 11]
     ]
   where
@@ -111,7 +116,7 @@ lastReadCases =
           @?= [[]]
     -- the continue's values are one step
     , testCase "spec-own-2-4" $
-        marks (loop [1, 2] (LoopContinue [rd 1, tup [rd 2, rd 1]]))
+        marks (loop [1, 2] (cont [rd 1, tup [rd 2, rd 1]]))
           @?= [[2]]
     -- a read in a closure is kept and keeps every earlier read
     , testCase "spec-own-3-1" $
@@ -119,7 +124,7 @@ lastReadCases =
           @?= [[], []]
     -- each branch marks its own last read
     , testCase "spec-own-2-5" $
-        marks (loop [1] (LoopIf (rd 2) (LoopBase (rd 1)) (LoopContinue [tup [rd 1]])))
+        marks (loop [1] (LoopIf (rd 2) (LoopBase (rd 1)) (cont [tup [rd 1]])))
           @?= [[], [1], [1]]
     -- a read of a local that refers into a value is a read of the value, in
     -- its own step
@@ -172,13 +177,13 @@ lastReadCases =
     -- a loop's next values run the lets they depend on first, one value
     -- after another, each a step of its own
     , testCase "spec-own-2-17" $ do
-        sealed (sealLoop (LoopContinue [D (rd 10) [(10, Right (tup [rd 1]))], D (rd 12) [(12, Right (tup [rd 11])), (11, Right (rd 1))]]))
+        sealed (sealLoop (cont [D (rd 10) [(10, Right (tup [rd 1]))], D (rd 12) [(12, Right (tup [rd 11])), (11, Right (rd 1))]]))
           @?= ([10, 11, 12], [False, False])
         -- a let two values share is bound once
-        sealed (sealLoop (LoopContinue [D (rd 10) [(10, Right (rd 1))], D (tup [rd 10]) [(10, Right (rd 1))]]))
+        sealed (sealLoop (cont [D (rd 10) [(10, Right (rd 1))], D (tup [rd 10]) [(10, Right (rd 1))]]))
           @?= ([10], [False, False])
         -- a leaf that depends on a serial let keeps its lets in its values
-        sealed (sealLoop (LoopContinue [D (rd 10) [(10, Right (rd 1))], D (rd 11) [(11, Left (LetVarS Nothing 3))]]))
+        sealed (sealLoop (cont [D (rd 10) [(10, Right (rd 1))], D (rd 11) [(11, Left (LetVarS Nothing 3))]]))
           @?= ([], [True, False])
     -- a do block a let's value holds through a conditional's arm holds what
     -- it reads
@@ -254,7 +259,7 @@ bodyMarks = spine . markLastReadsInBody
 -- of its values still binds a let of its own.
 sealed :: LoopBody NativeExpr SerialExpr NativeExpr -> ([Int], [Bool])
 sealed (LoopNLet i _ k) = let (is, vs) = sealed k in (i : is, vs)
-sealed (LoopContinue xs) = ([], [case x of NativeLetN {} -> True; _ -> False | x <- xs])
+sealed (LoopContinue xs) = ([], [case x of NativeLetN {} -> True; _ -> False | (_, x) <- xs])
 sealed _ = ([], [])
 
 -- | The variables a native body marks, in the order they are written.
@@ -271,7 +276,7 @@ marksWith aliases e = case markLastReadsWith aliases Set.empty e of
     steps (LoopNLet _ x b) = marked x : steps b
     steps (LoopSLet _ _ b) = steps b
     steps (LoopBase x) = [marked x]
-    steps (LoopContinue xs) = [concatMap marked xs]
+    steps (LoopContinue xs) = [concatMap (marked . snd) xs]
 
 marked :: NativeExpr -> [Int]
 marked (LetVarN _ i LastRead) = [i]
@@ -293,7 +298,7 @@ paths (LoopIf g t f) = map (Step True Nothing g :) (paths t <> paths f)
 paths (LoopNLet i x b) = [p <> q | p <- spinePaths i x, q <- paths b]
 paths (LoopSLet _ _ b) = paths b
 paths (LoopBase x) = [[Step False Nothing x]]
-paths (LoopContinue xs) = [[Step False Nothing (tup xs)]]
+paths (LoopContinue xs) = [[Step False Nothing (tup (map snd xs))]]
 
 -- | The paths through a right-hand side bound to @i@: a conditional's test is
 -- a step and each arm a path, a let's right-hand side a body of its own, and
@@ -357,7 +362,7 @@ genBody = sized (go (10 :: Int))
             , (3, LoopNLet next <$> genExpr <*> go (next + 1) (n - 1))
             , (2, LoopNLet next <$> genSpine (100 * next) 2 <*> go (next + 1) (n - 1))
             ]
-    leaf = oneof [LoopBase <$> genExpr, LoopContinue <$> vectorOf (length carriedVars) genExpr]
+    leaf = oneof [LoopBase <$> genExpr, LoopContinue . zipSame carriedVars <$> vectorOf (length carriedVars) genExpr]
 
 -- | A right-hand side that is a conditional or a let, its lets numbered from
 -- @base@ and read by what follows them.

@@ -83,6 +83,7 @@ module Morloc.CodeGenerator.Namespace
   , trimap
   , trimapM
   , firstContinue
+  , renameSlot
   , loopBodyLeaves
   -- unrecursive types
   , FoldManifoldM (..)
@@ -916,9 +917,9 @@ data LoopBody ne se b
   | LoopBase b
     -- ^ a base-case leaf: assign this value as the result and break (a
     -- serial value in a 'LoopS', a native one in a 'LoopN')
-  | LoopContinue [ne]
-    -- ^ a tail back-edge leaf: the new loop-carried values (positional with the
-    -- enclosing 'LoopS' ids), reassigned before the next iteration
+  | LoopContinue [(Int, ne)]
+    -- ^ a tail back-edge leaf: each loop-carried slot with its new value,
+    -- reassigned before the next iteration
   deriving (Show)
 
 -- | Whether every path through a loop body leaves the loop at a base leaf.
@@ -945,14 +946,23 @@ trimapM fne fse fb = go
     go (LoopNLet i ne b) = LoopNLet i <$> fne ne <*> go b
     go (LoopSLet i se b) = LoopSLet i <$> fse se <*> go b
     go (LoopBase x) = LoopBase <$> fb x
-    go (LoopContinue nes) = LoopContinue <$> mapM fne nes
+    go (LoopContinue nes) = LoopContinue <$> mapM (traverse fne) nes
 
 trimap :: (ne -> ne') -> (se -> se') -> (b -> b') -> LoopBody ne se b -> LoopBody ne' se' b'
 trimap fne fse fb = runIdentity . trimapM (pure . fne) (pure . fse) (pure . fb)
 
+-- | Rename a loop-carried slot in every continue of a body.
+renameSlot :: Int -> Int -> LoopBody ne se b -> LoopBody ne se b
+renameSlot i i' body = case body of
+  LoopIf ne t e -> LoopIf ne (renameSlot i i' t) (renameSlot i i' e)
+  LoopNLet j ne b -> LoopNLet j ne (renameSlot i i' b)
+  LoopSLet j se b -> LoopSLet j se (renameSlot i i' b)
+  LoopBase x -> LoopBase x
+  LoopContinue xs -> LoopContinue [(if j == i then i' else j, x) | (j, x) <- xs]
+
 -- | First 'LoopContinue' leaf on the body spine (the back-edge reachable
 -- without descending into a base).
-firstContinue :: LoopBody ne se b -> Maybe [ne]
+firstContinue :: LoopBody ne se b -> Maybe [(Int, ne)]
 firstContinue (LoopContinue nes) = Just nes
 firstContinue (LoopIf _ a b) = case firstContinue a of
   (Just x) -> Just x
@@ -968,7 +978,7 @@ loopBodyLeaves (LoopIf ne t e) = ne : loopBodyLeaves t ++ loopBodyLeaves e
 loopBodyLeaves (LoopNLet _ ne b) = ne : loopBodyLeaves b
 loopBodyLeaves (LoopSLet _ se b) = se : loopBodyLeaves b
 loopBodyLeaves (LoopBase se) = [se]
-loopBodyLeaves (LoopContinue nes) = nes
+loopBodyLeaves (LoopContinue nes) = map snd nes
 
 foldlSM :: (b -> a -> b) -> b -> SerialManifold_ a -> b
 foldlSM f b (SerialManifold_ _ _ _ _ se) = f b se
