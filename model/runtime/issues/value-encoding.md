@@ -107,3 +107,15 @@
   Intrinsics that write a value themselves (@write, cells, streams) are not
   checked and keep the run-time failure [read]. The fix is a recursive
   packer per language, generated at the back-reference.
+- [reproduced, 2026-11-05] A newtype whose C++ form differs from its wire
+  parent and that has no Packable instance builds, and fails at run time:
+  `newtype Handle = Int` with `type Cpp => Handle = "handle_t"`, produced
+  by a C++ source and passed through Python, gives "no marshaller for a
+  value of this C++ type (schema type 18)". Spec gap (native-types.md,
+  newtypes.md): whether a newtype with its own form needs a packer depends
+  on whether the language's runtime can build that native form from the
+  wire form; Python builds `bytes` from a Str (golden newtype-wire-parent),
+  C++ has no marshaller for a user struct. A compile-time check needs a
+  per-language statement of which native forms each wire form may become.
+  Reproduction:
+  /work/plans/error-clusters/repro/newtype-form-no-packer.
