@@ -208,3 +208,9 @@
 - **`findPackableWireForm` keeps only type-variable parameters.** [read,
   2026-11-02] A native with a Nat parameter gets no tier-2 wire form; the
   first match wins, with no specificity and no check on repeated variables.
+
+- [read, 2026-11-05] Desugar.hs declHead writes a newtype's Nat parameter
+  as a type variable (`VarU n`) in the derived Packable instance head, so
+  that head may not match through instance resolution (S2's resolver);
+  check before Packable selection is routed through it. Possibly the
+  cause of the NEWT-9/KIND-5 entry in kinds-dimensions.md.

@@ -76,3 +76,9 @@
 - **A JSON record argument with unknown keys is accepted.** [reproduced,
   2026-10-21] `'{"a":1,"b":"x","c":4}'` for `P {a, b}` runs in py, cpp and
   r; a missing key is refused. No item covers extra keys on input.
+
+- [reproduced, 2026-11-05] Violates REC-4: comparing two bare record
+  literals (`{x = 1} == {x = 2}`) is refused at the `==`, not at the
+  literal, with "No matching implementation found for '==' at type Record
+  -> Record -> Bool"; the error should say a bare record literal needs a
+  named record type.
