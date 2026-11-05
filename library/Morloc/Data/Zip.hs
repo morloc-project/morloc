@@ -25,6 +25,10 @@ module Morloc.Data.Zip
   , zip4Same
   , zip3Prefix
   , indexed
+  , indexedFrom
+  , mapIndexed
+  , mapIndexedM
+  , zipExact
   ) where
 
 import Data.Foldable (traverse_)
@@ -88,3 +92,19 @@ zip3Prefix = zip3
 -- | Each element with its 0-based position.
 indexed :: [a] -> [(Int, a)]
 indexed = zip [0 ..]
+
+-- | Each element with its position, counted from @n@.
+indexedFrom :: Int -> [a] -> [(Int, a)]
+indexedFrom n = zip [n ..]
+
+mapIndexed :: (Int -> a -> b) -> [a] -> [b]
+mapIndexed f = zipWith f [0 ..]
+
+mapIndexedM :: Applicative m => (Int -> a -> m b) -> [a] -> m [b]
+mapIndexedM f = traverse (uncurry f) . indexed
+
+-- | Pair two lists whose lengths are a fact to test, not an invariant.
+zipExact :: [a] -> [b] -> Maybe [(a, b)]
+zipExact (x : xs) (y : ys) = ((x, y) :) <$> zipExact xs ys
+zipExact [] [] = Just []
+zipExact _ _ = Nothing
