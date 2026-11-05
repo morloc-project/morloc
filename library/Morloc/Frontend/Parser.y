@@ -1365,7 +1365,7 @@ nestedLabel tok t = do
   inRep <- State.gets psInRep
   if inRep
     then return ()
-    else State.modify (\st -> st { psLabelSites = psLabelSites st ++ [(getName tok, locPos tok)] })
+    else State.modify (\st -> st { psLabelSites = (getName tok, locPos tok) : psLabelSites st })
   return (LabeledU (TV (getName tok)) t)
 
 -- | Check the labels of a signature (POLY-3, APP-1): a label may stand only
@@ -1377,7 +1377,7 @@ nestedLabel tok t = do
 -- signature.
 sigLabels :: Maybe [(Pos, TypeU)] -> [(Pos, TypeU)] -> P ()
 sigLabels cs args = do
-  sites <- State.gets psLabelSites
+  sites <- reverse <$> State.gets psLabelSites
   let cargs = fromMaybe [] cs
       start = maybe (Pos 0 0 "") fst (listToMaybe (cargs <> args))
       (stray, mine) = List.partition ((< start) . snd) sites
@@ -1407,7 +1407,7 @@ labelOrder t = concatMap labelOrder (typeUChildren t)
 -- | A label left in a type outside any signature binds nothing.
 noStrayLabels :: P ()
 noStrayLabels = do
-  sites <- State.gets psLabelSites
+  sites <- reverse <$> State.gets psLabelSites
   case sites of
     ((v, p) : _) -> labelError v p
     [] -> return ()

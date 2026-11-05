@@ -739,6 +739,20 @@ weave gscope = w Set.empty
       | otherwise = Left "concrete type has more non-Nat args than general type in weave"
     weaveArgs anc sls (g : gs) cs
       | Just k <- kindArgOf g = (KiA k :) <$> weaveArgs anc (drop 1 sls) gs (dropKindHead (kindOfK k) cs)
+    -- A ground row at a Rec parameter pairs with the concrete row when the
+    -- form kept one, and is erased when it did not: a row's columns hold
+    -- no values (KIND-2). A table's form keeps its row.
+    weaveArgs anc sls@((_, True) : _) (g : gs) cs
+      | Just fields <- rowFields g = case cs of
+          (c : cs')
+            | Just cfields <- rowFields c
+            , map fst fields == map fst cfields -> do
+                cols <- mapM (\((k, gt), (_, ct)) -> (,) (Key k) <$> w anc gt ct) (zip fields cfields)
+                (KiA (RowK cols) :) <$> weaveArgs anc (drop 1 sls) gs cs'
+            | kindOfU c == Just KindRec -> (KiA (VoidK KindRec) :) <$> weaveArgs anc (drop 1 sls) gs cs'
+          _ | length cs < length (g : gs) -> (KiA (VoidK KindRec) :) <$> weaveArgs anc (drop 1 sls) gs cs
+          (c : cs') -> (:) <$> (retagArg (headSlot sls) <$> w anc g c) <*> weaveArgs anc (drop 1 sls) gs cs'
+          [] -> Left "general type has more non-Nat args than concrete type in weave"
     weaveArgs anc sls (g:gs) (c:cs) =
       (:) <$> (retagArg (headSlot sls) <$> w anc g c) <*> weaveArgs anc (drop 1 sls) gs cs
     weaveArgs _ _ _ [] = Left "general type has more non-Nat args than concrete type in weave"
@@ -752,7 +766,15 @@ weave gscope = w Set.empty
 -- (an alias of a kind was expanded before code generation), or the type the
 -- walk gives.
 argWith :: Applicative f => (Maybe Kind, Bool) -> (TypeU -> f TypeF) -> TypeU -> f ArgF
+argWith (_, True) walk g
+  | Just fields <- rowFields g = KiA . RowK <$> traverse (\(k, t) -> (,) (Key k) <$> walk t) fields
 argWith sl walk g = maybe (retagArg sl <$> walk g) (pure . KiA) (kindArgOf g)
+
+-- | The fields of a ground row (`{y = Int}` at a Rec parameter), in order.
+rowFields :: TypeU -> Maybe [(MT.Text, TypeU)]
+rowFields (LabeledU _ t) = rowFields t
+rowFields (NamU NamRecord r [] rs) | r == anonRecordVar = Just [(k, t) | (Key k, t) <- rs]
+rowFields t = groundRecFields t
 
 -- | The arguments of @v@, each at its declared position.
 argsWith :: Applicative f => Scope -> TVar -> (TypeU -> f TypeF) -> [TypeU] -> f [ArgF]
@@ -764,7 +786,12 @@ argsWith2 scope v walk gs cs = sequenceA (zipWith3 (argWith2 walk) (argKinds sco
 
 -- | 'argWith' for a walk over a general argument and its concrete form.
 argWith2 :: Applicative f => (TypeU -> TypeU -> f TypeF) -> (Maybe Kind, Bool) -> TypeU -> TypeU -> f ArgF
-argWith2 walk sl g c = argWith sl (`walk` c) g
+argWith2 walk sl@(_, True) g c
+  | Just gs <- rowFields g
+  , Just cs <- rowFields c
+  , map fst gs == map fst cs =
+      KiA . RowK <$> traverse (\((k, gt), (_, ct)) -> (,) (Key k) <$> walk gt ct) (zip gs cs)
+argWith2 walk sl g c = maybe (retagArg sl <$> walk g c) (pure . KiA) (kindArgOf g)
 
 -- | A woven argument at a declared position: a ground row that fills a Rec
 -- parameter is that row, and a type nothing determined at a position of

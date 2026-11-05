@@ -225,9 +225,9 @@ rustTypeOf = f
     -- stored positions, so a function among them boxes ('rustFieldType').
     nominalTypeName x ps
       | T.any (== '$') x = do
-          let (typeTs, kindCount) = kindSplit ps
+          let typeTs = tyArgs ps
           ts' <- mapM rustFieldType typeTs
-          return . pretty $ expandMacro x (map render ts') kindCount
+          return . pretty $ expandMacro x (map render ts')
       | otherwise = return (pretty (nativeTypeName x))
 
     f :: TypeF -> RustM MDoc
@@ -242,12 +242,12 @@ rustTypeOf = f
     f (VariantF (FV _ (CV x)) ps _) = nominalTypeName x ps
     f (AppF t ts) = do
       t' <- f t
-      let (typeTs, kindCount) = kindSplit ts
+      let typeTs = tyArgs ts
       -- Type arguments are STORED positions (a Vec element, a tuple slot): a
       -- function leaf among them must box to `Arc<dyn Fn>` (a bare
       -- `impl Fn` is illegal in a container), which is exactly 'rustFieldType'.
       ts' <- mapM rustFieldType typeTs
-      return . pretty $ expandMacro (render t') (map render ts') kindCount
+      return . pretty $ expandMacro (render t') (map render ts')
     -- A recursive optional (?T where T points back to a containing record)
     -- must break the cycle with Box (an Option<T> of an infinite-size T won't
     -- compile). None == absent matches the voidstar single-relptr Optional.

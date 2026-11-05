@@ -117,6 +117,13 @@
   type error (Frontend/Typecheck.hs checkRigidNats, the DIM-6 check after
   inference) where DIM-7 makes it a run-time check with a warning. Waits
   on the DIM-3 run-time checks.
+- [reproduced, 2026-11-05] Violates DIM-7: NatDecide returns Holds with a
+  witness that does not satisfy the condition. QuickCheck property
+  `prop_int_holds_sound` (NatDecideTests.hs, "with Int variables, a holds
+  verdict is satisfied") failed once after 33 tests on
+  `0 - (2 + 1) + (b*i + (j + i)) = (i*b + a*c) + ((c + j) + (b - 1))` over
+  Nat a, b, c with Int i, j; witness a = b = c = 3. Not yet rerun with the
+  seed; the property passes on most runs, so the suite is intermittently red.
 - [read] DIM-7 has no complete procedure for linear arithmetic: a group
   of linear conditions over several inferred variables, beyond one
   equation with lower bounds, is decided by a bounded search, so a

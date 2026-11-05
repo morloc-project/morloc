@@ -1,21 +1,49 @@
 --' A C++ record form with a Rec parameter declares only its type parameters,
---' whether the record comes from C++ or from a record literal
-module main (run, viaLiteral)
+--' whether the record comes from C++, from a record literal, or is a field
+--' of another record; a newtype whose form drops its row takes no row
+module main (run, viaLiteral, viaField, fieldOut, newtypeOut, newtypeField)
 
 import root
 import root-cpp
 
-source Cpp from "foo.hpp" ("mkFoo", "getX")
+source Cpp from "foo.hpp" ("mkFoo", "getX", "mkBar", "getBX", "mkH", "mkBaz")
 
 record Foo (r :: Rec) a where
   x :: a
 record Cpp => Foo (r :: Rec) a = "foo_t"
 
+record Bar where
+  f :: Foo {y = Int} Int
+record Cpp => Bar = "bar_t"
+
+newtype H (r :: Rec) a = [a]
+type Cpp => H (r :: Rec) a = "std::vector<$1>" a
+
+record Baz where
+  h :: H {y = Int, z = Str} Int
+record Cpp => Baz = "baz_t"
+
 mkFoo :: Int -> Foo {y = Int} Int
 getX :: Foo {y = Int} Int -> Int
+mkBar :: Int -> Bar
+getBX :: Bar -> Int
+mkH :: Int -> H {z = Str, y = Int} Int
+mkBaz :: Int -> Baz
 
 run :: Int -> Int
 run k = getX (mkFoo k)
 
 viaLiteral :: Int -> Int
 viaLiteral k = getX ({x = k} :: Foo {y = Int} Int)
+
+viaField :: Int -> Int
+viaField k = getBX (mkBar k)
+
+fieldOut :: Int -> Bar
+fieldOut k = mkBar k
+
+newtypeOut :: Int -> H {z = Str, y = Int} Int
+newtypeOut k = mkH k
+
+newtypeField :: Int -> Baz
+newtypeField k = mkBaz k

@@ -1251,7 +1251,7 @@ collectTypes fullDag = do
 
 -- | Why a form's list cannot be read (NATIVE-1): every later pass pairs a
 -- form's list with the type's parameters by position, so the parameters it
--- names must follow the declaration's order, and each `$N` must name an
+-- names must follow the declaration's order, and each `$N` must name a type
 -- item of the list.
 formListProblem :: [Either (TVar, Kind) TypeU] -> TypeU -> Maybe MDoc
 formListProblem ps (AppU (VarU (TV tmpl)) items)
@@ -1260,11 +1260,16 @@ formListProblem ps (AppU (VarU (TV tmpl)) items)
         "its list names the parameters" <+> hsep (map pretty named)
           <+> "out of the declaration's order;"
           <+> "list them in the order the type declares them"
-  | Just n <- find (\k -> k < 1 || k > toInteger (length items)) (macroIndices tmpl) =
-      Just $ "its template names $" <> pretty n <> ", but its list has" <+> pretty (length items) <+> "item(s)"
+  | Just n <- find (\k -> k < 1 || k > toInteger (length typeItems)) (macroIndices tmpl) =
+      Just $
+        "its template names $" <> pretty n <> ", but its list has" <+> pretty (length typeItems)
+          <+> "type item(s); $N names a type parameter, never a Nat, Str or Rec one"
   | otherwise = Nothing
   where
     named = [item | item <- items, isJust (position item)]
+    typeItems = [item | item <- items, maybe True (isTypeParam . (ps !!)) (position item)]
+    isTypeParam (Left (_, k)) = k == KindType
+    isTypeParam (Right _) = True
     positions = mapMaybe position items
     -- the declaration position an item names: a parameter's variable, or a
     -- specialized parameter's type

@@ -2491,6 +2491,15 @@ newtTests =
         f :: P Int Real -> Real
         |]
     , rejectSaying
+        "spec-native-1-7"
+        "never a Nat"
+        [r|
+        module main (f)
+        newtype F (n :: Nat) = [Int]
+        type Cpp => F (n :: Nat) = "std::array<int,$1>" n
+        f :: F 3 -> Int
+        |]
+    , rejectSaying
         "spec-native-1-6"
         "out of the declaration's order"
         [r|

@@ -177,6 +177,8 @@ freshVarsAZ exclude =
 -- inputs; the rest belong to the function it returns.
 bindParams :: Int -> [Type] -> [EVar] -> MorlocMonad [Arg EVar]
 bindParams midx inputs vs = do
+  when (length vs > length inputs) $
+    MM.throwCompilerBugAt midx "a lambda binds more parameters than its function type has inputs"
   args <- mapM (\v -> (`Arg` v) <$> MM.getCounter) vs
   recordArgTypes midx [i | Arg i _ <- args] inputs
   return args

@@ -99,7 +99,7 @@ kindOfTests =
           @?= [RecVoidU, ListVoidU, SetVoidU]
     , testCase "a Str argument is a kind argument at every level" $
         ( let as = map argOf [StrLitU "id", NatLitU 1, RecVarU (TV "r"), VarU (TV "Real")] in (tyArgs as, length as - length (tyArgs as))
-        , kindSplit [KiA (StrLitK "id"), KiA (NatLitK 1), KiA (VoidK KindRec), TyA real]
+        , let as = [KiA (StrLitK "id"), KiA (NatLitK 1), KiA (VoidK KindRec), TyA real] in (tyArgs as, length as - length (tyArgs as))
         , partitionKindArgs kindOfU [StrLitU "id", NatLitU 1, RecVarU (TV "r"), VarU (TV "Real")] )
           @?= (([VarT (TV "Real")], 3), ([real], 3), ([VarU (TV "Real")], 3))
     , testCase "a ground row's kind depends on its parameter, an open row's does not" $

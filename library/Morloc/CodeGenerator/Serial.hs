@@ -1983,13 +1983,10 @@ generalTypeToSerialAST' i _ t = MM.throwSourcedError i $
 -- Used only to key a serial AST node's instantiation so a back-reference
 -- can be matched to the node it cuts against; two occurrences of one
 -- type map to equal keys, which is all the matching needs.
+-- A kind argument keys as a pool sees it: a length that is not ground
+-- carries none (DIM-8), so it changes no wire form.
 keyArgF :: ArgT -> ArgF
-keyArgF (KiA (NatLitT n)) = KiA (NatLitK n)
-keyArgF (KiA (VoidT k)) = KiA (VoidK k)
-keyArgF (KiA (StrLitT t)) = KiA (StrLitK t)
--- Unevaluated kind arithmetic has no codegen form; as a key any fixed value
--- keeps equal types equal and unequal ones apart.
-keyArgF (KiA k) = TyA (UnkF (FV (TV (DT.pack (show k))) (CV "")))
+keyArgF (KiA k) = KiA (groundK k)
 keyArgF (TyA t) = TyA (keyTypeF t)
 
 keyTypeF :: Type -> TypeF

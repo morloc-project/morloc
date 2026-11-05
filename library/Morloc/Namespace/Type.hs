@@ -71,6 +71,7 @@ module Morloc.Namespace.Type
   , OpTag (..)
   , TyLit (..)
   , extractKey
+  , groundRecFields
   , collectExtends
   , isTupleName
   , tupleArity
@@ -1606,8 +1607,8 @@ strictlyMoreGeneral a b = generalizes True a b && not (generalizes True b a)
 
 -- | The fields of a Rec extension chain that ends in RecEmptyU, else Nothing.
 groundRecFields :: TypeU -> Maybe [(Text, TypeU)]
-groundRecFields RecEmptyU = Just []
 groundRecFields (RecExtendU k t rest) = ((k, t):) <$> groundRecFields rest
+groundRecFields (LitU (LRec fs)) = Just fs
 groundRecFields _ = Nothing
 
 extractKey :: TypeU -> TVar

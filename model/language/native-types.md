@@ -4,7 +4,7 @@ Per-language type mappings (`type Py => X = ...`, `record Cpp => R`) and their a
 
 ### NATIVE-1 A native form is a template over the type's parameters
 Intent: proposed
-Tests: spec-native-1-1, spec-native-1-2, spec-native-1-3, spec-native-1-4, spec-native-1-5, spec-native-1-6
+Tests: spec-native-1-1, spec-native-1-2, spec-native-1-3, spec-native-1-4, spec-native-1-5, spec-native-1-6, spec-native-1-7
 Code: unaudited
 
 `type L => C x1 ... xn = "s" x1 ... xn` gives `[[C U1 ... Un]]_L` as the
@@ -13,7 +13,9 @@ and is checked only by language `L`. The list names the parameters in the
 order the type declares them, a specialized parameter by its type
 (`type Cpp => (P Int b) = "std::pair<$1,$2>" Int b`): a list that names
 them in another order, or one twice, is a compile error, and so is a `$i`
-past the list. Each variable of a specialized form takes the argument in
+past the list. `$i` counts the list's type items only: a Nat, Str or Rec
+item is never rendered, so `$i` cannot name one. Open: may `$i` render a
+literal kind argument (`"std::array<int,$1>" n` at `n = 3`)? Each variable of a specialized form takes the argument in
 its own position. Open: which form applies when two specializations both
 match (today the one specialized furthest left)? Open: may a
 list reorder its parameters (`"std::tuple<$2,$1>" b a`)?

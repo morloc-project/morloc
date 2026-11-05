@@ -30,7 +30,6 @@ module Morloc.CodeGenerator.Namespace
   , KArgF (.., NatVoidK)
   , ArgF
   , kargType
-  , kindSplit
   , TypeS (..)
   , FVar (..)
 
@@ -231,11 +230,6 @@ pattern NatVoidK :: KArgF
 pattern NatVoidK = VoidK KindNat
 
 type ArgF = TArg KArgF TypeF
-
--- | The type arguments, which the @$N@ of a native form counts, and how many
--- kind arguments it skips.
-kindSplit :: [ArgF] -> ([TypeF], Int)
-kindSplit as = let ts = tyArgs as in (ts, length as - length ts)
 
 -- | A kind argument as a type-level term; a row erases to its kind.
 kargType :: KArgF -> KTerm
