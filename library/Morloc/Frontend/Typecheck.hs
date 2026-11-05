@@ -23,10 +23,12 @@ import Morloc.Data.Doc
 import qualified Morloc.Data.Map as Map
 import qualified Data.Set as Set
 import Morloc.Frontend.Namespace
+import Morloc.Frontend.Rename (displayName)
 import Morloc.Frontend.PatternCheck (missingKeyError, receiverShape, rowFields, tupleWidthError)
 import qualified Morloc.Monad as MM
 import qualified Morloc.TypeEval as TE
 import Morloc.Typecheck.Internal
+import qualified Data.IntMap.Strict as IntMap
 import qualified Morloc.Typecheck.NatSolver as NS
 import qualified Morloc.Typecheck.NatDecide as ND
 
@@ -188,8 +190,10 @@ typecheckWith expected = run
   where
     run :: AnnoS Int ManyPoly Int -> MorlocMonad (AnnoS (Indexed TypeU) Many Int)
     run e0 = do
+      chosenLengthsApplied e0
       scope <- MM.getGeneralScope
-      let g0 = emptyGamma
+      -- An exported command's own lambda is applied once per call (DIM-10).
+      let g0 = emptyGamma {gammaDefinitionLambda = ownLambda e0}
       (g1raw, _, e1) <- case expected of
         Nothing -> synthG g0 e0
         Just t -> checkG g0 e0 t
@@ -262,6 +266,16 @@ typecheckWith expected = run
             , all (`Set.member` given) (NS.freeNatVars e)
             ]
           everyType t = t : concatMap everyType (typeUChildren t)
+      -- An input's length is the caller's; equating it with a length a call
+      -- chooses cannot be checked when the command starts (DIM-10).
+      let taken = filter (`Set.member` gammaObserved g3) (inwardNats rootType)
+          calls = [j | AnnoS (Idx j t) _ (AppS _ _) <- annoNodes e3, any (`elem` taken) (collectNatVarNames (apply g3 t))]
+      case e3 of
+        AnnoS (Idx i _) _ _
+          | not (null taken) ->
+              throwTypeError (fromMaybe i (listToMaybe calls))
+                "the length of an input of this command is taken to equal a length a call in its body chooses at run time, which the input cannot be checked against (DIM-10); give the command a signature that states the relation"
+        _ -> return ()
       forM_ (conditionGroups conditions) $ \grp -> do
         let cs = [c | (_, c, _) <- grp]
             observed = Set.intersection runTime (ND.condVars cs)
@@ -1215,7 +1229,7 @@ synthE _ g (AppS f []) = do
 
 --   -->E
 synthE i g0 (AppS f xs0) = do
-  (g1, funType0, funExpr0) <- synthG g0 f
+  (g1, funType0, funExpr0) <- leaveLambda g0 <$$> synthG (appliedDefinition f (length xs0) g0) f
   overApplied i f xs0 (apply g1 funType0) (synthE i g0) $ do
     -- Literal arguments solve the variables their labels bind (m@Int).
     let g1' = observeResultNats f funType0 (resolveNatLabels f funType0 xs0 g1)
@@ -1223,14 +1237,15 @@ synthE i g0 (AppS f xs0) = do
 
 
 -- -->I==>
-synthE _ g0 (LamS vs x) = do
-  let (g1, paramTypes) = statefulMap (\g' v -> newvar (unEVar v <> "_x") g') g0 vs
+synthE i g0 (LamS vs x) = do
+  let (g1, paramTypes) = statefulMap (\g' v -> newvar (unEVar v <> "_x") g') (enterLambda g0) vs
       g2 = g1 ++> zipWith AnnG vs paramTypes
 
   (g3, bodyType, bodyExpr) <- synthG g2 x
 
   let funType = apply g3 (FunU paramTypes bodyType)
-  return (g3, funType, LamS vs (applyGen g3 bodyExpr))
+  noEscapedLengths i g0 g3 funType
+  return (leaveLambda g0 g3, funType, LamS vs (applyGen g3 bodyExpr))
 
 --   List
 synthE _ g (LstS []) =
@@ -1311,9 +1326,9 @@ synthE vi g0 (VarS v (MonomorphicExpr (Just t0) xs0)) = do
     Nothing -> return newCs
   let outermost = isNothing (gammaAssumedConstraints g1)
       contract = isJust (gammaRigid g1)
-      -- A Nat only the result has is one the function chooses (DIM-10), so
-      -- it is not rigid in its body.
-      sigNats = List.nub (collectNatVarNames t1 <> Map.elems labelVars) List.\\ resultOnlyNats t1 (Map.elems labelVars)
+      -- A Nat the function chooses (DIM-10) is not rigid in its body.
+      allLabels = Map.elems labelVars <> [Map.findWithDefault lv lv natRen | lv <- Map.keys (enatLabels t0)]
+      sigNats = List.nub (collectNatVarNames t1 <> Map.elems labelVars) List.\\ outwardNats t1 allLabels
       -- Checking against a signature, at any depth, its effect variables
       -- are rigid and its constraints are given to its body. Both stay in
       -- gamma after the body, over names no other signature uses.
@@ -1338,9 +1353,9 @@ synthE vi g0 (VarS v (MonomorphicExpr (Just t0) xs0)) = do
             , gammaLabelVars = Map.union labelVars (gammaLabelVars g1)
             }
         | otherwise = g1Base {gammaLabelVars = Map.union labelVars (gammaLabelVars g1)}
-      g1' = (g1Cs ++> [AnnG v t1]) {gammaScoped = inScope}
+      g1' = (g1Cs ++> [AnnG v t1]) {gammaScoped = inScope, gammaDefinitionLambda = v <$ ownLambdaArity xs0}
   (g2scoped, t2, xs1) <- foldCheck g1' xs0 t1
-  let g2 = g2scoped {gammaScoped = gammaScoped g0}
+  let g2 = g2scoped {gammaScoped = gammaScoped g0, gammaDefinitionLambda = gammaDefinitionLambda g0}
   -- EFF-10: catches forces such as `f = !rint`, which subtyping cannot
   -- see since EvalS strips the effect. Reported at the body's index ci.
   mapM_ (\x@(AnnoS _ ci _) -> checkEffectCoverage ci (apply g2 t1) x) xs1
@@ -1451,7 +1466,7 @@ synthE _ g (CallS v) = do
     -- Checking against a signature, the body's quantified variables are
     -- rigid under their own names; a recursive call instantiates the
     -- signature afresh, so it must not reuse them.
-    (Just t) | Just _ <- gammaRigid g -> return (rename g t)
+    (Just t) | Just _ <- gammaRigid g -> return (observeRecursive g t)
     (Just t) -> return (g, t)
     Nothing -> return $ newvar (unEVar v <> "_rec") g
   return (g', t', CallS v)
@@ -2213,21 +2228,26 @@ checkE i g1 (LstS (e : es)) (AppU (VarU v) [t])
       return (g', t', reverse acc ++ xs')
 checkE i g0 (LamS vs body) t@(FunU as b)
   | length vs == length as = do
-      let g1 = g0 ++> zipWith AnnG vs as
+      let g1 = enterLambda g0 ++> zipWith AnnG vs as
       (g2, t2, e2) <- checkG g1 body b
 
       let t3 = apply g2 (FunU as t2)
           e3 = applyCon g2 (LamS vs e2)
-
-      return (g2, t3, e3)
+      noEscapedLengths i g0 g2 t3
+      return (leaveLambda g0 g2, t3, e3)
   -- Fewer parameters than arguments. Not eta-expanded: that would move the
   -- body's work from each application of this lambda to each call of the
   -- function it returns.
   | length vs < length as = do
       let (asHere, asRest) = splitAt (length vs) as
-          g1 = g0 ++> zipWith AnnG vs asHere
+          g1 = enterLambda g0 ++> zipWith AnnG vs asHere
       (g2, t2, e2) <- checkG g1 body (FunU asRest b)
-      return (g2, apply g2 (FunU asHere t2), applyCon g2 (LamS vs e2))
+      let t3 = apply g2 (FunU asHere t2)
+      noEscapedLengths i g0 g2 t3
+      return (leaveLambda g0 g2, t3, applyCon g2 (LamS vs e2))
+  -- More parameters than this arrow group has arguments, and the result is
+  -- the next group: one type (APP-1), checked as one lambda.
+  | FunU bs c <- b, not (null as) = checkE i g0 (LamS vs body) (FunU (as <> bs) c)
   -- More parameters than this arrow group has arguments (@FunU [A] (FunU
   -- [B] C)@): the surplus parameters are checked against the return type,
   -- as 'subtype' does. Each step consumes at least one parameter, so this
@@ -2238,6 +2258,7 @@ checkE i g0 (LamS vs body) t@(FunU as b)
       (g2, t2, e2) <- checkG g1 (AnnoS i i (LamS vsRest body)) b
       let t3 = apply g2 (FunU as t2)
           e3 = applyCon g2 (LamS vsHere e2)
+      noEscapedLengths i g0 g2 t3
       return (g2, t3, e3)
   -- A zero-argument arrow group cannot absorb any parameter, so there is
   -- nothing left to reconcile.
@@ -2563,7 +2584,7 @@ checkE i g0 e@(AppS _ _) t@(OptionalU _) = checkEFallback i g0 e t
 -- return (@r - f@, @m * n@) has nothing safe to pin; it and every other
 -- case take the synth-and-subtype path.
 checkE i g0 (AppS f xs) t = do
-  (g1, funType0, funExpr0) <- synthG g0 f
+  (g1, funType0, funExpr0) <- leaveLambda g0 <$$> synthG (appliedDefinition f (length xs) g0) f
   overApplied i f xs (apply g1 funType0) (\e -> checkE i g0 e t) $ do
     let g1' = observeResultNats f funType0 (resolveNatLabels f funType0 xs g1)
         (g2, funType1) = stripForallU g1' (normalizeType funType0)
@@ -3297,23 +3318,157 @@ resolveNatLabels (AnnoS _ _ (VarS _ (MonomorphicExpr (Just et) _))) funType args
       _ -> Nothing
 resolveNatLabels _ _ _ g = g
 
--- | The Nats of a function type that only its result has, other than the
--- given label variables: lengths the function chooses (DIM-10). Arguments
--- are read flat (APP-1), so @a -> (b -> c)@ has the arguments @a@ and @b@.
-resultOnlyNats :: TypeU -> [TVar] -> [TVar]
-resultOnlyNats t labelled =
-  let (args, ret) = uncurryU t
-      inArgs = concatMap collectNatVarNames args
-   in List.nub [v | v <- collectNatVarNames ret, v `notElem` inArgs, v `notElem` labelled]
+-- | The Nats of a type, each with whether it stands outward (DIM-10): a
+-- function's arguments take the opposite of its position.
+natPolarity :: TypeU -> [(Bool, TVar)]
+natPolarity = natsAt True
+  where
+    natsAt out x = case x of
+      FunU ts r -> concatMap (natsAt (not out)) ts <> natsAt out r
+      NatVarU v -> [(out, v)]
+      IntVarU v -> [(out, v)]
+      _ -> concatMap (natsAt out) (typeUChildren x)
+
+-- | The Nats of a signature the function chooses (DIM-10): those, other
+-- than the given label variables, that occur only outward.
+outwardNats :: TypeU -> [TVar] -> [TVar]
+outwardNats t labelled =
+  let occs = natPolarity t
+   in List.nub [v | (True, v) <- occs, (False, v) `notElem` occs, v `notElem` labelled]
+
+-- | The Nats of a type with an inward occurrence: those its caller gives.
+inwardNats :: TypeU -> [TVar]
+inwardNats t = List.nub [v | (False, v) <- natPolarity t]
+
+-- | A recursive call instantiates its definition's signature afresh. The
+-- lengths it chooses are observed there (DIM-10), and so are its labelled
+-- ones, since a recursive call's label arguments are not read.
+observeRecursive :: Gamma -> TypeU -> (Gamma, TypeU)
+observeRecursive g t =
+  let (g1, t1) = rename g t
+   in (g1 {gammaObserved = Set.union (Set.fromList (outwardNats t1 [] <> labelled t1)) (gammaObserved g1)}, t1)
+  where
+    labelled t1 = [v | IntVarU v <- universe t1]
+    universe x = x : concatMap universe (typeUChildren x)
+
+-- | A function that chooses a length (DIM-10) chooses it again at each
+-- application, so one type can stand for its result only where it is
+-- applied to all its arguments: named alone or partially applied, it would
+-- give every later application one length. A signed, method or exported
+-- definition is applied once per call at the root of its body (through
+-- `let` bodies and `if` branches), so a reference there is exempt; an
+-- unsigned definition's body takes the arguments its reference gives.
+chosenLengthsApplied :: AnnoS Int ManyPoly Int -> MorlocMonad ()
+chosenLengthsApplied (AnnoS _ _ root) = void (foldM (walk rootEnv Nothing) Set.empty (foldExprS (: []) root))
+  where
+    rootEnv = case root of
+      VarS v def -> Map.singleton v def
+      _ -> Map.empty
+    -- ctx Nothing: exempt; Just n: the expression is applied to n
+    -- arguments. env: the definitions a recursive call may name.
+    walk env ctx seen (AnnoS i _ e) = case e of
+      LamS vs x -> walk env (fmap (\n -> max 0 (n - length vs)) ctx) seen x
+      AppS f@(AnnoS fi _ (VarS v def)) xs -> do
+        let ctx' = fmap (+ length xs) ctx
+        applied ctx' fi v def
+        seen' <- definition env ctx' seen v f def
+        foldM (walk env (Just 0)) seen' xs
+      AppS (AnnoS fi _ (CallS v)) xs -> do
+        mapM_ (applied (fmap (+ length xs) ctx) fi v) (Map.lookup v env)
+        foldM (walk env (Just 0)) seen xs
+      AppS f xs -> walk env (fmap (+ length xs) ctx) seen f >>= \seen' -> foldM (walk env (Just 0)) seen' xs
+      VarS v def -> applied ctx i v def >> definition env ctx seen v (AnnoS i i e) def
+      CallS v -> mapM_ (applied ctx i v) (Map.lookup v env) >> return seen
+      LetS _ x body -> walk env (Just 0) seen x >>= \seen' -> walk env ctx seen' body
+      IfS c x y -> walk env (Just 0) seen c >>= \seen' -> walk env ctx seen' x >>= \seen'' -> walk env ctx seen'' y
+      LabelS _ x -> walk env ctx seen x
+      DoBlockS x -> walk env ctx seen x
+      EvalS x -> walk env ctx seen x
+      CoerceS _ x -> walk env ctx seen x
+      _ -> foldM (walk env (Just 0)) seen (foldExprS (: []) e)
+    -- A definition's body is the same at each of its references.
+    definition env ctx seen v (AnnoS _ _ f) def =
+      let bodies = foldExprS (: []) f
+          ctx' = case def of
+            MonomorphicExpr Nothing _ -> ctx
+            _ -> Nothing
+          key = (v, [j | AnnoS j _ _ <- bodies], ctx')
+       in if Set.member key seen then return seen else foldM (walk (Map.insert v def env) ctx') (Set.insert key seen) bodies
+    applied (Just n) at v def
+      | Just et <- signatureOf def
+      , (args, _) <- uncurryU (etype et)
+      , n < length args
+      , (l : _) <- outwardNats (etype et) (Map.keys (enatLabels et)) =
+          throwTypeError at $
+            squotes (pretty (displayName v)) <+> "chooses the length" <+> squotes (pretty l)
+              <+> "at each application (DIM-10), so it must be applied to all"
+              <+> pretty (length args) <+> "of its arguments here"
+    applied _ _ _ _ = return ()
+
+-- | Apply to the context of a synthesis result.
+(<$$>) :: Functor m => (Gamma -> Gamma) -> m (Gamma, a, b) -> m (Gamma, a, b)
+f <$$> m = (\(g, a, b) -> (f g, a, b)) <$> m
+infixl 4 <$$>
+
+-- | An unsigned definition is typed afresh at each reference, so applied
+-- there to all its parameters its lambda runs once (DIM-10).
+appliedDefinition :: AnnoS g ManyPoly c -> Int -> Gamma -> Gamma
+appliedDefinition (AnnoS _ _ (VarS v (MonomorphicExpr Nothing bodies))) n g
+  | Just k <- ownLambdaArity bodies, k <= n = g {gammaDefinitionLambda = Just v}
+appliedDefinition _ _ g = g
+
+-- | Entering a lambda: any lambda in its body is not a definition's own.
+enterLambda :: Gamma -> Gamma
+enterLambda g = g {gammaDefinitionLambda = Nothing}
+
+-- | The definition a root is, when its bodies are lambdas.
+ownLambda :: AnnoS g ManyPoly c -> Maybe EVar
+ownLambda (AnnoS _ _ e@(VarS v _)) = v <$ ownLambdaArity (foldExprS (: []) e)
+ownLambda _ = Nothing
+
+-- | When every body of a definition is a lambda, the most parameters a
+-- reference must give for each of them to run once.
+ownLambdaArity :: [AnnoS g f c] -> Maybe Int
+ownLambdaArity bodies = case [length vs | AnnoS _ _ (LamS vs _) <- bodies] of
+  ns@(_ : _) | length ns == length bodies -> Just (maximum ns)
+  _ -> Nothing
+
+-- | Leaving a lambda restores the mark it entered with, for the next of a
+-- definition's bodies.
+leaveLambda :: Gamma -> Gamma -> Gamma
+leaveLambda before after = after {gammaDefinitionLambda = gammaDefinitionLambda before}
+
+-- | A length observed in a lambda's body is one value per evaluation of the
+-- body (DIM-10): it may not reach a type outside the lambda, the variables
+-- in scope around it, or, unless the lambda runs once per call of its
+-- definition ('gammaDefinitionLambda'), the lambda's own type.
+noEscapedLengths :: Int -> Gamma -> Gamma -> TypeU -> MorlocMonad ()
+noEscapedLengths i before after t
+  | Set.null fresh = return ()
+  | any (`Set.member` fresh) (concatMap (collectNatVarNames . apply after) reach) =
+      throwTypeError i
+        "this lambda's type, or a variable around it, holds a length that a call in its body chooses, and the call may choose another at each application of the lambda (DIM-10); use the length only inside the body, or give the function a signature"
+  | otherwise = return ()
+  where
+    fresh = Set.difference (gammaObserved after) (gammaObserved before)
+    own = gammaDefinitionLambda before
+    outer = [x | AnnG v x <- IntMap.elems (gammaContext before), Just v /= own]
+    reach = if isJust own then outer else t : outer
 
 -- | At a call, a Nat the called function chooses is a value known only at
 -- run time (DIM-10).
 observeResultNats :: AnnoS Int ManyPoly Int -> TypeU -> Gamma -> Gamma
-observeResultNats (AnnoS _ _ (VarS _ (MonomorphicExpr (Just et) _))) funType g =
+observeResultNats (AnnoS _ _ (VarS _ def)) funType g
+  | Just et <- signatureOf def =
   let renamed = Map.fromList (zip (List.nub (collectNatVarNames (etype et))) (List.nub (collectNatVarNames funType)))
       labelled = [r | v <- Map.keys (enatLabels et), Just r <- [Map.lookup v renamed]]
-   in g {gammaObserved = Set.union (Set.fromList (resultOnlyNats funType labelled)) (gammaObserved g)}
+   in g {gammaObserved = Set.union (Set.fromList (outwardNats funType labelled)) (gammaObserved g)}
 observeResultNats _ _ g = g
+
+-- | The signature a reference is typed by: its own, or its class method's.
+signatureOf :: ManyPoly a -> Maybe EType
+signatureOf (MonomorphicExpr et _) = et
+signatureOf (PolymorphicExpr _ _ et _) = Just et
 
 -- | The Nat and Int variables of types that a run-time value gives: a
 -- Vector's length and a label's value.

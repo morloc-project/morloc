@@ -11,6 +11,16 @@ literal and record gaps. Reproduced on 0.109.0 unless marked.
   doubles the work at each level, `2^d` for `d` nested over-applied heads.
   Candidate: continue from the synthesized head and apply its result to
   the rest.
+- [reproduced, 2026-11-05] Typechecking a composition chain grows
+  superlinearly: `r = (id . id . ... . id) 42` takes 0.2 s at 200 links, 0.6
+  s at 400 and 28 s at 1600 (installed 0.112.0 and dev alike). The unit test
+  "long non-tuple composition chain stays linear" checks 200 links under a
+  1 s timeout, so it passes only on a quiet machine.
+- [read, 2026-11-05] A lambda with more parameters than its expected
+  arrow group (Typecheck.hs checkE LamS, third case) checks the remaining
+  parameters as `AnnoS i i (LamS rest body)`, reusing the outer lambda's
+  index, so an annotation on the outer lambda (`(\x y -> x + y :: Int ->
+  Int -> Int)`) would be applied again to the inner one. Not reproduced.
 - **Unreduced Rec expression not equal to itself.** [reproduced] Violates
   TEQ-4. `newtype Frame (r :: Rec); select, mySelect :: l@[Str] -> Frame r
   -> Frame (Restrict r l); mySelect l t = select l t` fails "Cannot compare

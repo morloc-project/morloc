@@ -521,6 +521,7 @@ listToGamma gs =
     , gammaRigidDomain = []
     , gammaLabelVars = Map.empty
     , gammaObserved = Set.empty
+    , gammaDefinitionLambda = Nothing
     , gammaScoped = Map.empty
 
     , gammaPositionalReceivers = Set.empty

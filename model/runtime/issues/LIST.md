@@ -29,4 +29,4 @@ it is solved, and a file when it is empty.
 - [spec-and-docs.md](spec-and-docs.md): FMT-2/FMT-5 stale against SHM-6/12/13, SHM-6 zeroing side, cited tests that miss their rule (SHM-1, STATE-3, FORK-7, NET-3, PANIC-10, SLOT-16, SLOT-24), FORK-9 and once primitives, README model list, undocumented runtime variables, arch-build pages, manual `registry` config path
 - [schema-grammar.md](schema-grammar.md): a recursive list alias's schema
 - [kind-arguments.md](kind-arguments.md): a `$N` naming a kind parameter reaches C++ unexpanded, Nat-literal record forms conflict, a field applying a Rec-parameterized record fails unlocated, raw errors in macro expansion, data-argument pairing and erasure on the nexus path
-- [function-types.md](function-types.md): labels and docstrings in a parenthesized result group need rulings; host call grouping read from the nesting of an instantiated type; DIM-10 polarity of Nats in result-held functions (ruling)
+- [function-types.md](function-types.md): docstrings in a parenthesized result group need a ruling; host call grouping read from the nesting of an instantiated type

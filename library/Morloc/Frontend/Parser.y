@@ -14,6 +14,9 @@ import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import qualified Data.Scientific as DS
 import Data.List (sortBy, foldl')
+import qualified Data.List as List
+import Data.Maybe (fromMaybe, listToMaybe)
+import Morloc.Typecheck.Internal (typeUChildren)
 import qualified Control.Monad.State.Strict as State
 import Morloc.Frontend.Token
 import Morloc.Frontend.Lexer (LexError (..), insertLayoutWith, lexMorloc, lexMorlocUnlaid, lexMorlocUnlaidFrom, showLexError)
@@ -157,15 +160,15 @@ import qualified Morloc.BaseTypes as BT
 --------------------------------------------------------------------
 
 program :: { ([Loc CstDecl], Bool) }
-  : modules EOF             { ($1, False) }
-  | top_body EOF            { ($1, True) }
+  : modules EOF             {% noStrayLabels >> return ($1, False) }
+  | top_body EOF            {% noStrayLabels >> return ($1, True) }
 
 -- Standalone entry points with explicit EOF
 type_eof :: { TypeU }
-  : type EOF                { $1 }
+  : type EOF                {% noStrayLabels >> return $1 }
 
 expr_eof :: { Loc CstExpr }
-  : expr EOF                { $1 }
+  : expr EOF                {% noStrayLabels >> return $1 }
 
 modules :: { [Loc CstDecl] }
   : module                   { [$1] }
@@ -402,8 +405,8 @@ nam_constructor :: { (Text, Bool, [TypeU]) }
 -- Each constructor carries the `=` or `|` that introduces it: a docstring
 -- written above a constructor sits above that token, which is where the
 -- lexer attaches it.
--- Labels in a newtype's representation are kept (DIM-9); anywhere else
--- inside a type they are an error.
+-- Labels in a newtype's representation are kept (DIM-9); others are
+-- checked against their signature.
 rep_open :: { () }
   : {- empty -}                       {% State.modify (\st -> st { psInRep = True }) }
 
@@ -516,7 +519,7 @@ non_string_atom :: { TypeU }
   | '[' type ']'              { BT.listU $2 }
   | '?' non_string_atom       { OptionalU $2 }
   | UPPER                     { VarU (TV (getName $1)) }
-  | LOWER '@' non_fun_type   { LabeledU (TV (getName $1)) $3 }
+  | LOWER '@' non_fun_type   {% nestedLabel $1 $3 }
   | LOWER                     { VarU (TV (getName $1)) }
   | INTEGER                   { NatLitU (getInt $1) }
 
@@ -1040,9 +1043,9 @@ effect_item :: { Either EffectLabel TVar }
 
 sig_type :: { CstSigType }
   : sig_fun_args '=>' sig_fun_args
-      { CstSigType (Just $1) $3 }
+      {% sigLabels (Just $1) $3 >> return (CstSigType (Just $1) $3) }
   | sig_fun_args
-      { CstSigType Nothing $1 }
+      {% sigLabels Nothing $1 >> return (CstSigType Nothing $1) }
 
 sig_fun_args :: { [(Pos, TypeU)] }
   : pos_non_fun_type '->' sig_fun_args  { $1 : $3 }
@@ -1076,7 +1079,7 @@ pos_atom_type :: { (Pos, TypeU) }
   | '{' '}'                      { (locPos $1, RecEmptyU) }
   | '{' rec_entries '}'          { (locPos $1, foldr (\(k, t) rest -> RecExtendU k t rest) RecEmptyU $2) }
   | UPPER                       { (locPos $1, VarU (TV (getName $1))) }
-  | LOWER '@' non_fun_type      { (locPos $1, LabeledU (TV (getName $1)) $3) }
+  | LOWER '@' non_fun_type      {% fmap (\t -> (locPos $1, t)) (nestedLabel $1 $3) }
   | LOWER                       { (locPos $1, VarU (TV (getName $1))) }
   | STRING                      { (locPos $1, StrLitU (getString $1)) }
   | INTEGER                     { (locPos $1, NatLitU (getInt $1)) }
@@ -1148,12 +1151,13 @@ data PState = PState
   , psStreamElems :: !(Map.Map EVar TypeU) -- @collect batch type per command
   , psOwnModule :: !Bool -- the program's own module, not one of an installed package
   , psInRep :: !Bool -- inside a newtype's representation
+  , psLabelSites :: ![(Text, Pos)] -- labels not yet checked against their signature
   , psMatchSites :: !(Map.Map Text MatchSite)
   }
   deriving (Show)
 
 emptyPState :: PState
-emptyPState = PState 1 Map.empty Nothing defaultValue Map.empty [] Map.empty Nothing Map.empty [] [] [] Map.empty True False Map.empty
+emptyPState = PState 1 Map.empty Nothing defaultValue Map.empty [] Map.empty Nothing Map.empty [] [] [] Map.empty True False [] Map.empty
 
 type P a = State.StateT PState (Either ParseError) a
 
@@ -1354,18 +1358,71 @@ repClose :: P ()
 repClose = State.modify (\st -> st { psInRep = False })
 
 -- | A label inside a type: in a newtype's representation it names the
--- parameter that integer holds (DIM-9); elsewhere only a whole signature
--- argument may carry one (POLY-3).
+-- parameter that integer holds (DIM-9); elsewhere it is checked once its
+-- signature is complete ('sigLabels').
 nestedLabel :: Located -> TypeU -> P TypeU
 nestedLabel tok t = do
   inRep <- State.gets psInRep
   if inRep
-    then return (LabeledU (TV (getName tok)) t)
-    else do
-      srcLines <- State.gets psSourceLines
-      let msg = "the label '" ++ T.unpack (getName tok) ++ "@' binds nothing here: a label names a whole"
-             ++ " argument of a signature, or a header field of a newtype's representation"
-      State.lift (Left (ParseError (locPos tok) msg [] srcLines False))
+    then return ()
+    else State.modify (\st -> st { psLabelSites = psLabelSites st ++ [(getName tok, locPos tok)] })
+  return (LabeledU (TV (getName tok)) t)
+
+-- | Check the labels of a signature (POLY-3, APP-1): a label may stand only
+-- at the root of an argument, or of a parameter of a parenthesized last
+-- group, not of the result, and names one argument. Label sites are recorded as their
+-- productions reduce, so the walk below lists a signature's labels in that
+-- same order (children first, left to right) and pairs them with the sites
+-- recorded since the signature began. Earlier sites lie outside any
+-- signature.
+sigLabels :: Maybe [(Pos, TypeU)] -> [(Pos, TypeU)] -> P ()
+sigLabels cs args = do
+  sites <- State.gets psLabelSites
+  let cargs = fromMaybe [] cs
+      start = maybe (Pos 0 0 "") fst (listToMaybe (cargs <> args))
+      (stray, mine) = List.partition ((< start) . snd) sites
+      walk = map (\v -> (v, False)) (concatMap (labelOrder . snd) cargs)
+        <> concat (zipWith rootLabels (map (== length args) [1 ..]) (map snd args))
+      named = scanl (\acc (v, ok) -> if ok then v : acc else acc) [] walk
+      -- each bad site, and whether it repeats a label that binds
+      bad = [(site, bound) | (site@(v, _), (w, ok), seen) <- List.zip3 mine walk named, let bound = ok && v == w, not bound || elem v seen]
+        <> [(site, False) | site <- drop (length walk) mine]
+  case (stray, bad) of
+    ((v, p) : _, _) -> labelError v p
+    (_, ((v, p), True) : _) -> duplicateLabel v p
+    (_, ((v, p), False) : _) -> labelError v p
+    _ -> State.modify (\st -> st { psLabelSites = [] })
+  where
+    below t = map (\v -> (v, False)) (labelOrder t)
+    -- isLast: the result, or a parenthesized group standing for the rest
+    rootLabels False (LabeledU (TV v) t) = below t <> [(v, True)]
+    rootLabels True (FunU ps@(_ : _) r) = concatMap (rootLabels False) ps <> rootLabels True r
+    rootLabels _ t = below t
+
+-- | The labels of a type in the order their productions reduce.
+labelOrder :: TypeU -> [Text]
+labelOrder (LabeledU (TV v) x) = labelOrder x <> [v]
+labelOrder t = concatMap labelOrder (typeUChildren t)
+
+-- | A label left in a type outside any signature binds nothing.
+noStrayLabels :: P ()
+noStrayLabels = do
+  sites <- State.gets psLabelSites
+  case sites of
+    ((v, p) : _) -> labelError v p
+    [] -> return ()
+
+duplicateLabel :: Text -> Pos -> P a
+duplicateLabel v pos = do
+  srcLines <- State.gets psSourceLines
+  State.lift (Left (ParseError pos ("the label '" ++ T.unpack v ++ "@' is given twice in this signature; each label names one argument") [] srcLines False))
+
+labelError :: Text -> Pos -> P a
+labelError v pos = do
+  srcLines <- State.gets psSourceLines
+  let msg = "the label '" ++ T.unpack v ++ "@' binds nothing here: a label names one whole"
+         ++ " argument of a signature, or a header field of a newtype's representation"
+  State.lift (Left (ParseError pos msg [] srcLines False))
 
 -- Reject `{x :: T}` inside type-level record literals. The literal form
 -- binds fields with `=` (mirroring morloc's term-level `{x = 3}` record

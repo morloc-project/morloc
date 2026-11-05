@@ -138,9 +138,9 @@ naming the same parameter, and one inside a signature's argument rather
 than on the whole argument (POLY-3).
 
 ### DIM-10 A length or label known only at run time stands for every value
-Intent: ruled 2026-10-31
-Tests: spec-dim-10-1, spec-dim-10-2, spec-dim-10-3, spec-dim-10-4, spec-dim-10-5, spec-dim-10-6, spec-dim-10-7, spec-dim-10-8
-Code: deviates (issues/kinds-dimensions.md; open ruling in issues/function-types.md)
+Intent: ruled 2026-11-05
+Tests: spec-dim-10-1, spec-dim-10-2, spec-dim-10-3, spec-dim-10-4, spec-dim-10-5, spec-dim-10-6, spec-dim-10-7, spec-dim-10-8, spec-dim-10-9, spec-dim-10-10, spec-dim-10-11, spec-dim-10-12, spec-dim-10-13, spec-dim-10-14, spec-dim-10-15, spec-dim-10-16, spec-dim-10-17, spec-dim-10-18, spec-dim-10-19, spec-dim-10-20, spec-dim-10-21, spec-dim-10-22, spec-dim-10-23, spec-dim-10-24, spec-dim-10-25, spec-dim-10-26, spec-dim-10-27, spec-dim-10-28, spec-dim-10-29, spec-dim-10-30, spec-dim-10-31, spec-dim-10-32, spec-dim-10-33
+Code: deviates (issues/kinds-dimensions.md)
 
 A label's value at a call is known before run time when its argument is a
 literal or the enclosing signature's own label. Any other label argument,
@@ -153,3 +153,34 @@ placed for it there (DIM-3). A signature that labels the value and states
 the relation moves the check to the command's input:
 `h :: w@Int -> Vector (m + w - 1) Int -> Int` may call `roll w`, and its
 input is checked for `m >= 0`.
+
+Polarity decides who chooses each unlabelled length of a signature. The
+signature's arguments are inward and its result outward; inside a function
+type, its arguments take the opposite of the position it stands in and its
+result keeps it; every other type (a list, tuple, record, optional,
+effect or application) keeps it. A length with an inward occurrence is the
+caller's: it is rigid in the body (POLY-7) and solved at each call. A length
+with only outward occurrences is the function's: the body chooses it, and
+at a call it is observed, as above. So `run :: Int -> (V n -> Int, Int)`
+returns a function the caller may apply to any `V n`, and a body returning
+one that takes only `V 3` is refused; `apply :: (V n -> Int) -> Int` may
+call its argument on a `V 3`, and a caller must pass a function that takes
+every `V n`; and in `mk :: Int -> (V n, V n -> Int)` the caller chooses `n`.
+
+A function chooses its lengths again at each application, so one type
+names them only within one application. A function that chooses a length
+is applied to all its arguments wherever it is named: `map mk xs`, with
+`mk :: Int -> V n`, would give every element one length, and is refused.
+A lambda's type cannot hold a length a call in its body chooses
+(`\k -> mk k`), since each application of the lambda may give another; a
+signed definition or exported command is exempt in its own parameters and
+at the root of its body (`open :: Table n r -> Table m r; open = sliceRows
+0 3`), as each of its calls applies that root once and observes afresh. An
+unsigned local definition is typed at each reference, so its lambda is
+exempt where that reference applies it to all its parameters.
+A length a call chooses may not reach the variables around the lambda
+whose body makes the call, nor the input of a command: in `bar v = dot (mk
+1) v`, `v`'s length would have to equal one known only once `mk` runs.
+A recursive call is an application like any other: it observes the
+lengths it chooses afresh, and its labelled ones, since its label arguments
+are not read.

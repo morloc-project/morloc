@@ -1,0 +1,30 @@
+-- Who chooses a length is decided by polarity (DIM-10): a function a result
+-- holds takes a length its caller chooses, and a callback's argument has a
+-- length its caller's callee chooses, at a literal or at run time.
+module main (scaleBy, sumBelow, sumThreePlus)
+
+import root-py
+import vector-py
+
+source Py from "src.py" ("scaler", "fst", "on_range" as onRange, "total", "range_k" as rangeK)
+
+scaler :: Int -> (Vector n Int -> Vector n Int, Int)
+fst :: (a, b) -> a
+onRange :: Int -> (Vector n Int -> Int) -> Int
+total :: Vector m Int -> Int
+rangeK :: k@Int -> Vector k Int
+
+onThree :: (Vector n Int -> Int) -> Int
+onThree f = f (rangeK 3)
+
+--' Scale a vector of three by a returned function
+scaleBy :: Int -> Vector 3 Int -> Vector 3 Int
+scaleBy k v = fst (scaler k) v
+
+--' Sum the integers below k through a callback
+sumBelow :: Int -> Int
+sumBelow k = onRange k total
+
+--' Add k to the sum of the integers below three
+sumThreePlus :: Int -> Int
+sumThreePlus k = k + onThree total

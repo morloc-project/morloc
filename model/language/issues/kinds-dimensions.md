@@ -24,6 +24,37 @@
   arm), checked against the parent's schema; the entry decodes it as a
   value the program built. If the entry's schema could differ from the
   parent's, its fixed lengths would never be checked. Not reproduced.
+- [read, 2026-11-05] Open ruling, DIM-10: a length an instance head
+  introduces (`pack :: [a] -> f a` at `instance Pack (Vector n)`) is the
+  caller's: it is solved at the use, and a morloc instance body must hold
+  for every n (a probe was refused), so a sourced instance claims any length
+  the caller asks for. A class signature's own lengths are observed as a
+  function's. Ruling needed: head lengths are the caller's (as now) or the
+  method's (observed at each use, which instance resolution would have to
+  report).
+- [read, 2026-11-05] Open ruling, DIM-10: polarity stops at a type head, so
+  `newtype P (n :: Nat) = V n -> Int` makes `run :: Int -> P n` the
+  function's while `run :: Int -> (V n -> Int)` is the caller's. Options:
+  each parameter's variance from its declaration (NEWT-9), or heads are
+  opaque, stated and tested.
+- [read, 2026-11-05] Open ruling, DIM-10: one length per body for a callback
+  argument the function chooses, so `apply f = f v3 + f v4` with `apply ::
+  (V n -> Int) -> Int` is refused though every legal callback takes both.
+  Incomplete, not unsound. The same holds for branches: `g k = ? isZero k =
+  mk k : mk 0` (and its recursive form `... : g 0`) is refused, as each
+  branch chooses its own length and the body has one.
+- [read, 2026-11-05] DIM-10: a recursive call's label arguments are never
+  read (Frontend/Typecheck.hs resolveNatLabels matches only VarS), so its
+  labelled lengths are observed even for a literal argument: `g k = ... g
+  0` with `g :: k@Int -> V k` cannot use that its call returns `V 0`.
+  Incomplete, not unsound.
+- [read, 2026-11-05] DIM-10: the call side does not assume the callee's
+  domain for an observed length (Frontend/Typecheck.hs adds it for the body
+  only), so a correct caller of a function choosing `V (n + 1)` may be refused.
+- [reproduced, 2026-11-05] A caller refused under DIM-10 (`apply g3`, `dot
+  (mk 1) v3`) is told "The body does not hold for every value of the Nat and
+  Int variables of its signature (POLY-7)", naming a `?n` variable; the
+  error is about the call, not a signature.
 - [read, 2026-10-31] Gap in DIM-10: a Table's row count is not among the
   lengths a command's input gives (Frontend/Typecheck.hs `runTimeVars`
   matches only Vector), so the main pass of an unsigned export may solve

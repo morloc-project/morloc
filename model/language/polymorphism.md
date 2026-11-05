@@ -24,8 +24,11 @@ Code: conforms 2026-10-21
 An unannotated type parameter has kind `Type`. `(n :: K)` in a type
 declaration gives kind `K`. In a signature, `x@Int` binds an `Int`, `x@Str`
 a `Str` and `x@[Str]` a `List` to the value of that argument. A label
-labels a whole argument; elsewhere in a type it is an error, except in a
-newtype's representation (DIM-9).
+labels a whole argument, and a parameter of a parenthesized last group is a
+whole argument (APP-1): `Int -> (n@Int -> V n)` is `Int -> n@Int -> V n`.
+A signature labels each name once. Elsewhere in a type, on the result, in
+a constraint or under a wrapper (`?n@Int`, `<IO> n@Int`), a label is an
+error, except in a newtype's representation (DIM-9).
 
 ### POLY-4 Type variables in a local signature
 Intent: ruled 2026-10-30
@@ -72,9 +75,9 @@ n Int -> Vector (n - 1) Int` may, since its domain has `n >= 1`. A label
 (`w@Int`) names such a variable whether or not it occurs elsewhere in the
 type, and a body that passes the labeled argument to another label passes
 that variable. A label on an unsigned type (`UInt`, `U8` to `U64`) adds
-its variable's non-negativity to the domain. A Nat that only the
-signature's result has, and that no label names, is one the function
-chooses, not one it is given: it is not rigid in the body, and at each call
-it is observed (DIM-10), so `sliceRows :: start@Int -> end@Int -> Table n r
+its variable's non-negativity to the domain. A Nat that occurs only
+outward in the signature (DIM-10), and that no label names, is one the
+function chooses, not one it is given: it is not rigid in the body, and at
+each call it is observed, so `sliceRows :: start@Int -> end@Int -> Table n r
 -> Table m r` returns a length no equation may fix. Every Nat position in the
 body's types must be non-negative there too. These conditions are decided by DIM-7.

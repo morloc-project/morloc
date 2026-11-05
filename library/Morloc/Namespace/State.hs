@@ -1013,6 +1013,9 @@ data Gamma = Gamma
   -- known before run time (DIM-3): never solved by an equation, and every
   -- condition over one must hold for each of its values.
   , gammaObserved :: Set.Set TVar
+  -- | The definition whose own lambda comes next: it runs once per call of
+  -- the definition, so its type may hold lengths its body observes (DIM-10).
+  , gammaDefinitionLambda :: Maybe EVar
   -- | The type variables of the signatures being checked around this point,
   -- by the name the signature wrote to the name the check gave it. An
   -- annotation writing one of these names means that variable; a local
