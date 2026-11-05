@@ -97,7 +97,7 @@ module Morloc.CodeGenerator.Grammars.Translator.Imperative
   , IndexM
   ) where
 
-import Morloc.Data.Zip (indexed, zip3Indexed, zip3Same, zipPrefix, zipSame, zipWith3Same, zipWithPrefixM, zipWithSame)
+import Morloc.Data.Zip (indexed, mapIndexedM, zip3Indexed, zip3Same, zipSame, zipWith3Same, zipWithSame)
 import Control.Monad.Identity (Identity, runIdentity)
 import qualified Control.Monad.State as CMS
 import Data.Binary (Binary)
@@ -945,7 +945,7 @@ nativeToWire cfg = go
       (before, x) <- go (pretty (lcLocalPrefix cfg) <> "i" <> pretty idx) s
       return ([IMapList v' resultType iterVar (IRawExpr (render v)) before x], IVar v')
     construct v tup@(SerialTuple _ ss) = do
-      results <- zipWithPrefixM (\i s -> go (lcTupleAccessor cfg i v) s) [0 ..] ss
+      results <- mapIndexedM (\i s -> go (lcTupleAccessor cfg i v) s) ss
       let (befores, exprs) = unzip results
       idx <- lcNewIndex cfg
       typeM <- lcSerialAstType cfg tup
@@ -984,7 +984,7 @@ nativeToWire cfg = go
       ty <- nominalTypeDoc cfg (serialAstToType var) cv
       resultType <- lcSerialAstType cfg var
       byVariantArm cfg resultType ty v arms $ \n i ss -> do
-        results <- zipWithPrefixM (\j s -> go (lcCtorField cfg FieldCopy ty n i j v) s) [0 ..] ss
+        results <- mapIndexedM (\j s -> go (lcCtorField cfg FieldCopy ty n i j v) s) ss
         let (befores, exprs) = unzip results
         return (concat befores, IRawExpr (render (lcVariantLit cfg ty n i (map (lcPrintExpr cfg) exprs))))
     construct _ _ = error "Unreachable in nativeToWire"
@@ -1055,14 +1055,14 @@ wireToNative cfg = check
       (x, before) <- check (pretty (lcLocalPrefix cfg) <> "i" <> pretty idx) s
       return (IVar v', [IMapList v' resultType iterVar (IRawExpr (render v)) before x])
     construct v tup@(SerialTuple _ ss) = do
-      results <- zipWithPrefixM (\i s -> check (lcTupleAccessor cfg i v) s) [0 ..] ss
+      results <- mapIndexedM (\i s -> check (lcTupleAccessor cfg i v) s) ss
       let (exprs, befores) = unzip results
       typeM <- lcDeserialAstType cfg tup
       v' <- (render . (helperVar cfg)) <$> lcNewIndex cfg
       return (IVar v', concat befores ++ [IAssign v' typeM (ITupleLit exprs)])
     construct v (SerialObject namType fv@(FV _ _) _ rs) = do
       let accessor = lcDeserialRecordAccessor cfg
-      results <- zipWithPrefixM (\i (k, s) -> check (accessor i k v) s) [0 ..] rs
+      results <- mapIndexedM (\i (k, s) -> check (accessor i k v) s) rs
       let (exprs, befores) = unzip results
       typeM <- lcDeserialAstType cfg (SerialObject namType fv [] rs)
       idx <- lcNewIndex cfg
@@ -1084,7 +1084,7 @@ wireToNative cfg = check
       ty <- nominalTypeDoc cfg (serialAstToType var) cv
       resultType <- lcDeserialAstType cfg var
       swap <$> byVariantArm cfg resultType ty v arms (\n i ss -> do
-        results <- zipWithPrefixM (\j s -> check (lcCtorField cfg FieldCopy ty n i j v) s) [0 ..] ss
+        results <- mapIndexedM (\j s -> check (lcCtorField cfg FieldCopy ty n i j v) s) ss
         let (exprs, befores) = unzip results
         return (concat befores, IRawExpr (render (lcVariantLit cfg ty n i (map (lcPrintExpr cfg) exprs)))))
     construct _ _ = error "Unreachable in wireToNative"
@@ -1100,7 +1100,7 @@ byVariantArm ::
   [(Text, [SerialAST])] ->
   (Text -> Int -> [SerialAST] -> m ([IStmt], IExpr)) ->
   m ([IStmt], IExpr)
-byVariantArm cfg resultType ty v arms rebuild = chain (zipPrefix [0 ..] arms)
+byVariantArm cfg resultType ty v arms rebuild = chain (indexed arms)
   where
     pass = return ([], IRawExpr (render v))
     arm (i, (n, ss))
@@ -1808,7 +1808,7 @@ consumedParams listKeeps byValue mayBorrow cands nm@(NativeManifold _ _ _ body) 
       RN (IfN _ c _ _) -> sinks (RN c)
       RN (LoopN _ starts _) -> here n <> mconcat [sinks (RN x) | (_, x) <- starts]
       RN (DoBlockN _ _) -> Set.empty
-      RNM (NativeManifold m _ form@(ManifoldFull _) _) -> Set.fromList [p | (j, Arg p _) <- zipPrefix [0 ..] (typeMofForm form), Set.member j (byValue m)]
+      RNM (NativeManifold m _ form@(ManifoldFull _) _) -> Set.fromList [p | (j, Arg p _) <- indexed (typeMofForm form), Set.member j (byValue m)]
       _ -> here n <> mconcat (map sinks (filter (not . isValueManifold) (rnodeChildren n)))
     here (RN e) = case e of
       LoopN _ starts _ -> Set.fromList [p | (s, BndVarN _ p _) <- starts, not (Set.member s borrows)]
@@ -1816,7 +1816,7 @@ consumedParams listKeeps byValue mayBorrow cands nm@(NativeManifold _ _ _ body) 
       ListN _ _ xs | listKeeps -> vars xs
       TupleN _ xs -> vars xs
       RecordN _ _ _ kvs -> vars (map snd kvs)
-      AppExeN _ (RecCallP mid _) args -> Set.fromList [p | (j, NativeArgExpr a) <- zipPrefix [0 ..] args, Just p <- [readOf a], Set.member j (byValue mid)]
+      AppExeN _ (RecCallP mid _) args -> Set.fromList [p | (j, NativeArgExpr a) <- indexed args, Just p <- [readOf a], Set.member j (byValue mid)]
       _ -> Set.empty
     here _ = Set.empty
     vars xs = Set.fromList [p | BndVarN _ p _ <- xs]
@@ -2305,7 +2305,7 @@ bodyIsBoundVar cfg i body = render (poolExpr body) == render ((svar cfg) i)
 
 -- | A constructor's 0-based tag within an arm list.
 armTagOf :: T.Text -> [(T.Text, [TypeF])] -> Maybe Int
-armTagOf nm as = lookup nm (zipPrefix (map fst as) [0 ..])
+armTagOf nm = findIndex ((== nm) . fst)
 
 
 -- | The per-shape lowering rules. Reached through 'lowerNativeExpr'.
@@ -3363,7 +3363,7 @@ lowerManifold cfg m form headForm bodyType bodyPool = do
           -- variables, so their ownership is read in the caller's scope. A
           -- non-Native (serialized) argument is an owned deserialized value.
           callArgs <- lcWithCallerScope cfg $
-            zipWithPrefixM
+            mapIndexedM
               ( \j a@(Arg i t) -> do
                   own <- case t of
                     Native tf -> lcOwnership cfg (BndVarN tf i KeptRead)
@@ -3373,7 +3373,6 @@ lowerManifold cfg m form headForm bodyType bodyPool = do
                     _ -> return ((argName cfg) a)
                   return $ lcSourcedArg cfg (ManifoldArg m j) own t x
               )
-              [0 ..]
               (typeMofRs rs)
           return $ mname <> tupled callArgs
         (ManifoldPart rs vs) -> do
@@ -3443,9 +3442,9 @@ type IndexM = CMS.StateT IndexState Identity
 -- past-the-end index, which is a tag no arm answers to and would surface as
 -- a wrong branch rather than an error.
 armIndex :: Text -> [Text] -> Int
-armIndex n names = case [i | (i, m) <- zipPrefix [0 ..] names, m == n] of
-  (i : _) -> i
-  [] -> error ("compiler bug: no tag for constructor " <> show n)
+armIndex n names = case elemIndex n names of
+  Just i -> i
+  Nothing -> error ("compiler bug: no tag for constructor " <> show n)
 
 isIdentifierText :: Text -> Bool
 isIdentifierText t = case T.uncons t of

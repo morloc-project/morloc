@@ -79,7 +79,7 @@ module Morloc.CodeGenerator.Grammars.Common
   , makeTraceLabelLookup
   ) where
 
-import Morloc.Data.Zip (zipPrefix, zipSame, zipWithPrefix, zipWithSameM)
+import Morloc.Data.Zip (indexed, indexedFrom, zipSame, zipWithSameM)
 import Morloc.Frontend.Rename (displayName)
 import qualified Control.Monad.State as CMS
 import Data.Binary (Binary)
@@ -252,7 +252,7 @@ makeManifoldIndexer getId putId =
 
 patternSetter ::
   (TypeF -> [MDoc] -> MDoc) -> -- make a tuple from a type and list of elements
-  (TypeF -> [MDoc] -> MDoc) -> -- make a record from a type and list of elements
+  (TypeF -> [((Key, TypeF), MDoc)] -> MDoc) -> -- make a record from a type and its fields with their elements
   (TypeF -> MDoc -> Int -> MDoc) -> -- access an element in a tuple
   (TypeF -> MDoc -> Text -> MDoc) -> -- access an element in a record
   (TypeF -> MDoc -> MDoc) -> -- finalize an UNCHANGED field's value for the rebuild
@@ -288,12 +288,12 @@ patternSetter makeTuple makeRecord accessTuple accessRecord finalizeSet dat0 t0 
         (AppF _ ts1) ->
           makeTuple t1
             [ rebuild (accessTuple t1 dat1 i) t (into (Left i) ps)
-            | (i, t) <- zipPrefix [0 ..] (tyArgs ts1)
+            | (i, t) <- indexed (tyArgs ts1)
             ]
         (NamF _ _ _ rs1) ->
           makeRecord t1
-            [ rebuild (accessRecord t1 dat1 k) t (into (Right k) ps)
-            | (Key k, t) <- rs1
+            [ (r, rebuild (accessRecord t1 dat1 k) t (into (Right k) ps))
+            | r@(Key k, t) <- rs1
             ]
         -- Every path was checked against the receiver's type when the setter
         -- was typed, so a step into something with no fields means an
@@ -1003,7 +1003,8 @@ unifyRecords ::
   ] ->
   RecMap
 unifyRecords xs =
-  zipWithPrefix (\i ((v, ks), es) -> ((v, ks), RecEntry (structName i v) es)) [1 ..]
+  map (\(i, ((v, ks), es)) -> ((v, ks), RecEntry (structName i v) es))
+    . indexedFrom 1
     . map (\((v, ks), rss) -> ((v, ks), map unifyField (transpose (map snd rss))))
     . groupSort
     . unique

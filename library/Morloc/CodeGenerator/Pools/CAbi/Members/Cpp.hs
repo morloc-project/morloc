@@ -23,7 +23,7 @@ module Morloc.CodeGenerator.Pools.CAbi.Members.Cpp
   , cppLang
   ) where
 
-import Morloc.Data.Zip (zipPrefix, zipSame, zipWithPrefixM, zipWithSame)
+import Morloc.Data.Zip (indexed, indexedFrom, mapIndexedM, zipExact, zipSame, zipWithSame)
 import Data.Foldable (toList)
 import Data.Char (isUpper)
 import Control.Monad.Identity (Identity, runIdentity)
@@ -691,7 +691,7 @@ makeClosureDispatch closureTable es = do
       argTypes <- mapM cppTypeOf (ctxTs <> bndTs)
       getVals <- mapM
         (\(j, (t, ast)) -> cppDecode ("args[" <> pretty j <> "]") t ast)
-        (zipPrefix [(0 :: Int) ..] (zipSame argTypes (capAsts <> bndAsts)))
+        (indexed (zipSame argTypes (capAsts <> bndAsts)))
       let call = manNamer i <> tupled getVals
       putRes <- cppEncode call resAst
       reifier <- closureReifyThunk ctxNames capAsts
@@ -844,7 +844,7 @@ makeSignature nativeEntries = foldWithSerialManifoldM fm
         else do
           let formArgs = typeMofForm form
 
-          args <- zipWithPrefixM (cppParamOf i) [0 ..] formArgs
+          args <- mapIndexedM (cppParamOf i) formArgs
           CMS.put (s {translatorSignatureSet = Set.insert i (translatorSignatureSet s)})
           return [typestr <+> manNamer i <> tupled args <> ";"]
 
@@ -1418,7 +1418,7 @@ PROPAGATE_ERROR(errmsg)|]
                 CMS.modify
                   (\s -> s {translatorLocalManifoldSet = Set.insert callIndex (translatorLocalManifoldSet s)})
             returnTypeStr <- returnType manifoldType
-            typedArgs <- zipWithPrefixM (cppParamOf callIndex) [0 ..] args
+            typedArgs <- mapIndexedM (cppParamOf callIndex) args
             let debugMode = translatorDebugMode state
                 -- Outside --debug a frame is a call of a named function,
                 -- labeled with its definition (DIAG-5); any other manifold
@@ -1792,7 +1792,7 @@ cppCacheBody resSa lbl midx args bodyPool = do
       resSchema = render (serialAstToMsgpackSchema resSa)
   -- Per-arg setup: serialize native bindings to packets, route serial
   -- bindings through by name; both feed the packets array.
-  preparedArgs <- mapM (prepareCppCacheArg wrapIdx) (zipPrefix [0 :: Int ..] args)
+  preparedArgs <- mapM (prepareCppCacheArg wrapIdx) (indexed args)
   let argRefs = [r | (r, _, _) <- preparedArgs]
       argSchemas = [s | (_, s, _) <- preparedArgs]
       argSetupLines = concatMap (\(_, _, ss) -> ss) preparedArgs
@@ -1898,7 +1898,7 @@ cppDebugWrap midx args bodyPool = do
       packetsVar = hp <> "dpk_" <> suffix
       schemasVar = hp <> "dsc_" <> suffix
       n = length args
-  preparedArgs <- mapM (prepareCppCacheArg wrapIdx) (zipPrefix [0 :: Int ..] args)
+  preparedArgs <- mapM (prepareCppCacheArg wrapIdx) (indexed args)
   let argRefs = [r | (r, _, _) <- preparedArgs]
       argSchemas = [s | (_, s, _) <- preparedArgs]
       argSetupLines = concatMap (\(_, _, ss) -> ss) preparedArgs
@@ -2029,9 +2029,9 @@ cppClosureProxyLambda cloInit ins out = do
     (\(i, ast) -> do
         enc <- cppEncode ("__a" <> pretty i) ast
         return ("__owned.emplace_back(" <> enc <> "); __pkts.push_back(__owned.back().get());"))
-    (zipPrefix [(0 :: Int) ..] ins)
+    (indexed ins)
   resDoc <- cppDecode "__res.get()" resType out
-  let paramDocs = [t <+> ("__a" <> pretty i) | (i, t) <- zipPrefix [(0 :: Int) ..] argTypes]
+  let paramDocs = [t <+> ("__a" <> pretty i) | (i, t) <- indexed argTypes]
       bodyDocs =
         [ "std::vector<const uint8_t*> __pkts;"
         , "std::vector<mlc::Packet> __owned;"
@@ -2203,14 +2203,11 @@ setterOf dead state0 t0 s0 m0 xs0 =
 
     -- A `?T` field may be stored as a pointer (CPP-6): its value is
     -- converted to the field's own form.
-    makeRecord t xs =
+    makeRecord t fields =
       let recT = CMS.evalState (cppTypeOf t) state0
-          fields = case t of
-            NamF _ _ _ fs -> map Just fs
-            _ -> map (const Nothing) xs
-          store (Just (Key k, OptionalF _)) x = "mlc::wrap_field<decltype(" <> recT <> "::" <> pretty k <> ")>(" <> x <> ")"
-          store _ x = x
-       in encloseSep "{" "}" ", " (zipWithSame store fields xs)
+          store ((Key k, OptionalF _), x) = "mlc::wrap_field<decltype(" <> recT <> "::" <> pretty k <> ")>(" <> x <> ")"
+          store (_, x) = x
+       in encloseSep "{" "}" ", " (map store fields)
 
     accessTuple _ m i = "std::get<" <> pretty i <> ">(" <> m <> ")"
     accessRecord _ d k = d <> "." <> pretty k
@@ -2466,13 +2463,13 @@ generateCppVariants cfg closureAsts es = do
           -- slot alone, and the payload is written over its own slot.
           armSerial (c, ts) = do
             let aname = CP.armName name c
-                fields = [("f" <> pretty i, t) | (i, t) <- zipPrefix [(0 :: Int) ..] ts]
-            wfs <- case lookup c asts of
-              Just ss | length ss == length ts -> zipWithPrefixM wireField [0 ..] ss
-              _ -> return (map (const Nothing) ts)
-            return $ if all isNothing wfs
+                fields = [("f" <> pretty i, t) | (i, t) <- indexed ts]
+            wfs <- case lookup c asts >>= zipExact ts of
+              Just tss -> mapIndexedM (\i (t, s) -> (,) t <$> wireField i s) tss
+              Nothing -> return [(t, Nothing) | t <- ts]
+            return $ if all (isNothing . snd) wfs
               then ([CP.printSerializer [] aname fields, CP.printDeserializer [] aname fields], [])
-              else ([], [CP.printArmMarshallers aname (zipSame ts wfs)])
+              else ([], [CP.printArmMarshallers aname wfs])
           serial = CP.printCppVariantSerializers name arms'
           payloadArms = filter (not . null . snd) arms'
           fwds = CP.printMarshalDecls [] name : [CP.printMarshalDecls [] (CP.armName name c) | (c, _) <- payloadArms]
@@ -2514,18 +2511,13 @@ generateAnonymousStructs = do
   where
     makeSerializers :: RecEntry -> CppTranslator ([MDoc], [MDoc], [MDoc])
     makeSerializers rec = do
-      let templateTerms = map (("T" <>) . pretty) ([1 ..] :: [Int])
-          rs' = zipPrefix templateTerms (recFields rec)
+      let rs' = [("T" <> pretty i, f) | (i, f) <- indexedFrom 1 (recFields rec)]
 
       let params = [t | (t, (_, Nothing)) <- rs']
           rname = recName rec
           rtype = rname <> CP.printRecordTemplate [v | (v, (_, Nothing)) <- rs']
 
-      let fieldNames = [k | (_, (k, _)) <- rs']
-
-      fieldTypes <- mapM (\(t, v) -> maybeM t cppTypeOf v) [(t', v') | (t', (_, v')) <- rs']
-
-      let fields = [(pretty k, v) | (k, v) <- zipSame fieldNames fieldTypes]
+      fields <- mapM (\(t, (k, v)) -> (,) (pretty k) <$> maybeM t cppTypeOf v) rs'
 
       let structDecl = CP.printStructTypedef params rname fields
           fwd = CP.printMarshalDecls params rtype

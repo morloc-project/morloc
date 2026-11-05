@@ -31,7 +31,6 @@ module Morloc.Data.GMap
   , yIsX
   ) where
 
-import Morloc.Data.Zip (zipPrefix, zipSame)
 import qualified Data.Set as Set
 import qualified Morloc.Data.Map as Map
 import Morloc.Namespace.Prim hiding (insert, lookup)
@@ -42,18 +41,12 @@ mapVals :: (c -> c') -> GMap a b c -> GMap a b c'
 mapVals f (GMap x y) = GMap x (Map.map f y)
 
 -- | Monadic 'mapVals'
-mapValsM :: (Ord b, Monad m) => (c -> m c') -> GMap a b c -> m (GMap a b c')
-mapValsM f (GMap m1 m2) = do
-  let m2list = Map.toList m2
-  xs2 <- mapM (f . snd) m2list
-  return $ GMap m1 (Map.fromList (zipSame (map fst m2list) xs2))
+mapValsM :: (Monad m) => (c -> m c') -> GMap a b c -> m (GMap a b c')
+mapValsM f (GMap m1 m2) = GMap m1 <$> traverse f m2
 
 -- | Monadic map over values with access to the inner key
-mapValsWithKeyM :: (Ord b, Monad m) => (b -> c -> m c') -> GMap a b c -> m (GMap a b c')
-mapValsWithKeyM f (GMap m1 m2) = do
-  let m2list = Map.toList m2
-  xs2 <- mapM (uncurry f) m2list
-  return $ GMap m1 (Map.fromList (zipSame (map fst m2list) xs2))
+mapValsWithKeyM :: (Monad m) => (b -> c -> m c') -> GMap a b c -> m (GMap a b c')
+mapValsWithKeyM f (GMap m1 m2) = GMap m1 <$> Map.traverseWithKey f m2
 
 -- | Map a function over outer keys
 mapKeys :: (Ord a') => (a -> a') -> GMap a b c -> GMap a' b c
@@ -107,7 +100,7 @@ change k1 v (GMap x y) = do
 
 -- | Point multiple outer keys at an inner key
 linkMany :: Ord a => [a] -> b -> GMap a b c -> GMap a b c
-linkMany ks k2 (GMap m1 m2) = GMap (Map.union (Map.fromList (zipPrefix ks (repeat k2))) m1) m2
+linkMany ks k2 (GMap m1 m2) = GMap (Map.union (Map.fromList [(k, k2) | k <- ks]) m1) m2
 
 -- | Insert multiple outer keys that all map to the same inner key and value
 insertMany :: (Ord a, Ord b) => [a] -> b -> c -> GMap a b c -> GMap a b c
@@ -118,7 +111,7 @@ insertMany ks k2 x g = case linkMany ks k2 g of
 insertManyWith :: (Ord a, Ord b) => (c -> c -> c) -> [a] -> b -> c -> GMap a b c -> GMap a b c
 insertManyWith f ks k2 x (GMap m1 m2) = GMap m1' m2'
   where
-    m1' = Map.union (Map.fromList (zipPrefix ks (repeat k2))) m1
+    m1' = Map.union (Map.fromList [(k, k2) | k <- ks]) m1
     m2' = Map.insertWith f k2 x m2
 
 {- | Make @newKey@ point to the same inner key as @oldKey@. Returns 'Nothing'

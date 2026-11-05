@@ -1788,11 +1788,9 @@ genericEvalPattern desc t0 (PatternStruct s0) (m0 : xs0) =
       "" -> tupled xs
       name -> pretty name <> tupled xs
 
-    makeRecord (NamF _ _ _ rs) xs =
+    makeRecord _ fields =
       pretty (ldRecordConstructor desc)
-        <> tupled
-          [pretty k <+> "=" <+> x | (k, x) <- zipSame (map fst rs) xs]
-    makeRecord _ _ = error "Incorrectly typed record setter"
+        <> tupled [pretty k <+> "=" <+> x | ((k, _), x) <- fields]
 
     accessTuple _ m i = case ldIndexStyle desc of
       ZeroBracket -> m <> "[" <> pretty i <> "]"

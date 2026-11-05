@@ -42,7 +42,7 @@ module Morloc.CodeGenerator.Pools.CAbi.Members.RustPrinter
   , ClosureMarshal (..)
   ) where
 
-import Morloc.Data.Zip (zipPrefix)
+import Morloc.Data.Zip (indexed)
 import qualified Data.Map as Map
 import qualified Data.Text as T
 import Text.Printf (printf)
@@ -485,7 +485,7 @@ printRustEnum name ctors =
     [ "#[repr(u8)]"
     , "#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]"
     , "pub enum" <+> name <+> "{"
-    , indent 4 (vsep [pretty c <+> "=" <+> pretty i <> "," | (i, c) <- zipPrefix [0 :: Int ..] ctors])
+    , indent 4 (vsep [pretty c <+> "=" <+> pretty i <> "," | (i, c) <- indexed ctors])
     , "}"
     ]
 
@@ -550,7 +550,7 @@ data ArmWire = ArmWire
 printVariantImpls :: MDoc -> MDoc -> [(T.Text, [MDoc], Maybe ArmWire)] -> MDoc
 printVariantImpls box name arms3 = vsep [toImpl, "", fromImpl]
   where
-    idxArms = zipPrefix [0 :: Int ..] arms3
+    idxArms = indexed arms3
     payload = "(**mlc_b)"
     readTy ts mw = maybe (armTy ts) awType mw
     readArm i ts mw p = case mw of
@@ -678,7 +678,7 @@ printEnumImpls name ctors = vsep [toImpl, "", fromImpl]
             , indent 4 $ vsep
                 [ "match *data {"
                 , indent 4 $ vsep
-                    ( [pretty i <+> "=>" <+> "Self::" <> pretty c <> "," | (i, c) <- zipPrefix [0 :: Int ..] ctors]
+                    ( [pretty i <+> "=>" <+> "Self::" <> pretty c <> "," | (i, c) <- indexed ctors]
                         ++ [ -- The runtime range-checks every tag at the wire
                              -- boundary, so reaching this arm means the value
                              -- and its schema disagree: a bug, not bad input.
@@ -715,7 +715,7 @@ data RecordFieldTypes = RenderedFieldTypes | StructFieldTypes
 printRecordImpls :: RecordFieldTypes -> MDoc -> [MDoc] -> [(MDoc, MDoc, Bool, Maybe ClosureMarshal)] -> MDoc
 printRecordImpls fieldTypes name params fields = vsep [toImpl, "", fromImpl]
   where
-    idx = zipPrefix [0 :: Int ..] fields
+    idx = indexed fields
     -- A closure field's wire form (ClosureOrigin) is variable-width, so a record
     -- with any closure field cannot short-circuit the size to schema.width.
     allFixed = all (\(_, _, v, cm) -> not v && isPlain cm) fields

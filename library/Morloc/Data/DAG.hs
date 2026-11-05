@@ -25,7 +25,6 @@ module Morloc.Data.DAG
   , findCycle
   ) where
 
-import Morloc.Data.Zip (zipSame)
 import qualified Data.Set as Set
 import qualified Morloc.Data.Map as Map
 import Morloc.Namespace.Prim
@@ -130,13 +129,11 @@ synthesize f fe d0 = go (Just Map.empty)
     -- Interior nodes: all children must be processed first
     addIfReady processed (key, (nodeVal, childEdges))
       | Map.member key processed = return processed
-      | otherwise = case mapM ((`Map.lookup` processed) . fst) childEdges of
+      | otherwise = case mapM resolve childEdges of
           Nothing -> return processed
-          (Just resolvedChildren) -> do
-            let augmented = [(k, e, n2) | ((k, e), (n2, _)) <- zipSame childEdges resolvedChildren]
+          (Just augmented) -> do
             newNode <- f key nodeVal augmented
-            newEdges <-
-              mapM
-                (\((k2, e), (childNode, _)) -> (,) k2 <$> fe e newNode childNode)
-                (zipSame childEdges resolvedChildren)
+            newEdges <- mapM (\(k2, e, childNode) -> (,) k2 <$> fe e newNode childNode) augmented
             return $ Map.insert key (newNode, newEdges) processed
+      where
+        resolve (k, e) = (\(n2, _) -> (k, e, n2)) <$> Map.lookup k processed
