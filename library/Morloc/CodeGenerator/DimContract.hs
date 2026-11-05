@@ -65,7 +65,7 @@ dimConstraints i = do
   inferred <- MM.gets (Map.lookup i . stateExportTypes)
   -- An export without a signature is held to the type inferred for it.
   let ets = case GMap.lookup i sgmap of
-        GMapJust (Monomorphic (TermTypes (Just et) _ _)) -> [(etype et, enatLabels et)]
+        GMapJust (Monomorphic (TermTypes (Just et) _ _ _)) -> [(etype et, enatLabels et)]
         GMapJust (Polymorphic _ _ et _) -> [(etype et, enatLabels et)]
         _ -> [(t, Map.empty) | Just t <- [inferred]]
   return $ concatMap (contract scope headers (maybe "" unEVar name)) ets

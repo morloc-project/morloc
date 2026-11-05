@@ -1,0 +1,38 @@
+-- Spec CLS-16: of two instances at `Vec n Int` and `Vec 3 Int`, a use at
+-- `Vec 3 Int` runs the more specific one and a use at `Vec 2 Int` the
+-- general one, for sourced and for morloc implementations.
+module main (describeThree, describeTwo, labelThree, labelTwo)
+
+import root-py
+
+newtype Vec (n :: Nat) a = List a
+
+class Describe a where
+  describe :: a -> Str
+
+instance Describe (Vec n Int) where
+  source Py from "describe.py" ("d_any" as describe)
+
+instance Describe (Vec 3 Int) where
+  source Py from "describe.py" ("d_three" as describe)
+
+class Label a where
+  label :: a -> Str
+
+instance Label (Vec 3 Int) where
+  label x = "three"
+
+instance Label (Vec n Int) where
+  label x = "any"
+
+describeThree :: Vec 3 Int -> Str
+describeThree x = describe x
+
+describeTwo :: Vec 2 Int -> Str
+describeTwo x = describe x
+
+labelThree :: Vec 3 Int -> Str
+labelThree x = label x
+
+labelTwo :: Vec 2 Int -> Str
+labelTwo x = label x

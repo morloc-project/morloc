@@ -42,11 +42,12 @@ mergeFirstIndexM f (Idx i x) (Idx _ y) = Idx i <$> f x y
 
 -- | Merge two 'TermTypes', combining general types, sources, and declarations.
 mergeTermTypes :: TermTypes -> TermTypes -> MorlocMonad TermTypes
-mergeTermTypes (TermTypes g1 cs1 es1) (TermTypes g2 cs2 es2) =
+mergeTermTypes (TermTypes g1 cs1 es1 k1) (TermTypes g2 cs2 es2 k2) =
   TermTypes
     <$> maybeCombine mergeEType g1 g2
     <*> pure (unique (cs1 <> cs2))
     <*> pure (unique (es1 <> es2))
+    <*> pure (maybe k2 Just k1)
   where
     -- either combine terms or take the first on that is defined, or whatever
     maybeCombine :: (Monad m) => (a -> a -> m a) -> Maybe a -> Maybe a -> m (Maybe a)
@@ -55,16 +56,16 @@ mergeTermTypes (TermTypes g1 cs1 es1) (TermTypes g2 cs2 es2) =
     maybeCombine _ _ (Just b) = return $ Just b
     maybeCombine _ _ _ = return Nothing
 
-{- | Insert a 'TermTypes' into a list, merging with an existing entry
-if they share an equivalent general type.
+{- | Insert a 'TermTypes' into a list, merging with an existing entry of the
+same instance whose general type is equivalent.
 -}
 weaveTermTypes :: TermTypes -> [TermTypes] -> [TermTypes]
-weaveTermTypes t1@(TermTypes (Just gt1) srcs1 es1) (t2@(TermTypes (Just gt2) srcs2 es2) : ts)
-  | equivalent (etype gt1) (etype gt2) =
-      TermTypes (Just gt1) (unique (srcs1 <> srcs2)) (es1 <> es2) : ts
+weaveTermTypes t1@(TermTypes (Just gt1) srcs1 es1 k1) (t2@(TermTypes (Just gt2) srcs2 es2 k2) : ts)
+  | k1 == k2 && equivalent (etype gt1) (etype gt2) =
+      TermTypes (Just gt1) (unique (srcs1 <> srcs2)) (es1 <> es2) k1 : ts
   | otherwise = t2 : weaveTermTypes t1 ts
-weaveTermTypes (TermTypes Nothing srcs1 es1) ((TermTypes e2 srcs2 es2) : ts2) =
-  weaveTermTypes (TermTypes e2 (srcs1 <> srcs2) (es1 <> es2)) ts2
+weaveTermTypes (TermTypes Nothing srcs1 es1 _) ((TermTypes e2 srcs2 es2 k2) : ts2) =
+  weaveTermTypes (TermTypes e2 (srcs1 <> srcs2) (es1 <> es2) k2) ts2
 weaveTermTypes TermTypes {} (TermTypes {} : _) = error "what the why?"
 weaveTermTypes t1 [] = [t1]
 

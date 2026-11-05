@@ -766,9 +766,9 @@ findPackerInstances = do
       Nothing -> []
 
     sigOf :: TermTypes -> [(([TVar], TypeU), [Indexed Source])]
-    sigOf (TermTypes (Just et) (map snd -> srcs) _) =
+    sigOf (TermTypes (Just et) (map snd -> srcs) _ _) =
       [(unqualify (etype et), srcs)]
-    sigOf (TermTypes Nothing _ _) = []
+    sigOf (TermTypes Nothing _ _ _) = []
 
     -- A language declares at most one source per method; two are rejected
     -- earlier as ambiguous source declarations.

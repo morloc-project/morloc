@@ -156,6 +156,8 @@ data MorlocState = MorlocState
   , stateDepth :: Int
   , stateSignatures :: GMap Int Int SignatureSet
   , stateTypeclasses :: Map.Map EVar Instance
+  , stateInstances :: InstanceEnv
+  -- ^ One entry per instance, merged across its declarations.
   , stateConcreteTypedefs :: Map Lang Scope
   , stateGeneralTypedefs :: Scope
   , stateNewtypeHeaders :: Map.Map TVar [(TVar, [Int])]
@@ -461,6 +463,8 @@ data TermTypes = TermTypes
   { termGeneral :: Maybe EType
   , termConcrete :: [(MVar, Indexed Source)]
   , termDecl :: [ExprI]
+  , termInstance :: Maybe InstanceKey
+  -- ^ the instance a method's implementations belong to
   }
   deriving (Show, Ord, Eq)
 
@@ -1106,6 +1110,7 @@ instance Defaultable MorlocState where
       , stateDepth = 0
       , stateSignatures = GMap Map.empty Map.empty
       , stateTypeclasses = Map.empty
+      , stateInstances = defaultValue
       , stateConcreteTypedefs = Map.empty
       , stateGeneralTypedefs = Map.empty
       , stateNewtypeHeaders = Map.empty
@@ -1313,8 +1318,8 @@ instance Pretty Instance where
       <+> list (map pretty ts)
 
 instance Pretty TermTypes where
-  pretty (TermTypes (Just t) cs es) = "TermTypes" <+> (align . vsep $ (parens (pretty t) : map pretty cs <> map pretty es))
-  pretty (TermTypes Nothing cs es) = "TermTypes" <+> "?" <> (align . vsep $ (map pretty cs <> map pretty es))
+  pretty (TermTypes (Just t) cs es _) = "TermTypes" <+> (align . vsep $ (parens (pretty t) : map pretty cs <> map pretty es))
+  pretty (TermTypes Nothing cs es _) = "TermTypes" <+> "?" <> (align . vsep $ (map pretty cs <> map pretty es))
 
 instance Pretty SignatureSet where
   pretty (Monomorphic t) = pretty t

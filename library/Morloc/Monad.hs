@@ -618,7 +618,7 @@ getDocStrings ::
 getDocStrings i = do
   sgmap <- gets stateSignatures
   case GMap.lookup i sgmap of
-    (GMapJust (Monomorphic (TermTypes (Just e) _ _))) -> return $ edocs e
+    (GMapJust (Monomorphic (TermTypes (Just e) _ _ _))) -> return $ edocs e
     (GMapJust (Polymorphic _ _ e _)) -> return $ edocs e
     GMapNoSnd -> error "Compiler bug: Internal GMap key missing"
     _ -> error "Compiler bug: No entry found for index in stateSignatures"

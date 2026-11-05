@@ -1425,15 +1425,15 @@ fromSourceSignatures f0 = do
   let f qs t = f0 scope qs (typeOf t)
   return . concatMap (fromSig f tcls) . Map.elems $ sigmap
   where
-    fromSig f _ (Monomorphic (TermTypes (Just et) srcs _)) =
+    fromSig f _ (Monomorphic (TermTypes (Just et) srcs _ _)) =
       let (qs, t') = unqualify (etype et)
        in entries f (Set.fromList qs) t' srcs
-    fromSig _ _ (Monomorphic (TermTypes Nothing _ _)) = []
+    fromSig _ _ (Monomorphic (TermTypes Nothing _ _ _)) = []
     fromSig f tcls (Polymorphic _ methodEV classET tts) =
       let cvars = maybe [] classVars (Map.lookup methodEV tcls)
           (fs, t') = unqualify (etype classET)
           qs = Set.fromList (fs <> cvars)
-       in concat [entries f qs t' srcs | TermTypes _ srcs _ <- tts]
+       in concat [entries f qs t' srcs | TermTypes _ srcs _ _ <- tts]
 
     entries f qs t' srcs =
       [(srcName s, f qs t') | (_, isrc) <- srcs, let s = val isrc, srcLang s == rustLang]

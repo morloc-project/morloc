@@ -15,6 +15,8 @@ import Morloc.Frontend.Namespace
 import Morloc.Data.Doc (render)
 import qualified Data.Char as DC
 import Morloc.Frontend.Typecheck (evaluateAnnoSTypes)
+import Morloc.Frontend.Instances (ResolveError (..), defaultPolicy, instanceDecls, resolve)
+import qualified Morloc.TypeEval as TE
 import qualified Morloc.Monad as MM
 import qualified Data.Text as MT
 import qualified System.Directory as SD
@@ -40,7 +42,9 @@ specTests =
     , localOption (mkTimeout 2000000) instanceAnnotationTests
     , localOption (mkTimeout 5000000) dimTests
     , localOption (mkTimeout 2000000) dim7Tests
+    , localOption (mkTimeout 2000000) cls5Tests
     , localOption (mkTimeout 2000000) cls16Tests
+    , localOption (mkTimeout 2000000) cls17Tests
     , localOption (mkTimeout 5000000) poly7Tests
     , localOption (mkTimeout 2000000) bindTests
     , localOption (mkTimeout 2000000) hostTests
@@ -4481,6 +4485,117 @@ cls16Tests =
     vec x y = AppU (VarU (TV "Vec")) [x, y]
     pair x y = AppU (VarU (TV "T")) [x, y]
     general = ForallU a (vec n (VarU a))
+
+cls5Tests :: TestTree
+cls5Tests =
+  testGroup
+    "CLS-5"
+    [ accept
+        "spec-cls-5-2"
+        [r|
+        module main (g)
+        class Sz a where
+          sz :: a -> Str
+        record W a where
+          val :: a
+        instance Sz Str where
+          sz x = "str"
+        instance Sz a => Sz (W a) where
+          sz w = "w"
+        g :: Sz a => W a -> Str
+        g w = sz w
+        |]
+    , accept
+        "spec-cls-5-8"
+        [r|
+        module main (useIt)
+        class Sz a where
+          sz :: a -> Str
+        record W a where
+          val :: a
+        instance Sz Str where
+          sz x = "str"
+        instance Sz a => Sz (W a) where
+          sz w = "w"
+        mkW :: a -> W a
+        useIt :: Str -> Str
+        useIt s = sz (mkW s)
+        |]
+    , accept
+        "spec-cls-5-9"
+        [r|
+        module main (f)
+        class Plus a where
+          plus :: a -> a -> a
+        instance Plus Str where
+          plus x y = x
+        ident :: Plus a => a -> a
+        ident x = x
+        f :: Str -> Str
+        f x = ident x
+        |]
+    , instanceTableTest
+    ]
+
+-- | The table Link builds, read by the resolver: one entry per instance,
+-- methodless ones included, with its context.
+instanceTableTest :: TestTree
+instanceTableTest =
+  testCase "instance table built by Link" $ do
+    (_, st) <-
+      runFrontWithState
+        [r|
+        module main (f)
+        class Marker a
+        class Sz a where
+          sz :: a -> Str
+        record W a where
+          val :: a
+        record Foo = Bar { n :: Str }
+        class Cat a where
+          cat :: a -> a -> a
+        instance Marker Str
+        instance Sz Str where
+          sz x = "str"
+        instance Sz a => Sz (W a) where
+          sz w = "w"
+        instance Cat Foo where
+          cat a b = b
+        f :: Str -> Str
+        f x = x
+        |]
+    let env = stateInstances st
+        scope = stateGeneralTypedefs st
+        run c ts = resolve defaultPolicy scope env [] (Constraint (ClassName c) ts)
+        keyName (Right (EvInstance k _ _)) = Just (snd (ikHead k))
+        keyName _ = Nothing
+        w t = AppU (VarU (TV "W")) [t]
+        str = VarU (TV "Str")
+        foo = either (const (VarU (TV "Foo"))) id (TE.evaluateType scope (VarU (TV "Foo")))
+    length (instanceDecls env (ClassName "Marker")) @?= 1
+    map idContext [d | d <- instanceDecls env (ClassName "Sz"), not (null (idContext d))]
+      @?= [[Constraint (ClassName "Sz") [VarU (TV "#0")]]]
+    keyName (run "Sz" [w str]) @?= Just [w (VarU (TV "#0"))]
+    (case run "Sz" [w (VarU (TV "Bool"))] of Left (ContextUnmet {}) -> True; _ -> False) @?= True
+    (case foo of NamU {} -> True; _ -> False) @?= True
+    keyName (run "Cat" [foo]) @?= Just [VarU (TV "Foo")]
+
+cls17Tests :: TestTree
+cls17Tests =
+  testGroup
+    "CLS-17"
+    [ accept
+        "spec-cls-17-2"
+        [r|
+        module main (f)
+        class Def a where
+          def :: a
+        instance Def Str where
+          def = "d"
+        f :: Bool -> Str
+        f k = def
+        |]
+    ]
 
 poly7Tests :: TestTree
 poly7Tests =

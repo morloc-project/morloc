@@ -24,6 +24,7 @@ import Morloc.Data.Doc
 import Morloc.Data.Map (Map)
 import qualified Morloc.Data.Map as Map
 import qualified Morloc.Data.Text as DT
+import Morloc.Frontend.Instances (insertClassInfo, insertInstanceDecl, mkInstanceDecl)
 import Morloc.Frontend.Merge (mergeSignatureSet, weaveTermTypes)
 import Morloc.Frontend.Namespace
 import qualified Morloc.Monad as MM
@@ -254,7 +255,7 @@ addLocalState m0 localMethods e0 s0 = do
       -- get the (GMap Int Int SigantureSet) map from state
       (GMap idmap sigmap) <- MM.gets stateSignatures
       -- define a new monomorphic term with no implementations
-      let sigset = Monomorphic (TermTypes (Just e) [] [])
+      let sigset = Monomorphic (TermTypes (Just e) [] [] Nothing)
           sigmap' = Map.insert sigIndex sigset sigmap
       -- update state with the signature, the signature index will be linked to by
       -- all future terms of this type (even after they have been aliased)
@@ -282,6 +283,10 @@ addLocalState m0 localMethods e0 s0 = do
               { stateSignatures = GMap idmap sigmap'
               , stateTypeclasses = tmap'
               , stateClassDefs = Map.insert cls constraints (stateClassDefs s)
+              , stateInstances =
+                  insertClassInfo cls
+                    (ClassInfo vs constraints (Map.fromList [(v, et) | Signature v _ et <- sigs]))
+                    (stateInstances s)
               }
         )
 
@@ -330,7 +335,7 @@ addLocalState m0 localMethods e0 s0 = do
           idx <- MM.getCounter
           (GMap idmap sigmap) <- MM.gets stateSignatures
           -- define a new monomorphic term with no implementation and no type
-          let sigset = Monomorphic (TermTypes Nothing [] [])
+          let sigset = Monomorphic (TermTypes Nothing [] [] Nothing)
               sigmap' = Map.insert idx sigset sigmap
               terms' = Set.insert v terms
           MM.modify' (\s -> s {stateSignatures = GMap idmap sigmap'})
@@ -441,7 +446,7 @@ linkLocalTerms m0 s0 e0 = linkLocal Set.empty s0 (toCondensedState s0) e0
             (Just (Polymorphic cls _ _ _)) ->
               MM.throwCompilerBugAt i $
                 "the term of" <+> squotes (pretty v) <+> "is a method of" <+> squotes (pretty cls)
-    linkLocal bnds c _ (ExprI i (IstE origin cls _ ts es)) = do
+    linkLocal bnds c _ (ExprI i (IstE origin cls ctx ts es)) = do
       case Map.lookup cls (linkClasses c) of
         -- The runtime handles' representation is an address, not a value
         -- of their own (NEWT-7).
@@ -493,11 +498,14 @@ linkLocalTerms m0 s0 e0 = linkLocal Set.empty s0 (toCondensedState s0) e0
                     <+> "differ in number of terms"
             else do
               checkSuperclassConstraints i cls (zipSame vs ts) superConstraints
+              let decl = mkInstanceDecl origin cls ctx ts (instanceImpls m0 origin es) i
+                  key = idKey decl
               if null es
                 then
-                  linkEmptyInstance m0 cls (zipSame vs ts) sigs emap
+                  linkEmptyInstance key cls (zipSame vs ts) sigs emap
                 else
-                  mapM_ (linkInstance origin (linkScoped bnds c) m0 cls (zipSame vs ts) sigs emap) es
+                  mapM_ (linkInstance origin (linkScoped bnds c) m0 key cls (zipSame vs ts) sigs emap) es
+              MM.modify' (\ms -> ms {stateInstances = insertInstanceDecl decl (stateInstances ms)})
     linkLocal bnds _ cs (ExprI termIdx (VarE _ v))
       | Set.member v bnds = return ()
       | otherwise = case Map.lookup v cs of
@@ -588,16 +596,29 @@ linkLocalTerms m0 s0 e0 = linkLocal Set.empty s0 (toCondensedState s0) e0
     updateName :: Int -> EVar -> MorlocMonad ()
     updateName i v = MM.modify' (\s -> s {stateName = Map.insert i v (stateName s)})
 
+-- | The implementations an instance declaration gives, by method.
+instanceImpls :: MVar -> InstanceOrigin -> [ExprI] -> Map EVar [Impl]
+instanceImpls m0 origin es = Map.fromListWith (flip (<>)) (concatMap one es)
+  where
+    one (ExprI i (SrcE src)) = [(srcAlias src, [ImplSource m0 (Idx i src)])]
+    one (ExprI _ (AssE v e _))
+      | origin == Derived, isCast e = [(v, [ImplCast e])]
+      | otherwise = [(v, [ImplBody e])]
+    one _ = []
+    isCast (ExprI _ (LamE [x] (ExprI _ (IntrinsicE intr [ExprI _ (VarE _ x')])))) =
+      x == x' && intr `elem` [IntrNewtypeUnwrap, IntrNewtypeWrap]
+    isCast _ = False
+
 -- | Register each method of a source-less instance with its specialized type
 -- and no implementations, so that it typechecks.
 linkEmptyInstance ::
-  MVar ->
+  InstanceKey ->
   ClassName ->
   [(TVar, TypeU)] ->
   [Signature] ->
   Map EVar Int ->
   MorlocMonad ()
-linkEmptyInstance _ cls0 params0 sigs emap = mapM_ go sigs
+linkEmptyInstance key cls0 params0 sigs emap = mapM_ go sigs
   where
     go (Signature v _ et) =
       case Map.lookup v emap of
@@ -605,7 +626,7 @@ linkEmptyInstance _ cls0 params0 sigs emap = mapM_ go sigs
         Just stateIdx -> do
           t <- substituteInstanceTypes params0 (etype et)
           let et' = et {etype = t}
-              tt = TermTypes (Just et') [] []
+              tt = TermTypes (Just et') [] [] (Just key)
           (GMap idmap sigmap) <- MM.gets stateSignatures
           tcls <- MM.gets stateTypeclasses
           case Map.lookup stateIdx sigmap of
@@ -629,20 +650,21 @@ linkInstance ::
   InstanceOrigin ->
   (Int -> ExprI -> [ExprI] -> MorlocMonad ()) ->
   MVar ->
+  InstanceKey ->
   ClassName ->
   [(TVar, TypeU)] ->
   [Signature] ->
   Map EVar Int ->
   ExprI ->
   MorlocMonad ()
-linkInstance origin linker m0 cls0 params0 sigs0 emap0 e0 = linkExpr e0
+linkInstance origin linker m0 key cls0 params0 sigs0 emap0 e0 = linkExpr e0
   where
     linkExpr (ExprI i (SrcE src)) = do
       let v = srcAlias src
       (Signature _ _ et, stateIdx) <- lookupInfo i v
       t <- substituteInstanceTypes params0 (etype et)
       let et' = et {etype = t}
-      let tt = TermTypes (Just et') [(m0, Idx i src)] []
+      let tt = TermTypes (Just et') [(m0, Idx i src)] [] (Just key)
       linkTermTypes v et tt stateIdx
     linkExpr (ExprI ai (AssE v e es)) = do
       (Signature _ _ et, stateIdx) <- lookupInfo ai v
@@ -652,7 +674,7 @@ linkInstance origin linker m0 cls0 params0 sigs0 emap0 e0 = linkExpr e0
       linker stateIdx e es
       t <- substituteInstanceTypes params0 (etype et)
       let et' = et {etype = t}
-      let tt = TermTypes (Just et') [] [e]
+      let tt = TermTypes (Just et') [] [e] (Just key)
       linkTermTypes v et tt stateIdx
     linkExpr (ExprI i (SigE (Signature v _ _))) =
       MM.throwSourcedError i $

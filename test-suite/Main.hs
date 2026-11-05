@@ -15,6 +15,7 @@ import FutharkTupleTests (futharkTupleTests)
 import GoldenMakefileTests (discoverGoldenTests)
 import GoldenShard (Shard (..), lookupShard)
 import GoldenShardTests (goldenShardTests)
+import InstanceResolveTests (instanceResolveTests)
 import IrrefutablePatternLexerTests (irrefutablePatternLexerTests)
 import LangSupportTests (langSupportTests)
 import MorlocDepsTests (morlocDepsTests)
@@ -43,6 +44,7 @@ import VersionConstraintTests (versionConstraintTests)
 unitTests :: [TestTree]
 unitTests =
   [ specTests
+  , instanceResolveTests
   , unitTypeTests
   , lastReadTests
   , ownershipCheckTests

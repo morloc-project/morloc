@@ -42,6 +42,7 @@ Code: conforms 2026-10-21
 
 ### CLS-5 Superclasses and instance contexts are obligations
 Intent: ruled 2026-10-29
+Tests: spec-cls-5-2, spec-cls-5-8, spec-cls-5-9
 Code: deviates (issues/typeclasses.md)
 
 `class C a => D a` requires an instance `C T` for every instance `D T`, and
@@ -178,6 +179,7 @@ numbers an instance at `a -> b -> c` is more specific than one at `a -> b`
 
 ### CLS-17 An instance is selected by its head alone
 Intent: ruled 2026-10-29
+Tests: spec-cls-17-2
 Code: deviates (issues/typeclasses.md)
 
 A head matches `T` when it instantiates to `T`. No coercion (OPT-1's

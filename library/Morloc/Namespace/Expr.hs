@@ -82,6 +82,12 @@ module Morloc.Namespace.Expr
   , Coercion (..)
   , CastDir (..)
   , InstanceOrigin (..)
+  , InstanceKey (..)
+  , Impl (..)
+  , InstanceDecl (..)
+  , ClassInfo (..)
+  , InstanceEnv (..)
+  , Evidence (..)
   , applyCoercion
   , ManyPoly (..)
   , mapAnnoSM
@@ -941,6 +947,63 @@ data CastDir = Unwrap | Wrap
 -- | Whether an instance was written in the program or derived by the
 -- compiler from a declaration.
 data InstanceOrigin = Declared | Derived
+  deriving (Show, Eq, Ord)
+
+-- | An instance's identity: its class and its head in 'canonicalHead' form,
+-- so that alpha-equivalent heads are one key.
+data InstanceKey = InstanceKey
+  { ikClass :: ClassName
+  , ikHead :: ([TVar], [TypeU])
+  }
+  deriving (Show, Eq, Ord)
+
+-- | An implementation an instance gives for a method.
+data Impl
+  = ImplSource MVar (Indexed Source)
+  | ImplBody ExprI
+  | -- | A derived @pack@ or @unpack@, a representation cast (NEWT-7).
+    ImplCast ExprI
+  deriving (Show, Eq, Ord)
+
+-- | One instance, merged across every declaration of its key (CLS-2).
+data InstanceDecl = InstanceDecl
+  { idKey :: InstanceKey
+  , idContext :: [Constraint]
+  -- ^ written in the key's variable names; a variable the head lacks is an
+  -- unsolved existential
+  , idMethods :: Map.Map EVar [Impl]
+  , idSites :: [Int]
+  , idOrigin :: InstanceOrigin
+  }
+  deriving (Show, Eq, Ord)
+
+data ClassInfo = ClassInfo
+  { ciVars :: [TVar]
+  , ciSupers :: [Constraint]
+  , ciMethods :: Map.Map EVar EType
+  }
+  deriving (Show, Eq, Ord)
+
+data InstanceEnv = InstanceEnv
+  { ieByClass :: Map.Map ClassName [InstanceDecl]
+  , ieClasses :: Map.Map ClassName ClassInfo
+  , ieFundeps :: Map.Map ClassName [Int]
+  -- ^ the class-argument positions the other arguments determine
+  }
+  deriving (Show, Eq, Ord)
+
+instance Defaultable InstanceEnv where
+  defaultValue = InstanceEnv Map.empty Map.empty Map.empty
+
+-- | How a constraint at a use is met.
+data Evidence
+  = -- | The instance, the values of its key's variables, and the evidence
+    -- for its context.
+    EvInstance InstanceKey [TypeU] [Evidence]
+  | -- | No instance: the derived comparison (DERIV-6).
+    EvDerived ClassName TypeU
+  | -- | A constraint of the signature being checked.
+    EvGiven Constraint
   deriving (Show, Eq, Ord)
 
 -- | Apply a coercion to a type, returning the coerced type.

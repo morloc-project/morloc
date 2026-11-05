@@ -185,7 +185,7 @@ instanceReceiverHeads method pos = do
   return
     [ h
     | Just inst <- [Map.lookup method sigmap]
-    , TermTypes (Just et) _ _ <- instanceTerms inst
+    , TermTypes (Just et) _ _ _ <- instanceTerms inst
     , Just h <- [instanceArgHead pos et]
     ]
 
@@ -3563,7 +3563,7 @@ findPackableWireForm nativeT = do
     Nothing -> return Nothing
     Just inst -> return $ listToMaybe
       [ wireSubstituted
-      | TermTypes (Just et) _ _ <- instanceTerms inst
+      | TermTypes (Just et) _ _ _ <- instanceTerms inst
       , let (_, t) = unqualify (etype et)
       , (wireForm, outputType) <- case t of
           FunU [w] o -> [(w, o)]

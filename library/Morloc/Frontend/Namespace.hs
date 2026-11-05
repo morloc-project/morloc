@@ -54,6 +54,7 @@ copyState oldIdx newIdx = do
       , stateDepth = stateDepth s
       , stateSignatures = updateGMap (stateSignatures s)
       , stateTypeclasses = stateTypeclasses s
+      , stateInstances = stateInstances s
       , stateConcreteTypedefs = stateConcreteTypedefs s
       , stateGeneralTypedefs = stateGeneralTypedefs s
       , stateNewtypeHeaders = stateNewtypeHeaders s

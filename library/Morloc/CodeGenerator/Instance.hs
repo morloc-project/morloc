@@ -34,7 +34,7 @@ findInstanceByArgHead pos method lang containerTv = do
     Nothing -> return Nothing
     Just inst -> return $ listToMaybe
       [ isrc
-      | TermTypes (Just et) cs _ <- instanceTerms inst
+      | TermTypes (Just et) cs _ _ <- instanceTerms inst
       , instanceArgHead pos et == Just containerTv
       , (_, isrc@(Idx _ src)) <- cs
       , srcLang src == lang

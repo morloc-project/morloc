@@ -810,7 +810,7 @@ findIndexLikeToIndex lang inputType = do
     Nothing -> return Nothing
     Just inst -> return $ listToMaybe
       [ isrc
-      | TermTypes (Just et) cs _ <- instanceTerms inst
+      | TermTypes (Just et) cs _ _ <- instanceTerms inst
       , termInputType et == Just inputType
       , (_, isrc@(Idx _ src)) <- cs
       , srcLang src == lang

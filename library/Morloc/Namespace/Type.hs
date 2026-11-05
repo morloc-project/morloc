@@ -178,6 +178,13 @@ module Morloc.Namespace.Type
   , mostGeneral
   , mostSpecific
   , generalizes
+  , matchGeneral
+  , canonicalHead
+  , canonicalHeadWith
+  , renameVarsU
+  , VarForm (..)
+  , varForms
+  , rebuildVar
   , mostSpecificSubtypes
   , dataCtorsOfName
   , dataDeclOfName
@@ -1280,7 +1287,13 @@ instance P.PartialOrd TypeU where
 -- every variable of the second type is fixed. An erased Nat placeholder
 -- matches any Nat either way.
 generalizes :: Bool -> TypeU -> TypeU -> Bool
-generalizes kinds t1 t2 = isJust (match flex0 t1 t2 Map.empty)
+generalizes kinds t1 t2 = isJust (matchGeneral kinds t1 t2)
+
+-- | The values the flexible variables of the first type take when it
+-- instantiates to the second, as for 'generalizes'. A bound variable of the
+-- second type is renamed apart (@w~k@) and is rigid.
+matchGeneral :: Bool -> TypeU -> TypeU -> Maybe (Map TVar TypeU)
+matchGeneral kinds t1 t2 = match flex0 t1 t2 Map.empty
   where
     flex0 = Set.fromList [v | kinds, (v, form) <- varForms t1, isKindForm form]
     isKindForm VarPlain = False
@@ -1575,6 +1588,61 @@ alphaEq a b =
             _ -> Nothing
       | not (Set.member v1 f1) && not (Set.member v2 f2) && v1 == v2 = Just bij
       | otherwise = Nothing
+
+-- | An instance head with its variables renamed in order of first
+-- occurrence, so that two heads are alpha-equivalent exactly when their
+-- canonical forms are equal. The variables are those the head's
+-- quantifiers bind, its free kind variables (implicitly quantified) and its
+-- free lower-case type variables; each keeps its carrier.
+canonicalHead :: [TypeU] -> ([TVar], [TypeU])
+canonicalHead ts = let (vs, ts', _) = canonicalHeadWith ts in (vs, ts')
+
+-- | 'canonicalHead' with the renaming it applied, so that types sharing the
+-- head's variables (an instance context) can be renamed the same way.
+canonicalHeadWith :: [TypeU] -> ([TVar], [TypeU], Map TVar TVar)
+canonicalHeadWith ts0 = (map snd renaming, map (renameVarsU table) bodies, table)
+  where
+    (bound, bodies) = DL.foldl' peel (Set.empty, []) ts0
+    peel (b, acc) t = let (vs, t') = peelForalls t in (foldr Set.insert b vs, acc <> [t'])
+    peelForalls (ForallU v t) = let (vs, t') = peelForalls t in (v : vs, t')
+    peelForalls t = ([], t)
+    quantified (v, form) = Set.member v bound || case (form, v) of
+      (VarPlain, TV n) -> isTypeVariableName n
+      _ -> True
+    occurring = nubOrd' [v | (v, form) <- concatMap headForms bodies, quantified (v, form)]
+    renaming = [(v, TV ("#" <> DT.pack (show k))) | (k, v) <- indexed occurring]
+    table = Map.fromList renaming
+    nubOrd' = go Set.empty
+      where
+        go _ [] = []
+        go seen (x : xs)
+          | Set.member x seen = go seen xs
+          | otherwise = x : go (Set.insert x seen) xs
+    -- A record's own name and an inner quantifier's binder are not head
+    -- variables.
+    headForms t = case t of
+      NamU _ _ ps rs -> concatMap headForms (ps <> map snd rs)
+      ForallU v x -> filter ((/= v) . fst) (headForms x)
+      ExistU _ (ps, _) (rs, _) -> concatMap headForms (ps <> map snd rs)
+      FunU xs r -> concatMap headForms (xs <> [r])
+      AppU h xs -> concatMap headForms (h : xs)
+      EffectU _ x -> headForms x
+      OptionalU x -> headForms x
+      LabeledU _ x -> headForms x
+      OpU _ xs -> concatMap headForms xs
+      LitU (LRec fs) -> concatMap (headForms . snd) fs
+      LitU (LList xs) -> concatMap headForms xs
+      LitU (LSet xs) -> concatMap headForms xs
+      _ -> varForms t
+
+-- | Rename variables by name, each keeping the carrier it occurs in.
+renameVarsU :: Map TVar TVar -> TypeU -> TypeU
+renameVarsU table t0 = DL.foldl' rename t0 (nubForms (varForms t0))
+  where
+    rename t (v, form) = case Map.lookup v table of
+      Just v' -> substituteTVar v (rebuildVar form v') t
+      Nothing -> t
+    nubForms = DL.nubBy (\a b -> fst a == fst b)
 
 isSubtypeOf :: TypeU -> TypeU -> Bool
 isSubtypeOf t1 t2 = case P.compare t1 t2 of

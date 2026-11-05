@@ -440,7 +440,7 @@ checkInstanceEffects = do
         "At its instance of" <+> pretty (className inst) <+> squotes (pretty v)
           <+> "has the type" <+> pretty (etype et) <> "." <+> leakMessage leaked
     | (v, inst) <- Map.toList tcls
-    , TermTypes (Just et) cs ds <- instanceTerms inst
+    , TermTypes (Just et) cs ds _ <- instanceTerms inst
     , let leaked = inescapableLeak declared (etype et)
     , not (Set.null leaked)
     ]
@@ -501,15 +501,15 @@ collectReceiverHeads method pos = do
     Nothing -> return Map.empty
     Just inst -> return $ Map.fromList
       [ (h, i)
-      | tt@(TermTypes (Just et) _ _) <- instanceTerms inst
+      | tt@(TermTypes (Just et) _ _ _) <- instanceTerms inst
       , Just h <- [instanceArgHead pos et]
       , Just i <- [instanceIndex tt]
       ]
   where
 
     instanceIndex :: TermTypes -> Maybe Int
-    instanceIndex (TermTypes _ ((_, Idx ix _) : _) _) = Just ix
-    instanceIndex (TermTypes _ _ (ExprI ix _ : _))    = Just ix
+    instanceIndex (TermTypes _ ((_, Idx ix _) : _) _ _) = Just ix
+    instanceIndex (TermTypes _ _ (ExprI ix _ : _) _) = Just ix
     instanceIndex _                                    = Nothing
 
 linkAndRemoveAnnotations :: ExprI -> MorlocMonad ExprI
