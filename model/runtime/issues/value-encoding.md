@@ -95,3 +95,15 @@
   json.rs `write_json`, `voidstar_to_json_string`, `print_voidstar_raw` and
   `voidstar_raw_to_bytes` are safe `pub fn`s that dereference an `AbsPtr`
   their caller passes.
+- [reproduced, 2026-11-05] Spec gap (model/language/native-types.md says
+  nothing of recursive types with a Packable inside them). A recursive
+  type with a packed value inside its cycle (`record Tree where label :: Lbl; children :: [Tree]`, `Lbl` with
+  a Packable instance) cannot cross languages: the serializer walks the
+  type once and a back-reference is written raw, so inner labels reached
+  the runtime unpacked ("Expected int for MORLOC_INT, but got Lbl"; "no
+  marshaller for a value of this C++ type"). Refused at compile time now
+  where such a value is serialized or deserialized (golden
+  recursive-record-packed-field); a single-pool use still builds.
+  Intrinsics that write a value themselves (@write, cells, streams) are not
+  checked and keep the run-time failure [read]. The fix is a recursive
+  packer per language, generated at the back-reference.

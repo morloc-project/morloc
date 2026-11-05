@@ -16,6 +16,7 @@ pack\/unpack calls into the manifold tree.
 -}
 module Morloc.CodeGenerator.Serial
   ( makeSerialAST
+  , makeWireSerialAST
   , checkTableColumns
   , checkPackerCoherence
   , findPackerInstances
@@ -551,8 +552,7 @@ rerootUnder parent child = case serialOuterName parent of
   where
     -- A nested declaration of the same name shadows the parent, so the
     -- references under it are its own and stay.
-    go v (SerialRec (FV v' _) _) | v' == v = parent
-    go v (SerialVariant (FV v' _) _ []) | v' == v = parent
+    go v n | backRefName n == Just v = parent
     go v (SerialPack fv (p, s)) = SerialPack fv (p, go v s)
     go v n@(SerialList fv@(FV v' _) d s)
       | v' == v = n
@@ -883,6 +883,31 @@ checkNested m lang ast = case concatMap nested (serialKids (unpack ast)) of
     nested (SerialObject NamTable _ _ _) = [Left ()]
     nested (SerialUnknown (FV v _)) = [Right v]
     nested s = concatMap nested (serialKids s)
+
+-- | The serial form of a value a pool writes to, or reads from, another
+-- process. A recursive value is written by one walk of its type, and a
+-- packer below the root of its cycle would have to run at every level the
+-- walk re-enters through a back-reference; no pool has such a recursive
+-- packer, so the type is refused rather than written unpacked.
+makeWireSerialAST :: Int -> Lang -> TypeF -> MorlocMonad SerialAST
+makeWireSerialAST m lang t = do
+  ast <- makeSerialAST m lang t
+  case [v | s <- universe ast, Just v <- [serialOuterName s], any ((== Just v) . backRefName) (universe s), any isPack (concatMap universe (serialKids s))] of
+    (v : _) | any (isJust . backRefName) (universe ast) -> MM.throwSourcedError m $
+      "The recursive type" <+> squotes (pretty v) <+> "holds a value that needs packing in" <+> pretty lang
+        <+> "(a Packable instance) inside its cycle, and a recursive value cannot yet be packed"
+        <+> "level by level, so it cannot be passed to or from another process."
+    _ -> return ast
+  where
+    universe x = x : concatMap universe (serialKids x)
+    isPack (SerialPack _ _) = True
+    isPack _ = False
+
+-- | The declaration a back-reference names.
+backRefName :: SerialAST -> Maybe TVar
+backRefName (SerialRec (FV v _) _) = Just v
+backRefName (SerialVariant (FV v _) _ []) = Just v
+backRefName _ = Nothing
 
 noWireForm :: Int -> Lang -> TVar -> MorlocMonad a
 noWireForm m lang v = MM.throwSourcedError m $

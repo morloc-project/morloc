@@ -1,0 +1,33 @@
+-- A parameterized recursive record mapped to a C++ template keeps its type
+-- argument at the recursive reference: `next :: ?(L a)` is `list_t<int>`,
+-- never a bare `list_t`.
+module main (lenL, sumL, listOut, roundTrip)
+
+import root-cpp
+
+record L a where
+  val :: a
+  next :: ?(L a)
+record Cpp => (L a) = "list_t<$1>" a
+
+source Cpp from "list.hpp" ("mk_list" as mkList, "len_list" as lenList, "sum_list" as sumList)
+
+mkList :: Int -> L Int
+lenList :: L Int -> Int
+sumList :: L Int -> Int
+
+--' Length of a list of k elements
+lenL :: Int -> Int
+lenL k = lenList (mkList k)
+
+--' Sum of a list of k elements
+sumL :: Int -> Int
+sumL k = sumList (mkList k)
+
+--' A list of k elements, as data
+listOut :: Int -> L Int
+listOut k = mkList k
+
+--' Sum a list given as data
+roundTrip :: L Int -> Int
+roundTrip l = sumList l

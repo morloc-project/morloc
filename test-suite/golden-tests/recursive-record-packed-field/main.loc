@@ -1,0 +1,43 @@
+-- A recursive record whose field needs packing, passed between languages.
+-- Every node's label, not only the root's, would need its packer, and no
+-- pool has a recursive packer: the program is refused at the call, naming
+-- the type (recorded in model/runtime/issues/value-encoding.md).
+module main (pyToCpp, cppToPy)
+
+import root-py
+import root-cpp
+
+newtype Lbl = Int
+type Py => Lbl = "Lbl"
+type Cpp => Lbl = "lbl_t"
+
+instance Packable Int Lbl where
+  source Py from "tree.py"
+   ( "pack_lbl" as pack
+   , "unpack_lbl" as unpack
+   )
+  source Cpp from "tree.hpp"
+   ( "pack_lbl" as pack
+   , "unpack_lbl" as unpack
+   )
+
+record Tree where
+  label :: Lbl
+  children :: [Tree]
+record Cpp => Tree = "tree_t"
+
+source Py from "tree.py" ("mk_tree" as mkTreePy, "sum_tree" as sumTreePy)
+source Cpp from "tree.hpp" ("mk_tree" as mkTreeCpp, "sum_tree" as sumTreeCpp)
+
+mkTreePy :: Int -> Tree
+sumTreePy :: Tree -> Int
+mkTreeCpp :: Int -> Tree
+sumTreeCpp :: Tree -> Int
+
+--' Build a tree in Python and sum its labels in C++
+pyToCpp :: Int -> Int
+pyToCpp k = sumTreeCpp (mkTreePy k)
+
+--' Build a tree in C++ and sum its labels in Python
+cppToPy :: Int -> Int
+cppToPy k = sumTreePy (mkTreeCpp k)

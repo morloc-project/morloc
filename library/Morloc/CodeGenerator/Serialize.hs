@@ -1128,7 +1128,7 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
     serializeS :: MDoc -> Int -> NativeExpr -> MorlocMonad SerialExpr
     serializeS _ m se = do
       refuseHostFunction m se
-      SerializeS <$> Serial.makeSerialAST m lang (typeFof se) <*> pure se
+      SerializeS <$> Serial.makeWireSerialAST m lang (typeFof se) <*> pure se
 
     inferState :: MonoExpr -> SerializationState
     inferState (MonoApp MonoPoolCall {} _) = Serialized
@@ -1190,7 +1190,7 @@ unwrapLetDef m e = (m, e)
 
 naturalizeN :: MDoc -> Int -> Lang -> TypeF -> SerialExpr -> MorlocMonad NativeExpr
 naturalizeN _ m lang t se =
-  DeserializeN t <$> Serial.makeSerialAST m lang t <*> pure se
+  DeserializeN t <$> Serial.makeWireSerialAST m lang t <*> pure se
 
 class IsSerializable a where
   serialLet :: Int -> SerialExpr -> a -> a
@@ -1575,7 +1575,7 @@ wireSerial lang sm0@(SerialManifold m0 _ _ _ _) = foldSerialManifoldM fm sm0 |>>
     serializeS :: MDoc -> Int -> TypeF -> NativeExpr -> MorlocMonad SerialExpr
     serializeS _ m t se = do
       refuseHostFunction m se
-      SerializeS <$> Serial.makeSerialAST m lang t <*> pure se
+      SerializeS <$> Serial.makeWireSerialAST m lang t <*> pure se
 
 data Request = SerialContent | NativeContent | NativeAndSerialContent
   deriving (Ord, Eq, Show)
