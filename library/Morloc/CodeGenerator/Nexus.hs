@@ -18,7 +18,7 @@ module Morloc.CodeGenerator.Nexus
   ( generate
   ) where
 
-import Morloc.Data.Zip (zip3Indexed, zipPrefix, zipSame, zipWithPrefix, zipWithPrefixM_, zipWithSame, zipWithSameM_)
+import Morloc.Data.Zip (indexed, indexedFrom, zipExact, zipSame)
 import qualified Control.Monad as CM
 import Morloc.CodeGenerator.DimContract (dimConstraints)
 import Morloc.System (shellQuote)
@@ -168,13 +168,13 @@ instance HasCmdDocSet GastData where
 -- an @IFile@, which is the file itself and is handed on by its path.
 stageReplayArgs :: HasCmdDocSet a => Set.Set EVar -> a -> a
 stageReplayArgs replayEntries x
-  | Set.member (termNameOf x) replayEntries =
-      let ds = docSetOf x
-          args' = zipWithPrefix stage (cmdDocArgs ds) (map Just (argAstsOf x) ++ repeat Nothing)
-       in setDocSet ds { cmdDocArgs = args' } x
+  | Set.member (termNameOf x) replayEntries
+  , Just pairs <- zipExact (cmdDocArgs ds) (argAstsOf x) =
+      setDocSet ds { cmdDocArgs = map (uncurry stage) pairs } x
   | otherwise = x
   where
-    stage (CmdArgPos r) (Just ast)
+    ds = docSetOf x
+    stage (CmdArgPos r) ast
       | underOptional (wireShape ast) /= WIFile = CmdArgPos r { argPosDocSource = Just SourceFile }
     stage a _ = a
 
@@ -485,11 +485,11 @@ checkExportedHigherOrder i name t = case findOffender t of
   where
     findOffender :: Type -> Maybe (MDoc, Type)
     findOffender (FunT ts ret) =
-      case [(n, a) | (n, a) <- zipPrefix [1 :: Int ..] ts, Serial.containsFunT a] of
+      case [(n, a) | (n, a) <- indexedFrom 1 ts, Serial.containsFunT a] of
         ((n, a) : _) -> Just ("argument" <+> pretty n <+> "is a function", a)
         [] | Serial.containsFunT ret ->
              Just ("return type contains a function", ret)
-           | otherwise -> case [(n, a) | (n, a) <- zipPrefix [1 :: Int ..] ts, nestedSuspension a] of
+           | otherwise -> case [(n, a) | (n, a) <- indexedFrom 1 ts, nestedSuspension a] of
                ((n, a) : _) -> Just ("argument" <+> pretty n <+> "holds a suspension below its root", a)
                [] | nestedSuspension ret ->
                     Just ("return type holds a suspension below its root", ret)
@@ -514,7 +514,7 @@ nexusCtorTag :: AnnoS (Indexed Type) One () -> Text -> MorlocMonad Int
 nexusCtorTag (AnnoS (Idx i t) _ _) n = do
   scope <- MM.gets stateGeneralTypedefs
   case TE.enumCtors scope (TE.whnf scope (type2typeu t)) of
-    Just names | (k : _) <- [k' | (k', m) <- zipPrefix [0 ..] names, m == n] -> return k
+    Just names | Just k <- List.elemIndex n names -> return k
     _ -> MM.throwCompilerBugAt i $
       "no tag for constructor" <+> squotes (pretty n)
 
@@ -1006,10 +1006,12 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
       StrX <$> type2schema t <*> pure v
     -- one used as a value is the lambda that calls it
     toNexusExpr (AnnoS (Idx _ (FunT ts r)) _ (CallS v)) = do
-      vars <- mapM (const (MM.getCounter >>= \k -> return ("call`" <> MT.pack (show k)))) ts
-      argSchemas <- mapM type2schema ts
+      args <- CM.forM ts $ \t -> do
+        k <- MM.getCounter
+        s <- type2schema t
+        return ("call`" <> MT.pack (show k), s)
       rs <- type2schema r
-      return $ LamX vars (CallX rs (render (pretty v)) (zipWithSame BndX argSchemas vars))
+      return $ LamX (map fst args) (CallX rs (render (pretty v)) [BndX s x | (x, s) <- args])
     toNexusExpr (AnnoS (Idx _ t) _ (CallS v)) = BndX <$> type2schema t <*> pure (render (pretty v))
     toNexusExpr _ = error $ "Unreachable value of type reached"
 
@@ -1399,7 +1401,7 @@ argToJson key mEmit mGeneral _ armSchemas _ (CmdArgAlt r) =
                 , ("schema", maybe jsonNull jsonStr
                     (lookup (Key (altArmCtor arm <> "/" <> MT.pack (show i))) armSchemas))
                 ]
-            | (i, ft) <- zipPrefix [(0 :: Int) ..] (altArmFields arm)
+            | (i, ft) <- indexed (altArmFields arm)
             ])
         ]
 argToJson key mEmit mGeneral _ _ entryShapes (CmdArgGrp r) =
@@ -1483,16 +1485,18 @@ isQuotedArg _literal mSource many mshape =
 -- than re-rendering.
 validateArgSpecs :: Int -> [CmdArg] -> [SerialAST] -> [Text] -> MorlocMonad ()
 validateArgSpecs i cmdargs asts schemas = do
-  CM.when (length cmdargs /= length asts || length asts /= length schemas) $
-    MM.throwCompilerBug $
-      "command at index" <+> pretty i <+> "has" <+> pretty (length cmdargs)
-        <+> "documented arguments," <+> pretty (length asts) <+> "wire forms and"
-        <+> pretty (length schemas) <+> "schemas"
-  loc <- Docstrings.argLocPrefix i
-  zipWithSameM_ (validateOne loc) (zip3Indexed 1 cmdargs schemas) asts
+  case zipExact cmdargs asts >>= (`zipExact` schemas) of
+    Nothing ->
+      MM.throwCompilerBug $
+        "command at index" <+> pretty i <+> "has" <+> pretty (length cmdargs)
+          <+> "documented arguments," <+> pretty (length asts) <+> "wire forms and"
+          <+> pretty (length schemas) <+> "schemas"
+    Just entries -> do
+      loc <- Docstrings.argLocPrefix i
+      mapM_ (validateOne loc) (indexedFrom 1 entries)
   where
-    validateOne :: MDoc -> (Int, CmdArg, Text) -> SerialAST -> MorlocMonad ()
-    validateOne loc (n, arg, schemaText) ast = do
+    validateOne :: MDoc -> (Int, ((CmdArg, SerialAST), Text)) -> MorlocMonad ()
+    validateOne loc (n, ((arg, ast), schemaText)) = do
       let argLoc = loc <> "argument #" <> pretty n
       case arg of
         CmdArgPos r -> do
@@ -1740,11 +1744,8 @@ validateValueAgainstAST loc env0 path ast value = case (ast, value) of
     | [(k, fieldsVal)] <- KM.toList o
     , Just fieldAsts <- lookup (AesonKey.toText k) arms
     , Aeson.Array vs <- fieldsVal
-    , V.length vs == length fieldAsts ->
-        zipWithSameM_
-          (\fieldAst v -> validateValueAgainstAST loc env path fieldAst v)
-          fieldAsts
-          (V.toList vs)
+    , Just pairs <- zipExact fieldAsts (V.toList vs) ->
+        mapM_ (uncurry (validateValueAgainstAST loc env path)) pairs
 
   -- Lists: array, with an optional fixed-length constraint.
   (SerialList _ dim elemAst, Aeson.Array arr) -> do
@@ -1758,14 +1759,15 @@ validateValueAgainstAST loc env0 path ast value = case (ast, value) of
           , "Got: " <> pretty (truncateForMsg (jsonGotDisplay value))
           ]
       _ -> return ()
-    zipWithPrefixM_
-      (\j v -> validateValueAgainstAST loc env (path <> "[" <> pretty j <> "]") elemAst v)
-      [(0::Int) ..]
-      (V.toList arr)
+    CM.forM_ (indexed (V.toList arr)) $ \(j, v) ->
+      validateValueAgainstAST loc env (path <> "[" <> pretty j <> "]") elemAst v
 
   -- Tuples: array of exactly the right length.
   (SerialTuple _ subs, Aeson.Array arr)
-    | length subs /= V.length arr ->
+    | Just pairs <- zipExact subs (V.toList arr) ->
+        CM.forM_ (indexed pairs) $ \(j, (subAst, v)) ->
+          validateValueAgainstAST loc env (path <> "[" <> pretty j <> "]") subAst v
+    | otherwise ->
         MM.throwRejected $ formatBlock
           [ loc <> ": default" <> pathAt path <> " is an array of length "
               <> pretty (V.length arr) <> ", expected tuple of length "
@@ -1773,11 +1775,6 @@ validateValueAgainstAST loc env0 path ast value = case (ast, value) of
           , "Expected: " <> pretty (expectedJsonShape ast)
           , "Got: " <> pretty (truncateForMsg (jsonGotDisplay value))
           ]
-    | otherwise ->
-        zipWithPrefixM_
-          (\j (subAst, v) -> validateValueAgainstAST loc env (path <> "[" <> pretty j <> "]") subAst v)
-          [(0::Int) ..]
-          (zipSame subs (V.toList arr))
 
   -- Records: object form. Collect every missing required field up
   -- front so the diagnostic lists all of them at once (for a large
@@ -2236,7 +2233,7 @@ collectDataTypes = do
   scope <- MM.gets stateGeneralTypedefs
   fmap Map.fromList . sequence $
     [ do
-        ctors <- CM.forM (zipPrefix table (map snd ctorDocs <> repeat defaultValue)) $
+        ctors <- CM.forM (zipSame table (map snd ctorDocs)) $
           \((name, fieldTs), vars) -> do
             fts <- mapM (Docstrings.resolveNestedTypes . typeOf) fieldTs
             return (name, fts, docLines vars)
@@ -3267,7 +3264,7 @@ buildManifest ManifestInputs{..} =
                 CmdArgAlt _ ->
                   [ (Key (arm <> "/" <> MT.pack (show i)), fs)
                   | (arm, fss) <- altArmFieldSchemas ast
-                  , (i, fs) <- zipPrefix [(0 :: Int) ..] fss ]
+                  , (i, fs) <- indexed fss ]
                 _ -> []
               entryShapes = case a of
                 CmdArgGrp _ -> groupEntryShapes ast
@@ -3349,13 +3346,12 @@ generate cs rASTs helperRASTs = do
       reach seen (v : vs)
         | Set.member v seen = reach seen vs
         | otherwise = reach (Set.insert v seen) (Map.findWithDefault [] v callees <> vs)
-  namedGasts <- mapM (annotateGasts . snd) named
-  let namedOrder = [(n, commandExpr g) | ((n, _), g) <- zipSame named namedGasts]
-      withNamed t g = case reach Set.empty (callsOf t) of
+  namedOrder <- mapM (\(n, c) -> (\g -> (n, commandExpr g)) <$> annotateGasts c) named
+  let withNamed t g = case reach Set.empty (callsOf t) of
         used
           | Set.null used -> g
           | otherwise -> g {commandExpr = NamedX [(unEVar n, e) | (n, e) <- namedOrder, Set.member n used] (commandExpr g)}
-  gastsRaw <- zipWithSame withNamed (map fst exportCs) <$> mapM annotateGasts exportCs
+  gastsRaw <- mapM (\c -> withNamed (fst c) <$> annotateGasts c) exportCs
 
   -- Give each `mlcp_<parent>_<long>` internal command the parent's
   -- per-arg shape docs. Without this the dispatch loader sees the

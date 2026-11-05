@@ -25,7 +25,7 @@ module Morloc.CodeGenerator.Ownership
   , nativeLets
   ) where
 
-import Morloc.Data.Zip (zipPrefix, zipSame)
+import Morloc.Data.Zip (indexed, zipSame)
 import Control.Monad.Identity (Identity, runIdentity)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
@@ -85,7 +85,7 @@ planPool caps sms =
         , let args = typeMofForm form
               cands = Set.fromList [i | Arg i (Native tf) <- args, not (ocCheap caps tf)]
               kept = consumedParams (ocListKeeps caps) (\c -> Map.findWithDefault Set.empty c known) (not . ocCheap caps) cands nm
-              positions = Set.fromList [j | (j, Arg i _) <- zipPrefix [0 ..] args, Set.member i kept]
+              positions = Set.fromList [j | (j, Arg i _) <- indexed args, Set.member i kept]
         ]
     natives = concatMap (nativeManifoldsUnder . RSM) sms
     -- A manifold also used as a function value is called with what its
@@ -103,7 +103,7 @@ planPool caps sms =
 -- | The parameter indices manifold @m@ takes by value.
 byValueIndices :: PoolPlan -> Int -> ManifoldForm (Or TypeS TypeF) TypeF -> Set.Set Int
 byValueIndices pp m form =
-  Set.fromList [i | (j, Arg i _) <- zipPrefix [0 :: Int ..] (typeMofForm form), Set.member j positions]
+  Set.fromList [i | (j, Arg i _) <- indexed (typeMofForm form), Set.member j positions]
   where
     positions = Map.findWithDefault Set.empty m (ppByValue pp)
 

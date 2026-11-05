@@ -32,7 +32,7 @@ module Morloc.CodeGenerator.Docstrings
   , underOptional
   ) where
 
-import Morloc.Data.Zip (zip3Indexed, zipSame, zipWithSame, zipWithSameM)
+import Morloc.Data.Zip (indexedFrom, zipSame, zipWithSame, zipWithSameM)
 import qualified Data.Map as Map
 import qualified Data.Set as Set
 import Data.Text (Text)
@@ -199,15 +199,15 @@ processArgDoc :: Int -> Type -> ArgDoc -> MorlocMonad CmdDocSet
 processArgDoc i (FunT ts t) (ArgDocSig cmddoc argdocs0 retdoc) = do
   -- one doc per argument of the type: missing ones default, extras are dropped
   let argdocs = take (length ts) (argdocs0 <> repeat defaultValue)
-  (ts0, argdocs') <- zipWithSameM (reduceArgDoc i) ts (map ArgDocAlias argdocs) |>> unzip
-  ts' <- mapM resolveNestedTypes ts0
+  reduced <- zipWithSameM (reduceArgDoc i) ts (map ArgDocAlias argdocs)
+  resolved <- mapM (\(t0, a) -> (\t' -> (t', a)) <$> resolveNestedTypes t0) reduced
   loc <- argLocPrefix i
   validateCommandLevelDirectives loc cmddoc
   mapM_ (rejectAuthoredMime loc) (cmddoc : retdoc : argdocs)
   cmdargs <-
     sequence
       [ makeCmdArg (loc <> "argument #" <> pretty n) t' a'
-      | (n, t', a') <- zip3Indexed 1 ts' argdocs'
+      | (n, (t', a')) <- indexedFrom 1 resolved
       ]
   validateManyOrdering loc cmdargs
   validateFlagRevCollisions loc cmdargs
@@ -407,14 +407,14 @@ reduceArgDocFrom seen i t@(VarT v) arg
       _ -> return ()
 
 reduceArgDocFrom seen i (NamT o v ps (map snd -> ts)) (ArgDocRec arg rs) = do
-  let args = map (ArgDocAlias . snd) rs
-      keys = map fst rs
-  entries <- zipWithSameM (reduceArgDocFrom (Set.insert v seen) i) ts args
   -- A field's reduced doc keeps whatever shape its type gave it (a `data`
   -- field carries its constructors, a record field its own fields); the
   -- entry keeps the field-level variables from any of them.
-  let args' = map (argDocTop . snd) entries
-  return (NamT o v ps (zipSame keys (map fst entries)), ArgDocRec arg (zipSame keys args'))
+  let reduceField t (k, r) = do
+        (t', d) <- reduceArgDocFrom (Set.insert v seen) i t (ArgDocAlias r)
+        return ((k, t'), (k, argDocTop d))
+  entries <- zipWithSameM reduceField ts rs
+  return (NamT o v ps (map fst entries), ArgDocRec arg (map snd entries))
 -- An argument that may be omitted is documented as the type it holds.
 reduceArgDocFrom seen i (OptionalT t) arg = do
   (t', arg') <- reduceArgDocFrom seen i t arg

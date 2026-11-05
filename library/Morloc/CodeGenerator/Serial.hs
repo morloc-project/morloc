@@ -51,7 +51,7 @@ module Morloc.CodeGenerator.Serial
   , generalTypeToSerialAST
   ) where
 
-import Morloc.Data.Zip (zipPrefix, zipSame)
+import Morloc.Data.Zip (indexed, zipSame)
 import qualified Data.Char as C
 import qualified Data.Set as Set
 import qualified Data.ByteString as BS
@@ -107,7 +107,7 @@ serialAstToTypeWith' onPack onClosure = go
     go (SerialList v (Just d) s) = AppF (VarF v) [KiA d, TyA (go s)]
     go (SerialList v Nothing s) = AppF (VarF v) [TyA (go s)]
     go (SerialTuple v ss) = AppF (VarF v) (map (TyA . go) ss)
-    go (SerialObject o n ps rs) = NamF o n ps (zipSame (map fst rs) (map (go . snd) rs))
+    go (SerialObject o n ps rs) = NamF o n ps (map (second go) rs)
     go (SerialRec v _) = RecF v
     go (SerialEnum v ps ns) = EnumF v ps ns
     go (SerialVariant v ps as) = VariantF v ps [(n, map go fs) | (n, fs) <- as]
@@ -616,9 +616,7 @@ shallowType (SerialPack _ (p, _)) = typePackerPacked p
 shallowType (SerialList v (Just d) s) = AppF (VarF v) [KiA d, TyA (shallowType s)]
 shallowType (SerialList v Nothing s) = AppF (VarF v) [TyA (shallowType s)]
 shallowType (SerialTuple v ss) = AppF (VarF v) $ map (TyA . shallowType) ss
-shallowType (SerialObject o n ps rs) =
-  let ts = map (shallowType . snd) rs
-   in NamF o n ps (zipSame (map fst rs) ts)
+shallowType (SerialObject o n ps rs) = NamF o n ps (map (second shallowType) rs)
 shallowType (SerialReal x) = VarF x
 shallowType (SerialFloat32 x) = VarF x
 shallowType (SerialFloat64 x) = VarF x
@@ -749,7 +747,7 @@ findPackerInstances = do
     canonical :: [TVar] -> TypeU -> TypeU
     canonical vs t =
       let order = List.nub [v | v <- occurrences t, v `elem` vs]
-          names = Map.fromList (zipPrefix order [TV ("_" <> DT.pack (show k)) | k <- [(0 :: Int) ..]])
+          names = Map.fromList [(v, TV ("_" <> DT.pack (show k))) | (k, v) <- indexed order]
        in rename names t
 
     occurrences :: TypeU -> [TVar]
@@ -1097,8 +1095,8 @@ makeSerialAST m lang t0 = do
                 AliasIsNone -> case Map.lookup gv typepackers of
                   (Just ps) -> do
                     packers <- mapM makeTypePacker ps
-                    unpacked <- mapM (makeSerialAST' gscope typepackers anc . typePackerUnpacked) packers
-                    selection <- selectPacker (zipSame packers unpacked)
+                    unpacked <- mapM (\p -> (,) p <$> makeSerialAST' gscope typepackers anc (typePackerUnpacked p)) packers
+                    selection <- selectPacker unpacked
                     return $ SerialPack v selection
                   Nothing ->
                     MM.throwSourcedError m $
@@ -1535,8 +1533,7 @@ makeSerialAST m lang t0 = do
       | Set.member t anc = return $ SerialRec n ps
       | otherwise = do
           anc' <- descend t anc
-          ts <- mapM (makeSerialAST' gscope typepackers anc' . snd) rs
-          let entries = zipSame (map fst rs) ts
+          entries <- mapM (traverse (makeSerialAST' gscope typepackers anc')) rs
           return $ SerialObject o n ps entries
     makeSerialAST' gscope typepackers anc (OptionalF t) = do
       inner <- makeSerialAST' gscope typepackers anc t
@@ -1754,9 +1751,8 @@ unweaveTypeF (AppF t ts) =
    in (AppU gt gts, AppU ct cts)
 unweaveTypeF (NamF n (FV gv cv) ps rs) =
   let (psg, psc) = unzip $ map unweaveArg ps
-      keys = map fst rs
-      (vsg, vsc) = unzip $ map (unweaveTypeF . snd) rs
-   in (NamU n gv psg (zipSame keys vsg), NamU n (cv2tv cv) psc (zipSame keys vsc))
+      fields = map (second unweaveTypeF) rs
+   in (NamU n gv psg [(k, g) | (k, (g, _)) <- fields], NamU n (cv2tv cv) psc [(k, c) | (k, (_, c)) <- fields])
 unweaveTypeF (OptionalF t) =
   let (gt, ct) = unweaveTypeF t
    in (OptionalU gt, OptionalU ct)

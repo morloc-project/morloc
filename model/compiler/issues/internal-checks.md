@@ -17,6 +17,14 @@ output. Spec gap: no item says an internal invariant fails loudly. Type
 changes that remove each class are in /work/plans/gadt/type-audit.md. All
 [read, 2026-10-29].
 
+- **A data type's declared parameters paired with its arguments.** [read,
+  2026-11-05] CodeGenerator/Infer.hs (needed, inferVariantArms),
+  CodeGenerator/Serial.hs (appliedTypeToSerialAST) and TypeEval.hs
+  (dataCtorsOf) pair the parameters a `data` declaration gives with the
+  arguments it is applied to, exactly. The declared parameters drop a
+  specialized one, so a `data` with a specialized parameter, or a bare
+  reference to a parameterized `data`, would reach a length fault.
+  Namespace/Type.hs paramPairs handles both. No reproduction yet.
 - **Name-prefix tuple tests.** `isPrefixOf "Tuple"` decides tuple-ness in
   Rust.hs rustIsCopy, isVarWidthF and tupleArgs, Desugar.hs
   extractConstraints (two sites) and Typecheck/Internal.hs

@@ -37,7 +37,7 @@ module Morloc.CodeGenerator.StaticArgs
   ( specializeStaticArgs
   ) where
 
-import Morloc.Data.Zip (zip3Indexed, zipPrefix)
+import Morloc.Data.Zip (indexed, zipExact)
 import Morloc.CodeGenerator.Namespace
 import Morloc.CodeGenerator.LambdaEval (applyPoolLambdas, reindexTree)
 import qualified Morloc.Monad as MM
@@ -151,14 +151,12 @@ staticPositions v vs body = do
     then Nothing
     else Just (foldr1 Set.intersection sites)
   where
-    n = length vs
-
     -- the positions a back-edge passes through, given the names rebound
     -- around it (a rebound name is not the parameter)
-    passed rebound xs =
+    passed rebound pairs =
       Set.fromList
         [ i
-        | (i, p, AnnoS _ _ (BndS x)) <- zip3Indexed 0 vs xs
+        | (i, (p, AnnoS _ _ (BndS x))) <- indexed pairs
         , x == p
         , not (Set.member p rebound)
         ]
@@ -166,10 +164,9 @@ staticPositions v vs body = do
     backEdges :: Set.Set EVar -> Tree -> Maybe [Set.Set Int]
     backEdges rebound (AnnoS _ _ e) = case e of
       AppS (AnnoS _ _ (CallS w)) xs
-        | w == v ->
-            if length xs == n
-              then (passed rebound xs :) <$> concatMapM (backEdges rebound) xs
-              else Nothing
+        | w == v -> do
+            pairs <- zipExact vs xs
+            (passed rebound pairs :) <$> concatMapM (backEdges rebound) xs
       CallS w
         | w == v -> Nothing
       LamS ws b -> backEdges (Set.union rebound (Set.fromList ws)) b
@@ -320,4 +317,4 @@ dropInputs ds (EffectT effs t) = EffectT effs (dropInputs ds t)
 dropInputs _ t = t
 
 dropAt :: Set.Set Int -> [a] -> [a]
-dropAt ds xs = [x | (i, x) <- zipPrefix [0 ..] xs, not (Set.member i ds)]
+dropAt ds xs = [x | (i, x) <- indexed xs, not (Set.member i ds)]

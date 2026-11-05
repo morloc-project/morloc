@@ -24,6 +24,7 @@ module Morloc.CodeGenerator.Express
   ) where
 
 import Morloc.Data.Zip (zipPrefix, zipSame, zipWithSame)
+import qualified Morloc.Data.Zip as Zip
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -618,11 +619,11 @@ checkRsizeArity idx src arity = case srcRsize src of
 -- arguments and its function's inputs. A difference is a compiler defect,
 -- reported at the expression.
 zipExact :: HasCallStack => Int -> [a] -> [b] -> MorlocMonad [(a, b)]
-zipExact i xs ys
-  | length xs == length ys = return (zipSame xs ys)
-  | otherwise =
-      withFrozenCallStack
-        (MM.throwCompilerBugAt i ("paired lists differ in length (" <> pretty (length xs) <> " and " <> pretty (length ys) <> ")"))
+zipExact i xs ys = case Zip.zipExact xs ys of
+  Just pairs -> return pairs
+  Nothing ->
+    withFrozenCallStack
+      (MM.throwCompilerBugAt i ("paired lists differ in length (" <> pretty (length xs) <> " and " <> pretty (length ys) <> ")"))
 
 -- | An element of a literal, expressed at its type and returned with it.
 expressTyped :: Lang -> (AnnoS (Indexed Type) One (Indexed Lang, [Arg EVar]), Type) -> MorlocMonad (Indexed Type, PolyExpr)
@@ -720,8 +721,8 @@ expressCore (AnnoS (Idx midx (NamT o v ps rs)) (Idx cidx lang, args) (NamS entri
   -- declared NamU; if that ever regresses, this assertion catches the
   -- mis-zip at the point where it would corrupt the wire format.
   assertRecordKeyOrder midx entries rs
-  xs' <- mapM (expressTyped lang) (zipSame (map snd entries) (map snd rs))
-  let x = PolyRecord o (Idx cidx v) (map (Idx cidx) ps) (zipSame (map fst rs) xs')
+  xs' <- mapM (\((_, x), (k, t)) -> (,) k <$> expressTyped lang (x, t)) (zipSame entries rs)
+  let x = PolyRecord o (Idx cidx v) (map (Idx cidx) ps) xs'
   return $ PolyHead lang midx [Arg i None | Arg i _ <- args] (PolyReturn x)
 expressCore (AnnoS (Idx midx t) (Idx cidx lang, args) (NamS entries)) = do
   mayT <- evalGeneralStep (type2typeu t)
@@ -2011,8 +2012,8 @@ expressPolyExpr _ pl pc (AnnoS (Idx midx t) c@(Idx cidx lang, _) e@(TupS _)) = d
 expressPolyExpr _ parentLang pc (AnnoS (Idx midx (NamT o v ps rs)) (Idx cidx lang, args) (NamS entries)) = do
   -- C3 invariant: see comment at expressCore NamT above.
   assertRecordKeyOrder midx entries rs
-  xs' <- mapM (expressTyped lang) (zipSame (map snd entries) (map snd rs))
-  let e = PolyRecord o (Idx cidx v) (map (Idx cidx) ps) (zipSame (map fst rs) xs')
+  xs' <- mapM (\((_, x), (k, t)) -> (,) k <$> expressTyped lang (x, t)) (zipSame entries rs)
+  let e = PolyRecord o (Idx cidx v) (map (Idx cidx) ps) xs'
   expressContainer pc (Idx midx parentLang) (Idx cidx lang) args e
 expressPolyExpr _ pl pc (AnnoS (Idx i t) c e@(NamS _)) = do
   scope <- MM.getGeneralScope

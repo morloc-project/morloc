@@ -21,7 +21,7 @@ module Morloc.CodeGenerator.Realize
   , placeNormalized
   ) where
 
-import Morloc.Data.Zip (zip3Same, zipPrefix, zipSame)
+import Morloc.Data.Zip (indexed, zip3Same, zipSame)
 import Morloc.CodeGenerator.Serial (containsEffectT, containsFunT)
 import Morloc.CodeGenerator.Value (etaParts, isValue, isValueWith)
 import Morloc.CodeGenerator.HostProvenance (HostLimit (..), planHostFunctions, sameTermSources)
@@ -883,7 +883,7 @@ realizeWithRegistry registry tables pins seedLangs s00 = do
           bound = boundArgs f
           pairss =
             [ (if loopsOver f then runsDeeper else id) (kid x')
-            | (k, x'@(AnnoS (Idx _ t) _ _)) <- zipPrefix [0 ..] xs'
+            | (k, x'@(AnnoS (Idx _ t) _ _)) <- indexed xs'
             , not (k < bound && isCallableType t)
             ]
       -- A head has no ambient language: it is placed by its own
@@ -1114,7 +1114,7 @@ realizeWithRegistry registry tables pins seedLangs s00 = do
     sourceLangs = unique . map srcLang . headSources
 
     zipLang :: Int -> RState -> Indexed [(Lang, Score)]
-    zipLang i (rLangs -> langs) = Idx i (zipPrefix langs (repeat mempty))
+    zipLang i (rLangs -> langs) = Idx i [(l, mempty) | l <- langs]
 
     scoresOf :: AnnoS a Many (Indexed [(Lang, Score)]) -> [(Lang, Score)]
     scoresOf (AnnoS _ (Idx _ xs) _) = minPairs xs
@@ -1489,8 +1489,8 @@ realizeWithRegistry registry tables pins seedLangs s00 = do
       return (TupS xs', Idx i lang)
     collapseExpr heads _ l1 (e@(NamS rs), Idx i ss) = do
       lang <- if isFunctionalData e then return l1 else pickLanguage heads l1 (map snd rs) ss
-      xs' <- mapM (collapseElement heads e lang . snd) rs
-      return (NamS (zipSame (map fst rs) xs'), Idx i lang)
+      rs' <- mapM (traverse (collapseElement heads e lang)) rs
+      return (NamS rs', Idx i lang)
     -- collapse leaf expressions
     collapseExpr _ _ _ (ExeS x@(SrcCall (Idx _ src)), Idx i _) = return (ExeS x, Idx i (Just (srcLang src)))
     collapseExpr _ _ lang (ExeS x@(PatCall _), Idx i _) = return (ExeS x, Idx i lang)
@@ -1761,7 +1761,7 @@ realizeWithRegistry registry tables pins seedLangs s00 = do
             (LamS vs x) -> LamS vs <$> f lang x
             (LstS xs) -> LstS <$> mapM (f lang) xs
             (TupS xs) -> TupS <$> mapM (f lang) xs
-            (NamS rs) -> NamS <$> (zipSame (map fst rs) <$> mapM (f lang . snd) rs)
+            (NamS rs) -> NamS <$> mapM (traverse (f lang)) rs
             UniS -> return UniS
             NullS -> return NullS
             (VarS v (One x)) -> VarS v . One <$> f lang x
@@ -2184,9 +2184,8 @@ extractExpr exports (TupS xs) = do
   let (xs', helperLists) = unzip results
   return (TupS xs', concat helperLists)
 extractExpr exports (NamS rs) = do
-  results <- mapM (extractFromTree exports . snd) rs
-  let (vals', helperLists) = unzip results
-  return (NamS (zipSame (map fst rs) vals'), concat helperLists)
+  results <- mapM (traverse (extractFromTree exports)) rs
+  return (NamS [(k, v) | (k, (v, _)) <- results], concatMap (snd . snd) results)
 extractExpr exports (LetS v e1 e2) = do
   (e1', h1) <- extractFromTree exports e1
   (e2', h2) <- extractFromTree exports e2

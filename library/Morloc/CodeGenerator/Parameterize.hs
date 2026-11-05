@@ -16,7 +16,7 @@ module Morloc.CodeGenerator.Parameterize
   ( parameterize
   ) where
 
-import Morloc.Data.Zip (zipPrefix, zipSame)
+import Morloc.Data.Zip (zipPrefix)
 import Data.Text (Text)
 import Morloc.CodeGenerator.Namespace
 import Morloc.Data.Doc
@@ -87,9 +87,9 @@ parameterize' args (AnnoS g c (TupS xs)) = do
   let args' = pruneArgs args xs'
   return $ AnnoS g (c, args') (TupS xs')
 parameterize' args (AnnoS g c (NamS entries)) = do
-  xs' <- mapM (parameterize' args . snd) entries
-  let args' = pruneArgs args xs'
-  return $ AnnoS g (c, args') (NamS (zipSame (map fst entries) xs'))
+  entries' <- mapM (traverse (parameterize' args)) entries
+  let args' = pruneArgs args (map snd entries')
+  return $ AnnoS g (c, args') (NamS entries')
 parameterize' args (AnnoS g@(Idx midx (FunT inputs _)) c (LamS vs x)) = do
   -- Bind exactly the lambda's own parameters. A lambda may bind FEWER params
   -- than its (right-flattened) function type has inputs when its body returns a

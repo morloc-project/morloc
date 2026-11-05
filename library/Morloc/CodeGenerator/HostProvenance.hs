@@ -22,7 +22,7 @@ module Morloc.CodeGenerator.HostProvenance
   , sameTermSources
   ) where
 
-import Morloc.Data.Zip (zip3Indexed, zipPrefix, zipSame, zipWith3Same, zipWithPrefix, zipWithSame)
+import Morloc.Data.Zip (indexed, zip3Indexed, zipPrefix, zipSame, zipWith3Same, zipWithPrefix, zipWithSame)
 import Control.Monad.State (State, evalStateT, get, gets, lift, modify, put, runState)
 import qualified Data.List as List
 import qualified Data.Set as Set
@@ -666,7 +666,8 @@ planWith view target trees00
           paramTypes j = case Map.lookup j viewRoot of
             Just (AnnoS (Idx _ (FunT ts _)) _ (LamS vs _)) -> take (length vs) ts
             _ -> []
-          rootKeys = [(rootIdx t, map portable (paramTypes (rootIdx t))) | t <- trees0]
+          roots = [((rootIdx t, map portable (paramTypes (rootIdx t))), t) | t <- trees0]
+          rootKeys = map fst roots
       sigs <- signatures trees0
       labels <- MM.gets stateManifoldConfig
       exports <- Set.fromList <$> MM.gets stateExports
@@ -688,7 +689,7 @@ planWith view target trees00
           copied = [key | key <- Set.toList reachable, key `notElem` rootKeys]
       names <- Map.fromList <$> mapM (\key -> (,) key <$> copyName key) copied
       copies <- mapM (\key -> (,) key <$> makeCopy byRoot names key) copied
-      let instances = zipSame rootKeys trees0 <> copies
+      let instances = roots <> copies
           -- a call of a copy reaches the tree it copies
           copyTree = Map.fromList [(name, j) | ((j, _), name) <- Map.toList names]
           cxCopies = cx {cxTree = \v -> maybe (target v) Just (Map.lookup v copyTree)}
@@ -810,7 +811,7 @@ planWith view target trees00
                   return (AnnoS (Idx ri xt) (Idx rci xl) (LetBndS v), [(v, x)])
                 else return (x, [])
           )
-          (zipPrefix [0 :: Int ..] xs)
+          (indexed xs)
       ci' <- MM.getCounter
       let app = AnnoS g (Idx ci' cl) (AppS f (map fst bound))
           letIn body@(AnnoS (Idx _ bt) _ _) (v, x@(AnnoS _ (Idx _ xl) _)) = do

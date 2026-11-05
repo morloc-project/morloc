@@ -19,7 +19,7 @@ module Morloc.CodeGenerator.OwnershipCheck
   , checkNative
   ) where
 
-import Morloc.Data.Zip (zipPrefix)
+import Morloc.Data.Zip (indexed)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Data.Text (Text)
@@ -269,7 +269,7 @@ walkN env s e = case e of
     walkN env s c `andThen` \s' -> eitherArm (walkN env s' a) (walkN env s' b)
   IntrinsicN _ IntrTagTest _ (LetVarN _ i _ : rest)
     | envTagAfterTake env -> step s ((\s' -> refRead env s' i) : map (\x s' -> walkN env s' x) rest)
-  AppExeN _ (RecCallP mid _) args -> step s [arg j a | (j, a) <- zipPrefix [0 ..] args]
+  AppExeN _ (RecCallP mid _) args -> step s [arg j a | (j, a) <- indexed args]
     where
       arg j (NativeArgExpr x) | Set.member j (envByValue env mid) = \s' -> keepPart env s' x
       arg _ a = \s' -> walkArg env s' a

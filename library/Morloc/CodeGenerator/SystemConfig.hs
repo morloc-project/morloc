@@ -26,7 +26,6 @@ module Morloc.CodeGenerator.SystemConfig
   , strictToolchainError
   ) where
 
-import Morloc.Data.Zip (zipSame)
 import qualified System.Info as SI
 import Morloc.CodeGenerator.Namespace
 import qualified Morloc.CodeGenerator.Platform as P
@@ -287,9 +286,8 @@ configureAllSteps verbose force slurmSupport sanitize config = do
   forM_ DF.langSetups $ \ls -> do
     let tools = DF.lsRequiredTools ls
         marker = langMarkerDir </> DF.lsName ls
-    avail <- mapM (toolAvailableInEnv mStrictPrefix) tools
+    unavailable <- filterM (fmap not . toolAvailableInEnv mStrictPrefix) tools
     alreadyBuilt <- doesFileExist marker
-    let unavailable = [t | (t, False) <- zipSame tools avail]
     if not (null unavailable)
       then
         let reason = case mStrictPrefix of
