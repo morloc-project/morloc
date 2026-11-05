@@ -20,11 +20,22 @@ changes that remove each class are in /work/plans/gadt/type-audit.md. All
 - **A data type's declared parameters paired with its arguments.** [read,
   2026-11-05] CodeGenerator/Infer.hs (needed, inferVariantArms),
   CodeGenerator/Serial.hs (appliedTypeToSerialAST) and TypeEval.hs
-  (dataCtorsOf) pair the parameters a `data` declaration gives with the
-  arguments it is applied to, exactly. The declared parameters drop a
-  specialized one, so a `data` with a specialized parameter, or a bare
-  reference to a parameterized `data`, would reach a length fault.
-  Namespace/Type.hs paramPairs handles both. No reproduction yet.
+  (dataCtorsOf) pair the parameters a `data` declaration gives, which drop a
+  specialized one, with its arguments, exactly. Not reachable today: the
+  frontend refuses a bare parameterized `data` (arity check) and a `data`
+  with a specialized parameter (`data Box Int b = Full b | Empty`). That
+  refusal is unclear, though: "Cannot compare types Box b@q0 and Box Int
+  b@q0" at the declaration [reproduced]. Namespace/Type.hs paramPairs
+  pairs both cases if specialized `data` parameters are ever allowed.
+- **Pairings whose lengths only an earlier check guarantees.** [read,
+  2026-11-05] Restructure.hs checkAliasApplications: the kind check reads
+  the first scope entry as an alias while the arity check requires every
+  entry to be one, so a name with mixed entries would skip the arity check
+  and reach the exact pairing (no such program found: conflicting
+  declarations are refused first). Namespace/Type.hs paramPairs: its
+  fallback faults when an application has more arguments than variable
+  parameters; Serial.hs appliedTypeToSerialAST calls it unguarded.
+  TypeEval.hs dataCtorsOf is given no arguments for a bare head.
 - **Name-prefix tuple tests.** `isPrefixOf "Tuple"` decides tuple-ness in
   Rust.hs rustIsCopy, isVarWidthF and tupleArgs, Desugar.hs
   extractConstraints (two sites) and Typecheck/Internal.hs

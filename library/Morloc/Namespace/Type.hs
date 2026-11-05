@@ -186,7 +186,7 @@ module Morloc.Namespace.Type
   , dataBodyCtors
   ) where
 
-import Morloc.Data.Zip (zipSame)
+import Morloc.Data.Zip (indexed, zipExact, zipSame)
 import qualified Data.List as DL
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
@@ -357,9 +357,9 @@ paramPairs ps ts
 -- is respected.
 instantiateParams :: Typelike a => [(TVar, a)] -> a -> a
 instantiateParams pairs t =
-  let held = [TV (T.pack ("#" <> show i)) | i <- [0 .. length pairs - 1 :: Int]]
-      named = foldl (\acc ((p, _), h) -> substituteTVar p (tvar h) acc) t (zipSame pairs held)
-   in foldl (\acc ((_, a), h) -> substituteTVar h a acc) named (zipSame pairs held)
+  let held = [(p, a, TV (T.pack ("#" <> show i))) | (i, (p, a)) <- indexed pairs]
+      named = foldl (\acc (p, _, h) -> substituteTVar p (tvar h) acc) t held
+   in foldl (\acc (_, a, h) -> substituteTVar h a acc) named held
 
 -- | Decode a `data` declaration's body: a list of constructors, each a list
 -- of its name followed by its argument types.
@@ -1034,7 +1034,7 @@ instance Typelike Type where
   normalizeType (AppT (AppT h innerArgs) outerArgs) =
     normalizeType (AppT h (innerArgs ++ outerArgs))
   normalizeType (AppT t ts) = AppT (normalizeType t) (map (fmap normalizeType) ts)
-  normalizeType (NamT n v ds ks) = NamT n v (map (fmap normalizeType) ds) (zipSame (map fst ks) (map (normalizeType . snd) ks))
+  normalizeType (NamT n v ds ks) = NamT n v (map (fmap normalizeType) ds) (map (second normalizeType) ks)
   normalizeType (EffectT effs t) = EffectT effs (normalizeType t)
   normalizeType (OptionalT t) = OptionalT (normalizeType t)
   normalizeType t = t
@@ -1070,7 +1070,7 @@ argOf u = case u of
     FunT us r | not (null ts), not (null us) -> FunT (map typeOf ts ++ us) r
     t' -> FunT (map typeOf ts) t'
   AppU t ts -> TyA (AppT (typeOf t) (map argOf ts))
-  NamU n o ps rs -> TyA (NamT n o (map argOf ps) (zipSame (map fst rs) (map (typeOf . snd) rs)))
+  NamU n o ps rs -> TyA (NamT n o (map argOf ps) (map (second typeOf) rs))
   EffectU effs t -> TyA (mkEffectT (resolveEffectSet effs) (typeOf t))
   OptionalU t -> TyA (OptionalT (typeOf t))
   KVarU (_, KindInt) -> KiA NatVoidT
@@ -1250,7 +1250,7 @@ instance Typelike TypeU where
   normalizeType (AppU (AppU h innerArgs) outerArgs) =
     normalizeType (AppU h (innerArgs ++ outerArgs))
   normalizeType (AppU t ts) = AppU (normalizeType t) (map normalizeType ts)
-  normalizeType (NamU n v ds ks) = NamU n v (map normalizeType ds) (zipSame (map fst ks) (map (normalizeType . snd) ks))
+  normalizeType (NamU n v ds ks) = NamU n v (map normalizeType ds) (map (second normalizeType) ks)
   normalizeType (ForallU v t) = ForallU v (normalizeType t)
   normalizeType (ExistU v (map normalizeType -> ps, pc) (map (second normalizeType) -> rs, rc)) = ExistU v (ps, pc) (rs, rc)
   normalizeType (EffectU effs t) = mkEffectU effs (normalizeType t)
@@ -1301,23 +1301,23 @@ generalizes kinds t1 t2 = isJust (match flex0 t1 t2 Map.empty)
       (ListVarU v, ListVarU w) -> guard (v == w) s
       (SetVarU v, SetVarU w) -> guard (v == w) s
       (ExistU v (ts1, _) (rs1, _), ExistU w (ts2, _) (rs2, _))
-        | v == w, length ts1 == length ts2 ->
-            pairs flex (zipSame ts1 ts2) s
+        | v == w, Just ts <- zipExact ts1 ts2 ->
+            pairs flex ts s
               >>= \s' -> pairs flex [(x, y) | (k, x) <- rs1, Just y <- [lookup k rs2]] s'
               >>= \s'' -> guard (all (\(k, _) -> isJust (lookup k rs2)) rs1) s''
       (FunU ts1 r1, FunU ts2 r2) -> do
         (ps, rs) <- alignFun (ts1, r1) (ts2, r2)
         pairs flex (rs : ps) s
-      (AppU h1 as1, AppU h2 as2) | length as1 == length as2 -> pairs flex (zipSame (h1 : as1) (h2 : as2)) s
+      (AppU h1 as1, AppU h2 as2) | Just hs <- zipExact (h1 : as1) (h2 : as2) -> pairs flex hs s
       (NamU o1 n1 ps1 rs1, NamU o2 n2 ps2 rs2)
-        | o1 == o2, n1 == n2, length ps1 == length ps2, DL.sort (map fst rs1) == DL.sort (map fst rs2) ->
-            pairs flex (zipSame ps1 ps2 <> [(x, y) | (k, x) <- rs1, Just y <- [lookup k rs2]]) s
+        | o1 == o2, n1 == n2, Just ps <- zipExact ps1 ps2, DL.sort (map fst rs1) == DL.sort (map fst rs2) ->
+            pairs flex (ps <> [(x, y) | (k, x) <- rs1, Just y <- [lookup k rs2]]) s
       (EffectU e1 x, EffectU e2 y) | e1 == e2 -> match flex x y s
       (OptionalU x, OptionalU y) -> match flex x y s
-      (OpU op1 as1, OpU op2 as2) | op1 == op2, length as1 == length as2 -> pairs flex (zipSame as1 as2) s
+      (OpU op1 as1, OpU op2 as2) | op1 == op2, Just ops <- zipExact as1 as2 -> pairs flex ops s
       (LitU (LRec fs1), LitU (LRec fs2)) | map fst fs1 == map fst fs2 -> pairs flex (zipSame (map snd fs1) (map snd fs2)) s
-      (LitU (LList es1), LitU (LList es2)) | length es1 == length es2 -> pairs flex (zipSame es1 es2) s
-      (LitU (LSet es1), LitU (LSet es2)) | length es1 == length es2 -> pairs flex (zipSame es1 es2) s
+      (LitU (LList es1), LitU (LList es2)) | Just es <- zipExact es1 es2 -> pairs flex es s
+      (LitU (LSet es1), LitU (LSet es2)) | Just es <- zipExact es1 es2 -> pairs flex es s
       (LitU l1, LitU l2) -> guard (l1 == l2) s
       (NatVoidU, y) | natLike y -> Just s
       (x, NatVoidU) | natLike x -> Just s
@@ -1448,9 +1448,7 @@ unifyU flex = go []
       (ForallU v1 u1, ForallU v2 u2) | v1 == v2 -> go sub u1 u2
       _ -> Nothing
 
-    goAll sub xs ys
-      | length xs /= length ys = Nothing
-      | otherwise = foldl step (Just sub) (zipSame xs ys)
+    goAll sub xs ys = zipExact xs ys >>= foldl step (Just sub)
       where
         step acc (u, v) = acc >>= \s -> go s u v
 
@@ -1556,9 +1554,7 @@ alphaEq a b =
       [TypeU] ->
       [TypeU] ->
       Maybe [(TVar, TVar)]
-    walkAll flex bij xs ys
-      | length xs /= length ys = Nothing
-      | otherwise = go bij (zipSame xs ys)
+    walkAll flex bij xs ys = zipExact xs ys >>= go bij
       where
         go acc [] = Just acc
         go acc ((u, v) : rest) = walk flex acc u v >>= \acc' -> go acc' rest

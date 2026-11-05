@@ -28,7 +28,6 @@ module Morloc.Frontend.Rename
   , fresh
   ) where
 
-import Morloc.Data.Zip (zipSame)
 import qualified Data.Map as Map
 import qualified Data.Set as Set
 import qualified Data.Text as T
@@ -94,8 +93,8 @@ localDecl _ env e = expr env e
 
 bindAll :: Env -> [EVar] -> MorlocMonad ([EVar], Env)
 bindAll env vs = do
-  vs' <- mapM fresh vs
-  return (vs', foldr (uncurry Map.insert) env (zipSame vs vs'))
+  pairs <- mapM (\v -> (,) v <$> fresh v) vs
+  return (map snd pairs, foldr (uncurry Map.insert) env pairs)
 
 lookupName :: Env -> EVar -> EVar
 lookupName env v = Map.findWithDefault v v env

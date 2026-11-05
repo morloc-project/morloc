@@ -69,7 +69,7 @@ module Morloc.Typecheck.RecSolver
   , mkCanon
   ) where
 
-import Morloc.Data.Zip (zipSame)
+import Morloc.Data.Zip (zipExact, zipSame)
 import Control.Monad (foldM)
 import Data.List (foldl')
 import Data.Map.Strict (Map)
@@ -324,9 +324,7 @@ alignPrefix ((k1, t1) : as) ((k2, t2) : bs)
 -- | Both sides still hold row variables. Only a structural match is decided
 -- here; anything else waits for one side to ground out.
 linkSegs :: [RecSeg] -> [RecSeg] -> Either RecError RecSolution
-linkSegs sa sb
-  | length sa /= length sb = Left RecDeferred
-  | otherwise = foldM step mempty (zipSame sa sb)
+linkSegs sa sb = maybe (Left RecDeferred) (foldM step mempty) (zipExact sa sb)
   where
     step acc (RecGround fa, RecGround fb)
       -- Differing known blocks are not a contradiction: a row variable

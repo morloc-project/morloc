@@ -15,7 +15,7 @@ segregation in the code generator.
 -}
 module Morloc.Frontend.Typecheck (typecheck, typecheckRoot, typecheckRootAt, validate, resolveTypes, evaluateAnnoSTypes, peakSExpr) where
 
-import Morloc.Data.Zip (zipPrefix, zipSame, zipWithSame)
+import Morloc.Data.Zip (indexed, zipExact, zipPrefix, zipSame, zipWithSame)
 import qualified Data.List as List
 import Data.Text (Text)
 import qualified Data.Text as MT
@@ -481,7 +481,7 @@ resolveTypes (AnnoS (Idx i t) ci e) =
     f (LamS vs x) = LamS vs (resolveTypes x)
     f (LstS xs) = LstS (map resolveTypes xs)
     f (TupS xs) = TupS (map resolveTypes xs)
-    f (NamS rs) = NamS (zipSame (map fst rs) (map (resolveTypes . snd) rs))
+    f (NamS rs) = NamS (map (second resolveTypes) rs)
     f (RealS si x) = RealS si x
     f (IntS si x) = IntS si x
     f (LogS x) = LogS x
@@ -566,9 +566,8 @@ resolveInstances g (AnnoS gi@(Idx _ gt) ci e0) = do
     f _ g0 (LamS vs e) = resolveInstances g0 e |>> second (LamS vs)
     f _ g0 (LstS es) = statefulMapM resolveInstances g0 es |>> second LstS
     f _ g0 (TupS es) = statefulMapM resolveInstances g0 es |>> second TupS
-    f _ g0 (NamS rs) = do
-      (g1, es') <- statefulMapM resolveInstances g0 (map snd rs)
-      return (g1, NamS (zipSame (map fst rs) es'))
+    f _ g0 (NamS rs) =
+      statefulMapM (\gk (k, x) -> second ((,) k) <$> resolveInstances gk x) g0 rs |>> second NamS
 
     f _ g0 (LetBndS v) = return (g0, LetBndS v)
     f _ g0 (LetS v e1 e2) = do
@@ -820,9 +819,9 @@ compatibleTypeU = go Set.empty Set.empty
       Just (ps, (q1, q2)) -> all (uncurry (go b1 b2)) ps && go b1 b2 q1 q2
       Nothing -> False
     go b1 b2 (AppU h1 ps1) (AppU h2 ps2)
-      | length ps1 == length ps2 =
+      | Just ps <- zipExact ps1 ps2 =
           go b1 b2 h1 h2
-            && all (uncurry (go b1 b2)) (zipSame ps1 ps2)
+            && all (uncurry (go b1 b2)) ps
       -- Partial application, as in 'subtype': @Vector n a@ matches @f a@.
       | length ps1 > length ps2
       , let k = length ps1 - length ps2
@@ -837,10 +836,8 @@ compatibleTypeU = go Set.empty Set.empty
       | otherwise = False
     go b1 b2 (NamU o1 n1 ps1 rs1) (NamU o2 n2 ps2 rs2) =
       o1 == o2 && n1 == n2
-        && length ps1 == length ps2
-        && all (uncurry (go b1 b2)) (zipSame ps1 ps2)
-        && length rs1 == length rs2
-        && all (\((k1,v1),(k2,v2)) -> k1 == k2 && go b1 b2 v1 v2) (zipSame rs1 rs2)
+        && maybe False (all (uncurry (go b1 b2))) (zipExact ps1 ps2)
+        && maybe False (all (\((k1,v1),(k2,v2)) -> k1 == k2 && go b1 b2 v1 v2)) (zipExact rs1 rs2)
     go b1 b2 (OptionalU t1) (OptionalU t2) = go b1 b2 t1 t2
     go b1 b2 (EffectU e1 t1) (EffectU e2 t2) = e1 == e2 && go b1 b2 t1 t2
     go _  _  t1 t2 | isNatExprT t1 && isNatExprT t2 = True
@@ -1027,7 +1024,7 @@ synthE i g0 e | Just e' <- reduceSetterRedex e = synthE i g0 e'
 
 synthE i g (AppS f@(AnnoS _ _ (ExeS (PatCall (PatternText _ _)))) es) = do
   (g1, _, f1) <- synthG g f
-  (g2, _, es1, _) <- zipCheck i g1 es (take (length es) (repeat BT.strU))
+  (g2, _, es1, _) <- zipCheck i g1 es (map (const BT.strU) es)
   return (g2, BT.strU, AppS f1 es1)
 
 synthE _ _ (AppS (AnnoS _ _ (ExeS (PatCall (PatternStruct _)))) []) = error "Unreachable application pattern to no data"
@@ -1277,11 +1274,9 @@ synthE i g (TupS (e : es)) = do
     _ -> error "impossible" -- synth does not change data constructors
   return (g2, t3, TupS (itemExpr : xs'))
 synthE _ g0 (NamS rs) = do
-  (g1, xs) <- statefulMapM (\s v -> synthG s v |>> (\(a, b, c) -> (a, (b, c)))) g0 (map snd rs)
-  let (ts, es) = unzip xs
-      ks = map fst rs
-      (g2, t) = newvarRich ([], Closed) (zipSame ks ts, Closed) "record_" g1
-      e = NamS (zipSame ks es)
+  (g1, xs) <- statefulMapM (\s (k, v) -> synthG s v |>> (\(a, b, c) -> (a, ((k, b), (k, c))))) g0 rs
+  let (g2, t) = newvarRich ([], Closed) (map fst xs, Closed) "record_" g1
+      e = NamS (map snd xs)
   return (g2, t, e)
 
 -- A signed term referenced by its signature alone is instantiated, its
@@ -2075,7 +2070,7 @@ etaExpandSynthE i g1 funType0 funExpr0 _f xs0 = do
 
         let newVars = map fst newVarsWithTypes
             newTypes = map snd newVarsWithTypes
-            g4 = g3 ++> zipWithSame AnnG newVars newTypes
+            g4 = g3 ++> map (uncurry AnnG) newVarsWithTypes
 
         newVarExprs <-
           mapM
@@ -2823,7 +2818,7 @@ subtype' i a b g = do
 -- | Conditions grouped so that no two groups share a variable, each group
 -- in input order.
 conditionGroups :: [(Int, ND.Condition, MDoc)] -> [[(Int, ND.Condition, MDoc)]]
-conditionGroups xs = map (map snd . List.sortOn fst) (foldl insert [] (zipPrefix [0 :: Int ..] xs))
+conditionGroups xs = map (map snd . List.sortOn fst) (foldl insert [] (indexed xs))
   where
     vars (_, (_, c, _)) = ND.condVars [c]
     insert groups x =

@@ -21,7 +21,7 @@ module Morloc.Frontend.PatternCheck
   , missingKeyError
   ) where
 
-import Morloc.Data.Zip (zipPrefix, zipSame, zipWithSame)
+import Morloc.Data.Zip (indexed, zipExact, zipSame, zipWithSame)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import qualified Data.Text as DT
@@ -74,7 +74,7 @@ checkPatterns trees = do
       LamS vs _ ->
         let ts = argTypes t
          in [ (k, take (siteWidth site) (drop i ts))
-            | (i, v) <- zipPrefix [0 ..] vs
+            | (i, v) <- indexed vs
             , let k = base v
             , Just site <- [Map.lookup k sites]
             ]
@@ -93,10 +93,10 @@ checkPatterns trees = do
 -- | Check one match at one receiver type, returning its unreachable
 -- clauses.
 checkSite :: Scope -> [TypeU] -> MatchSite -> MorlocMonad [Int]
-checkSite scope ts (MatchSite i rows total)
-  | any ((/= length ts) . length . snd) rows = return []
-  | otherwise = do
-      let converted = [(ri, [(pi', toPat scope t p) | (t, (pi', p)) <- zipSame ts ps]) | (ri, ps) <- rows]
+checkSite scope ts (MatchSite i rows total) = case mapM (traverse (zipExact ts)) rows of
+  Nothing -> return []
+  Just paired -> do
+      let converted = [(ri, [(pi', toPat scope t p) | (t, (pi', p)) <- tps]) | (ri, tps) <- paired]
       sequence_ [problem pi' q | (_, cols) <- converted, (pi', Left q) <- cols]
       case mapM (\(ri, cols) -> (,) ri <$> combine (map snd cols)) converted of
         Left _ -> return []
@@ -110,7 +110,7 @@ checkSite scope ts (MatchSite i rows total)
                     "These clauses do not match every value; not matched:"
                       <+> hsep (punctuate ";" (map (pretty . showRow) ws))
               let dead = U.redundant signature [(False, r) | (_, r) <- matrix]
-              return [ri | (k, (ri, _)) <- zipPrefix [0 :: Int ..] matrix, k `elem` dead]
+              return [ri | (k, (ri, _)) <- indexed matrix, k `elem` dead]
   where
     problem :: Int -> Problem -> MorlocMonad ()
     problem at (TupleWidth given wanted) = tupleWidthError at given (pretty wanted)

@@ -21,7 +21,7 @@ module Morloc.Frontend.Lexer
   , showLexError
   ) where
 
-import Morloc.Data.Zip (zipSame, zipWithPrefix)
+import Morloc.Data.Zip (mapIndexed, zipSame)
 import Data.Char (isAlpha, isAlphaNum, isDigit, isHexDigit, isLower, isOctDigit, isUpper)
 import Data.List (find)
 import Data.Maybe (fromMaybe)
@@ -640,7 +640,7 @@ lexStringLit start quote input0 st0 = segment (advanceCol start (length delim)) 
           lastPart = length parts - 1
           toks = case zipSame parts texts of
             [((Segment _ r, _), t)] -> [Located start (TokString t) (d <> T.pack r <> d)]
-            pts -> concat (reverse (zipWithPrefix emit [0 :: Int ..] pts))
+            pts -> concat (reverse (mapIndexed emit pts))
           emit i ((Segment q r, hole), t)
             | i == 0 = hole <> [Located start (TokStringStart t) (d <> T.pack r)]
             | i == lastPart = hole <> [Located q (TokStringEnd t) (T.pack r <> d)]

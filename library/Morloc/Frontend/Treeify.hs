@@ -20,7 +20,6 @@ module Morloc.Frontend.Treeify
   , recName
   ) where
 
-import Morloc.Data.Zip (zipSame)
 import qualified Data.Set as Set
 import qualified Morloc.BaseTypes as BT
 import qualified Morloc.Data.DAG as DAG
@@ -529,9 +528,7 @@ linkAndRemoveAnnotations = f
     f (ExprI i (AssE v e es)) = ExprI i <$> (AssE v <$> f e <*> mapM f es)
     f (ExprI i (LstE es)) = ExprI i <$> (LstE <$> mapM f es)
     f (ExprI i (TupE es)) = ExprI i <$> (TupE <$> mapM f es)
-    f (ExprI i (NamE rs)) = do
-      es' <- mapM (f . snd) rs
-      return . ExprI i $ NamE (zipSame (map fst rs) es')
+    f (ExprI i (NamE rs)) = ExprI i . NamE <$> mapM (traverse f) rs
     f (ExprI i (AppE e es)) = ExprI i <$> (AppE <$> f e <*> mapM f es)
     f (ExprI i (LamE vs e)) = ExprI i <$> (LamE vs <$> f e)
     f (ExprI i (LetE bindings body)) = ExprI i <$> (LetE <$> mapM (\(v, e) -> (,) v <$> f e) bindings <*> f body)
@@ -718,10 +715,10 @@ collectExprS namer0 (ExprI gi0 e0) = f namer0 e0
         (Just k, GMapJust (Polymorphic cls clsName t ts)) -> do
           MM.sayVVV $
             "  polymorphic term" <+> pretty v <> ":" <+> list (map (maybe "?" pretty . termGeneral) ts)
-          (namer', ess) <- expanding k namer (\n -> statefulMapM (termtypesToAnnoS gi0) n ts)
-          let etypes = map (fromJust . termGeneral) ts
+          let typed n' t' = second ((,) (fromJust (termGeneral t'))) <$> termtypesToAnnoS gi0 n' t'
+          (namer', ess) <- expanding k namer (\n -> statefulMapM typed n ts)
           v' <- nameIfRecursive namer' k
-          return (namer', VarS v' (PolymorphicExpr cls clsName t (zipSame etypes ess)))
+          return (namer', VarS v' (PolymorphicExpr cls clsName t ess))
         -- Terms not associated with TermTypes objects must be lambda-bound or let-bound
         -- These terms will be renamed for uniqueness
         _ -> do
@@ -778,9 +775,8 @@ collectExprS namer0 (ExprI gi0 e0) = f namer0 e0
     f namer (LstE es) = statefulMapM collectAnnoS namer es |>> second LstS
     f namer (TupE es) = statefulMapM collectAnnoS namer es |>> second TupS
     f namer (NamE rs) = do
-      (namer', vals) <- statefulMapM collectAnnoS namer (map snd rs)
-      let keys = map fst rs
-      return (namer', NamS (zipSame keys vals))
+      (namer', rs') <- statefulMapM (\n (key, x) -> second ((,) key) <$> collectAnnoS n x) namer rs
+      return (namer', NamS rs')
     f namer (LamE vs e) = do
       let namer' = foldr (updateRenamer LambdaBound) namer vs
           vs' = map (fst . fromJust . (flip Map.lookup) (namerMap namer')) vs

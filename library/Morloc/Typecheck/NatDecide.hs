@@ -38,9 +38,8 @@ module Morloc.Typecheck.NatDecide
   , sideConditions
   ) where
 
-import Morloc.Data.Zip (zipPrefix, zipSame)
 import Control.Applicative ((<|>))
-import Data.List (partition)
+import Data.List (partition, tails)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (listToMaybe, mapMaybe)
@@ -180,7 +179,7 @@ discharged asm0 c0 = proven c || any (sameAs c) asm || ineq
     lower = [condSOP a | a@(NatGe _ _) <- asm]
     combos =
       [scaleSOP k a | a <- lower, k <- [1, 2, 3]]
-        <> [addSOPs a b | (i, a) <- zipPrefix [0 :: Int ..] lower, (j, b) <- zipPrefix [0 ..] lower, i < j]
+        <> [addSOPs a b | a : later <- tails lower, b <- later]
     nonNegative x = not (hasOpaqueDivision x) && nonNegativeByCases 2 x
     scaleSOP k (NatSOP ps) = NatSOP [p {npCoeff = k * npCoeff p} | p <- ps]
     addSOPs (NatSOP a) (NatSOP b) = normalize (NatAdd (sopToNatExpr (NatSOP a)) (sopToNatExpr (NatSOP b)))
@@ -425,7 +424,7 @@ counterexample c
     vs = Set.toList (condVars [c])
     zeros = Map.fromList [(v, 0) | v <- vs]
     degree v = maximum (1 : [Map.findWithDefault 0 v (npVars p) | p <- ps])
-    grid = [Map.fromList (zipPrefix vs xs) | xs <- mapM (\v -> [0 .. degree v]) vs]
+    grid = [Map.fromList xs | xs <- mapM (\v -> map ((,) v) [0 .. degree v]) vs]
 
 -- | Witnesses tried for the inferred variables of a group that also has
 -- rigid ones: small constants, each rigid variable times one or two, and
@@ -442,7 +441,7 @@ witness follows rs inferred conds
       map NatLit [0, 1, 2]
         <> concat [[NatVar r, NatMul (NatLit 2) (NatVar r)] | r <- rs]
         <> [sumRigid | length rs > 1]
-    choices = [Map.fromList (zipSame inferred es) | es <- mapM (const candidates) inferred]
+    choices = [Map.fromList es | es <- mapM (\v -> map ((,) v) candidates) inferred]
 
 data Satisfiable = Sat (Map TVar Integer) | Unsat | Undecided
   deriving (Eq)
@@ -562,7 +561,7 @@ searchWidth budget n conds =
    in last (0 : takeWhile (\w -> (w + 1) ^ n <= budget) [1 .. max 4 bound])
 
 assignments :: [TVar] -> Integer -> [Map TVar Integer]
-assignments vs w = [Map.fromList (zipPrefix vs xs) | xs <- mapM (const [0 .. w]) vs]
+assignments vs w = [Map.fromList xs | xs <- mapM (\v -> map ((,) v) [0 .. w]) vs]
 
 -- | A condition at an assignment; Nothing when a variable is unassigned or
 -- an operation is undefined.

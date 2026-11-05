@@ -125,7 +125,7 @@ module Morloc.Typecheck.Internal
   , seeType
   ) where
 
-import Morloc.Data.Zip (zipPrefix, zipSame)
+import Morloc.Data.Zip (indexed, zipExact, zipPrefix, zipSame)
 import qualified Data.List
 import Data.Functor.Const (Const (..))
 import Data.Functor.Identity (Identity (..))
@@ -1629,8 +1629,8 @@ subtype _ t1 t2 g
 -- falls through, and no function over "any table with a pop column" can be
 -- given a body in morloc.
 subtype scope t1@(OpU o1 as1) t2@(OpU o2 as2) g
-  | o1 == o2 && length as1 == length as2 =
-      foldM (\gAcc (a, b) -> subtype scope a b gAcc) g (zipSame as1 as2)
+  | o1 == o2, Just ops <- zipExact as1 as2 =
+      foldM (\gAcc (a, b) -> subtype scope a b gAcc) g ops
   | otherwise = subtypeError t1 t2 "Type operator mismatch"
 -- An applied alias meeting a type of another shape, such as the record it
 -- names, is compared through its expansion.
@@ -1793,7 +1793,7 @@ headerLabels = go []
     go path t = case t of
       LabeledU l x -> [(l, path, x)]
       AppU (VarU h) ts
-        | h == BT.tuple (length ts) -> concat [go (path <> [j]) x | (j, x) <- zipPrefix [0 ..] ts]
+        | h == BT.tuple (length ts) -> concat [go (path <> [j]) x | (j, x) <- indexed ts]
       _ -> []
 
 -- | Every label in a type.
@@ -2595,8 +2595,8 @@ selectorType g0 (SelectorIdx x xs) = do
       Nothing -> selectorType g SelectorEnd
 selectorType g0 (SelectorKey x xs) = do
   xs' <- mapM (secondM weaveSelectors) (groupSort (x : xs))
-  (g1, ss) <- statefulMapM selectorType g0 (map snd xs')
-  return $ newvarRich ([], Closed) (zipSame (map (Key . fst) xs') ss, Open) "_pattern_" g1
+  (g1, ss) <- statefulMapM (\gx (k, s) -> second ((,) (Key k)) <$> selectorType gx s) g0 xs'
+  return $ newvarRich ([], Closed) (ss, Open) "_pattern_" g1
 selectorType g0 (SelectorBracketIndex s) = do
   -- The receiver must be a list; bracket-index strips one Array layer
   -- and the inner selector applies to the element type. Produce an
@@ -2794,16 +2794,13 @@ renameWithMap g0 t0 =
    in if null nvs && null svs && null rvs && null lvs && null evs
       then (g0, t0, id)
       else
-        let (g1, nvs') = statefulMap (\g (TV s) -> tvarname g (s <> "@n")) g0 nvs
-            (g2, svs') = statefulMap (\g (TV s) -> tvarname g (s <> "@s")) g1 svs
-            (g3, rvs') = statefulMap (\g (TV s) -> tvarname g (s <> "@r")) g2 rvs
-            (g4, lvs') = statefulMap (\g (TV s) -> tvarname g (s <> "@l")) g3 lvs
-            (g5, evs') = statefulMap (\g (TV s) -> tvarname g (s <> "@e")) g4 evs
-            natMap = Map.fromList (zipSame nvs nvs')
-            strMap = Map.fromList (zipSame svs svs')
-            recMap = Map.fromList (zipSame rvs rvs')
-            listMap = Map.fromList (zipSame lvs lvs')
-            effMap = Map.fromList (zipSame evs evs')
+        let freshMap suffix g vs =
+              second Map.fromList (statefulMap (\gx v@(TV s) -> second ((,) v) (tvarname gx (s <> suffix))) g vs)
+            (g1, natMap) = freshMap "@n" g0 nvs
+            (g2, strMap) = freshMap "@s" g1 svs
+            (g3, recMap) = freshMap "@r" g2 rvs
+            (g4, listMap) = freshMap "@l" g3 lvs
+            (g5, effMap) = freshMap "@e" g4 evs
             rw = renameKindedVars natMap strMap recMap listMap effMap
          in (g5, rw t0, rw)
 

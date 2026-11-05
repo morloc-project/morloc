@@ -18,7 +18,7 @@ type declarations, and collects type definitions and source mappings into
 -}
 module Morloc.Frontend.Restructure (restructure) where
 
-import Morloc.Data.Zip (zipPrefix, zipSame, zipWithPrefix, zipWithSame)
+import Morloc.Data.Zip (indexed, zipPrefix, zipSame, zipWithPrefix, zipWithSame)
 import qualified Control.Monad.State.Strict as St
 import qualified Data.Graph as Graph
 import Data.Set (Set)
@@ -861,7 +861,7 @@ handleTypeDeclarations = DAG.mapNode f
     isNotSelfDef :: ExprI -> Bool
     isNotSelfDef (ExprI _ (TypE (ExprTypeE Nothing v [] (VarU v') _ _))) = v /= v'
     isNotSelfDef (ExprI _ (TypE (ExprTypeE Nothing (VarU -> v) (map (either (VarU . fst) id) -> vs) (AppU v' vs') _ _))) =
-      v /= v' || length vs /= length vs' || not (all (uncurry (==)) (zipSame vs vs'))
+      v /= v' || vs /= vs'
     isNotSelfDef _ = True
 
 handleBinops :: DAG MVar [AliasedSymbol] ExprI -> MorlocMonad (DAG MVar [AliasedSymbol] ExprI)
@@ -932,9 +932,7 @@ handleBinops d0 = do
         f (ExprI i (AssE v e es)) = AssE v <$> f e <*> mapM f es |>> ExprI i
         f (ExprI i (LstE es)) = LstE <$> mapM f es |>> ExprI i
         f (ExprI i (TupE es)) = TupE <$> mapM f es |>> ExprI i
-        f (ExprI i (NamE rs)) = do
-          es' <- mapM (f . snd) rs
-          return $ ExprI i (NamE (zipSame (map fst rs) es'))
+        f (ExprI i (NamE rs)) = NamE <$> mapM (traverse f) rs |>> ExprI i
         f (ExprI i (AppE e es)) = AppE <$> f e <*> mapM f es |>> ExprI i
         f (ExprI i (LamE vs e)) = LamE vs <$> f e |>> ExprI i
         f (ExprI i (AnnE e t)) = AnnE <$> f e <*> pure t |>> ExprI i
@@ -1274,7 +1272,7 @@ formListProblem ps (AppU (VarU (TV tmpl)) items)
     positions = mapMaybe position items
     -- the declaration position an item names: a parameter's variable, or a
     -- specialized parameter's type
-    position item = listToMaybe [d | (d, p) <- zipPrefix [0 :: Int ..] ps, names p item]
+    position item = findIndex (`names` item) ps
     names (Left (v, _)) (VarU v') = v == v'
     names (Right t) x = t == x
     names _ _ = False
@@ -1314,7 +1312,7 @@ checkConflictingForms modules lang scope =
             <+> hsep (punctuate "," (map (squotes . pretty) vs))
             <> "; a type is declared once, and has one form per language for each parameter pattern"
           decls = [(i, paramPattern ps) | (i, ps) <- concatMap (typedefDecls lang v0) modules]
-          repeats = [(i, pat) | (k, (i, pat)) <- zipPrefix [0 :: Int ..] decls, pat `elem` map snd (take k decls)]
+          repeats = [(i, pat) | (k, (i, pat)) <- indexed decls, pat `elem` map snd (take k decls)]
        in case repeats ++ drop 1 decls of
             (i, pat) : _ -> do
               let samePattern = [j | (j, pat') <- decls, j /= i, pat' == pat]

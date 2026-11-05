@@ -41,7 +41,7 @@ module Morloc.TypeEval
   , enumCtors
   ) where
 
-import Morloc.Data.Zip (zipSame)
+import Morloc.Data.Zip (indexed, zipExact, zipSame)
 import Data.Either (isLeft)
 import qualified Data.Set as Set
 import Morloc.Data.Doc
@@ -197,8 +197,8 @@ reduceTypeLeaves scope t0 =
     descend bnd (NamU o n ps rs) =
       let bnd' = Set.insert n bnd
           (ps', cs1) = unzip (map (go bnd') ps)
-          (vs', cs2) = unzip (map (go bnd' . snd) rs)
-      in (NamU o n ps' (zipSame (map fst rs) vs'), or (cs1 ++ cs2))
+          (rs', cs2) = unzip (map (\(k, v) -> first ((,) k) (go bnd' v)) rs)
+      in (NamU o n ps' rs', or (cs1 ++ cs2))
     descend bnd (EffectU effs t) =
       let (t', c) = go bnd t in (EffectU effs t', c)
     descend bnd (OptionalU t) =
@@ -211,8 +211,8 @@ reduceTypeLeaves scope t0 =
       let (ts', cs) = unzip (map (go bnd) ts)
       in (OpU op ts', or cs)
     descend bnd (LitU (LRec fs)) =
-      let (vs', cs) = unzip (map (go bnd . snd) fs)
-      in (LitU (LRec (zipSame (map fst fs) vs')), or cs)
+      let (fs', cs) = unzip (map (\(k, v) -> first ((,) k) (go bnd v)) fs)
+      in (LitU (LRec fs'), or cs)
     descend bnd (LitU (LList es)) =
       let (es', cs) = unzip (map (go bnd) es)
       in (LitU (LList es'), or cs)
@@ -296,7 +296,7 @@ generalTransformType bnd0 recurse' resolve' scope = f bnd0
       -- outer NamU is now named @dict@. See
       -- plans/in-morloc-recursive-fields-* for context.
       let bnd' = Set.insert n' (Set.insert n bnd)
-      ts' <- mapM (recurse bnd' . snd) rs
+      rs' <- mapM (traverse (recurse bnd')) rs
       -- A structural record form holds in its fields every parameter its
       -- representation uses, so a parameter with no form here is phantom and
       -- is kept as written (POLY-6). A template form ("Map<$1,$2>") spells
@@ -305,7 +305,7 @@ generalTransformType bnd0 recurse' resolve' scope = f bnd0
         if MT.isInfixOf "$" (unTVar n')
           then mapM (recurse bnd') ps
           else return [either (const p) id (recurse bnd' p) | p <- ps]
-      return $ NamU o' n' ps' (zipSame (map fst rs) ts')
+      return $ NamU o' n' ps' rs'
     -- Flatten nested AppU heads first. Substituting a partial-applied
     -- class head into a method's @f a@ signature produces @AppU (AppU H
     -- [n]) [a]@; the parser-produced canonical shape is @AppU H [n,
@@ -624,16 +624,15 @@ generalTransformType bnd0 recurse' resolve' scope = f bnd0
       ([Either (TVar, Kind) TypeU], TypeU, ArgDoc, Bool, TypedefKind) ->
       Bool
     checkAlias ts1 (ts2, _, _, _, _) =
-      length ts1 == length ts2
-        && all (\(x, y) -> either (const True) (\ytype -> isSubtypeOf ytype x) y) (zipSame ts1 ts2)
+      maybe False (all (\(x, y) -> either (const True) (\ytype -> isSubtypeOf ytype x) y)) (zipExact ts1 ts2)
 
 -- | Replace several type variables at once: an argument that names another
 -- parameter is not substituted again.
 parsubAll :: [(TVar, TypeU)] -> TypeU -> TypeU
 parsubAll pairs body =
-  let fresh = [TV ("#" <> MT.show' j) | j <- [0 .. length pairs - 1]]
-      named = foldr parsub body (zipSame (map fst pairs) (map VarU fresh))
-   in foldr parsub named (zipSame fresh (map snd pairs))
+  let held = [(p, a, TV ("#" <> MT.show' j)) | (j, (p, a)) <- indexed pairs]
+      named = foldr (\(p, _, h) -> parsub (p, VarU h)) body held
+   in foldr (\(_, a, h) -> parsub (h, a)) named held
 
 -- Replace a type variable with an expression. For example:
 -- parsub ("a", "Int") -> "Map a b" -> "Map Int b"
@@ -665,7 +664,7 @@ parsub (v, t2) t1@(ListVarU v0)
 parsub (v, t2) t1@(SetVarU v0)
   | v0 == v = t2
   | otherwise = t1
-parsub pair (ExistU t (ts, tc) (rs, rc)) = ExistU t (map (parsub pair) ts, tc) (zipSame (map fst rs) (map (parsub pair . snd) rs), rc)
+parsub pair (ExistU t (ts, tc) (rs, rc)) = ExistU t (map (parsub pair) ts, tc) (map (second (parsub pair)) rs, rc)
 parsub pair (ForallU v t1) = ForallU v (parsub pair t1)
 parsub pair (FunU ts t) = FunU (map (parsub pair) ts) (parsub pair t)
 parsub pair (AppU t ts) = AppU (parsub pair t) (map (parsub pair) ts)
@@ -833,8 +832,8 @@ expandLeavesOnce scope t0 =
     descend bnd (NamU o n ps rs) =
       let bnd' = Set.insert n bnd
           (ps', cs1) = unzip (map (go bnd') ps)
-          (vs', cs2) = unzip (map (go bnd' . snd) rs)
-      in (NamU o n ps' (zipSame (map fst rs) vs'), or (cs1 ++ cs2))
+          (rs', cs2) = unzip (map (\(k, v) -> first ((,) k) (go bnd' v)) rs)
+      in (NamU o n ps' rs', or (cs1 ++ cs2))
     descend bnd (EffectU effs t) =
       let (t', c) = go bnd t in (EffectU effs t', c)
     descend bnd (OptionalU t) =
@@ -847,8 +846,8 @@ expandLeavesOnce scope t0 =
       let (ts', cs) = unzip (map (go bnd) ts)
       in (OpU op ts', or cs)
     descend bnd (LitU (LRec fs)) =
-      let (vs', cs) = unzip (map (go bnd . snd) fs)
-      in (LitU (LRec (zipSame (map fst fs) vs')), or cs)
+      let (fs', cs) = unzip (map (\(k, v) -> first ((,) k) (go bnd v)) fs)
+      in (LitU (LRec fs'), or cs)
     descend bnd (LitU (LList es)) =
       let (es', cs) = unzip (map (go bnd) es)
       in (LitU (LList es'), or cs)
