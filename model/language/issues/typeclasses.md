@@ -38,10 +38,6 @@
   APP-1) keeps the class signature's argument docs, written for fewer
   parameters (Link.hs `substituteInstanceTypes`, `et {etype = t}`); code
   pairing docs with inputs would misalign them.
-- **A signature inside an instance body is refused.** [2026-11-04] Spec
-  incomplete. The grammar accepts `m :: T` in an instance body and Link
-  refuses it with a located error (it crashed before). Open: should it be
-  legal, checked against the instance type, as Haskell's InstanceSigs?
 
 - **An omitted method falls through to a more general instance.** [read]
   Spec gap: CLS-12 (open). Typecheck.resolveInstances chooses the most
@@ -88,7 +84,7 @@
   declared in stdlib `root`, so a replacement prelude without them breaks
   code generation.
 - **A sourced function with a class constraint ignores the instance.**
-  [reproduced] Violates CLS-19. root's `sort :: Ord a => [a] ->
+  [reproduced] Violates CLS-21. root's `sort :: Ord a => [a] ->
   [a]` is sourced in every root-* as `morloc_sort`, which uses the native
   comparison, not the selected `Ord` instance. With
   `newtype Z = Real deriving (Eq, Ord)`, Python `sort [0.0, -0.0]` gives
@@ -191,3 +187,26 @@
   that head may not match through instance resolution (S2's resolver);
   check before Packable selection is routed through it. Possibly the
   cause of the NEWT-9/KIND-5 entry in kinds-dimensions.md.
+
+- **Sourced root sort/unique are not the instance's relation.** [read
+  2026-11-05] CLS-21. root-r `morloc_sort` (root-r/R/core.R:316-331)
+  sorts with `method="radix"`: NA/NaN dropped (length changes), C-locale
+  string order where R's `<` collates by locale, and a list of lists by
+  its first element only. root-py `morloc_unique` (core.py:288) dedups
+  through a `set`: TypeError on list or record elements, hash equality
+  instead of the selected Eq. So a primitive-instance test alone does not
+  make a sourced constrained term agree with the instance. Reproduced
+  separately: `sort` at `newtype Z = Real deriving (Eq, Ord)` in Python
+  gives [0,-0,1] (derived order is totalOrder). Open: rulings Q4/Q6 in
+  /work/plans/error-clusters/s2-rulings.md. Fixed by CLS-21's classes.
+- **Packer coherence is checked after typecheck.** [read 2026-11-05]
+  `checkPackerCoherence` runs after typechecking (library/Morloc.hs:238),
+  but a Packable wire-argument improvement (S2 Q2) happens during it, so
+  improvement would rely on a check that has not run. Move it to the
+  instance table build (CLS-20).
+- **map-r's specific Packable head serves every language.** [read
+  2026-11-05] map-r/main.loc:35 declares `Packable [(Str, val)] (Map Str
+  val)` with R implementations only. Language plays no part in selection
+  (CLS-16), so it is selected at `Map Str v` in Python and C++ too, which
+  then depend on the unruled CLS-12 fall-through to map's general head.
+

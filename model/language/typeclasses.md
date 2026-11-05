@@ -160,7 +160,7 @@ operators where they are right for the instance's type.
 
 Why: defined in `root` from `==` and `<=`, the four were one or two calls
 more in every language, and a native source for them was chosen at every
-type, bypassing the instance (CLS-19).
+type, bypassing the instance (CLS-21).
 
 ### CLS-16 The most specific matching instance is selected
 Intent: ruled 2026-10-29
@@ -187,21 +187,58 @@ A head matches `T` when it instantiates to `T`. No coercion (OPT-1's
 applies to a selected method's value as to any other term.
 
 ### CLS-18 A constraint nothing determines is a compile error
-Intent: ruled 2026-10-29
+Intent: ruled 2026-11-05
 Code: deviates (issues/typecheck.md)
 
 A constrained type variable that does not occur in the signature's type
 outside its constraints is an error at the signature. One that occurs but
-that nothing at a use determines is an error at the use. Neither is
-defaulted.
+that nothing at a use determines is an error at the use, even when only one
+instance could match (`[] == []`, `showList [gen n]` with one `Gen`
+instance). Neither is defaulted. Nat and effect-row variables are exempt:
+a class argument may hold one that nothing determines (`size` of a `Vector
+n a` whose `n` is unknown). An argument a dependency determines (CLS-20)
+is not undetermined.
+
+Why: an instance's existence elsewhere in a program would otherwise decide
+whether distant code compiles, and the failure would not name the class.
 
 ### CLS-19 A sourced constrained term runs the selected instance
-Intent: ruled 2026-10-29
+Intent: retired 2026-11-05
+Code: unaudited
+
+Replaced by CLS-21: a host function that agrees with an instance only at
+some types is an instance at those types.
+
+
+### CLS-20 Packable's wire argument is determined by the packed type
+Intent: ruled 2026-11-05
 Code: deviates (issues/typeclasses.md)
 
-A sourced implementation of a term whose signature has a class constraint
-uses the host language's own operations, not the instance (root's `sort`
-uses the host's comparison). It is a candidate only at a use whose
-constraints all select an instance at a primitive type, whose host
-operation is the instance. Elsewhere the term runs a morloc implementation
-that calls the selected instance's methods (`sort` as `sortBy (<=)`).
+`Packable a b` has the dependency `b -> a`: the instance selected by `b`
+fixes `a` where a use leaves it open (`unpack x` needs no annotation of
+the wire type). No two instances may have heads that match the same `b`
+and differ in `a`; this is checked when the program's instances are
+collected, before typechecking. No other class has a dependency, and no
+other class argument is fixed by instance selection.
+
+### CLS-21 A host function that agrees only at some types is an instance
+Intent: ruled 2026-11-05
+Code: deviates (issues/typeclasses.md)
+
+A sourced implementation of a constrained term is a candidate at every use
+the constraints admit, so it must agree with every instance it may run
+under. A host function that agrees only at some types (Python's `sorted`
+agrees with `Ord` at `Real` but not at a type deriving `Ord`, DERIV-3) is
+written as an instance of a class whose method is the term, at exactly
+those types, beside a general instance with a morloc body. Root's `sort`,
+`unique` and `groupSort` are methods of such classes (`class Ord a =>
+Sortable a`, general instance `sort xs = sortBy (<=) xs`). CLS-16 selects
+between the instances.
+
+### CLS-22 An instance body gives only implementations
+Intent: ruled 2026-11-05
+Tests: spec-cls-22-1
+Code: conforms 2026-11-05
+
+A signature inside an instance body is a compile error at the signature;
+a method's type comes from its class.

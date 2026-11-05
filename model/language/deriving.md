@@ -71,7 +71,10 @@ As DERIV-2 says, the derived instance needs no instance for the type's
 parameters. A
 hand-written instance replaces the derived one, and is how a type gets a
 faster comparison; it is not a DERIV-5 conflict. The primitive types have
-hand-written instances that are the host operators (CLS-19).
+hand-written instances that are the host operators (CLS-21). `List`,
+`Deque` and optionals have hand-written instances (in root) that compare
+elements with the element's instance, as `Eq a => Eq [a]`, ruled
+2026-11-05.
 
 Why: a catch-all host-operator instance claimed `Eq` for every type, and
 was wrong wherever the host operator was.

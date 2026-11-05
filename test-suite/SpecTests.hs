@@ -4509,6 +4509,19 @@ cls16Tests =
         g :: Vec 3 a -> Str
         g x = big x
         |]
+    , rejectSaying
+        "spec-cls-22-1"
+        "inside an instance of"
+        [r|
+        module main (f)
+        class Sz a where
+          sz :: a -> Int
+        instance Sz Int where
+          sz :: Int -> Int
+          sz x = x
+        f :: Int -> Int
+        f x = sz x
+        |]
     , accept
         "spec-cls-5-10"
         [r|

@@ -10,3 +10,8 @@
   one pass for Str, List, Deque and Set; a stream cannot reach it without
   holding every part, so a fix combines each batch with `mconcat` and keeps
   the running accumulator's copies per batch rather than per element.
+
+- **R `sortBy` is a bubble sort.** [read 2026-11-05] root-r
+  `morloc_sortBy` (root-r/R/core.R:334-349) is O(n^2) comparator calls.
+  Any rule that routes `sort` through `sortBy (<=)` (S2 ruling Q4) makes
+  R's `sort` quadratic until it is a merge sort.
