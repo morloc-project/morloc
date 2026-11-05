@@ -2919,23 +2919,21 @@ desugarExpr (Loc sp (CAsE (EV label) _)) = do
 -- through unchanged here (arity 1) so the terminal-action synthesis can see
 -- and rewrite it; it is expanded later by 'expandCollectE'.
 etaExpandIntrinsic :: Span -> Intrinsic -> [ExprI] -> D ExprI
-etaExpandIntrinsic sp intr args = do
-  let arity = intrinsicArity intr
-      actual = length args
-  if actual > arity
-    then do
-      -- INTR-9: the saturated intrinsic is applied to the rest
-      saturated <- freshExprSpan sp (IntrinsicE intr (take arity args))
-      freshExprSpan sp (AppE saturated (drop arity args))
-  else if actual == arity
-    then freshExprSpan sp (IntrinsicE intr args)
-    else do
-      idx <- freshIdSpan sp
-      let remaining = arity - actual
-          vars = [EV ("_intr_" <> T.pack (show idx) <> "_" <> T.pack (show j)) | j <- [0..remaining-1]]
-      varExprs <- mapM (\v -> freshExprSpan sp (VarE defaultValue v)) vars
-      intrExpr <- freshExprSpan sp (IntrinsicE intr (args ++ varExprs))
-      mkLam sp vars intrExpr
+etaExpandIntrinsic sp intr args = case intrinsicArity intr of
+  Nothing -> freshExprSpan sp (IntrinsicE intr args)
+  Just arity
+    | length args > arity -> do
+        -- INTR-9: the saturated intrinsic is applied to the rest
+        saturated <- freshExprSpan sp (IntrinsicE intr (take arity args))
+        freshExprSpan sp (AppE saturated (drop arity args))
+    | length args == arity -> freshExprSpan sp (IntrinsicE intr args)
+    | otherwise -> do
+        idx <- freshIdSpan sp
+        let remaining = arity - length args
+            vars = [EV ("_intr_" <> T.pack (show idx) <> "_" <> T.pack (show j)) | j <- [0 .. remaining - 1]]
+        varExprs <- mapM (\v -> freshExprSpan sp (VarE defaultValue v)) vars
+        intrExpr <- freshExprSpan sp (IntrinsicE intr (args ++ varExprs))
+        mkLam sp vars intrExpr
 
 -- | Late pass (after terminal-action synthesis): expand every @collect node
 -- to the default stdout-sink producer pattern:

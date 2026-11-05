@@ -1912,11 +1912,10 @@ synthArgs g (a:as) = do
 checkIntrinsicArgs ::
   Int -> Gamma -> Intrinsic -> [TypeU] -> MorlocMonad Gamma
 checkIntrinsicArgs i g intr argTypes = do
-  let expected = intrinsicArity intr
-      actual = length argTypes
-  if actual /= expected
+  let actual = length argTypes
+  if maybe False (/= actual) (intrinsicArity intr)
     then MM.throwCompilerBugAt i $
-      "@" <> pretty (intrinsicName intr) <+> "expects" <+> pretty expected
+      "@" <> pretty (intrinsicName intr) <+> "expects" <+> pretty (intrinsicArity intr)
         <+> "arguments but got" <+> pretty actual
     else do
       case (intr, argTypes) of

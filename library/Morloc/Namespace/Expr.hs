@@ -621,10 +621,10 @@ data Intrinsic
                     -- chains). The selector chain is encoded as a path string
                     -- (`.1.[]`, `.foo.[:]`, etc.); bracket steps consume
                     -- runtime args in DFS order. Lowers to a single per-
-                    -- language @_mlc_ifile_walk@ call. NOT user-facing; arity
-                    -- is dynamic (path + handle + 0..n bracket bounds), so
-                    -- 'intrinsicArity' is intentionally undefined.
-  deriving (Show, Ord, Eq)
+                    -- language @_mlc_ifile_walk@ call. NOT user-facing; its
+                    -- argument count varies (path + handle + 0..n bracket
+                    -- bounds), so it has no fixed arity.
+  deriving (Show, Ord, Eq, Enum, Bounded)
 
 -- | A derived comparison method over its two parameters (DERIV-2).
 data WireComparison
@@ -647,169 +647,86 @@ derivedComparisons "Ord" =
 derivedComparisons _ = Nothing
 
 -- | Map intrinsic to its canonical name
+-- | Everything known of an intrinsic before typechecking: its name, its
+-- arity (none for one whose argument count varies), whether it performs IO (its type carries an @IO@ effect; the eval
+-- sandbox forbids the IO ones written directly), and whether a program may
+-- write it as @name. One equation per constructor, so a new intrinsic
+-- without a row is an incomplete-pattern warning.
+data IntrSig = IntrSig
+  { sigName :: Text
+  , sigArity :: Maybe Int
+  , sigIO :: Bool
+  , sigWritten :: Bool
+  }
+
+intrinsicSig :: Intrinsic -> IntrSig
+intrinsicSig IntrSave = IntrSig "save" (Just 3) True True
+intrinsicSig IntrSaveJ = IntrSig "savej" (Just 2) True True
+intrinsicSig IntrLoad = IntrSig "load" (Just 1) True True
+intrinsicSig IntrHash = IntrSig "hash" (Just 1) False True
+intrinsicSig IntrEq = IntrSig "eq" (Just 2) False True
+intrinsicSig IntrLe = IntrSig "le" (Just 2) False True
+intrinsicSig IntrVersion = IntrSig "version" (Just 0) False True
+intrinsicSig IntrCompiled = IntrSig "compiled" (Just 0) False True
+intrinsicSig IntrLang = IntrSig "lang" (Just 0) False True
+intrinsicSig IntrSchema = IntrSig "schema" (Just 1) False True
+intrinsicSig IntrTypeof = IntrSig "typeof" (Just 1) False True
+intrinsicSig IntrShow = IntrSig "show" (Just 1) False True
+intrinsicSig IntrRead = IntrSig "read" (Just 1) False True
+intrinsicSig IntrDatafile = IntrSig "datafile" (Just 1) False True
+intrinsicSig IntrUnpack = IntrSig "unpack" (Just 1) True False
+intrinsicSig IntrOpen = IntrSig "open" (Just 1) True True
+intrinsicSig IntrClose = IntrSig "close" (Just 1) True True
+intrinsicSig IntrFSchema = IntrSig "fschema" (Just 1) True True
+intrinsicSig IntrMap = IntrSig "map" (Just 2) False False
+intrinsicSig IntrMapOptional = IntrSig "mapoptional" (Just 2) False False
+intrinsicSig IntrTagTest = IntrSig "tagtest" (Just 2) False False
+intrinsicSig IntrNewtypeUnwrap = IntrSig "unwrap" (Just 1) False False
+intrinsicSig IntrNewtypeWrap = IntrSig "wrap" (Just 1) False False
+intrinsicSig IntrCtorField = IntrSig "ctorfield" (Just 3) False False
+intrinsicSig IntrListLenTest = IntrSig "listlentest" (Just 2) False False
+intrinsicSig IntrListElem = IntrSig "listelem" (Just 2) False False
+intrinsicSig IntrFLength = IntrSig "flen" (Just 1) True True
+intrinsicSig IntrStreamLayout = IntrSig "streamLayout" (Just 1) True True
+intrinsicSig IntrNext = IntrSig "next" (Just 1) True True
+intrinsicSig IntrStream = IntrSig "stream" (Just 1) True True
+intrinsicSig IntrWrite = IntrSig "write" (Just 3) True True
+intrinsicSig IntrAppend = IntrSig "append" (Just 1) True True
+intrinsicSig IntrConcat = IntrSig "concat" (Just 2) True True
+intrinsicSig IntrFlush = IntrSig "flush" (Just 1) True True
+intrinsicSig IntrStdin = IntrSig "stdin" (Just 0) True True
+intrinsicSig IntrStdout = IntrSig "stdout" (Just 0) True True
+intrinsicSig IntrStderr = IntrSig "stderr" (Just 0) True True
+intrinsicSig IntrThrow = IntrSig "throw" (Just 1) False True
+intrinsicSig IntrTry = IntrSig "try" (Just 1) False True
+intrinsicSig IntrTell = IntrSig "tell" (Just 0) True True
+intrinsicSig IntrCollect = IntrSig "collect" (Just 1) True True
+intrinsicSig IntrShape = IntrSig "shape" (Just 2) False False
+intrinsicSig IntrTmpfile = IntrSig "tmpfile" (Just 0) True False
+intrinsicSig IntrCellNew = IntrSig "cellnew" (Just 1) True False
+intrinsicSig IntrCellGet = IntrSig "cellget" (Just 1) True False
+intrinsicSig IntrCellPut = IntrSig "cellput" (Just 2) True False
+intrinsicSig IntrCellReduce = IntrSig "cellreduce" (Just 2) True False
+intrinsicSig IntrReplay = IntrSig "replay" (Just 2) True False
+intrinsicSig IntrChannel = IntrSig "channel" (Just 0) True False
+intrinsicSig IntrSpawn = IntrSig "spawn" (Just 2) True False
+intrinsicSig IntrSettle = IntrSig "settle" (Just 1) True False
+intrinsicSig IntrIFileWalk = IntrSig "ifile_walk" Nothing True False
+intrinsicSig IntrConform = IntrSig "conform" (Just 1) False False
+intrinsicSig IntrCellSlots = IntrSig "cellslots" (Just 1) True False
+intrinsicSig IntrReduceList = IntrSig "reducelist" (Just 2) False False
+
 intrinsicName :: Intrinsic -> Text
-intrinsicName IntrSave = "save"
-intrinsicName IntrSaveJ = "savej"
-intrinsicName IntrLoad = "load"
-intrinsicName IntrHash = "hash"
-intrinsicName IntrEq = "eq"
-intrinsicName IntrLe = "le"
-intrinsicName IntrVersion = "version"
-intrinsicName IntrCompiled = "compiled"
-intrinsicName IntrLang = "lang"
-intrinsicName IntrSchema = "schema"
-intrinsicName IntrTypeof = "typeof"
-intrinsicName IntrShow = "show"
-intrinsicName IntrRead = "read"
-intrinsicName IntrDatafile = "datafile"
-intrinsicName IntrUnpack = "unpack"
-intrinsicName IntrOpen = "open"
-intrinsicName IntrClose = "close"
-intrinsicName IntrFSchema = "fschema"
-intrinsicName IntrMap = "map"
-intrinsicName IntrMapOptional = "mapoptional"
-intrinsicName IntrTagTest = "tagtest"
-intrinsicName IntrNewtypeUnwrap = "unwrap"
-intrinsicName IntrNewtypeWrap = "wrap"
-intrinsicName IntrCtorField = "ctorfield"
-intrinsicName IntrListLenTest = "listlentest"
-intrinsicName IntrListElem = "listelem"
-intrinsicName IntrFLength = "flen"
-intrinsicName IntrStreamLayout = "streamlayout"
-intrinsicName IntrNext = "next"
-intrinsicName IntrStream = "stream"
-intrinsicName IntrWrite = "write"
-intrinsicName IntrAppend = "append"
-intrinsicName IntrConcat = "concat"
-intrinsicName IntrFlush = "flush"
-intrinsicName IntrStdin = "stdin"
-intrinsicName IntrStdout = "stdout"
-intrinsicName IntrStderr = "stderr"
-intrinsicName IntrThrow = "throw"
-intrinsicName IntrTry = "try"
-intrinsicName IntrTell = "tell"
-intrinsicName IntrCollect = "collect"
-intrinsicName IntrShape = "shape"
-intrinsicName IntrTmpfile = "tmpfile"
-intrinsicName IntrCellNew = "cellnew"
-intrinsicName IntrCellGet = "cellget"
-intrinsicName IntrCellPut = "cellput"
-intrinsicName IntrCellReduce = "cellreduce"
-intrinsicName IntrReplay = "replay"
-intrinsicName IntrChannel = "channel"
-intrinsicName IntrSpawn = "spawn"
-intrinsicName IntrSettle = "settle"
-intrinsicName IntrIFileWalk = "ifile_walk"
-intrinsicName IntrConform = "conform"
-intrinsicName IntrCellSlots = "cellslots"
-intrinsicName IntrReduceList = "reducelist"
+intrinsicName = sigName . intrinsicSig
 
--- | Does this intrinsic perform IO? True iff its type carries an `IO` effect
--- (see 'Morloc.Frontend.Typecheck.intrinsicType'/'intrinsicTypeG'). Used by the
--- eval sandbox to forbid directly-written IO intrinsics while leaving pure ones
--- (`@lang`, `@show`, `IntrMap`, ...) usable. Kept exhaustive on purpose: a new
--- 'Intrinsic' constructor triggers a non-exhaustive warning, forcing an explicit
--- IO/pure classification rather than silently defaulting to allowed.
 intrinsicIsIO :: Intrinsic -> Bool
-intrinsicIsIO IntrSave = True
-intrinsicIsIO IntrSaveJ = True
-intrinsicIsIO IntrLoad = True
-intrinsicIsIO IntrOpen = True
-intrinsicIsIO IntrClose = True
-intrinsicIsIO IntrFSchema = True
-intrinsicIsIO IntrFLength = True
-intrinsicIsIO IntrStreamLayout = True
-intrinsicIsIO IntrNext = True
-intrinsicIsIO IntrStream = True
-intrinsicIsIO IntrWrite = True
-intrinsicIsIO IntrAppend = True
-intrinsicIsIO IntrConcat = True
-intrinsicIsIO IntrFlush = True
-intrinsicIsIO IntrStdin = True
-intrinsicIsIO IntrStdout = True
-intrinsicIsIO IntrStderr = True
-intrinsicIsIO IntrTell = True
-intrinsicIsIO IntrTmpfile = True
--- @collect desugar-expands to @stdout/@write/@close (all IO); classify IO so a
--- stray @collect that reached this check is still refused.
-intrinsicIsIO IntrCollect = True
-intrinsicIsIO IntrShape = False
--- Synthesized post-typecheck (never user-written); IO by nature.
-intrinsicIsIO IntrIFileWalk = True
-intrinsicIsIO IntrConform = False
-intrinsicIsIO IntrCellSlots = True
-intrinsicIsIO IntrReduceList = False
--- Synthesized by the `@fold` handler form; all touch runtime-owned state.
-intrinsicIsIO IntrCellNew = True
-intrinsicIsIO IntrCellGet = True
-intrinsicIsIO IntrCellPut = True
-intrinsicIsIO IntrCellReduce = True
-intrinsicIsIO IntrReplay = True
-intrinsicIsIO IntrChannel = True
-intrinsicIsIO IntrSpawn = True
-intrinsicIsIO IntrSettle = True
--- No IO: safe to write directly in a sandboxed eval.
-intrinsicIsIO IntrHash = False
-intrinsicIsIO IntrEq = False
-intrinsicIsIO IntrLe = False
-intrinsicIsIO IntrVersion = False
-intrinsicIsIO IntrCompiled = False
-intrinsicIsIO IntrLang = False
-intrinsicIsIO IntrSchema = False
-intrinsicIsIO IntrTypeof = False
-intrinsicIsIO IntrShow = False
-intrinsicIsIO IntrRead = False
-intrinsicIsIO IntrDatafile = False
-intrinsicIsIO IntrUnpack = True
-intrinsicIsIO IntrMap = False
-intrinsicIsIO IntrMapOptional = False
-intrinsicIsIO IntrTagTest = False
-intrinsicIsIO IntrNewtypeUnwrap = False
-intrinsicIsIO IntrNewtypeWrap = False
-intrinsicIsIO IntrCtorField = False
-intrinsicIsIO IntrListLenTest = False
-intrinsicIsIO IntrListElem = False
-intrinsicIsIO IntrThrow = False
-intrinsicIsIO IntrTry = False
+intrinsicIsIO = sigIO . intrinsicSig
 
--- | Parse a name to an intrinsic (Nothing if not a known intrinsic)
+intrinsicArity :: Intrinsic -> Maybe Int
+intrinsicArity = sigArity . intrinsicSig
+
 parseIntrinsic :: Text -> Maybe Intrinsic
-parseIntrinsic "save" = Just IntrSave
-parseIntrinsic "savej" = Just IntrSaveJ
-parseIntrinsic "load" = Just IntrLoad
-parseIntrinsic "hash" = Just IntrHash
-parseIntrinsic "eq" = Just IntrEq
-parseIntrinsic "le" = Just IntrLe
-parseIntrinsic "version" = Just IntrVersion
-parseIntrinsic "compiled" = Just IntrCompiled
-parseIntrinsic "lang" = Just IntrLang
-parseIntrinsic "schema" = Just IntrSchema
-parseIntrinsic "typeof" = Just IntrTypeof
-parseIntrinsic "show" = Just IntrShow
-parseIntrinsic "read" = Just IntrRead
-parseIntrinsic "datafile" = Just IntrDatafile
-parseIntrinsic "open" = Just IntrOpen
-parseIntrinsic "close" = Just IntrClose
-parseIntrinsic "fschema" = Just IntrFSchema
--- @flen is user-facing so users can alias: `length = @flen` in stdlib.
--- IntrIFileWalk is compiler-internal (synthesized from `.[i] f`, `.foo f`,
--- etc. by Express.hs and Nexus.hs); no entry here.
-parseIntrinsic "flen" = Just IntrFLength
-parseIntrinsic "streamLayout" = Just IntrStreamLayout
-parseIntrinsic "next" = Just IntrNext
-parseIntrinsic "stream" = Just IntrStream
-parseIntrinsic "write" = Just IntrWrite
-parseIntrinsic "append" = Just IntrAppend
-parseIntrinsic "concat" = Just IntrConcat
-parseIntrinsic "flush" = Just IntrFlush
-parseIntrinsic "stdin" = Just IntrStdin
-parseIntrinsic "stdout" = Just IntrStdout
-parseIntrinsic "stderr" = Just IntrStderr
-parseIntrinsic "throw" = Just IntrThrow
-parseIntrinsic "try" = Just IntrTry
-parseIntrinsic "tell" = Just IntrTell
-parseIntrinsic "collect" = Just IntrCollect
-parseIntrinsic _ = Nothing
+parseIntrinsic t = lookup t [(sigName (intrinsicSig x), x) | x <- [minBound .. maxBound], sigWritten (intrinsicSig x)]
 
 -- | An intrinsic only the compiler writes, with its fixed arguments; a
 -- literal argument a consumer rebuilds is kept beside its value.
@@ -844,63 +761,6 @@ viewInternal intr args = case intr of
   _ -> NotInternal
 
 -- | Expected number of arguments for each intrinsic
-intrinsicArity :: Intrinsic -> Int
-intrinsicArity IntrSave = 3
-intrinsicArity IntrTagTest = 2
-intrinsicArity IntrNewtypeUnwrap = 1
-intrinsicArity IntrNewtypeWrap = 1
-intrinsicArity IntrCtorField = 3
-intrinsicArity IntrListLenTest = 2
-intrinsicArity IntrListElem = 2
-intrinsicArity IntrSaveJ = 2
-intrinsicArity IntrLoad = 1
-intrinsicArity IntrHash = 1
-intrinsicArity IntrEq = 2
-intrinsicArity IntrLe = 2
-intrinsicArity IntrVersion = 0
-intrinsicArity IntrCompiled = 0
-intrinsicArity IntrLang = 0
-intrinsicArity IntrSchema = 1
-intrinsicArity IntrTypeof = 1
-intrinsicArity IntrShow = 1
-intrinsicArity IntrRead = 1
-intrinsicArity IntrDatafile = 1
-intrinsicArity IntrUnpack = 1
-intrinsicArity IntrOpen = 1
-intrinsicArity IntrClose = 1
-intrinsicArity IntrFSchema = 1
-intrinsicArity IntrMap = 2
-intrinsicArity IntrMapOptional = 2
-intrinsicArity IntrFLength = 1
-intrinsicArity IntrStreamLayout = 1
-intrinsicArity IntrNext = 1
-intrinsicArity IntrStream = 1
-intrinsicArity IntrWrite = 3
-intrinsicArity IntrAppend = 1
-intrinsicArity IntrConcat = 2
-intrinsicArity IntrFlush = 1
-intrinsicArity IntrStdin = 0
-intrinsicArity IntrStdout = 0
-intrinsicArity IntrStderr = 0
-intrinsicArity IntrThrow = 1
-intrinsicArity IntrTry = 1
-intrinsicArity IntrTell = 0
-intrinsicArity IntrCollect = 1
-intrinsicArity IntrShape = 2
-intrinsicArity IntrTmpfile = 0
-intrinsicArity IntrCellNew = 1
-intrinsicArity IntrCellGet = 1
-intrinsicArity IntrCellPut = 2
-intrinsicArity IntrCellReduce = 2
-intrinsicArity IntrReplay = 2
-intrinsicArity IntrChannel = 0
-intrinsicArity IntrSpawn = 2
-intrinsicArity IntrSettle = 1
-intrinsicArity IntrConform = 1
-intrinsicArity IntrCellSlots = 1
-intrinsicArity IntrReduceList = 2
-intrinsicArity IntrIFileWalk =
-  error "intrinsicArity: IntrIFileWalk has dynamic arity (path + handle + 0..n bracket bounds) and is never eta-expanded"
 
 data ExprI = ExprI Int Expr
   deriving (Show, Ord, Eq)
