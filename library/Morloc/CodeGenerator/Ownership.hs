@@ -174,18 +174,13 @@ unchangedSlot i e = case e of
   BndVarN _ j _ -> i == j
   _ -> False
 
--- | The carried slots a continue reassigns, with their new values and, when
--- the IR continue is known, their IR values: every slot, less those whose IR
--- value is the slot itself. The carried slots, the values and the IR values
--- must match in number.
-changedSlots :: [Int] -> Maybe [NativeExpr] -> [a] -> [(Int, a, Maybe NativeExpr)]
-changedSlots ids origs vals
+-- | The carried slots a continue reassigns, with their new values and their
+-- IR values: every slot, less those whose IR value is the slot itself. The
+-- carried slots and the values must match in number.
+changedSlots :: [Int] -> [(NativeExpr, a)] -> [(Int, a, NativeExpr)]
+changedSlots ids vals
   | length ids /= length vals = error "morloc bug: a loop continue whose values do not match its carried slots"
-  | otherwise = case origs of
-      Just os
-        | length os == length vals -> [(i, v, Just o) | (i, o, v) <- zip3 ids os vals, not (unchangedSlot i o)]
-        | otherwise -> error "morloc bug: a loop continue whose lowered values do not match its IR values"
-      Nothing -> [(i, v, Nothing) | (i, v) <- zip ids vals]
+  | otherwise = [(i, v, o) | (i, (o, v)) <- zip ids vals, not (unchangedSlot i o)]
 
 -- | The decisions within one manifold's body.
 data ManifoldPlan = ManifoldPlan

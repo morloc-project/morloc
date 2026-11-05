@@ -48,7 +48,13 @@ import Morloc.CodeGenerator.Grammars.Common hiding (manNamer, manifoldIdOf)
 import Morloc.CodeGenerator.LogTemplate (RenderedTemplate (..), collectRenderedTemplates)
 import Morloc.CodeGenerator.Grammars.Macro (expandMacro)
 import Morloc.CodeGenerator.Grammars.Translator.Imperative
-  ( LoopResult (..)
+  (
+  Low (..)
+  , LowArg (..)
+  , LowN
+  , LowS
+  , loopBodyDocs
+  , LoopResult (..)
   , RNode (RSM)
   , lastBuilds
   , nativeManifoldsUnder
@@ -2137,7 +2143,7 @@ rustWithCallerScope = local (\e -> e {oeCurrent = oeParent e, oeShared = oeParen
 -- 'rustOwnership' can tell a borrowed @&T@ parameter from an owned value. For a
 -- native-loop manifold the loop-carried locals are additionally recorded (for
 -- the @let mut@ / never-move handling) and unioned into the shared set.
-rustSurround :: SurroundManifoldM RustM PoolDocs PoolDocs PoolDocs PoolDocs (TypeS, PoolDocs) (TypeM, PoolDocs)
+rustSurround :: SurroundManifoldM RustM PoolDocs PoolDocs LowS LowN (TypeS, PoolDocs) LowArg
 rustSurround =
   defaultValue
     { surroundSerialManifoldM = \recurse sm -> withPlan (planSerialManifold rustCaps sm) (recurse sm)
@@ -2491,7 +2497,7 @@ rustLowerConfig mask makers consumed =
     , lcEvalPattern = \t _ -> rustEvalPattern t
     , lcTakeGetter = rustTakeGetter
     , lcListConstructor = \_ _ es -> "vec![" <> hcat (punctuate ", " es) <> "]"
-    , lcTupleConstructor = \_ _ es -> tupled es
+    , lcTupleConstructor = tupled
     , lcRecordConstructor = \recType _ _ _ rs -> do
         name <- rustStructCtor recType
         return $ defaultValue {poolExpr = name <+> "{" <+> RP.rustRecordFields rs <+> "}"}
@@ -2770,19 +2776,19 @@ rustLetAnnotation letIndex mt native = do
 -- new value of each slot it changes, followed by reassignment of those slots
 -- ('changedSlots'). Every temp is computed before any reassignment; which
 -- reads move is OWN-2's, and which locals are borrows is OWN-6's.
-rustMakeLoop :: LoopResult -> [(Int, Maybe PoolDocs)] -> Maybe (LoopBody NativeExpr SerialExpr ()) -> LoopBody PoolDocs PoolDocs PoolDocs -> RustM PoolDocs
-rustMakeLoop res carried origBody body = do
+rustMakeLoop :: LoopResult -> [(Int, Maybe PoolDocs)] -> LoopBody LowN LowS PoolDocs -> RustM PoolDocs
+rustMakeLoop res carried body = do
   resultIdx <- getCounter
   resT <- case res of
     LoopResultSerial -> return "*mut u8"
     LoopResultNative t -> rustTypeOf t
   let resultVar = (helperNamer rustLocals) resultIdx
-  bodyLines <- walk origBody body
+  bodyLines <- walk body
   -- A native loop's locals are its own, started from their initializers.
   let initLines = concat [poolPriorLines d <> ["let mut" <+> (nvarNamer rustLocals) i <+> "=" <+> poolExpr d <> ";"] | (i, Just d) <- carried]
       loopExpr = vsep ["loop {", indent 4 (vsep bodyLines), "}"]
       resultDecl = "let" <+> resultVar <> ":" <+> resT <+> "=" <+> loopExpr <> ";"
-      leaves = loopBodyLeaves body <> [d | (_, Just d) <- carried]
+      leaves = loopBodyDocs body <> [d | (_, Just d) <- carried]
   return $ PoolDocs
     { poolCompleteManifolds = concatMap poolCompleteManifolds leaves
     , poolExpr = resultVar
@@ -2794,33 +2800,26 @@ rustMakeLoop res carried origBody body = do
     }
   where
     ids = map fst carried
-    walk _ (LoopBase seDocs) =
+    walk (LoopBase seDocs) =
       return $ poolPriorLines seDocs <> ["break" <+> poolExpr seDocs <> ";"]
-    -- The IR body, when known, is walked beside the lowered one, so a slot
-    -- the continue leaves as it is gets no temporary.
-    walk o (LoopContinue contDocs) = do
-      let changed = [(i, v) | (i, v, _) <- changedSlots ids (case o of Just (LoopContinue os) -> Just os; _ -> Nothing) contDocs]
+    -- A slot the continue leaves as it is gets no temporary.
+    walk (LoopContinue xs) = do
+      let changed = [(i, v) | (i, v, _) <- changedSlots ids [(o, d) | Low o d <- xs]]
       tmpVars <- map (helperNamer rustLocals) <$> mapM (const getCounter) changed
       let priors = concatMap (poolPriorLines . snd) changed
           tmpAssigns = zipWith (\tv (_, cd) -> "let" <+> tv <+> "=" <+> poolExpr cd <> ";") tmpVars changed
           reassigns = zipWith (\(i, _) tv -> (nvarNamer rustLocals) i <+> "=" <+> tv <> ";") changed tmpVars
       return $ priors <> tmpAssigns <> reassigns
-    walk o (LoopNLet i neDocs b) = do
-      let (orhs, ob) = case o of
-            Just (LoopNLet j r k) | j == i -> (Just r, Just k)
-            _ -> (Nothing, Nothing)
-      ann <- maybe (return "") (\r -> rustLetAnnotation i (Just (typeFof r)) True) orhs
-      rest <- walk ob b
+    walk (LoopNLet i (Low r neDocs) b) = do
+      ann <- rustLetAnnotation i (Just (typeFof r)) True
+      rest <- walk b
       return $ poolPriorLines neDocs <> ["let" <+> (nvarNamer rustLocals) i <> ann <+> "=" <+> poolExpr neDocs <> ";"] <> rest
-    walk o (LoopSLet i seDocs b) = do
-      rest <- walk (case o of Just (LoopSLet j _ k) | j == i -> Just k; _ -> Nothing) b
+    walk (LoopSLet i (Low _ seDocs) b) = do
+      rest <- walk b
       return $ poolPriorLines seDocs <> ["let" <+> (svarNamer rustLocals) i <+> "=" <+> poolExpr seDocs <> ";"] <> rest
-    walk o (LoopIf guardDocs t e) = do
-      let (ot, oe) = case o of
-            Just (LoopIf _ a b) -> (Just a, Just b)
-            _ -> (Nothing, Nothing)
-      tLines <- walk ot t
-      eLines <- walk oe e
+    walk (LoopIf (Low _ guardDocs) t e) = do
+      tLines <- walk t
+      eLines <- walk e
       -- Every branch ends the iteration, so the else branch follows the
       -- guarded one rather than nesting in it (EMIT-5).
       let next = ["continue;" | not (loopBodyBreaks t)]

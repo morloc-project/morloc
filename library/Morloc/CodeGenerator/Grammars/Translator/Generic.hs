@@ -31,7 +31,11 @@ import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import Morloc.CodeGenerator.Grammars.Common
 import Morloc.CodeGenerator.Grammars.Translator.Imperative
-  ( LoopResult (..)
+  (
+  Low (..)
+  , LowN
+  , LowS
+  , LoopResult (..)
   , infixOperator
   , containsClosure
   , IAccessor (..)
@@ -602,7 +606,7 @@ genericLowerConfig desc srcNamer debugInfo traceInfo debugMode = cfg
               (FV _ (CV typeName))
                 | typeName `elem` ldAtomicTypes desc -> pretty (ldAtomicListFn desc) <> tupled es
               _ -> pretty (ldGenericListFn desc) <> tupled es
-        , lcTupleConstructor = \_ _ -> case ldTupleConstructor desc of
+        , lcTupleConstructor = case ldTupleConstructor desc of
             "" -> tupled
             name -> \es -> pretty name <> tupled es
         , lcRecordConstructor = \_ _ _ _ rs ->
@@ -1093,10 +1097,10 @@ genericMakeLoop ::
   LowerConfig IndexM ->
   LoopResult ->
   [(Int, Maybe PoolDocs)] ->
-  Maybe (LoopBody NativeExpr SerialExpr ()) ->
-  LoopBody PoolDocs PoolDocs PoolDocs ->
+  LoopBody LowN LowS PoolDocs ->
   IndexM PoolDocs
-genericMakeLoop desc cfg _ carried _ body = do
+genericMakeLoop desc cfg _ carried body0 = do
+  let body = trimap lowDocs lowDocs id body0
   resultIdx <- lcNewIndex cfg
   let resultVar = (helperNamer (ldManifoldPrefix desc)) resultIdx
       ids = map fst carried

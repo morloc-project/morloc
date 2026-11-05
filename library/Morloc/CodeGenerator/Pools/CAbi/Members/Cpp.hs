@@ -36,7 +36,12 @@ import qualified Data.Text as T
 import Morloc.CodeGenerator.Grammars.Common
 import Morloc.CodeGenerator.Grammars.Macro (expandMacro)
 import Morloc.CodeGenerator.Grammars.Translator.Imperative
-  ( LoopResult (..)
+  (
+  Low (..)
+  , LowN
+  , LowS
+  , loopBodyDocs
+  , LoopResult (..)
   , armIndex
   , infixOperator
   , papplySteps
@@ -988,21 +993,20 @@ isFunctionValue _ = False
 -- | Walk a lowered 'LoopBody' into C++ statement lines for the loop body.
 -- Guards -> if/else; native/serial lets -> locals; a base leaf ->
 -- @resultVar = <base>; break;@; a continue leaf -> compute each new value of
--- a slot it changes into an @auto@ temp, then move it into the slot. The IR
--- body, when it is known, is walked beside the lowered one; a let whose IR
--- node is not at the same place, with the same index, binds a copy.
-cppWalkLoopBody :: (MDoc -> MDoc) -> [Int] -> Maybe (LoopBody NativeExpr SerialExpr ()) -> LoopBody PoolDocs PoolDocs PoolDocs -> CppTranslatorM [MDoc]
+-- a slot it changes into an @auto@ temp, then move it into the slot. Each
+-- let binds as its IR node decides.
+cppWalkLoopBody :: (MDoc -> MDoc) -> [Int] -> LoopBody LowN LowS PoolDocs -> CppTranslatorM [MDoc]
 cppWalkLoopBody setResult ids = go
   where
-    go _ (LoopBase seDocs) =
+    go (LoopBase seDocs) =
       return $ poolPriorLines seDocs <> [setResult (poolExpr seDocs), "break;"]
     -- A slot whose new value is itself is left alone: copying it into a temp
     -- and back would copy the whole value every iteration.
     -- A let moved into its slot needs no temp, as no slot reassignment
     -- changes it.
-    go o (LoopContinue contDocs) = do
-      let changed = changedSlots ids (case o of Just (LoopContinue os) -> Just os; _ -> Nothing) contDocs
-      moved <- mapM (\(_, cd, oe) -> maybe (return Nothing) (\e -> cppKeptLet e (poolExpr cd)) oe) changed
+    go (LoopContinue xs) = do
+      let changed = changedSlots ids [(o, d) | Low o d <- xs]
+      moved <- mapM (\(_, cd, oe) -> cppKeptLet oe (poolExpr cd)) changed
       let viaTemp = [(i, cd) | ((i, cd, _), Nothing) <- zip changed moved]
           direct = [(i, x) | ((i, _, _), Just x) <- zip changed moved]
       tmpVars <- map (helperNamer cppLocals) <$> mapM (const getCounter) viaTemp
@@ -1011,31 +1015,23 @@ cppWalkLoopBody setResult ids = go
           reassigns = zipWith (\(i, _) tv -> (nvarNamer cppLocals) i <+> "= std::move(" <> tv <> ");") viaTemp tmpVars
           moves = [(nvarNamer cppLocals) i <+> "=" <+> x <> ";" | (i, x) <- direct]
       return $ priors <> tmpAssigns <> reassigns <> moves
-    go o (LoopNLet i neDocs b) = do
-      let (orhs, ob) = case o of
-            Just (LoopNLet j r k) | j == i -> (Just r, Just k)
-            _ -> (Nothing, Nothing)
-      mode <- maybe (return LetCopy) (cppLetMode i) orhs
+    go (LoopNLet i (Low r neDocs) b) = do
+      mode <- cppLetMode i r
       -- A function value keeps its own type; a std::function would allocate.
-      typestr <- case orhs of
-        Just r | not (isFunctionValue (typeFof r)) -> cppTypeOf (typeFof r)
-        _ -> return "auto"
+      typestr <- if isFunctionValue (typeFof r) then return "auto" else cppTypeOf (typeFof r)
       let decl = if mode == LetBorrow then "const" <+> typestr <> "&" else typestr
           letLine
             | render typestr == "mlc::Unit" && isIdentifierExpr (poolExpr neDocs) = [typestr <+> (nvarNamer cppLocals) i <> "{};"]
             | render typestr == "mlc::Unit" = [poolExpr neDocs <> ";", typestr <+> (nvarNamer cppLocals) i <> "{};"]
             | otherwise = [decl <+> (nvarNamer cppLocals) i <+> "=" <+> poolExpr neDocs <> ";"]
-      rest <- go ob b
+      rest <- go b
       return $ poolPriorLines neDocs <> letLine <> rest
-    go o (LoopSLet i seDocs b) = do
-      rest <- go (case o of Just (LoopSLet j _ k) | j == i -> Just k; _ -> Nothing) b
+    go (LoopSLet i (Low _ seDocs) b) = do
+      rest <- go b
       return $ poolPriorLines seDocs <> ["auto" <+> (svarNamer cppLocals) i <+> "=" <+> poolExpr seDocs <> ";"] <> rest
-    go o (LoopIf guardDocs t e) = do
-      let (ot, oe) = case o of
-            Just (LoopIf _ a b) -> (Just a, Just b)
-            _ -> (Nothing, Nothing)
-      tLines <- go ot t
-      eLines <- go oe e
+    go (LoopIf (Low _ guardDocs) t e) = do
+      tLines <- go t
+      eLines <- go e
       -- Every branch ends the iteration, so the else branch follows the
       -- guarded one rather than nesting in it (EMIT-5).
       let next = ["continue;" | not (loopBodyBreaks t)]
@@ -1136,7 +1132,7 @@ cppLowerConfig (ClosureGen reifyThunks stageTable papplyHeads) =
         return $ evaluatePattern state t (listToMaybe argTypes) p xs
     , lcTakeSetter = cppTakeSetter
     , lcListConstructor = \_ _ es -> encloseSep "{" "}" "," es
-    , lcTupleConstructor = \_ _ -> ((<>) "std::make_tuple" . tupled)
+    , lcTupleConstructor = (<>) "std::make_tuple" . tupled
     , lcRecordConstructor = \recType _ _ _ rs -> do
         t <- cppTypeOf recType
         let -- For a field at a recursive-cycle position the field's
@@ -1257,7 +1253,7 @@ PROPAGATE_ERROR(errmsg)|]
             else d
     , lcLetRhs = \_ _ d -> return d
     , lcOwnPacketDecl = \v e -> Just ("mlc::Packet" <+> v <> "(" <> e <> ");", v <> ".get()")
-    , lcMakeLoop = \res carried origBody body -> do
+    , lcMakeLoop = \res carried body -> do
         -- Tail-loop. Walk the 'LoopBody' tree into C++ control flow. The
         -- loop-carried vars are native locals ('nvarNamer id'), non-const,
         -- reassigned in place: the manifold's deserialized parameters in a
@@ -1280,9 +1276,9 @@ PROPAGATE_ERROR(errmsg)|]
             return ( "std::optional<" <> tStr <> ">" <+> resultVar <> ";"
                    , \e -> resultVar <> ".emplace(" <> e <> ");"
                    , "std::move(*" <> resultVar <> ")" )
-        bodyLines <- cppWalkLoopBody setResult ids origBody body
+        bodyLines <- cppWalkLoopBody setResult ids body
         let whileDoc = vsep ["while (true) {", indent 4 (vsep bodyLines), "}"]
-            leaves = loopBodyLeaves body <> [d | (_, Just d) <- carried]
+            leaves = loopBodyDocs body <> [d | (_, Just d) <- carried]
         return $ PoolDocs
           { poolCompleteManifolds = concatMap poolCompleteManifolds leaves
           , poolExpr = resultExpr

@@ -17,15 +17,6 @@ output. Spec gap: no item says an internal invariant fails loudly. Type
 changes that remove each class are in /work/plans/gadt/type-audit.md. All
 [read, 2026-10-29].
 
-- **Ownership lowering skips its work on a mismatch.** Grammars/Translator/
-  Imperative.hs lowers a node from its folded layer plus the original node
-  passed separately, and re-pairs them by shape and length. adaptOwnedElems,
-  keepElems and storeElems return their input when lengths differ; the
-  `elemEs`/`slotTypes` re-matches of origExpr fall to `[]`; argOwnerships
-  defaults to `repeat Owned`; the loop-body pass and bindCallArgs pass
-  through; several plain zipWith/zipWith3 over owners and arguments. A
-  misalignment would show up as a copy or borrow error in C++/Rust, not as
-  a compiler error.
 - **Name-prefix tuple tests.** `isPrefixOf "Tuple"` decides tuple-ness in
   Rust.hs rustIsCopy, isVarWidthF and tupleArgs, Desugar.hs
   extractConstraints (two sites) and Typecheck/Internal.hs
