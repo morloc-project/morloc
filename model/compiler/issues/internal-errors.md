@@ -19,3 +19,8 @@ belong to are in /work/plans/gadt/type-audit.md.
   an empty argument list (every argument kind-filtered or dropped) the
   template is returned with its `$N` left in the generated code. Fix:
   parse templates once at declaration and check their arity there.
+- **A program reaches the catch-all of `toNexusExpr`.** [reproduced,
+  2026-11-06] `never :: <IO> Int -> Int -> <IO> Int; never t y = do y` with
+  `a2 k = never (runIt (mkio k)) k`, `runIt` and `mkio` sourced, makes
+  `morloc make` die with "Unreachable value of type reached" (Nexus.hs). The
+  node that reaches it is not identified.

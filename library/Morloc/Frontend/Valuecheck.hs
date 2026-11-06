@@ -14,6 +14,7 @@ contradictory, such as two constants of one type with different values.
 -}
 module Morloc.Frontend.Valuecheck (valuecheck, checkPair, checkRecursion) where
 
+import Data.Foldable (toList)
 import Morloc.Data.Zip (zipPrefix, zipSame, zipWithSame)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
@@ -47,11 +48,12 @@ toE (AnnoS g _ (LogS x)) = LitP g (MLog x)
 toE (AnnoS g _ (StrS x)) = LitP g (MStr x)
 toE (AnnoS g _ (ConS _ n _ xs)) = ConP g n (map toE xs)
 toE (AnnoS g _ (ExeS (SrcCall (Idx _ s)))) = SrcP g s
-toE (AnnoS g _ (ExeS (PatCall (PatternText s ss)))) =
-  LitP g (MStr (s <> DT.concat ["#{}" <> s' | s' <- ss]))
-toE (AnnoS g _ (ExeS (PatCall (PatternStruct s)))) = PatP g s
-toE (AnnoS g _ (ExeS (PatCall PatternBracketIndex))) = BracketIndexP g
-toE (AnnoS g _ (ExeS (PatCall PatternBracketSlice))) = BracketSliceP g
+toE (AnnoS g _ (PatS fg _ _ app)) = AppP g (patE fg (patAppPattern app)) (map toE (toList app))
+  where
+    patE i (PatternText t ts) = LitP i (MStr (t <> DT.concat ["#{}" <> t' | t' <- ts]))
+    patE i (PatternStruct sel) = PatP i sel
+    patE i PatternBracketIndex = BracketIndexP i
+    patE i PatternBracketSlice = BracketSliceP i
 toE (AnnoS g _ (LetBndS v)) = BndP g v
 toE (AnnoS g _ (CallS v)) = BndP g v
 toE (AnnoS _ _ (LetS _ _ body)) = toE body

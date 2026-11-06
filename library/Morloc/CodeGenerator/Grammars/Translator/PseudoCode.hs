@@ -21,6 +21,7 @@ module Morloc.CodeGenerator.Grammars.Translator.PseudoCode
   , pseudocodeNativeExpr
   ) where
 
+import Data.Foldable (toList)
 import Morloc.Data.Zip (zipWithSame)
 import qualified Control.Monad.Identity as MI
 import Morloc.CodeGenerator.Grammars.Common
@@ -88,8 +89,8 @@ prettyFoldManifold =
       (Monad m) => NativeExpr -> NativeExpr_ PoolDocs PoolDocs PoolDocs PoolDocs PoolDocs -> m PoolDocs
     makeNativeExpr _ (AppExeN_ _ (SrcCallP _ src) xs) =
       return $ mergePoolDocs ((<>) (pretty $ srcName src) . tupled) xs
-    makeNativeExpr _ (AppExeN_ _ (PatCallP pat) xs) =
-      return $ mergePoolDocs ((<>) (pretty pat) . tupled) xs
+    makeNativeExpr _ (PatN_ _ app) =
+      return $ mergePoolDocs ((<>) (pretty (patAppPattern app)) . tupled) (toList app)
     makeNativeExpr _ (AppExeN_ _ (LocalCallP idx) xs) =
       return $ mergePoolDocs ((<>) (letNamerN idx) . tupled) xs
     makeNativeExpr _ (AppExeN_ _ (PapplyP idx) xs) =
@@ -108,7 +109,6 @@ prettyFoldManifold =
       return $ (mergePoolDocs (const "") es) {poolExpr = "WireToNativeN" <> parens (pretty (intrinsicName intr) <> tupled (map poolExpr es))}
     makeNativeExpr _ (NativeToWireN_ _ _ e) = return $ e {poolExpr = "NativeToWireN" <> parens (poolExpr e)}
     makeNativeExpr _ (ExeN_ _ (SrcCallP _ src)) = return $ defaultValue {poolExpr = pretty (srcName src)}
-    makeNativeExpr _ (ExeN_ _ (PatCallP pat)) = return $ defaultValue {poolExpr = pretty pat}
     makeNativeExpr _ (ExeN_ _ (LocalCallP idx)) = return $ defaultValue {poolExpr = letNamerN idx}
     makeNativeExpr _ (ExeN_ _ (PapplyP idx)) = return $ defaultValue {poolExpr = letNamerN idx}
     makeNativeExpr _ (ExeN_ _ (RecCallP mid _)) = return $ defaultValue {poolExpr = manNamer mid}

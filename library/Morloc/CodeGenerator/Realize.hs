@@ -22,6 +22,7 @@ module Morloc.CodeGenerator.Realize
   , evidenceProblem
   ) where
 
+import Data.Foldable (toList)
 import Morloc.Data.Zip (indexed, zip3Same, zipSame)
 import Morloc.CodeGenerator.Serial (containsEffectT, containsFunT)
 import Morloc.CodeGenerator.Value (etaParts, isValue, isValueWith)
@@ -47,6 +48,7 @@ import qualified Morloc.CodeGenerator.Infer as Infer
 nodeKind :: ExprS g f c -> MT.Text
 nodeKind e = case e of
   AppS {} -> "application"
+  PatS {} -> "application"
   LamS {} -> "lambda"
   LstS {} -> "list"
   TupS {} -> "tuple"
@@ -880,8 +882,7 @@ realizeWithRegistry registry tables pins seedLangs s00 = do
     heldTypes _ (LetS _ (AnnoS (Idx j boundT) _ _) _) _
       | holdsCallable boundT = Just (j, [boundT])
     heldTypes gidx e t = (,) gidx <$> case e of
-      ExeS (PatCall _) -> Just (componentTypes t)
-      AppS (AnnoS (Idx _ ft) _ (ExeS (PatCall _))) _ -> Just (componentTypes ft)
+      PatS (Idx _ ft) _ _ _ -> Just (componentTypes ft)
       -- a call of a function value runs wherever it is placed
       AppS (AnnoS (Idx _ ft) _ (BndS _)) _ -> Just (componentTypes ft)
       AppS (AnnoS (Idx _ ft) _ (LetBndS _)) _ -> Just (componentTypes ft)
@@ -943,6 +944,10 @@ realizeWithRegistry registry tables pins seedLangs s00 = do
             [] -> [(l, mempty) | l <- rLangs rstat]
             table -> table
       return (AppS f' xs', Idx i (scoreApp headTable pairss))
+    scoreExpr rstat (PatS fg fi ev app, i) = do
+      xs' <- traverse (scoreAnnoS rstat {rLangs = [], rApplied = []}) app
+      let headTable = [(l, mempty) | l <- rLangs rstat]
+      return (PatS fg (Idx fi []) ev xs', Idx i (scoreApp headTable (map kid (toList xs'))))
     -- non-recursive expressions
     -- A literal is built wherever it is used (COST-11).
     scoreExpr _ (UniS, i) = return (UniS, Idx i [])
@@ -957,7 +962,6 @@ realizeWithRegistry registry tables pins seedLangs s00 = do
         Just scores -> return (BndS v, Idx i scores)
         Nothing -> return (BndS v, Idx i [])
     scoreExpr _ (ExeS x@(SrcCall (Idx _ src)), i) = return (ExeS x, Idx i [(srcLang src, callScore registry (srcLang src))])
-    scoreExpr rstat (ExeS x@(PatCall _), i) = return (ExeS x, zipLang i rstat)
     scoreExpr _ (RealS si x, i) = return (RealS si x, Idx i [])
     scoreExpr _ (IntS si x, i) = return (IntS si x, Idx i [])
     scoreExpr _ (LogS x, i) = return (LogS x, Idx i [])
@@ -1401,6 +1405,10 @@ realizeWithRegistry registry tables pins seedLangs s00 = do
           f' <- collapseHead heads lang f
           xs' <- mapM (if isSourceHead f' then collapseCarried heads lang else collapseAnnoS heads lang) xs
           return (AppS f' xs', Idx i lang)
+    collapseExpr heads _ l1 (PatS fg (Idx fi _) ev app, Idx i ss) = do
+      lang <- pickLanguage heads l1 (toList app) ss
+      app' <- traverse (collapseAnnoS heads lang) app
+      return (PatS fg (Idx fi lang) ev app', Idx i lang)
     -- Propagate data
     collapseExpr heads _ l1 (e@(LstS xs), Idx i ss) = do
       lang <- if isFunctionalData e then return l1 else pickLanguage heads l1 xs ss
@@ -1416,7 +1424,6 @@ realizeWithRegistry registry tables pins seedLangs s00 = do
       return (NamS rs', Idx i lang)
     -- collapse leaf expressions
     collapseExpr _ _ _ (ExeS x@(SrcCall (Idx _ src)), Idx i _) = return (ExeS x, Idx i (Just (srcLang src)))
-    collapseExpr _ _ lang (ExeS x@(PatCall _), Idx i _) = return (ExeS x, Idx i lang)
     collapseExpr _ _ lang (BndS v, Idx i _) = return (BndS v, Idx i lang)
     collapseExpr _ _ lang (UniS, Idx i _) = return (UniS, Idx i lang)
     collapseExpr _ _ lang (NullS, Idx i _) = return (NullS, Idx i lang)
@@ -1681,6 +1688,7 @@ realizeWithRegistry registry tables pins seedLangs s00 = do
         f _ (AnnoS g (Idx i (Just lang)) e') = do
           e'' <- case e' of
             (AppS x xs) -> AppS <$> f lang x <*> mapM (f lang) xs
+            (PatS fg (Idx fi _) ev app) -> PatS fg (Idx fi lang) ev <$> traverse (f lang) app
             (LamS vs x) -> LamS vs <$> f lang x
             (LstS xs) -> LstS <$> mapM (f lang) xs
             (TupS xs) -> TupS <$> mapM (f lang) xs
@@ -1870,6 +1878,7 @@ unrealized (AnnoS g (Idx i _) e) = AnnoS g i $ case e of
   BndS v -> BndS v
   VarS v (One x) -> VarS v (Many [] [(Nothing, unrealized x)])
   AppS f xs -> AppS (unrealized f) (map unrealized xs)
+  PatS fg (Idx fi _) ev app -> PatS fg fi ev (fmap unrealized app)
   LamS vs x -> LamS vs (unrealized x)
   LstS xs -> LstS (map unrealized xs)
   TupS xs -> TupS (map unrealized xs)
@@ -2095,6 +2104,9 @@ extractExpr exports (AppS f xs) = do
   results <- mapM (extractFromTree exports) xs
   let (xs', xHelperLists) = unzip results
   return (AppS f' xs', fHelpers ++ concat xHelperLists)
+extractExpr exports (PatS fg fc ev app) = do
+  results <- traverse (extractFromTree exports) app
+  return (PatS fg fc ev (fmap fst results), concatMap snd results)
 extractExpr exports (LamS vs e) = do
   (e', helpers) <- extractFromTree exports e
   return (LamS vs e', helpers)

@@ -16,6 +16,7 @@ module Morloc.CodeGenerator.Parameterize
   ( parameterize
   ) where
 
+import Data.Foldable (toList)
 import Morloc.Data.Zip (zipPrefix)
 import Data.Text (Text)
 import Morloc.CodeGenerator.Namespace
@@ -76,8 +77,6 @@ parameterize' args (AnnoS g c (BndS v)) = do
   return $ AnnoS g (c, args') (BndS v)
 parameterize' _ (AnnoS m c (ExeS x@(SrcCall _))) =
   return $ AnnoS m (c, []) (ExeS x)
-parameterize' _ (AnnoS g c (ExeS (PatCall x))) =
-  return (AnnoS g (c, []) (ExeS (PatCall x)))
 parameterize' args (AnnoS g c (LstS xs)) = do
   xs' <- mapM (parameterize' args) xs
   let args' = pruneArgs args xs'
@@ -108,6 +107,9 @@ parameterize' args (AnnoS g c (AppS x xs)) = do
   xs' <- mapM (parameterize' args) xs
   let args' = pruneArgs args (x' : xs')
   return $ AnnoS g (c, args') (AppS x' xs')
+parameterize' args (AnnoS g c (PatS fg fc ev app)) = do
+  app' <- mapM (parameterize' args) app
+  return $ AnnoS g (c, pruneArgs args (toList app')) (PatS fg (fc, []) ev app')
 parameterize' args (AnnoS g c (LetBndS v)) = do
   let args' = [r | r@(Arg _ v') <- args, v' == v]
   return $ AnnoS g (c, args') (LetBndS v)

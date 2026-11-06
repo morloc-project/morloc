@@ -92,6 +92,8 @@ reduceNativeExpr ver ts lang (IntrinsicN t intr msch es) =
 reduceNativeExpr ver ts _ (ManN nm) = ManN <$> reduceNativeManifold ver ts nm
 reduceNativeExpr ver ts lang (AppExeN t exe args) =
   AppExeN t exe <$> mapM (reduceNativeArg ver ts lang) args
+reduceNativeExpr ver ts lang (PatN t app) =
+  PatN t <$> mapM (reduceNativeArg ver ts lang) app
 reduceNativeExpr ver ts lang (ReturnN ne) = ReturnN <$> reduceNativeExpr ver ts lang ne
 reduceNativeExpr ver ts lang (SerialLetN i se ne) =
   SerialLetN i <$> reduceSerialExpr ver ts lang se <*> reduceNativeExpr ver ts lang ne

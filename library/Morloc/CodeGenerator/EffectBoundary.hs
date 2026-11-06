@@ -145,6 +145,9 @@ polyOuterType (PolyDebugWrap _ _ body)                = polyOuterType body
 polyOuterType (PolyApp fn _) = case polyOuterType fn of
   Just (FunT _ ret) -> Just ret
   other             -> other
+polyOuterType (PolyPat (Idx _ t) _) = case t of
+  FunT _ ret -> Just ret
+  other -> Just other
 polyOuterType (PolyIf _ t e) = case polyOuterType t of
   Just tp | hasOuterEffect tp -> Just tp
   _                           -> polyOuterType e
@@ -267,6 +270,7 @@ descend m _ (PolyLet _ e1 e2) = do
 descend m ctx (PolyApp f xs) = do
   walk m ctx f
   mapM_ (walk m LocalRoot) xs
+descend m _ (PolyPat _ app) = mapM_ (walk m LocalRoot) app
 descend m ctx (PolyIf c t' e) = do
   walk m LocalRoot c
   walk m ctx t'
@@ -311,26 +315,22 @@ rewrite lang m (PolyApp fn xs) = do
   fn'  <- rewrite lang m fn
   xs'  <- mapM (rewrite lang m) xs
   case (fn', xs') of
-    -- A field read through a record whose value is the host's reads a value
-    -- in the host's convention. A read applied to further arguments is the
-    -- read followed by a call of what it read.
-    (PolyExe (Idx gi (FunT (recT : rest) r)) (PatCallP pat@(PatternStruct sel)), x : ys) -> do
+    (PolyRemoteInterface {}, _) -> crossPool lang m fn' xs'
+    _ -> maybeSuspendRemoteReceive <$> sourceCall lang fn' xs'
+-- A field read through a record whose value is the host's reads a value in the
+-- host's convention.
+rewrite lang m (PolyPat g@(Idx gi ft) app) = do
+  app' <- mapM (rewrite lang m) app
+  case (ft, app') of
+    (FunT (recT : rest) r, PatGet sel [] x) -> do
       scope <- MM.getGeneralScope
       hostRecs <- hostRecords lang gi [recT]
       let hv = HostView scope Set.empty hostRecs Set.empty Nothing
           fieldT = if null rest then r else FunT rest r
       if readsHostRecord hv sel recT && needsAdapt hv Nothing fieldT
-        then do
-          let getter = PolyExe (Idx gi (FunT [recT] (hostType hv Nothing fieldT))) (PatCallP pat)
-          value <- adapt Inbound lang gi hv Nothing fieldT (PolyApp getter [x])
-          if null ys
-            then return value
-            else do
-              v <- MM.getCounter
-              return $ PolyLet v value (PolyApp (PolyExe (Idx gi fieldT) (LocalCallP v)) ys)
-        else return (PolyApp fn' xs')
-    (PolyRemoteInterface {}, _) -> crossPool lang m fn' xs'
-    _ -> maybeSuspendRemoteReceive <$> sourceCall lang fn' xs'
+        then adapt Inbound lang gi hv Nothing fieldT (PolyPat (Idx gi (FunT [recT] (hostType hv Nothing fieldT))) (PatGet sel [] x))
+        else return (PolyPat g app')
+    _ -> return (PolyPat g app')
 rewrite _ _ (PolyManifold l m' f k e) = do
   e' <- rewrite l m' e
   return $ PolyManifold l m' f k e'
@@ -396,6 +396,7 @@ substBndVar i i' t = go
     go (PolyLet j a b) = PolyLet j (go a) (go b)
     go (PolyReturn e) = PolyReturn (go e)
     go (PolyApp h xs) = PolyApp (go h) (map go xs)
+    go (PolyPat g app) = PolyPat g (fmap go app)
     go (PolyCacheBody lbl m as e) = PolyCacheBody lbl m as (go e)
     go (PolyDebugWrap m as e) = PolyDebugWrap m as (go e)
     go (PolyList v ts xs) = PolyList v ts (map go xs)
@@ -975,9 +976,7 @@ rebuildIn dir lang g hv@(HostView scope _ _ _ _) d t0 e = do
             let dk = declField hv k d
                 here' = case dir of Outbound -> ft; Inbound -> hostType (withinRecord name hv) dk ft
                 there = case dir of Outbound -> hostType (withinRecord name hv) dk ft; Inbound -> ft
-                getter = PolyApp
-                  (PolyExe (Idx g (FunT [here] here')) (PatCallP (PatternStruct (SelectorKey (unKey k, SelectorEnd) []))))
-                  [var]
+                getter = PolyPat (Idx g (FunT [here] here')) (PatGet (SelectorKey (unKey k, SelectorEnd) []) [] var)
             x <- adapt dir lang g (withinRecord name hv) dk ft getter
             return (k, (Idx g there, x))
         | (k, ft) <- fts ]
@@ -988,9 +987,7 @@ rebuildIn dir lang g hv@(HostView scope _ _ _ _) d t0 e = do
         [ do
             let here' = case dir of Outbound -> tx; Inbound -> hostType hv dx tx
                 there = case dir of Outbound -> hostType hv dx tx; Inbound -> tx
-                getter = PolyApp
-                  (PolyExe (Idx g (FunT [here] here')) (PatCallP (PatternStruct (SelectorIdx (i, SelectorEnd) []))))
-                  [var]
+                getter = PolyPat (Idx g (FunT [here] here')) (PatGet (SelectorIdx (i, SelectorEnd) []) [] var)
             x <- adapt dir lang g hv dx tx getter
             return (Idx g there, x)
         | (i, dx, tx) <- zip3Indexed 0 ds ts ]
@@ -1304,6 +1301,7 @@ insertExportBoundaries isCommand cidx t (PolyHead lang midx args body) =
     go ids (PolyLet i e1 e2) = PolyLet i (go ids e1) (go ids e2)
     go ids (PolyReturn e) = PolyReturn (go ids e)
     go ids (PolyApp e es) = PolyApp (go ids e) (map (go ids) es)
+    go ids (PolyPat g app) = PolyPat g (fmap (go ids) app)
     go ids (PolyCacheBody lbl cm cargs e) = PolyCacheBody lbl cm cargs (go ids e)
     go ids (PolyEval ti e) = PolyEval ti (go ids e)
     go ids (PolyDoBlock ti e) = PolyDoBlock ti (go ids e)

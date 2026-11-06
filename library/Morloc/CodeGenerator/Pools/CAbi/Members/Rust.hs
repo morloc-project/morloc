@@ -453,39 +453,28 @@ closureParamType _ = return "_"
 -- | Render a getter/bracket/interpolation pattern. A getter (@.0@/@.field@,
 -- possibly chained, multi-sibling, or with bracket steps) becomes native field
 -- access + @morloc_at@/@morloc_slice@; string interpolation interweaves
--- fragments and insertions. Record/tuple SETTERS are not yet supported (unused
--- by the stdlib) and fall to the catch-all error.
-rustEvalPattern :: TypeF -> Pattern -> [MDoc] -> RustM MDoc
+-- fragments and insertions.
+rustEvalPattern :: TypeF -> PatApp MDoc -> RustM MDoc
 -- String interpolation: interweave compile-time fragments with the rendered
 -- insertion expressions (each forced to an owned String for a uniform slice).
-rustEvalPattern _ (PatternText s ss) xs =
+rustEvalPattern _ (PatText s xs) =
   return $ "::rustmorloc::interweave_strings(&["
-    <> hcat (punctuate ", " [dquotes (pretty (RP.rustEscape frag)) | frag <- s : ss])
+    <> hcat (punctuate ", " [dquotes (pretty (RP.rustEscape frag)) | frag <- s : map snd xs])
     <> "], &["
-    <> hcat (punctuate ", " [parens x <> ".as_str()" | x <- xs])
+    <> hcat (punctuate ", " [parens x <> ".as_str()" | (x, _) <- xs])
     <> "])"
 -- Field/index getter with NO bracket steps: plain `.field` / `.i` accessor(s).
--- The `not selectorHasBracket` guard is load-bearing: a bracket chain with one
--- receiver arg would otherwise match here and `ungroup` would silently drop the
--- bracket steps, emitting field-only access.
-rustEvalPattern _ (PatternStruct sel) [m]
-  | not (selectorHasBracket sel) =
-      return $ case ungroup sel of
-        [ss] -> writeSelectorRust m ss
-        sss -> tupled (map (writeSelectorRust m) sss)
+rustEvalPattern _ (PatGet sel [] m) =
+  return $ case ungroup sel of
+    [ss] -> writeSelectorRust m ss
+    sss -> tupled (map (writeSelectorRust m) sss)
 -- Getter chain containing bracket steps (`.f.[i]`, `.[i:j].0`, ...). Args are
 -- [bracket_bounds..., receiver]; walk the selector, threading the bracket args.
-rustEvalPattern _ (PatternStruct s) args
-  | selectorHasBracket s, length args == bracketArity s + 1 =
-      let n = bracketArity s
-          (bracketArgs, receivers) = splitAt n args
-          receiver = case receivers of
-            [r] -> r
-            _ -> error "rustEvalPattern: bracket-in-selector expected 1 receiver"
-       in return $ fst (walkRustSelectorBrackets receiver bracketArgs s)
-rustEvalPattern _ PatternBracketIndex [i, m] =
+rustEvalPattern _ (PatGet s bracketArgs receiver) =
+  return $ fst (walkRustSelectorBrackets receiver bracketArgs s)
+rustEvalPattern _ (PatIndex i m) =
   return $ "morloc_at" <> tupled [i, "&(" <> m <> ")"]
-rustEvalPattern _ PatternBracketSlice [start, stop, step, m] =
+rustEvalPattern _ (PatSlice start stop step m) =
   return $ "morloc_slice" <> tupled [start, stop, step, "&(" <> m <> ")"]
 -- Record/tuple SETTER: rebuild the aggregate with one leaf replaced. The shared
 -- 'patternSetter' re-accesses every UNCHANGED field on the receiver; in Rust the
@@ -495,8 +484,7 @@ rustEvalPattern _ PatternBracketSlice [start, stop, step, m] =
 -- copy. This is the same per-field copy C++'s aggregate-init makes. The struct
 -- name for a record literal is resolved by running 'rustTypeOf' with the
 -- captured state (mirrors the C++ `evalState` name capture).
-rustEvalPattern t0 (PatternStruct s0) (m0 : xs0)
-  | not (null xs0) = do
+rustEvalPattern t0 (PatSet s0 m0 (toList -> xs0)) = do
       st <- CMS.get
       env <- asks id
       let nameOf recType = CMS.evalState (runReaderT (rustStructCtor recType) env) st
@@ -511,8 +499,6 @@ rustEvalPattern t0 (PatternStruct s0) (m0 : xs0)
           finalizeSet _ v = v <> ".clone()"
           spine = patternSetter makeTuple makeRecord accessTuple accessRecord finalizeSet "__morloc_rec" t0 s0 xs0
       return $ "{ let __morloc_rec = &(" <> m0 <> "); " <> spine <> " }"
-rustEvalPattern _ p args =
-  error $ "Rust v1: unsupported pattern " <> show p <> " with " <> show (length args) <> " args"
 
 -- | A setter on an owned local at its last read (OWN-2) updates it in place,
 -- so its unchanged fields are neither copied nor rebuilt. It applies only
@@ -823,7 +809,7 @@ ownerPure g s (LetVarN _ i r) = classifyRead g s i r
 ownerPure g s (ReturnN e) = ownerPure g s e
 ownerPure g s (NativeLetN _ _ e) = ownerPure g s e
 ownerPure g s (SerialLetN _ _ e) = ownerPure g s e
-ownerPure g s (AppExeN _ (PatCallP (PatternStruct _)) [recv]) =
+ownerPure g s (PatN _ (PatGet _ [] recv)) =
   case argOwnerPure g s recv of
     Owned -> Owned
     _ -> BorrowedPlace

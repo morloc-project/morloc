@@ -647,9 +647,9 @@ data LowerConfig m = LowerConfig
   , -- expression/arg lowering fields
     lcPrintExpr :: IExpr -> MDoc
   , lcPrintStmt :: IStmt -> MDoc
-  , -- | A pattern call: its result type, its argument types, the pattern
-    -- and the rendered arguments.
-    lcEvalPattern :: TypeF -> [TypeF] -> Pattern -> [MDoc] -> m MDoc
+  , -- | A pattern call: its result type, its argument types, and the pattern
+    -- with its rendered arguments.
+    lcEvalPattern :: TypeF -> [TypeF] -> PatApp MDoc -> m MDoc
   -- ^ Pattern evaluation (language-specific because patterns use
   -- language-specific constructors for tuples/records)
   , lcTakeSetter :: NativeExpr -> TypeF -> Selector -> [MDoc] -> m (Maybe MDoc)
@@ -1225,9 +1225,8 @@ lowerSerialExprRaw cfg _ (SerializeS_ s (Low origE e)) = do
 -- @borrowSafe = False@). If a future path frees a value's backing SHM mid-body,
 -- revisit whether that value's fields may be borrowed.
 isBorrowableProjection :: NativeExpr -> Bool
-isBorrowableProjection (AppExeN _ (PatCallP (PatternStruct sel)) [NativeArgExpr arg]) =
-  not (selectorHasBracket sel)
-    && length (ungroup sel) == 1
+isBorrowableProjection (PatN _ (PatGet sel [] (NativeArgExpr arg))) =
+  length (ungroup sel) == 1
     && borrowableRoot arg
 isBorrowableProjection (IntrinsicN _ IntrCtorField _ (arg : _)) = borrowableRoot arg
 isBorrowableProjection _ = False
@@ -1350,6 +1349,7 @@ rnodeChildren (RS e) = case e of
 rnodeChildren (RN e) = case e of
   ManN nm -> [RNM nm]
   AppExeN _ _ args -> map nativeArg args
+  PatN _ app -> map nativeArg (toList app)
   ReturnN x -> [RN x]
   SerialLetN _ a b -> [RS a, RN b]
   NativeLetN _ a b -> [RN a, RN b]
@@ -1895,8 +1895,8 @@ borrowPartOf mayBorrow = go
       | otherwise = case e of
           IntrinsicN _ IntrCtorField _ [s, StrN _ n, IntN _ k] -> (\p -> BorrowCtorField (typeFof s) p n k) <$> go env s
           IntrinsicN _ IntrListElem _ [s, IntN _ k] -> (`BorrowElem` k) <$> go env s
-          AppExeN _ (PatCallP (PatternStruct sel)) [NativeArgExpr s]
-            | not (selectorHasBracket sel), [path] <- ungroup sel -> (`BorrowField` path) <$> var env s
+          PatN _ (PatGet sel [] (NativeArgExpr s))
+            | [path] <- ungroup sel -> (`BorrowField` path) <$> var env s
           IfN _ c a b
             | Just t <- test env c -> BorrowIf t <$> go env a <*> go env b
           NativeLetN i rhs body -> BorrowLet i <$> go env rhs <*> go (\j -> j == i || env j) body
@@ -2028,6 +2028,7 @@ scanLoop scanB lbody =
 scanNE :: NativeExpr -> ConsumeScan
 scanNE (ManN nm) = scanNM nm
 scanNE (AppExeN _ _ args) = mconcat (map scanNA args)
+scanNE (PatN _ app) = mconcat (map scanNA (toList app))
 scanNE (ReturnN e) = scanNE e
 scanNE (SerialLetN _ e1 e2) = scanSE e1 <> scanNE e2
 scanNE (NativeLetN i rhs body) = scanLet i rhs <> scanNE rhs <> scanNE body
@@ -2210,6 +2211,7 @@ serialVarsOf =
         _ -> foldlSE Set.union Set.empty e
     , opNativeExprM = \e -> return $ case e of
         AppExeN_ _ x xs -> exeVars x <> Set.unions xs
+        PatN_ _ app -> Set.unions (toList app)
         ExeN_ _ x -> exeVars x
         _ -> foldlNE Set.union Set.empty e
     , opSerialArgM = return . foldlSA Set.union Set.empty
@@ -2557,8 +2559,8 @@ namesArg (NativeArgExpr e) = namesValue e
     namesValue (CoerceN (CoerceNewtype _ _) _ x) = namesValue x
     namesValue (IntrinsicN _ IntrCtorField _ (x : _)) = namesValue x
     namesValue (IntrinsicN _ IntrListElem _ (x : _)) = namesValue x
-    namesValue (AppExeN _ (PatCallP (PatternStruct sel)) [NativeArgExpr x]) =
-      not (selectorHasBracket sel) && length (ungroup sel) == 1 && namesValue x
+    namesValue (PatN _ (PatGet sel [] (NativeArgExpr x))) =
+      length (ungroup sel) == 1 && namesValue x
     namesValue _ = False
 namesArg _ = False
 
@@ -2604,24 +2606,22 @@ lowerNativeExprRaw cfg _ (AppExeN_ resT (SrcCallP _ src) es1) = do
           [] -> lcSrcName cfg src
           (g0 : gs) -> foldl (lcApplySrcGroup cfg) (lcSrcName cfg src <> (if null g0 then tupled g0 else tupledNoFold g0)) gs
   return $ mergePoolDocs (lcSourcedResult cfg src (length es) resT . handleFunctionArgs) (map laDocs es)
-lowerNativeExprRaw cfg _ (AppExeN_ t (PatCallP p) xs) = do
-  es <- case (p, xs) of
+lowerNativeExprRaw cfg _ (PatN_ t xs) = do
+  app <- case xs of
     -- A setter's new values are stored in the rebuilt record, an owned sink.
-    (PatternStruct sel, recv : vals)
-      | not (selectorHasBracket sel) -> (laDocs recv :) <$> mapM ownedVal vals
-    _ -> return (map laDocs xs)
-  taken <- case (p, xs, es) of
-    (PatternStruct sel, [LowArg recv _ _], [e])
-      | not (selectorHasBracket sel) -> do
-          own <- nativeArgOwnership cfg recv
-          if own == Owned
-            then lcTakeGetter cfg (nativeArgTypeF recv) sel (poolExpr e)
-            else return Nothing
-    (PatternStruct sel, LowArg (NativeArgExpr recv) _ _ : _ : _, _)
-      | not (selectorHasBracket sel) -> lcTakeSetter cfg recv t sel (map poolExpr es)
+    PatSet sel recv vals -> PatSet sel (laDocs recv) <$> mapM ownedVal vals
+    _ -> return (fmap laDocs xs)
+  let es = toList app
+  taken <- case (xs, app) of
+    (PatGet sel [] (LowArg recv _ _), PatGet _ [] e) -> do
+      own <- nativeArgOwnership cfg recv
+      if own == Owned
+        then lcTakeGetter cfg (nativeArgTypeF recv) sel (poolExpr e)
+        else return Nothing
+    (PatSet sel (LowArg (NativeArgExpr recv) _ _) _, _) -> lcTakeSetter cfg recv t sel (map poolExpr es)
     _ -> return Nothing
-  let argTypes = map (nativeArgTypeF . laOrig) xs
-  patResult <- maybe (lcEvalPattern cfg t argTypes p (map poolExpr es)) return taken
+  let argTypes = map (nativeArgTypeF . laOrig) (toList xs)
+  patResult <- maybe (lcEvalPattern cfg t argTypes (fmap poolExpr app)) return taken
   return $
     PoolDocs
       { poolCompleteManifolds = concatMap poolCompleteManifolds es
@@ -2733,7 +2733,6 @@ lowerNativeExprRaw cfg _ (DeserializeN_ t s (Low _ x)) = do
       , poolPriorLines = poolPriorLines x <> assignments
       }
 lowerNativeExprRaw cfg _ (ExeN_ _ (SrcCallP _ src)) = return $ defaultValue {poolExpr = lcSrcName cfg src}
-lowerNativeExprRaw _ _ (ExeN_ _ (PatCallP _)) = error "Unreachable: patterns are always used in applications"
 lowerNativeExprRaw cfg _ (ExeN_ _ (LocalCallP idx)) = return $ defaultValue {poolExpr = (nvar cfg) idx}
 lowerNativeExprRaw cfg _ (ExeN_ _ (PapplyP idx)) = return $ defaultValue {poolExpr = (nvar cfg) idx}
 lowerNativeExprRaw cfg _ (ExeN_ _ (RecCallP mid _)) = return $ defaultValue {poolExpr = lcManifoldName cfg mid}

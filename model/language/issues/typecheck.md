@@ -222,3 +222,20 @@ literal and record gaps. Reproduced on 0.109.0 unless marked.
 - **A curried head under `@collect` loses a type.** [reproduced
   2026-11-02, Python only] `score x = @collect (prod inc x)` fails
   "cannot serialize unknown type variable: b"; the `\k ->` form builds.
+- [reproduced, 2026-11-06] A getter takes an effectful receiver without
+  checking the field: with `getR :: Int -> <IO> R`, `bad :: Int -> Str;
+  bad x = .zzz (getR x)` typechecks although `R` has no `zzz`, because the
+  suspension solves the selector's open record variable. `bad :: Int -> Int;
+  bad x = .a (getR x)` builds and fails at run time with `'functools.partial'
+  object is not subscriptable`. The same receiver through a bracket or a
+  setter is rejected.
+- [reproduced, 2026-11-06] The plain getter typechecks its receiver twice
+  (`synthE` PatGet: `synthG`, then `checkG` on the same expression), so time
+  is exponential in nested getters: `bad x = .a (step (.a (step ... x)))`
+  takes 2.6 s at depth 12 and exceeds 25 s at depth 14. The index rule reuses
+  its synthesized receiver.
+- [reproduced, 2026-11-06] Surplus arguments to a getter make it a setter:
+  `bad :: R -> R; bad r = .a r 5` compiles as an update returning a record,
+  and with a function field `.f (mkr k) 5` is rejected while `(.f (mkr k)) 5`
+  runs, against APP-1 (`applyPattern` decides by argument count; only the
+  setter syntax should build a setter).

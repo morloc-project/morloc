@@ -398,6 +398,7 @@ instance Dependable NativeExpr where
         return $ D (LetVarN (typeFof e) i KeptRead) ((i, Right e) : deps)
 
   isAtomic (AppExeN _ _ _) = False
+  isAtomic (PatN _ _) = False
   isAtomic ManN {} = False
   isAtomic SerialLetN {} = False
   isAtomic NativeLetN {} = False
@@ -469,6 +470,7 @@ renameNEWith m old new = go where
   ri i = if i == old then new else i
   go (ManN nm) = ManN (renameNM old new nm)
   go (AppExeN t exe args) = AppExeN t (renameExe old new exe) (map goA args)
+  go (PatN t app) = PatN t (fmap goA app)
   go (ReturnN ne) = ReturnN (go ne)
   go (SerialLetN i se ne) = SerialLetN (ri i) (renameSE old new se) (go ne)
   go (NativeLetN i ne1 ne2) = NativeLetN (ri i) (go ne1) (go ne2)
@@ -608,6 +610,7 @@ argsBoundS a e0 = case e0 of
 argsBoundN :: Set.Set Int -> NativeExpr -> NativeExpr
 argsBoundN a e0 = case e0 of
   AppExeN t exe xs -> AppExeN t exe (map argN xs)
+  PatN t app -> PatN t (fmap argN app)
   ManN nm -> ManN (nativeManifoldArgsBound nm)
   ReturnN e -> ReturnN (go e)
   SerialLetN i se e -> SerialLetN i (argsBoundS a se) (argsBoundN (Set.delete i a) e)
@@ -683,6 +686,7 @@ wrapArgForms = goSM Map.empty
 
     goN env e0 = case e0 of
       AppExeN t exe xs -> AppExeN t exe (map (argN env) xs)
+      PatN t app -> PatN t (fmap (argN env) app)
       ManN nm -> ManN (goNM env nm)
       ReturnN e -> ReturnN (goN env e)
       SerialLetN i se e -> SerialLetN i (goS env se) (goN (Map.insert i BoundSerial env) e)
@@ -829,6 +833,8 @@ invertSerialManifold sm0 =
       let nativeArgs' = map unD nativeArgs
           deps = concatMap getDeps nativeArgs
       atomize (AppExeN t exe nativeArgs') deps
+    invertNativeExprM (PatN_ t app) = do
+      atomize (PatN t (fmap unD app)) (concatMap getDeps app)
     invertNativeExprM (ManN_ (D nm lets)) = atomize (ManN nm) lets
     invertNativeExprM (ReturnN_ (D ne lets)) = atomize (ReturnN ne) lets
     -- Eliminate trivial let-bindings where the RHS is just a variable

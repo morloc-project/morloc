@@ -163,6 +163,7 @@ module Morloc.CodeGenerator.Namespace
   , renderSrcLocForDebug
   ) where
 
+import Data.Foldable (toList)
 import Control.Monad.Identity (runIdentity)
 import qualified Data.Char as Char
 import Data.Text (Text)
@@ -403,7 +404,6 @@ builtSrcCall (Idx i src) = SrcCallP (Built i) src
 
 data ExecutableExpressionPool
   = SrcCallP SrcOrigin Source
-  | PatCallP Pattern -- pattern function
   | LocalCallP Int -- a locally defined function
   | PapplyP Int
   -- ^ A partial application of a local function value: applying it to
@@ -415,7 +415,6 @@ data ExecutableExpressionPool
 
 instance Pretty ExecutableExpressionPool where
   pretty (SrcCallP _ src) = pretty src
-  pretty (PatCallP pat) = pretty pat
   pretty (LocalCallP i) = "x" <> pretty i
   pretty (PapplyP i) = "papply_x" <> pretty i
   pretty (RecCallP i Nothing) = "rec_m" <> pretty i
@@ -612,6 +611,8 @@ data PolyExpr
   | PolyLet Int PolyExpr PolyExpr
   | PolyReturn PolyExpr
   | PolyApp PolyExpr [PolyExpr]
+  | -- | A pattern applied to its arguments, typed as a function of them.
+    PolyPat (Indexed Type) (PatApp PolyExpr)
   | PolyCacheBody Text Int [Arg None] PolyExpr
     -- ^ Memoization wrap inserted around a labeled manifold's body
     -- by the 'Express.addCacheWraps' post-pass when the enclosing
@@ -720,6 +721,7 @@ data MonoExpr
     -- 'DebugWrapS'.
   | -- terms that map 1:1 versus SAnno; have defined types in one language
     MonoExe (Indexed Type) ExecutableExpressionPool
+  | MonoPat (Indexed Type) (PatApp MonoExpr)
   | MonoBndVar (Three None Type (Indexed Type)) Int -- (Three Lang Type (Indexed Type)) Int  -- (Maybe (Indexed Type))
   -- data types
   | MonoRecord NamType (Indexed TVar) [Indexed ArgT] [(Key, (Indexed Type, MonoExpr))]
@@ -832,6 +834,7 @@ data VarRead = KeptRead | LastRead
 data NativeExpr
   = ManN NativeManifold
   | AppExeN TypeF ExecutableExpressionPool [NativeArg]
+  | PatN TypeF (PatApp NativeArg)
   | ReturnN NativeExpr
   | SerialLetN Int SerialExpr NativeExpr
   | NativeLetN Int NativeExpr NativeExpr
@@ -1011,6 +1014,7 @@ foldlSE f b (LoopS_ _ _ body) = foldl f b (loopBodyLeaves body)
 
 foldlNE :: (b -> a -> b) -> b -> NativeExpr_ a a a a a -> b
 foldlNE f b (AppExeN_ _ _ xs) = foldl f b xs
+foldlNE f b (PatN_ _ app) = foldl f b app
 foldlNE f b (ManN_ x) = f b x
 foldlNE f b (ReturnN_ x) = f b x
 foldlNE f b (SerialLetN_ _ x1 x2) = foldl f b [x1, x2]
@@ -1052,6 +1056,7 @@ mapPolySubExprs f e = case e of
   PolyLet i a b -> PolyLet i (f a) (f b)
   PolyReturn x -> PolyReturn (f x)
   PolyApp h xs -> PolyApp (f h) (map f xs)
+  PolyPat g app -> PolyPat g (fmap f app)
   PolyCacheBody lbl m as x -> PolyCacheBody lbl m as (f x)
   PolyDebugWrap m as x -> PolyDebugWrap m as (f x)
   PolyList v ts xs -> PolyList v ts (map f xs)
@@ -1073,6 +1078,7 @@ polySubExprs (PolyRemoteInterface _ _ _ _ e) = [e]
 polySubExprs (PolyLet _ a b) = [a, b]
 polySubExprs (PolyReturn e) = [e]
 polySubExprs (PolyApp h xs) = h : xs
+polySubExprs (PolyPat _ app) = toList app
 polySubExprs (PolyCacheBody _ _ _ e) = [e]
 polySubExprs (PolyDebugWrap _ _ e) = [e]
 polySubExprs (PolyList _ _ xs) = xs
@@ -1142,6 +1148,7 @@ makeMonoidFoldDefault mempty' mappend' =
 
     monoidNativeExpr' (ManN_ (req, nm)) = return (req, ManN nm)
     monoidNativeExpr' (AppExeN_ t exe (unzip -> (reqs, es))) = return (foldl mappend' mempty' reqs, AppExeN t exe es)
+    monoidNativeExpr' (PatN_ t app) = return (foldl mappend' mempty' (fmap fst app), PatN t (fmap snd app))
     monoidNativeExpr' (ReturnN_ (req, ne)) = return (req, ReturnN ne)
     monoidNativeExpr' (SerialLetN_ i (req1, se) (req2, ne)) = return (mappend' req1 req2, SerialLetN i se ne)
     monoidNativeExpr' (NativeLetN_ i (req1, ne1) (req2, ne2)) = return (mappend' req1 req2, NativeLetN i ne1 ne2)
@@ -1301,6 +1308,7 @@ data SerialExpr_ sm se ne sr nr
 
 data NativeExpr_ nm se ne sr nr
   = AppExeN_ TypeF ExecutableExpressionPool [nr]
+  | PatN_ TypeF (PatApp nr)
   | ManN_ nm
   | ReturnN_ ne
   | SerialLetN_ Int se ne
@@ -1491,6 +1499,9 @@ surroundFoldNativeExprM sfm fm = surroundNativeExprM sfm f
     f full@(AppExeN t exe nativeArgs) = do
       nativeArgs' <- mapM (surroundFoldNativeArgM sfm fm) nativeArgs
       opFoldWithNativeExprM fm full $ AppExeN_ t exe nativeArgs'
+    f full@(PatN t app) = do
+      app' <- mapM (surroundFoldNativeArgM sfm fm) app
+      opFoldWithNativeExprM fm full $ PatN_ t app'
     f full@(ManN nativeManifold) = do
       nativeManifold' <- surroundFoldNativeManifoldM sfm fm nativeManifold
       opFoldWithNativeExprM fm full $ ManN_ nativeManifold'
@@ -1572,6 +1583,7 @@ instance HasTypeF TypeF where
 instance HasTypeF NativeExpr where
   typeFof (ManN nm) = typeFof nm
   typeFof (AppExeN t _ _) = t
+  typeFof (PatN t _) = t
   typeFof (ReturnN e) = typeFof e
   typeFof (SerialLetN _ _ e) = typeFof e
   typeFof (NativeLetN _ _ e) = typeFof e
@@ -1788,6 +1800,7 @@ instance MFunctor NativeExpr where
   mgatedMap g f ne0
     | gateNativeExpr g ne0 = case ne0 of
         (AppExeN t exe nativeArgs) -> mapNativeExpr f $ AppExeN t exe (map (mgatedMap g f) nativeArgs)
+        (PatN t app) -> mapNativeExpr f $ PatN t (fmap (mgatedMap g f) app)
         (ManN nm) -> mapNativeExpr f $ ManN (mgatedMap g f nm)
         (ReturnN ne) -> mapNativeExpr f $ ReturnN (mgatedMap g f ne)
         (SerialLetN i se ne) -> mapNativeExpr f $ SerialLetN i (mgatedMap g f se) (mgatedMap g f ne)
@@ -1864,6 +1877,7 @@ instance Pretty PolyExpr where
   pretty (PolyLet i e1 e2) = "PolyLet<" <> pretty i <> ">" <+> list [pretty e1, pretty e2]
   pretty (PolyReturn e) = "PolyReturn" <+> parens (pretty e)
   pretty (PolyApp e es) = "PolyApp" <+> list (map pretty (e : es))
+  pretty (PolyPat _ app) = "PolyPat" <+> pretty (patAppPattern app) <+> list (map pretty (toList app))
   pretty (PolyCacheBody lbl m _ e) =
     "PolyCacheBody<" <> pretty lbl <> ":" <> pretty m <> ">" <+> parens (pretty e)
   pretty (PolyDebugWrap m _ e) =
@@ -1871,7 +1885,6 @@ instance Pretty PolyExpr where
   pretty (PolyBndVar _ _) = "PolyBndVar"
   pretty (PolyLetVar _ _) = "PolyLetVar"
   pretty (PolyExe _ (SrcCallP _ src)) = "PolyExe<" <> pretty (srcAlias src) <> ">"
-  pretty (PolyExe _ (PatCallP _)) = "PolyExe<pattern>"
   pretty (PolyExe _ (LocalCallP _)) = "PolyExe<local>"
   pretty (PolyExe _ (PapplyP _)) = "PolyExe<papply>"
   pretty (PolyExe _ (RecCallP i _)) = "PolyExe<rec_m" <> pretty i <> ">"
@@ -1904,6 +1917,7 @@ instance Pretty MonoExpr where
   pretty (MonoLetVar t i) = parens $ "x" <> pretty i <> " :: " <> pretty t
   pretty (MonoReturn e) = "return" <> parens (pretty e)
   pretty (MonoApp e es) = parens (pretty e) <+> hsep (map (parens . pretty) es)
+  pretty (MonoPat _ app) = pretty (patAppPattern app) <+> hsep (map (parens . pretty) (toList app))
   pretty (MonoCacheBody lbl m _ e) =
     "cache<" <> pretty lbl <> ":" <> pretty m <> ">" <+> parens (pretty e)
   pretty (MonoDebugWrap m _ e) =

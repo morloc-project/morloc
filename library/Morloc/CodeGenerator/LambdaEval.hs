@@ -176,11 +176,9 @@ expandShortCalls fresh e0 = do
   go e0
   where
     -- the number of arguments a call's head takes, where that is more than
-    -- the call gives it; Nothing where it is not a function or is a pattern,
-    -- whose arguments are its own
+    -- the call gives it; Nothing where it is not a function
     headArity scope given f@(AnnoS (Idx _ ft) _ _) = case calledHead f of
-      Just (Left ()) -> return Nothing
-      Just (Right isrc) -> case declaredFun scope ft of
+      Just isrc -> case declaredFun scope ft of
         FunT own _ | length own > given -> sourceArity isrc
         _ -> return Nothing
       -- a function's own type: flat, or grouped where it is staged
@@ -204,7 +202,7 @@ splitLongCalls ::
 splitLongCalls fresh e0 = do
   scope <- MM.getGeneralScope
   let split f xs = case (calledHead f, f) of
-        (Just (Right isrc), AnnoS (Idx _ ft) _ _)
+        (Just isrc, AnnoS (Idx _ ft) _ _)
           | length xs >= 2
           , FunT own out <- declaredFun scope ft
           , length own >= length xs -> do
@@ -250,14 +248,12 @@ splitLongCalls fresh e0 = do
       LabelS k y -> LabelS k (retype t y)
       _ -> x
 
--- | The callee of a call through the wrappers a reference carries: a
--- source, a pattern (@Left ()@), or neither.
-calledHead :: AnnoS g One c -> Maybe (Either () (Indexed Source))
+-- | The source a call's head calls, through the wrappers a reference carries.
+calledHead :: AnnoS g One c -> Maybe (Indexed Source)
 calledHead (AnnoS _ _ x) = case x of
   VarS _ (One y) -> calledHead y
   LabelS _ y -> calledHead y
-  ExeS (PatCall _) -> Just (Left ())
-  ExeS (SrcCall isrc) -> Just (Right isrc)
+  ExeS (SrcCall isrc) -> Just isrc
   _ -> Nothing
 
 -- | The arguments a source takes: those of its declared signature, up to a
@@ -740,17 +736,18 @@ reduce ai (AnnoS g c (AppS headA es)) = do
     AnnoS (Idx ti _) tc (IntrinsicS IntrThrow msg) -> do
       binds <- concat <$> mapM (fmap fst . bindArg ai) es
       wrapLets g c binds =<< retypeThrow ti (annT g) tc msg
-    _ -> do
-      es' <- mapM (reduce ai) es
-      return $ case (headA', es') of
-        (AnnoS _ _ (ExeS (PatCall (PatternStruct sel))), [x])
-          | ai, Just (AnnoS _ cy y) <- project sel x -> AnnoS g cy y
-        _ -> AnnoS g c (AppS headA' es')
+    _ -> AnnoS g c . AppS headA' <$> mapM (reduce ai) es
   where
     annT (Idx _ t) = t
-    -- on the nexus path, a field of a container literal that computes
-    -- nothing is the element itself, so a function it holds reaches its
-    -- uses as a lambda
+-- On the nexus path, a field of a container literal that computes nothing is
+-- the element itself, so a function it holds reaches its uses as a lambda.
+reduce ai (AnnoS g c (PatS fg fc ev app)) = do
+  app' <- traverse (reduce ai) app
+  return $ case app' of
+    PatGet sel [] x
+      | ai, Just (AnnoS _ cy y) <- project sel x -> AnnoS g cy y
+    _ -> AnnoS g c (PatS fg fc ev app')
+  where
     project sel x
       | isValue x = field sel x
       | otherwise = Nothing
@@ -846,18 +843,25 @@ hoistThunkArgs ::
   MorlocMonad ([(EVar, AnnoS (Indexed Type) One a)], AnnoS (Indexed Type) One a)
 hoistThunkArgs e@(AnnoS g@(Idx _ (EffectT _ _)) c (AppS f xs))
   | isValue f && not (all isValue xs) = do
-      pieces <- mapM hoist xs
+      pieces <- mapM hoistThunkArg xs
       return (concatMap fst pieces, AnnoS g c (AppS f (map snd pieces)))
   | otherwise = return ([], e)
-  where
-    hoist x
-      | isValue x = return ([], x)
-      | otherwise = do
-          -- a nested suspension builder: its own arguments first
-          (inner, x') <- hoistThunkArgs x
-          (bs, y) <- bindData x'
-          return (inner <> bs, y)
+hoistThunkArgs (AnnoS g@(Idx _ (EffectT _ _)) c (PatS fg fc ev app))
+  | not (all isValue app) = do
+      pieces <- traverse hoistThunkArg app
+      return (foldMap fst pieces, AnnoS g c (PatS fg fc ev (fmap snd pieces)))
 hoistThunkArgs e = return ([], e)
+
+hoistThunkArg ::
+  AnnoS (Indexed Type) One a ->
+  MorlocMonad ([(EVar, AnnoS (Indexed Type) One a)], AnnoS (Indexed Type) One a)
+hoistThunkArg x
+  | isValue x = return ([], x)
+  | otherwise = do
+      -- a nested suspension builder: its own arguments first
+      (inner, x') <- hoistThunkArgs x
+      (bs, y) <- bindData x'
+      return (inner <> bs, y)
 
 -- | @let v1 = e1 in ... let vn = en in body@, each let annotated like the
 -- application it came from.

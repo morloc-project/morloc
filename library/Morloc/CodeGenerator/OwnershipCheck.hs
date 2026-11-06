@@ -19,6 +19,7 @@ module Morloc.CodeGenerator.OwnershipCheck
   , checkNative
   ) where
 
+import Data.Foldable (toList)
 import Morloc.Data.Zip (indexed)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
@@ -184,7 +185,7 @@ projectionBase e = case e of
   BndVarN _ i _ -> Just i
   IntrinsicN _ IntrCtorField _ (x : _) -> projectionBase x
   IntrinsicN _ IntrListElem _ (x : _) -> projectionBase x
-  AppExeN _ (PatCallP (PatternStruct _)) [NativeArgExpr x] -> projectionBase x
+  PatN _ (PatGet _ [] (NativeArgExpr x)) -> projectionBase x
   _ -> Nothing
 
 -- | The variable a projection reads from, through aliases.
@@ -194,7 +195,7 @@ projectionRoot env e = case e of
   BndVarN _ i _ -> Just (rootOf env i)
   IntrinsicN _ IntrCtorField _ (x : _) -> projectionRoot env x
   IntrinsicN _ IntrListElem _ (x : _) -> projectionRoot env x
-  AppExeN _ (PatCallP (PatternStruct _)) [NativeArgExpr x] -> projectionRoot env x
+  PatN _ (PatGet _ [] (NativeArgExpr x)) -> projectionRoot env x
   _ -> Nothing
 
 -- | A native let: its right-hand side, then its body with the binding in
@@ -274,9 +275,9 @@ walkN env s e = case e of
       arg j (NativeArgExpr x) | Set.member j (envByValue env mid) = \s' -> keepPart env s' x
       arg _ a = \s' -> walkArg env s' a
   -- a setter keeps its receiver
-  AppExeN _ (PatCallP (PatternStruct sel)) (NativeArgExpr recv : vals@(_ : _))
-    | not (selectorHasBracket sel) ->
-    step s ((\s' -> keepPart env s' recv) : map (\a s' -> walkArg env s' a) vals)
+  PatN _ (PatSet _ (NativeArgExpr recv) vals) ->
+    step s ((\s' -> keepPart env s' recv) : map (\a s' -> walkArg env s' a) (toList vals))
+  PatN _ app -> step s (map (\a s' -> walkArg env s' a) (toList app))
   AppExeN _ _ args -> step s (map (\a s' -> walkArg env s' a) args)
   ReturnN x -> walkN env s x
   DeserializeN _ _ x -> walkS env s x

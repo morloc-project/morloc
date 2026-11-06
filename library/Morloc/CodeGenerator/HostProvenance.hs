@@ -22,7 +22,9 @@ module Morloc.CodeGenerator.HostProvenance
   , sameTermSources
   ) where
 
-import Morloc.Data.Zip (indexed, zip3Indexed, zipPrefix, zipSame, zipWith3Same, zipWithPrefix, zipWithSame)
+import Data.Foldable (toList)
+import Data.Traversable (mapAccumL)
+import Morloc.Data.Zip (zip3Indexed, zipPrefix, zipSame, zipWith3Same, zipWithPrefix, zipWithSame)
 import Control.Monad.State (State, evalStateT, get, gets, lift, modify, put, runState)
 import qualified Data.List as List
 import qualified Data.Set as Set
@@ -295,7 +297,6 @@ analyze cx env dm (AnnoS (Idx gi t) (Idx ci _) e) = case e of
           (g1 : _) | g1 < arity t -> PFun Portable g1 (mark (hostOf src) (afterCall t g1))
           _ -> PFun Portable (arity t) (sourcedResult (hostOf src) (cxSig cx si) [] (afterCall t (arity t)))
     done p Map.empty []
-  ExeS (PatCall _) -> stray >> leaf
   CallS v -> do
     stray
     case cxTree cx v of
@@ -305,6 +306,12 @@ analyze cx env dm (AnnoS (Idx gi t) (Idx ci _) e) = case e of
         done (PFun Portable (arity t) (fst (cxSummary cx key))) Map.empty []
       Nothing -> leaf
   AppS f xs -> stray >> app f xs
+  PatS _ _ _ papp -> do
+    let args = toList papp
+    stray
+    is <- mapM (analyze cx env Portable) args
+    floats args is
+    done' Portable (fit t (mark (joinsO (map (held . iProv) is)) t)) (frees is) is
   LamS vs b -> do
     let ins = case t of
           FunT ts _ -> ts
@@ -443,9 +450,7 @@ analyze cx env dm (AnnoS (Idx gi t) (Idx ci _) e) = case e of
           fi <- analyze cx env Portable f
           is <- mapM (analyze cx env Portable) xs
           floats xs is
-          let (r, through) = case f of
-                AnnoS _ _ (ExeS (PatCall _)) -> (mark (joinsO (map (held . iProv) is)) t, Portable)
-                _ -> applyP (annoType f) (iProv fi) (map iProv is)
+          let (r, through) = applyP (annoType f) (iProv fi) (map iProv is)
           labeled f is r
           done' through (fit t r) (frees (fi : is)) (fi : is)
 
@@ -787,10 +792,8 @@ planWith view target trees00
             AppS f xs -> do
               f' <- go f
               xs' <- mapM go xs
-              let sites = [k | (k', k) <- Set.toList (fFloat found), k' == ci]
-              if null sites
-                then return (AnnoS g c (AppS f' xs'))
-                else floatArgs g cl sites f' xs'
+              floatSites ci g c cl found (AppS f') xs'
+            PatS fg fc ev app -> traverse go app >>= floatSites ci g c cl found (PatS fg fc ev)
             _ -> AnnoS g c <$> mapExprSM go e
       go t
 
@@ -798,9 +801,14 @@ planWith view target trees00
       k <- MM.getCounter
       return (EV (unEVar (displayName v) <> "`h" <> MT.show' k))
 
-    floatArgs g@(Idx gi _) cl sites f xs = do
+    floatSites ci g c cl found mk xs =
+      case [k | (k', k) <- Set.toList (fFloat found), k' == ci] of
+        [] -> return (AnnoS g c (mk xs))
+        sites -> floatArgs g cl sites mk xs
+
+    floatArgs g@(Idx gi _) cl sites mk xs = do
       bound <-
-        mapM
+        traverse
           ( \(k, x@(AnnoS (Idx xi xt) (Idx xci xl) _)) ->
               if k `elem` sites
                 then do
@@ -811,14 +819,14 @@ planWith view target trees00
                   return (AnnoS (Idx ri xt) (Idx rci xl) (LetBndS v), [(v, x)])
                 else return (x, [])
           )
-          (indexed xs)
+          (snd (mapAccumL (\k x -> (k + 1, (k, x))) (0 :: Int) xs))
       ci' <- MM.getCounter
-      let app = AnnoS g (Idx ci' cl) (AppS f (map fst bound))
+      let app = AnnoS g (Idx ci' cl) (mk (fmap fst bound))
           letIn body@(AnnoS (Idx _ bt) _ _) (v, x@(AnnoS _ (Idx _ xl) _)) = do
             li <- newIndex gi
             lci <- MM.getCounter
             return (AnnoS (Idx li bt) (Idx lci xl) (LetS v x body))
-      foldM letIn app (reverse (concatMap snd bound))
+      foldM letIn app (reverse (foldMap snd bound))
 
     -- the limits of one rewritten tree, refusing what cannot be placed
     limitsOf cx exports (_, pat) t = do

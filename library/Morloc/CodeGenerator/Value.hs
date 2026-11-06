@@ -84,6 +84,7 @@ isValueWith stage a@(AnnoS (Idx _ t) _ e) = case e of
   -- applying a function whose result is a suspension builds the suspension
   -- and runs nothing (EFF-6)
   AppS f xs -> isValueWith stage f && all (isValueWith stage) xs && (length xs < arity stage f || isSuspensionType t)
+  PatS (Idx _ ft) _ _ app -> all (isValueWith stage) app && (length app < typeArity ft || isSuspensionType t)
   _ -> False
 
 annC :: AnnoS g f c -> c

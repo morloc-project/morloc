@@ -1,4 +1,7 @@
+{-# LANGUAGE DeriveFoldable #-}
+{-# LANGUAGE DeriveFunctor #-}
 {-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE DeriveTraversable #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ViewPatterns #-}
@@ -42,7 +45,12 @@ module Morloc.Namespace.Expr
   , ungroup
   , bracketArity
   , selectorHasBracket
-  , unappliedPatternArity
+  , PatApp (..)
+  , PatEvidence (..)
+  , noPatEvidence
+  , patAppPattern
+  , applyPattern
+  , patternArity
   , Pattern (..)
   , Intrinsic (..)
   , SaveFormat (..)
@@ -119,12 +127,14 @@ import Data.Aeson (FromJSON (..), ToJSON (..), (.!=), (.:?))
 import qualified Data.Aeson as Aeson
 import Data.Aeson.Types (Options (..), defaultOptions)
 import Data.Foldable (toList)
+import Data.List.NonEmpty (NonEmpty (..))
 import qualified Data.Map as Map
 import Data.Scientific (Scientific)
 import qualified Data.Set as Set
 import Data.Text (Text)
 import GHC.Generics (Generic)
 import Morloc.Data.Doc
+import Morloc.Data.Zip (zipExact)
 import Morloc.Namespace.Prim
 import Morloc.Namespace.Type
 
@@ -361,9 +371,8 @@ ungroup (SelectorIdx x xs) = concat [map ((:) (Left i)) (ungroup s) | (i, s) <- 
 -- | DFS-count of bracket steps in a Selector. Each
 -- 'SelectorBracketIndex' contributes 1 runtime arg (the index); each
 -- 'SelectorBracketSlice' contributes 3 (start, stop, step). Used by
--- the typechecker to validate @App (PatCall (PatternStruct sel)) args@
--- arity: @args@ must be @bracketArity sel + 1@ (the +1 is the
--- receiver).
+-- 'applyPattern' to check a getter's arguments: they are @bracketArity sel
+-- + 1@ (the +1 is the receiver).
 bracketArity :: Selector -> Int
 bracketArity SelectorEnd = 0
 bracketArity (SelectorBracketIndex s) = 1 + bracketArity s
@@ -390,29 +399,68 @@ data Pattern
   | PatternStruct Selector
   -- ^ Field / index accessor (record .field, tuple .0).
   | PatternBracketIndex
-  -- ^ Python-style bracket index (xs[i]). Carries no payload; the index
-  -- expression and receiver are passed via the outer AppS as
-  -- [index, receiver]. The typechecker synthesizes the result type as
+  -- ^ Python-style bracket index (xs[i]). Carries no payload; its arguments
+  -- are the index and the receiver ('PatIndex').
+  -- The typechecker synthesizes the result type as
   -- the receiver's element type. The codegen translator emits the
   -- appropriate native indexing operation based on the receiver type.
   | PatternBracketSlice
   -- ^ Python-style bracket slice (xs[i:j:k]). Carries no payload; the
   -- three bound expressions (start, stop, step; each Null or an Int64
-  -- after toIndex wrapping) and the receiver are passed via the outer
-  -- AppS as [start, stop, step, receiver]. The typechecker synthesizes
+  -- after toIndex wrapping) and the receiver are its arguments
+  -- ('PatSlice'). The typechecker synthesizes
   -- the result type structurally: a Nat-parameterized container has
   -- its outer Nat replaced by NatUnknown; otherwise the receiver type
   -- is preserved. The codegen translator emits the appropriate native
   -- slicing operation.
   deriving (Show, Ord, Eq)
 
--- | The arguments a pattern takes when it appears unapplied. A setter only
--- appears applied to its values, so an unapplied 'PatternStruct' is a getter.
-unappliedPatternArity :: Pattern -> Int
-unappliedPatternArity (PatternText _ ss) = length ss
-unappliedPatternArity (PatternStruct s) = bracketArity s + 1
-unappliedPatternArity PatternBracketIndex = 2
-unappliedPatternArity PatternBracketSlice = 4
+-- | A pattern with the values it is applied to, in the order they are
+-- evaluated. Elsewhere a pattern used as a function is a lambda around one
+-- of these.
+data PatApp a
+  = -- | Text, then each interpolated value and the text after it.
+    PatText Text [(a, Text)]
+  | -- | The bracket bounds in depth-first order, then the receiver.
+    PatGet Selector [a] a
+  | -- | The receiver, then a new value for each leaf of the selector.
+    PatSet Selector a (NonEmpty a)
+  | -- | The index, then the receiver.
+    PatIndex a a
+  | -- | The start, stop and step, then the receiver.
+    PatSlice a a a a
+  deriving (Show, Ord, Eq, Functor, Foldable, Traversable)
+
+-- | The pattern a 'PatApp' applies.
+patAppPattern :: PatApp a -> Pattern
+patAppPattern app = case app of
+  PatText s xs -> PatternText s (map snd xs)
+  PatGet s _ _ -> PatternStruct s
+  PatSet s _ _ -> PatternStruct s
+  PatIndex _ _ -> PatternBracketIndex
+  PatSlice {} -> PatternBracketSlice
+
+-- | A pattern applied to arguments, if they are the arguments it takes. Any
+-- argument beyond a getter's receiver is a value a setter stores.
+applyPattern :: Pattern -> [a] -> Maybe (PatApp a)
+applyPattern pat args = case (pat, args) of
+  (PatternText s ss, _) -> PatText s <$> zipExact args ss
+  (PatternStruct s, _) | selectorHasBracket s -> case splitAt (bracketArity s) args of
+    (bounds, [rcv]) | length bounds == bracketArity s -> Just (PatGet s bounds rcv)
+    _ -> Nothing
+  (PatternStruct s, [rcv]) -> Just (PatGet s [] rcv)
+  (PatternStruct s, rcv : v : vs) -> Just (PatSet s rcv (v :| vs))
+  (PatternBracketIndex, [i, rcv]) -> Just (PatIndex i rcv)
+  (PatternBracketSlice, [start, stop, step, rcv]) -> Just (PatSlice start stop step rcv)
+  _ -> Nothing
+
+-- | The number of arguments a pattern used as a function takes. A setter is
+-- only ever written applied to its values, so a selector is a getter.
+patternArity :: Pattern -> Int
+patternArity (PatternText _ ss) = length ss
+patternArity (PatternStruct s) = bracketArity s + 1
+patternArity PatternBracketIndex = 2
+patternArity PatternBracketSlice = 4
 
 -- | The file format a save intrinsic writes.
 data SaveFormat
@@ -987,6 +1035,19 @@ data ClassInfo = ClassInfo
   }
   deriving (Show, Eq, Ord)
 
+-- | How the classes a pattern calls through are met (CLS-2): the instance
+-- that serves its receiver, and the instance casting each bracket bound. Each
+-- is absent where nothing in the program serves it: a pool then has no call to
+-- make, while the nexus may need none.
+data PatEvidence = PatEvidence
+  { patReceiver :: Maybe Evidence
+  , patBounds :: [Maybe Evidence]
+  }
+  deriving (Show, Eq, Ord)
+
+noPatEvidence :: PatEvidence
+noPatEvidence = PatEvidence Nothing []
+
 data InstanceEnv = InstanceEnv
   { ieByClass :: Map.Map ClassName [InstanceDecl]
   , ieClasses :: Map.Map ClassName ClassInfo
@@ -1026,7 +1087,7 @@ applyCoercion (CoerceNewtype _ t) _ = t
 
 -- | A call of a sourced function carries the index the source is declared
 -- under, which names the term it implements and so its signature.
-data ExecutableExpr = SrcCall (Indexed Source) | PatCall Pattern
+data ExecutableExpr = SrcCall (Indexed Source)
   deriving (Ord, Eq, Show)
 
 data AnnoS g f c = AnnoS g c (ExprS g f c)
@@ -1037,6 +1098,9 @@ data ExprS g f c
   | BndS EVar
   | VarS EVar (f (AnnoS g f c))
   | AppS (AnnoS g f c) [AnnoS g f c]
+  -- | A pattern applied to its arguments. The first annotations are the
+  -- pattern's own, as a function of those arguments.
+  | PatS g c PatEvidence (PatApp (AnnoS g f c))
   | LamS [EVar] (AnnoS g f c)
   | LstS [AnnoS g f c]
   | TupS [AnnoS g f c]
@@ -1268,6 +1332,9 @@ mapExprSM ::
   (Traversable f, Monad m) => (AnnoS g f c -> m (AnnoS g' f c')) -> ExprS g f c -> m (ExprS g' f c')
 mapExprSM f (VarS v xs) = VarS v <$> traverse f xs
 mapExprSM f (AppS x xs) = AppS <$> f x <*> mapM f xs
+mapExprSM f (PatS g c ev app) = do
+  AnnoS g' c' _ <- f (AnnoS g c UniS)
+  PatS g' c' ev <$> traverse f app
 mapExprSM f (LamS vs x) = LamS vs <$> f x
 mapExprSM f (ShapeS w sh r) = ShapeS w sh <$> f r
 mapExprSM f (LstS xs) = LstS <$> mapM f xs
@@ -1337,6 +1404,7 @@ foldExprS :: (Foldable f, Monoid m) => (AnnoS g f c -> m) -> ExprS g f c -> m
 foldExprS f (VarS _ xs)       = foldMap f xs
 foldExprS f (ShapeS _ _ r)    = f r
 foldExprS f (AppS x xs)       = f x <> foldMap f xs
+foldExprS f (PatS _ _ _ app)  = foldMap f app
 foldExprS f (LamS _ x)        = f x
 foldExprS f (LstS xs)         = foldMap f xs
 foldExprS f (TupS xs)         = foldMap f xs
@@ -1540,6 +1608,7 @@ instance (Foldable f) => Pretty (AnnoS a f b) where
 
 instance (Foldable f) => Pretty (ExprS a f b) where
   pretty (AppS e es) = "(AppS" <+> list (map pretty (e : es)) <> ")"
+  pretty (PatS _ _ _ app) = "(PatS" <+> pretty (patAppPattern app) <+> list (map pretty (toList app)) <> ")"
   pretty (ShapeS _ _ r) = "(ShapeS" <+> pretty r <> ")"
   pretty (VarS v res) = "(VarS" <+> pretty v <+> "=" <+> list (map pretty (toList res)) <> ")"
   pretty (LamS vs e) = "(LamS" <+> list (map pretty vs) <+> "->" <+> pretty e <> ")"
@@ -1567,7 +1636,6 @@ instance (Foldable f) => Pretty (ExprS a f b) where
 
 instance Pretty ExecutableExpr where
   pretty (SrcCall (Idx _ src)) = pretty src
-  pretty (PatCall pat) = pretty pat
 
 instance Pretty Signature where
   pretty (Signature v _ e) = pretty v <+> "::" <+> pretty (etype e)

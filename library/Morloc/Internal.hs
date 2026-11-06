@@ -53,12 +53,14 @@ module Morloc.Internal
     -- * Stateful mapping
   , statefulMap
   , statefulMapM
+  , statefulTraverseM
   , filterApart
   ) where
 
 import Control.Applicative ((<|>))
 import Control.Monad
 import Control.Monad.IO.Class
+import qualified Control.Monad.State.Strict as CMS
 import Data.Char (isLower, isUpper, toLower)
 import Data.Either
 import Data.Foldable (foldlM, foldrM)
@@ -109,6 +111,12 @@ statefulMap f s0 (x : xs) =
        in (sn, y : ys)
 
 -- | Monadic 'statefulMap'
+-- | 'statefulMapM' over any traversable.
+statefulTraverseM :: (Monad m, Traversable t) => (s -> a -> m (s, b)) -> s -> t a -> m (s, t b)
+statefulTraverseM f s0 t = do
+  (t', s1) <- CMS.runStateT (traverse (\x -> CMS.StateT (fmap (\(s', y) -> (y, s')) . (`f` x))) t) s0
+  return (s1, t')
+
 statefulMapM :: (Monad m) => (s -> a -> m (s, b)) -> s -> [a] -> m (s, [b])
 statefulMapM _ s [] = return (s, [])
 statefulMapM f s (x : xs) = do

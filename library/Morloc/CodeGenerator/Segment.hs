@@ -97,6 +97,9 @@ segmentExpr m args (PolyApp e es) = do
   (ms, (lang, e')) <- segmentExpr m args e
   (mss, es') <- mapM (segmentExpr m args) es |>> unzip
   return (ms ++ concat mss, (lang, MonoApp e' (map snd es')))
+segmentExpr m args (PolyPat t app) = do
+  results <- mapM (segmentExpr m args) app
+  return (concatMap fst results, (Nothing, MonoPat t (fmap (snd . snd) results)))
 segmentExpr m args (PolyCacheBody lbl midx cargs e) = do
   (ms, (lang, e')) <- segmentExpr m args e
   return (ms, (lang, MonoCacheBody lbl midx cargs e'))
@@ -172,6 +175,7 @@ monoHasRec (MonoManifold _ _ _ e) = monoHasRec e
 monoHasRec (MonoLet _ a b) = monoHasRec a || monoHasRec b
 monoHasRec (MonoReturn e) = monoHasRec e
 monoHasRec (MonoApp f xs) = monoHasRec f || any monoHasRec xs
+monoHasRec (MonoPat _ app) = any monoHasRec app
 monoHasRec (MonoCacheBody _ _ _ e) = monoHasRec e
 monoHasRec (MonoDebugWrap _ _ e) = monoHasRec e
 monoHasRec (MonoRecord _ _ _ es) = any (monoHasRec . snd . snd) es
@@ -204,6 +208,7 @@ reindexRecShadows s = go
     go (MonoLet i a b) = MonoLet i <$> go a <*> go b
     go (MonoReturn e) = MonoReturn <$> go e
     go (MonoApp f xs) = MonoApp <$> go f <*> mapM go xs
+    go (MonoPat t app) = MonoPat t <$> mapM go app
     go (MonoCacheBody l i as e) = MonoCacheBody l i as <$> go e
     go (MonoDebugWrap i as e) = MonoDebugWrap i as <$> go e
     go (MonoRecord n v ts es) =
@@ -245,12 +250,12 @@ checkScopes h@(MonoHead lang m args _ body) = do
       MonoBndVar _ i -> missing [i]
       MonoReturn x -> go sc x
       MonoApp f xs -> go sc f <> concatMap (go sc) xs
+      MonoPat _ app -> concatMap (go sc) app
       MonoCacheBody _ _ xs x -> missing (map ann xs) <> go sc x
       MonoDebugWrap _ xs x -> missing (map ann xs) <> go sc x
       MonoExe _ (LocalCallP j) -> missing [j]
       MonoExe _ (PapplyP j) -> missing [j]
       MonoExe _ (SrcCallP _ _) -> []
-      MonoExe _ (PatCallP _) -> []
       MonoExe _ (RecCallP _ _) -> []
       MonoRecord _ _ _ fs -> concatMap (go sc . snd . snd) fs
       MonoList _ _ xs -> concatMap (go sc) xs

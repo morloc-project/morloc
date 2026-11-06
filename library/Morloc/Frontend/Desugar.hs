@@ -1574,8 +1574,8 @@ applyAccessor sp (CABIdx idx tail') subject = do
   applyTail sp tail' applied
 applyAccessor sp (CABGroup bodies) subject = do
   -- First try to fold the whole group into a single unified-Selector
-  -- PatCall. This keeps the pattern as ONE first-class object
-  -- (instead of a TupE of separate PatCall applications), which lets
+  -- pattern. This keeps the pattern as ONE first-class object
+  -- (instead of a TupE of separate pattern applications), which lets
   -- IFile-aware codegen emit a single walker call and gives any
   -- future pattern-level optimisation an undisturbed AST to work on.
   --

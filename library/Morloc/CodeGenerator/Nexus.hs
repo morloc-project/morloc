@@ -18,6 +18,7 @@ module Morloc.CodeGenerator.Nexus
   ( generate
   ) where
 
+import Data.Foldable (toList)
 import Morloc.Data.Zip (indexed, indexedFrom, zipExact, zipSame)
 import qualified Control.Monad as CM
 import Morloc.CodeGenerator.DimContract (dimConstraints)
@@ -594,6 +595,15 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
     -- A suspension held as a value has no representation in the nexus
     -- evaluator, which has no closure values; it must be run in place
     -- (bound with <-) or realized in a pool.
+    patAppX t ft app =
+      AppX
+        <$> type2schema t
+        <*> (PatX <$> type2schema (funResult ft) <*> pure (patAppPattern app))
+        <*> mapM toNexusExpr (toList app)
+      where
+        funResult (FunT _ r) = r
+        funResult r = r
+
     heldSuspension :: MDoc -> AnnoS (Indexed Type) One () -> MorlocMonad ()
     heldSuspension how (AnnoS (Idx ix (EffectT _ _)) _ _) =
       MM.throwSourcedError ix $
@@ -630,13 +640,13 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
     -- @(Null :: ?Int64)@ (from the desugar's empty-bound annotation),
     -- bare integer literals, and explicit @(_ :: Int*)@ annotations
     -- all pass.
-    -- IFile pattern detection at the nexus path: any PatCall on an
+    -- IFile pattern detection at the nexus path: any pattern on an
     -- IFile-typed receiver routes to the unified IFile walker rather
     -- than the generic Array/Tuple dispatch. The receiver is a u64
     -- handle, not an in-memory structure; the standard apply_*
     -- functions would cast garbage. Mirrors Express.hs's pool-path
     -- IFile detection.
-    toNexusExpr (AnnoS (Idx _ t) _ (AppS funcE@(AnnoS _ _ (ExeS (PatCall PatternBracketSlice))) [sE, eE, pE, rE])) = do
+    toNexusExpr (AnnoS (Idx _ t) _ (PatS (Idx _ ft) _ _ app@(PatSlice sE eE pE rE))) = do
       validateBracketBound "start" sE
       validateBracketBound "stop"  eE
       validateBracketBound "step"  pE
@@ -644,49 +654,26 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
         then emitIFileWalkX t rE IFile.bracketSliceSteps [sE, eE, pE]
         else do
           requireListReceiver rE
-          AppX <$> type2schema t <*> toNexusExpr funcE <*> mapM toNexusExpr [sE, eE, pE, rE]
-    toNexusExpr (AnnoS (Idx _ t) _ (AppS funcE@(AnnoS _ _ (ExeS (PatCall PatternBracketIndex))) [iE, rE])) = do
+          patAppX t ft app
+    toNexusExpr (AnnoS (Idx _ t) _ (PatS (Idx _ ft) _ _ app@(PatIndex iE rE))) = do
       validateBracketBound "index" iE
       if recvIsIFile rE
         then emitIFileWalkX t rE IFile.bracketIndexSteps [iE]
         else do
           requireListReceiver rE
-          AppX <$> type2schema t <*> toNexusExpr funcE <*> mapM toNexusExpr [iE, rE]
-    -- PatternStruct app with brackets in the Selector. The first
-    -- bracketArity(sel) args are the bracket bounds (DFS order) and
-    -- the LAST arg is the receiver. IFile receivers route to the
-    -- walker; non-IFile receivers with bracket-in-Selector are
-    -- currently unsupported by the runtime (codegen for that case
-    -- isn't wired yet).
-    toNexusExpr (AnnoS (Idx midx t) _ (AppS funcE@(AnnoS _ _ (ExeS (PatCall (PatternStruct sel)))) appArgs))
-      | bracketArity sel > 0 =
-          let n        = bracketArity sel
-              rE       = last appArgs
-              brackets = take n appArgs
-          in if length appArgs /= n + 1
-               then MM.throwSourcedError midx
-                      ("PatternStruct app with brackets: expected "
-                       <> pretty (n + 1)
-                       <> " args (bracket bounds + receiver), got "
-                       <> pretty (length appArgs))
-               else do
-                 mapM_ (validateBracketBound "bracket") brackets
-                 if recvIsIFile rE
-                   then do
-                     steps <- IFile.selectorToWalkSteps (annoIdx rE) sel
-                     emitIFileWalkX t rE steps brackets
-                   else
-                     AppX <$> type2schema t
-                          <*> toNexusExpr funcE
-                          <*> mapM toNexusExpr appArgs
-    -- Pure-field PatternStruct getter on an IFile receiver (no
-    -- brackets, single receiver arg). Routes to the walker.
-    toNexusExpr (AnnoS (Idx _ t) _ (AppS funcE@(AnnoS _ _ (ExeS (PatCall (PatternStruct sel)))) [rE]))
-      | recvIsIFile rE = do
+          patAppX t ft app
+    -- A getter on an IFile receiver routes to the walker. A selector's
+    -- bracket bounds are in DFS order.
+    toNexusExpr (AnnoS (Idx _ t) _ (PatS (Idx _ ft) _ _ app@(PatGet sel bounds rE))) = do
+      mapM_ (validateBracketBound "bracket") bounds
+      if recvIsIFile rE
+        then do
           steps <- IFile.selectorToWalkSteps (annoIdx rE) sel
-          emitIFileWalkX t rE steps []
-      | otherwise =
-          AppX <$> type2schema t <*> toNexusExpr funcE <*> mapM toNexusExpr [rE]
+          emitIFileWalkX t rE steps bounds
+        else patAppX t ft app
+    toNexusExpr (AnnoS (Idx _ t) _ (PatS (Idx _ ft) _ _ app)) = do
+      mapM_ (heldSuspension "passed as an argument") app
+      patAppX t ft app
     -- a shared specialization the nexus calls by name
     toNexusExpr (AnnoS (Idx _ t) _ (AppS (AnnoS _ _ (CallS v)) es)) = do
       mapM_ (heldSuspension "passed as an argument") es
@@ -695,13 +682,12 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
       mapM_ (heldSuspension "passed as an argument") es
       AppX <$> type2schema t <*> toNexusExpr e <*> mapM toNexusExpr es
     toNexusExpr (AnnoS _ _ (LamS vs e)) = LamX (map (render . pretty) vs) <$> toNexusExpr e
-    toNexusExpr (AnnoS (Idx _ (FunT _ t)) _ (ExeS (PatCall p))) = PatX <$> type2schema t <*> pure p
     toNexusExpr (AnnoS (Idx _ t) _ (BndS v)) = BndX <$> type2schema t <*> pure (render (pretty v))
     toNexusExpr (AnnoS (Idx _ t) _ (LstS es)) = do
       mapM_ (heldSuspension "stored in a list") es
       LstX <$> type2schema t <*> mapM toNexusExpr es
     -- TupS construction. Multi-field patterns are no longer fragmented
-    -- at desugar time (they emit a unified PatCall (PatternStruct ...)
+    -- at desugar time (they emit a unified PatS (PatGet ...)
     -- instead), so any TupS reaching here is a user-written tuple
     -- literal or the legacy fall-back form for mixed-kind groups that
     -- can't be unified. Standard per-element rendering applies.
@@ -926,7 +912,7 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
       StderrX <$> type2schema (handleStorageOfResult t)
     -- @ifile_walk: synthesised by Express.hs on pool-bound manifolds.
     -- Args: [pathExpr (Str lit), handle, runtime args...]. The nexus
-    -- path normally constructs IFileWalkX directly from PatCall +
+    -- path normally constructs IFileWalkX directly from a pattern +
     -- IFile-receiver detection (see toNexusExpr cases above); this
     -- handler exists to support any future site that synthesises the
     -- IntrinsicS form directly.

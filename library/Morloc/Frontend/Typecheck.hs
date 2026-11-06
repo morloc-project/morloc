@@ -17,9 +17,11 @@ segregation in the code generator.
 -}
 module Morloc.Frontend.Typecheck (typecheck, typecheckRoot, typecheckRootAt, validate, resolveTypes, evaluateAnnoSTypes, peakSExpr) where
 
+import Data.Foldable (toList)
 import Morloc.Data.Zip (indexed, zipPrefix, zipSame, zipWithSame)
 import Data.IORef (IORef, modifyIORef', newIORef, readIORef)
 import qualified Data.List as List
+import qualified Data.List.NonEmpty as NE
 import Data.Text (Text)
 import qualified Data.Text as MT
 import qualified Morloc.BaseTypes as BT
@@ -274,7 +276,10 @@ typecheckWith expected = run
       -- An input's length is the caller's; equating it with a length a call
       -- chooses cannot be checked when the command starts (DIM-10).
       let taken = filter (`Set.member` gammaObserved g3) (inwardNats rootType)
-          calls = [j | AnnoS (Idx j t) _ (AppS _ _) <- annoNodes e3, any (`elem` taken) (collectNatVarNames (apply g3 t))]
+          isCall (AppS _ _) = True
+          isCall PatS {} = True
+          isCall _ = False
+          calls = [j | AnnoS (Idx j t) _ x <- annoNodes e3, isCall x, any (`elem` taken) (collectNatVarNames (apply g3 t))]
       case e3 of
         AnnoS (Idx i _) _ _
           | not (null taken) ->
@@ -482,6 +487,7 @@ resolveTypes (AnnoS (Idx i t) ci e) =
     f (VarS v xs) = VarS v (fmap resolveTypes xs)
     f (ExeS exe) = ExeS exe
     f (AppS x xs) = AppS (resolveTypes x) (map resolveTypes xs)
+    f x@PatS {} = mapExprS resolveTypes x
     f (LamS vs x) = LamS vs (resolveTypes x)
     f (LstS xs) = LstS (map resolveTypes xs)
     f (TupS xs) = TupS (map resolveTypes xs)
@@ -675,13 +681,14 @@ resolveInstances mode g (AnnoS gi@(Idx _ gt) ci e0) = do
     f _ _ g0 (ConS tv n i xs) = do
       (g1, xs') <- statefulMapM recur g0 xs
       return (g1, ConS tv n i xs')
-    f scope _ g0 (ExeS x@(PatCall p))
-      | Just (what, pos, methods) <- bracketRule p
-      , FunU args _ <- gt
-      , length args > pos = do
-          checkBracketReceiver scope ci what methods (args !! pos)
-          return (g0, ExeS x)
     f _ _ g0 (ExeS x) = return (g0, ExeS x)
+    f scope _ g0 (PatS fg@(Idx _ ft) fc ev app) = do
+      (g1, app') <- statefulTraverseM recur g0 app
+      case (bracketRule (patAppPattern app), ft) of
+        (Just (what, pos, methods), FunU args _)
+          | length args > pos -> checkBracketReceiver scope fc what methods (args !! pos)
+        _ -> return ()
+      return (g1, PatS fg fc ev app')
     f _ _ g0 (DoBlockS e) = recur g0 e |>> second DoBlockS
     f _ _ g0 (EvalS e) = recur g0 e |>> second EvalS
     f _ _ g0 (CoerceS c e) = recur g0 e |>> second (CoerceS c)
@@ -1039,23 +1046,16 @@ synthE i g0 (ConS tv n ord xs) = do
 -- rule below sees the receiver. See 'reduceSetterRedex'.
 synthE i g0 e | Just e' <- reduceSetterRedex e = synthE i g0 e'
 
-synthE i g (AppS f@(AnnoS _ _ (ExeS (PatCall (PatternText _ _)))) es) = do
-  (g1, _, f1) <- synthG g f
-  (g2, _, es1, _) <- zipCheck i g1 es (map (const BT.strU) es)
-  return (g2, BT.strU, AppS f1 es1)
+synthE i g (PatS fgidx fcidx ev (PatText s xs)) = do
+  (g1, _, es1, _) <- zipCheck i g (map fst xs) (map (const BT.strU) xs)
+  let ft = FunU (map (const BT.strU) xs) BT.strU
+      xs1 = [(e, t) | (e, (_, t)) <- zipSame es1 xs]
+  return (g1, BT.strU, PatS (Idx fgidx ft) fcidx ev (PatText s xs1))
 
-synthE _ _ (AppS (AnnoS _ _ (ExeS (PatCall (PatternStruct _)))) []) = error "Unreachable application pattern to no data"
 -- A selector with bracket steps, e.g. @.(.0.[i], .1) f@. The arguments
 -- are the bracket bounds in DFS order, then the receiver.
-synthE i g0 (AppS (AnnoS fgidx fcidx (ExeS (PatCall (PatternStruct s)))) args)
-  | bracketArity s > 0 = do
-      let n = bracketArity s
-      when (length args /= n + 1) $
-        MM.throwSourcedError i $
-          "PatternStruct with bracket-containing selector expects"
-          <+> pretty (n + 1) <+> "args, got" <+> pretty (length args)
-      let bracketArgs = take n args
-          rcvArg      = last args
+synthE _ g0 (PatS fgidx fcidx ev (PatGet s bracketArgs@(_ : _) rcvArg)) = do
+      let n = length bracketArgs
       -- Bounds are not pinned to Int: codegen inserts the per-language
       -- __to_index__ cast.
       let nameForArgIx j = MT.pack ("_pat_bracket_arg_" <> show j <> "_")
@@ -1083,8 +1083,7 @@ synthE i g0 (AppS (AnnoS fgidx fcidx (ExeS (PatCall (PatternStruct s)))) args)
       let resolvedRetType = apply gArgChecked retType
           rcvFunInputType = if isIFile then rcvResolved else apply gArgChecked expectedInner
           ft = FunU (map (apply gArgChecked) bracketArgTypes <> [rcvFunInputType]) resolvedRetType
-          f1 = AnnoS (Idx fgidx ft) fcidx (ExeS (PatCall (PatternStruct s)))
-      return (gArgChecked, resolvedRetType, AppS f1 (bracketArgsChecked <> [rcvExpr]))
+      return (gArgChecked, resolvedRetType, PatS (Idx fgidx ft) fcidx ev (PatGet s bracketArgsChecked rcvExpr))
   where
     typecheckBracketArgs
       :: Gamma
@@ -1098,7 +1097,7 @@ synthE i g0 (AppS (AnnoS fgidx fcidx (ExeS (PatCall (PatternStruct s)))) args)
       return (g'', e' : es')
     typecheckBracketArgs _ _ _ =
       error "typecheckBracketArgs: length mismatch (should be unreachable)"
-synthE _ g0 (AppS (AnnoS fgidx fcidx (ExeS (PatCall (PatternStruct s)))) [e0]) = do
+synthE _ g0 (PatS fgidx fcidx ev (PatGet s [] e0)) = do
   -- On an @IFile a@ receiver the selector reads @a@. The function's input
   -- stays @IFile a@, which codegen (Express.hs) detects.
   (gsyn, rcvSyn, e0Syn) <- synthG g0 e0
@@ -1113,8 +1112,7 @@ synthE _ g0 (AppS (AnnoS fgidx fcidx (ExeS (PatCall (PatternStruct s)))) [e0]) =
       g2 <- subtype' fgidx structType innerType g1
       rejectListSelectorTarget fgidx s (apply g2 innerType)
       let ft = FunU [rcvResolved] (apply g2 retType)
-          f1 = AnnoS (Idx fgidx ft) fcidx (ExeS (PatCall (PatternStruct s)))
-      return (g2, apply g2 retType, AppS f1 [e0Syn])
+      return (g2, apply g2 retType, PatS (Idx fgidx ft) fcidx ev (PatGet s [] e0Syn))
     _ -> do
       rejectListSelectorTarget fgidx s rcvResolved
       (g1, datType) <- selectorType gsyn s
@@ -1125,13 +1123,13 @@ synthE _ g0 (AppS (AnnoS fgidx fcidx (ExeS (PatCall (PatternStruct s)))) [e0]) =
       let ft = FunU [datType] retType
       (g2, _, e') <- checkG g1 e0 datType
       rejectListSelectorTarget fgidx s (apply g2 datType)
-      let f1 = AnnoS (Idx fgidx ft) fcidx (ExeS (PatCall (PatternStruct s)))
-      return (g2, apply g2 retType, AppS f1 [e'])
+      return (g2, apply g2 retType, PatS (Idx fgidx ft) fcidx ev (PatGet s [] e'))
 
 -- Setter. The receiver is checked before the new values, so that
 -- @.count = 42@ can fill an @Int32@ field rather than synthesize @Int@.
-synthE i g0 (AppS (AnnoS fgidx fcidx (ExeS (PatCall (PatternStruct s)))) (e0 : es0)) = do
-  let (g1, slotVars) = statefulMap (\g _ -> newvar "set_slot_" g) g0 es0
+synthE i g0 (PatS fgidx fcidx ev (PatSet s e0 es0)) = do
+  let (g1, slots) = mapAccumL (\g _ -> newvar "set_slot_" g) g0 es0
+      slotVars = toList slots
   (g2, structType) <- selectorType g1 s
   outputType <- case selectorSetter slotVars s structType of
     Just t -> return t
@@ -1139,12 +1137,12 @@ synthE i g0 (AppS (AnnoS fgidx fcidx (ExeS (PatCall (PatternStruct s)))) (e0 : e
   (g3, datType, e1) <- checkG g2 e0 outputType
   rejectListSelectorTarget fgidx s (apply g3 datType)
   (g4, es1) <-
-    statefulMapM
+    statefulTraverseM
       (\g (e, slotT) -> do
          (g', _, e') <- checkG g e (apply g slotT)
          return (g', e'))
       g3
-      (zipSame es0 slotVars)
+      (NE.zip es0 slots)
   let setTypes = map (apply g4) slotVars
       receiverType = apply g4 datType
       -- Built from the receiver, not the selector's structural type, to
@@ -1152,15 +1150,11 @@ synthE i g0 (AppS (AnnoS fgidx fcidx (ExeS (PatCall (PatternStruct s)))) (e0 : e
       resultType =
         fromMaybe (apply g4 outputType) (selectorSetter setTypes s receiverType)
       patternType = FunU (receiverType : setTypes) resultType
-      f1 = AnnoS (Idx fgidx patternType) fcidx (ExeS (PatCall (PatternStruct s)))
-  return (g4, resultType, AppS f1 (e1 : es1))
-synthE _ g (ExeS (PatCall (PatternText s ss@(length -> n)))) = do
-  let t = FunU (take n (repeat BT.strU)) BT.strU
-  return (g, t, ExeS (PatCall (PatternText s ss)))
+  return (g4, resultType, PatS (Idx fgidx patternType) fcidx ev (PatSet s e1 es1))
 
 -- xs[i]. The index type stays open; codegen supplies the __to_index__
 -- cast.
-synthE _ g0 (AppS (AnnoS fgidx fcidx (ExeS (PatCall PatternBracketIndex))) [iExpr, rcvExpr]) = do
+synthE _ g0 (PatS fgidx fcidx ev (PatIndex iExpr rcvExpr)) = do
   -- An IFile receiver is indexed through; the function's input keeps the
   -- IFile so codegen detects it.
   (gsyn, rcvSyn, rcvSynExpr) <- synthG g0 rcvExpr
@@ -1175,8 +1169,7 @@ synthE _ g0 (AppS (AnnoS fgidx fcidx (ExeS (PatCall PatternBracketIndex))) [iExp
       (g5, _, i') <- checkG g4 iExpr idxType
       let resultType = apply g5 elemType
           ft = FunU [apply g5 idxType, rcvResolved] resultType
-          f1 = AnnoS (Idx fgidx ft) fcidx (ExeS (PatCall PatternBracketIndex))
-      return (g5, resultType, AppS f1 [i', rcvSynExpr])
+      return (g5, resultType, PatS (Idx fgidx ft) fcidx ev (PatIndex i' rcvSynExpr))
     _ -> do
       let (g1, elemType) = newvar "bidx_elem_" gsyn
           (g2, fExist)   = newvar "bidx_f_" g1
@@ -1186,16 +1179,11 @@ synthE _ g0 (AppS (AnnoS fgidx fcidx (ExeS (PatCall PatternBracketIndex))) [iExp
       (g5, _, i')   <- checkG g4 iExpr idxType
       let resultType = apply g5 elemType
           ft = FunU [apply g5 idxType, apply g5 expectedRcv] resultType
-          f1 = AnnoS (Idx fgidx ft) fcidx (ExeS (PatCall PatternBracketIndex))
-      return (g5, resultType, AppS f1 [i', rcvSynExpr])
-synthE i _ (AppS (AnnoS _ _ (ExeS (PatCall PatternBracketIndex))) args) =
-  MM.throwSourcedError i $
-    "A bracket index expects 2 args, got" <+> pretty (length args)
-
+      return (g5, resultType, PatS (Idx fgidx ft) fcidx ev (PatIndex i' rcvSynExpr))
 -- xs[i:j:k]. Each bound gets its own bare existential; whether a bound is
 -- absent is carried by NullS, not by the type. The result type is from
 -- 'bracketSliceResultType'.
-synthE _ g0 (AppS (AnnoS fgidx fcidx (ExeS (PatCall PatternBracketSlice))) [startE, stopE, stepE, rcvExpr]) = do
+synthE _ g0 (PatS fgidx fcidx ev (PatSlice startE stopE stepE rcvExpr)) = do
   (g1, rcvType, rcv') <- synthG g0 rcvExpr
   let rcvType' = apply g1 rcvType
       (g1a, bareResultType) = bracketSliceResultType g1 rcvType'
@@ -1216,27 +1204,7 @@ synthE _ g0 (AppS (AnnoS fgidx fcidx (ExeS (PatCall PatternBracketSlice))) [star
           else apply g7 bareResultType
       ft = FunU [apply g7 startTy, apply g7 stopTy, apply g7 stepTy, rcvType']
               resultType
-      f1 = AnnoS (Idx fgidx ft) fcidx (ExeS (PatCall PatternBracketSlice))
-  return (g7, resultType, AppS f1 [s1, s2, s3, rcv'])
-synthE i _ (AppS (AnnoS _ _ (ExeS (PatCall PatternBracketSlice))) args) =
-  MM.throwSourcedError i $
-    "A bracket slice expects 4 args, got" <+> pretty (length args)
-
--- Bracket patterns used as values, not applied.
-synthE _ g (ExeS (PatCall PatternBracketIndex)) = do
-  let (g1, a) = newvar "bidx_elem_" g
-      (g2, r) = newvar "bidx_recv_" g1
-      (g3, i) = newvar "bidx_idx_"  g2
-      ft = FunU [i, r] a
-  return (g3, ft, ExeS (PatCall PatternBracketIndex))
-synthE _ g (ExeS (PatCall PatternBracketSlice)) = do
-  let (g1, a) = newvar "bslice_recv_"  g
-      (g2, s) = newvar "bslice_start_" g1
-      (g3, t) = newvar "bslice_stop_"  g2
-      (g4, p) = newvar "bslice_step_"  g3
-      ft = FunU [OptionalU s, OptionalU t, OptionalU p, a] a
-  return (g4, ft, ExeS (PatCall PatternBracketSlice))
-
+  return (g7, resultType, PatS (Idx fgidx ft) fcidx ev (PatSlice s1 s2 s3 rcv'))
 --   -->E0
 synthE _ g (AppS f []) = do
   (g1, t1, f1) <- synthG g f
@@ -1459,15 +1427,6 @@ synthE i g0 (VarS v (PolymorphicExpr cls clsName t0 rs0)) = do
 
       return (g12, applyGen g12 e' : es')
 
--- A selector used as a value, not applied.
-synthE _ g0 (ExeS (PatCall (PatternStruct s))) = do
-  (g1, datType) <- selectorType g0 s
-  retType <- return $ case selectorGetter datType s of
-    [] -> error "Illegal empty selection"
-    [t] -> t
-    ts -> BT.tupleU ts
-  let ft = FunU [datType] retType
-  return (g1, ft, ExeS (PatCall (PatternStruct s)))
 -- The existential is subtyped against the type the enclosing VarS knows.
 synthE _ g (ExeS exe) = do
   let (g', t) = newvar "call_" g
@@ -2564,9 +2523,9 @@ checkE i g UniS t = do
 -- the value slots first, so @.(.n = 42) r@ can write an @I32@ field. The
 -- expected type only pins slots the receiver would pin the same way. A
 -- setter that changes its receiver's type cannot be seated and falls back.
-checkE i g0 e@(AppS (AnnoS fgidx fcidx (ExeS (PatCall (PatternStruct s)))) (e0 : es0@(_ : _))) t
-  | not (selectorHasBracket s) = do
-      let (g1, slotVars) = statefulMap (\g _ -> newvar "set_slot_" g) g0 es0
+checkE i g0 e@(PatS fgidx fcidx ev (PatSet s e0 es0)) t = do
+      let (g1, slots) = mapAccumL (\g _ -> newvar "set_slot_" g) g0 es0
+          slotVars = toList slots
       (g2, structType) <- selectorType g1 s
       scope <- MM.getGeneralScope
       let seated = do
@@ -2579,20 +2538,18 @@ checkE i g0 e@(AppS (AnnoS fgidx fcidx (ExeS (PatCall (PatternStruct s)))) (e0 :
           (g4, datType, e1) <- checkG g3 e0 (apply g3 outputType)
           rejectListSelectorTarget fgidx s (apply g4 datType)
           (g5, es1) <-
-            statefulMapM
+            statefulTraverseM
               (\g (e', slotT) -> do
                  (g'', _, e'') <- checkG g e' (apply g slotT)
                  return (g'', e''))
               g4
-              (zipSame es0 slotVars)
+              (NE.zip es0 slots)
           let setTypes = map (apply g5) slotVars
               receiverType = apply g5 datType
               resultType =
                 fromMaybe (apply g5 outputType) (selectorSetter setTypes s receiverType)
               patternType = FunU (receiverType : setTypes) resultType
-              f1 = AnnoS (Idx fgidx patternType) fcidx (ExeS (PatCall (PatternStruct s)))
-          return (g5, resultType, AppS f1 (e1 : es1))
--- Patterns have synthesis rules that the App-Check rule below would bypass.
+          return (g5, resultType, PatS (Idx fgidx patternType) fcidx ev (PatSet s e1 es1))
 checkE i g0 e@(AppS (AnnoS _ _ (ExeS _)) _) t = checkEFallback i g0 e t
 -- Against @?T@ the App-Check rule would push the optional into the
 -- parameters (@at :: f a -> a@ would need @xs :: f ?a@); the fallback
@@ -2767,19 +2724,10 @@ reduceSetterRedex ::
   Maybe (ExprS Int ManyPoly Int)
 reduceSetterRedex
   ( AppS
-      ( AnnoS _ _
-          ( LamS [v]
-              ( AnnoS _ _
-                  ( AppS
-                      pat@(AnnoS _ _ (ExeS (PatCall (PatternStruct _))))
-                      (AnnoS _ _ (BndS v') : values@(_ : _))
-                    )
-                )
-            )
-        )
+      (AnnoS _ _ (LamS [v] (AnnoS _ _ (PatS gi ci ev (PatSet s (AnnoS _ _ (BndS v')) values)))))
       [receiver]
     )
-    | v == v' = Just (AppS pat (receiver : values))
+    | v == v' = Just (PatS gi ci ev (PatSet s receiver values))
 reduceSetterRedex _ = Nothing
 
 -- | The join of two suspension types whose rows have at most one tail
@@ -2975,6 +2923,7 @@ collectDoEffects = go
       EvalS e -> effectOfAnno e `effUnion` go e
       LetS _ e1 e2 -> go e1 `effUnion` go e2
       AppS f args -> unions (go f : map go args)
+      PatS _ _ _ app -> unions (map go (toList app))
       TupS es -> unions (map go es)
       LstS es -> unions (map go es)
       NamS rs -> unions (map (go . snd) rs)
@@ -3010,6 +2959,7 @@ inferExprEffects = go
       EvalS e -> effectOfAnno e `effUnion` go e
       LetS _ e1 e2 -> go e1 `effUnion` go e2
       AppS f args -> unions (go f : map go args)
+      PatS _ _ _ app -> unions (map go (toList app))
       TupS es -> unions (map go es)
       LstS es -> unions (map go es)
       NamS rs -> unions (map (go . snd) rs)
@@ -3107,6 +3057,7 @@ uncoveredEvalIdxs uncovered = go
         | otherwise -> go e
       LetS _ e1 e2 -> go e1 ++ go e2
       AppS f' args -> go f' ++ concatMap go args
+      PatS _ _ _ app -> concatMap go app
       TupS es -> concatMap go es
       LstS es -> concatMap go es
       NamS rs -> concatMap (go . snd) rs
@@ -3220,8 +3171,7 @@ tryEvalConst g (LstS es) = ConstList <$> mapM (\(AnnoS _ _ e) -> tryEvalConst g 
 tryEvalConst g (LetS v (AnnoS _ _ e1) (AnnoS _ _ e2)) = do
   val' <- tryEvalConst g e1
   tryEvalConst (g { gammaIntVals = Map.insert v val' (gammaIntVals g) }) e2
-tryEvalConst g (AppS (AnnoS _ _ (ExeS (PatCall (PatternStruct
-  (SelectorIdx (idx, SelectorEnd) []))))) [AnnoS _ _ inner])
+tryEvalConst g (PatS _ _ _ (PatGet (SelectorIdx (idx, SelectorEnd) []) [] (AnnoS _ _ inner)))
   = case tryEvalConst g inner of
       Just (ConstTup vs) | idx >= 0, idx < length vs -> Just (vs !! idx)
       _ -> Nothing
@@ -3507,6 +3457,7 @@ runTimeVars = Set.fromList . concatMap go
 
 peakSExpr :: ExprS Int ManyPoly Int -> MDoc
 peakSExpr UniS = "UniS"
+peakSExpr (PatS _ _ _ app) = "PatS" <+> pretty (patAppPattern app)
 peakSExpr NullS = "NullS"
 peakSExpr (VarS v (MonomorphicExpr mayT _)) = "VarS" <+> pretty v <+> "::" <+> maybe "?" pretty mayT
 peakSExpr (VarS v (PolymorphicExpr cls _ t _)) = "VarS" <+> pretty cls <+> " => " <+> pretty v <+> "::" <+> pretty t

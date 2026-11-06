@@ -6,6 +6,7 @@ Description : Which reads 'checkNative' reports as seeing a taken payload
 -}
 module OwnershipCheckTests (ownershipCheckTests) where
 
+import Data.List.NonEmpty (NonEmpty (..))
 import qualified Data.Set as Set
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit
@@ -145,5 +146,5 @@ takeCases =
     tup = TupleN (FV (TV "t") (CV "t"))
     field i = IntrinsicN ty IntrCtorField Nothing [rd i, StrN fv "Link", IntN fv 1]
     tag i = IntrinsicN ty IntrTagTest Nothing [rd i, StrN fv "Link"]
-    setK r = AppExeN ty (PatCallP (PatternStruct (SelectorKey ("k", SelectorEnd) []))) [NativeArgExpr r, NativeArgExpr (IntN fv 2)]
+    setK r = PatN ty (PatSet (SelectorKey ("k", SelectorEnd) []) (NativeArgExpr r) (NativeArgExpr (IntN fv 2) :| []))
     loop starts body = LoopN ty starts body

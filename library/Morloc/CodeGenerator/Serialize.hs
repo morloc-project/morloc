@@ -17,6 +17,7 @@ module Morloc.CodeGenerator.Serialize
   ( serialize
   ) where
 
+import Data.Foldable (toList)
 import Morloc.Data.Zip (zip3Same, zipExact, zipSame, zipWithSameM)
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -365,6 +366,7 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
         -- manifold boundary (a pool call, loop, suspension or wrap does).
         inlinable x = case x of
           MonoApp (MonoExe _ _) xs -> all inlinable xs
+          MonoPat _ app -> all inlinable app
           MonoApp (MonoLetVar _ _) xs -> all inlinable xs
           MonoManifold _ _ _ b -> inlinable b
           MonoReturn b -> inlinable b
@@ -461,6 +463,15 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
         remaining -> inferType $ Idx idx (FunT remaining outputType)
 
       return $ AppExeN appType exe args
+    nativeExpr m (MonoPat (Idx idx t0) app) = do
+      args <- mapM (nativeArg m) app
+      let (inputTypes, outputType) = case t0 of
+            FunT its ot -> (its, ot)
+            _ -> ([], t0)
+      appType <- case drop (length app) inputTypes of
+        [] -> inferType (Idx idx outputType)
+        remaining -> inferType $ Idx idx (FunT remaining outputType)
+      return $ PatN appType args
     nativeExpr m e@(MonoApp (MonoPoolCall t _ _ _ _) _) = do
       e' <- serialExpr m e
       t' <- inferType t
@@ -1109,6 +1120,7 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
       Map.unionsWith mergeTypes (Map.singleton j (Right hg) : map (makeTypemap idx) es)
     makeTypemap _ (MonoApp (MonoExe (ann -> idx) _) es) = Map.unionsWith mergeTypes (map (makeTypemap idx) es)
     makeTypemap parentIdx (MonoApp e es) = Map.unionsWith mergeTypes (map (makeTypemap parentIdx) (e : es))
+    makeTypemap _ (MonoPat (ann -> idx) app) = Map.unionsWith mergeTypes (map (makeTypemap idx) (toList app))
     makeTypemap parentIdx (MonoCacheBody _ _ _ e) = makeTypemap parentIdx e
     makeTypemap parentIdx (MonoDebugWrap _ _ e) = makeTypemap parentIdx e
     makeTypemap _ (MonoList (ann -> idx) _ es) = Map.unionsWith mergeTypes (map (makeTypemap idx) es)
@@ -1134,6 +1146,7 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
     inferState :: MonoExpr -> SerializationState
     inferState (MonoApp MonoPoolCall {} _) = Serialized
     inferState (MonoApp MonoExe {} _) = Unserialized
+    inferState (MonoPat {}) = Unserialized
     inferState (MonoApp (MonoManifold _ _ _ e) _) = inferState e
     inferState (MonoLet _ _ e) = inferState e
     inferState (MonoReturn e) = inferState e

@@ -23,6 +23,7 @@ module Morloc.CodeGenerator.Express
   , polyFreeVars
   ) where
 
+import Data.Foldable (toList)
 import Morloc.Data.Zip (zipPrefix, zipSame, zipWithSame)
 import qualified Morloc.Data.Zip as Zip
 import qualified Data.Set as Set
@@ -447,6 +448,7 @@ cacheWrapExpr (PolyManifold l m form k inner) = do
     Nothing -> PolyManifold l m form k inner'
 cacheWrapExpr (PolyApp f args) =
   PolyApp <$> cacheWrapExpr f <*> mapM cacheWrapExpr args
+cacheWrapExpr (PolyPat g app) = PolyPat g <$> mapM cacheWrapExpr app
 cacheWrapExpr (PolyCacheBody lbl m args body) =
   PolyCacheBody lbl m args <$> cacheWrapExpr body
 cacheWrapExpr (PolyLet i e1 e2) =
@@ -508,6 +510,7 @@ hasDebugWrapAt m (PolyCacheBody _ _ _ inner) = hasDebugWrapAt m inner
 hasDebugWrapAt m (PolyReturn e) = hasDebugWrapAt m e
 hasDebugWrapAt m (PolyLet _ e1 e2) = hasDebugWrapAt m e1 || hasDebugWrapAt m e2
 hasDebugWrapAt m (PolyApp h xs) = hasDebugWrapAt m h || any (hasDebugWrapAt m) xs
+hasDebugWrapAt m (PolyPat _ app) = any (hasDebugWrapAt m) app
 hasDebugWrapAt m (PolyDoBlock _ e) = hasDebugWrapAt m e
 hasDebugWrapAt m (PolyEval _ e) = hasDebugWrapAt m e
 hasDebugWrapAt m (PolyCoerce _ _ e) = hasDebugWrapAt m e
@@ -544,6 +547,7 @@ debugWrapExpr (PolyManifold l m form k inner) = do
   return $ PolyManifold l m form k (PolyDebugWrap m argsList inner')
 debugWrapExpr (PolyApp head' args') =
   PolyApp <$> debugWrapExpr head' <*> mapM debugWrapExpr args'
+debugWrapExpr (PolyPat g app) = PolyPat g <$> mapM debugWrapExpr app
 debugWrapExpr (PolyCacheBody lbl m args' body) =
   PolyCacheBody lbl m args' <$> debugWrapExpr body
 debugWrapExpr (PolyDebugWrap m args' body) =
@@ -648,7 +652,6 @@ expressCore (AnnoS (Idx midx c@(FunT inputs _)) (Idx cidx lang, _) (ExeS exe)) =
   ids <- MM.takeFromCounter (length inputs)
   exe' <- case exe of
     (SrcCall (Idx si src)) -> checkRsizeArity midx src (length inputs) >> return (SrcCallP (Written si) src)
-    (PatCall pat) -> return $ PatCallP pat
   let lambdaVals = zipWithSame (PolyBndVar . C . Idx cidx) inputs ids
   return
     . PolyHead lang midx [Arg i None | i <- ids]
@@ -870,42 +873,41 @@ optI64T = OptionalT (VarT BT.i64)
 expressBracketSlice
   :: Lang
   -> Int                       -- outer manifold index, reused for the synthetic SrcCall PolyExe
-  -> [Type]                    -- bracket pattern input types: [startT, stopT, stepT, rcvT]
   -> Type                      -- bracket pattern result type
-  -> [PolyExpr]                -- already-expressed args
+  -> (Type, PolyExpr)          -- start
+  -> (Type, PolyExpr)          -- stop
+  -> (Type, PolyExpr)          -- step
+  -> (Type, PolyExpr)          -- receiver
   -> MorlocMonad PolyExpr
-expressBracketSlice callLang midx inputs out xsExpr =
-  case (inputs, xsExpr) of
-    ([sT, eT, pT, rcvT], [sE, eE, pE, rcvE]) -> do
-      -- IFile receivers route to the unified runtime walker
-      -- (@mlc_ifile_walk). Each bound is still wrapped in __to_index__
-      -- because the desugar produces them with their natural types
-      -- and the wrapper marshals the optional encoding to the C ABI.
-      isIFile <- typeHeadIs BT.ifileVar rcvT
-      if isIFile
-        then do
+expressBracketSlice callLang midx out (sT, sE) (eT, eE) (pT, pE) (rcvT, rcvE) = do
+  -- IFile receivers route to the unified runtime walker
+  -- (@mlc_ifile_walk). Each bound is still wrapped in __to_index__
+  -- because the desugar produces them with their natural types
+  -- and the wrapper marshals the optional encoding to the C ABI.
+  isIFile <- typeHeadIs BT.ifileVar rcvT
+  if isIFile
+    then do
+      sW <- wrapBoundInToIndex callLang midx sT sE
+      eW <- wrapBoundInToIndex callLang midx eT eE
+      pW <- wrapBoundInToIndex callLang midx pT pE
+      emitIFileWalk callLang midx out bracketSliceSteps rcvE [sW, eW, pW]
+    else do
+      mPat <- tryPatternAccessible callLang midx out bracketSliceSteps rcvT
+                [(sT, sE), (eT, eE), (pT, pE)] rcvE
+      case mPat of
+        Just p -> return p
+        Nothing -> do
+          getSliceSrc <- requireInstance midx
+            (firstJustM
+              [ resolveInstanceForType findSliceableGetSlice midx callLang rcvT
+              , resolveInstanceForType findSliceableDimGetSliceDim midx callLang rcvT
+              ])
+            callLang "Sliceable.__get_slice__ or SliceableDim.__get_slice_dim__" rcvT
           sW <- wrapBoundInToIndex callLang midx sT sE
           eW <- wrapBoundInToIndex callLang midx eT eE
           pW <- wrapBoundInToIndex callLang midx pT pE
-          emitIFileWalk callLang midx out bracketSliceSteps rcvE [sW, eW, pW]
-        else do
-          mPat <- tryPatternAccessible callLang midx out bracketSliceSteps rcvT
-                    [(sT, sE), (eT, eE), (pT, pE)] rcvE
-          case mPat of
-            Just p -> return p
-            Nothing -> do
-              getSliceSrc <- requireInstance midx
-                (firstJustM
-                  [ resolveInstanceForType findSliceableGetSlice midx callLang rcvT
-                  , resolveInstanceForType findSliceableDimGetSliceDim midx callLang rcvT
-                  ])
-                callLang "Sliceable.__get_slice__ or SliceableDim.__get_slice_dim__" rcvT
-              sW <- wrapBoundInToIndex callLang midx sT sE
-              eW <- wrapBoundInToIndex callLang midx eT eE
-              pW <- wrapBoundInToIndex callLang midx pT pE
-              let fT = FunT [optI64T, optI64T, optI64T, rcvT] out
-              return $ PolyApp (PolyExe (Idx midx fT) (builtSrcCall getSliceSrc)) [sW, eW, pW, rcvE]
-    _ -> MM.throwSourcedError midx "PatternBracketSlice expects 4 arguments"
+          let fT = FunT [optI64T, optI64T, optI64T, rcvT] out
+          return $ PolyApp (PolyExe (Idx midx fT) (builtSrcCall getSliceSrc)) [sW, eW, pW, rcvE]
 
 -- | Run a list of @Maybe@-returning monadic lookups in order, returning
 -- the first @Just@. Used to fan out a single bracket op across multiple
@@ -928,34 +930,31 @@ firstJustM (m : ms) = do
 expressBracketIndex
   :: Lang
   -> Int
-  -> [Type]                    -- [indexT, rcvT]
   -> Type
-  -> [PolyExpr]                -- already-expressed args
+  -> (Type, PolyExpr)          -- index
+  -> (Type, PolyExpr)          -- receiver
   -> MorlocMonad PolyExpr
-expressBracketIndex callLang midx inputs out xsExpr =
-  case (inputs, xsExpr) of
-    ([iT, rcvT], [iE, rcvE]) -> do
-      -- IFile receivers route to the runtime intrinsic
-      -- @ifile_index, bypassing typeclass dispatch entirely. The
-      -- walker handles materialisation + bounds checks. Aliases are
-      -- resolved by walking the chain via @TE.reduceType@ until the
-      -- head TVar exposes itself.
-      isIFile <- typeHeadIs BT.ifileVar rcvT
-      if isIFile
-        then emitIFileWalk callLang midx out bracketIndexSteps rcvE [iE]
-        else do
-          mPat <- tryPatternAccessible callLang midx out bracketIndexSteps rcvT
-                    [(iT, iE)] rcvE
-          case mPat of
-            Just p -> return p
-            Nothing -> do
-              accessSrc <- requireInstance midx
-                (resolveInstanceForType findIndexableAccessIndex midx callLang rcvT)
-                callLang "Indexable.__access_index__" rcvT
-              iW <- wrapBoundInToIndex callLang midx iT iE
-              let fT = FunT [optI64T, rcvT] out
-              return $ PolyApp (PolyExe (Idx midx fT) (builtSrcCall accessSrc)) [iW, rcvE]
-    _ -> MM.throwSourcedError midx "PatternBracketIndex expects 2 arguments"
+expressBracketIndex callLang midx out (iT, iE) (rcvT, rcvE) = do
+  -- IFile receivers route to the runtime intrinsic
+  -- @ifile_index, bypassing typeclass dispatch entirely. The
+  -- walker handles materialisation + bounds checks. Aliases are
+  -- resolved by walking the chain via @TE.reduceType@ until the
+  -- head TVar exposes itself.
+  isIFile <- typeHeadIs BT.ifileVar rcvT
+  if isIFile
+    then emitIFileWalk callLang midx out bracketIndexSteps rcvE [iE]
+    else do
+      mPat <- tryPatternAccessible callLang midx out bracketIndexSteps rcvT
+                [(iT, iE)] rcvE
+      case mPat of
+        Just p -> return p
+        Nothing -> do
+          accessSrc <- requireInstance midx
+            (resolveInstanceForType findIndexableAccessIndex midx callLang rcvT)
+            callLang "Indexable.__access_index__" rcvT
+          iW <- wrapBoundInToIndex callLang midx iT iE
+          let fT = FunT [optI64T, rcvT] out
+          return $ PolyApp (PolyExe (Idx midx fT) (builtSrcCall accessSrc)) [iW, rcvE]
 
 -- | Walk the alias chain and check whether the receiver type's head
 -- TVar matches `target`. Mirrors the alias-walking strategy of
@@ -1061,79 +1060,42 @@ tryPatternAccessible callLang midx out steps rcvT bounds rcvE = do
         Just src -> Just <$>
           emitPatternAccessibleCall callLang midx out src steps rcvT bounds rcvE
 
--- | Unified PatternStruct dispatch. A getter's args are
--- @[bracket_bounds..., receiver]@, so a getter application always has
--- @bracketArity sel + 1@ of them. A setter's are
--- @[receiver, set_values...]@ and a setter selector never carries a
--- bracket step (the desugar rejects one), so a longer argument list
--- means a setter and the receiver is the first argument, not the last.
+-- | A getter on an IFile routes to the walker, and on a receiver with a
+-- 'PatternAccessible' instance to that instance, whatever the selector;
+-- otherwise it is read structurally. A setter always is: both of those read a
+-- value out of a receiver, and a setter rebuilds its receiver.
 --
--- IFile-typed receivers route to the walker via 'emitIFileWalk',
--- regardless of selector shape. Non-IFile receivers can use the
--- 'fallback' action (typically 'expressPolyApp') when the selector
--- has no brackets; with brackets, non-IFile receivers raise a
--- sourced error because the runtime path for unified-Selector
--- patterns on in-memory values isn't implemented yet (the fragmented
--- bracket-then-field form via separate PatCalls remains available).
---
--- A setter always takes the fallback. Both walkers this function can
--- route to read a value out of a receiver and neither writes one back:
--- the IFile walker reads a file, and a user 'PatternAccessible'
--- instance implements @__extract_pattern__@. A setter rebuilds its
--- receiver, which only the structural path expresses.
-dispatchPatternStruct
-  :: Lang
-  -> Int                       -- midx
-  -> Int                       -- cidxCall (currently unused; reserved)
-  -> Selector
-  -> [Type]                    -- input types (one per App arg)
-  -> Type                      -- output type (the FunT result)
-  -> [PolyExpr]                -- expressed args, same length as inputs
-  -> MorlocMonad PolyExpr      -- fallback for non-IFile pure-field case
-  -> MorlocMonad PolyExpr
-dispatchPatternStruct callLang midx _cidxCall sel inputs out xsExpr fallback =
-  case (inputs, xsExpr) of
-    ([], []) -> fallback
-    _ | length inputs > bracketArity sel + 1 -> fallback
-    _ -> do
-      let n         = bracketArity sel
-          rcvT      = last inputs
-          rcvE      = last xsExpr
-          bracketEs = take n xsExpr
-          bracketTs = take n inputs
-      steps <- selectorToWalkSteps midx sel
-      isIFile <- typeHeadIs BT.ifileVar rcvT
-      if isIFile
-        then emitIFileWalk callLang midx out steps rcvE bracketEs
-        else do
-          mPat <- tryPatternAccessible callLang midx out steps rcvT
-                    (zipSame bracketTs bracketEs) rcvE
-          case mPat of
-            Just p -> return p
-            Nothing -> fallback
-
--- | Unified per-'Pattern' dispatch for @AppS (ExeS (PatCall pat)) xs@.
--- Direct call-sites (in 'expressPolyExpr') and eta-expansion call-sites
--- (in 'expressPolyApp' for higher-order use of pattern-typed
--- expressions like @map firstOf fs@ where @firstOf f = .[0] f@) both
--- route through this so the IFile guard and user @PatternAccessible@
--- instance dispatch fire uniformly. Returns an UNWRAPPED 'PolyExpr';
--- callers wrap in 'PolyReturn' when the surrounding context needs it.
+-- Returns an UNWRAPPED 'PolyExpr'; callers wrap in 'PolyReturn' when the
+-- surrounding context needs it.
 dispatchPatCall
   :: Lang
   -> Int                       -- midx
-  -> Int                       -- cidxCall
-  -> Pattern
-  -> [Type]                    -- FunT inputs
-  -> Type                      -- FunT output
-  -> [PolyExpr]                -- expressed args
-  -> MorlocMonad PolyExpr      -- structural fallback (returns unwrapped)
+  -> Indexed Type              -- the pattern as a function of its arguments
+  -> Type                      -- its result
+  -> PatApp (Type, PolyExpr)   -- the arguments, each at its input type
   -> MorlocMonad PolyExpr
-dispatchPatCall callLang midx cidxCall pat inputs out xs fallback = case pat of
-  PatternBracketSlice -> expressBracketSlice callLang midx inputs out xs
-  PatternBracketIndex -> expressBracketIndex callLang midx inputs out xs
-  PatternStruct sel   -> dispatchPatternStruct callLang midx cidxCall sel inputs out xs fallback
-  _                   -> fallback
+dispatchPatCall callLang midx g out app = case app of
+  PatSlice s e p rcv -> expressBracketSlice callLang midx out s e p rcv
+  PatIndex i rcv -> expressBracketIndex callLang midx out i rcv
+  PatGet sel bounds (rcvT, rcvE) -> do
+    steps <- selectorToWalkSteps midx sel
+    isIFile <- typeHeadIs BT.ifileVar rcvT
+    if isIFile
+      then emitIFileWalk callLang midx out steps rcvE (map snd bounds)
+      else
+        tryPatternAccessible callLang midx out steps rcvT bounds rcvE
+          >>= maybe structural return
+  _ -> structural
+  where
+    structural = return (PolyPat g (fmap snd app))
+
+-- | A pattern's arguments, each with its input type.
+patWithInputs :: Int -> PatApp a -> [Type] -> MorlocMonad (PatApp (a, Type))
+patWithInputs i app ts = do
+  pairs <- zipArgs i (toList app) ts
+  case applyPattern (patAppPattern app) pairs of
+    Just typed -> return typed
+    Nothing -> MM.throwCompilerBugAt i "a pattern's arguments do not fit it"
 
 requireInstance
   :: Int
@@ -1633,12 +1595,12 @@ expressPolyExpr
       isLocal = isNothing remote
       stripPolyReturn (PolyReturn e) = return e
       stripPolyReturn e = return e
--- Inline pattern call: skip PolyManifold. PatCallP (record/struct
+-- Inline pattern call: skip PolyManifold. A pattern (record/struct
 -- accessors, format patterns) renders as a direct expression in the
 -- target language (e.g. `x.field` for .isFile). Wrapping in
 -- PolyManifold creates a nested manifold whose body's `return` leaks
 -- into the parent's scope when the manifold gets inlined by codegen.
--- Treating PatCallP like srcInline matches its semantics - it's
+-- Treating a pattern like srcInline matches its semantics - it's
 -- always a leaf expression, never a real function call.
 --
 -- Bracket patterns (.[i], .[s:e:p]) are rewritten here into the
@@ -1652,72 +1614,39 @@ expressPolyExpr
   findRemote
   parentLang
   pc
-  ( AnnoS
-      (Idx midx _)
-      (_, outerArgs)
-      (AppS f@(AnnoS (Idx _ ft@(FunT _ _)) (Idx cidxCall callLang, _) (ExeS (PatCall pat))) xs)
-    )
+  (AnnoS (Idx midx _) (_, outerArgs) (PatS g@(Idx _ ft) (Idx cidxCall callLang, _) _ app))
     | isLocal = do
-        mapM_ requireBoundDetermined (bracketBounds pat xs)
-        xsExpr <- zipArgs midx xs inputs >>= mapM (\(x, t) -> expressPolyArg callLang (Idx cidxCall t) x)
-        dispatchPatCall callLang midx cidxCall pat inputs out xsExpr
-          (expressPolyApp callLang f xsExpr >>= stripPolyReturn)
+        mapM_ requireBoundDetermined (bracketBounds app)
+        typed <- patWithInputs midx app inputs
+        xsExpr <- mapM (\(x, t) -> (,) t <$> expressPolyArg callLang (Idx cidxCall t) x) typed
+        dispatchPatCall callLang midx g out xsExpr
     -- Cross-pool bracket: receiver lives in one pool, surrounding
-    -- expression in another. Without this branch, the not-isLocal
-    -- generic AppS handler at the next clause would call
-    -- expressPolyApp, which builds a @PatCallP@; the per-language
-    -- Generic.hs::genericEvalPattern fallback then emits raw bracket
-    -- syntax (e.g. R's @m[[(i) + 1]]@) and skips the per-bound
-    -- @__to_index__@ cast plus the per-receiver @__access_index__@ /
-    -- @__get_slice__@ dispatch. That fallback is also semantically
-    -- broken for negative indices in R (@m[[-1]]@ means "all except
-    -- first", and @m[[0]]@ errors) and for mixed-width indices in
-    -- C++. The fix is to run the same SrcCall rewrite as the
-    -- isLocal branch, then wrap it in the cross-pool PolyManifold /
-    -- PolyRemoteInterface structure used by the generic not-isLocal
-    -- handler.
-    | not isLocal = do
-        mapM_ requireBoundDetermined (bracketBounds pat xs)
-        xsExpr <- zipArgs midx xs inputs >>= mapM (\(x, t) -> expressPolyArg callLang (mkIdx x t) x)
-        -- The inner callLang PolyManifold body needs PolyReturn to
-        -- emit a 'return' statement in the pool source; without it C++
-        -- generates a non-void function with no return and hits a
-        -- syntax / control-reaches-end error. @expressBracketSlice@ /
-        -- @expressBracketIndex@ return a bare @PolyApp@ (suited to the
-        -- inline isLocal path that strips PolyReturn anyway), so we
-        -- wrap them here. @expressPolyApp@ already returns
-        -- PolyReturn-wrapped on the non-bracket fallback path.
-        bracketCall <- case pat of
-          PatternBracketSlice ->
-            PolyReturn <$> expressBracketSlice callLang midx inputs out xsExpr
-          PatternBracketIndex ->
-            PolyReturn <$> expressBracketIndex callLang midx inputs out xsExpr
-          PatternStruct sel ->
-            -- Same unified dispatch as the isLocal branch, with a
-            -- PolyReturn wrapper for the cross-pool PolyManifold body.
-            dispatchPatternStruct callLang midx cidxCall sel inputs out xsExpr
-              (expressPolyApp callLang f xsExpr) >>= (return . PolyReturn)
-          _ ->
-            expressPolyApp callLang f xsExpr
-        innerWrap <- mkPolyManifold callLang midx (ManifoldFull (map unvalue outerArgs)) bracketCall
+    -- expression in another. The call runs in its own pool's manifold, with
+    -- the same dispatch as the local path: its per-bound @__to_index__@ casts
+    -- and per-receiver instance calls, not raw bracket syntax.
+    | otherwise = do
+        mapM_ requireBoundDetermined (bracketBounds app)
+        typed <- patWithInputs midx app inputs
+        xsExpr <- mapM (\(x, t) -> (,) t <$> expressPolyArg callLang (mkIdx x t) x) typed
+        call <- dispatchPatCall callLang midx g out xsExpr
+        -- The inner manifold's body needs PolyReturn to emit a 'return' in
+        -- the pool source.
+        innerWrap <- mkPolyManifold callLang midx (ManifoldFull (map unvalue outerArgs)) (PolyReturn call)
         let remoteApp =
               PolyReturn $ PolyApp
                 ( PolyRemoteInterface callLang pc [] (fromJust remote) innerWrap )
                 [PolyBndVar (A parentLang) i | Arg i _ <- outerArgs]
         mkPolyManifold parentLang midx (ManifoldFull (map unvalue outerArgs)) remoteApp
     where
-      (inputs, out) = splitFunAt (length xs) ft
+      (inputs, out) = splitFunAt (length app) ft
       remote = findRemote parentLang callLang
       isLocal = isNothing remote
-      stripPolyReturn (PolyReturn e) = return e
-      stripPolyReturn e = return e
       -- POLY-6 at the bound itself rather than at the bracket.
       requireBoundDetermined (AnnoS (Idx i t) _ _) = requireDetermined i t
-      bracketBounds PatternBracketIndex as = take (length as - 1) as
-      bracketBounds PatternBracketSlice as = take (length as - 1) as
-      bracketBounds (PatternStruct sel) as
-        | length as == bracketArity sel + 1 = take (bracketArity sel) as
-      bracketBounds _ _ = []
+      bracketBounds (PatIndex b _) = [b]
+      bracketBounds (PatSlice a b c _) = [a, b, c]
+      bracketBounds (PatGet _ bs _) = bs
+      bracketBounds _ = []
 expressPolyExpr
   findRemote
   parentLang
@@ -1758,7 +1687,7 @@ expressPolyExpr
         ids <- MM.takeFromCounter (length callInputs)
         let lambdaVals = bindVarIds ids (map (C . Idx cidx) callInputs)
             lambdaTypedArgs = zipWithSame annotate ids (map Just callInputs)
-        retapp <- expressEtaApp parentLang e lambdaVals
+        retapp <- expressPolyApp parentLang e lambdaVals
         -- Implicit eta-abstraction of a function value. Any variables the
         -- wrapped value closes over (e.g. a let-bound closure `f <- ...;
         -- applyIt f 10`) are captured as CONTEXT args so the trampoline
@@ -1776,7 +1705,7 @@ expressPolyExpr
         let lambdaArgs = [Arg i None | i <- ids]
             lambdaTypedArgs = map (`Arg` Nothing) ids
             callVals = bindVarIds ids (map (C . Idx cidx) callInputs)
-        retapp <- expressEtaApp callLang e callVals
+        retapp <- expressPolyApp callLang e callVals
         -- The values the wrapped value closes over (a captured closure) are
         -- captured here, as in the local case above, and passed across with
         -- the arguments.
@@ -2153,26 +2082,6 @@ dataHeadTVar (VarT v) = Just v
 dataHeadTVar (AppT (VarT v) _) = Just v
 dataHeadTVar _ = Nothing
 
--- | Apply a function value to arguments made from its type, as eta
--- abstraction does. A pattern whose result is a function takes fewer
--- arguments than its flattened type lists: apply it to its own, bind the
--- function it yields, and call that with the rest.
-expressEtaApp ::
-  Lang ->
-  AnnoS (Indexed Type) One (Indexed Lang, [Arg EVar]) ->
-  [PolyExpr] ->
-  MorlocMonad PolyExpr
-expressEtaApp lang e@(AnnoS (Idx i t) (Idx cidx _, _) (ExeS (PatCall pat))) xs
-  | k < length xs = do
-      patApp <- expressPolyApp lang e pre
-      return $ bindThenCall i (Idx cidx (snd (splitFunAt k t))) (unReturn patApp) post
-  where
-    k = unappliedPatternArity pat
-    (pre, post) = splitAt k xs
-    unReturn (PolyReturn x) = x
-    unReturn x = x
-expressEtaApp lang e xs = expressPolyApp lang e xs
-
 -- | Bind a computed function value under @i@, then call it.
 bindThenCall :: Int -> Indexed Type -> PolyExpr -> [PolyExpr] -> PolyExpr
 bindThenCall i fnT fe es = PolyLet i fe . PolyReturn $ PolyApp (PolyLetVar fnT i) es
@@ -2187,21 +2096,6 @@ expressPolyApp _ (AnnoS g@(Idx gi (FunT inputs _)) _ (ExeS (SrcCall (Idx si src)
   return . PolyReturn $ PolyApp (PolyExe g (SrcCallP (Written si) src)) xs
 expressPolyApp _ (AnnoS g _ (ExeS (SrcCall (Idx si src)))) xs =
   return . PolyReturn $ PolyApp (PolyExe g (SrcCallP (Written si) src)) xs
--- Eta-expanded pattern call: fires when a pattern-typed expression
--- (e.g. @firstOf f = .[0] f@) is used higher-order (e.g. @map firstOf
--- fs@). The eta-expansion path in 'expressPolyExpr' delegates to
--- 'expressPolyApp' with @xs@ already bound to the lambda's arg-vars;
--- if we emit 'PatCallP' directly, native bracket indexing (@n[0]@)
--- reaches the target language, which fails for IFile handles (they're
--- integers, not lists). Route the pattern through the same dispatch
--- 'expressPolyExpr' uses so the IFile guard and user-declared
--- @PatternAccessible@ instances see it.
-expressPolyApp callLang (AnnoS g@(Idx gi ft@(FunT _ _)) _ (ExeS (PatCall pat))) xs =
-  let (inputs, out) = splitFunAt (length xs) ft
-      fallback = return $ PolyApp (PolyExe g (PatCallP pat)) xs
-  in PolyReturn <$> dispatchPatCall callLang gi gi pat inputs out xs fallback
-expressPolyApp _ (AnnoS g _ (ExeS (PatCall pat))) xs =
-  return . PolyReturn $ PolyApp (PolyExe g (PatCallP pat)) xs
 -- A function value computed by an application or an intrinsic (a
 -- constructor's field, a throw), applied: bind it, then call it.
 expressPolyApp lang f@(AnnoS g@(Idx i _) _ e) es
@@ -2210,6 +2104,7 @@ expressPolyApp lang f@(AnnoS g@(Idx i _) _ e) es
       return $ bindThenCall i g fe es
   where
     isComputedHead (AppS _ _) = True
+    isComputedHead PatS {} = True
     isComputedHead (IntrinsicS _ _) = True
     isComputedHead _ = False
 expressPolyApp _ (AnnoS g (_, args) (BndS v)) xs = do
@@ -2283,6 +2178,7 @@ expressPolyApp _ (AnnoS (Idx i t) _ e) _ =
     tagExpr (ExeS _) = "ExeS"
     tagExpr (LamS _ _) = "LamS"
     tagExpr (AppS _ _) = "AppS"
+    tagExpr PatS {} = "PatS"
     tagExpr (LstS _) = "LstS"
     tagExpr (TupS _) = "TupS"
     tagExpr (NamS _) = "NamS"
@@ -2350,9 +2246,7 @@ matchSelectorLambda
   -> Maybe Selector
 matchSelectorLambda (AnnoS _ _ (LamS [v] body)) =
   case body of
-    AnnoS _ _ (AppS
-                 (AnnoS _ _ (ExeS (PatCall (PatternStruct sel))))
-                 [AnnoS _ _ (BndS v')])
+    AnnoS _ _ (PatS _ _ _ (PatGet sel [] (AnnoS _ _ (BndS v'))))
       | v == v' -> Just sel
     _ -> Nothing
 matchSelectorLambda _ = Nothing
@@ -2364,9 +2258,7 @@ matchSliceOnIFile
              , AnnoS (Indexed Type) One (Indexed Lang, [Arg EVar]) )
            , AnnoS (Indexed Type) One (Indexed Lang, [Arg EVar])
            , Type )
-matchSliceOnIFile (AnnoS _ _ (AppS
-                                 (AnnoS _ _ (ExeS (PatCall PatternBracketSlice)))
-                                 [sE, eE, pE, rcvE@(AnnoS (Idx _ rcvT) _ _)])) =
+matchSliceOnIFile (AnnoS _ _ (PatS _ _ _ (PatSlice sE eE pE rcvE@(AnnoS (Idx _ rcvT) _ _)))) =
   Just ((sE, eE, pE), rcvE, rcvT)
 matchSliceOnIFile _ = Nothing
 
@@ -2375,8 +2267,7 @@ boundTypeAt
   -> AnnoS (Indexed Type) One (Indexed Lang, [Arg EVar])
   -> Int
   -> MorlocMonad Type
-boundTypeAt midx (AnnoS _ _ (AppS
-                                (AnnoS (Idx _ (FunT inputs _)) _ _) _)) n
+boundTypeAt midx (AnnoS _ _ (PatS (Idx _ (FunT inputs _)) _ _ _)) n
   | n < length inputs = return (inputs !! n)
   | otherwise = MM.throwSourcedError midx
       "chain fusion: bound-type index out of range"
@@ -2452,7 +2343,7 @@ polyFreeVars = go
     -- step. The callee body is a separate scope and contributes nothing.
     go (PolyRemoteInterface _ _ is _ _) = Set.fromList is
     go (PolyExe _ (SrcCallP _ _)) = Set.empty
-    go (PolyExe _ (PatCallP _)) = Set.empty
+    go (PolyPat _ app) = Set.unions (map go (toList app))
     go (PolyExe _ (RecCallP _ _)) = Set.empty
     go (PolyLog _ _) = Set.empty
     go (PolyReal _ _) = Set.empty

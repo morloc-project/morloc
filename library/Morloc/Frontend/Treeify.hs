@@ -801,6 +801,15 @@ collectExprS namer0 (ExprI gi0 e0) = f namer0 e0
       (inner, body') <- collectAnnoS namer2 innerBody
       return (namer {namerRecursive = namerRecursive inner, namerIndex = namerIndex inner}, LetS v' e1' body')
     f _ (LetE [] _) = MM.throwCompilerBugAt gi0 "a let with no bindings reached Treeify"
+    f namer (AppE (ExprI hi (PatE p)) es)
+      | null es && patternArity p > 0 = etaPattern namer hi p
+      | otherwise = do
+          (namer', es') <- statefulMapM collectAnnoS namer es
+          case applyPattern p es' of
+            Just app -> return (namer', PatS hi hi noPatEvidence app)
+            Nothing ->
+              MM.throwSourcedError gi0 $
+                "This pattern takes" <+> pretty (patternArity p) <+> "arguments, got" <+> pretty (length es)
     f namer (AppE e es) = do
       (namer', e') <- collectAnnoS namer e
       (namer'', es') <- statefulMapM collectAnnoS namer' es
@@ -818,7 +827,9 @@ collectExprS namer0 (ExprI gi0 e0) = f namer0 e0
     f namer (StrE x) = return (namer, StrS x)
     f namer (ConE tv n i xs) =
       statefulMapM collectAnnoS namer xs |>> second (ConS tv n i)
-    f namer (PatE p) = return (namer, ExeS (PatCall p))
+    f namer (PatE p) = do
+      hi <- MM.getCounterWithPos gi0
+      etaPattern namer hi p
     f namer (DoBlockE e) = do
       (namer', e') <- collectAnnoS namer e
       return (namer', DoBlockS e')
@@ -845,6 +856,14 @@ collectExprS namer0 (ExprI gi0 e0) = f namer0 e0
       return (namer3, IfS c' t' e')
     -- all other expressions are strictly illegal here and represent compiler bugs
     f _ e = error $ "Bug in collectExprS: " <> show (render (pretty e))
+
+    -- A pattern used as a function: a lambda over the arguments it takes.
+    etaPattern namer hi p = do
+      vs <- replicateM (patternArity p) (MM.getCounterWithPos gi0)
+      let name i = EV (".pat_" <> MT.show' i)
+          vars = [ExprI i (VarE defaultValue (name i)) | i <- vs]
+      appI <- MM.getCounterWithPos gi0
+      f namer (LamE (map name vs) (ExprI appI (AppE (ExprI hi (PatE p)) vars)))
 
 -- | The name shared by a recursive term's 'VarS' and its 'CallS' back-edges.
 -- The @`t@ segment is removed by 'Morloc.Frontend.Rename.displayName'.

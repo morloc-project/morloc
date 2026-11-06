@@ -125,7 +125,7 @@ letMode pp root i rhs
     isPlace e = case e of
       IntrinsicN _ IntrListElem _ (s : _) -> borrowableRoot s || isPlace s
       IntrinsicN _ IntrCtorField _ (s : _) -> borrowableRoot s || isPlace s
-      AppExeN _ (PatCallP (PatternStruct sel)) [NativeArgExpr s] ->
+      PatN _ (PatGet sel [] (NativeArgExpr s)) ->
         not (selectorHasBracket sel) && length (ungroup sel) == 1 && (borrowableRoot s || isPlace s)
       _ -> False
 
@@ -155,7 +155,7 @@ letPlan lets =
       BndVarN _ j _ -> Just j
       IntrinsicN _ IntrCtorField _ (x : _) -> baseVar x
       IntrinsicN _ IntrListElem _ (x : _) -> baseVar x
-      AppExeN _ (PatCallP (PatternStruct _)) [NativeArgExpr x] -> baseVar x
+      PatN _ (PatGet _ [] (NativeArgExpr x)) -> baseVar x
       _ -> Nothing
 
 -- | Every native let under a manifold, with its right-hand side, nested

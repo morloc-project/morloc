@@ -421,7 +421,7 @@ shareable key t alts = do
       ns = concatMap annoNodes defined
       inner = Set.fromList [v | AnnoS _ _ (VarS v _) <- ns]
   return $
-    not (null (drop shareSize ns))
+    length ns + length [() | AnnoS _ _ PatS {} <- ns] > shareSize
       && not (null params)
       && not (isSuspension result)
       && isElaborable key
@@ -459,7 +459,8 @@ shareable key t alts = do
       _ -> False
 
 
--- | The node count above which a closed specialization is shared.
+-- | The node count above which a closed specialization is shared. An applied
+-- pattern counts its head as a node of its own.
 shareSize :: Int
 shareSize = 32
 

@@ -1128,9 +1128,9 @@ cppLowerConfig (ClosureGen reifyThunks stageTable papplyHeads) =
     , lcPrintExpr = CP.printExpr
     , lcPrintStmt = CP.printStmt
     , lcTakeGetter = \_ _ _ -> return Nothing
-    , lcEvalPattern = \t argTypes p xs -> do
+    , lcEvalPattern = \t argTypes app -> do
         state <- CMS.get
-        return $ evaluatePattern state t (listToMaybe argTypes) p xs
+        return $ evaluatePattern state t (listToMaybe argTypes) app
     , lcTakeSetter = cppTakeSetter
     , lcListConstructor = \_ _ es -> encloseSep "{" "}" "," es
     , lcTupleConstructor = (<>) "std::make_tuple" . tupled
@@ -2149,45 +2149,33 @@ translateSegment closureGen m0@(SerialManifold root _ _ _ _) = do
 
 -- handle string interpolation
 -- | A pattern call, given its result type and its receiver's type.
-evaluatePattern :: CppTranslatorState -> TypeF -> Maybe TypeF -> Pattern -> [MDoc] -> MDoc
-evaluatePattern _ _ _ (PatternText s ss) xs = "interweave_strings" <> tupled [fragments, insertions]
+evaluatePattern :: CppTranslatorState -> TypeF -> Maybe TypeF -> PatApp MDoc -> MDoc
+evaluatePattern _ _ _ (PatText s xs) = "interweave_strings" <> tupled [fragments, insertions]
   where
-    fragments = encloseSep "{" "}" ", " (map (dquotes . pretty . escapeQuotes "\"" "\\\"" . escapeStringLit) (s : ss))
-    insertions = encloseSep "{" "}" ", " xs
+    fragments = encloseSep "{" "}" ", " (map (dquotes . pretty . escapeQuotes "\"" "\\\"" . escapeStringLit) (s : map snd xs))
+    insertions = encloseSep "{" "}" ", " (map fst xs)
 
 -- handle getters
-evaluatePattern _ _ rt (PatternStruct (ungroup -> [ss])) [m] =
+evaluatePattern _ _ rt (PatGet (ungroup -> [ss]) [] m) =
   readSelector rt m ss
-evaluatePattern _ _ rt (PatternStruct (ungroup -> sss)) [m] =
+evaluatePattern _ _ rt (PatGet (ungroup -> sss) [] m) =
   encloseSep "{" "}" "," (map (readSelector rt m) sss)
 -- PatternStruct with bracket steps inside the Selector. App args are
 -- [bracket_bounds..., receiver]. Walk the Selector recursively,
 -- emitting C++ source for each step: `.field`, `std::get<N>(...)`,
 -- `morloc_at(idx, value)`, `morloc_slice(...)`. Multi-sibling groups
 -- emit `std::make_tuple(...)`.
-evaluatePattern _ _ _ (PatternStruct s) args
-  | selectorHasBracket s, length args == bracketArity s + 1 =
-      let n = bracketArity s
-          (bracketArgs, receivers) = splitAt n args
-          receiver = case receivers of
-            [r] -> r
-            _ -> error $ "evaluatePattern: bracket-in-Selector expected 1 receiver, \
-                         \got " <> show (length receivers)
-      in fst (walkCppSelectorBrackets receiver bracketArgs s)
-evaluatePattern state0 t0 _ (PatternStruct s0) (m0 : xs0) = setterOf False state0 t0 s0 m0 xs0
-evaluatePattern _ _ _ (PatternStruct _) [] = error "Unreachable illegal pattern"
+evaluatePattern _ _ _ (PatGet s bracketArgs receiver) =
+  fst (walkCppSelectorBrackets receiver bracketArgs s)
+evaluatePattern state0 t0 _ (PatSet s0 m0 xs0) = setterOf False state0 t0 s0 m0 (toList xs0)
 -- C++ bracket index: List and Vector both use std::vector<T> on the wire,
 -- so the same morloc_at helper works for both. Args: [index, receiver].
-evaluatePattern _ _ _ PatternBracketIndex [i, m] =
+evaluatePattern _ _ _ (PatIndex i m) =
   "morloc_at" <> tupled [i, m]
-evaluatePattern _ _ _ PatternBracketIndex args =
-  error $ "PatternBracketIndex expects 2 args, got " <> show (length args)
 -- C++ bracket slice: List and Vector share std::vector<T> on the wire,
 -- so morloc_slice works for both. Args: [start, stop, step, receiver].
-evaluatePattern _ _ _ PatternBracketSlice [start, stop, step, m] =
+evaluatePattern _ _ _ (PatSlice start stop step m) =
   "morloc_slice" <> tupled [start, stop, step, m]
-evaluatePattern _ _ _ PatternBracketSlice args =
-  error $ "PatternBracketSlice expects 4 args, got " <> show (length args)
 
 -- | A setter on receiver @m0@ with values @xs0@: the receiver rebuilt with
 -- the set fields changed; when nothing reads the receiver again (@dead@),

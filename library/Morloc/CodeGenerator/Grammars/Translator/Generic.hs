@@ -598,7 +598,7 @@ genericLowerConfig desc srcNamer debugInfo traceInfo debugMode = cfg
         , lcNewIndex = newIndex
         , lcPrintExpr = genericPrintExpr desc
         , lcPrintStmt = genericPrintStmt desc
-        , lcEvalPattern = \t _ p xs -> return $ genericEvalPattern desc t p xs
+        , lcEvalPattern = \t _ app -> return $ genericEvalPattern desc t app
         , lcTakeGetter = \_ _ _ -> return Nothing
         , lcListConstructor = \v _ es -> case ldListStyle desc of
             BracketList -> list es
@@ -1740,23 +1740,23 @@ printProgram desc prog =
     isEmpty d = T.null (render d)
 
 -- | Generic pattern evaluation
-genericEvalPattern :: LangDescriptor -> TypeF -> Pattern -> [MDoc] -> MDoc
-genericEvalPattern desc _ (PatternText firstStr fragments) xs =
+genericEvalPattern :: LangDescriptor -> TypeF -> PatApp MDoc -> MDoc
+genericEvalPattern desc _ (PatText firstStr xs) =
   case ldPatternStyle desc of
     FStringPattern ->
       let qt = pretty (ldQuoteTerminator desc)
           esc = escapeQuotes (ldQuoteTerminator desc) (ldQuoteTerminatorEsc desc) . escapeStringLit
-      in "f" <> qt <> hcat (pretty (esc firstStr) : [("{" <> x <> "}" <> pretty (esc s)) | (x, s) <- zipSame xs fragments]) <> qt
+      in "f" <> qt <> hcat (pretty (esc firstStr) : [("{" <> x <> "}" <> pretty (esc s)) | (x, s) <- xs]) <> qt
     ConcatCall ->
       let qt = ldQuoteTerminator desc
           esc = escapeQuotes qt (ldQuoteTerminatorEsc desc) . escapeStringLit
           wrap t = pretty qt <> pretty t <> pretty qt
       in pretty (ldConcatFn desc)
-        <> tupled (wrap (esc firstStr) : concat [[x, wrap (esc s)] | (x, s) <- zipSame xs fragments])
+        <> tupled (wrap (esc firstStr) : concat [[x, wrap (esc s)] | (x, s) <- xs])
 -- getters (always have exactly one argument)
-genericEvalPattern desc _ (PatternStruct (ungroup -> [ss])) [m] =
+genericEvalPattern desc _ (PatGet (ungroup -> [ss]) [] m) =
   hcat (m : map (writeSelector desc) ss)
-genericEvalPattern desc _ (PatternStruct (ungroup -> sss)) [m] =
+genericEvalPattern desc _ (PatGet (ungroup -> sss) [] m) =
   case ldTupleConstructor desc of
     "" -> tupled [hcat (m : map (writeSelector desc) ss) | ss <- sss]
     name -> pretty name <> tupled [hcat (m : map (writeSelector desc) ss) | ss <- sss]
@@ -1766,18 +1766,11 @@ genericEvalPattern desc _ (PatternStruct (ungroup -> sss)) [m] =
 -- through siblings, and emits per-step native code: field access for
 -- field steps, language-native bracket syntax (or morloc_at/slice
 -- helper) for bracket steps. Multi-sibling groups produce a tuple.
-genericEvalPattern desc _ (PatternStruct s) args
-  | selectorHasBracket s, length args == bracketArity s + 1 =
-      let n = bracketArity s
-          (bracketArgs, receivers) = splitAt n args
-          receiver = case receivers of
-            [r] -> r
-            _ -> error $ "genericEvalPattern: bracket-in-Selector expected 1 receiver, \
-                         \got " <> show (length receivers)
-      in fst (walkGenericSelectorBrackets desc receiver bracketArgs s)
+genericEvalPattern desc _ (PatGet s bracketArgs receiver) =
+  fst (walkGenericSelectorBrackets desc receiver bracketArgs s)
 -- setters
-genericEvalPattern desc t0 (PatternStruct s0) (m0 : xs0) =
-  patternSetter makeTuple makeRecord accessTuple accessRecord finalizeSet m0 t0 s0 xs0
+genericEvalPattern desc t0 (PatSet s0 m0 xs0) =
+  patternSetter makeTuple makeRecord accessTuple accessRecord finalizeSet m0 t0 s0 (toList xs0)
   where
     -- dynamically-typed members copy by value at the runtime level, so an
     -- unchanged leaf needs no explicit clone
@@ -1799,27 +1792,22 @@ genericEvalPattern desc t0 (PatternStruct s0) (m0 : xs0) =
     accessRecord (NamF o (FV _ cname) _ _) d k =
       genericRecordAccessor desc o cname d (pretty k)
     accessRecord t _ _ = error $ "Invalid record type: " <> show t
-genericEvalPattern _ _ (PatternStruct _) [] = error "Unreachable empty pattern"
 -- Bracket index: receiver[index]. Emits native indexing syntax per
 -- language. Args are [index, receiver].
-genericEvalPattern desc _ PatternBracketIndex [i, m] =
+genericEvalPattern desc _ (PatIndex i m) =
   case ldIndexStyle desc of
     ZeroBracket -> m <> "[" <> i <> "]"
     OneBracket -> m <> "[(" <> i <> ") + 1]"
     OneDoubleBracket -> m <> "[[(" <> i <> ") + 1]]"
-genericEvalPattern _ _ PatternBracketIndex args =
-  error $ "PatternBracketIndex expects 2 args (index, receiver), got " <> show (length args)
 -- Bracket slice: receiver[start:stop:step]. For now uses native Python-style
 -- slicing where the language supports it. Args are [start, stop, step, receiver].
 -- start/stop/step may be Null (rendered as a language-specific null).
-genericEvalPattern desc _ PatternBracketSlice [start, stop, step, m] =
+genericEvalPattern desc _ (PatSlice start stop step m) =
   case ldIndexStyle desc of
     ZeroBracket -> m <> "[" <> start <> ":" <> stop <> ":" <> step <> "]"
     -- Non-zero-based languages (R) don't have native Python-style step
     -- slicing. Emit a fallback that will need a runtime helper.
     _ -> "morloc_slice" <> tupled [start, stop, step, m]
-genericEvalPattern _ _ PatternBracketSlice args =
-  error $ "PatternBracketSlice expects 4 args (start, stop, step, receiver), got " <> show (length args)
 
 writeSelector :: LangDescriptor -> Either Int Text -> MDoc
 writeSelector desc (Right k) = case ldKeyAccess desc of
