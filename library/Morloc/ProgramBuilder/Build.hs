@@ -43,7 +43,7 @@ import qualified System.Directory as SD
 import System.Environment (getEnvironment, getExecutablePath, lookupEnv)
 import System.Exit (ExitCode (..))
 import System.FilePath (takeDirectory, takeFileName)
-import System.IO.Error (ioeGetFileName)
+import System.IO.Error (ioeGetFileName, isDoesNotExistError)
 import System.Process (CreateProcess (env), callProcess, createProcess, getCurrentPid, proc, waitForProcess)
 
 -- | The build layout, resolved once by 'resolveBuildDirs'.
@@ -428,8 +428,9 @@ removeMatching pattern = do
     names <- liftIO $ SD.listDirectory dir
     forM_ (filter (matchGlob namePat) names) $ \name -> do
       let path = dir </> name
-      result <- liftIO $ try (SD.removeFile path) :: MorlocMonad (Either IOException ())
+      result <- liftIO $ try (SD.removeFile path)
       case result of
-        Right () -> return ()
-        Left e ->
-          MM.throwFailed $ "Cannot remove" <+> pretty path <> ":" <+> pretty (show e)
+        Left e
+          | not (isDoesNotExistError e) ->
+              MM.throwFailed $ "Cannot remove" <+> pretty path <> ":" <+> pretty (show e)
+        _ -> return ()
