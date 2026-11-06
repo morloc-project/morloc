@@ -1,0 +1,20 @@
+--' An instance whose source another instance shares
+module apply (*)
+
+import root-py
+import root-cpp
+
+class Apply a where
+  apply :: (Int -> Int) -> a -> Int
+
+instance Apply Int where
+  source Cpp from "f.hpp" ("gen_apply" as apply)
+
+instance Apply Real where
+  source Cpp from "f.hpp" ("gen_apply" as apply)
+  source Py from "f.py" ("py_apply_real" as apply)
+
+source Py from "f.py" ("py_make_adder" as pyMakeAdder)
+
+--' Make an adder in Python
+pyMakeAdder :: Int -> <IO> (Int -> Int)

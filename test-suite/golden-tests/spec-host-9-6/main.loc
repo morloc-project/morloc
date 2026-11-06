@@ -1,0 +1,17 @@
+-- A call given a function made by host code may take another source of
+-- its term, in the host's language (HOST-9), but only a source of the
+-- instance its use selected (CLS-2). `Apply Int` and `Apply Real` share a
+-- C++ source; only `Apply Real` has a Python one. `useReal` applies a
+-- Python adder through it; bad.loc, applying one at Int, is refused, not
+-- given the Real instance's Python source.
+
+--' Another source of a call is of its own instance
+module main (useReal)
+
+import .apply
+
+--' Apply a Python adder at Real
+useReal :: Int -> Real -> <IO> Int
+useReal n x = do
+  h <- pyMakeAdder n
+  apply h x

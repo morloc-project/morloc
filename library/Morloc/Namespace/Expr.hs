@@ -88,9 +88,11 @@ module Morloc.Namespace.Expr
   , ClassInfo (..)
   , InstanceEnv (..)
   , Evidence (..)
+  , evidenceInstance
   , applyCoercion
   , ManyPoly (..)
   , Many (..)
+  , unMany
   , mapAnnoSM
   , mapExprSM
   , mapAnnoS
@@ -1007,6 +1009,11 @@ data Evidence
     EvGiven Constraint
   deriving (Show, Eq, Ord)
 
+-- | The instance an evidence names, if it names one.
+evidenceInstance :: Evidence -> Maybe InstanceKey
+evidenceInstance (EvInstance k _ _) = Just k
+evidenceInstance _ = Nothing
+
 -- | Apply a coercion to a type, returning the coerced type.
 -- CoerceToOptional widens the RESULT type; under an effect wrapper the
 -- result is the inner type, so the OptionalU is placed under the EffectU
@@ -1088,21 +1095,25 @@ data ManyPoly a = MonomorphicExpr (Maybe EType) [a] | PolymorphicExpr ClassName 
   deriving (Show, Eq, Ord)
 
 -- | A use after instance resolution: how its class constraints are met, and
--- its implementations.
-data Many a = Many {manyEvidence :: [Evidence], unMany :: [a]}
+-- its implementations, each a method's with the instance it was selected
+-- for (CLS-2).
+data Many a = Many {manyEvidence :: [Evidence], manyAlts :: [(Maybe InstanceKey, a)]}
   deriving (Show)
 
+unMany :: Many a -> [a]
+unMany = map snd . manyAlts
+
 instance Functor Many where
-  fmap f (Many ev x) = Many ev (map f x)
+  fmap f (Many ev xs) = Many ev [(k, f x) | (k, x) <- xs]
 
 instance Traversable Many where
-  traverse f (Many ev xs) = Many ev <$> traverse f xs
+  traverse f (Many ev xs) = Many ev <$> traverse (traverse f) xs
 
 instance Foldable Many where
-  foldr f b (Many _ xs) = foldr f b xs
+  foldr f b = foldr f b . unMany
 
 instance (Pretty a) => Pretty (Many a) where
-  pretty (Many _ xs) = list $ map pretty xs
+  pretty = list . map pretty . unMany
 
 ---- Class instances
 

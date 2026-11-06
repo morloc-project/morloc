@@ -117,11 +117,10 @@ bottomUp :: ShareEnv -> Node -> MorlocMonad Node
 bottomUp env n0 = do
   AnnoS g c e <- descend n0
   case e of
-    VarS v (Many ev alts)
+    VarS v alts
       | Just d <- termOfNode env (AnnoS g c e)
-      , Set.member d (seOwners env) -> do
-          alts' <- mapM (mapRegionOf (placeGroups env (termKey env (ownedBy env d)))) alts
-          return (AnnoS g c (VarS v (Many ev alts')))
+      , Set.member d (seOwners env) ->
+          AnnoS g c . VarS v <$> traverse (mapRegionOf (placeGroups env (termKey env (ownedBy env d)))) alts
     LetS v e1 e2 -> sinkLet (AnnoS g c (LetS v e1 e2))
     _ -> return (AnnoS g c e)
   where
@@ -130,7 +129,7 @@ bottomUp env n0 = do
 -- | The regions of an export root: the body of each implementation, under
 -- the command's own parameters.
 mapRegions :: (Node -> MorlocMonad Node) -> Node -> MorlocMonad Node
-mapRegions f (AnnoS g c (VarS v (Many ev alts))) = AnnoS g c . VarS v . Many ev <$> mapM (mapRegionOf f) alts
+mapRegions f (AnnoS g c (VarS v alts)) = AnnoS g c . VarS v <$> traverse (mapRegionOf f) alts
 mapRegions f n = mapRegionOf f n
 
 -- | Apply to the region under a definition's own parameters. A lambda the
@@ -158,7 +157,7 @@ cafCandidate env (EV v) k = not (T.any (== '`') v) && not (seMethod env k)
 
 -- | The group of a copy of an eligible term: the term and its type.
 termKey :: ShareEnv -> (EVar -> Int -> Bool) -> Node -> Maybe (Int, Type)
-termKey env eligible u@(AnnoS (Idx _ t) _ (VarS v (Many _ alts)))
+termKey env eligible u@(AnnoS (Idx _ t) _ (VarS v alts))
   | Just k <- termOfNode env u
   , eligible v k
   , isData t || (isFunctionValued t && any (not . isValue) alts)
@@ -327,9 +326,9 @@ placeAt stop isUse bind = place
           -- a term whose implementations are functions is built where it
           -- is named, like a lambda; data implementations are exclusive
           -- regions
-          VarS _ (Many _ alts)
+          VarS _ alts
             | any isLambda alts -> bind n
-          VarS v (Many ev alts) -> AnnoS g c . VarS v . Many ev <$> mapM (\a -> if has a then place a else return a) alts
+          VarS v alts -> AnnoS g c . VarS v <$> traverse (\a -> if has a then place a else return a) alts
           IntrinsicS IntrTry [arg] -> do
             arg' <- placeTry arg
             return (AnnoS g c (IntrinsicS IntrTry [arg']))
@@ -362,7 +361,7 @@ reachesRegion stop isUse = go
             | otherwise -> False
           AppS f _ | has f -> False
           IfS cond _ _ -> not (has cond)
-          VarS _ (Many _ alts) -> not (any isLambda alts)
+          VarS _ alts -> not (any isLambda alts)
           IntrinsicS IntrTry [_] -> True
           _ -> case filter has (childrenOf e) of
             [x] -> go x

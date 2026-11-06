@@ -919,13 +919,13 @@ implementations (Polymorphic _ _ _ ts) = [[s | (_, Idx _ s) <- termConcrete t] |
 -- | The other sources of the term @src@ implements, in other languages, with
 -- the same call groups (HOST-3).
 sameTermSources :: Indexed Source -> MorlocMonad [Indexed Source]
-sameTermSources (Idx _ src) = do
+sameTermSources isrc@(Idx _ src) = do
   sigs <- GMap.elems <$> MM.gets stateSignatures
   return $
     List.nubBy (\a b -> val a == val b)
       [ is
       | srcs <- concatMap indexedImplementations sigs
-      , src `elem` map val srcs
+      , isrc `elem` srcs
       , is@(Idx _ s) <- srcs
       , srcLang s /= srcLang src
       , srcRsize s == srcRsize src

@@ -19,6 +19,7 @@ module Morloc.CodeGenerator.Realize
   ( realityCheck
   , removeVarS
   , placeNormalized
+  , evidenceProblem
   ) where
 
 import Morloc.Data.Zip (indexed, zip3Same, zipSame)
@@ -39,7 +40,6 @@ import Data.Graph (SCC (..), stronglyConnComp)
 import qualified Data.List as List
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Monad as MM
-import qualified Morloc.TypeEval as TE
 import qualified Morloc.LangRegistry as LR
 import qualified Morloc.CodeGenerator.Infer as Infer
 
@@ -125,6 +125,7 @@ realityCheck ::
     , [AnnoS (Indexed Type) One (Indexed Lang)]
     )
 realityCheck es = do
+  mapM_ checkEvidence es
   names <- MM.gets stateSpecNames
   let isSpec (AnnoS _ _ (VarS v _)) = Set.member v names
       isSpec _ = False
@@ -510,6 +511,53 @@ realize tables pins s0 = do
           ls -> return ls
       else return []
   realizeWithRegistry registry tables pins langs s0
+
+-- | CLS-2, CLS-16: a method use reaches realization with the evidence of
+-- the one instance its use selected, never a signature's assumption, and
+-- with only implementations selected for that instance.
+checkEvidence :: AnnoS (Indexed Type) Many Int -> MorlocMonad ()
+checkEvidence root = do
+  GMap idmap sigmap <- MM.gets stateSignatures
+  let methodClass i = case Map.lookup i idmap >>= (`Map.lookup` sigmap) of
+        Just (Polymorphic cls _ _ _) -> Just cls
+        _ -> Nothing
+  sequence_
+    [ MM.throwCompilerBugAt gi $ "realize: the use of" <+> squotes (pretty v) <+> problem
+    | AnnoS (Idx gi _) ci (VarS v (Many evs alts@(_ : _))) <- annoNodes root
+    , Just problem <- [evidenceProblem (methodClass ci) evs (map fst alts)]
+    ]
+
+-- | What is wrong with a use, given the class of the method it uses (if its
+-- signature is a method's), its evidence, and the instance each of its
+-- implementations was selected for.
+evidenceProblem :: Maybe ClassName -> [Evidence] -> [Maybe InstanceKey] -> Maybe MDoc
+evidenceProblem sigClass evs tags
+  | any givenIn evs = Just "carries a signature's constraint as its evidence"
+  | otherwise = case unique (maybeToList sigClass <> map ikClass (catMaybes tags)) of
+      [] -> Nothing
+      [cls] -> case unique [maybe (Left ()) Right (evidenceInstance ev) | ev <- evs, evidenceClass ev == Just cls] of
+        [Left ()] | all isNothing tags -> Nothing
+        [Right key] | all (== Just key) tags -> Nothing
+        [] -> Just "has no instance"
+        [_] -> Just "has an implementation not selected for its instance"
+        _ -> Just "has the evidence of several instances"
+      _ -> Just "has implementations of several classes"
+  where
+    givenIn (EvGiven _) = True
+    givenIn (EvInstance _ _ ctx) = any givenIn ctx
+    givenIn (EvDerived _ _) = False
+    evidenceClass (EvInstance k _ _) = Just (ikClass k)
+    evidenceClass (EvDerived c _) = Just c
+    evidenceClass (EvGiven _) = Nothing
+
+sameImplementation :: Source -> Source -> Bool
+sameImplementation sa sb = srcLang sa == srcLang sb && srcPath sa == srcPath sb && srcName sa == srcName sb
+
+-- | The source an implementation calls, if it is a source call.
+sourceOf :: AnnoS g f c -> Maybe Source
+sourceOf (AnnoS _ _ (ExeS (SrcCall (Idx _ src)))) = Just src
+sourceOf (AnnoS _ _ (LabelS _ y)) = sourceOf y
+sourceOf _ = Nothing
 
 -- | What a boundary from one language to another costs: nothing within a
 -- language, a switch within a pool, one crossing between pools (COST-3).
@@ -1045,7 +1093,7 @@ realizeWithRegistry registry tables pins seedLangs s00 = do
     sourcedHead :: AnnoS (Indexed Type) Many c -> Bool
     sourcedHead (AnnoS _ _ e) = case e of
       ExeS (SrcCall _) -> True
-      VarS _ (Many _ xs@(_ : _)) -> all sourcedHead xs
+      VarS _ xs@(Many _ (_ : _)) -> all sourcedHead xs
       LabelS _ x -> sourcedHead x
       CoerceS _ x -> sourcedHead x
       _ -> False
@@ -1054,7 +1102,7 @@ realizeWithRegistry registry tables pins seedLangs s00 = do
     headSources :: AnnoS (Indexed Type) Many c -> [Source]
     headSources (AnnoS _ _ e) = case e of
       ExeS (SrcCall (Idx _ src)) -> [src]
-      VarS _ (Many _ ys) -> concatMap headSources ys
+      VarS _ ys -> concatMap headSources ys
       LabelS _ x -> headSources x
       CoerceS _ x -> headSources x
       _ -> []
@@ -1087,7 +1135,7 @@ realizeWithRegistry registry tables pins seedLangs s00 = do
     boundArgs :: AnnoS (Indexed Type) Many c -> Int
     boundArgs (AnnoS _ _ e) = case e of
       LamS vs body -> length vs + boundArgs body
-      VarS _ (Many _ ys@(_ : _)) -> minimum (map boundArgs ys)
+      VarS _ (Many _ ys@(_ : _)) -> minimum (map (boundArgs . snd) ys)
       LetS _ _ body -> boundArgs body
       LabelS _ x -> boundArgs x
       CoerceS _ x -> boundArgs x
@@ -1125,17 +1173,17 @@ realizeWithRegistry registry tables pins seedLangs s00 = do
     scoreAlternatives ::
       EVar ->
       RState ->
-      [AnnoS (Indexed Type) Many Int] ->
-      MorlocMonad ([AnnoS (Indexed Type) Many (Indexed [(Lang, Score)])], [(Lang, Score)])
+      [(Maybe InstanceKey, AnnoS (Indexed Type) Many Int)] ->
+      MorlocMonad ([(Maybe InstanceKey, AnnoS (Indexed Type) Many (Indexed [(Lang, Score)]))], [(Lang, Score)])
     scoreAlternatives v rstat xs00 = do
       -- rescoring a placement keeps only the implementation collapse chose
       xs0 <- case rForced rstat of
         Nothing -> return xs00
-        Just kept -> case [x | x@(AnnoS _ j _) <- xs00, Map.member j kept] of
+        Just kept -> case [x | x@(_, AnnoS _ j _) <- xs00, Map.member j kept] of
           [] -> MM.throwCompilerBug $ "rescoring a placement: no implementation of" <+> pretty v <+> "was built"
           chosen -> return chosen
-      xs1 <- mapM (fmap repeated . scoreAnnoS rstat) xs0
-      let pairs = minPairs (concat [xs' | (AnnoS _ (Idx _ xs') _) <- xs1])
+      xs1 <- mapM (traverse (fmap repeated . scoreAnnoS rstat)) xs0
+      let pairs = minPairs (concat [xs' | (_, AnnoS _ (Idx _ xs') _) <- xs1])
       -- rescoring keeps one implementation, but the term is still reached
       -- from every language the placement uses
       let langs = unique (map fst pairs <> rForcedLangs rstat)
@@ -1281,41 +1329,25 @@ realizeWithRegistry registry tables pins seedLangs s00 = do
 
     collapseExpr _ _ _ (VarS v (Many _ []), Idx i _) =
       MM.throwSourcedError i $ "No implementation found for" <+> squotes (pretty (displayName v))
-    -- Select one implementation for the given term
-    -- CLS-2 first, where the implementations' types differ: those whose
-    -- type matches the use best; then the least by COST-1, ties going to the
-    -- preferred language (COST-16). Two different sources of one type still
-    -- tied are an error; definitions in morloc that tie are interchangeable
-    -- (REAL-1) and the first is taken.
-    collapseExpr heads (Idx _ gt) l1 (VarS v (Many _ xs), Idx i _) = do
-      typed <- case xs of
-        (AnnoS (Idx _ t0) _ _ : _)
-          | any (\(AnnoS (Idx _ t) _ _) -> t /= t0) xs -> resolveInstances gt xs
-        _ -> return xs
-      let minXs = minsBy (\(AnnoS _ (Idx _ ss) _) -> minimumMay [(cost l1 l2 s, fst (preferred l2)) | (l2, s) <- ss]) typed
-      (x, lang) <- case minXs of
-        [] -> MM.throwSourcedError i $ "No implementation found for" <+> squotes (pretty (displayName v))
-        (y@(AnnoS (Idx _ ty) _ _) : _)
-          | length (List.nubBy sameImplementation (mapMaybe sourceOf minXs)) <= 1 -> handleOne y
-          -- implementations of different types are instance resolution's
-          -- to separate, and a type left open is reported where it is used
-          | any (\(AnnoS (Idx _ t) _ _) -> t /= ty) minXs -> handleOne y
+    -- Select one implementation for the given term: the least by COST-1,
+    -- ties going to the preferred language (COST-16). A method's
+    -- implementations are the selected instance's (CLS-2). Two different
+    -- sources still tied are an error; definitions in morloc that tie are
+    -- interchangeable (REAL-1) and the first is taken.
+    collapseExpr heads _ l1 (VarS v (unMany -> xs), Idx i _) = do
+      let minXs = minsBy (\(AnnoS _ (Idx _ ss) _) -> minimumMay [(cost l1 l2 s, fst (preferred l2)) | (l2, s) <- ss]) xs
+      (x, lang) <- case (minXs, List.nubBy sameImplementation (mapMaybe sourceOf minXs)) of
+        ([], _) -> MM.throwSourcedError i $ "No implementation found for" <+> squotes (pretty (displayName v))
+        (y : _, srcs)
+          | length srcs <= 1 -> handleOne y
           | otherwise ->
               MM.throwSourcedError i $
                 "Ambiguous implementations of" <+> squotes (pretty (displayName v)) <> ":"
-                  <> "\n" <> indent 2 (vsep (map describe (List.nubBy sameImplementation (mapMaybe sourceOf minXs))))
+                  <> "\n" <> indent 2 (vsep (map describe srcs))
                   <> "\nEach is placed equally well (COST-1). Remove all but one from scope,"
                   <+> "by importing fewer modules."
       return (VarS v (One x), Idx i lang)
       where
-        sameImplementation :: Source -> Source -> Bool
-        sameImplementation sa sb = srcLang sa == srcLang sb && srcPath sa == srcPath sb && srcName sa == srcName sb
-
-        sourceOf :: AnnoS g f c -> Maybe Source
-        sourceOf (AnnoS _ _ (ExeS (SrcCall (Idx _ src)))) = Just src
-        sourceOf (AnnoS _ _ (LabelS _ y)) = sourceOf y
-        sourceOf _ = Nothing
-
         describe :: Source -> MDoc
         describe src = pretty (srcLang src) <+> pretty (srcName src) <+> maybe "" (\pth -> "from" <+> pretty pth) (srcPath src)
 
@@ -1335,115 +1367,6 @@ realizeWithRegistry registry tables pins seedLangs s00 = do
                 _ -> heads
           x' <- collapseAnnoS heads' newLang x
           return (x', newLang)
-
-        -- The implementations whose type matches the use best: the most
-        -- specific instance, at the nearest link of the use's alias chain.
-        resolveInstances ::
-          Type ->
-          [AnnoS (Indexed Type) Many (Indexed [(Lang, Score)])] ->
-          MorlocMonad [AnnoS (Indexed Type) Many (Indexed [(Lang, Score)])]
-        resolveInstances gt' xs' = do
-          gscope <- MM.getGeneralScope
-          -- A candidate matches at the first link of the alias chain its
-          -- head is compatible with, so a nearer alias wins and a sibling
-          -- alias never matches.
-          let chain = gt' : List.unfoldr (fmap (\t -> (t, t)) . reduceStep gscope) gt'
-              matched =
-                [ (lvl, type2typeu t, x)
-                | x@(AnnoS (Idx _ t) _ _) <- xs'
-                , Just lvl <- [List.findIndex (`compatibleType` t) chain]
-                ]
-              -- Equally specific heads are separated by the chain link they
-              -- matched; incomparable maxima overlap.
-              maxima = mostSpecific [h | (_, h, _) <- matched]
-              best = [(lvl, h, x) | (lvl, h, x) <- matched, any (equivalent h) maxima]
-              nearest = [(h, x) | (lvl, h, x) <- best, lvl == minimum [l | (l, _, _) <- best]]
-          case nearest of
-            [] ->
-              MM.throwSourcedError i $
-                "No matching implementation found for" <+> squotes (pretty (displayName v))
-                  <+> "at type" <+> pretty gt'
-            -- one head, possibly sourced several times (duplicate imports)
-            ((h0, _) : rest) | all (equivalent h0 . fst) rest -> return (map snd nearest)
-            -- The use's type holds an unsolved variable, so the overlap is
-            -- not judged and the nearest candidates are kept.
-            _ | containsUnk gt' -> return (map snd nearest)
-            _ ->
-              MM.throwSourcedError i $
-                "Ambiguous instances for" <+> squotes (pretty (displayName v))
-                  <+> "at type" <+> pretty gt' <> ":"
-                  <> "\n" <> indent 2 (vsep (map pretty maxima))
-                  <> "\nEach matches, and none is more specific than the others."
-                  <> "\nDeclare an instance for their common specialization to"
-                  <+> "disambiguate, or remove one of them."
-
-        -- One alias-reduction step: the head first, else the leaves.
-        reduceStep :: Scope -> Type -> Maybe Type
-        reduceStep gscope t =
-          typeOf <$> (TE.reduceType gscope (type2typeu t) <|> TE.reduceTypeLeaves gscope (type2typeu t))
-
-        -- Structural equality with UnkT (an unsolved generic) as wildcard.
-        compatibleType :: Type -> Type -> Bool
-        compatibleType (UnkT _) _ = True
-        compatibleType _ (UnkT _) = True
-        compatibleType (VarT v1) (VarT v2) = v1 == v2
-        compatibleType (FunT as1 r1) (FunT as2 r2) =
-          length as1 == length as2
-            && all (uncurry compatibleType) (zipSame as1 as2)
-            && compatibleType r1 r2
-        compatibleType (AppT h1 ps1) (AppT h2 ps2) =
-          compatibleType h1 h2
-            && length ps1 == length ps2
-            && all (uncurry compatibleArg) (zipSame ps1 ps2)
-        compatibleType (NamT o1 n1 ps1 rs1) (NamT o2 n2 ps2 rs2) =
-          o1 == o2 && n1 == n2
-            && length ps1 == length ps2
-            && all (uncurry compatibleArg) (zipSame ps1 ps2)
-            && length rs1 == length rs2
-            && all (\((k1,v1),(k2,v2)) -> k1 == k2 && compatibleType v1 v2) (zipSame rs1 rs2)
-        compatibleType (OptionalT t1) (OptionalT t2) = compatibleType t1 t2
-        compatibleType (EffectT e1 t1) (EffectT e2 t2) = e1 == e2 && compatibleType t1 t2
-        compatibleType t1 t2 = t1 == t2
-
-        -- An undetermined argument matches any; an erased placeholder
-        -- matches any literal of its kind.
-        compatibleArg :: ArgT -> ArgT -> Bool
-        compatibleArg (TyA (UnkT _)) _ = True
-        compatibleArg _ (TyA (UnkT _)) = True
-        compatibleArg (TyA t1) (TyA t2) = compatibleType t1 t2
-        compatibleArg (KiA k1) (KiA k2) = compatibleK k1 k2
-        compatibleArg _ _ = False
-
-        compatibleK :: KTerm -> KTerm -> Bool
-        compatibleK (KUnkT _) _ = True
-        compatibleK _ (KUnkT _) = True
-        compatibleK (VoidT k) t | kindOfK t == Just k = True
-        compatibleK t (VoidT k) | kindOfK t == Just k = True
-        compatibleK (NatAddT a b) (NatAddT c d) = compatibleK a c && compatibleK b d
-        compatibleK (NatMulT a b) (NatMulT c d) = compatibleK a c && compatibleK b d
-        compatibleK (NatSubT a b) (NatSubT c d) = compatibleK a c && compatibleK b d
-        compatibleK (NatDivT a b) (NatDivT c d) = compatibleK a c && compatibleK b d
-        compatibleK (StrConcatT a b) (StrConcatT c d) = compatibleK a c && compatibleK b d
-        compatibleK k1 k2 = k1 == k2
-
-        kindOfK :: KTerm -> Maybe Kind
-        kindOfK k = case k of
-          NatLitT _ -> Just KindNat
-          NatAddT _ _ -> Just KindNat
-          NatMulT _ _ -> Just KindNat
-          NatSubT _ _ -> Just KindNat
-          NatDivT _ _ -> Just KindNat
-          StrLitT _ -> Just KindStr
-          StrConcatT _ _ -> Just KindStr
-          VoidT x -> Just x
-          _ -> Nothing
-
-    ----- NOTE: Some cases are inseperable, the code above does not
-    ----- account for this, which may allow incorrect code to be
-    ----- generated.
-    -- xs' ->  MM.throwSystemError
-    --   $ "no rule to separate the following sourced functions of type" <+> parens (pretty gt)":\n"
-    --   <> indent 2 (vsep [ "*" <+> pretty t <+> ":" <+> pretty y | y@(AnnoS (Idx _ t) _ _, _)  <- xs'])
 
     -- Propagate downwards
     -- A lambda is a value built where it appears, so it lives in its
@@ -1618,9 +1541,9 @@ realizeWithRegistry registry tables pins seedLangs s00 = do
       AnnoS (Indexed Type) Many (Indexed [(Lang, Score)])
     pinNamedLambda lang x@(AnnoS g (Idx i ss) e) = case e of
       LamS _ _ -> AnnoS g (Idx i (pinScores ss)) e
-      VarS v (Many ev alts)
+      VarS v alts
         | any isNamedLambda alts ->
-            AnnoS g (Idx i (pinScores ss)) (VarS v (Many ev (map (pinNamedLambda lang) alts)))
+            AnnoS g (Idx i (pinScores ss)) (VarS v (fmap (pinNamedLambda lang) alts))
       _ -> x
       where
         pinScores ss0 = case minimumMay [cost (Just lang) l2 s2 | (l2, s2) <- ss0] of
@@ -1661,14 +1584,14 @@ realizeWithRegistry registry tables pins seedLangs s00 = do
 
     isNamedLambda :: AnnoS g Many c -> Bool
     isNamedLambda (AnnoS _ _ (LamS _ _)) = True
-    isNamedLambda (AnnoS _ _ (VarS _ (Many _ alts))) = any isNamedLambda alts
+    isNamedLambda (AnnoS _ _ (VarS _ alts)) = any isNamedLambda alts
     isNamedLambda _ = False
 
     -- The head of an application, before collapse, is a sourced function
     -- however it is named: every alternative of the term is a source call.
     isSourcedMany :: AnnoS (Indexed Type) Many c -> Bool
     isSourcedMany (AnnoS _ _ (ExeS (SrcCall _))) = True
-    isSourcedMany (AnnoS _ _ (VarS _ (Many _ xs))) = not (null xs) && all isSourcedMany xs
+    isSourcedMany (AnnoS _ _ (VarS _ xs)) = not (null xs) && all isSourcedMany xs
     isSourcedMany _ = False
 
     -- The head of an application is a sourced function, reached directly or
@@ -1891,7 +1814,7 @@ reopenSources limits n@(AnnoS g ci e)
             hd <-
               if null alts
                 then return f
-                else (\k -> AnnoS fg k (VarS (srcAlias src) (Many [] (f : alts)))) <$> MM.getCounter
+                else (\k -> AnnoS fg k (VarS (srcAlias src) (Many [] (map ((,) Nothing) (f : alts))))) <$> MM.getCounter
             return (AppS hd xs')
       _ -> mapExprSM (reopenSources limits) e
   where
@@ -1945,7 +1868,7 @@ unrealized (AnnoS g (Idx i _) e) = AnnoS g i $ case e of
   UniS -> UniS
   NullS -> NullS
   BndS v -> BndS v
-  VarS v (One x) -> VarS v (Many [] [unrealized x])
+  VarS v (One x) -> VarS v (Many [] [(Nothing, unrealized x)])
   AppS f xs -> AppS (unrealized f) (map unrealized xs)
   LamS vs x -> LamS vs (unrealized x)
   LstS xs -> LstS (map unrealized xs)
@@ -2014,7 +1937,7 @@ stagePoints :: AnnoS (Indexed Type) Many Int -> Map EVar Int
 stagePoints = go
   where
     go (AnnoS _ _ e) = case e of
-      VarS v (Many _ alts) ->
+      VarS v (unMany -> alts) ->
         Map.unions (Map.fromList [ (v, length vs) | a <- alts, Just vs <- [staged v a] ] : map go alts)
       _ -> Map.unions (foldExprS (\x -> [go x]) e)
     staged v (AnnoS (Idx _ (FunT ts _)) _ (LamS vs body@(AnnoS _ _ be)))

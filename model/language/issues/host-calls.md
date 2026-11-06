@@ -57,3 +57,10 @@
   Python function calling it with two arguments all give the right value,
   since each call is eta-expanded to `f(1)(b)(c)`; the flat path may be
   reachable only through Rust `lcSourcedResult`.
+- **The advice to choose a source can name sources of other instances.**
+  [read, 2026-11-06] HostProvenance.hs `chooseSourceHint` finds the term
+  of the source that made a function by value (`src elem srcs`), and a
+  provenance (`MadeBy`) holds no index, so when that source is a method's
+  and two instances source the same function, the advice lists the
+  languages of both instances' sources, though only the selected
+  instance's can be chosen (HOST-9). Not reproduced.

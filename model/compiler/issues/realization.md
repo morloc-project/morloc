@@ -6,7 +6,8 @@ objective is COST-1 (crossings by depth, then switches, then language
 preference, then size).
 
 - **Remaining gaps around values a pool cannot hold.** [read 2026-11-04]
-  A value a pool only relays is a packet (Serialize.hs `inferHeld`,
+  COST-15 condition 1 is not yet a limit before comparison. A value a
+  pool only relays is a packet (Serialize.hs `inferHeld`,
   `heldSerial`, `letState`), but the universal-inference branches
   (`prepareArg`, `contextArg`, `boundArg` on a `Left` typemap entry) have
   no index to check with and still infer the native type. A real native
@@ -72,7 +73,8 @@ preference, then size).
   copy's manifold to the host's language; a parameter or body value of a
   type the host's language cannot hold (a record mapped only to Python, in
   C++) then fails at the pool's compile or as a compiler bug at `pinTable`,
-  instead of as a located refusal. Spec gap beside COST-11 and HOST-9: what
+  instead of as a located refusal (COST-15 conditions 1 and 2 conflict
+  here). Spec gap beside COST-11 and HOST-9: what
   a program must do when the host's language cannot hold a value computed
   from a host-made function.
 - **A stage entry's body is expressed under the stage entry's own id.**
@@ -92,7 +94,8 @@ preference, then size).
   a manifold language its tree's table does not offer (Realize.hs
   `pinTable`). `pickLanguage` can also return a recursion head's language
   that the node's table lacks (its `hostedWith` fallback), which collapse
-  then cannot build. No witness yet.
+  then cannot build. No witness yet. COST-15 condition 5 holds only if
+  these cannot happen.
 - **The realizer's placements are checked only against themselves.**
   [read, 2026-10-25] COST-11. No test enumerates the placements of a small
   tree to confirm the DP finds the least; no test compares the crossings
@@ -127,12 +130,3 @@ preference, then size).
   and is reached only through strict positions (no conditional arm, lambda
   or `@try` region). Open in COST-13: whether EVAL-3 lets such a value be
   computed in the caller's pool.
-
-- **Instance resolution cannot compare Nat-dimensioned types.** [reproduced,
-  2026-10-24] Collapse resolves instances by type before cost (COST-15)
-  only when a term's implementations differ in type, because
-  `compatibleType` does not match Nat-dimensioned types: resolving `pack`
-  in golden tensor-comprehensive fails "No matching implementation found
-  for 'pack' at type ((Int, Int), Vector 6 Real) -> Matrix 2 3 Real"
-  (vector-comprehensive likewise). Implementations of differing
-  Nat-dimensioned types would hit the same failure.

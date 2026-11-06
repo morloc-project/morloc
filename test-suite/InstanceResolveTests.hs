@@ -7,6 +7,8 @@ module InstanceResolveTests (instanceResolveTests) where
 
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
+import Data.Maybe (isNothing)
+import Morloc.CodeGenerator.Realize (evidenceProblem)
 import Morloc.Frontend.Instances
 import Morloc.Namespace.Expr
 import Morloc.Namespace.Prim
@@ -149,6 +151,26 @@ instanceResolveTests =
                 ( methodImpls defaultPolicy e ev (EV "m")
                 , methodImpls defaultPolicy {policyOmitted = OmittedMissing} e ev (EV "m") )
                   @?= (Right [body "m"], Left (MethodOmitted (key "Sz" [int]) (EV "m")))
+    , testCase "a method use realizes only what was selected for its evidence (CLS-2)" $
+        let cls = Just (ClassName "Sz")
+            k1 = key "Sz" [int]
+            k2 = key "Sz" [str]
+            ev = EvInstance k1 [] []
+         in map
+              isNothing
+              [ evidenceProblem cls [ev] [Just k1, Just k1]
+              , evidenceProblem cls [ev, EvInstance k1 [str] []] [Just k1]
+              , evidenceProblem cls [EvDerived (ClassName "Sz") int] [Nothing]
+              , evidenceProblem Nothing [] [Nothing, Nothing]
+              , evidenceProblem cls [ev] [Just k1, Just k2]
+              , evidenceProblem cls [ev] [Just k1, Nothing]
+              , evidenceProblem Nothing [ev] [Just k2]
+              , evidenceProblem Nothing [] [Just k1]
+              , evidenceProblem cls [ev, EvInstance k2 [] []] [Just k1]
+              , evidenceProblem cls [EvInstance k1 [] [EvGiven (sz int)]] [Just k1]
+              , evidenceProblem cls [EvDerived (ClassName "Sz") int] [Just k1]
+              ]
+              @?= replicate 4 True <> replicate 7 False
     ]
   where
     a = TV "a"

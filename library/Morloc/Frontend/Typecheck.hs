@@ -130,7 +130,7 @@ assertBackEdgeTypes root = go Map.empty root >> return root
                 "the call of" <+> squotes (pretty v) <+> "here is bound to its own definition, of type"
                   <+> pretty tdef <> ", at another type," <+> pretty t
         _ -> return ()
-      VarS v (Many _ xs) -> mapM_ (go (Map.insert v t env)) xs
+      VarS v m -> mapM_ (go (Map.insert v t env)) (unMany m)
       _ -> mapM_ (go env) (foldExprS (: []) e)
     groundU ty = case ty of
       ExistU {} -> False
@@ -548,7 +548,7 @@ resolveRoot :: Strictness -> Gamma -> AnnoS (Indexed TypeU) ManyPoly Int -> Morl
 resolveRoot mode g = \case
   AnnoS gi ci (VarS v (MonomorphicExpr _ xs)) -> do
     (g', xs') <- statefulMapM (resolveInstances mode) g xs
-    return (g', AnnoS gi ci (VarS v (Many [] xs')))
+    return (g', AnnoS gi ci (VarS v (Many [] (map ((,) Nothing) xs'))))
   e -> resolveInstances mode g e
 
 resolveInstances ::
@@ -583,7 +583,7 @@ resolveInstances mode g (AnnoS gi@(Idx _ gt) ci e0) = do
             Just (g1, body) -> do
               counted second
               (g2, body') <- recur g1 body
-              return (g2, VarS v (Many [EvDerived cls arg] [body']))
+              return (g2, VarS v (Many [EvDerived cls arg] [(Nothing, body')]))
             Nothing -> unresolved c (FI.NoInstance c [])
         Right ev -> do
           -- An instance that declares the method with no implementation is
@@ -611,7 +611,7 @@ resolveInstances mode g (AnnoS gi@(Idx _ gt) ci e0) = do
               then connectInstanceTypes scope g0 use instanceTypes
               else return (connectTypes scope g0 use [t | AnnoS (Idx _ t) _ _ <- es0])
           (g2, es) <- statefulMapM recur g1 es0
-          return (g2, VarS v (Many [ev] es))
+          return (g2, VarS v (Many [ev] (map ((,) (evidenceInstance ev)) es)))
         Left e@(FI.Undetermined _ _) -> deferOr g0 (VarS v (Many [] [])) (unresolved c e)
         Left e -> unresolved c e
       where
@@ -639,7 +639,7 @@ resolveInstances mode g (AnnoS gi@(Idx _ gt) ci e0) = do
         Right ev -> Just ev <$ counted second
         Left e@(FI.Undetermined _ _) -> Nothing <$ deferOr g0 UniS (constraintUnmet c e)
         Left e -> constraintUnmet c e
-      statefulMapM recur g0 xs |>> second (VarS v . Many evs)
+      statefulMapM recur g0 xs |>> second (VarS v . Many evs . map ((,) Nothing))
       where
         constraintUnmet c e =
           throwTypeError ci $

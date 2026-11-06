@@ -231,12 +231,8 @@ generatedVars t = case t of
   where
     invented (TV v) = T.any (== '@') v
 
--- | The Type-kinded variables the checker generated in a type.
---
--- These are excluded from sharing because an unsolved Type variable reaches
--- 'Morloc.CodeGenerator.Realize' as @UnkT@, a wildcard in implementation
--- selection, so the implementation a use gets can depend on the use. A
--- kind variable erases to a phantom that cannot steer the choice.
+-- | The Type-kinded variables the checker generated in a type; 'shareable'
+-- does not share a key holding one.
 --
 -- 'Morloc.Typecheck.Internal.renameWithMap' tags a generated variable by
 -- kind: @\@q@ for Type, @\@n@, @\@s@, @\@r@, @\@l@, @\@e@ for the others.
@@ -285,8 +281,8 @@ elaborate spec target use key@(k, t) = do
         Definition -> case Map.lookup k (specDefs spec) of
           Just x -> return x
           Nothing -> MM.throwCompilerBug $ "specialize: no definition for term" <+> pretty k
-      -- checked at the key; a method's result is still a set of candidate
-      -- instances, chosen among in Realize
+      -- checked at the key; a method's result is the implementations of
+      -- the instance the key selects
       let check = typecheckRootAt t
       e <- snd <$> collectElaborable spec False check root
       -- A body may determine a kind-tagged slot that the key it is filed
@@ -343,7 +339,7 @@ splice spec backs stack n@(AnnoS (Idx gi t) ci e) = refTerm spec n >>= \r -> let
             case copy of
               AnnoS _ _ (VarS name (Many ev alts)) -> do
                 inner <- liftIO (newIORef Set.empty)
-                alts' <- mapM (splice spec inner ((k, key) : stack)) alts
+                alts' <- mapM (traverse (splice spec inner ((k, key) : stack))) alts
                 innerBacks <- liftIO (readIORef inner)
                 liftIO (modifyIORef' backs (Set.union (Set.delete k innerBacks)))
                 let name' = if Set.member k innerBacks then token k else name
@@ -353,12 +349,12 @@ splice spec backs stack n@(AnnoS (Idx gi t) ci e) = refTerm spec n >>= \r -> let
                 let closed = target == Definition && Set.null innerBacks
                 share <-
                   if closed && not inlined
-                    then shareable key t alts'
+                    then shareable key t (map snd alts')
                     else return False
                 if share
                   then do
                     tok <- newSpecName name
-                    let (sourced, defined) = List.partition isSourced alts'
+                    let (sourced, defined) = List.partition (isSourced . snd) alts'
                     root <- AnnoS <$> (Idx <$> plainIndex gi <*> pure t) <*> plainIndex ci <*> pure (VarS tok (Many ev defined))
                     liftIO (modifyIORef' (specShared spec) (Map.insert (k, key) tok))
                     MM.modify' (\st -> let Specs xs = stateSpecs st in st {stateSpecs = Specs (xs <> [root]), stateSpecNames = Set.insert tok (stateSpecNames st)})
@@ -366,7 +362,7 @@ splice spec backs stack n@(AnnoS (Idx gi t) ci e) = refTerm spec n >>= \r -> let
                   else do
                     when closed $
                       liftIO (modifyIORef' (specInlined spec) (Set.insert (k, key)))
-                    let alts'' = map (atUse ci) alts'
+                    let alts'' = map (fmap (atUse ci)) alts'
                     return (AnnoS (Idx gi t) ci (VarS name' (Many (useEvidence ev) alts'')))
               _ -> MM.throwCompilerBug "specialize: an elaboration is not a term"
   Nothing -> AnnoS (Idx gi t) ci <$> mapExprSM (splice spec backs stack) e
@@ -382,13 +378,13 @@ splice spec backs stack n@(AnnoS (Idx gi t) ci e) = refTerm spec n >>= \r -> let
     -- a use of a shared specialization: its sourced implementations, each
     -- chosen per use, and a call of the shared one
     sharedUse tok (AnnoS _ _ (VarS name (Many ev alts))) = do
-      sourced <- mapM instantiate (filter isSourced alts)
+      sourced <- mapM (traverse instantiate) (filter (isSourced . snd) alts)
       callAt tok name ev sourced
     sharedUse _ _ = MM.throwCompilerBug "specialize: an elaboration is not a term"
     callAt tok name ev sourced = do
-      let sourced' = map (atUse ci) sourced
+      let sourced' = map (fmap (atUse ci)) sourced
       call <- AnnoS <$> (Idx <$> plainIndex gi <*> pure t) <*> plainIndex ci <*> pure (CallS tok)
-      return (AnnoS (Idx gi t) ci (VarS name (Many (useEvidence ev) (sourced' <> [call]))))
+      return (AnnoS (Idx gi t) ci (VarS name (Many (useEvidence ev) (sourced' <> [(Nothing, call)]))))
 
 isSourced :: Typed -> Bool
 isSourced (AnnoS _ _ (ExeS (SrcCall _))) = True
@@ -406,7 +402,7 @@ newSpecName name = do
 -- call; it must not change what the program computes or how often:
 --
 -- * a function of at least one argument whose result is not a suspension;
--- * its key is fully solved, with no variable the checker invented;
+-- * its key is fully solved, with no Type variable the checker invented;
 -- * each implementation defined here is a value taking every argument at
 --   once: a function built by a computation (a lambda doing work before the
 --   function it returns, a partial application computing an argument or
@@ -453,7 +449,7 @@ shareable key t alts = do
     recurses _ _ _ = False
     -- a top-level name, not a class method, whose value is computed once
     -- per command: data, or a function built by a computation
-    readsConstant idmap sigmap (AnnoS (Idx _ ty) ci (VarS (EV v) (Many _ xs))) =
+    readsConstant idmap sigmap (AnnoS (Idx _ ty) ci (VarS (EV v) xs)) =
       not (T.any (== '`') v)
         && not (isMethod idmap sigmap ci)
         && (not (isArrow ty) || not (all isValue xs))

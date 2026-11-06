@@ -98,19 +98,13 @@
   A`) lists every method with no implementation, so a use selects it and
   typechecks, and only realization says "No implementation found for
   'sh'", naming no instance. Open: CLS-14.
-- **Instances are matched three ways.** [read] Violates CLS-16 (one rule).
-  Typecheck selects one instance per use through the resolver; but
-  Realize.collapseExpr still picks among a use's implementations with its
-  own `compatibleType` (UnkT a wildcard), and CodeGenerator/Instance.hs,
-  used for calls the compiler builds (`__get_slice__`, `__access_index__`,
-  `__to_index__`, `map` across effects), takes the first sourced match,
-  with no specificity and blind to an instance whose body is morloc.
-- **Realization cannot order a Nat-kinded instance head against a literal
-  one.** [read] Violates CLS-16. Realize.collapseExpr orders heads after
-  erasure, where a Nat variable is a placeholder that matches any Nat in
-  both directions, so `Vec n Int` and `Vec 3 Int` are equivalent there and
-  the choice falls to the alias chain. The typechecker orders them
-  correctly; realization should use its choice (C3 in the brittleness plan).
+- **Instances are matched two ways.** [read] Violates CLS-16 (one rule).
+  Typecheck selects one instance per use through the resolver, and
+  realization takes that instance's implementations; but
+  CodeGenerator/Instance.hs, used for calls the compiler builds
+  (`__get_slice__`, `__access_index__`, `__to_index__`, `map` across
+  effects), takes the first sourced match, with no specificity and blind
+  to an instance whose body is morloc.
 - **A field of a Rec alias used as a record type cannot be read.**
   [reproduced] Violates KIND-2's record-type reading (ALIAS-11). `type R =
   {x = Int}; f :: R -> Int; f r = .x r` passes the kind check and fails at

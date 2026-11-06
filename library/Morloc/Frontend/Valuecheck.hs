@@ -33,7 +33,7 @@ toE :: AnnoS (Indexed Type) Many Int -> E
 toE (AnnoS g _ UniS) = LitP g MUni
 toE (AnnoS g _ NullS) = LitP g MNull
 toE (AnnoS g _ (BndS v)) = BndP g v
-toE (AnnoS g _ (VarS v (Many _ es))) = VarP g v (map toE es)
+toE (AnnoS g _ (VarS v es)) = VarP g v (map toE (unMany es))
 toE (AnnoS g _ (AppS e es)) = AppP g (toE e) (map toE es)
 toE (AnnoS g _ (LamS vs e)) = LamP g vs (toE e)
 toE (AnnoS g _ (LstS es)) = LstP g (map toE es)
@@ -113,7 +113,7 @@ checkRecursion specs termOf owners sites = go [] id
   where
     go :: [Member g] -> (Demand -> Demand) -> AnnoS g Many Int -> MorlocMonad ()
     go open here node@(AnnoS _ c e) = case e of
-      VarS v (Many _ alts) ->
+      VarS v alts ->
         mapM_ (\alt -> go (Member v (termOf c) alt here : open) id alt) alts
       CallS v
         | not (Set.member v specs)

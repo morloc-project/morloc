@@ -58,3 +58,10 @@
   `x != k`, against 0.15 ms for a call to a definition in the same file
   (bench typechecking, TYCK-3, TYCK-6, TYCK-7, quick run 2026-11-03). The
   copies also reach code generation.
+- **A key holding a Type variable the checker generated is never shared.**
+  [read, 2026-11-06] Frontend/Specialize.hs `shareable` refuses a key with
+  `generatedTypeVars`; it was written for Realize's selection by type, in
+  which an unsolved variable was a wildcard, and collapse no longer
+  selects by type. Whether the exclusion is still needed, and what lifting
+  it saves in copies and compile time, is not measured. Lifting it changes
+  which elaborations are shared, hence the generated pools.

@@ -104,7 +104,7 @@ read by the closure's calls (STATE-3).
 
 ### HOST-9 A function made by host code stays in the pool that made it
 Intent: ruled 2026-10-26
-Tests: spec-host-9-1, spec-host-9-2, spec-host-9-3, spec-host-9-4, spec-host-9-5
+Tests: spec-host-9-1, spec-host-9-2, spec-host-9-3, spec-host-9-4, spec-host-9-5, spec-host-9-6
 Code: conforms 2026-10-26
 
 A function made by host code has no identity outside the pool that made
