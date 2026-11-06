@@ -161,7 +161,7 @@ data Target = Definition | Method
 refTerm :: Spec -> Typed -> MorlocMonad (Maybe (Int, Target))
 -- The concrete index names the reference: an implementation's root keeps
 -- the index of the use it was expanded at as its general index.
-refTerm spec (AnnoS _ ci (VarS _ (Many []))) = do
+refTerm spec (AnnoS _ ci (VarS _ (Many _ []))) = do
   k <- termOf ci
   GMap _ sigmap <- MM.gets stateSignatures
   return $ case k of
@@ -341,7 +341,7 @@ splice spec backs stack n@(AnnoS (Idx gi t) ci e) = refTerm spec n >>= \r -> let
           _ -> do
             copy <- instantiate elab
             case copy of
-              AnnoS _ _ (VarS name (Many alts)) -> do
+              AnnoS _ _ (VarS name (Many ev alts)) -> do
                 inner <- liftIO (newIORef Set.empty)
                 alts' <- mapM (splice spec inner ((k, key) : stack)) alts
                 innerBacks <- liftIO (readIORef inner)
@@ -359,32 +359,36 @@ splice spec backs stack n@(AnnoS (Idx gi t) ci e) = refTerm spec n >>= \r -> let
                   then do
                     tok <- newSpecName name
                     let (sourced, defined) = List.partition isSourced alts'
-                    root <- AnnoS <$> (Idx <$> plainIndex gi <*> pure t) <*> plainIndex ci <*> pure (VarS tok (Many defined))
+                    root <- AnnoS <$> (Idx <$> plainIndex gi <*> pure t) <*> plainIndex ci <*> pure (VarS tok (Many ev defined))
                     liftIO (modifyIORef' (specShared spec) (Map.insert (k, key) tok))
                     MM.modify' (\st -> let Specs xs = stateSpecs st in st {stateSpecs = Specs (xs <> [root]), stateSpecNames = Set.insert tok (stateSpecNames st)})
-                    callAt tok name sourced
+                    callAt tok name ev sourced
                   else do
                     when closed $
                       liftIO (modifyIORef' (specInlined spec) (Set.insert (k, key)))
                     let alts'' = map (atUse ci) alts'
-                    return (AnnoS (Idx gi t) ci (VarS name' (Many alts'')))
+                    return (AnnoS (Idx gi t) ci (VarS name' (Many (useEvidence ev) alts'')))
               _ -> MM.throwCompilerBug "specialize: an elaboration is not a term"
   Nothing -> AnnoS (Idx gi t) ci <$> mapExprSM (splice spec backs stack) e
   where
     token k = recName (maybe (refName e) snd (Map.lookup k (specDefs spec))) k
     refName (VarS v _) = v
     refName _ = EV "?"
+    -- the reference's own evidence: how the use meets its constraints
+    useEvidence ev = case e of
+      VarS _ (Many evs _) -> List.nub (evs <> ev)
+      _ -> ev
     methodDepth = 64
     -- a use of a shared specialization: its sourced implementations, each
     -- chosen per use, and a call of the shared one
-    sharedUse tok (AnnoS _ _ (VarS name (Many alts))) = do
+    sharedUse tok (AnnoS _ _ (VarS name (Many ev alts))) = do
       sourced <- mapM instantiate (filter isSourced alts)
-      callAt tok name sourced
+      callAt tok name ev sourced
     sharedUse _ _ = MM.throwCompilerBug "specialize: an elaboration is not a term"
-    callAt tok name sourced = do
+    callAt tok name ev sourced = do
       let sourced' = map (atUse ci) sourced
       call <- AnnoS <$> (Idx <$> plainIndex gi <*> pure t) <*> plainIndex ci <*> pure (CallS tok)
-      return (AnnoS (Idx gi t) ci (VarS name (Many (sourced' <> [call]))))
+      return (AnnoS (Idx gi t) ci (VarS name (Many (useEvidence ev) (sourced' <> [call]))))
 
 isSourced :: Typed -> Bool
 isSourced (AnnoS _ _ (ExeS (SrcCall _))) = True
@@ -449,7 +453,7 @@ shareable key t alts = do
     recurses _ _ _ = False
     -- a top-level name, not a class method, whose value is computed once
     -- per command: data, or a function built by a computation
-    readsConstant idmap sigmap (AnnoS (Idx _ ty) ci (VarS (EV v) (Many xs))) =
+    readsConstant idmap sigmap (AnnoS (Idx _ ty) ci (VarS (EV v) (Many _ xs))) =
       not (T.any (== '`') v)
         && not (isMethod idmap sigmap ci)
         && (not (isArrow ty) || not (all isValue xs))

@@ -45,6 +45,8 @@ specTests =
     , localOption (mkTimeout 2000000) cls5Tests
     , localOption (mkTimeout 2000000) cls16Tests
     , localOption (mkTimeout 2000000) cls17Tests
+    , localOption (mkTimeout 2000000) cls18Tests
+    , localOption (mkTimeout 2000000) cls20Tests
     , localOption (mkTimeout 5000000) poly7Tests
     , localOption (mkTimeout 2000000) bindTests
     , localOption (mkTimeout 2000000) hostTests
@@ -1678,6 +1680,20 @@ instanceAnnotationTests =
         f :: Box -> Int
         f b = size b
         |]
+    , accept
+        "spec-cls-2-7"
+        [r|
+        module main (combine)
+        class Cat a where
+          cat :: a -> a -> a
+        record Foo = Bar { n :: Str }
+        instance Cat Foo where
+          cat a b = b
+        record Scan where
+          q :: Foo
+        combine :: Foo -> Foo -> Scan
+        combine x y = {q = cat x y}
+        |]
     ]
 
 -- | A rejection whose message contains @needle@.
@@ -2370,6 +2386,31 @@ derivTests =
         eqA x y = x == y
         f :: Int -> Bool
         f n = eqA n 1
+        |]
+    , rejectNaming
+        "spec-deriv-6-11"
+        ["Ord"]
+        []
+        [r|
+        module main (f)
+        class Eq a where
+          (==) :: a -> a -> Bool
+          (!=) :: a -> a -> Bool
+        class Ord a where
+          (<) :: a -> a -> Bool
+          (<=) :: a -> a -> Bool
+          (>) :: a -> a -> Bool
+          (>=) :: a -> a -> Bool
+        record Box a where
+          v :: a
+        instance Eq (Box a) where
+          (==) x y = True
+          (!=) x y = False
+        instance Eq (Box Int) where
+          (!=) x y = False
+        mkBox :: a -> Box a
+        f :: Int -> Bool
+        f n = mkBox n < mkBox 1
         |]
     , accept
         "spec-deriv-1-1"
@@ -4021,7 +4062,7 @@ sigTests =
         case x of
           Left e -> assertFailure ("expected acceptance, got: " <> show e)
           Right es -> do
-            let chosen = [v | e <- es, AnnoS _ _ (VarS v (Many (_ : _))) <- annoNodes e, v `elem` [EV "lt", EV "le"]]
+            let chosen = [v | e <- es, AnnoS _ _ (VarS v (Many _ (_ : _))) <- annoNodes e, v `elem` [EV "lt", EV "le"]]
                 Specs specs = stateSpecs st
             assertEqual "method uses given implementations" [] chosen
             assertEqual "shared specializations" 0 (length specs)
@@ -4533,7 +4574,7 @@ cls16Tests =
         instance Pk [a] (Vec n a) where
           source Py from "lib.py" ("pk", "unpk")
         g :: Vec n Str -> Vec n Str
-        g t = pk (unpk t)
+        g t = pk (unpk t :: [Str])
         |]
     , reject
         "spec-cls-5-11"
@@ -4546,7 +4587,37 @@ cls16Tests =
         instance Pk [a] (Vec 3 a) where
           source Py from "lib.py" ("pk", "unpk")
         g :: Vec n Str -> Vec n Str
-        g t = pk (unpk t)
+        g t = pk (unpk t :: [Str])
+        |]
+    , reject
+        "spec-cls-16-8"
+        [r|
+        module main (f)
+        class C a where
+          c1 :: a -> Str
+          c2 :: a -> Str
+        instance C (Bool, b) where
+          c1 x = "a1"
+        instance C (a, Str) where
+          c1 x = "b1"
+          c2 x = "b2"
+        f :: (Bool, Str) -> Str
+        f x = c2 x
+        |]
+    , reject
+        "spec-cls-16-10"
+        [r|
+        module main (f)
+        class C a where
+          c1 :: a -> Str
+          c2 :: a -> Str
+        instance C (Bool, b) where
+          c1 x = "a1"
+        instance C (a, Str) where
+          c1 x = "b1"
+          c2 x = "b2"
+        f :: (Bool, Str) -> Str
+        f x = c1 x
         |]
     , testCase "spec-cls-16-3" $
         ( isSubtypeOf (ForallU a (ForallU b (pair (VarU a) (VarU b)))) (ForallU c (pair (VarU c) int))
@@ -4629,6 +4700,35 @@ cls5Tests =
         g w = sz w
         |]
     , rejectFixture "spec-cls-5-3" False "Base" "cls-5-3/main.loc"
+    , reject
+        "spec-cls-5-6"
+        [r|
+        module main (useIt)
+        class Sz a where
+          sz :: a -> Str
+        record W a where
+          val :: a
+        instance Sz Bool where
+          sz x = "bool"
+        instance Sz a => Sz (W a) where
+          sz w = "w"
+        mkW :: a -> W a
+        useIt :: Str -> Str
+        useIt s = sz (mkW s)
+        |]
+    , reject
+        "spec-cls-5-7"
+        [r|
+        module main (f)
+        class Plus a where
+          plus :: a -> a -> a
+        instance Plus Str where
+          plus x y = x
+        ident :: Plus a => a -> a
+        ident x = x
+        f :: Bool -> Bool
+        f x = ident x
+        |]
     , accept
         "spec-cls-5-4"
         [r|
@@ -4717,6 +4817,320 @@ cls17Tests =
           def = "d"
         f :: Bool -> Str
         f k = def
+        |]
+    , reject
+        "spec-cls-17-1"
+        [r|
+        module main (f)
+        class Def a where
+          def :: a
+        instance Def Str where
+          def = "d"
+        f :: Bool -> ?Str
+        f k = def
+        |]
+    , reject
+        "spec-cls-17-3"
+        [r|
+        module main (f)
+        class Packable a b where
+          pack :: a -> b
+          unpack :: b -> a
+        newtype Foo = Int
+        instance Packable Int Foo where
+          source Py from "lib.py" ("pack", "unpack")
+        f :: Int -> ?Foo
+        f x = pack x
+        |]
+    ]
+
+cls18Tests :: TestTree
+cls18Tests =
+  testGroup
+    "CLS-18"
+    [ reject
+        "spec-cls-18-1"
+        [r|
+        module main (useIt)
+        class Gen a where
+          gen :: Str -> [a]
+        instance Gen Str where
+          gen n = [n]
+        showList :: [a] -> Str
+        render :: Gen a => Str -> Str
+        render n = showList (gen n)
+        useIt :: Str -> Str
+        useIt n = render n
+        |]
+    , reject
+        "spec-cls-18-3"
+        [r|
+        module main (f)
+        class Def a where
+          def :: a
+        instance Def Str where
+          def = "d"
+        instance Def Bool where
+          def = True
+        konst :: a -> b -> a
+        f :: Str -> Str
+        f k = konst k def
+        |]
+    , accept
+        "spec-cls-18-4"
+        [r|
+        module main (f)
+        newtype Vector (n :: Nat) a = List a
+        class Sizeable a where
+          size :: a -> Int
+        instance Sizeable (Vector n a) where
+          size x = 1
+        fromList :: [a] -> Vector n a
+        f :: [Int] -> Int
+        f xs = size (fromList xs)
+        |]
+    , reject
+        "spec-cls-18-5"
+        [r|
+        module main (f)
+        class Sizeable a where
+          size :: a -> Int
+        instance Sizeable [a] where
+          size x = 1
+        f :: Int -> Int
+        f x = size []
+        |]
+    , reject
+        "spec-cls-18-6"
+        [r|
+        module main (f)
+        class Packable a b where
+          pack :: a -> b
+          unpack :: b -> a
+        newtype Box = Int
+        instance Packable Int Box where
+          source Py from "lib.py" ("pack", "unpack")
+        class Def a where
+          def :: a
+        instance Def Str where
+          def = "d"
+        instance Def Bool where
+          def = True
+        konst :: a -> b -> a
+        konst x y = x
+        asBox :: Box -> Box
+        asBox x = x
+        f b = konst (unpack (asBox b)) def
+        |]
+    ]
+
+cls20Tests :: TestTree
+cls20Tests =
+  testGroup
+    "CLS-20"
+    [ accept
+        "spec-cls-20-1"
+        [r|
+        module main (f)
+        class Size a where
+          size :: a -> Int
+        instance Size Int where
+          size x = 1
+        instance Size Str where
+          size x = 2
+        newtype Box = Int
+        class Packable a b where
+          pack :: a -> b
+          unpack :: b -> a
+        f :: Box -> Int
+        f b = size (unpack b)
+        |]
+    , reject
+        "spec-cls-20-2"
+        [r|
+        module main (f)
+        class Size a where
+          size :: a -> Int
+        instance Size Int where
+          size x = 1
+        instance Size Str where
+          size x = 2
+        newtype Box = Int
+        class Pk a b where
+          pk :: a -> b
+          unpk :: b -> a
+        instance Pk Int Box where
+          source Py from "lib.py" ("pk", "unpk")
+        f :: Box -> Int
+        f b = size (unpk b)
+        |]
+    , reject
+        "spec-cls-20-3"
+        [r|
+        module main (f)
+        class Packable a b where
+          pack :: a -> b
+          unpack :: b -> a
+        instance Packable Int Bool where
+          source Py from "lib.py" ("pack", "unpack")
+        instance Packable Str Bool where
+          source Py from "lib2.py" ("pack", "unpack")
+        f :: Bool -> Bool
+        f b = b
+        |]
+    , reject
+        "spec-cls-20-4"
+        [r|
+        module main (f)
+        class Packable a b where
+          pack :: a -> b
+          unpack :: b -> a
+        newtype Foo = Int
+        instance Packable Int Foo where
+          source Py from "lib.py" ("pack", "unpack")
+        class Packable Str b => Wire b where
+          wire :: b -> Str
+        instance Wire Foo where
+          wire x = "w"
+        f :: Foo -> Str
+        f x = wire x
+        |]
+    , reject
+        "spec-cls-20-5"
+        [r|
+        module main (f)
+        class Packable a b where
+          pack :: a -> b
+          unpack :: b -> a
+        newtype Foo = Int
+        instance Packable Int Foo where
+          source Py from "lib.py" ("pack", "unpack")
+        class Sh a where
+          sh :: a -> Str
+        instance Packable Str a => Sh [a] where
+          sh x = "l"
+        f :: [Foo] -> Str
+        f x = sh x
+        |]
+    , reject
+        "spec-cls-20-6"
+        [r|
+        module main (f, g)
+        class Packable a b where
+          pack :: a -> b
+          unpack :: b -> a
+        newtype Bag a = List Int
+        instance Packable [Int] (Bag a) where
+          source Py from "lib.py" ("pack", "unpack")
+        g :: Bag a -> [Str]
+        g b = unpack b
+        f :: Int -> Int
+        f x = x
+        |]
+    , accept
+        "spec-cls-20-7"
+        [r|
+        module main (f)
+        class Packable a where
+          pk :: a -> Str
+        instance Packable Int where
+          pk x = "int"
+        instance Packable Str where
+          pk x = "str"
+        f :: Int -> Str
+        f x = pk x
+        |]
+    , accept
+        "spec-cls-20-8"
+        [r|
+        module main (g)
+        class Packable a b where
+          pack :: a -> b
+          unpack :: b -> a
+        newtype Vector (n :: Nat) a = List a
+        instance Packable [a] (Vector n a) where
+          source Py from "lib.py" ("pack", "unpack")
+        len :: [a] -> Int
+        g :: Vector n Int -> Int
+        g v = len (unpack v)
+        |]
+    , accept
+        "spec-cls-20-9"
+        [r|
+        module main (f)
+        class Packable a b where
+          pack :: a -> b
+          unpack :: b -> a
+        newtype Box = Int
+        instance Packable Int Box where
+          source Py from "lib.py" ("pack", "unpack")
+        class Def a where
+          def :: a
+        instance Def Int where
+          def = 1
+        instance Def Str where
+          def = "d"
+        same :: a -> a -> a
+        size2 :: a -> Int
+        sel :: Int -> Int -> Int
+        class Pick a where
+          pick :: a -> Box -> Int
+        instance Pick [a] where
+          pick xs b = size2 (same def (unpack b))
+        f :: Box -> Int
+        f b = pick [1] b
+        |]
+    , accept
+        "spec-cls-20-10"
+        [r|
+        module main (f)
+        class Packable a b where
+          pack :: a -> b
+          unpack :: b -> a
+        newtype Box = Int
+        instance Packable Int Box where
+          source Py from "lib.py" ("pack", "unpack")
+        class Def a where
+          def :: a
+        instance Def Int where
+          def = 1
+        instance Def Str where
+          def = "d"
+        same :: a -> a -> a
+        size2 :: a -> Int
+        sel :: Int -> Int -> Int
+        class Pick a where
+          pick :: a -> Box -> Int
+        instance Pick [a] where
+          pick xs b = size2 (same (unpack b) def)
+        f :: Box -> Int
+        f b = pick [1] b
+        |]
+    , reject
+        "spec-cls-20-11"
+        [r|
+        module main (f)
+        class Packable a b where
+          pack :: a -> b
+          unpack :: b -> a
+        newtype Box = Int
+        instance Packable Int Box where
+          source Py from "lib.py" ("pack", "unpack")
+        class Def a where
+          def :: a
+        instance Def Int where
+          def = 1
+        instance Def Str where
+          def = "d"
+        same :: a -> a -> a
+        size2 :: a -> Int
+        sel :: Int -> Int -> Int
+        class Pick a where
+          pick :: a -> Box -> Int
+        instance Pick [a] where
+          pick xs b = sel (size2 def) (size2 (unpack b))
+        f :: Box -> Int
+        f b = pick [1] b
         |]
     ]
 

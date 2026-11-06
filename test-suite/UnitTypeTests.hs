@@ -5271,12 +5271,13 @@ complexityRegressionTests =
         localOption (mkTimeout 5000000) $
           testCase "nested function arguments are scored once"
             (assertGenerates (nestedComposeChain 25))
-      , -- A use whose type only a sole instance determines is solved while
-        -- the export is checked with its references left as signatures, so
-        -- the export is specialized use by use rather than expanded in place.
+      , -- A use whose type only its instance determines (CLS-20) is solved
+        -- while the export is checked with its references left as
+        -- signatures, so the export is specialized use by use rather than
+        -- expanded in place.
         localOption (mkTimeout 10000000) $
           assertGeneralType
-            "a use solved by its sole instance keeps the export shallow"
+            "a use solved by its instance keeps the export shallow"
             (soleInstanceComparisons 150)
             (fun [lst (VarU (TV "Tag")), int])
       , -- Each method use checks every instance of its class and trims the
@@ -5342,7 +5343,7 @@ nestedMethodUses k =
             <> method l <> " x y = " <> body <> "\n"
 
 -- | A comparison class with container instances whose bodies use the class
--- again, over a two-parameter class with one instance.
+-- again, and a newtype with its Packable instance.
 classComparisons :: MT.Text
 classComparisons =
   "module main (f)\n"
@@ -5357,19 +5358,18 @@ classComparisons =
     <> "instance (Cmp a, Cmp b, Cmp c) => Cmp (a, b, c) where\n"
     <> "  lt x y = lt (pick (lt (cmpC (.0 x) (.0 y)) 0) 0 (pick (lt (cmpC (.1 x) (.1 y)) 0) 0 (cmpC (.2 x) (.2 y)))) 0\n"
     <> "  le x y = le (pick (lt (cmpC (.0 x) (.0 y)) 0) 0 (pick (lt (cmpC (.1 x) (.1 y)) 0) 0 (cmpC (.2 x) (.2 y)))) 0\n"
-    <> "class Conv a b where\n  conv :: a -> b\n"
+    <> "class Packable a b where\n  pack :: a -> b\n  unpack :: b -> a\n"
     <> "newtype Tag = Int\n"
-    <> "instance Conv Tag Int where\n  conv x = 1\n"
     <> "mapL :: (a -> b) -> [a] -> [b]\nmapL g xs = []\n"
     <> "sizeL :: [a] -> Int\nsizeL xs = 0\n"
 
--- | @k@ tuple comparisons and a use whose result type only the sole
--- @Conv@ instance determines.
+-- | @k@ tuple comparisons and a use whose result type only the selected
+-- Packable instance determines (CLS-20).
 soleInstanceComparisons :: Int -> MT.Text
 soleInstanceComparisons k =
   classComparisons
     <> "f :: [Tag] -> Int\n"
-    <> "f ts = " <> foldr (\i e -> "(pick (lt (" <> MT.pack (show i) <> ", 2.0, \"a\") (3, 4.0, \"b\")) 1 " <> e <> ")") "(sizeL (mapL conv ts))" [1 .. k] <> "\n"
+    <> "f ts = " <> foldr (\i e -> "(pick (lt (" <> MT.pack (show i) <> ", 2.0, \"a\") (3, 4.0, \"b\")) 1 " <> e <> ")") "(sizeL (mapL unpack ts))" [1 .. k] <> "\n"
 
 -- | @(inc . inc . ... . inc) x@, @k@ compositions deep, with @(.)@ defined
 -- in morloc and @inc@ sourced in Python and C++ so the realizer has a
@@ -6964,8 +6964,9 @@ typeclassTests =
 
       , -- === COERCION-AWARE INSTANCE RESOLUTION ===
 
-        assertGeneralType
-          "instance resolved through optional coercion"
+        -- CLS-17: no coercion makes a head match
+        expectUserError
+          "instance not resolved through optional coercion"
           [r|
         module main (x)
         class Default a where
@@ -6975,7 +6976,6 @@ typeclassTests =
         x :: ?Int
         x = def
           |]
-          (OptionalU int)
 
       , assertGeneralType
           "typeclass method in effectful do-block"

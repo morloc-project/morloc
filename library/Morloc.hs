@@ -78,6 +78,9 @@ typecheckFrontend path code = do
     _ -> return ()
   (checks, exports) <- restructure dag >>= treeify
   checkRsize
+  -- CLS-20: a type's Packable instances agree on its wire form, so the
+  -- instance a use selects may fix the wire type.
+  checkPackerCoherence
   F.validate (validationTrees checks)
   es <- specialize checks exports
   specNames <- MM.gets stateSpecNames
@@ -231,11 +234,6 @@ writeProgram translateFn path code =
   -- tree or an aborted build leaves a .tmp.<pid> directory beside the program.
   withStagingCleanup $ do
   typecheck path code
-    -- A constructor whose Packable instances disagree about its wire form
-    -- cannot be serialized consistently by every language that shares it, and
-    -- the disagreement is invisible until a value crosses between two pools.
-    -- Settle it before anything is lowered.
-    >>= (\asts -> checkPackerCoherence >> return asts)
     -- Evaluate applied lambdas. gASTs run in the pure nexus evaluator, which
     -- cannot hold a native closure, so let-bound lambdas are always inlined
     -- there; rASTs become pools, where a multiply-used lambda is kept as a

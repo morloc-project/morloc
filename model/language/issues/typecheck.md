@@ -109,42 +109,15 @@ literal and record gaps. Reproduced on 0.109.0 unless marked.
   (Int -> <e> ()) -> <e> ()` it typechecks. Open: instantiate an
   existential branch to a suspension with a fresh row before joining.
 - **A class variable that only a constraint mentions.** [reproduced,
-  2026-10-18, 0.109.0] Violates POLY-6 and DIAG-2. In `f :: C a => Int ->
-  Str`, nothing at any call can fix `a`, but the signature is accepted and
-  `typecheck` passes every caller; what happens next depends on the body
-  and on how many instances are in scope:
-  - `class Gen a where gen :: Int -> [a]`, `render :: Gen a => Int -> Str;
-    render n = showList (gen n)`, `useIt n = render n`. With only `instance
-    Gen Int` in scope, `make` builds and `./prog useIt 5` prints `"[5]"`: the
-    sole instance is chosen though nothing chose it. Add `instance Gen Str`
-    and `make` fails "The type of this term is not determined: nothing in
-    the program fixes 'a'" at `gen n`. An instance added by an unrelated
-    import changes a working program into a rejected one.
-  - The same with a body that calls a library function: `ingest :: C a =>
-    Int -> Str -> Str -> <IO> (); ingest l i o = saveSource l o (readFormat
-    i)` fails at `@open` inside the library's `saveSource`, not at
-    `ingest`.
-  - Two-parameter class: `class Conv f a where conv :: f -> [a]`; `size ::
-    Conv f a => f -> Int; size x = length (conv x)` fails in typecheck with
-    "This definition needs Conv f (a) but its signature does not declare it
-    (the signature's constraints and their superclasses give Conv f a)",
-    which reads as a missing constraint the signature visibly has. The
-    message should say `a` is undetermined.
-  - `count :: Named a => Int -> Int; count n = n + 0` (no method used)
-    builds silently.
-  CLS-18 (ruled 2026-10-29) makes this an error at the signature, naming
-  the variable; the code deviates. Re-reproduced 2026-10-31 (`count`).
-  The mechanism: resolution solves a use's open type from the one matching
-  instance group (Frontend/Typecheck.hs `resolveInstances`, from the
-  implementations or, in a shallow pass, the instance types). The same
-  step fixes a newtype's representation in `map unpack ts`, which needs a
-  ruling on whether a Packable instance determines its packed type.
-- **A method use nothing determines is accepted inside a concrete
-  export.** [reproduced, 2026-11-02] Violates the second sentence of
-  CLS-18. With `instance Monoid Str` and `instance Monoid (List a)`,
-  `k :: a -> b -> a; x :: Bool; x = k True mempty` typechecks; nothing
-  fixes the type of `mempty`. It also sends `x` to the specializer's
-  in-place fallback (model/compiler/issues/specialization.md).
+  2026-11-05] Violates the first sentence of CLS-18. In `count :: Named a
+  => Int -> Int; count n = n`, nothing at any use can fix `a`, but the
+  signature is accepted and the program typechecks. Where the body uses a
+  method at `a` (`render n = showList (gen n)`), the use inside the body is
+  rejected as undetermined, but the error is at that use, not at the
+  signature. The two-parameter case `size :: Conv f a => f -> Int; size x
+  = length (conv x)` is rejected at validation "This definition needs Conv
+  f (a) but its signature does not declare it", which reads as a missing
+  constraint the signature visibly has.
 - **A newtype over a `type` alias reports a phantom instance.** [reproduced,
   2026-10-21] `type Meters = Int; newtype Wrapped = Meters` fails "Cannot
   declare instance on transparent alias 'Meters'" though no instance is

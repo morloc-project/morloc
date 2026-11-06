@@ -86,12 +86,33 @@ instanceResolveTests =
         , isUndetermined (resolve skolem mempty (env [decl "Sz" [] [ForallU a (list (VarU a))], decl "Sz" [] [list int]]) [] (sz (list ex)))
         , isUndetermined (resolve skolem mempty (env [decl "Sz" [] [ForallU a (VarU a)]]) [] (sz partial)) )
           @?= (Just (key "Sz" [ForallU a (list (VarU a))]), True, True)
-    , testCase "Packable's wire argument under Q2 (a)" $
-        let packable = (env [decl "Packable" [] [int, VarU name]]) {ieFundeps = packableWireFundep}
+    , testCase "Packable's wire argument is fixed by its native one (CLS-20)" $
+        let packable = fundeps [a, b] [decl "Packable" [] [int, VarU name]]
          in ( keyOf (run packable [] (pk ex (VarU name)))
-            , isNoInstance (run packable [] (pk str (VarU name)))
-            , isUndetermined (run (env [decl "Packable" [] [int, VarU name]]) [] (pk ex (VarU name))) )
-              @?= (Just (key "Packable" [int, VarU name]), True, True)
+            , isDisagrees (run packable [] (pk str (VarU name)))
+            , isUndetermined (run (env [decl "Packable" [] [int, VarU name]]) [] (pk ex (VarU name)))
+            , ieFundeps (fundeps [a] []) )
+              @?= (Just (key "Packable" [int, VarU name]), True, True, Map.empty)
+    , testCase "a wire argument's Nat arithmetic is evaluated at the instance (CLS-20)" $
+        let m = NatVarU (TV "m")
+            mat x y z = AppU (VarU (TV "Mat")) [x, y, z]
+            packable = fundeps [a, b] [decl "Packable" [] [ForallU a (vec (NatMulU m n) (VarU a)), ForallU a (mat m n (VarU a))]]
+            use x = pk (vec x int) (mat (NatLitU 2) (NatLitU 3) int)
+            k = NatVarU (TV "k")
+         in ( keyOf (run packable [] (use (NatLitU 6)))
+            , isDisagrees (run packable [] (use (NatLitU 7)))
+            , isJust (keyOf (run packable [] (pk (vec (NatMulU n k) int) (mat k n int))))
+            , isJust (keyOf (run packable [] (use (NatAddU (VarU (TV "x@q1")) (NatLitU 1))))) )
+              @?= (Just (key "Packable" [ForallU a (vec (NatMulU m n) (VarU a)), ForallU a (mat m n (VarU a))]), True, True, True)
+    , testCase "a wire argument known in part agrees through its parts (CLS-20)" $
+        let m = NatVarU (TV "m")
+            mat x y = AppU (VarU (TV "Mat")) [x, y]
+            packable = fundeps [a, b] [decl "Packable" [] [ForallU a (pair int (vec (NatMulU m n) (VarU a))), ForallU a (mat m (VarU a))]]
+            part x = ExistU (TV "p") ([ex, vec x int], Open) ([], Open)
+            use x = pk (part x) (mat (NatLitU 2) int)
+         in ( isJust (keyOf (run packable [] (use (NatMulU (NatLitU 2) n))))
+            , isDisagrees (run packable [] (use (NatLitU 7))) )
+              @?= (True, True)
     , testCase "DERIV-6 derives Eq where no instance matches, behind the policy flag" $
         ( run (env []) [] (eq (pair int str))
         , resolve derive mempty (env []) [] (eq (pair int str))
@@ -181,5 +202,10 @@ instanceResolveTests =
     isLoop _ = False
     isUndetermined (Left (Undetermined _ _)) = True
     isUndetermined _ = False
+    isDisagrees (Left (Disagrees _ _)) = True
+    isDisagrees _ = False
+    fundeps vs ds =
+      let e = insertClassInfo (ClassName "Packable") (ClassInfo vs [] Map.empty) (env ds)
+       in e {ieFundeps = packableWireFundep (ieClasses e)}
     isNotCrossable (Left (NotCrossable _)) = True
     isNotCrossable _ = False

@@ -32,9 +32,11 @@ module Morloc.Frontend.Instances
   , instanceDecls
   , resolve
   , methodImpls
+  , methodSources
   , superclassObligations
   , fixOpenVars
   , couldMatch
+  , hasOpenVars
   , fixRigidVars
   , explainResolveError
   , keyConstraint
@@ -42,6 +44,7 @@ module Morloc.Frontend.Instances
   , renameConstraint
   ) where
 
+import Control.Monad.State.Strict (State, get, put, runState)
 import qualified Data.List as DL
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
@@ -51,6 +54,8 @@ import Morloc.Data.Zip (indexed, zipExact, zipPrefix)
 import Morloc.Namespace.Expr
 import Morloc.Namespace.Prim
 import Morloc.Namespace.Type
+import Morloc.Typecheck.Internal (natPositionExpr, traverseTypeUChildren)
+import qualified Morloc.Typecheck.NatSolver as NS
 import qualified Morloc.TypeEval as TE
 
 data ResolveError
@@ -65,6 +70,9 @@ data ResolveError
   | -- | Context resolution repeats a constraint or grows without end; the
     -- chain from the use.
     ContextLoop [Constraint]
+  | -- | The instance the other arguments select fixes a dependent argument
+    -- otherwise (CLS-20).
+    Disagrees Constraint InstanceKey
   | -- | DERIV-6 derives no comparison of a function or a suspension.
     NotCrossable Constraint
   | NotAClass Constraint
@@ -107,10 +115,12 @@ data OmittedMethods
 defaultPolicy :: ResolvePolicy
 defaultPolicy = ResolvePolicy OpenArgsUndetermined False OmittedFallThrough
 
--- | Ruling Q2 (a): Packable's wire argument is fixed by its native one.
--- Not installed in the table unless the ruling grants it.
-packableWireFundep :: Map.Map ClassName [Int]
-packableWireFundep = Map.singleton (ClassName "Packable") [0]
+-- | CLS-20: the wire argument of a two-parameter Packable class is fixed by
+-- its native one.
+packableWireFundep :: Map.Map ClassName ClassInfo -> Map.Map ClassName [Int]
+packableWireFundep classes = case Map.lookup (ClassName "Packable") classes of
+  Just ci | length (ciVars ci) == 2 -> Map.singleton (ClassName "Packable") [0]
+  _ -> Map.empty
 
 -- | An instance as one declaration writes it: the context is renamed with
 -- the head, and a context variable the head lacks becomes an unsolved
@@ -159,8 +169,9 @@ instanceDecls env cls = Map.findWithDefault [] cls (ieByClass env)
 -- No coercion is applied (CLS-17): neither @?T@ nor an effect is stripped,
 -- and effect rows match only when equal, a row variable binding nothing.
 -- A record is matched by the name it was declared under. Language plays no
--- part. Positions in 'ieFundeps' do not select; a head is consistent with
--- such an argument when the argument is open or the head matches it.
+-- part. Positions in 'ieFundeps' do not select: the other arguments
+-- choose the instance, which fixes them, and the constraint's own arguments
+-- there must agree with it, its open variables flexible (CLS-20).
 resolve :: ResolvePolicy -> Scope -> InstanceEnv -> [Constraint] -> Constraint -> Either ResolveError Evidence
 resolve policy scope env givens = go []
   where
@@ -187,6 +198,7 @@ resolve policy scope env givens = go []
         Just (linkArgs, ms) -> case mostSpecificDecls fundeps ms of
           [(d, sub)]
             | not (null open) && not (skolemUnique fundeps d linkArgs) -> Left (Undetermined c open)
+            | not (dependentsAgree fundeps d sub linkArgs) -> Left (Disagrees c (idKey d))
             | otherwise -> do
                 let (vs, hs) = ikHead (idKey d)
                     tys = [Map.findWithDefault (keyVar hs v) v sub | v <- vs]
@@ -230,12 +242,20 @@ resolve policy scope env givens = go []
     matchDecl fundeps d useArgs =
       let (vs, hs) = ikHead (idKey d)
           useNom = map (nominal recordNames) useArgs
-          openFundep = or [not (null (openVars a)) | (i, a) <- indexed useNom, i `elem` fundeps]
-          positions = if openFundep then [i | (i, _) <- indexed hs, i `notElem` fundeps] else map fst (indexed hs)
-          pick xs = [x | (i, x) <- indexed xs, i `elem` positions]
+          pick xs = [x | (i, x) <- indexed xs, i `notElem` fundeps]
        in if length hs /= length useNom
             then Nothing
             else matchGeneral True (quantify vs (tuple (pick hs))) (tuple (pick useNom))
+
+    dependentsAgree fundeps d sub useArgs =
+      let (vs, hs) = ikHead (idKey d)
+          unbound = filter (`Map.notMember` sub) vs
+          evalOr t = either (const t) id (TE.evaluateType scope t)
+          one h u =
+            let flex = unbound <> openVars u <> [v | (v, _) <- varForms u, generated v || fixedOpen v]
+                h' = substituteAll sub h
+             in agree flex h' (flexExist (nominal recordNames u)) || agree flex (evalOr h') (flexExist (evalOr u))
+       in maybe False (\ps -> and [one h u | (i, (h, u)) <- indexed ps, i `elem` fundeps]) (zipExact hs useArgs)
 
     mostSpecificDecls fundeps ms =
       let pat d = selectionPattern fundeps (idKey d)
@@ -258,6 +278,45 @@ resolve policy scope env givens = go []
 
 contextDepth :: Int
 contextDepth = 64
+
+-- | Whether two types unify, the given variables flexible, where each pair
+-- of Nat positions they align may be equal and each existential carrying
+-- part of a tuple or record fits what it aligns with.
+agree :: [TVar] -> TypeU -> TypeU -> Bool
+agree flex a b = case unifyU (flex <> map fst held) a' b' of
+  Nothing -> False
+  Just s ->
+    let restore = applySubstU held . applySubstU s
+     in and [fits (restore e) (restore (VarU v)) | (v, e) <- held]
+  where
+    ((a', b'), held) = runState ((,) <$> abstract a <*> abstract b) []
+    abstract :: TypeU -> State [(TVar, TypeU)] TypeU
+    abstract t
+      | isNatPosition t || hasPartialExist t && isExist t = do
+          seen <- get
+          let v = TV ("#held." <> DT.pack (show (length seen)))
+          put (seen <> [(v, t)])
+          return (VarU v)
+      | otherwise = traverseTypeUChildren abstract t
+    isNatPosition t = case t of
+      OpU op _ -> op `elem` [OpNatAdd, OpNatSub, OpNatMul, OpNatDiv]
+      NatVoidU -> True
+      _ -> False
+    isExist ExistU {} = True
+    isExist _ = False
+    fits x y | x == y = True
+    fits (ExistU _ (ps, pc) (rs, _)) y = case y of
+      AppU _ qs ->
+        length ps <= length qs && (pc /= Closed || length ps == length qs)
+          && and [agree flex p q | (p, q) <- zipPrefix ps qs]
+      NamU _ _ _ fs -> null ps && and [maybe False (agree flex p) (lookup k fs) | (k, p) <- rs]
+      ExistU {} -> True
+      _ -> False
+    fits x y = case (natPositionExpr x, natPositionExpr y) of
+      (Just ex, Just ey) ->
+        let fixed = Set.difference (NS.freeNatVars ex <> NS.freeNatVars ey) (Set.fromList flex)
+         in NS.solveNatFixing fixed ex ey /= Left NS.Contradiction
+      _ -> x == NatVoidU || y == NatVoidU
 
 -- | The head positions that select, quantified, for specificity.
 selectionPattern :: [Int] -> InstanceKey -> TypeU
@@ -315,19 +374,27 @@ superClosure env = go contextDepth []
       _ -> []
     supers _ = []
 
--- | The variables of a type that nothing has fixed: existentials and the
--- checker's generated variables.
+-- | The Type variables of a type that nothing has fixed: existentials and
+-- the checker's generated variables. A Nat or effect-row variable is never
+-- undetermined (CLS-18).
 openVars :: TypeU -> [TVar]
 openVars t = here <> concatMap openVars (childrenU t)
   where
     here = case t of
       ExistU v _ _ -> [v]
       VarU v | generated v -> [v]
-      KVarU (v, _) | generated v -> [v]
       _ -> []
+
+-- | Whether a type holds a Type variable nothing fixed.
+hasOpenVars :: TypeU -> Bool
+hasOpenVars = not . null . openVars
 
 generated :: TVar -> Bool
 generated (TV n) = "@q" `DT.isInfixOf` n
+
+-- | A variable 'fixOpenVars' fixed: nothing has fixed it yet either.
+fixedOpen :: TVar -> Bool
+fixedOpen (TV n) = "?" `DT.isPrefixOf` n
 
 -- | The constraints a declaration owes the superclasses of its class, at
 -- its head (CLS-5).
@@ -423,6 +490,8 @@ explainResolveError pc e = case e of
     "the instance" <+> pc (keyConstraint k) <+> "needs" <+> pc c <> ", and" <+> explainResolveError pc e'
   ContextLoop cs ->
     "resolving it does not end:" <+> hsep (punctuate " needs" (map pc cs))
+  Disagrees c k ->
+    pc c <+> "selects the instance" <+> pc (keyConstraint k) <+> "by its other arguments, and that instance fixes the rest otherwise"
   NotCrossable c -> pc c <+> "is not derived for a function or a suspension"
   NotAClass c -> pc c <+> "is not a class constraint"
 
@@ -503,22 +572,18 @@ mapChildrenU f t = case t of
   LabeledU v x -> LabeledU v (f x)
   _ -> t
 
--- | The implementations a method has under the evidence: those the
--- selected instance gives, or under 'OmittedFallThrough' those of the most
--- specific more general instance that gives some, plus the representation
--- casts of the more general instances (NEWT-7). CLS-8 defaults join here
--- once CLS-7 parses.
-methodImpls :: ResolvePolicy -> InstanceEnv -> Evidence -> EVar -> Either MissingMethod [Impl]
-methodImpls policy env ev@(EvInstance key tys _) m =
+-- | Where a method's implementations under the evidence come from: the
+-- instance whose own implementations are taken (the selected one, or under
+-- 'OmittedFallThrough' the most specific more general instance that gives
+-- some), and the more general instances whose representation casts join
+-- them (NEWT-7). CLS-8 defaults join here once CLS-7 parses.
+methodSources :: ResolvePolicy -> InstanceEnv -> Evidence -> EVar -> Either MissingMethod (InstanceKey, [InstanceKey])
+methodSources policy env ev@(EvInstance key tys _) m =
   case ([d | d <- instanceDecls env (ikClass key), idKey d == key], zipExact (fst (ikHead key)) tys) of
     ([], _) -> Left (NotAnInstance ev)
     (_, Nothing) -> Left (NotAnInstance ev)
     (d : _, Just inst) ->
-      let impls x = Map.findWithDefault [] m (idMethods x)
-          isCast (ImplCast _) = True
-          isCast _ = False
-          hs = snd (ikHead key)
-          selected = tuple (map (substituteAll (Map.fromList inst)) hs)
+      let selected = tuple (map (substituteAll (Map.fromList inst)) (snd (ikHead key)))
           general =
             [ x
             | x <- instanceDecls env (ikClass key)
@@ -526,17 +591,33 @@ methodImpls policy env ev@(EvInstance key tys _) m =
             , let (xvs, xhs) = ikHead (idKey x)
             , generalizes True (quantify xvs (tuple xhs)) selected
             ]
-          given = impls d
           fallback = case policyOmitted policy of
-            OmittedMissing -> []
+            OmittedMissing -> Nothing
             OmittedFallThrough ->
-              let giving = [x | x <- general, any (not . isCast) (impls x)]
+              let giving = [x | x <- general, any (not . isCast) (declImpls m x)]
                   pat x = let (xvs, xhs) = ikHead (idKey x) in quantify xvs (tuple xhs)
                   heads = mostSpecific (map pat giving)
                in case [x | x <- giving, any (alphaEq (pat x)) heads] of
-                    [x] -> impls x
-                    _ -> []
-          base = if null given then fallback else given
-          result = base <> [i | x <- general, i <- impls x, isCast i, i `notElem` base]
-       in if null result then Left (MethodOmitted key m) else Right result
-methodImpls _ _ ev _ = Left (NotAnInstance ev)
+                    [x] -> Just x
+                    _ -> Nothing
+          source = if null (declImpls m d) then fallback else Just d
+          casts = [idKey x | x <- general, any isCast (declImpls m x)]
+       in case source of
+            Nothing | null casts -> Left (MethodOmitted key m)
+            _ -> Right (maybe key idKey source, casts)
+methodSources _ _ ev _ = Left (NotAnInstance ev)
+
+-- | The implementations a method has under the evidence ('methodSources').
+methodImpls :: ResolvePolicy -> InstanceEnv -> Evidence -> EVar -> Either MissingMethod [Impl]
+methodImpls policy env ev m = do
+  (k, casts) <- methodSources policy env ev m
+  let impls x = concat [declImpls m d | d <- instanceDecls env (ikClass x), idKey d == x]
+      base = impls k
+  Right (base <> [i | x <- casts, i <- impls x, isCast i, i `notElem` base])
+
+declImpls :: EVar -> InstanceDecl -> [Impl]
+declImpls m d = Map.findWithDefault [] m (idMethods d)
+
+isCast :: Impl -> Bool
+isCast (ImplCast _) = True
+isCast _ = False

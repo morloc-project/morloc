@@ -641,6 +641,11 @@ skeletonShape (ExprI i e) = case e of
   NamE rs -> Shape i . FormRecord <$> mapM (\(k, x) -> (,) k <$> skeletonShape x) rs
   _ -> Nothing
 
+-- | The instance and type of a method's instance term.
+instanceOf :: EVar -> TermTypes -> MorlocMonad (InstanceKey, EType)
+instanceOf _ (TermTypes (Just et) _ _ (Just key)) = return (key, et)
+instanceOf v _ = MM.throwCompilerBug $ "an instance term of" <+> pretty v <+> "has no type or no instance"
+
 -- | Translate ExprI to ExprS tree
 collectExprS :: Namer -> ExprI -> MorlocMonad (Namer, ExprS Int ManyPoly Int)
 collectExprS namer0 (ExprI gi0 e0) = f namer0 e0
@@ -675,8 +680,9 @@ collectExprS namer0 (ExprI gi0 e0) = f namer0 e0
         (Just k, GMapJust (Polymorphic cls clsName t ts))
           | Just r <- namerShallow namer
           , Nothing <- Map.lookup v (namerMap namer)
-          , isNothing (namerShallowOnly namer) || k /= r || Map.member k (namerExpanding namer) ->
-              return (namer, VarS v (PolymorphicExpr cls clsName t [(et, []) | Just et <- map termGeneral ts]))
+          , isNothing (namerShallowOnly namer) || k /= r || Map.member k (namerExpanding namer) -> do
+              cands <- mapM (instanceOf v) ts
+              return (namer, VarS v (PolymorphicExpr cls clsName t [(k', et, []) | (k', et) <- cands]))
         -- A reference to a term that is being expanded is a recursive
         -- back-edge. It is recognized by the term's identity, not its name:
         -- two unrelated terms may share a name.
@@ -707,7 +713,9 @@ collectExprS namer0 (ExprI gi0 e0) = f namer0 e0
         (Just k, GMapJust (Polymorphic cls clsName t ts)) -> do
           MM.sayVVV $
             "  polymorphic term" <+> pretty v <> ":" <+> list (map (maybe "?" pretty . termGeneral) ts)
-          let typed n' t' = second ((,) (fromJust (termGeneral t'))) <$> termtypesToAnnoS gi0 n' t'
+          let typed n' t' = do
+                (key, et) <- instanceOf v t'
+                second ((,,) key et) <$> termtypesToAnnoS gi0 n' t'
           (namer', ess) <- expanding k namer (\n -> statefulMapM typed n ts)
           v' <- nameIfRecursive namer' k
           return (namer', VarS v' (PolymorphicExpr cls clsName t ess))

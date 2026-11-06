@@ -33,6 +33,7 @@ import Morloc.Frontend.Instances
   , keyConstraint
   , keyNames
   , mkInstanceDecl
+  , packableWireFundep
   , renameConstraint
   , resolve
   , superclassObligations
@@ -69,7 +70,10 @@ link d0 = do
   mayResult <- DAG.synthesizeNodes synth d0
   case mayResult of
     Nothing -> MM.throwCompilerBug "the module graph has a cycle after loading"
-    (Just _) -> checkSuperclasses
+    (Just _) -> do
+      -- CLS-20: Packable's wire argument is the only dependent one.
+      MM.modify' (\ms -> let env = stateInstances ms in ms {stateInstances = env {ieFundeps = packableWireFundep (ieClasses env)}})
+      checkSuperclasses
 
 synth ::
   MVar ->

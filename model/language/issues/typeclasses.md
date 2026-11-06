@@ -40,25 +40,13 @@
   pairing docs with inputs would misalign them.
 
 - **An omitted method falls through to a more general instance.** [read]
-  Spec gap: CLS-12 (open). Typecheck.resolveInstances chooses the most
-  specific instance among those that give an implementation of the method,
+  Spec gap: CLS-12 (open). Instances.methodSources takes the most
+  specific more general instance that gives an implementation of the method,
   so `instance C Int` without `g` runs `g` from `instance C a`, whether or
   not `instance C Int` has a body. root's bodiless `instance Eq (List a)`
   relies on this for `==` on lists. Option (a) of CLS-12 would make these
   uses errors.
 
-- **A class constraint is never checked unless a method of the class is
-  used.** [reproduced] Violates CLS-5's obligation reading.
-  `ident :: Numeric a => a -> a; ident x = x` applied at Int builds and
-  runs, though root has no `Numeric Int`.
-
-- **An instance on a legacy-form record is not found where its type was
-  evaluated.** [read] Violates CLS-2. Instance filtering
-  (Frontend/Typecheck.hs `compatibleTypeU`) compares an evaluated record
-  (`NamU`) by its name, but a record declared `record Foo = Bar {...}`
-  evaluates to a `NamU` named by its constructor `Bar` (Desugar.hs ~3563),
-  so `instance Semigroup Foo` used where the type was evaluated (a field of
-  a record literal) is still "No instance found". Not reproduced.
 - [reproduced] Violates CLS-2 (#160). Inside an instance body, a use of the
   class's own method at another type is bound to the instance being
   defined. With `instance Eq Q where (==) a b = .num a * .den b == .num b
@@ -103,58 +91,26 @@
   UTF-8 bytes, while DERIV-6 makes the primitive instance the host
   operator; whether `Str`'s host order must agree across languages needs
   a ruling.
-- **An instance that omits a method is reported as no instance.**
-  [reproduced, 2026-10-21] `instance Foo Int` gives `m` but not `n`; using
-  `n` at Int says "No instance found for Foo::n at type Int -> Int". It
-  should say the instance lacks `n` (CLS-5). Repro: /work/plans/model-audit-2026-10-21/repro/D/cls/c14.
-- **Two newtypes over one type deriving `Eq`/`Ord` break comparison of
-  unpacked values.** [reproduced, 2026-11-01] Violates CLS-2 and CLS-16.
-  Under root-py this is rejected with "No matching implementation found
-  for '<=' at type I64 -> I64 -> Bool":
-  `newtype A = I64 deriving (Packable, Eq, Ord)`,
-  `newtype B = I64 deriving (Packable, Eq, Ord)`,
-  `g :: A -> A -> Bool; g d t = unpack t <= unpack d`,
-  `f :: I64 -> Bool; f x = g (pack x) (pack x)`. Both operands come from
-  `A`; declaring `B` alone breaks it, and `==` fails the same way under
-  `deriving (Eq)`. It builds when only one newtype derives `Ord`, when the
-  value goes through a function typed `A -> I64`, or with one operand
-  annotated (`unpack t :: I64`). It reaches constrained library functions:
-  stdlib `time`'s `pack (addSat (unpack t) (unpack d))` over `Instant` and
-  `Duration` fails inside root's `(>)`. Speculative cause: the derived
-  instances of `A` and `B` both stand at the representation `I64` beside
-  the catch-all `Ord a` (entry above), and the unannotated `unpack` result
-  leaves the choice among them open at realization.
-- **Instance selection matches through a coercion.** [read] Violates
-  CLS-17. Typecheck.resolveInstances accepts a candidate when
-  `tryCoerce` turns its method type into the use's
-  (Frontend/Typecheck.hs, `isCompatible`), so a value-like method of
-  `instance C T` (`mempty :: T`) can serve a use at `?T`, wrapped in a
-  present optional.
-- **Instances are matched four ways.** [read] Violates CLS-16 (one rule).
-  Typecheck.resolveInstances keeps every subtype-or-coercion match after
-  alias filtering; Realize.collapseExpr picks among them with its own
-  `compatibleType` (UnkT a wildcard); CodeGenerator/Instance.hs, used for
-  calls the compiler builds (`__get_slice__`, `__access_index__`,
+- **An instance declared without a body omits a method silently.**
+  [reproduced, 2026-11-05] An instance whose declarations do not mention a
+  method is reported at a use of it ("selects the instance Foo Int, which
+  gives no implementation of it"). A bodiless declaration (`instance Sh
+  A`) lists every method with no implementation, so a use selects it and
+  typechecks, and only realization says "No implementation found for
+  'sh'", naming no instance. Open: CLS-14.
+- **Instances are matched three ways.** [read] Violates CLS-16 (one rule).
+  Typecheck selects one instance per use through the resolver; but
+  Realize.collapseExpr still picks among a use's implementations with its
+  own `compatibleType` (UnkT a wildcard), and CodeGenerator/Instance.hs,
+  used for calls the compiler builds (`__get_slice__`, `__access_index__`,
   `__to_index__`, `map` across effects), takes the first sourced match,
   with no specificity and blind to an instance whose body is morloc.
-- **An ambiguous use is resolved silently in realization.** [read]
-  Violates CLS-16 and CLS-18. When a use's type holds an unsolved Type
-  variable (an open `mempty` inside a body), Realize.collapseExpr keeps the
-  nearest of several incomparable instances instead of rejecting the use
-  (`containsUnk` case of its resolveInstances).
 - **Realization cannot order a Nat-kinded instance head against a literal
   one.** [read] Violates CLS-16. Realize.collapseExpr orders heads after
   erasure, where a Nat variable is a placeholder that matches any Nat in
   both directions, so `Vec n Int` and `Vec 3 Int` are equivalent there and
   the choice falls to the alias chain. The typechecker orders them
   correctly; realization should use its choice (C3 in the brittleness plan).
-- **Instances are chosen per method, not whole.** [reproduced] Violates
-  CLS-16. A bodied instance registers only the methods it writes, so a use
-  of a method sees only the instances that write it. With `class C a`
-  (`c1`, `c2`), `instance C (Int, b)` writing only `c1` and `instance C (a,
-  Str)` writing both, `f :: (Int, Str) -> Str; f x = c2 x` builds and runs
-  the second instance, while `c1` at the same type is rejected as
-  ambiguous.
 - **A field of a Rec alias used as a record type cannot be read.**
   [reproduced] Violates KIND-2's record-type reading (ALIAS-11). `type R =
   {x = Int}; f :: R -> Int; f r = .x r` passes the kind check and fails at
@@ -166,18 +122,6 @@
   representation of 'Vec a' is '[a]'"; `Vec n a` builds. The head seems to
   be compared before its Nat is filled (KIND-5).
 
-- **An instance context is not enforced at a use.** [reproduced,
-  2026-11-01, morloc typecheck] Violates CLS-5. Link.hs:428 matches
-  `IstE origin cls _ ts es` and drops the context; `Instance`
-  (Namespace/State.hs:442) has no field for it. With `instance Sz a => Sz
-  (W a)` and no `Sz Str`, `useIt s = sz (mkW s)` typechecks. Repro:
-  /work/plans/error-clusters/repro/instance-context-use.loc.
-- **Use-level selection treats any two Nats as equal.** [read,
-  2026-11-05] `compatibleTypeU` (Frontend/Typecheck.hs) matches any two
-  Nat expressions, so `instance Sz (Vec 3 Int)` is a candidate at every
-  `Vec k Int`. The contract check now rejects a use at a signature's Nat
-  variable (spec-cls-16-7), and a literal mismatch is rejected at the use
-  (`Vec 4 Str`); no program is known to reach the wildcard. CLS-16.
 - **`findPackableWireForm` keeps only type-variable parameters.** [read,
   2026-11-02] A native with a Nat parameter gets no tier-2 wire form; the
   first match wins, with no specificity and no check on repeated variables.
@@ -199,14 +143,38 @@
   separately: `sort` at `newtype Z = Real deriving (Eq, Ord)` in Python
   gives [0,-0,1] (derived order is totalOrder). Open: rulings Q4/Q6 in
   /work/plans/error-clusters/s2-rulings.md. Fixed by CLS-21's classes.
-- **Packer coherence is checked after typecheck.** [read 2026-11-05]
-  `checkPackerCoherence` runs after typechecking (library/Morloc.hs:238),
-  but a Packable wire-argument improvement (S2 Q2) happens during it, so
-  improvement would rely on a check that has not run. Move it to the
-  instance table build (CLS-20).
 - **map-r's specific Packable head serves every language.** [read
   2026-11-05] map-r/main.loc:35 declares `Packable [(Str, val)] (Map Str
   val)` with R implementations only. Language plays no part in selection
   (CLS-16), so it is selected at `Map Str v` in Python and C++ too, which
   then depend on the unruled CLS-12 fall-through to map's general head.
 
+- **A `Packable` class over a Nat head escapes the contract check.**
+  [reproduced, 2026-11-05] Violates CLS-5 and CLS-16. With `class Packable
+  a b where pack :: a -> b; unpack :: b -> a`, `newtype Vec (n :: Nat) a
+  = List a`, a sourced `instance Packable [a] (Vec 3 a)` and `g :: Vec n
+  Str -> Vec n Str; g t = pack (unpack t)`, `morloc typecheck` accepts and
+  prints two signatures for `g` (`Vec 3 Str -> Vec 3 Str` and `Vec a Str
+  -> Vec a Str`). The same program with the methods named `pk`/`unpk` is
+  rejected at validation.
+- **A signed term's class constraints cannot be instantiated when its
+  signature binds a label.** [reproduced 2026-11-05, latent] Typecheck.hs
+  `signatureConstraints` instantiates the signature with `instantiateAll`
+  and subtypes the use against it; a label (`l@[Str] -> Table a b -> Table
+  a (b # l)`) becomes a plain existential, so `{x=Int} <: {x=Int, y=Str} #
+  l` fails. Today only row constraints occur with labels and no class
+  constraint is owed, so it returns none; a signature with both would stop
+  at its compiler bug. Instantiate labels as the checker does at the use.
+- **An instance no use selects is never checked for its own uses.**
+  [reproduced 2026-11-06, open question] An undetermined or missing-instance
+  use inside an instance body is reported only at a use that selects the
+  instance (probes q5, v2 in the step 3 r2 scratch); a broken instance is
+  accepted until something uses it. Spec gap in CLS-2/CLS-5: say whether an
+  instance body must check on its own.
+- **stdlib time fails typecheck: `addSat`/`subSat` at I64.** [reproduced
+  2026-11-06, on base too] lib/stdlib/time/main.loc's `after`, `before`,
+  `since` and `instance Semigroup Duration` call root's `addSat`/`subSat` at
+  `I64`, which needs `Integral I64`; root has `Integral` only at `Int` and
+  `Real`: "No instance found for Integral::zero at type I64". A stdlib
+  defect (CLS-2 holds); root needs `Integral` at the fixed-width integers
+  or time must not use them there.

@@ -90,6 +90,7 @@ module Morloc.Namespace.Expr
   , Evidence (..)
   , applyCoercion
   , ManyPoly (..)
+  , Many (..)
   , mapAnnoSM
   , mapExprSM
   , mapAnnoS
@@ -1081,8 +1082,27 @@ data ShapeForm
 data PreTyped f where
   PreTyped :: PreTyped ManyPoly
 
-data ManyPoly a = MonomorphicExpr (Maybe EType) [a] | PolymorphicExpr ClassName EVar EType [(EType, [a])]
+-- | A use before instance resolution: a term's implementations, or a class
+-- method's candidate instances, each with its method type.
+data ManyPoly a = MonomorphicExpr (Maybe EType) [a] | PolymorphicExpr ClassName EVar EType [(InstanceKey, EType, [a])]
   deriving (Show, Eq, Ord)
+
+-- | A use after instance resolution: how its class constraints are met, and
+-- its implementations.
+data Many a = Many {manyEvidence :: [Evidence], unMany :: [a]}
+  deriving (Show)
+
+instance Functor Many where
+  fmap f (Many ev x) = Many ev (map f x)
+
+instance Traversable Many where
+  traverse f (Many ev xs) = Many ev <$> traverse f xs
+
+instance Foldable Many where
+  foldr f b (Many _ xs) = foldr f b xs
+
+instance (Pretty a) => Pretty (Many a) where
+  pretty (Many _ xs) = list $ map pretty xs
 
 ---- Class instances
 
@@ -1092,17 +1112,17 @@ instance HasOneLanguage Source where
 
 instance Functor ManyPoly where
   fmap f (MonomorphicExpr t xs) = MonomorphicExpr t (map f xs)
-  fmap f (PolymorphicExpr cls v t xs) = PolymorphicExpr cls v t (map (second (map f)) xs)
+  fmap f (PolymorphicExpr cls v t xs) = PolymorphicExpr cls v t [(k, et, map f es) | (k, et, es) <- xs]
 
 instance Traversable ManyPoly where
   traverse f (MonomorphicExpr t xs) = MonomorphicExpr t <$> traverse f xs
   traverse f (PolymorphicExpr cls v t xs) = PolymorphicExpr cls v t <$> traverse f2 xs
     where
-      f2 (t', x) = (,) t' <$> traverse f x
+      f2 (k, t', x) = (,,) k t' <$> traverse f x
 
 instance Foldable ManyPoly where
   foldr f b (MonomorphicExpr _ xs) = foldr f b xs
-  foldr f b (PolymorphicExpr _ _ _ (concatMap snd -> xs)) = foldr f b xs
+  foldr f b (PolymorphicExpr _ _ _ xs) = foldr f b [x | (_, _, es) <- xs, x <- es]
 
 instance Defaultable ModuleConfig where
   defaultValue =

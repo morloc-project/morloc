@@ -1,3 +1,5 @@
+{-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE MultiWayIf #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ViewPatterns #-}
 
@@ -15,7 +17,8 @@ segregation in the code generator.
 -}
 module Morloc.Frontend.Typecheck (typecheck, typecheckRoot, typecheckRootAt, validate, resolveTypes, evaluateAnnoSTypes, peakSExpr) where
 
-import Morloc.Data.Zip (indexed, zipExact, zipPrefix, zipSame, zipWithSame)
+import Morloc.Data.Zip (indexed, zipPrefix, zipSame, zipWithSame)
+import Data.IORef (IORef, modifyIORef', newIORef, readIORef)
 import qualified Data.List as List
 import Data.Text (Text)
 import qualified Data.Text as MT
@@ -127,7 +130,7 @@ assertBackEdgeTypes root = go Map.empty root >> return root
                 "the call of" <+> squotes (pretty v) <+> "here is bound to its own definition, of type"
                   <+> pretty tdef <> ", at another type," <+> pretty t
         _ -> return ()
-      VarS v (Many xs) -> mapM_ (go (Map.insert v t env)) xs
+      VarS v (Many _ xs) -> mapM_ (go (Map.insert v t env)) xs
       _ -> mapM_ (go env) (foldExprS (: []) e)
     groundU ty = case ty of
       ExistU {} -> False
@@ -211,7 +214,7 @@ typecheckWith expected = run
       e2 <- coerceLiteralsToOptional . mapAnnoSG (fmap normalizeType) . applyGen g1 $ e1
 
       let openRecords = openRecordLiterals e2
-      (g2, e3) <- resolveInstances g1 e2
+      (g2, e3) <- resolveTree g1 e2
       let g3 = apply g2 g2
       checkShapes g3 e1
 
@@ -497,215 +500,300 @@ resolveTypes (AnnoS (Idx i t) ci e) =
     f (IfS c t' e') = IfS (resolveTypes c) (resolveTypes t') (resolveTypes e')
     f (IntrinsicS intr es) = IntrinsicS intr (map resolveTypes es)
 
+-- | How a use whose class arguments nothing fixed yet is treated. A lenient
+-- pass leaves it unresolved, so that a later pass may find it fixed by
+-- another use's instance (CLS-20), and counts the uses it leaves and those it
+-- resolves; the strict pass reports it. A strict pass over a tree whose type
+-- is still generic leaves it too: such a tree is never realized (SIG-5).
+data Strictness = Strict Bool | Lenient (IORef (Int, Int))
+
+-- | Resolution at a use: DERIV-6 derives Eq and Ord where no instance
+-- matches.
+usePolicy :: FI.ResolvePolicy
+usePolicy = FI.defaultPolicy {FI.policyDerive = True}
+
+-- | Resolve every class constraint of a tree's uses: lenient passes until
+-- none is left undetermined or a pass resolves no more uses than the one
+-- before, then a strict one if some still is. Each pass after the first
+-- starts from the solutions the one before found, and adds its deferred
+-- equations afresh.
+--
+-- The constraints of the definition the tree checks are its assumptions,
+-- met where it is used, not here.
+resolveTree :: Gamma -> AnnoS (Indexed TypeU) ManyPoly Int -> MorlocMonad (Gamma, AnnoS (Indexed TypeU) Many Int)
+resolveTree g0 e =
+  lenientPasses g0 e >>= \case
+    (g, Just e') -> return (g, e')
+    (g, Nothing) -> resolveRoot (Strict generic) g e
+      where
+        generic = case e of
+          AnnoS (Idx _ t) _ _ -> FI.hasOpenVars (apply g t)
+
+-- | The lenient passes of 'resolveTree': the tree resolved if none left a
+-- use, and the gamma the next pass starts from.
+lenientPasses :: Gamma -> AnnoS (Indexed TypeU) ManyPoly Int -> MorlocMonad (Gamma, Maybe (AnnoS (Indexed TypeU) Many Int))
+lenientPasses g0 e = go g0 (-1)
+  where
+    go g before = do
+      ref <- liftIO (newIORef (0, 0))
+      (g', e') <- resolveRoot (Lenient ref) g e
+      (left, resolved) <- liftIO (readIORef ref)
+      let next = g' {gammaDeferred = gammaDeferred g0, gammaDeferredAt = gammaDeferredAt g0}
+      if
+        | left == 0 -> return (g', Just e')
+        | resolved > before -> go next resolved
+        | otherwise -> return (next, Nothing)
+
+resolveRoot :: Strictness -> Gamma -> AnnoS (Indexed TypeU) ManyPoly Int -> MorlocMonad (Gamma, AnnoS (Indexed TypeU) Many Int)
+resolveRoot mode g = \case
+  AnnoS gi ci (VarS v (MonomorphicExpr _ xs)) -> do
+    (g', xs') <- statefulMapM (resolveInstances mode) g xs
+    return (g', AnnoS gi ci (VarS v (Many [] xs')))
+  e -> resolveInstances mode g e
+
 resolveInstances ::
-  Gamma -> AnnoS (Indexed TypeU) ManyPoly Int -> MorlocMonad (Gamma, AnnoS (Indexed TypeU) Many Int)
+  Strictness -> Gamma -> AnnoS (Indexed TypeU) ManyPoly Int -> MorlocMonad (Gamma, AnnoS (Indexed TypeU) Many Int)
 -- A shape is checked from the typed tree ('checkShapes'); the binding that
 -- holds one goes with it.
-resolveInstances g (AnnoS _ _ (LetS _ (AnnoS _ _ (ShapeS {})) body)) = resolveInstances g body
-resolveInstances g (AnnoS _ _ (ShapeS _ _ r)) = resolveInstances g r
-resolveInstances g (AnnoS gi@(Idx _ gt) ci e0) = do
+resolveInstances mode g (AnnoS _ _ (LetS _ (AnnoS _ _ (ShapeS {})) body)) = resolveInstances mode g body
+resolveInstances mode g (AnnoS _ _ (ShapeS _ _ r)) = resolveInstances mode g r
+resolveInstances mode g (AnnoS gi@(Idx _ gt) ci e0) = do
   gscope <- MM.getGeneralScope
-  (g', e1) <- f gscope g e0
+  env <- MM.gets stateInstances
+  (g', e1) <- f gscope env g e0
   return (g', AnnoS gi ci e1)
   where
+    recur = resolveInstances mode
+
     f ::
       Scope ->
+      InstanceEnv ->
       Gamma ->
       ExprS (Indexed TypeU) ManyPoly Int ->
       MorlocMonad (Gamma, ExprS (Indexed TypeU) Many Int)
 
-    f scope g0 (VarS v (PolymorphicExpr clsName _ _ rss)) = do
-      implemented <- implementedAt ci v
-      let gtEval = evalOr scope gt
-          rssSubtypes = instancesAt scope implemented gt rss
-          implements t rs = not (null rs) || Set.member t implemented
-
-      -- Every most specific candidate is kept; Morloc.CodeGenerator.Realize
-      -- (collapseExpr) picks one by the alias chain of the use's type.
-      (g2, es1) <- case mostSpecific [t | (EType t _ _ _, _) <- rssSubtypes] of
-        [] ->
-          deriveComparison scope g0 clsName v >>= \derived -> case derived of
-            Just (g1, body) -> return (g1, [body])
-            Nothing ->
-              throwTypeError ci $
-                "No instance found for" <+> pretty clsName
-                  <> "::"
-                  <> pretty v
-                  <+> "at type" <+> prettyTypeU gtEval
-                  <> noInstanceAdvice scope clsName v gtEval
-        manyTypes -> do
-          -- Without deduplication, N aliases branch exponentially.
-          let eval = evalOr scope
-              deduped = nubBy (\t1 t2 -> eval t1 == eval t2) manyTypes
-              chosen t = any (\d -> eval (etype t) == eval d) deduped
-              -- A representation cast agrees with every instance of its
-              -- newtype, so a more specific instance does not shadow it
-              -- (NEWT-7).
-              es0 = concat [rs | (t, rs) <- rssSubtypes, chosen t]
-                <> concat [filter isRepresentationCast rs | (t, rs) <- rssSubtypes, not (chosen t)]
-              -- A cast does not count as a group of its own.
-              explicitGroups = nubBy (\t1 t2 -> eval t1 == eval t2)
-                [etype t | (t, rs) <- rssSubtypes, chosen t, not (all isRepresentationCast rs)]
-              singleGroup = length explicitGroups <= 1
-          -- Collected shallowly, the candidates carry no implementations:
-          -- the instance types solve what the implementations' types would.
-          let shallow = null es0 && or [implements t rs | (t, rs) <- rssSubtypes, chosen t]
+    -- CLS-2, CLS-16: the use's class arguments select one instance, whose
+    -- implementations of the method are kept.
+    f scope env g0 (VarS v (PolymorphicExpr cls _ t0 rss)) = do
+      let use = apply g0 gt
+      c <- useConstraint scope g0 env cls (etype t0) use
+      case FI.resolve usePolicy scope env [] c of
+        Right (EvDerived _ arg) ->
+          deriveComparison scope env g0 cls v >>= \case
+            Just (g1, body) -> do
+              counted second
+              (g2, body') <- recur g1 body
+              return (g2, VarS v (Many [EvDerived cls arg] [body']))
+            Nothing -> unresolved c (FI.NoInstance c [])
+        Right ev -> do
+          -- An instance that declares the method with no implementation is
+          -- reported where the use is realized (CLS-14 (b)); one that does
+          -- not declare it is reported here.
+          (primary, casts) <- case FI.methodSources FI.defaultPolicy env ev v of
+            Right x -> return x
+            Left (FI.MethodOmitted key _)
+              | any (\(k, _, _) -> k == key) rss -> return (key, [])
+              | otherwise ->
+                  let gtEval = evalOr scope use
+                   in throwTypeError ci $
+                        "The use of" <+> squotes (pretty v) <+> "at type" <+> prettyTypeU gtEval
+                          <+> "selects the instance" <+> prettyConstraint (FI.keyConstraint key)
+                          <> ", which gives no implementation of it"
+                          <> noInstanceAdvice scope cls v gtEval
+            Left (FI.NotAnInstance _) ->
+              MM.throwCompilerBug $ "resolveInstances: the evidence for" <+> prettyConstraint c <+> "is not an instance"
+          counted second
+          let given = concat [rs | (k, _, rs) <- rss, k == primary]
+              es0 = given <> concat [filter isRepresentationCast rs | (k, _, rs) <- rss, k `elem` casts]
+              instanceTypes = [etype t | (k, t, _) <- rss, k == primary || k `elem` casts]
           g1 <-
-            if shallow
-              then connectInstanceTypes (length deduped <= 1) g0 [etype t | (t, _) <- rssSubtypes, chosen t]
-              else connectInstance singleGroup g0 es0
-          return (g1, es0)
-
-      (g3, es2) <- statefulMapM resolveInstances g2 es1
-
-      return (g3, VarS v (Many es2))
-    f _ g0 (VarS v (MonomorphicExpr _ xs)) = statefulMapM resolveInstances g0 xs |>> second (VarS v . Many)
-    f _ g0 (AppS e es) = do
-      (g1, e') <- resolveInstances g0 e
-      (g2, es') <- statefulMapM resolveInstances g1 es
+            if null es0
+              then connectInstanceTypes scope g0 use instanceTypes
+              else return (connectTypes scope g0 use [t | AnnoS (Idx _ t) _ _ <- es0])
+          (g2, es) <- statefulMapM recur g1 es0
+          return (g2, VarS v (Many [ev] es))
+        Left e@(FI.Undetermined _ _) -> deferOr g0 (VarS v (Many [] [])) (unresolved c e)
+        Left e -> unresolved c e
+      where
+        unresolved c e =
+          let gtEval = evalOr scope (apply g0 gt)
+              lead = case e of
+                FI.Undetermined _ _ -> "The type of this term is not determined: the use of"
+                _ -> "The use of"
+           in throwTypeError ci $
+                lead <+> squotes (pretty v) <+> "at type" <+> prettyTypeU gtEval
+                  <+> "needs" <+> prettyConstraint c <> ":" <+> FI.explainResolveError prettyConstraint e
+                  <> case e of
+                    FI.Disagrees _ _ -> mempty
+                    _ -> noInstanceAdvice scope cls v gtEval
+    -- CLS-5: a use of a signed term at a type meets the term's constraints
+    -- there. One nothing fixes yet is left to the uses inside the term.
+    f scope env g0 (VarS v (MonomorphicExpr me xs)) = do
+      cs <- case me of
+        Just et | not (Set.null (econs et)) -> signatureConstraints scope g0 et (apply g0 gt)
+        _ -> return []
+      evs <- fmap catMaybes . forM cs $ \c -> case FI.resolve usePolicy scope env [] c of
+        Right ev@(EvDerived cls arg) -> do
+          derived <- derivedAt scope env cls arg
+          if derived then Just ev <$ counted second else constraintUnmet c (FI.NoInstance c [])
+        Right ev -> Just ev <$ counted second
+        Left e@(FI.Undetermined _ _) -> Nothing <$ deferOr g0 UniS (constraintUnmet c e)
+        Left e -> constraintUnmet c e
+      statefulMapM recur g0 xs |>> second (VarS v . Many evs)
+      where
+        constraintUnmet c e =
+          throwTypeError ci $
+            ( case e of
+                FI.Undetermined _ _ -> "The type of this term is not determined: the use of"
+                _ -> "The use of"
+            ) <+> squotes (pretty v) <+> "at type" <+> prettyTypeU (evalOr scope (apply g0 gt))
+              <+> "needs" <+> prettyConstraint c <> ":" <+> FI.explainResolveError prettyConstraint e
+    -- Arguments first: an argument's instance may fix its result's type,
+    -- which the function's own class arguments may need (CLS-20).
+    f _ _ g0 (AppS e es) = do
+      (g1, es') <- statefulMapM recur g0 es
+      (g2, e') <- recur g1 e
       return (g2, AppS e' es')
-    f _ g0 (LamS vs e) = resolveInstances g0 e |>> second (LamS vs)
-    f _ g0 (LstS es) = statefulMapM resolveInstances g0 es |>> second LstS
-    f _ g0 (TupS es) = statefulMapM resolveInstances g0 es |>> second TupS
-    f _ g0 (NamS rs) =
-      statefulMapM (\gk (k, x) -> second ((,) k) <$> resolveInstances gk x) g0 rs |>> second NamS
-
-    f _ g0 (LetBndS v) = return (g0, LetBndS v)
-    f _ g0 (LetS v e1 e2) = do
-      (g1, e1') <- resolveInstances g0 e1
-      (g2, e2') <- resolveInstances g1 e2
+    f _ _ g0 (LamS vs e) = recur g0 e |>> second (LamS vs)
+    f _ _ g0 (LstS es) = statefulMapM recur g0 es |>> second LstS
+    f _ _ g0 (TupS es) = statefulMapM recur g0 es |>> second TupS
+    f _ _ g0 (NamS rs) =
+      statefulMapM (\gk (k, x) -> second ((,) k) <$> recur gk x) g0 rs |>> second NamS
+    f _ _ g0 (LetBndS v) = return (g0, LetBndS v)
+    f _ _ g0 (LetS v e1 e2) = do
+      (g1, e1') <- recur g0 e1
+      (g2, e2') <- recur g1 e2
       return (g2, LetS v e1' e2')
-    f _ g0 UniS = return (g0, UniS)
-    f _ g0 NullS = return (g0, NullS)
-    f _ g0 (BndS v) = return (g0, BndS v)
-    f _ g0 (CallS v) = return (g0, CallS v)
-    f _ g0 (RealS si x) = return (g0, RealS si x)
-    f _ g0 (IntS si x) = return (g0, IntS si x)
-    f _ g0 (LogS x) = return (g0, LogS x)
-    f _ g0 (StrS x) = return (g0, StrS x)
-    f _ g0 (ConS tv n i xs) = do
-      (g1, xs') <- statefulMapM resolveInstances g0 xs
+    f _ _ g0 UniS = return (g0, UniS)
+    f _ _ g0 NullS = return (g0, NullS)
+    f _ _ g0 (BndS v) = return (g0, BndS v)
+    f _ _ g0 (CallS v) = return (g0, CallS v)
+    f _ _ g0 (RealS si x) = return (g0, RealS si x)
+    f _ _ g0 (IntS si x) = return (g0, IntS si x)
+    f _ _ g0 (LogS x) = return (g0, LogS x)
+    f _ _ g0 (StrS x) = return (g0, StrS x)
+    f _ _ g0 (ConS tv n i xs) = do
+      (g1, xs') <- statefulMapM recur g0 xs
       return (g1, ConS tv n i xs')
-    f scope g0 (ExeS x@(PatCall p))
+    f scope _ g0 (ExeS x@(PatCall p))
       | Just (what, pos, methods) <- bracketRule p
       , FunU args _ <- gt
       , length args > pos = do
           checkBracketReceiver scope ci what methods (args !! pos)
           return (g0, ExeS x)
-    f _ g0 (ExeS x) = return (g0, ExeS x)
-    f _ g0 (DoBlockS e) = resolveInstances g0 e |>> second DoBlockS
-    f _ g0 (EvalS e) = resolveInstances g0 e |>> second EvalS
-    f _ g0 (CoerceS c e) = resolveInstances g0 e |>> second (CoerceS c)
-    f _ g0 (LabelS k e) = resolveInstances g0 e |>> second (LabelS k)
-    f _ _ (ShapeS {}) = MM.throwCompilerBug "a shape reached instance resolution inside its node"
-    f _ g0 (IfS c t e) = do
-      (g1, c') <- resolveInstances g0 c
-      (g2, t') <- resolveInstances g1 t
-      (g3, e') <- resolveInstances g2 e
+    f _ _ g0 (ExeS x) = return (g0, ExeS x)
+    f _ _ g0 (DoBlockS e) = recur g0 e |>> second DoBlockS
+    f _ _ g0 (EvalS e) = recur g0 e |>> second EvalS
+    f _ _ g0 (CoerceS c e) = recur g0 e |>> second (CoerceS c)
+    f _ _ g0 (LabelS k e) = recur g0 e |>> second (LabelS k)
+    f _ _ _ (ShapeS {}) = MM.throwCompilerBug "a shape reached instance resolution inside its node"
+    f _ _ g0 (IfS c t e) = do
+      (g1, c') <- recur g0 c
+      (g2, t') <- recur g1 t
+      (g3, e') <- recur g2 e
       return (g3, IfS c' t' e')
-    f _ g0 (IntrinsicS intr es) = do
-      (g1, es') <- statefulMapM resolveInstances g0 es
+    f _ _ g0 (IntrinsicS intr es) = do
+      (g1, es') <- statefulMapM recur g0 es
       return (g1, IntrinsicS intr es')
 
+    -- A use nothing has determined yet: counted and left by a lenient pass,
+    -- left in a generic tree, else reported.
+    deferOr :: Gamma -> ExprS (Indexed TypeU) Many Int -> MorlocMonad (Gamma, ExprS (Indexed TypeU) Many Int) -> MorlocMonad (Gamma, ExprS (Indexed TypeU) Many Int)
+    deferOr g0 placeholder err = case mode of
+      Lenient _ -> counted first >> return (g0, placeholder)
+      Strict True -> return (g0, placeholder)
+      Strict False -> err
+
+    counted :: ((Int -> Int) -> (Int, Int) -> (Int, Int)) -> MorlocMonad ()
+    counted which = case mode of
+      Lenient ref -> liftIO (modifyIORef' ref (which (+ 1)))
+      Strict _ -> return ()
+
     -- DERIV-6: an Eq or Ord method at a type with no instance is the
-    -- derived one. Ord is derived only where Eq is too, and a bare type
-    -- variable has no instance to derive.
+    -- derived one.
     deriveComparison ::
-      Scope -> Gamma -> ClassName -> EVar -> MorlocMonad (Maybe (Gamma, AnnoS (Indexed TypeU) ManyPoly Int))
-    deriveComparison scope g0 cls (EV method)
+      Scope -> InstanceEnv -> Gamma -> ClassName -> EVar -> MorlocMonad (Maybe (Gamma, AnnoS (Indexed TypeU) ManyPoly Int))
+    deriveComparison scope env g0 cls (EV method)
       | Just methods <- derivedComparisons (unClassName cls)
       , Just w <- lookup method methods
-      , FunU (compared : _) _ <- gt = do
-          derivable <- derivableAt scope cls compared
-          eqWritten <-
-            if unClassName cls == "Ord"
-              then handWrittenEq scope
-              else return False
-          if not derivable || eqWritten
+      , use@(FunU (compared : _) _) <- apply g0 gt = do
+          derived <- derivedAt scope env cls compared
+          if not derived
             then return Nothing
             else do
               let (g1, x) = evarname g0 "x"
                   (g2, y) = evarname g1 "y"
               body <- derivedBody ci x y w
               lamIdx <- MM.getCounterWithPos ci
-              (g3, _, typed) <- checkG g2 (AnnoS lamIdx lamIdx (LamS [x, y] body)) gt
+              (g3, _, typed) <- checkG g2 (AnnoS lamIdx lamIdx (LamS [x, y] body)) use
               return (Just (g3, typed))
       | otherwise = return Nothing
 
-    -- Whether an Eq instance other than the wire one matches the use's
-    -- type, chosen as a use of @==@ there would choose.
-    handWrittenEq :: Scope -> MorlocMonad Bool
-    handWrittenEq scope = do
-      GMap _ sigmap <- MM.gets stateSignatures
-      let terms =
-            [ tt
-            | Polymorphic (ClassName "Eq") (EV "==") _ ts <- Map.elems sigmap
-            , tt <- ts
-            , not (isWireEq tt)
-            ]
-          candidates = [(t, [] :: [()]) | tt <- terms, Just t <- [termGeneral tt]]
-      return . not . null $ instancesAt scope (implementedBy terms) gt candidates
+-- | The class constraint of a method use: the class's variables as the use's
+-- type instantiates the method's type. No coercion is applied (CLS-17).
+useConstraint :: Scope -> Gamma -> InstanceEnv -> ClassName -> TypeU -> TypeU -> MorlocMonad Constraint
+useConstraint scope g0 env cls method use = case Map.lookup cls (ieClasses env) of
+  Nothing -> MM.throwCompilerBug $ "resolveInstances: no class" <+> pretty cls
+  Just ci -> do
+    let (g1, t1, rw) = renameWithMap g0 method
+    (g2, sub, body) <- return (instantiateAll g1 t1)
+    case subtype scope use body g2 of
+      Right g3 -> return (Constraint cls [apply g3 (sub (rw (VarU v))) | v <- ciVars ci])
+      Left err ->
+        MM.throwCompilerBug $
+          "resolveInstances: the use type" <+> prettyTypeU use <+> "is not an instance of the method type"
+            <+> prettyTypeU method <> ":" <+> err
 
-    -- Solutions propagate only when every candidate is in one
-    -- alias-equivalent group; otherwise solving to one would exclude the
-    -- others (e.g. Integral Int and Integral Real).
-    connectInstance :: Bool -> Gamma -> [AnnoS (Indexed TypeU) f c] -> MorlocMonad Gamma
-    connectInstance singleGroup g0 es = connectTypes singleGroup g0 [t | AnnoS (Idx _ t) _ _ <- es]
+-- | The constraints of a signature at a use of its term, but for those over
+-- a variable only a constraint names, which no use can fix (CLS-18).
+signatureConstraints :: Scope -> Gamma -> EType -> TypeU -> MorlocMonad [Constraint]
+signatureConstraints scope g0 et use = do
+  let (g1, et') = renameEType g0 et
+      quantified = fst (unqualify (etype et'))
+      loose =
+        List.nub
+          [ v
+          | Constraint _ ts <- Set.toList (econs et')
+          , (v@(TV n), VarPlain) <- concatMap varForms ts
+          , isTypeVariableName n
+          , v `notElem` quantified
+          ]
+      (g2, sub, body) = instantiateAll g1 (etype et')
+      owed = [(c, ts) | Constraint c ts <- Set.toList (econs et'), not (any (any ((`elem` loose) . fst) . varForms) ts)]
+  case subtype scope use body g2 of
+    _ | null owed -> return []
+    Right g3 -> return [Constraint c (map (apply g3 . sub) ts) | (c, ts) <- owed]
+    Left err ->
+      MM.throwCompilerBug $
+        "signatureConstraints: the use type" <+> prettyTypeU use <+> "is not an instance of the signature"
+          <+> prettyTypeU (etype et) <> ":" <+> err
 
-    -- An instance's type, each of its variables a fresh existential.
-    connectInstanceTypes :: Bool -> Gamma -> [TypeU] -> MorlocMonad Gamma
-    connectInstanceTypes singleGroup g0 ts =
-      let (g1, ts') = statefulMap (\g t -> let (g', t') = rename g t in toExistential g' t') g0 ts
-       in connectTypes singleGroup g1 ts'
+-- | A quantified type with each of its variables a fresh existential, and
+-- the substitution.
+instantiateAll :: Gamma -> TypeU -> (Gamma, TypeU -> TypeU, TypeU)
+instantiateAll g0 t0 =
+  let (vs, body) = unqualify t0
+      (g1, exs) = statefulMap (\g w -> newvar (unTVar w <> "_") g) g0 vs
+      sub t = foldr (\(w, x) acc -> substituteTVar w x acc) t (zipSame vs exs)
+   in (g1, sub, sub body)
 
-    connectTypes :: Bool -> Gamma -> [TypeU] -> MorlocMonad Gamma
-    connectTypes _ g0 [] = return g0
-    connectTypes singleGroup g0 (t : ts) = do
-      scope <- MM.getGeneralScope
-      case subtype scope (stripCoercionWrappers gt) t g0 of
-        (Left _) -> connectTypes singleGroup g0 ts
-        (Right g1)
-          | singleGroup -> connectTypes singleGroup g1 ts
-          | otherwise   -> connectTypes singleGroup g0 ts
+-- | Solve what the selected instance's implementations fix in the use's
+-- type: a dependent class argument (CLS-20) and the method's own
+-- variables.
+connectTypes :: Scope -> Gamma -> TypeU -> [TypeU] -> Gamma
+connectTypes scope g0 use = foldl (\g t -> either (const g) id (subtype scope (stripCoercionWrappers use) t g)) g0
+
+-- | 'connectTypes' through instance types, each of their variables a fresh
+-- existential.
+connectInstanceTypes :: Scope -> Gamma -> TypeU -> [TypeU] -> MorlocMonad Gamma
+connectInstanceTypes scope g0 use ts =
+  let (g1, ts') = statefulMap (\g t -> let (g', t') = rename g t in toExistential g' t') g0 ts
+   in return (connectTypes scope g1 use ts')
 
 evalOr :: Scope -> TypeU -> TypeU
 evalOr scope t = case TE.evaluateType scope t of
   Right et -> et
   Left _ -> t
-
--- | The instance types of a method's term that give an implementation of
--- it, read from the term rather than from a use's candidates, which a
--- shallow collection leaves empty.
-implementedAt :: Int -> EVar -> MorlocMonad (Set.Set EType)
-implementedAt ci v = do
-  GMap idmap sigmap <- MM.gets stateSignatures
-  case Map.lookup ci idmap >>= (`Map.lookup` sigmap) of
-    Just (Polymorphic _ _ _ ts) -> return (implementedBy ts)
-    _ -> MM.throwCompilerBug $ "resolveInstances: no class term for the use of" <+> pretty v
-
-implementedBy :: [TermTypes] -> Set.Set EType
-implementedBy ts =
-  Set.fromList [t | tt <- ts, Just t <- [termGeneral tt], not (null (termConcrete tt) && null (termDecl tt))]
-
--- | The candidates a method use at @gt@ chooses among: compatible with the
--- use's type, reached by its alias chain, and, for an instance that gives
--- no implementation of the method, only where no more general instance
--- does (answer (b) of the open CLS-12).
-instancesAt :: Scope -> Set.Set EType -> TypeU -> [(EType, [a])] -> [(EType, [a])]
-instancesAt scope implemented gt rss =
-  [x | x@(t, rs) <- rssMatching, implements t rs || not (hasFallback (etype t))]
-  where
-    implements t rs = not (null rs) || Set.member t implemented
-    gtEval = evalOr scope gt
-    -- Open: the occurrence type may still hold an unsolved existential,
-    -- which an empty gamma cannot instantiate.
-    isCompatible t = isSubtypeOfOpen scope t gtEval || isJust (tryCoerce scope t gtEval emptyGamma)
-    rssCompat = [x | x@(EType t _ _ _, _) <- rss, isCompatible t]
-    -- Sibling aliases do not share instances: @instance Qux A@ does not
-    -- match @A'@ though both evaluate to the same type.
-    rssMatching = filterByAliasChain scope gt rssCompat
-    hasFallback h =
-      not . null $ mostSpecific [et | (t, rs) <- rssMatching, implements t rs, let et = etype t, generalizes True et h]
 
 -- | DERIV-6: Eq and Ord, the compiler's classes, are derived at a type that
 -- is not a bare type variable.
@@ -718,13 +806,26 @@ derivableAt scope cls t = case (derivedComparisons (unClassName cls), evalOr sco
     let declared = Set.fromList [v | Polymorphic c v _ _ <- Map.elems sigmap, c == cls]
     return (declared == Set.fromList [EV m | (m, _) <- methods])
 
--- | An instance whose @==@ is @eq on its parameters, as a deriving clause
--- writes it.
-isWireEq :: TermTypes -> Bool
-isWireEq tt = case termDecl tt of
-  [ExprI _ (LamE [x, y] (ExprI _ (IntrinsicE IntrEq [ExprI _ (VarE _ x'), ExprI _ (VarE _ y')])))] ->
-    null (termConcrete tt) && x == x' && y == y'
-  _ -> False
+-- | DERIV-6: whether the comparison of a class with no instance at @t@ is
+-- derived there. Ord is derived only where Eq is too: not where a
+-- hand-written Eq instance is selected.
+derivedAt :: Scope -> InstanceEnv -> ClassName -> TypeU -> MorlocMonad Bool
+derivedAt scope env cls t = do
+  derivable <- derivableAt scope cls t
+  return (derivable && not (unClassName cls == "Ord" && handWrittenEq))
+  where
+    handWrittenEq = case FI.resolve FI.defaultPolicy scope env [] (Constraint (ClassName "Eq") [t]) of
+      Right ev@(EvInstance k _ _) ->
+        let source = either (const k) fst (FI.methodSources FI.defaultPolicy env ev (EV "=="))
+         in not (all isWireEq (concat [Map.findWithDefault [] (EV "==") (idMethods d) | d <- FI.instanceDecls env (ikClass k), idKey d == source]))
+      _ -> False
+
+-- | An implementation of @==@ that is @eq on its parameters, as a deriving
+-- clause writes it.
+isWireEq :: Impl -> Bool
+isWireEq (ImplBody (ExprI _ (LamE [x, y] (ExprI _ (IntrinsicE IntrEq [ExprI _ (VarE _ x'), ExprI _ (VarE _ y')]))))) =
+  x == x' && y == y'
+isWireEq _ = False
 
 -- | A derived comparison's body over its parameters @x@ and @y@, untyped,
 -- each node at the use's source position.
@@ -764,91 +865,6 @@ isRepresentationCast (AnnoS _ _ (LamS _ (AnnoS _ _ (CoerceS (CoerceNewtype _ _) 
 isRepresentationCast (AnnoS _ _ (LamS _ (AnnoS _ _ (IntrinsicS intr _)))) =
   intr `elem` [IntrNewtypeUnwrap, IntrNewtypeWrap]
 isRepresentationCast _ = False
-
--- | The instances reachable by walking @gt@'s alias chain. Only @gt@'s
--- chain is walked: an instance head is never a transparent alias
--- (Restructure.checkInstanceOnRoot), and
--- walking it would merge sibling newtypes (Deque a, Array a) that share
--- the body @List a@ but own separate instances.
---
--- Each step removes a non-recursive alias level, pushes a recursive
--- alias a level deeper than any candidate head reaches, or strips a
--- wrapper, which bounds the fuel.
-filterByAliasChain :: Scope -> TypeU -> [(EType, [a])] -> [(EType, [a])]
-filterByAliasChain scope gt0 candidates = go fuel gt0
-  where
-    fuel = Map.size scope + typeDepth gt0 + maximum (0 : [typeDepth t | (EType t _ _ _, _) <- candidates]) + 1
-    go n currentGt =
-      case [x | x@(EType t _ _ _, _) <- candidates, compatibleTypeU currentGt t] of
-        [] | n <= 0 -> []
-        [] -> case TE.reduceType scope currentGt of
-          Just gt' | gt' /= currentGt -> go (n - 1) gt'
-          _ -> case TE.reduceTypeLeaves scope currentGt of
-            Just gt' | gt' /= currentGt -> go (n - 1) gt'
-            _ -> case currentGt of
-              -- Strip coercion wrappers: a -> ?a, a -> <E> a
-              OptionalU t -> go (n - 1) t
-              EffectU _ t -> go (n - 1) t
-              _ -> []  -- nothing reachable
-        matches -> matches
-    typeDepth :: TypeU -> Int
-    typeDepth t = 1 + maximum (0 : map typeDepth (typeUChildren t))
-
--- | Whether an instance type matches a call-site type at one alias level,
--- without evaluating aliases. Bound variables and existentials match
--- anything. Any two Nat expressions match: 'subtype' runs the Nat solver
--- later, and only it can equate @Vector (d1*d2) a@ with @Vector 4 a@.
-compatibleTypeU :: TypeU -> TypeU -> Bool
-compatibleTypeU = go Set.empty Set.empty
-  where
-    go b1 b2 (ForallU v t1) t2 = go (Set.insert v b1) b2 t1 t2
-    go b1 b2 t1 (ForallU v t2) = go b1 (Set.insert v b2) t1 t2
-    go _  _  (ExistU _ _ _) _ = True
-    go _  _  _ (ExistU _ _ _) = True
-    go b1 b2 (VarU v1) (VarU v2)
-      | Set.member v1 b1 || Set.member v2 b2 = True
-      | otherwise = v1 == v2
-    -- A record evaluated to its body still carries its name and parameters,
-    -- and an instance head names it nominally.
-    go b1 b2 t1@NamU{} t2@(VarU _) = go b1 b2 (nominal t1) t2
-    go b1 b2 t1@NamU{} t2@(AppU _ _) = go b1 b2 (nominal t1) t2
-    go b1 b2 t1@(VarU _) t2@NamU{} = go b1 b2 t1 (nominal t2)
-    go b1 b2 t1@(AppU _ _) t2@NamU{} = go b1 b2 t1 (nominal t2)
-    go b1 _  (VarU v1) _ = Set.member v1 b1
-    go _  b2 _ (VarU v2) = Set.member v2 b2
-    go b1 b2 (FunU as1 r1) (FunU as2 r2) = case alignFun (as1, r1) (as2, r2) of
-      Just (ps, (q1, q2)) -> all (uncurry (go b1 b2)) ps && go b1 b2 q1 q2
-      Nothing -> False
-    go b1 b2 (AppU h1 ps1) (AppU h2 ps2)
-      | Just ps <- zipExact ps1 ps2 =
-          go b1 b2 h1 h2
-            && all (uncurry (go b1 b2)) ps
-      -- Partial application, as in 'subtype': @Vector n a@ matches @f a@.
-      | length ps1 > length ps2
-      , let k = length ps1 - length ps2
-            (ps1prefix, ps1suffix) = splitAt k ps1
-      = go b1 b2 (AppU h1 ps1prefix) h2
-          && all (uncurry (go b1 b2)) (zipSame ps1suffix ps2)
-      | length ps2 > length ps1
-      , let k = length ps2 - length ps1
-            (ps2prefix, ps2suffix) = splitAt k ps2
-      = go b1 b2 h1 (AppU h2 ps2prefix)
-          && all (uncurry (go b1 b2)) (zipSame ps1 ps2suffix)
-      | otherwise = False
-    go b1 b2 (NamU o1 n1 ps1 rs1) (NamU o2 n2 ps2 rs2) =
-      o1 == o2 && n1 == n2
-        && maybe False (all (uncurry (go b1 b2))) (zipExact ps1 ps2)
-        && maybe False (all (\((k1,v1),(k2,v2)) -> k1 == k2 && go b1 b2 v1 v2)) (zipExact rs1 rs2)
-    go b1 b2 (OptionalU t1) (OptionalU t2) = go b1 b2 t1 t2
-    go b1 b2 (EffectU e1 t1) (EffectU e2 t2) = e1 == e2 && go b1 b2 t1 t2
-    go _  _  t1 t2 | isNatExprT t1 && isNatExprT t2 = True
-    go _  _  _ _ = False
-
-    nominal (NamU _ n [] _) = VarU n
-    nominal (NamU _ n ps _) = AppU (VarU n) ps
-    nominal t = t
-
-    isNatExprT t = maybe False fillsNat (kindOfU t)
 
 -- | Result type of slicing a container. A leading Nat parameter becomes
 -- 'NatVoidU', which matches any Nat. A fresh existential would never be
@@ -1396,10 +1412,10 @@ synthE i g0 (VarS v (PolymorphicExpr cls clsName t0 rs0)) = do
     checkInstances ::
       Gamma ->
       TypeU ->
-      [(EType, [AnnoS Int ManyPoly Int])] ->
-      MorlocMonad (Gamma, [(EType, [AnnoS (Indexed TypeU) ManyPoly Int])])
+      [(InstanceKey, EType, [AnnoS Int ManyPoly Int])] ->
+      MorlocMonad (Gamma, [(InstanceKey, EType, [AnnoS (Indexed TypeU) ManyPoly Int])])
     checkInstances g _ [] = return (g, [])
-    checkInstances g10 genType ((instType, es) : rs) = do
+    checkInstances g10 genType ((key, instType, es) : rs) = do
       let (g11, genType') = toExistential g10 genType
       let (g12, instType') = rename g11 (etype instType)
       g13 <- subtype' i instType' genType' g12
@@ -1413,7 +1429,7 @@ synthE i g0 (VarS v (PolymorphicExpr cls clsName t0 rs0)) = do
       -- The original general type: each instance gets its own existentials.
       (g15, rs') <- checkInstances gNext genType rs
 
-      return (g15, (instType, es') : rs')
+      return (g15, (key, instType, es') : rs')
 
     checkImplementations ::
       Gamma ->
@@ -1426,10 +1442,18 @@ synthE i g0 (VarS v (PolymorphicExpr cls clsName t0 rs0)) = do
       -- constrain each implementation (the List instance's `[]`).
       implAnn <- MM.gets (Map.lookup implGi . stateAnnotations)
       MM.modify' (\s -> s { stateAnnotations = Map.delete implGi (stateAnnotations s) })
-      (g11, _, e') <- checkG g10 e t
+      (g11raw, _, e') <- checkG g10 e t
       case implAnn of
         Just ann' -> MM.modify' (\s -> s { stateAnnotations = Map.insert implGi ann' (stateAnnotations s) })
         Nothing -> return ()
+      -- What the body's own uses fix is solved while its gamma holds them
+      -- (CLS-20). The body is resolved again, and its errors reported, at
+      -- each use that selects the instance.
+      g11 <- MM.recoverRejected
+        ( lenientPasses g11raw e' |>> \(g, _) ->
+            g {gammaDeferred = gammaDeferred g11raw, gammaDeferredAt = gammaDeferredAt g11raw}
+        )
+        (return g11raw)
 
       (g12, es') <- checkImplementations g11 t es
 

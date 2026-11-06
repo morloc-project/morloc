@@ -24,7 +24,6 @@ module Morloc.Namespace.Prim
   , None (..)
   , One (..)
   , Or (..)
-  , Many (..)
 
     -- ** Other classes
   , Three (..)
@@ -245,10 +244,6 @@ data None = None
 newtype One a = One {unOne :: a}
   deriving (Show)
 
--- | A wrapped list
-newtype Many a = Many {unMany :: [a]}
-  deriving (Show)
-
 -- | A value that may be left, right, or both
 data Or a b = L a | R b | LR a b
   deriving (Ord, Eq, Show)
@@ -268,20 +263,11 @@ instance Functor (IndexedGeneral k) where
 instance Functor One where
   fmap f (One x) = One (f x)
 
-instance Functor Many where
-  fmap f (Many x) = Many (map f x)
-
 instance Traversable One where
   traverse f (One x) = One <$> f x
 
-instance Traversable Many where
-  traverse f (Many xs) = Many <$> traverse f xs
-
 instance Foldable One where
   foldr f b (One a) = f a b
-
-instance Foldable Many where
-  foldr f b (Many xs) = foldr f b xs
 
 instance Bifunctor Or where
   bimapM f _ (L a) = L <$> f a
@@ -396,9 +382,6 @@ instance Pretty None where
 
 instance (Pretty a) => Pretty (One a) where
   pretty (One x) = pretty x
-
-instance (Pretty a) => Pretty (Many a) where
-  pretty (Many xs) = list $ map pretty xs
 
 instance (Pretty k, Pretty a) => Pretty (IndexedGeneral k a) where
   pretty (Idx i x) = parens (pretty i <> ":" <+> pretty x)

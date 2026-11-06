@@ -899,9 +899,9 @@ realizeWithRegistry registry tables pins seedLangs s00 = do
     -- A literal is built wherever it is used (COST-11).
     scoreExpr _ (UniS, i) = return (UniS, Idx i [])
     scoreExpr _ (NullS, i) = return (NullS, Idx i [])
-    scoreExpr rstat (VarS v (Many xs), i) = do
+    scoreExpr rstat (VarS v (Many ev xs), i) = do
       (xs', best) <- scoreAlternatives v rstat xs
-      return (VarS v (Many xs'), Idx i best)
+      return (VarS v (Many ev xs'), Idx i best)
     -- A parameter bound to no function value is data the caller passes
     -- in, read wherever it is used (COST-3).
     scoreExpr rstat (BndS v, i) = do
@@ -1045,7 +1045,7 @@ realizeWithRegistry registry tables pins seedLangs s00 = do
     sourcedHead :: AnnoS (Indexed Type) Many c -> Bool
     sourcedHead (AnnoS _ _ e) = case e of
       ExeS (SrcCall _) -> True
-      VarS _ (Many xs@(_ : _)) -> all sourcedHead xs
+      VarS _ (Many _ xs@(_ : _)) -> all sourcedHead xs
       LabelS _ x -> sourcedHead x
       CoerceS _ x -> sourcedHead x
       _ -> False
@@ -1054,7 +1054,7 @@ realizeWithRegistry registry tables pins seedLangs s00 = do
     headSources :: AnnoS (Indexed Type) Many c -> [Source]
     headSources (AnnoS _ _ e) = case e of
       ExeS (SrcCall (Idx _ src)) -> [src]
-      VarS _ (Many ys) -> concatMap headSources ys
+      VarS _ (Many _ ys) -> concatMap headSources ys
       LabelS _ x -> headSources x
       CoerceS _ x -> headSources x
       _ -> []
@@ -1087,7 +1087,7 @@ realizeWithRegistry registry tables pins seedLangs s00 = do
     boundArgs :: AnnoS (Indexed Type) Many c -> Int
     boundArgs (AnnoS _ _ e) = case e of
       LamS vs body -> length vs + boundArgs body
-      VarS _ (Many ys@(_ : _)) -> minimum (map boundArgs ys)
+      VarS _ (Many _ ys@(_ : _)) -> minimum (map boundArgs ys)
       LetS _ _ body -> boundArgs body
       LabelS _ x -> boundArgs x
       CoerceS _ x -> boundArgs x
@@ -1279,7 +1279,7 @@ realizeWithRegistry registry tables pins seedLangs s00 = do
       (ExprS (Indexed Type) Many (Indexed [(Lang, Score)]), Indexed [(Lang, Score)]) ->
       MorlocMonad (ExprS (Indexed Type) One (Indexed (Maybe Lang)), Indexed (Maybe Lang))
 
-    collapseExpr _ _ _ (VarS v (Many []), Idx i _) =
+    collapseExpr _ _ _ (VarS v (Many _ []), Idx i _) =
       MM.throwSourcedError i $ "No implementation found for" <+> squotes (pretty (displayName v))
     -- Select one implementation for the given term
     -- CLS-2 first, where the implementations' types differ: those whose
@@ -1287,7 +1287,7 @@ realizeWithRegistry registry tables pins seedLangs s00 = do
     -- preferred language (COST-16). Two different sources of one type still
     -- tied are an error; definitions in morloc that tie are interchangeable
     -- (REAL-1) and the first is taken.
-    collapseExpr heads (Idx _ gt) l1 (VarS v (Many xs), Idx i _) = do
+    collapseExpr heads (Idx _ gt) l1 (VarS v (Many _ xs), Idx i _) = do
       typed <- case xs of
         (AnnoS (Idx _ t0) _ _ : _)
           | any (\(AnnoS (Idx _ t) _ _) -> t /= t0) xs -> resolveInstances gt xs
@@ -1618,9 +1618,9 @@ realizeWithRegistry registry tables pins seedLangs s00 = do
       AnnoS (Indexed Type) Many (Indexed [(Lang, Score)])
     pinNamedLambda lang x@(AnnoS g (Idx i ss) e) = case e of
       LamS _ _ -> AnnoS g (Idx i (pinScores ss)) e
-      VarS v (Many alts)
+      VarS v (Many ev alts)
         | any isNamedLambda alts ->
-            AnnoS g (Idx i (pinScores ss)) (VarS v (Many (map (pinNamedLambda lang) alts)))
+            AnnoS g (Idx i (pinScores ss)) (VarS v (Many ev (map (pinNamedLambda lang) alts)))
       _ -> x
       where
         pinScores ss0 = case minimumMay [cost (Just lang) l2 s2 | (l2, s2) <- ss0] of
@@ -1661,14 +1661,14 @@ realizeWithRegistry registry tables pins seedLangs s00 = do
 
     isNamedLambda :: AnnoS g Many c -> Bool
     isNamedLambda (AnnoS _ _ (LamS _ _)) = True
-    isNamedLambda (AnnoS _ _ (VarS _ (Many alts))) = any isNamedLambda alts
+    isNamedLambda (AnnoS _ _ (VarS _ (Many _ alts))) = any isNamedLambda alts
     isNamedLambda _ = False
 
     -- The head of an application, before collapse, is a sourced function
     -- however it is named: every alternative of the term is a source call.
     isSourcedMany :: AnnoS (Indexed Type) Many c -> Bool
     isSourcedMany (AnnoS _ _ (ExeS (SrcCall _))) = True
-    isSourcedMany (AnnoS _ _ (VarS _ (Many xs))) = not (null xs) && all isSourcedMany xs
+    isSourcedMany (AnnoS _ _ (VarS _ (Many _ xs))) = not (null xs) && all isSourcedMany xs
     isSourcedMany _ = False
 
     -- The head of an application is a sourced function, reached directly or
@@ -1891,7 +1891,7 @@ reopenSources limits n@(AnnoS g ci e)
             hd <-
               if null alts
                 then return f
-                else (\k -> AnnoS fg k (VarS (srcAlias src) (Many (f : alts)))) <$> MM.getCounter
+                else (\k -> AnnoS fg k (VarS (srcAlias src) (Many [] (f : alts)))) <$> MM.getCounter
             return (AppS hd xs')
       _ -> mapExprSM (reopenSources limits) e
   where
@@ -1945,7 +1945,7 @@ unrealized (AnnoS g (Idx i _) e) = AnnoS g i $ case e of
   UniS -> UniS
   NullS -> NullS
   BndS v -> BndS v
-  VarS v (One x) -> VarS v (Many [unrealized x])
+  VarS v (One x) -> VarS v (Many [] [unrealized x])
   AppS f xs -> AppS (unrealized f) (map unrealized xs)
   LamS vs x -> LamS vs (unrealized x)
   LstS xs -> LstS (map unrealized xs)
@@ -2014,7 +2014,7 @@ stagePoints :: AnnoS (Indexed Type) Many Int -> Map EVar Int
 stagePoints = go
   where
     go (AnnoS _ _ e) = case e of
-      VarS v (Many alts) ->
+      VarS v (Many _ alts) ->
         Map.unions (Map.fromList [ (v, length vs) | a <- alts, Just vs <- [staged v a] ] : map go alts)
       _ -> Map.unions (foldExprS (\x -> [go x]) e)
     staged v (AnnoS (Idx _ (FunT ts _)) _ (LamS vs body@(AnnoS _ _ be)))
