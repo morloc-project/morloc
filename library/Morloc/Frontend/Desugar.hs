@@ -1775,10 +1775,9 @@ lowerBracket sp axes tail' subject = case axes of
         -- require the user's module to import a binding for `map`
         -- (typically Functor's class method via root) -- a silent
         -- dependency the user has no reason to expect from a bracket
-        -- accessor. The intrinsic node is self-contained: the
-        -- pure-runtime path lowers it to the Map evaluator branch
-        -- directly, and the pool path resolves @Functor.map@ for the
-        -- target language at codegen.
+        -- accessor. Where a program has an instance, instance resolution
+        -- makes it a use of @Functor.map@; where it has none, the nexus
+        -- runs it on a list with its Map evaluator branch.
         freshExprSpan sp (IntrinsicE IntrMap [lamExpr, sliceCall])
   _ -> dfail (startPos sp)
          "multi-axis bracket accessors are not supported in v1 (1D lists only)"

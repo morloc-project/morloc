@@ -1,0 +1,27 @@
+-- Spec CLS-16: of two Functor instances of one head, a bracket chain maps
+-- through the more specific; its receiver is no list on the wire (COST-15).
+module main (runInt, runReal, directInt)
+import root-py
+
+record R where
+  x :: Int
+record Py => R = "dict"
+
+newtype Box k a = (k, [a])
+type Py => (Box k a) = "tuple" k a
+instance Packable (k, [a]) (Box k a) where
+  source Py from "h.py" ("h_id" as pack, "h_id" as unpack)
+instance Sliceable (Box k) where
+  source Py from "h.py" ("h_slice" as __get_slice__)
+
+instance Functor (Box k) where
+  source Py from "h.py" ("h_map_general" as map)
+instance Functor (Box Int) where
+  source Py from "h.py" ("h_map_int" as map)
+
+runInt :: Box Int R -> Box Int Int
+runInt xs = .[:].x xs
+directInt :: Box Int R -> Box Int Int
+directInt xs = map (\r -> .x r) xs
+runReal :: Box Real R -> Box Real Int
+runReal xs = .[:].x xs

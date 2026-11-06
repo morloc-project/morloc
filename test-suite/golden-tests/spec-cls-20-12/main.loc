@@ -1,0 +1,29 @@
+-- Spec CLS-20: the wire form of a body's own pack and unpack holds a variable of
+-- the instance's partially applied head, which only the use of the method fixes.
+module main (run, direct)
+import root-py
+
+newtype Pairs k a = [(k, a)]
+type Py => (Pairs k a) = "dict" k a
+instance Packable [(k, a)] (Pairs k a) where
+  source Py from "h.py" ("h_pack" as pack, "h_unpack" as unpack)
+
+source Py from "h.py" ("h_mapv" as mapv, "h_inc" as incr, "h_size" as size2)
+mapv :: (a -> b) -> [(k, a)] -> [(k, b)]
+incr :: Int -> Int
+size2 :: [k] -> Int
+
+instance Functor (Pairs k) where
+  map f xs = pack (mapv f (unpack xs))
+
+class Keyed f where
+  keyCount :: f a -> Int
+
+instance Keyed (Pairs k) where
+  keyCount xs = size2 (.[:].0 (unpack xs))
+
+run :: Pairs Str Int -> Pairs Str Int
+run xs = map incr xs
+
+direct :: Pairs Str Int -> Int
+direct xs = keyCount xs

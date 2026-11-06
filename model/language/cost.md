@@ -115,7 +115,7 @@ Replaced by COST-16: no per-language or per-pair costs are stated.
 
 ### COST-15 Only placements that run are compared
 Intent: proposed
-Tests: spec-cost-15-1, spec-cost-15-2
+Tests: spec-cost-15-1, spec-cost-15-2, spec-cost-15-3, spec-cost-15-4, spec-cost-15-5
 Code: deviates (../compiler/issues/realization.md: conditions 1 and 5)
 
 Whether a program runs never depends on a comparison. Before COST-1

@@ -67,7 +67,12 @@ module Morloc.Typecheck.Internal
   , gammaTrimAfter
 
     -- * Packable wire-form lookup
-  , findPackableWireForm
+  , instantiateAll
+  , indexMethods
+  , sliceMethods
+  , getterMethods
+  , boundMethods
+  , functorMapMethod
 
     -- * selectors
   , selectorType
@@ -189,15 +194,30 @@ instanceReceiverHeads method pos = do
     , Just h <- [instanceArgHead pos et]
     ]
 
+-- | What may serve a bracket step's receiver, in the order tried: a
+-- user-declared walker over the structural classes.
+indexMethods, sliceMethods, getterMethods, boundMethods :: [ArgMethod]
+indexMethods = [patternAccessibleMethod, ArgMethod (ClassName "Indexable") (EV "__access_index__") 1]
+sliceMethods =
+  [ patternAccessibleMethod
+  , ArgMethod (ClassName "Sliceable") (EV "__get_slice__") 3
+  , ArgMethod (ClassName "SliceableDim") (EV "__get_slice_dim__") 3
+  ]
+getterMethods = [patternAccessibleMethod]
+boundMethods = [ArgMethod (ClassName "IndexLike") (EV "__to_index__") 0]
+
+functorMapMethod :: ArgMethod
+functorMapMethod = ArgMethod (ClassName "Functor") (EV "map") 1
+
+patternAccessibleMethod :: ArgMethod
+patternAccessibleMethod = ArgMethod (ClassName "PatternAccessible") (EV BT.extractPatternMethod) 2
+
 -- | PAT-5: for a bracket step, what its receiver needs (for diagnostics),
 -- the receiver's position in the step's function type, and the instance
 -- methods, with their receiver positions, that can supply it.
-bracketRule :: Pattern -> Maybe (MDoc, Int, [(EVar, Int)])
-bracketRule PatternBracketIndex =
-  Just ("an Indexable", 1, [(EV "__access_index__", 1), (EV BT.extractPatternMethod, 2)])
-bracketRule PatternBracketSlice =
-  Just ( "a Sliceable or SliceableDim", 3
-       , [(EV "__get_slice__", 3), (EV "__get_slice_dim__", 3), (EV BT.extractPatternMethod, 2)] )
+bracketRule :: Pattern -> Maybe (MDoc, Int, [ArgMethod])
+bracketRule PatternBracketIndex = Just ("an Indexable", 1, indexMethods)
+bracketRule PatternBracketSlice = Just ("a Sliceable or SliceableDim", 3, sliceMethods)
 bracketRule _ = Nothing
 
 data BracketReceiver
@@ -3540,44 +3560,14 @@ evarname g prefix =
   let i = gammaCounter g
    in (g {gammaCounter = i + 1}, EV (prefix <> "@@" <> MT.pack (show i)))
 
--- | Find a @Packable@ instance whose @pack@ output head matches the
--- outer TVar of @nativeT@, and return @pack@'s input (the decomposed
--- form) with the instance's type parameters substituted from
--- @nativeT@'s args. The class is @class Packable a b where pack :: a
--- -> b@; pack composes recursively toward the wire format, so its
--- input @a@ is the decomposed/serializable form for the wrapped
--- output @b@. This is the tier-2 wire-form lookup that runs after a
--- literal-check or codegen-dispatch rule fails to find a structural
--- match via 'TE.wireParentRoot' (newtype bodies). For example, with
--- @instance Packable (List (Tuple2 a b)) (Map a b)@ and a literal at
--- @Map Str Int@, returns @List (Tuple2 Str Int)@. Returns 'Nothing'
--- if no instance applies.
-findPackableWireForm :: TypeU -> MorlocMonad (Maybe TypeU)
-findPackableWireForm nativeT = do
-  let nativeTV = extractKey nativeT
-      nativeArgs = case nativeT of
-        AppU _ args -> args
-        _           -> []
-  sigmap <- MM.gets stateTypeclasses
-  case Map.lookup (EV "pack") sigmap of
-    Nothing -> return Nothing
-    Just inst -> return $ listToMaybe
-      [ wireSubstituted
-      | TermTypes (Just et) _ _ _ <- instanceTerms inst
-      , let (_, t) = unqualify (etype et)
-      , (wireForm, outputType) <- case t of
-          FunU [w] o -> [(w, o)]
-          _          -> []
-      , extractKey outputType == nativeTV
-      , let outputParams = case outputType of
-              AppU _ args -> [v | VarU v <- args]
-              _           -> []
-      , length outputParams == length nativeArgs
-      , let wireSubstituted = foldr
-              (\(v, t') acc -> substituteTVar v t' acc)
-              wireForm
-              (zipSame outputParams nativeArgs)
-      ]
+-- | A quantified type with each of its variables a fresh existential, and
+-- the substitution.
+instantiateAll :: Gamma -> TypeU -> (Gamma, TypeU -> TypeU, TypeU)
+instantiateAll g0 t0 =
+  let (vs, body) = unqualify t0
+      (g1, exs) = statefulMap (\g w -> newvar (unTVar w <> "_") g) g0 vs
+      sub t = foldr (\(w, x) acc -> substituteTVar w x acc) t (zipSame vs exs)
+   in (g1, sub, sub body)
 
 -- debugging -------------------
 

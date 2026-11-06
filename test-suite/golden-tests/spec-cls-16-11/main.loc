@@ -1,0 +1,27 @@
+-- Spec CLS-16: a bracket chain maps through the instance a `map` written out
+-- selects, also when that instance is written in morloc.
+module main (run, runDirect)
+import root-py
+
+record R where
+  x :: Int
+record Py => R = "dict"
+
+newtype Bag a = List a
+type Py => (Bag a) = "list" a
+instance Sliceable Bag where
+  source Py from "h.py" ("h_slice" as __get_slice__)
+instance Packable [a] (Bag a) where
+  source Py from "h.py" ("h_id" as pack, "h_id" as unpack)
+
+instance Functor Bag where
+  map f xs = pack (map f (rev (unpack xs)))
+
+source Py from "h.py" ("h_rev" as rev)
+rev :: [a] -> [a]
+
+run :: Bag R -> Bag Int
+run xs = .[:].x xs
+
+runDirect :: Bag R -> Bag Int
+runDirect xs = map (\r -> .x r) xs

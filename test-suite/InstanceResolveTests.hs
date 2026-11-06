@@ -29,6 +29,13 @@ instanceResolveTests =
         ( keyOf (run nat3 [] (sz (vec (NatLitU 3) int)))
         , keyOf (run nat3 [] (sz (vec (NatLitU 4) int))) )
           @?= (Just (key "Sz" [vec (NatLitU 3) int]), Just (key "Sz" [ForallU a (vec n (VarU a))]))
+    , testCase "an erased Nat cannot decide between heads (CLS-16)" $
+        isErasedNat (run nat3 [] (sz (vec NatVoidU int))) @?= True
+    , testCase "an erased Nat is not matched by a lone head that fixes it (CLS-16)" $
+        isErasedNat (run (env [decl "Sz" [] [vec (NatLitU 3) int]]) [] (sz (vec NatVoidU int))) @?= True
+    , testCase "an erased Nat selects the head that holds any Nat over one that needs none other (CLS-16)" $
+        keyOf (run (env [decl "Sz" [] [ForallU a (vec n (VarU a))], decl "Sz" [] [vec (NatLitU 3) str]]) [] (sz (vec NatVoidU int)))
+          @?= Just (key "Sz" [ForallU a (vec n (VarU a))])
     , testCase "a Nat-variable head covers a literal use (N3)" $
         keyOf (run (env [decl "Sz" [] [ForallU a (vec n (VarU a))]]) [] (sz (vec (NatLitU 3) (VarU a))))
           @?= Just (key "Sz" [ForallU a (vec n (VarU a))])
@@ -218,6 +225,8 @@ instanceResolveTests =
     isNoInstance _ = False
     isAmbiguous (Left (Ambiguous _ _)) = True
     isAmbiguous _ = False
+    isErasedNat (Left (ErasedNat _ _)) = True
+    isErasedNat _ = False
     isContextUnmet (Left (ContextUnmet {})) = True
     isContextUnmet _ = False
     isLoop (Left (ContextLoop _)) = True

@@ -39,6 +39,7 @@ is built by the same compiler.
 
 ### REAL-3 A call with no realizable implementation is rejected at build
 Intent: proposed
+Tests: spec-real-3-1
 Code: deviates (issues/diagnostics-docs.md)
 
 If no implementation of a term can be used where it is called, for example

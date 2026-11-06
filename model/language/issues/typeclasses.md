@@ -67,7 +67,7 @@
   method back-edge whose type differs from its definition's.
 - **Classes the compiler names still live in `root`.** [read] Violates
   CLS-15. `Functor` (`map`, found by name in
-  library/Morloc/CodeGenerator/Instance.hs `findFunctorMap`) and `Integral`
+  library/Morloc/Frontend/Treeify.hs for a bracket chain's map) and `Integral`
   and `Numeric` (literal defaulting, library/Morloc/BaseTypes.hs) are
   declared in stdlib `root`, so a replacement prelude without them breaks
   code generation.
@@ -98,13 +98,6 @@
   A`) lists every method with no implementation, so a use selects it and
   typechecks, and only realization says "No implementation found for
   'sh'", naming no instance. Open: CLS-14.
-- **Instances are matched two ways.** [read] Violates CLS-16 (one rule).
-  Typecheck selects one instance per use through the resolver, and
-  realization takes that instance's implementations; but
-  CodeGenerator/Instance.hs, used for calls the compiler builds
-  (`__get_slice__`, `__access_index__`, `__to_index__`, `map` across
-  effects), takes the first sourced match, with no specificity and blind
-  to an instance whose body is morloc.
 - **A field of a Rec alias used as a record type cannot be read.**
   [reproduced] Violates KIND-2's record-type reading (ALIAS-11). `type R =
   {x = Int}; f :: R -> Int; f r = .x r` passes the kind check and fails at
@@ -116,15 +109,7 @@
   representation of 'Vec a' is '[a]'"; `Vec n a` builds. The head seems to
   be compared before its Nat is filled (KIND-5).
 
-- **`findPackableWireForm` keeps only type-variable parameters.** [read,
-  2026-11-02] A native with a Nat parameter gets no tier-2 wire form; the
-  first match wins, with no specificity and no check on repeated variables.
 
-- [read, 2026-11-05] Desugar.hs declHead writes a newtype's Nat parameter
-  as a type variable (`VarU n`) in the derived Packable instance head, so
-  that head may not match through instance resolution (S2's resolver);
-  check before Packable selection is routed through it. Possibly the
-  cause of the NEWT-9/KIND-5 entry in kinds-dimensions.md.
 
 - **Sourced root sort/unique are not the instance's relation.** [read
   2026-11-05] CLS-21. root-r `morloc_sort` (root-r/R/core.R:316-331)
@@ -140,17 +125,11 @@
 - **map-r's specific Packable head serves every language.** [read
   2026-11-05] map-r/main.loc:35 declares `Packable [(Str, val)] (Map Str
   val)` with R implementations only. Language plays no part in selection
-  (CLS-16), so it is selected at `Map Str v` in Python and C++ too, which
-  then depend on the unruled CLS-12 fall-through to map's general head.
+  (CLS-16), so a use of `pack` selects it at `Map Str v` in Python and C++
+  too, which then depend on the unruled CLS-12 fall-through to map's general
+  head. Serialization has no such dependency: a pool converts a value by the
+  instances it can run (spec-cls-16-14), all agreeing on the wire (CLS-20).
 
-- **A `Packable` class over a Nat head escapes the contract check.**
-  [reproduced, 2026-11-05] Violates CLS-5 and CLS-16. With `class Packable
-  a b where pack :: a -> b; unpack :: b -> a`, `newtype Vec (n :: Nat) a
-  = List a`, a sourced `instance Packable [a] (Vec 3 a)` and `g :: Vec n
-  Str -> Vec n Str; g t = pack (unpack t)`, `morloc typecheck` accepts and
-  prints two signatures for `g` (`Vec 3 Str -> Vec 3 Str` and `Vec a Str
-  -> Vec a Str`). The same program with the methods named `pk`/`unpk` is
-  rejected at validation.
 - **A signed term's class constraints cannot be instantiated when its
   signature binds a label.** [reproduced 2026-11-05, latent] Typecheck.hs
   `signatureConstraints` instantiates the signature with `instantiateAll`
@@ -172,3 +151,27 @@
   `Real`: "No instance found for Integral::zero at type I64". A stdlib
   defect (CLS-2 holds); root needs `Integral` at the fixed-width integers
   or time must not use them there.
+- **Serialization selects among the instances a language implements.**
+  [read, 2026-11-06] Needs a ruling on CLS-16. A method use selects with no
+  regard to language, and a compiler-built bracket call with no implementation
+  in its pool is rejected (spec-real-3-1). A value converted in a pool has no
+  use to reject: `selectPackerInstance` (CodeGenerator/Serial.hs) runs the
+  resolver over the Packable instances that pool can call, because root-style
+  families need it (map-r's `Map Str val` is R only, and Python must still
+  read a `Map Str Int`; spec-cls-16-14). So where `Vec 3` is only in Python and
+  `Vec n` in C++, the C++ pool converts a `Vec 3` by `Vec n`. CLS-20 makes the
+  two agree on the wire; nothing says they agree on the native value.
+- **A bracket step cannot call an instance's morloc body.** [reproduced,
+  2026-11-06] Violates CLS-2. An `Indexable`, `Sliceable` or `SliceableDim`
+  instance implementing its method by a body is refused at build
+  (spec-real-3-1, Express.hs `evidenceSource`), though the body is callable and
+  a bracket chain's `map` calls one (spec-cls-16-11). The same holds for
+  `PatternAccessible` (spec-pat-5-13). A fix makes the pattern a method use
+  when the selected instance has a body: Treeify must add a use of the method
+  and of `__to_index__` per bound, under a new wrapper node that synthE types
+  and resolveInstances discards or applies, about 80 lines.
+- **normalizeType does not descend into a function type.** [read, 2026-11-06]
+  Namespace/Type.hs `normalizeType` has only the curried FunU clause, so the
+  catch-all returns any other FunU as is, and the method type of an instance
+  over a partly applied head keeps `(Pairs k) a`. subtype and apply flatten such
+  an application when they meet it; no failure is known.

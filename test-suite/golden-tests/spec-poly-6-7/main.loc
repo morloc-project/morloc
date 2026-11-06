@@ -1,0 +1,18 @@
+-- Spec POLY-6: a getter's receiver holding a variable nothing fixes, where an
+-- instance that the variable may decide could serve it, is an error, not a
+-- structural read past the instance.
+module main (f)
+import root-py
+
+record Two k a where
+  foo :: Str
+record Py => Two k a = "dict"
+instance PatternAccessible (Two Int) where
+  source Py from "h.py" ("walker" as __extract_pattern__)
+
+source Py from "h.py" ("mk", "same")
+mk :: Int -> Two k Int
+same :: Str -> Str
+
+f :: Int -> Str
+f x = same (.foo (mk x))

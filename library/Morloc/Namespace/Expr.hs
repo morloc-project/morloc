@@ -48,6 +48,7 @@ module Morloc.Namespace.Expr
   , PatApp (..)
   , PatEvidence (..)
   , noPatEvidence
+  , ArgMethod (..)
   , patAppPattern
   , applyPattern
   , patternArity
@@ -501,9 +502,10 @@ data Intrinsic
                   -- the desugar's bracket-accessor lowering when a slice is
                   -- followed by a chained accessor (e.g. @.[::-1].x pts@). NOT
                   -- a user-facing @\@map@ -- there is no entry in 'parseIntrinsic'.
-                  -- The pure-runtime evaluator executes this as a direct
-                  -- per-element loop over MORLOC_ARRAY; the pool path resolves
-                  -- it to the language's @Functor.map@ instance.
+                  -- Instance resolution makes it a use of @Functor.map@ where
+                  -- an instance implements it; otherwise the pure-runtime
+                  -- evaluator executes it as a direct per-element loop over
+                  -- MORLOC_ARRAY. A fused walk of an IFile keeps it.
   | IntrMapOptional -- ^ internal @(a -> b) -> ?a -> ?b@: apply a function to
                   -- an optional's value, if it has one. Emitted only by the
                   -- host adapter ('Morloc.CodeGenerator.EffectBoundary'),
@@ -1043,6 +1045,10 @@ data PatEvidence = PatEvidence
   { patReceiver :: Maybe Evidence
   , patBounds :: [Maybe Evidence]
   }
+  deriving (Show, Eq, Ord)
+
+-- | A method whose class may serve a value, and the input the value takes.
+data ArgMethod = ArgMethod ClassName EVar Int
   deriving (Show, Eq, Ord)
 
 noPatEvidence :: PatEvidence

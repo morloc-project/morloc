@@ -43,6 +43,10 @@ import qualified Morloc.Data.Text as MT
 import qualified Morloc.Monad as MM
 import qualified Morloc.LangRegistry as LR
 import qualified Morloc.CodeGenerator.Infer as Infer
+import qualified Morloc.BaseTypes as BT
+import qualified Morloc.Frontend.Instances as FI
+import qualified Morloc.TypeEval as TE
+import Morloc.Typecheck.Internal (getterMethods, indexMethods, sliceMethods)
 
 -- | How the placement listing names a node that has no name of its own.
 nodeKind :: ExprS g f c -> MT.Text
@@ -67,6 +71,30 @@ nodeKind e = case e of
   CallS v -> "call " <> unEVar (displayName v)
   ExeS (SrcCall (Idx _ src)) -> unEVar (displayName (srcAlias src))
   _ -> "value"
+
+-- | The languages a step served by an instance can run in, on a receiver that
+-- is not a list on the wire: those whose pools can call the selected instances.
+-- Only a pool can call one, so the step leaves the nexus (PAT-5).
+instanceLanguages :: Scope -> InstanceEnv -> Indexed Type -> PatEvidence -> PatApp a -> [Lang]
+instanceLanguages scope env (Idx _ ft) pev app = case (ft, app, patReceiver pev) of
+  (FunT (_ : r : _) _, PatIndex _ _, Just ev) -> onReceiver indexMethods r ev
+  (FunT (_ : _ : _ : r : _) _, PatSlice {}, Just ev) -> onReceiver sliceMethods r ev
+  (FunT ins _, PatGet _ bs _, Just ev) | r : _ <- drop (length bs) ins -> onReceiver getterMethods r ev
+  _ -> []
+  where
+    onReceiver methods r ev
+      | isList (TE.wireParentRoot scope (type2typeu r)) = []
+      | otherwise = case FI.evidenceMethod methods ev of
+          Just m ->
+            [ l
+            | l <- langsOf ev m
+            , and [l `elem` langsOf b (EV "__to_index__") | Just b <- patBounds pev]
+            ]
+          Nothing -> []
+    isList t = extractKey t == BT.list
+    langsOf ev m = case FI.methodImpls FI.usePolicy env ev m of
+      Right impls -> unique [srcLang src | ImplSource _ (Idx _ src) <- impls]
+      Left _ -> []
 
 -- | One line per named call of a realized tree, its arguments and body
 -- indented beneath it, with the language its implementation runs in. @*@
@@ -946,7 +974,12 @@ realizeWithRegistry registry tables pins seedLangs s00 = do
       return (AppS f' xs', Idx i (scoreApp headTable pairss))
     scoreExpr rstat (PatS fg fi ev app, i) = do
       xs' <- traverse (scoreAnnoS rstat {rLangs = [], rApplied = []}) app
-      let headTable = [(l, mempty) | l <- rLangs rstat]
+      scope <- MM.getGeneralScope
+      env <- MM.gets stateInstances
+      let ambient = [(l, mempty) | l <- rLangs rstat]
+          headTable = case instanceLanguages scope env fg ev app of
+            [] -> ambient
+            ls -> [(l, callScore registry l) | l <- ls]
       return (PatS fg (Idx fi []) ev xs', Idx i (scoreApp headTable (map kid (toList xs'))))
     -- non-recursive expressions
     -- A literal is built wherever it is used (COST-11).

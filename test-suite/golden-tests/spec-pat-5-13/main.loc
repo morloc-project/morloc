@@ -1,0 +1,17 @@
+-- Spec PAT-5: a getter whose instance no language can call is refused; the
+-- nexus does not read its receiver past the instance.
+module main (first)
+import root-py
+
+record Box a where
+  foo :: Str
+record Py => Box a = "dict"
+
+source Py from "h.py" ("h_walk" as walk)
+walk :: Int -> Box a -> b
+
+instance PatternAccessible Box where
+  __extract_pattern__ p args b = walk 0 b
+
+first :: Box Int -> Str
+first b = .foo b

@@ -59,7 +59,6 @@ module Morloc.BaseTypes
   , handleStorageType
   , handleStorageTypeF
   , patternChainVar
-  , patternAccessibleClass
   , extractPatternMethod
   , patternChainGrammarVersion
   , unitU
@@ -314,8 +313,6 @@ handleStorageTypeF v a
 patternChainVar :: TVar
 patternChainVar = TV "PatternChain"
 
-patternAccessibleClass :: TVar
-patternAccessibleClass = TV "PatternAccessible"
 
 extractPatternMethod :: Text
 extractPatternMethod = "__extract_pattern__"

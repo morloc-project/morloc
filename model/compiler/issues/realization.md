@@ -104,13 +104,6 @@ preference, then size).
   pin a placement directly (PlacementTests.hs was planned). The consistency
   check of `typecheck -v --realize` runs over every golden program
   (spec-cost-11-1).
-- **A bracket step through an instance is never placed in a pool.**
-  [read, 2026-10-21] Realize gives a PatCall only its ambient languages (Realize.hs:911),
-  so a pure `f m = .[0] m` on a receiver that is not a list on the wire
-  (a newtype over a tuple with a sourced `Indexable` instance) stays on the
-  nexus, which refuses it ("needs its instance, which no language here can
-  call") although a pool could run it. Placement should require a language
-  that has the instance whenever the receiver is not a list or IFile.
 - **The nexus brackets a newtype over a list natively.** [read, 2026-10-21]
   Gap in PAT-5. `newtype Deque a = List a` with its own `Indexable`
   instance is a list on the wire, so the nexus indexes it as a list while a
@@ -118,9 +111,21 @@ preference, then size).
   indexing (true of stdlib `Vector`). Needs a ruling: an instance on a
   list-represented newtype must agree with its representation, or such
   brackets must go to a pool.
+- **A bracket step on a list-represented newtype is not moved to its instance's
+  language.** [reproduced, 2026-11-06] COST-15 condition 1. With `newtype Vec
+  (n :: Nat) a = [a]`, `SliceableDim Vec` sourced only in Python and `run xs =
+  size2 (.[0:2] xs)` with `size2` in C++, the step stays in C++ and the build
+  stops with "gives no cpp implementation", though Python could run it.
+  `instanceLanguages` (Realize.hs) leaves such a receiver its ambient languages
+  so that the nexus can still bracket it (the entry above).
+- **An unapplied pattern passed as a function adds a wrapper call per element.**
+  [reproduced, 2026-11-06] pattern-getters: since a pattern is eta-expanded in
+  Treeify, generated Python is `morloc_map(lambda n: m(n), xs)` where it was
+  `morloc_map(m, xs)`. Same results, one more Python call per element. COST-1
+  does not see it; the printer could drop a lambda that only forwards.
 - **An argument computable in the caller is computed by a callback.**
   [reproduced, 2026-10-23] A cut is a subtree (Express.hs, the cross-pool
-  AppS clause ~1674-1688, and PatCall ~1616, eta ~1714, expressContainer
+  AppS clause ~1674-1688, and the PatS clause ~1616, eta ~1714, expressContainer
   ~2347): in `inc (dbl (inc x))` with `inc` in Python and `dbl` in C++, C++
   calls back into Python for the inner `inc x`, two round trips where one
   would do; `inc (add (inc x) (inc y))` takes three. A `where` value used

@@ -576,14 +576,15 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
     -- PAT-5: the nexus brackets only a value that is a list on the wire.
     -- Another receiver an instance accepts is reached only through that
     -- instance, in a pool.
-    requireListReceiver (AnnoS (Idx ri rt) _ _) = do
+    requireListReceiver r@(AnnoS (Idx ri rt) _ _) = do
       Infer.requireDetermined ri rt
       ast <- generalTypeToSerialAST i rt
       case wireShape ast of
         WList _ -> return ()
-        _ -> MM.throwSourcedError ri $
-          "A bracket step on" <+> pretty rt
-            <+> "needs its instance, which no language here can call"
+        _ -> needsInstance "A bracket step on" r
+    needsInstance :: MDoc -> AnnoS (Indexed Type) One () -> MorlocMonad a
+    needsInstance what (AnnoS (Idx ri rt) _ _) =
+      MM.throwSourcedError ri $ what <+> pretty rt <+> "needs its instance, which no language here can call"
 
     type2schema :: Type -> MorlocMonad Text
     type2schema t = (render . Serial.serialAstToMsgpackSchema) <$> generalTypeToSerialAST i t
@@ -664,13 +665,15 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
           patAppX t ft app
     -- A getter on an IFile receiver routes to the walker. A selector's
     -- bracket bounds are in DFS order.
-    toNexusExpr (AnnoS (Idx _ t) _ (PatS (Idx _ ft) _ _ app@(PatGet sel bounds rE))) = do
+    toNexusExpr (AnnoS (Idx _ t) _ (PatS (Idx _ ft) _ pev app@(PatGet sel bounds rE))) = do
       mapM_ (validateBracketBound "bracket") bounds
       if recvIsIFile rE
         then do
           steps <- IFile.selectorToWalkSteps (annoIdx rE) sel
           emitIFileWalkX t rE steps bounds
-        else patAppX t ft app
+        else case patReceiver pev of
+          Just _ -> needsInstance "A getter on" rE
+          Nothing -> patAppX t ft app
     toNexusExpr (AnnoS (Idx _ t) _ (PatS (Idx _ ft) _ _ app)) = do
       mapM_ (heldSuspension "passed as an argument") app
       patAppX t ft app

@@ -1,0 +1,13 @@
+-- Spec CLS-16: the same for a Packable head a slice's value would be read by.
+module packable (run)
+import root-py
+
+newtype Vec (n :: Nat) a = [a]
+type Py => (Vec n a) = "list" a
+instance Packable [a] (Vec 3 a) where
+  source Py from "h.py" ("h_id" as pack, "h_id" as unpack)
+instance SliceableDim Vec where
+  source Py from "h.py" ("h_slice" as __get_slice_dim__)
+
+run :: Vec 3 Int -> [Int]
+run xs = unpack (.[0:2] xs)

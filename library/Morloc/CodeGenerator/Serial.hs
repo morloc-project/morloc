@@ -21,6 +21,7 @@ module Morloc.CodeGenerator.Serial
   , checkPackerCoherence
   , findPackerInstances
   , findCoveringPacker
+  , selectPackerInstance
   , PackerInstance (..)
   , wireSerialAstToType
   , containsFunT
@@ -64,7 +65,8 @@ import Morloc.Data.Doc
 import qualified Morloc.Data.Map as Map
 import qualified Morloc.Monad as MM
 import qualified Morloc.TypeEval as TE
-import Morloc.Typecheck.Internal (apply, emptyGamma, isSubtypeOf2, mapTypeUChildren, qualify, substitute, subtype, typeUChildren, unqualify)
+import qualified Morloc.Frontend.Instances as FI
+import Morloc.Typecheck.Internal (apply, emptyGamma, mapTypeUChildren, prettyConstraint, qualify, substitute, subtype, typeUChildren, unqualify)
 import qualified Data.List as List
 import Morloc.Frontend.TypeNames (isReservedTypeName)
 
@@ -1094,10 +1096,14 @@ makeSerialAST m lang t0 = do
                 -- lookup the same way this branch did before.
                 AliasIsNone -> case Map.lookup gv typepackers of
                   (Just ps) -> do
-                    packers <- mapM makeTypePacker ps
-                    unpacked <- mapM (\p -> (,) p <$> makeSerialAST' gscope typepackers anc (typePackerUnpacked p)) packers
-                    selection <- selectPacker unpacked
-                    return $ SerialPack v selection
+                    selected <- selectPackerInstance m (const True) (VarU gv) ps
+                    case selected of
+                      Just pin -> do
+                        packer <- makeTypePacker pin
+                        ast <- makeSerialAST' gscope typepackers anc (typePackerUnpacked packer)
+                        return $ SerialPack v (packer, ast)
+                      Nothing ->
+                        MM.throwSourcedError m $ "No Packable instance for" <+> squotes (pretty cv) <> "."
                   Nothing ->
                     MM.throwSourcedError m $
                       "Cannot find constructor in VarF" <+> dquotes (pretty v) <+> " finalType=" <> pretty finalType
@@ -1169,19 +1175,6 @@ makeSerialAST m lang t0 = do
               , typePackerReverse = reverseSource
               }
 
-        -- A parameterless constructor gives selection nothing to discriminate
-        -- on: every instance for it has the same head, so more than one is
-        -- ambiguous by construction.
-        selectPacker :: [(TypePacker, SerialAST)] -> MorlocMonad (TypePacker, SerialAST)
-        selectPacker [] =
-          MM.throwSourcedError m $ "No Packable instance for" <+> squotes (pretty cv) <> "."
-        selectPacker [x] = return x
-        selectPacker xs =
-          MM.throwSourcedError m $
-            "Ambiguous Packable instances for" <+> squotes (pretty cv) <> ":"
-              <> "\n" <> indent 2 (vsep [pretty (typePackerUnpacked tp) | (tp, _) <- xs])
-              <> "\nA type with no parameters admits only one instance; these"
-              <+> "differ only in the form they serialize to."
     -- A function value crossing a pool boundary is defunctionalized: it travels
     -- as a closure datum (home language, manifold id, captured argument packets).
     -- The argument and result schemas shape only the native callable on each
@@ -1379,12 +1372,20 @@ makeSerialAST m lang t0 = do
         -- SerialPack, or raise a helpful error if no instance is registered.
         packableFallback = case Map.lookup generalTypeName typepackers of
           (Just ps) -> do
-            -- Carry each instance's general packed type alongside the
-            -- resolved packer. Selection ranks instances by that head, and
-            -- 'resolvePacker' has already rewritten it to the concrete form.
-            (rejected, matches) <- partitionEithers <$> mapM resolveWithHead ps
-            selection <- selectPacker rejected matches
-            return $ SerialPack fv selection
+            selected <- selectPackerInstance m (const True) generalType ps
+            resolved <- maybe (return (Left "no instance head covers it")) (resolvePacker lang m ft) selected
+            case resolved of
+              Right packer -> do
+                ast <- makeSerialAST' gscope typepackers anc (typePackerUnpacked packer)
+                return $ SerialPack fv (packer, ast)
+              Left reason -> do
+                let (gt, ct) = unweaveTypeF ft
+                MM.throwSourcedError m $
+                  "No Packable instance covers" <+> squotes (pretty gt)
+                    <> " (concrete:" <+> pretty ct <> ")."
+                    <> "\nInstances declared for" <+> pretty generalTypeName <> ":"
+                    <> "\n" <> indent 2 (vsep (map (pretty . piHead) ps))
+                    <> "\n" <> reason
           Nothing ->
             let (gt, ct) = unweaveTypeF ft
             in MM.throwSourcedError m $
@@ -1394,17 +1395,6 @@ makeSerialAST m lang t0 = do
                    <> "\n  instance Packable <unpacked> (" <> pretty generalTypeName <+> "...) where ..."
                    <> "\nor map" <+> pretty generalTypeName
                    <+> "to a primitive list / tuple / sourced type."
-
-        -- Resolve one instance against the use site, keeping its general
-        -- packed type so the candidates can be ordered by specificity.
-        resolveWithHead ::
-          PackerInstance ->
-          MorlocMonad (Either (TypeU, MDoc) (TypeU, TypePacker))
-        resolveWithHead pin = do
-          resolved <- resolvePacker lang m ft pin
-          return $ case resolved of
-            (Right packer) -> Right (piHead pin, packer)
-            (Left reason) -> Left (piHead pin, reason)
 
         -- A Nat is a length only as Vector's first parameter (DIM-8): it
         -- annotates the list Vector is, including a literal 0 (a real empty
@@ -1491,38 +1481,6 @@ makeSerialAST m lang t0 = do
 
         finalVar = basevar $ maybe generalType id evaluatedType
 
-        -- Choose among the instances that match this use site. Instance
-        -- heads are ordered by subsumption, so a well-formed instance set
-        -- gives the matches a unique greatest element: the most specific
-        -- instance, which is the one to apply. Several incomparable maxima
-        -- mean the heads overlap without either specializing the other, and
-        -- no choice between them is defensible.
-        selectPacker ::
-          [(TypeU, MDoc)] ->
-          [(TypeU, TypePacker)] ->
-          MorlocMonad (TypePacker, SerialAST)
-        selectPacker rejected [] =
-          let (gt, ct) = unweaveTypeF ft
-           in MM.throwSourcedError m $
-                "No Packable instance covers" <+> squotes (pretty gt)
-                  <> " (concrete:" <+> pretty ct <> ")."
-                  <> "\nInstances declared for" <+> pretty generalTypeName
-                  <> ", and why each was rejected:"
-                  <> "\n" <> indent 2 (vsep [pretty h <> "\n  " <> reason | (h, reason) <- rejected])
-        selectPacker _ matches =
-          let maxima = mostSpecific (map fst matches)
-           in case [packer | (h, packer) <- matches, any (equivalent h) maxima] of
-                [packer] -> do
-                  ast <- makeSerialAST' gscope typepackers anc (typePackerUnpacked packer)
-                  return (packer, ast)
-                _ ->
-                  MM.throwSourcedError m $
-                    "Ambiguous Packable instances for"
-                      <+> squotes (pretty (fst (unweaveTypeF ft))) <> ":"
-                      <> "\n" <> indent 2 (vsep (map pretty maxima))
-                      <> "\nEach matches, and none is more specific than the others."
-                      <> "\nDeclare an instance for their common specialization to"
-                      <+> "disambiguate, or remove one of them."
     -- Cycle detection at the NamF entry. If we are already lowering this
     -- record on the path above us, emit a back-ref; otherwise add it to the
     -- ancestor set and recurse on the fields. A record's genuine
@@ -1607,33 +1565,38 @@ packerSources lang m0 pin = case Map.lookup lang (piSources pin) of
 findCoveringPacker :: Lang -> Int -> Type -> MorlocMonad (Maybe (Indexed Source))
 findCoveringPacker lang m0 t = do
   instances <- findPackerInstances
-  gscope <- MM.getGeneralScope
   let useT = type2typeu t
-      -- Coverage is a property of the general types: a head covers the
-      -- use site when it specializes to it, any of its variables (a
-      -- dimension included) standing for anything.
-      generic h =
-        let (vs, body) = unqualify h
-         in qualify (List.nub (vs <> occurrences body)) body
-      occurrences (VarU v@(TV n)) = [v | Just (c, _) <- [DT.uncons n], C.isLower c]
-      occurrences (KVarU (v, _)) = [v]
-      occurrences x = concatMap occurrences (typeUChildren x)
-      covers pin = isSubtypeOf2 gscope (generic (piHead pin)) useT
-      matches =
-        [ pin
-        | pin <- instances
-        , extractKey (piHead pin) == extractKey useT
-        , Map.member lang (piPacks pin)
-        , covers pin
-        ]
-  let maxima = mostSpecific (map piHead matches)
-  case [pin | pin <- matches, any (equivalent (piHead pin)) maxima] of
-    [] -> return Nothing
-    [pin] -> return (Map.lookup lang (piPacks pin))
-    pins ->
-      MM.throwSourcedError m0 $
-        "Ambiguous Packable instances for" <+> squotes (pretty t) <> ":"
-          <> "\n" <> indent 2 (vsep (map (pretty . piHead) pins))
+  selected <- selectPackerInstance m0 (Map.member lang . piPacks) useT instances
+  return $ case selected of
+    Just pin | extractKey (piHead pin) == extractKey useT -> Map.lookup lang (piPacks pin)
+    _ -> Nothing
+
+-- | The Packable instance that serves a type where no use site exists, among
+-- those that can run: a value of the type is converted in this pool. The same
+-- rule as any use selects it (CLS-16), but over the instances the pool can
+-- call, since an instance another language gives converts nothing here and
+-- all of them agree on the wire form (CLS-20). Only a type no head matches has
+-- none; any other failure to select is an error.
+selectPackerInstance ::
+  Int -> (PackerInstance -> Bool) -> TypeU -> [PackerInstance] -> MorlocMonad (Maybe PackerInstance)
+selectPackerInstance m usable t instances = do
+  scope <- MM.getGeneralScope
+  env <- MM.gets stateInstances
+  let candidates = filter usable instances
+      keep d = any (samePacker (idKey d)) candidates
+      env' = env {ieByClass = Map.adjust (filter keep) FI.packableClass (ieByClass env)}
+  case FI.resolvePackable scope env' t of
+    Right (EvInstance key _ _, _) -> return (listToMaybe (filter (samePacker key) candidates))
+    Right _ -> return Nothing
+    Left (FI.NoInstance _ _) -> return Nothing
+    Left e ->
+      MM.throwSourcedError m $
+        "Cannot select a Packable instance for" <+> squotes (pretty t) <> ":"
+          <+> FI.explainResolveError prettyConstraint e
+  where
+    samePacker key pin = case FI.keyPackedHead key of
+      Just h -> generalizes True h (piHead pin) && generalizes True (piHead pin) h
+      Nothing -> False
 
 resolvePacker ::
   Lang ->

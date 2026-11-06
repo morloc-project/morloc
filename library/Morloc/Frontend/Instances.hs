@@ -25,12 +25,22 @@ module Morloc.Frontend.Instances
   , OpenClassArgs (..)
   , OmittedMethods (..)
   , defaultPolicy
+  , usePolicy
   , packableWireFundep
   , mkInstanceDecl
   , insertInstanceDecl
   , insertClassInfo
   , instanceDecls
   , resolve
+  , resolveArg
+  , resolvePackable
+  , packableWireForm
+  , packableClass
+  , keyPackedHead
+  , methodSource
+  , methodHasBody
+  , intrinsicMapServes
+  , evidenceMethod
   , methodImpls
   , methodSources
   , superclassObligations
@@ -49,12 +59,14 @@ import qualified Data.List as DL
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import qualified Data.Text as DT
+import qualified Morloc.BaseTypes as BT
 import Morloc.Data.Doc
 import Morloc.Data.Zip (indexed, zipExact, zipPrefix)
 import Morloc.Namespace.Expr
 import Morloc.Namespace.Prim
+import Morloc.Namespace.State (Gamma)
 import Morloc.Namespace.Type
-import Morloc.Typecheck.Internal (natPositionExpr, traverseTypeUChildren)
+import Morloc.Typecheck.Internal (Applicable (..), instantiateAll, natPositionExpr, renameWithMap, subtype, traverseTypeUChildren)
 import qualified Morloc.Typecheck.NatSolver as NS
 import qualified Morloc.TypeEval as TE
 
@@ -63,6 +75,9 @@ data ResolveError
     NoInstance Constraint [InstanceKey]
   | -- | Several most specific heads match (CLS-16).
     Ambiguous Constraint [InstanceKey]
+  | -- | A Nat the use erased, which only a head leaving it a variable holds
+    -- (CLS-16); the most specific head that matches.
+    ErasedNat Constraint InstanceKey
   | -- | The class arguments hold variables nothing at the use fixed (CLS-18).
     Undetermined Constraint [TVar]
   | -- | The selected instance's context fails (CLS-5).
@@ -114,6 +129,11 @@ data OmittedMethods
 
 defaultPolicy :: ResolvePolicy
 defaultPolicy = ResolvePolicy OpenArgsUndetermined False OmittedFallThrough
+
+-- | Resolution at a use, written or compiler-built: DERIV-6 derives Eq and Ord
+-- where no instance matches.
+usePolicy :: ResolvePolicy
+usePolicy = defaultPolicy {policyDerive = True}
 
 -- | CLS-20: the wire argument of a two-parameter Packable class is fixed by
 -- its native one.
@@ -196,6 +216,8 @@ resolve policy scope env givens = go []
           | null open -> noInstance c
           | otherwise -> Left (Undetermined c open)
         Just (linkArgs, ms) -> case mostSpecificDecls fundeps ms of
+          [(d, _)]
+            | erasedNatDecides fundeps d linkArgs -> Left (ErasedNat c (idKey d))
           [(d, sub)]
             | not (null open) && not (skolemUnique fundeps d linkArgs) -> Left (Undetermined c open)
             | not (dependentsAgree fundeps d sub linkArgs) -> Left (Disagrees c (idKey d))
@@ -257,6 +279,11 @@ resolve policy scope env givens = go []
              in agree flex h' (flexExist (nominal recordNames u)) || agree flex (evalOr h') (flexExist (evalOr u))
        in maybe False (\ps -> and [one h u | (i, (h, u)) <- indexed ps, i `elem` fundeps]) (zipExact hs useArgs)
 
+    -- A use whose Nat was erased matches every head at that position, but
+    -- only one that leaves the Nat a variable holds whatever it was.
+    erasedNatDecides fundeps d useArgs =
+      any holdsNatVoid useArgs && isNothing (matchDecl fundeps d (map rigidNatVoid useArgs))
+
     mostSpecificDecls fundeps ms =
       let pat d = selectionPattern fundeps (idKey d)
           heads = mostSpecific (map (pat . fst) ms)
@@ -278,6 +305,120 @@ resolve policy scope env givens = go []
 
 contextDepth :: Int
 contextDepth = 64
+
+holdsNatVoid :: TypeU -> Bool
+holdsNatVoid t = t == NatVoidU || any holdsNatVoid (childrenU t)
+
+rigidNatVoid :: TypeU -> TypeU
+rigidNatVoid t = case t of
+  NatVoidU -> NatVarU (TV "#erased")
+  _ -> mapChildrenU rigidNatVoid t
+
+-- | The class constraint a method makes of a value at the given input.
+argConstraint :: Scope -> Gamma -> InstanceEnv -> ArgMethod -> TypeU -> Maybe Constraint
+argConstraint scope g0 env (ArgMethod cls method pos) arg = do
+  ci <- Map.lookup cls (ieClasses env)
+  et <- Map.lookup method (ciMethods ci)
+  let (g1, t1, rw) = renameWithMap g0 (etype et)
+      (g2, inst, body) = instantiateAll g1 t1
+  input <- case body of
+    FunU ins _ -> listToMaybe (drop pos ins)
+    _ -> Nothing
+  g3 <- either (const Nothing) Just (subtype scope input (nominal (declaredRecordNames scope) arg) g2)
+  return (Constraint cls [apply g3 (inst (rw (VarU v))) | v <- ciVars ci])
+
+-- | The instance serving a value the compiler itself calls a method on, with
+-- no use site for it to be a use of: the first class that has an instance at
+-- some link of the value's alias chain. Absent if none does.
+resolveArg :: Scope -> Gamma -> InstanceEnv -> [ArgMethod] -> TypeU -> Either ResolveError (Maybe Evidence)
+resolveArg scope g0 env methods arg = case methods of
+  [] -> Right Nothing
+  m@(ArgMethod cls _ _) : rest
+    | null (instanceDecls env cls) -> resolveArg scope g0 env rest arg
+    | otherwise -> links m rest (TE.aliasChain scope arg)
+  where
+    links _ rest [] = resolveArg scope g0 env rest arg
+    links m rest (t : ts) = case argConstraint scope g0 env m t of
+      Nothing -> links m rest ts
+      Just c -> case resolve usePolicy scope env [] c of
+        Right ev -> Right (Just ev)
+        Left (NoInstance _ _) -> links m rest ts
+        Left e -> Left e
+
+packableClass :: ClassName
+packableClass = ClassName "Packable"
+
+-- | The Packable instance of a type (CLS-20), whose wire form its instance
+-- fixes. A part of the type nothing has fixed is held fixed: it can select only
+-- a head that covers whatever it turns out to be, and every instance it could
+-- yet select agrees on the wire form.
+resolvePackable :: Scope -> InstanceEnv -> TypeU -> Either ResolveError (Evidence, Map.Map TVar TypeU)
+resolvePackable scope env t =
+  let wire = ExistU (TV "#wire") ([], Open) ([], Open)
+      (c, _) = fixOpenVars (Constraint packableClass [wire, t])
+   in (\ev -> (ev, fixedForms t)) <$> resolve usePolicy scope env [] c
+
+-- | Each variable 'fixOpenVars' fixes in a type, with what it stands for.
+fixedForms :: TypeU -> Map.Map TVar TypeU
+fixedForms t = case fixOpenVars (Constraint packableClass [t]) of
+  (Constraint _ [fixed], _) -> Map.fromList (pairs fixed t)
+  _ -> Map.empty
+  where
+    pairs (VarU v) o | fixedOpen v = [(v, o)]
+    pairs (KVarU (v, _)) o | fixedOpen v = [(v, o)]
+    pairs a b = concat (zipPrefixWith pairs (childrenU a) (childrenU b))
+    zipPrefixWith g xs ys = [g x y | (x, y) <- zipPrefix xs ys]
+
+-- | The form a type packs to, by its own head's instance (CLS-20).
+packableWireForm :: Scope -> InstanceEnv -> TypeU -> Maybe TypeU
+packableWireForm scope env t = case resolvePackable scope env t of
+  Right (EvInstance key@(InstanceKey _ (vs, w : _)) tys _, fixed)
+    | Just inst <- zipExact vs tys
+    , Just h <- keyPackedHead key
+    , extractKey h == extractKey t ->
+        Just (substituteAll fixed (substituteAll (Map.fromList inst) w))
+  _ -> Nothing
+
+-- | The type a Packable instance packs, quantified over its variables.
+keyPackedHead :: InstanceKey -> Maybe TypeU
+keyPackedHead (InstanceKey _ (vs, [_, h])) = Just (quantify vs h)
+keyPackedHead _ = Nothing
+
+-- | The source of a method under the evidence in a language, if the instance
+-- gives one there.
+methodSource :: InstanceEnv -> Evidence -> EVar -> Lang -> Maybe (Indexed Source)
+methodSource env ev m lang = case methodImpls usePolicy env ev m of
+  Right impls -> listToMaybe [s | ImplSource _ s@(Idx _ src) <- impls, srcLang src == lang]
+  Left _ -> Nothing
+
+-- | Whether the instance under the evidence implements a method by a body.
+methodHasBody :: InstanceEnv -> Evidence -> EVar -> Bool
+methodHasBody env ev m = case methodImpls usePolicy env ev m of
+  Right impls -> not (null [() | ImplBody _ <- impls])
+  Left _ -> False
+
+-- | Whether a bracket chain's map does what the instance's @map@ does: the
+-- instance implements no @map@, or is the standard library's over a plain
+-- list. Any other instance over a list, by a morloc body or by a source in
+-- another module, is a method use like one over any other head.
+intrinsicMapServes :: InstanceEnv -> Evidence -> Bool
+intrinsicMapServes env ev = case methodImpls usePolicy env ev (EV "map") of
+  Right impls -> null impls || overList && all standard impls
+  Left _ -> True
+  where
+    overList = case ev of
+      EvInstance (InstanceKey _ (_, hs)) _ _ -> hs == [VarU BT.list]
+      _ -> False
+    standard (ImplSource (MV m) _) = m `elem` ["root-cpp", "root-py", "root-r", "root-rust"]
+    standard _ = False
+
+-- | The method of a receiver's evidence that a bracket step calls.
+evidenceMethod :: [ArgMethod] -> Evidence -> Maybe EVar
+evidenceMethod methods ev = listToMaybe [m | ArgMethod cls m _ <- methods, classIs cls]
+  where
+    classIs cls = case ev of
+      EvInstance (InstanceKey c _) _ _ -> c == cls
+      _ -> False
 
 -- | Whether two types unify, the given variables flexible, where each pair
 -- of Nat positions they align may be equal and each existential carrying
@@ -484,8 +625,11 @@ explainResolveError pc e = case e of
   Ambiguous c ks ->
     "several instances match" <+> pc c <+> "and none is more specific than the others ("
       <> hsep (punctuate "," (map (pc . keyConstraint) ks)) <> ")"
+  ErasedNat c k ->
+    pc c <+> "has a dimension no type here fixes, which the instance" <+> pc (keyConstraint k)
+      <+> "needs: only an instance leaving it a variable holds whatever it is"
   Undetermined c vs ->
-    "nothing fixes" <+> hsep (punctuate "," (map pretty vs)) <+> "in" <+> pc c
+    "nothing fixes" <+> hsep (punctuate "," (map (pretty . DT.takeWhile (/= '@') . unTVar) vs)) <+> "in" <+> pc c
   ContextUnmet k c e' ->
     "the instance" <+> pc (keyConstraint k) <+> "needs" <+> pc c <> ", and" <+> explainResolveError pc e'
   ContextLoop cs ->

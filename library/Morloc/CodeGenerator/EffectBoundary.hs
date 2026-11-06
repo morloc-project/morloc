@@ -71,9 +71,10 @@ import Control.Monad.Except (catchError)
 import Morloc.CodeGenerator.Infer (inferConcreteType)
 import qualified Morloc.LangRegistry as LR
 import qualified Morloc.Language as ML
-import Morloc.CodeGenerator.Instance (findFunctorMap, resolveInstanceForType)
-import Morloc.Typecheck.Internal (unqualify)
-import Morloc.CodeGenerator.Serial (PackerInstance (..), findPackerInstances)
+import qualified Morloc.Frontend.Instances as FI
+import Morloc.CodeGenerator.Infer (requireDetermined)
+import Morloc.Typecheck.Internal (emptyGamma, functorMapMethod, prettyConstraint, unqualify)
+import Morloc.CodeGenerator.Serial (PackerInstance (..), findPackerInstances, selectPackerInstance)
 
 -- | The calling convention imposed by the surrounding boundary.
 data BoundaryContext
@@ -998,7 +999,7 @@ rebuildIn dir lang g hv@(HostView scope _ _ _ _) d t0 e = do
       return $ PolyIntrinsic (Idx g (OptionalT aThere)) IntrMapOptional [each, var]
     AppT (VarT h) ts -> do
       mapSrc <- case ts of
-        [_] -> resolveInstanceForType findFunctorMap g lang t
+        [_] -> functorMapSource
         _ -> return Nothing
       case (mapSrc, ts) of
         (Just src, [TyA a]) -> do
@@ -1011,6 +1012,15 @@ rebuildIn dir lang g hv@(HostView scope _ _ _ _) d t0 e = do
   return (PolyLet v e body)
   where
     t = expandT scope t0
+
+    -- The @map@ of the instance the container's type selects, in this pool.
+    functorMapSource = do
+      requireDetermined g t
+      env <- MM.gets stateInstances
+      case FI.resolveArg scope emptyGamma env [functorMapMethod] (type2typeu t) of
+        Right (Just ev) -> return (FI.methodSource env ev (EV "map") lang)
+        Right Nothing -> return Nothing
+        Left e -> MM.throwSourcedError g $ "Cannot map over" <+> pretty t <> ":" <+> FI.explainResolveError prettyConstraint e
 
     elemHere da a = case dir of
       Outbound -> a
@@ -1031,16 +1041,15 @@ rebuildIn dir lang g hv@(HostView scope _ _ _ _) d t0 e = do
     -- the form it packs to: unpacked, adapted, and packed again.
     packed h ts var here = do
       instances <- findPackerInstances
-      case [ (vs, headArgs, wire, srcs)
-           | pin <- instances
-           , let (vs, headU) = unqualify (piHead pin)
-           , AppU (VarU h') headArgs <- [headU]
+      selected <- selectPackerInstance g (Map.member lang . piSources) (type2typeu t) instances
+      case [ (headArgs, snd (unqualify (piWire pin)), srcs)
+           | Just pin <- [selected]
+           , AppU (VarU h') headArgs <- [snd (unqualify (piHead pin))]
            , h' == h
            , length headArgs == length ts
            , Just srcs <- [Map.lookup lang (piSources pin)]
-           , let wire = snd (unqualify (piWire pin))
            ] of
-        ((_, headArgs, wireU, (packSrc, unpackSrc)) : _) -> do
+        ((headArgs, wireU, (packSrc, unpackSrc)) : _) -> do
           let instantiate args =
                 typeOf (instantiateParams [(pv, argU a) | (VarU pv, a) <- zipSame headArgs args] wireU)
               wireT = instantiate ts

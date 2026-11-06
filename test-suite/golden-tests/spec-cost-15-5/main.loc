@@ -1,0 +1,11 @@
+-- Spec COST-15, PAT-6: the broadcast of a pure chain over a plain list is no
+-- call of an instance, so it stays on the nexus with Functor List in scope.
+module main (run)
+import root-py
+
+record R where
+  x :: Int
+record Py => R = "dict"
+
+run :: [R] -> [Int]
+run xs = .[:].x xs

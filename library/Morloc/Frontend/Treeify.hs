@@ -841,6 +841,16 @@ collectExprS namer0 (ExprI gi0 e0) = f namer0 e0
         (namer1, r') <- collectAnnoS namer r
         return (namer1, ShapeS PreTyped sh r')
       _ -> MM.throwCompilerBugAt gi0 "malformed shape intrinsic"
+    f namer (IntrinsicE IntrMap es@[_, _]) = do
+      (namer1, es') <- statefulMapM collectAnnoS namer es
+      GMap idmap sigmap <- MM.gets stateSignatures
+      case [k | (k, Polymorphic cls v _ _) <- Map.toList sigmap, cls == ClassName "Functor", v == EV "map"] of
+        [] -> return (namer1, IntrinsicS IntrMap es')
+        (k : _) -> do
+          i <- MM.getCounterWithPos gi0
+          MM.modify' (\st -> st {stateSignatures = GMap (Map.insert i k idmap) sigmap})
+          (namer2, use) <- collectExprS namer1 {namerMap = Map.delete (EV "map") (namerMap namer1)} (ExprI i (VarE defaultValue (EV "map")))
+          return (namer2 {namerMap = namerMap namer1}, IntrinsicS IntrMap (es' <> [AnnoS i i use]))
     f namer (IntrinsicE intr es) = do
       (namer', es') <- go namer [] es
       return (namer', IntrinsicS intr es')

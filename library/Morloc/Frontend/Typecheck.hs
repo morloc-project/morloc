@@ -513,11 +513,6 @@ resolveTypes (AnnoS (Idx i t) ci e) =
 -- is still generic leaves it too: such a tree is never realized (SIG-5).
 data Strictness = Strict Bool | Lenient (IORef (Int, Int))
 
--- | Resolution at a use: DERIV-6 derives Eq and Ord where no instance
--- matches.
-usePolicy :: FI.ResolvePolicy
-usePolicy = FI.defaultPolicy {FI.policyDerive = True}
-
 -- | Resolve every class constraint of a tree's uses: lenient passes until
 -- none is left undetermined or a pass resolves no more uses than the one
 -- before, then a strict one if some still is. Each pass after the first
@@ -583,7 +578,7 @@ resolveInstances mode g (AnnoS gi@(Idx _ gt) ci e0) = do
     f scope env g0 (VarS v (PolymorphicExpr cls _ t0 rss)) = do
       let use = apply g0 gt
       c <- useConstraint scope g0 env cls (etype t0) use
-      case FI.resolve usePolicy scope env [] c of
+      case FI.resolve FI.usePolicy scope env [] c of
         Right (EvDerived _ arg) ->
           deriveComparison scope env g0 cls v >>= \case
             Just (g1, body) -> do
@@ -638,7 +633,7 @@ resolveInstances mode g (AnnoS gi@(Idx _ gt) ci e0) = do
       cs <- case me of
         Just et | not (Set.null (econs et)) -> signatureConstraints scope g0 et (apply g0 gt)
         _ -> return []
-      evs <- fmap catMaybes . forM cs $ \c -> case FI.resolve usePolicy scope env [] c of
+      evs <- fmap catMaybes . forM cs $ \c -> case FI.resolve FI.usePolicy scope env [] c of
         Right ev@(EvDerived cls arg) -> do
           derived <- derivedAt scope env cls arg
           if derived then Just ev <$ counted second else constraintUnmet c (FI.NoInstance c [])
@@ -682,13 +677,14 @@ resolveInstances mode g (AnnoS gi@(Idx _ gt) ci e0) = do
       (g1, xs') <- statefulMapM recur g0 xs
       return (g1, ConS tv n i xs')
     f _ _ g0 (ExeS x) = return (g0, ExeS x)
-    f scope _ g0 (PatS fg@(Idx _ ft) fc ev app) = do
+    f scope env g0 (PatS fg@(Idx _ ft) fc ev app) = do
       (g1, app') <- statefulTraverseM recur g0 app
       case (bracketRule (patAppPattern app), ft) of
         (Just (what, pos, methods), FunU args _)
           | length args > pos -> checkBracketReceiver scope fc what methods (args !! pos)
         _ -> return ()
-      return (g1, PatS fg fc ev app')
+      ev' <- patEvidence scope env g1 fc (apply g1 ft) app' ev
+      return (g1, PatS fg fc ev' app')
     f _ _ g0 (DoBlockS e) = recur g0 e |>> second DoBlockS
     f _ _ g0 (EvalS e) = recur g0 e |>> second EvalS
     f _ _ g0 (CoerceS c e) = recur g0 e |>> second (CoerceS c)
@@ -699,9 +695,56 @@ resolveInstances mode g (AnnoS gi@(Idx _ gt) ci e0) = do
       (g2, t') <- recur g1 t
       (g3, e') <- recur g2 e
       return (g3, IfS c' t' e')
+    -- A map is a use of the class's @map@, unless the intrinsic does the same:
+    -- the instance selected is the standard one over a plain list, or none
+    -- implements it.
+    f scope env g0 (IntrinsicS IntrMap [funcE, listE, use@(AnnoS (Idx _ useT) _ (VarS _ (PolymorphicExpr cls _ t0 _)))]) = do
+      (g1, funcE') <- recur g0 funcE
+      (g2, listE') <- recur g1 listE
+      c <- useConstraint scope g2 env cls (etype t0) (apply g2 useT)
+      let intrinsic = return (g2, IntrinsicS IntrMap [funcE', listE'])
+          method = do
+            (g3, use') <- recur g2 use
+            return (g3, AppS use' [funcE', listE'])
+      case FI.resolve FI.usePolicy scope env [] c of
+        Left (FI.NoInstance _ _) -> intrinsic
+        Right ev | FI.intrinsicMapServes env ev -> intrinsic
+        _ -> method
+    -- Inside an expansion of @map@ itself, the use is a back-edge to it.
+    f _ _ g0 (IntrinsicS IntrMap [funcE, listE, use]) = do
+      (g1, funcE') <- recur g0 funcE
+      (g2, listE') <- recur g1 listE
+      (g3, use') <- recur g2 use
+      return (g3, AppS use' [funcE', listE'])
     f _ _ g0 (IntrinsicS intr es) = do
       (g1, es') <- statefulMapM recur g0 es
       return (g1, IntrinsicS intr es')
+
+    -- CLS-2: what serves a pattern's receiver and casts its bracket bounds.
+    -- What nothing has determined by the strict pass is an error (POLY-6).
+    patEvidence ::
+      Scope -> InstanceEnv -> Gamma -> Int -> TypeU -> PatApp x -> PatEvidence -> MorlocMonad PatEvidence
+    patEvidence scope env g1 fc ft app old = case (app, ft) of
+      -- A result that is a function extends the flattened inputs.
+      (PatIndex _ _, FunU (i : r : _) _) -> at indexMethods r [i]
+      (PatSlice {}, FunU (a : b : c : r : _) _) -> at sliceMethods r [a, b, c]
+      (PatGet _ bs _, FunU ins _) | (bts, r : _) <- splitAt (length bs) ins -> at getterMethods r bts
+      _ -> return old
+      where
+        at methods r bts = do
+          rcv <-
+            if any ((== Just BT.ifileVar) . headTVar) (TE.aliasChain scope r)
+              then return Nothing
+              else serve methods r
+          PatEvidence rcv <$> mapM (serve boundMethods) bts
+        serve methods t = case FI.resolveArg scope g1 env methods t of
+          Right ev -> return ev
+          Left e@(FI.Undetermined _ _) -> Nothing <$ deferOr g1 UniS (refuse "The type of this term is not determined:" t e)
+          Left e -> refuse "This pattern" t e
+        refuse lead t e =
+          throwTypeError fc $
+            lead <+> "the pattern on" <+> prettyTypeU t <+> "cannot select an instance:"
+              <+> FI.explainResolveError prettyConstraint e
 
     -- A use nothing has determined yet: counted and left by a lenient pass,
     -- left in a generic tree, else reported.
@@ -775,15 +818,6 @@ signatureConstraints scope g0 et use = do
         "signatureConstraints: the use type" <+> prettyTypeU use <+> "is not an instance of the signature"
           <+> prettyTypeU (etype et) <> ":" <+> err
 
--- | A quantified type with each of its variables a fresh existential, and
--- the substitution.
-instantiateAll :: Gamma -> TypeU -> (Gamma, TypeU -> TypeU, TypeU)
-instantiateAll g0 t0 =
-  let (vs, body) = unqualify t0
-      (g1, exs) = statefulMap (\g w -> newvar (unTVar w <> "_") g) g0 vs
-      sub t = foldr (\(w, x) acc -> substituteTVar w x acc) t (zipSame vs exs)
-   in (g1, sub, sub body)
-
 -- | Solve what the selected instance's implementations fix in the use's
 -- type: a dependent class argument (CLS-20) and the method's own
 -- variables.
@@ -856,9 +890,9 @@ derivedBody site x y = go
 -- back end brackets natively, or reaches some instance of the step's
 -- classes. A receiver nothing has determined yet is left to code
 -- generation (POLY-6).
-checkBracketReceiver :: Scope -> Int -> MDoc -> [(EVar, Int)] -> TypeU -> MorlocMonad ()
+checkBracketReceiver :: Scope -> Int -> MDoc -> [ArgMethod] -> TypeU -> MorlocMonad ()
 checkBracketReceiver scope i what methods rcv = do
-  heads <- concat <$> mapM (uncurry instanceReceiverHeads) methods
+  heads <- concat <$> sequence [instanceReceiverHeads m pos | ArgMethod _ m pos <- methods]
   when (classifyBracketReceiver scope heads rcv == ReceiverNone) $
     throwTypeError i $
       "A bracket step needs a receiver with" <+> what <+> "instance, but"
@@ -1376,7 +1410,9 @@ synthE i g0 (VarS v (PolymorphicExpr cls clsName t0 rs0)) = do
   return (g2, t1, VarS v (PolymorphicExpr cls clsName t0 rsChecked))
   where
     -- Each instance is checked independently; the context is trimmed
-    -- between instances to keep it from growing quadratically.
+    -- between instances to keep it from growing quadratically, unless a body
+    -- left a use only a later use of the method can determine (CLS-20): its
+    -- existentials are solved then.
     checkInstances ::
       Gamma ->
       TypeU ->
@@ -1390,9 +1426,9 @@ synthE i g0 (VarS v (PolymorphicExpr cls clsName t0 rs0)) = do
       -- The ExistG entries made so far must survive the trim:
       -- connectInstance solves through them.
       let slotAfterSubtype = gammaSlot g13
-      (g14, es') <- checkImplementations g13 genType' es
+      (g14, es', settled) <- checkImplementations g13 genType' es
 
-      let gNext = gammaTrimAfter slotAfterSubtype g14
+      let gNext = if settled then gammaTrimAfter slotAfterSubtype g14 else g14
 
       -- The original general type: each instance gets its own existentials.
       (g15, rs') <- checkInstances gNext genType rs
@@ -1403,8 +1439,8 @@ synthE i g0 (VarS v (PolymorphicExpr cls clsName t0 rs0)) = do
       Gamma ->
       TypeU ->
       [AnnoS Int ManyPoly Int] ->
-      MorlocMonad (Gamma, [AnnoS (Indexed TypeU) ManyPoly Int])
-    checkImplementations g _ [] = return (g, [])
+      MorlocMonad (Gamma, [AnnoS (Indexed TypeU) ManyPoly Int], Bool)
+    checkImplementations g _ [] = return (g, [], True)
     checkImplementations g10 t (e@(AnnoS implGi _ _) : es) = do
       -- An annotation copied from the use site (`mempty :: Str`) must not
       -- constrain each implementation (the List instance's `[]`).
@@ -1417,15 +1453,15 @@ synthE i g0 (VarS v (PolymorphicExpr cls clsName t0 rs0)) = do
       -- What the body's own uses fix is solved while its gamma holds them
       -- (CLS-20). The body is resolved again, and its errors reported, at
       -- each use that selects the instance.
-      g11 <- MM.recoverRejected
-        ( lenientPasses g11raw e' |>> \(g, _) ->
-            g {gammaDeferred = gammaDeferred g11raw, gammaDeferredAt = gammaDeferredAt g11raw}
+      (g11, settled) <- MM.recoverRejected
+        ( lenientPasses g11raw e' |>> \(g, resolved) ->
+            (g {gammaDeferred = gammaDeferred g11raw, gammaDeferredAt = gammaDeferredAt g11raw}, isJust resolved)
         )
-        (return g11raw)
+        (return (g11raw, False))
 
-      (g12, es') <- checkImplementations g11 t es
+      (g12, es', settledRest) <- checkImplementations g11 t es
 
-      return (g12, applyGen g12 e' : es')
+      return (g12, applyGen g12 e' : es', settled && settledRest)
 
 -- The existential is subtyped against the type the enclosing VarS knows.
 synthE _ g (ExeS exe) = do
@@ -1532,7 +1568,11 @@ synthE i g (EvalS e) = do
 -- @(a -> b) -> f a -> f b@. The receiver is checked before the function:
 -- with @a@ still open, a selector in the function would make structural
 -- existentials that never bind @b@.
-synthE _ g (IntrinsicS IntrMap [funcE, listE]) = do
+--
+-- A third argument is the use of @map@ the map becomes (Treeify), checked
+-- here at the map's own type; a contract tree checks no method's instances,
+-- so it goes without.
+synthE _ g (IntrinsicS IntrMap (funcE : listE : mapUse)) = do
   let (g1, a) = newvar "map_elem_"      g
       (g2, b) = newvar "map_result_"    g1
       (g3, f) = newvar "map_container_" g2
@@ -1541,9 +1581,11 @@ synthE _ g (IntrinsicS IntrMap [funcE, listE]) = do
   (g4, _, listE') <- checkG g3 listE listExpectedT
   let funcExpectedT = FunU [apply g4 a] (apply g4 b)
   (g5, _, funcE') <- checkG g4 funcE funcExpectedT
-  return (g5, apply g5 resultT, IntrinsicS IntrMap [funcE', listE'])
-synthE i _ (IntrinsicS IntrMap args) =
-  MM.throwCompilerBugAt i $ "IntrMap expects 2 args (lambda, list), got " <> pretty (length args)
+  case (mapUse, gammaRigid g5) of
+    ([use], Nothing) -> do
+      (g6, _, use') <- checkG g5 use (apply g5 (FunU [funcExpectedT, listExpectedT] resultT))
+      return (g6, apply g6 resultT, IntrinsicS IntrMap [funcE', listE', use'])
+    _ -> return (g5, apply g5 resultT, IntrinsicS IntrMap [funcE', listE'])
 -- IntrEq / IntrLe: two values of one type, compared on the wire (INTR-7).
 synthE _ g (IntrinsicS intr [aE, bE])
   | intr `elem` [IntrEq, IntrLe] = do
@@ -2331,7 +2373,7 @@ checkE i g1 e1@(LstS _) b = do
                || isListExpr elemT || isSetExpr elemT)
         _ -> False
       tier1Ok = isListShape bWire && bWire /= bApplied
-  tier2 <- if tier1Ok then return Nothing else findPackableWireForm bApplied
+  tier2 <- if tier1Ok then return Nothing else (\env -> FI.packableWireForm scope env bApplied) <$> MM.gets stateInstances
   let effectiveWire = if tier1Ok
         then Just bWire
         else case tier2 of

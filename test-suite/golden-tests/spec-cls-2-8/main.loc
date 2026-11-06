@@ -1,0 +1,18 @@
+-- Spec CLS-2: a literal at a type packs through its instance, whose source is
+-- shared with another term of another type.
+module main (lit, litLen)
+import root-py
+
+newtype Q a = [a]
+type Py => Q a = "tuple" a
+instance Packable [a] (Q a) where
+  source Py from "h.py" ("h_shared" as pack, "h_unp" as unpack)
+source Py from "h.py" ("h_shared" as idShared)
+idShared :: Str -> Str
+source Py from "h.py" ("h_len" as qlen)
+qlen :: Q a -> Int
+
+lit :: Int -> Int
+lit y = qlen ([1, y, 3] :: Q Int)
+litLen :: Int -> Int
+litLen y = qlen ([y] :: Q Int)

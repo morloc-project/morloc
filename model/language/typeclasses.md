@@ -10,7 +10,7 @@ Replaced by CLS-7: a class may give a method a default body.
 
 ### CLS-2 The type at the use site selects the instance
 Intent: proposed
-Tests: spec-cls-2-1, spec-cls-2-2, spec-cls-2-3, spec-cls-2-4, spec-cls-2-5, spec-cls-2-6, spec-cls-2-7
+Tests: spec-cls-2-1, spec-cls-2-2, spec-cls-2-3, spec-cls-2-4, spec-cls-2-5, spec-cls-2-6, spec-cls-2-7, spec-cls-2-8
 Code: deviates (issues/typeclasses.md)
 
 A method used at type `T` runs an implementation of the instance for `T`.
@@ -42,7 +42,7 @@ Code: conforms 2026-10-21
 
 ### CLS-5 Superclasses and instance contexts are obligations
 Intent: ruled 2026-10-29
-Tests: spec-cls-5-1, spec-cls-5-2, spec-cls-5-3, spec-cls-5-4, spec-cls-5-5, spec-cls-5-6, spec-cls-5-7, spec-cls-5-8, spec-cls-5-9, spec-cls-5-10, spec-cls-5-11
+Tests: spec-cls-5-1, spec-cls-5-2, spec-cls-5-3, spec-cls-5-4, spec-cls-5-5, spec-cls-5-6, spec-cls-5-7, spec-cls-5-8, spec-cls-5-9, spec-cls-5-10, spec-cls-5-11, spec-cls-5-12
 Code: conforms 2026-11-05
 
 `class C a => D a` requires an instance `C T` for every instance `D T`, and
@@ -164,7 +164,7 @@ type, bypassing the instance (CLS-21).
 
 ### CLS-16 The most specific matching instance is selected
 Intent: ruled 2026-10-29
-Tests: spec-cls-16-1, spec-cls-16-2, spec-cls-16-3, spec-cls-16-5, spec-cls-16-6, spec-cls-16-7, spec-cls-16-8, spec-cls-16-9, spec-cls-16-10
+Tests: spec-cls-16-1, spec-cls-16-2, spec-cls-16-3, spec-cls-16-5, spec-cls-16-6, spec-cls-16-7, spec-cls-16-8, spec-cls-16-9, spec-cls-16-10, spec-cls-16-11, spec-cls-16-12, spec-cls-16-13, spec-cls-16-14, spec-cls-16-15, spec-cls-16-16
 Code: deviates (issues/typeclasses.md)
 
 Instances may overlap. At a use at type `T`, the instances whose heads match
@@ -213,7 +213,7 @@ some types is an instance at those types.
 
 ### CLS-20 Packable's wire argument is determined by the packed type
 Intent: ruled 2026-11-05
-Tests: spec-cls-20-1, spec-cls-20-2, spec-cls-20-3, spec-cls-20-4, spec-cls-20-5, spec-cls-20-6, spec-cls-20-7, spec-cls-20-8, spec-cls-20-9, spec-cls-20-10, spec-cls-20-11
+Tests: spec-cls-20-1, spec-cls-20-2, spec-cls-20-3, spec-cls-20-4, spec-cls-20-5, spec-cls-20-6, spec-cls-20-7, spec-cls-20-8, spec-cls-20-9, spec-cls-20-10, spec-cls-20-11, spec-cls-20-12
 Code: conforms 2026-11-05
 
 `Packable a b` has the dependency `b -> a`: the instance selected by `b`
