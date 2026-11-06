@@ -39,11 +39,19 @@ instance Testable p => Testable (Int -> p) where
 
 --' Whether addition commutes on the numbers tried
 commutes :: Bool
-commutes = check (\x y -> x + y == y + x)
+commutes = check plusCommutes
+
+--' Whether x + y equals y + x
+plusCommutes :: Int -> Int -> Bool
+plusCommutes x y = x + y == y + x
 
 --' Whether subtraction commutes on the numbers tried
 subtractionCommutes :: Bool
-subtractionCommutes = check (\x y -> x - y == y - x)
+subtractionCommutes = check minusCommutes
+
+--' Whether x - y equals y - x
+minusCommutes :: Int -> Int -> Bool
+minusCommutes x y = x - y == y - x
 
 instance Semigroup b => Semigroup (a -> b) where
   (<>) f g = \x -> f x <> g x
