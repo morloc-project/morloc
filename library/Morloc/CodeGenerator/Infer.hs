@@ -418,8 +418,8 @@ inferConcreteTypeStructuralRest lang i gscope g c = case (g, c) of
   -- Str@ takes Str's mapping -- and an inherited form cannot carry the
   -- newtype's parameters, so those arguments are carried here instead.
   (AppU (VarU vG) ts, VarU (TV vC)) -> do
-    (cscope, _) <- getScope lang
-    if Map.member vG cscope
+    (cscope, gscopeHere) <- getScope lang
+    if T.declaresFormAt cscope gscopeHere g
       then
         MM.throwSourcedError i $
           "The" <+> pretty lang <+> "form of" <+> squotes (pretty vG)
@@ -508,7 +508,7 @@ inferConcreteTypeUniversalStructural lang i gscopeUni t g c
   -- Same rule as in the module-scoped walk above.
   (AppU (VarU vG) ts, VarU (TV vC)) -> do
     cscopeUni <- MM.getConcreteScope lang
-    if Map.member vG cscopeUni
+    if T.declaresFormAt cscopeUni gscopeUni g
       then
         MM.throwRejected $
           "The" <+> pretty lang <+> "form of" <+> squotes (pretty vG)
@@ -555,7 +555,7 @@ inheritedForm cscope gscope g = case g of
     step v = case Map.lookup v gscope of
       Just entries
         | any (\(_, _, _, _, k) -> k == TypedefNewtype) entries
-        , not (Map.member v cscope) -> T.expandWireParent gscope g
+        , not (T.declaresFormAt cscope gscope g) -> T.expandWireParent gscope g
       _ -> Nothing
 
 -- | In a compiled language a record mapped to a type the program declares

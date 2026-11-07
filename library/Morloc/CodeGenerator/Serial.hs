@@ -1664,7 +1664,7 @@ resolvePacker lang m0 resolvedType@(AppF _ _) pin = do
           -- gc is the unresolved general unpacked type
           case generalTypes of
             (u, gc) ->
-              case subtype Map.empty u ga emptyGamma of
+              case subtype gscope u ga emptyGamma of
                 (Left typeErr) ->
                   return . Left $
                     "its general form" <+> pretty u <+> "does not cover" <+> pretty ga <> ":" <+> typeErr

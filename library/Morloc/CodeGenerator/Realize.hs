@@ -805,7 +805,7 @@ realizeWithRegistry registry tables pins seedLangs s00 = do
       -- The arguments of an application reach only the lambdas its head
       -- binds them with ('boundArgs' follows the same chain).
       let rstat = if passesApplied e then rstat0 else rstat0 {rApplied = []}
-      (e', Idx ci' table) <- scoreExpr rstat (e, ci)
+      (e', Idx ci' table) <- scoreExpr rstat (atNodeType t e, ci)
       -- An operation that belongs to no language runs where its context
       -- puts it, but only in a language that can hold what it computes.
       held <- maybe (return table) (\(j, ts) -> holding j ts table) (heldTypes gidx e t)
@@ -1327,20 +1327,27 @@ realizeWithRegistry registry tables pins seedLangs s00 = do
     tableDoc (Idx _ ss) =
       list [pretty l <> ":" <> pretty (renderScore (Just sc)) | (l, sc) <- ss]
 
+    -- A wrapping cast converts to the type its node is realized at; the
+    -- target the typechecker recorded may still hold the newtype's
+    -- parameters.
+    atNodeType t (CoerceS (CoerceNewtype Wrap _) x) = CoerceS (CoerceNewtype Wrap (type2typeu t)) x
+    atNodeType _ x = x
+
     -- The newtype a cast converts: the argument's type when unwrapping, the
     -- result's when wrapping.
-    castHead :: CastDir -> TypeU -> Type -> TVar
-    castHead Unwrap _ argT = extractKey (type2typeu argT)
-    castHead Wrap target _ = extractKey target
+    castHead :: CastDir -> TypeU -> Type -> TypeU
+    castHead Unwrap _ argT = type2typeu argT
+    castHead Wrap target _ = target
 
     -- These languages with the program's pool languages, and those of them
-    -- where a cast of newtype @n@ changes no value: @n@ declares no form
-    -- there (NEWT-7).
-    castLangs :: TVar -> [Lang] -> MorlocMonad ([Lang], [Lang])
+    -- where a cast of newtype type @n@ changes no value: no form is declared
+    -- there for @n@ (NEWT-7).
+    castLangs :: TypeU -> [Lang] -> MorlocMonad ([Lang], [Lang])
     castLangs n langs = do
       scopes <- MM.gets stateConcreteTypedefs
       let candidates = unique (langs <> map (LR.poolOf registry) (Map.keys scopes))
-      allowed <- filterM (\l -> not . Map.member n <$> MM.getConcreteScope l) candidates
+      gscope <- MM.getGeneralScope
+      allowed <- filterM (\l -> (\cs -> not (TE.declaresFormAt cs gscope n)) <$> MM.getConcreteScope l) candidates
       return (candidates, allowed)
 
     -- A placement that cannot be realized, above every one that can.

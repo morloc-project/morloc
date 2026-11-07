@@ -185,4 +185,10 @@
   (spec-cls-2-15): a stuck use there is expanded in place, while a use inside its
   own expansion must stay a reference to terminate, and a reference needs a solved
   type. Refusing costs one extra collection pass.
-
+- **map-r declares its form at every `Map`, so a `Map Int v` cannot enter R.**
+  [read, 2026-11-07] Stdlib, against CLS-16's example. map-r declares `type R =>
+  (Map a b) = "list" a b` but packs only `Map Str val`. Declaring the form at `Map
+  Str b` alone (NATIVE-1, spec-native-1-8) would let a `Map Int v` enter R as a
+  list of pairs, but map-r's sources at `Map a b` (`keys`, `lookup`, ...) assume
+  names and would then receive pairs: they must handle both forms or become
+  instances at `Map Str b` (CLS-21) first.

@@ -66,7 +66,8 @@ the runtime handles (`IFile`, `IStream`, `OStream`, `Cell`,
 `PatternChain`) are not covered, and only the compiler's `Packable` class
 (methods `pack` and `unpack`) is given these instances. The conversion
 changes no value, so a more specific instance never hides it. Within
-one language `L` it is available only when `N` declares no form in `L`;
+one language `L` it is available only when `N` declares no form in `L` at
+the cast's arguments (NATIVE-1);
 otherwise it runs where `N` has none, and the value crosses to it, or the
 build is rejected (REAL-3). Explicit instances for the same head are
 alternatives to it (REAL-1).

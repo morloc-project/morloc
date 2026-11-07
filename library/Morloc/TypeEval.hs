@@ -17,6 +17,7 @@ module Morloc.TypeEval
   , transformType
   , evaluateStep
   , pairEval
+  , declaresFormAt
   , reduceType
   , aliasChain
   , reduceTypeLeaves
@@ -65,7 +66,7 @@ pairEval ::
   Either MorlocError TypeU
 pairEval cscope gscope =
   -- transform the concrete type until an unresolvable node is reached
-  generalTransformType Set.empty id resolveGen cscope
+  generalTransformTypeWith (expandAliases gscope) Set.empty id resolveGen cscope
   where
     -- resolve by attempting to evaluate one step as in the general scope
     resolveGen f bnd t =
@@ -268,7 +269,27 @@ generalTransformType ::
   Scope -> -- may be general or concrete scope
   TypeU ->
   Either MorlocError TypeU
-generalTransformType bnd0 recurse' resolve' scope = f bnd0
+generalTransformType = generalTransformTypeWith id
+
+-- | 'generalTransformType', comparing a type's arguments with a form's
+-- parameters through @norm@.
+generalTransformTypeWith ::
+  (TypeU -> TypeU) ->
+  Set.Set TVar ->
+  ( (Set.Set TVar -> TypeU -> Either MorlocError TypeU) ->
+    Set.Set TVar ->
+    TypeU ->
+    Either MorlocError TypeU
+  ) ->
+  ( (Set.Set TVar -> TypeU -> Either MorlocError TypeU) ->
+    Set.Set TVar ->
+    TypeU ->
+    Either MorlocError TypeU
+  ) ->
+  Scope ->
+  TypeU ->
+  Either MorlocError TypeU
+generalTransformTypeWith norm bnd0 recurse' resolve' scope = f bnd0
   where
     recurse = recurse' f
     resolve = resolve' recurse
@@ -329,7 +350,7 @@ generalTransformType bnd0 recurse' resolve' scope = f bnd0
       | otherwise =
           case Map.lookup v scope of
             (Just ts') -> do
-              mergedAliases <- foldlM (mergeAliases ts) Nothing (map Just ts') |>> fmap (renameTypedefs bnd)
+              mergedAliases <- fmap (renameTypedefs bnd) <$> lookupForm (map norm ts) t0 ts'
               case mergedAliases of
                 -- @v@ is added to bnd only when the substituted body is
                 -- a record (NamU): records are the one alias shape that
@@ -365,11 +386,9 @@ generalTransformType bnd0 recurse' resolve' scope = f bnd0
                        (TypedefEnum, _) -> resolve bnd t0
                        (TypedefAlias, True) -> terminate bnd' substituted
                        (TypedefAlias, False) -> recurse bnd' substituted
-                Nothing ->
-                  MM.throwRejected $
-                    "No matching alias found for" <+> pretty t0
-                      <> "\n  Available aliases have"
-                      <+> pretty (length ts') <+> "entries, none match the given arguments"
+                -- forms are declared only for other arguments: this type
+                -- has none of its own here (NATIVE-2)
+                Nothing -> resolve bnd t0
             _ -> resolve bnd t0
     -- t may be existential
     f bnd (AppU t ts) = AppU <$> recurse bnd t <*> mapM (recurse bnd) ts
@@ -542,89 +561,131 @@ generalTransformType bnd0 recurse' resolve' scope = f bnd0
         go _                   = False
 
     -- When a type alias is imported from two places, this function reconciles them, if possible
-    mergeAliases ::
-      [TypeU] ->
-      Maybe ([Either (TVar, Kind) TypeU], TypeU, ArgDoc, Bool, TypedefKind) ->
-      Maybe ([Either (TVar, Kind) TypeU], TypeU, ArgDoc, Bool, TypedefKind) ->
-      Either MorlocError (Maybe ([Either (TVar, Kind) TypeU], TypeU, ArgDoc, Bool, TypedefKind))
-    mergeAliases _ Nothing Nothing = Right Nothing
-    mergeAliases tsMain Nothing (Just b)
-      | checkAlias tsMain b = Right (Just b)
-      | otherwise = Right Nothing
-    mergeAliases tsMain (Just a) Nothing
-      | checkAlias tsMain a = Right (Just a)
-      | otherwise = Right Nothing
-    -- TODO: should the docstring args be considered here?
-    mergeAliases tsMain (Just a@(ts1, t1, _, isTerminal1, kind1)) (Just b@(ts2, t2, _, isTerminal2, kind2))
-      -- if both are invalid, return nothing
-      | not aIsValid && not bIsValid = Right Nothing
-      -- if one is valid and the other isn't, return the valid one
-      | aIsValid && not bIsValid = Right (Just a)
-      | not aIsValid && bIsValid = Right (Just b)
-      -- if they are both valid AND they are identical AND there is no specialization, return the first
-      | -- the return types are the same
-        isSubtypeOf t1 t2
-          && isSubtypeOf t2 t1
-          -- there is no specialization
-          && nonspecialized
-          -- the return type is concrete, not an alias for something else
-          && isTerminal1 == isTerminal2
-          -- and both are the same kind of definition (alias vs newtype)
-          && kind1 == kind2 =
-          return (Just a)
-      -- handle specialization
-      | not nonspecialized = return $ selectSpecialization a b
-      -- Two fully-generic terminal alias bodies for the same nominal
-      -- type, with different concrete forms. This happens when distinct
-      -- modules each declare their own per-language override for the
-      -- newtype (e.g. table-py maps @Vector@ to a Python @list@ for
-      -- table operations, while vector-py maps it to @numpy.ndarray@).
-      -- The bodies are NOT subtype-comparable here -- they are concrete
-      -- forms in disjoint spaces -- so a per-language conflict is a
-      -- user's choice between competing definitions, not a type error.
-      -- Keep the first definition; the order is determined by import
-      -- order at scope-build time.
-      | nonspecialized
-      , isTerminal1 && isTerminal2
-      , kind1 == TypedefAlias && kind2 == TypedefAlias =
-          return (Just a)
-      | otherwise =
-          MM.throwRejected $
-            "Cannot merge conflicting type aliases:"
-              <> "\n  t1:" <+> pretty t1
-              <> "\n  t2:" <+> pretty t2
-      where
-        aIsValid = checkAlias tsMain a
-        bIsValid = checkAlias tsMain b
-        -- True if all parameters in both aliases are generic
-        nonspecialized =
-          all
-            (\(x, y) -> either (\_ -> either (const True) (const False) y) (const False) x)
-            (zipSame ts1 ts2)
+mergeAliases ::
+  [TypeU] ->
+  Maybe ([Either (TVar, Kind) TypeU], TypeU, ArgDoc, Bool, TypedefKind) ->
+  Maybe ([Either (TVar, Kind) TypeU], TypeU, ArgDoc, Bool, TypedefKind) ->
+  Either MorlocError (Maybe ([Either (TVar, Kind) TypeU], TypeU, ArgDoc, Bool, TypedefKind))
+mergeAliases _ Nothing Nothing = Right Nothing
+mergeAliases tsMain Nothing (Just b)
+  | checkAlias tsMain b = Right (Just b)
+  | otherwise = Right Nothing
+mergeAliases tsMain (Just a) Nothing
+  | checkAlias tsMain a = Right (Just a)
+  | otherwise = Right Nothing
+-- TODO: should the docstring args be considered here?
+mergeAliases tsMain (Just a@(ts1, t1, _, isTerminal1, kind1)) (Just b@(ts2, t2, _, isTerminal2, kind2))
+  -- if both are invalid, return nothing
+  | not aIsValid && not bIsValid = Right Nothing
+  -- if one is valid and the other isn't, return the valid one
+  | aIsValid && not bIsValid = Right (Just a)
+  | not aIsValid && bIsValid = Right (Just b)
+  -- if they are both valid AND they are identical AND there is no specialization, return the first
+  | -- the return types are the same
+    isSubtypeOf t1 t2
+      && isSubtypeOf t2 t1
+      -- there is no specialization
+      && nonspecialized
+      -- the return type is concrete, not an alias for something else
+      && isTerminal1 == isTerminal2
+      -- and both are the same kind of definition (alias vs newtype)
+      && kind1 == kind2 =
+      return (Just a)
+  -- handle specialization
+  | not nonspecialized = return $ selectSpecialization a b
+  -- Two fully-generic terminal alias bodies for the same nominal
+  -- type, with different concrete forms. This happens when distinct
+  -- modules each declare their own per-language override for the
+  -- newtype (e.g. table-py maps @Vector@ to a Python @list@ for
+  -- table operations, while vector-py maps it to @numpy.ndarray@).
+  -- The bodies are NOT subtype-comparable here -- they are concrete
+  -- forms in disjoint spaces -- so a per-language conflict is a
+  -- user's choice between competing definitions, not a type error.
+  -- Keep the first definition; the order is determined by import
+  -- order at scope-build time.
+  | nonspecialized
+  , isTerminal1 && isTerminal2
+  , kind1 == TypedefAlias && kind2 == TypedefAlias =
+      return (Just a)
+  | otherwise =
+      MM.throwRejected $
+        "Cannot merge conflicting type aliases:"
+          <> "\n  t1:" <+> pretty t1
+          <> "\n  t2:" <+> pretty t2
+  where
+    aIsValid = checkAlias tsMain a
+    bIsValid = checkAlias tsMain b
+    -- True if all parameters in both aliases are generic
+    nonspecialized =
+      all
+        (\(x, y) -> either (\_ -> either (const True) (const False) y) (const False) x)
+        (zipSame ts1 ts2)
 
-    selectSpecialization ::
-      ([Either (TVar, Kind) TypeU], TypeU, ArgDoc, Bool, TypedefKind) ->
-      ([Either (TVar, Kind) TypeU], TypeU, ArgDoc, Bool, TypedefKind) ->
-      Maybe ([Either (TVar, Kind) TypeU], TypeU, ArgDoc, Bool, TypedefKind)
-    selectSpecialization a@(aps0, _, _, _, _) b@(bps0, _, _, _, _) = g aps0 bps0
-      where
-        g [] _ = Just a
-        g _ [] = Just b
-        g ((Right _) : _) ((Left _) : _) = Just a
-        g ((Left _) : _) ((Right _) : _) = Just b
-        g ((Left _) : aps) ((Left _) : bps) = g aps bps
-        g ((Right ta) : aps) ((Right tb) : bps)
-          | isSubtypeOf ta tb && isSubtypeOf tb ta = g aps bps
-          | isSubtypeOf ta tb && not (isSubtypeOf tb ta) = Just b
-          | not (isSubtypeOf ta tb) && isSubtypeOf tb ta = Just a
-          | otherwise = Nothing
+selectSpecialization ::
+  ([Either (TVar, Kind) TypeU], TypeU, ArgDoc, Bool, TypedefKind) ->
+  ([Either (TVar, Kind) TypeU], TypeU, ArgDoc, Bool, TypedefKind) ->
+  Maybe ([Either (TVar, Kind) TypeU], TypeU, ArgDoc, Bool, TypedefKind)
+selectSpecialization a@(aps0, _, _, _, _) b@(bps0, _, _, _, _) = g aps0 bps0
+  where
+    g [] _ = Just a
+    g _ [] = Just b
+    g ((Right _) : _) ((Left _) : _) = Just a
+    g ((Left _) : _) ((Right _) : _) = Just b
+    g ((Left _) : aps) ((Left _) : bps) = g aps bps
+    g ((Right ta) : aps) ((Right tb) : bps)
+      | isSubtypeOf ta tb && isSubtypeOf tb ta = g aps bps
+      | isSubtypeOf ta tb && not (isSubtypeOf tb ta) = Just b
+      | not (isSubtypeOf ta tb) && isSubtypeOf tb ta = Just a
+      | otherwise = Nothing
 
-    checkAlias ::
-      [TypeU] ->
-      ([Either (TVar, Kind) TypeU], TypeU, ArgDoc, Bool, TypedefKind) ->
-      Bool
-    checkAlias ts1 (ts2, _, _, _, _) =
-      maybe False (all (\(x, y) -> either (const True) (\ytype -> isSubtypeOf ytype x) y)) (zipExact ts1 ts2)
+-- | The form a scope declares for a type at its arguments. A declaration with
+-- another number of parameters is an error, and so are two matching
+-- specializations neither of which is more specific. A type whose forms are
+-- all language forms declared at other arguments has none here (NATIVE-1).
+lookupForm ::
+  [TypeU] ->
+  TypeU ->
+  [([Either (TVar, Kind) TypeU], TypeU, ArgDoc, Bool, TypedefKind)] ->
+  Either MorlocError (Maybe ([Either (TVar, Kind) TypeU], TypeU, ArgDoc, Bool, TypedefKind))
+lookupForm ts t0 entries = case filter (checkAlias ts) entries of
+  []
+    | all (\(ps, _, _, terminal, _) -> terminal && length ps == length ts) entries -> Right Nothing
+    | otherwise -> noMatch
+  ms -> foldlM (mergeAliases ts) Nothing (map Just ms) >>= maybe ambiguous (Right . Just)
+  where
+    ambiguous =
+      MM.throwRejected $
+        "Two forms match" <+> pretty t0 <+> "and neither is more specific than the other"
+    noMatch =
+      MM.throwRejected $
+        "No matching alias found for" <+> pretty t0
+          <> "\n  Available aliases have" <+> pretty (length entries) <+> "entries, none match the given arguments"
+
+-- | Whether a declaration's parameters match a type's arguments.
+checkAlias :: [TypeU] -> ([Either (TVar, Kind) TypeU], TypeU, ArgDoc, Bool, TypedefKind) -> Bool
+checkAlias ts1 (ts2, _, _, _, _) =
+  maybe False (all (\(x, y) -> either (const True) (\ytype -> isSubtypeOf ytype x) y)) (zipExact ts1 ts2)
+
+-- | Whether a concrete scope declares a form for a type at its arguments,
+-- compared with the general scope's aliases expanded: a form declared only at
+-- other arguments is not one (NATIVE-1). A declaration that does not fit is
+-- counted as one, so the error it gives is not hidden.
+declaresFormAt :: Scope -> Scope -> TypeU -> Bool
+declaresFormAt cscope gscope t = case flattenApp t of
+  AppU (VarU v) ts -> at v ts
+  VarU v -> at v []
+  NamU _ v _ _ -> not (null (Map.findWithDefault [] v cscope))
+  ForallU _ x -> declaresFormAt cscope gscope x
+  LabeledU _ x -> declaresFormAt cscope gscope x
+  _ -> False
+  where
+    at v ts = case Map.findWithDefault [] v cscope of
+      [] -> False
+      entries -> either (const True) isJust (lookupForm (map (expandAliases gscope) ts) t entries)
+
+-- | A type with the general scope's aliases expanded, for comparison.
+expandAliases :: Scope -> TypeU -> TypeU
+expandAliases gscope t = either (const t) id (evaluateType gscope t)
 
 -- | Replace several type variables at once: an argument that names another
 -- parameter is not substituted again.

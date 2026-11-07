@@ -75,9 +75,9 @@ method alongside those the instance gives. Realization chooses among them
 as among any alternatives (REAL-1, REAL-2); being a default neither raises
 nor lowers its standing. An instance may omit a method that has a default.
 
-By REAL-1, every implementation an instance gives for a method must agree
-with the default at that instance. An instance implementation that differs
-on purpose is a false claim, not an override.
+By REAL-1, the default and the implementations the instance gives may
+substitute for each other; an implementation the instance gives does not
+override the default.
 
 Why: a default is an ordinary morloc implementation, so one selection rule
 covers it.
@@ -129,7 +129,8 @@ Code: unaudited
 Under CLS-8, realization may choose defaults for several methods at one
 instance whose bodies call each other, with no implementation the instance
 gives anywhere on the loop. The program then diverges, though a choice of
-the instance's own implementations would not; that breaks REAL-1. Is this
+the instance's own implementations would not, and the compiler is what
+chose the loop, not the author (REAL-1). Is this
 (a) prevented by realization, which never chooses defaults that reach
 themselves at the same instance type through defaults alone, and rejects
 the build (REAL-3) when no other choice exists, (b) prevented at the class,
@@ -181,9 +182,12 @@ numbers an instance at `a -> b -> c` is more specific than one at `a -> b`
 A method use selects without regard to language. A value a pool converts
 has no use: the pool selects among the `Packable` instances it can call
 (spec-cls-16-14), because the wire form, not the native value, is the
-contract between languages (CLS-20). A type no such instance covers does not
-build: with only `Packable [(Str, v)] (Map Str v)` in R, a `Map Int v` cannot
-enter R.
+contract between languages (CLS-20). A type with a form of its own in a
+language that no such instance covers does not build there: with
+`Map`'s R form declared at every argument and only `Packable [(Str, v)] (Map
+Str v)` in R, a `Map Int v` cannot enter R. With the form declared at `Map
+Str v` only, a `Map Int v` has no form of its own in R and enters as its
+representation (NEWT-7).
 
 A bracket step or a bracket chain's `map` on a list on the wire runs natively
 in the nexus when the selected instance implements no such method or is the
@@ -245,13 +249,13 @@ In one language an instance has at most one source of `pack` and one of
 `unpack`, across all its declarations (NATIVE-10). More is a compile error
 naming the sources.
 
-### CLS-21 A host function that agrees only at some types is an instance
+### CLS-21 A host function that is right only at some types is an instance
 Intent: ruled 2026-11-05
 Code: deviates (issues/typeclasses.md)
 
 A sourced implementation of a constrained term is a candidate at every use
-the constraints admit, so it must agree with every instance it may run
-under. A host function that agrees only at some types (Python's `sorted`
+the constraints admit (REAL-1). A host function that is right only at some
+types (Python's `sorted`
 agrees with `Ord` at `Real` but not at a type deriving `Ord`, DERIV-3) is
 written as an instance of a class whose method is the term, at exactly
 those types, beside a general instance with a morloc body. Root's `sort`,

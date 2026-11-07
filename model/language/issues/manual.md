@@ -24,7 +24,7 @@ Waiting on a ruling:
   runs where it is written" while an unused `where` never does (the code
   agrees; typecheck.md).
 - INTR-6 open: features-intrinsics.asc presents `@lang`, whose value depends
-  on the realization, against REAL's interchangeable implementations.
+  on the realization, against REAL-1, under which merged implementations may substitute for each other.
 - SUM-4 vs ALIAS-7: features-sum-types.asc:396-425 says records or aliases
   alone never close a cycle; a guarded self-recursive alias or record builds
   (records.md).

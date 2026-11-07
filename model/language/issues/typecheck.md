@@ -232,3 +232,11 @@ literal and record gaps. Reproduced on 0.109.0 unless marked.
   ground type (`other (mkB [n])` with `n :: Int`) and a `newtype Box a = [a]` in
   place of the record both work. Spec gap or defect against CLS-2: a record is a
   type constructor like any other.
+- **An imported module's definitions are never checked against their
+  signatures.** [reproduced, 2026-11-07, installed 0.112.0] Violates SIG-1 and
+  POLY-1. Treeify `contractRoots` collects the signed definitions and instances
+  of the root module only, so `bad :: a -> a; bad x = 5` in an imported module is
+  accepted wherever it is used at `Int` (`useIt :: Int -> Int; useIt x = bad x`),
+  while the same definition in the root module is rejected ("expected: a,
+  inferred: Int"). An imported body is checked only at the concrete types its
+  uses reach (Specialize `elaborate`), never with its variables rigid.

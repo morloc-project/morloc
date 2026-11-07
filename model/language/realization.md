@@ -1,33 +1,36 @@
 # Realization
 
-Choosing an implementation and a language for each call; implementations are interchangeable. Prefix: REAL.
+Choosing an implementation and a language for each call; merged implementations may substitute for each other. Prefix: REAL.
 
-### REAL-1 Implementations of one term are interchangeable
-Intent: proposed
-Code: deviates (issues/values.md)
+### REAL-1 Implementations of one term may substitute for each other
+Intent: ruled 2026-11-07
+Code: unaudited
 
-A term with several implementations, in one language or several, gives the
-same value whichever is chosen. Declaring them under one name is the
-author's claim that this holds. The choice changes cost, never meaning.
+Declaring several implementations under one name, in one language or
+several, permits the compiler to run any of them at any use of the term,
+and the realizer chooses by cost (COST-1). It is the library author's
+decision which implementations to merge, and theirs to make them agree
+where agreement matters (arithmetic, helpers, control flow). Morloc does
+not check that they agree, and without analysing the host code it cannot.
+A program whose result depends on which implementation runs depends on the
+realizer's choice.
 
 ### REAL-5 Implementations that provably differ are rejected
 Intent: proposed
 Code: conforms 2026-10-31
 
-Two implementations of one term at one type are rejected when they provably
-give different values: numbers or other literals that differ, a value and
-null, containers of different length or with an element that provably
-differs, records or constructor applications with such a field, two
-different constructors, `@show` of values of one type that provably
-differ, or lambdas
-whose bodies differ once their shared parameters are named alike, where two
-different parameters, or a parameter and a constant, differ at a type with
-more than one value. A name is compared through its own implementations.
-Anything that cannot be decided, such as an application, a branch or an
-intrinsic that may map different arguments to one value, is accepted as
-REAL-1's claim, as is a comparison not decided within a fixed number of
-steps. Two sources of one name in one language are rejected as
-ambiguous.
+Two implementations of one term at one type are rejected when they provably give
+different values: numbers or other literals that differ, a value and null,
+containers of different length or with an element that provably differs, records
+or constructor applications with such a field, two different constructors,
+`@show` of values of one type that provably differ, or lambdas whose bodies
+differ once their shared parameters are named alike, where two different
+parameters, or a parameter and a constant, differ at a type with more than one
+value. A name is compared through its own implementations. Anything that cannot
+be decided, such as an application, a branch or an intrinsic that may map
+different arguments to one value, is accepted (REAL-1), as is a
+comparison not decided within a fixed number of steps. Two sources of one name
+in one language are rejected as ambiguous.
 
 ### REAL-2 The compiler chooses an implementation and a language for each call
 Intent: proposed
@@ -52,4 +55,4 @@ Code: unaudited
 
 Open: whether a program may pin a call to a language. What the choice
 minimizes is cost.md (COST-1).
-A pin would make REAL-1 checkable by building both ways.
+A pin would let an author compare implementations by building both ways.

@@ -170,18 +170,6 @@ on 0.109.0 unless marked.
   2026-10-21] Violates INTR-4. `schemaBoom x = @schema (boom x)` with a
   raising Python `boom` fails "run failed / boom". features-intrinsics.asc:
   449-450 says the argument is not evaluated. Repro: /work/plans/model-audit-2026-10-21/repro/E/intr/main.loc.
-- **REAL-1 vs NUM-1: the realizer's choice changes a program's value.**
-  [reproduced, 2026-10-21] REAL-1 says the choice changes cost, never
-  meaning; NUM-1 (ruled) makes `Int` width per language. With sourced
-  identities `pid` (py) and `cid` (cpp), `hc x = pid (cid x * 3)` prints
-  -1294967296 for 1000000000 (the realizer placed `* 3` in C++) and
-  `hp x = pid (pid x * 3)` prints 3000000000. C++ signed overflow is also
-  undefined behaviour, not an overflow behavior. Same for `size` of a
-  `Str` and real division by zero (above). Candidates: (a) REAL-1 holds
-  only for values every candidate language represents, stated so; (b)
-  `Int` arithmetic is pinned to one checked semantics; (c) the realizer
-  may move `Int` arithmetic only between languages of equal width.
-  Repro: /work/plans/model-audit-2026-10-21/repro/F/wire/re.loc.
 - **INTR-5 says a program that is not installed sees `p` unchanged.**
   [reproduced, 2026-10-23] Pools and (since 2026-10-23) the nexus join a
   literal `@datafile` path with the program's source root, installed or

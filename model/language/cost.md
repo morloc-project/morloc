@@ -34,7 +34,8 @@ differ in preference unless neither language is in the order, and two
 sources of one type still tied after rule 4 are an error at build naming
 both. Either
 way the program removes one from scope by importing fewer modules. Definitions
-in morloc that tie are interchangeable (REAL-1), and a fixed one is used.
+in morloc that tie may substitute for each other (REAL-1), and a fixed one
+is used.
 Starting a pool costs nothing.
 
 ### COST-2 A call costs its language's coefficient times its self time
