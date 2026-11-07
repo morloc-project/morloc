@@ -51,9 +51,10 @@ isPrimitiveConstraint (CDisjoint _ _) = True
 -- existential. Real literals go first, so that an existential shared by a
 -- real and an integer literal becomes @Real@ whatever the argument order;
 -- an integer literal accepts a real type, never the reverse. An integer
--- literal whose type must be Numeric defaults like a real one.
-resolvePendingNumLits :: Gamma -> [(Int, TVar, NumLitKind)] -> MorlocMonad Gamma
-resolvePendingNumLits g0 entries = do
+-- literal whose type must be Numeric defaults like a real one. A literal
+-- whose existential is one of the given signature variables stays open.
+resolvePendingNumLits :: Set.Set TVar -> Gamma -> [(Int, TVar, NumLitKind)] -> MorlocMonad Gamma
+resolvePendingNumLits held g0 entries = do
   closed <- superclassClosure [c | c@(Constraint _ [_]) <- gammaConstraints g0]
   let numericVars = Set.fromList
         [ v
@@ -61,14 +62,15 @@ resolvePendingNumLits g0 entries = do
         , cls == BT.numericClass
         , ExistU v _ _ <- [apply g0 t]
         ]
-  let (intLits0, realLits0) = partition (\(_, _, k) -> k == IntDefault) entries
+  let (intLits0, realLits0) = partition (\(_, _, k) -> k == IntDefault) (filter (\(_, v, _) -> Set.notMember (chainEnd v) held) entries)
       (numericInts, intLits) = partition (\(_, v, _) -> Set.member (chainEnd v) numericVars) intLits0
       realLits = realLits0 ++ numericInts
   g1 <- foldlM (resolveOne BT.isRealBaseType BT.realU) g0 realLits
   foldlM (resolveOne acceptableForInt BT.intU) g1 intLits
   where
-    chainEnd v = case apply g0 (ExistU v ([], Open) ([], Open)) of
+    chainEnd v = case peelWrappers (apply g0 (ExistU v ([], Open) ([], Open))) of
       ExistU v' _ _ -> v'
+      VarU u -> u
       _ -> v
 
     acceptableForInt t = BT.isIntegerBaseType t || BT.isRealBaseType t
@@ -107,48 +109,28 @@ resolvePendingNumLits g0 entries = do
     peelWrappers (OptionalU t)  = peelWrappers t
     peelWrappers t              = t
 
+-- | The unsolved existentials the constrained variables of a signature being
+-- checked became, at the end of their chains. A use's obligations already
+-- name their existentials; only the variables of a definition's own
+-- signature are written as variables here.
+constrainedVars :: Gamma -> Set.Set TVar
+constrainedVars g =
+  Set.fromList
+    [ end
+    | Constraint _ ts <- gammaConstraints g
+    , VarU v <- concatMap everyType ts
+    , end <- case apply g (ExistU v ([], Open) ([], Open)) of
+        ExistU v' _ _ -> [v, v']
+        _ -> [v]
+    ]
+
+everyType :: TypeU -> [TypeU]
+everyType t = t : concatMap everyType (typeUChildren t)
+
 typecheck ::
   [AnnoS Int ManyPoly Int] ->
   MorlocMonad [AnnoS (Indexed TypeU) Many Int]
 typecheck = mapM typecheckRoot
-
--- | A recursive call reaches the one function its definition becomes, so it
--- has that definition's type. A class method named inside its own instance
--- at another type resolves by that type (CLS-2); bound to the instance
--- being defined instead, it would run that instance on values of the wrong
--- type (#160). A mismatch between two ground types is reported as a
--- compiler bug; a mismatch involving an unsolved type is not checked.
-assertBackEdgeTypes :: AnnoS (Indexed TypeU) Many Int -> MorlocMonad (AnnoS (Indexed TypeU) Many Int)
-assertBackEdgeTypes root = go Map.empty root >> return root
-  where
-    go :: Map.Map EVar TypeU -> AnnoS (Indexed TypeU) Many Int -> MorlocMonad ()
-    go env (AnnoS (Idx i t) _ e) = case e of
-      CallS v -> case Map.lookup v env of
-        Just tdef
-          | groundU t
-          , groundU tdef
-          , typeOf t /= typeOf tdef ->
-              MM.throwCompilerBugAt i $
-                "the call of" <+> squotes (pretty v) <+> "here is bound to its own definition, of type"
-                  <+> pretty tdef <> ", at another type," <+> pretty t
-        _ -> return ()
-      VarS v m -> mapM_ (go (Map.insert v t env)) (unMany m)
-      _ -> mapM_ (go env) (foldExprS (: []) e)
-    groundU ty = case ty of
-      ExistU {} -> False
-      VarU _ -> False
-      KVarU _ -> False
-      ListVarU _ -> False
-      SetVarU _ -> False
-      ForallU _ _ -> False
-      FunU ts x -> all groundU (x : ts)
-      AppU x ts -> all groundU (x : ts)
-      NamU _ _ ps rs -> all groundU ps && all (groundU . snd) rs
-      EffectU _ x -> groundU x
-      OptionalU x -> groundU x
-      OpU _ ts -> all groundU ts
-      LabeledU _ x -> groundU x
-      _ -> True
 
 -- | The record literals whose type checking left open, before instance
 -- resolution (REC-4).
@@ -186,11 +168,11 @@ assertStructuralTypesExpanded = mapAnnoSGM check
 -- | Check one tree on its own: its outermost 'VarS' is the definition being
 -- checked, and nothing outside the tree constrains it.
 typecheckRoot :: AnnoS Int ManyPoly Int -> MorlocMonad (AnnoS (Indexed TypeU) Many Int)
-typecheckRoot = typecheckWith Nothing >=> assertStructuralTypesExpanded >=> assertBackEdgeTypes
+typecheckRoot = typecheckWith Nothing >=> assertStructuralTypesExpanded
 
 -- | Check one tree against a type, as a use of it at that type is checked.
 typecheckRootAt :: TypeU -> AnnoS Int ManyPoly Int -> MorlocMonad (AnnoS (Indexed TypeU) Many Int)
-typecheckRootAt t = typecheckWith (Just t) >=> assertStructuralTypesExpanded >=> assertBackEdgeTypes
+typecheckRootAt t = typecheckWith (Just t) >=> assertStructuralTypesExpanded
 
 typecheckWith :: Maybe TypeU -> AnnoS Int ManyPoly Int -> MorlocMonad (AnnoS (Indexed TypeU) Many Int)
 typecheckWith expected = run
@@ -201,13 +183,16 @@ typecheckWith expected = run
       scope <- MM.getGeneralScope
       -- An exported command's own lambda is applied once per call (DIM-10).
       let g0 = emptyGamma {gammaDefinitionLambda = ownLambda e0}
-      (g1raw, _, e1) <- case expected of
+      (g1raw, rootT, e1) <- case expected of
         Nothing -> synthG g0 e0
         Just t -> checkG g0 e0 t
 
       -- Literal defaults must precede instance resolution: in @3 <= 5@
-      -- the class variable is solved only by the Int default.
-      g1 <- resolvePendingNumLits g1raw (gammaPendingNumLits g1raw)
+      -- the class variable is solved only by the Int default. A signature's
+      -- constrained variable left in the root's type is not defaulted, so
+      -- the export stays generic (SIG-5).
+      let rootVars = Set.fromList (map fst (varForms (apply g1raw rootT)))
+      g1 <- resolvePendingNumLits (Set.intersection rootVars (constrainedVars g1raw)) g1raw (gammaPendingNumLits g1raw)
 
       insetSay "-------- leaving frontend typechecker ------------------"
       insetSay "g1:"
@@ -272,7 +257,6 @@ typecheckWith expected = run
             , Just e <- [natPositionExpr pos]
             , all (`Set.member` given) (NS.freeNatVars e)
             ]
-          everyType t = t : concatMap everyType (typeUChildren t)
       -- An input's length is the caller's; equating it with a length a call
       -- chooses cannot be checked when the command starts (DIM-10).
       let taken = filter (`Set.member` gammaObserved g3) (inwardNats rootType)
@@ -633,15 +617,35 @@ resolveInstances mode g (AnnoS gi@(Idx _ gt) ci e0) = do
       cs <- case me of
         Just et | not (Set.null (econs et)) -> signatureConstraints scope g0 et (apply g0 gt)
         _ -> return []
-      evs <- fmap catMaybes . forM cs $ \c -> case FI.resolve FI.usePolicy scope env [] c of
-        Right ev@(EvDerived cls arg) -> do
-          derived <- derivedAt scope env cls arg
-          if derived then Just ev <$ counted second else constraintUnmet c (FI.NoInstance c [])
-        Right ev -> Just ev <$ counted second
-        Left e@(FI.Undetermined _ _) -> Nothing <$ deferOr g0 UniS (constraintUnmet c e)
-        Left e -> constraintUnmet c e
+      evs <- catMaybes <$> meet g0 cs
       statefulMapM recur g0 xs |>> second (VarS v . Many evs . map ((,) Nothing))
       where
+        -- A selected instance fixes the dependent arguments it has, which
+        -- other constraints may need (CLS-20), so a constraint nothing fixes
+        -- yet waits for the rest.
+        meet _ [] = return []
+        meet gk pending =
+          let resolved c = FI.resolve FI.usePolicy scope env [] (apply gk c)
+              undetermined c = case resolved c of
+                Left (FI.Undetermined _ _) -> True
+                _ -> False
+           in case break (not . undetermined) pending of
+                (_, []) -> forM pending $ \c -> case resolved c of
+                  Left e -> Nothing <$ deferOr g0 UniS (constraintUnmet (apply gk c) e)
+                  Right _ -> MM.throwCompilerBug "resolved an undetermined constraint"
+                (before, c : after) -> do
+                  ev <- one (apply gk c) (resolved c)
+                  (Just ev :) <$> meet (fixedBy gk (apply gk c) ev) (before <> after)
+        one c (Right ev@(EvDerived cls arg)) = do
+          derived <- derivedAt scope env cls arg
+          if derived then ev <$ counted second else constraintUnmet c (FI.NoInstance c [])
+        one _ (Right ev) = ev <$ counted second
+        one c (Left e) = constraintUnmet c e
+        fixedBy gk (Constraint _ args) (EvInstance key tys _) =
+          let Constraint _ heads = FI.keyConstraintAt key tys
+              gk' = foldl (+>) gk [v | ExistU v _ _ <- concatMap everyType args]
+           in connectTypes scope gk' (FunU args BT.unitU) [FunU heads BT.unitU]
+        fixedBy gk _ _ = gk
         constraintUnmet c e =
           throwTypeError ci $
             ( case e of
@@ -795,13 +799,14 @@ useConstraint scope g0 env cls v method use = case Map.lookup v (ieMethods env) 
           "resolveInstances: the use type" <+> prettyTypeU use <+> "is not an instance of the method type"
             <+> prettyTypeU method <> ":" <+> err
 
--- | The constraints of a signature at a use of its term, but for those over
--- a variable only a constraint names, which no use can fix (CLS-18).
+-- | The constraints of a signature at a use of its term. A variable only a
+-- constraint names is one a dependency determines (CLS-18, CLS-20): the use
+-- leaves it open and the selected instance fixes it.
 signatureConstraints :: Scope -> Gamma -> EType -> TypeU -> MorlocMonad [Constraint]
 signatureConstraints scope g0 et use = do
   let (g1, et') = renameEType g0 et
       quantified = fst (unqualify (etype et'))
-      loose =
+      dependent =
         List.nub
           [ v
           | Constraint _ ts <- Set.toList (econs et')
@@ -810,7 +815,7 @@ signatureConstraints scope g0 et use = do
           , v `notElem` quantified
           ]
       (g2, sub, body) = instantiateAll g1 (etype et')
-      owed = [(c, ts) | Constraint c ts <- Set.toList (econs et'), not (any (any ((`elem` loose) . fst) . varForms) ts)]
+      owed = [(c, map (\t -> foldr substitute t dependent) ts) | Constraint c ts <- Set.toList (econs et')]
   case subtype scope use body g2 of
     _ | null owed -> return []
     Right g3 -> return [Constraint c (map (apply g3 . sub) ts) | (c, ts) <- owed]
@@ -1357,7 +1362,7 @@ synthE vi g0 (VarS v (MonomorphicExpr (Just t0) xs0)) = do
               | contract -> Just (old <> given)
               | otherwise -> gammaAssumedConstraints g1
         , gammaRigid = case gammaRigid g1 of
-            Just rigid -> Just (Set.union rigid (Set.fromList (typeEffectVars t1)))
+            Just rigid -> Just (Set.union rigid (Set.fromList (collectEffVarNames t1)))
             r -> r
         }
       -- Every signature checked as a contract, at any depth, adds its Nat
@@ -2074,7 +2079,7 @@ etaExpandSynthE i g1 funType0 funExpr0 _f xs0 = do
   -- enclosing application's may still be fixed by its later arguments.
   let before = Set.fromList (gammaPendingNumLits g1)
       own = filter (`Set.notMember` before) (gammaPendingNumLits g2raw)
-  g2 <- resolvePendingNumLits g2raw own
+  g2 <- resolvePendingNumLits (constrainedVars g2raw) g2raw own
 
   MM.sayVVV $
     "  funType1:" <+> pretty funType1
@@ -3573,7 +3578,7 @@ validate = mapM_ one
             Right _ -> return ()
             -- a head may match once the use fixes the open variables
             Left (FI.NoInstance _ _)
-              | not (null open), FI.couldMatch scope env c1 -> return ()
+              | not (null open), FI.couldMatch scope env c1 || FI.givenFixes env given c1 -> return ()
             -- each instantiation is resolved where it is used
             Left (FI.NoInstance _ _)
               | [t] <- args -> derivableAt scope cls t >>= \d -> if d then return () else unmet i given open c
@@ -3773,17 +3778,6 @@ scopeType rigid m t
       | Map.member v m = strip x
       | otherwise = ForallU v (strip x)
     strip x = x
-
--- | The effect-row variables of a type.
-typeEffectVars :: TypeU -> [TVar]
-typeEffectVars t = case t of
-  EffectU es x -> effectSetVars es <> typeEffectVars x
-  ForallU _ x -> typeEffectVars x
-  FunU ts x -> concatMap typeEffectVars ts <> typeEffectVars x
-  AppU x ts -> typeEffectVars x <> concatMap typeEffectVars ts
-  NamU _ _ ps rs -> concatMap typeEffectVars ps <> concatMap (typeEffectVars . snd) rs
-  OptionalU x -> typeEffectVars x
-  _ -> []
 
 -- | A quantified type instantiated with fresh existentials; the constraints,
 -- rewritten over the same existentials, are recorded as obligations.

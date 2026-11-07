@@ -46,6 +46,7 @@ specTests =
     , localOption (mkTimeout 2000000) cls16Tests
     , localOption (mkTimeout 2000000) cls17Tests
     , localOption (mkTimeout 2000000) cls18Tests
+    , localOption (mkTimeout 5000000) cls2OwnInstanceTests
     , localOption (mkTimeout 2000000) cls20Tests
     , localOption (mkTimeout 5000000) poly7Tests
     , localOption (mkTimeout 2000000) bindTests
@@ -4083,6 +4084,28 @@ sigTests =
             let types = [t | AnnoS (Idx _ t) _ _ <- gasts] <> [t | AnnoS (Idx _ t) _ _ <- rasts]
             assertBool "nothing realized" (not (null types))
             assertBool "a generic tree realized" (not (any containsUnk types))
+    , testCase "spec-sig-5-4" $ do
+        -- a literal at a signature's constrained variable leaves it generic
+        config <- emptyConfig
+        ((x, msgs), st) <- MM.runMorlocMonad Nothing 0 config defaultValue . typecheck Nothing . Code $ sig5Literal
+        case x of
+          Left e -> assertFailure ("expected acceptance, got: " <> show e)
+          Right _ -> do
+            assertBool ("no warning names f: " <> show msgs) (any (MT.isInfixOf "skipping generic export 'f'") msgs)
+            assertBool ("no warning names h: " <> show msgs) (any (MT.isInfixOf "skipping generic export 'h'") msgs)
+            assertBool "g warned about" (not (any (MT.isInfixOf "export 'g'") msgs))
+            assertBool "f not recorded" (DM.member (EV "f") (stateSkippedGeneric st))
+    , accept
+        "spec-sig-5-6"
+        [r|
+        module main (f)
+        class Integral a where
+          ofInt :: a -> Int
+        both :: b -> b -> b
+        wrap :: a -> ?a
+        f :: Integral a => a -> ?a
+        f x = both 1 (wrap x)
+        |]
     , accept
         "spec-sig-5-2"
         [r|
@@ -4096,6 +4119,24 @@ sigTests =
           x = mempty
         |]
     ]
+
+-- | Generic exports whose bodies, directly and through a signed term, apply
+-- the class to a literal, and a concrete use of one.
+sig5Literal :: MT.Text
+sig5Literal =
+  [r|
+  module main (f, h, g)
+    class Integral a where
+      add :: a -> a -> a
+    instance Integral Int, Integral Real where
+      add x y = x
+    f :: Integral a => a -> a
+    f x = add x 1
+    h :: Integral a => a -> a
+    h x = f x
+    g :: Real -> Real
+    g y = f y
+  |]
 
 -- | A generic export using a class whose container instances use the class
 -- again.
@@ -4685,7 +4726,34 @@ cls5Tests :: TestTree
 cls5Tests =
   testGroup
     "CLS-5"
-    [ accept
+    [ reject
+        "spec-cls-5-16"
+        [r|
+        module main (g)
+        class Packable a b where
+          pack :: a -> b
+          unpack :: b -> a
+        f :: Packable a b => b -> Int
+        f x = 1
+        g :: Bool -> Int
+        g x = f x
+        |]
+    , accept
+        "spec-cls-5-17"
+        [r|
+        module main (g)
+        class Packable a b where
+          pack :: a -> b
+          unpack :: b -> a
+        newtype Box = Int
+        instance Packable Int Box where
+          source Py from "lib.py" ("pack", "unpack")
+        f :: Packable a b => b -> Int
+        f x = 1
+        g :: Box -> Int
+        g x = f x
+        |]
+    , accept
         "spec-cls-5-2"
         [r|
         module main (g)
@@ -4889,11 +4957,149 @@ cls17Tests =
         |]
     ]
 
+-- | A use of a method inside its own instance, in a definition expanded in
+-- place because `tally []` leaves an element type open.
+cls2OwnInstanceTests :: TestTree
+cls2OwnInstanceTests =
+  testGroup
+    "CLS-2 own instance"
+    [ rejectSaying
+        "spec-cls-2-12"
+        "inside its own instance is not determined"
+        [r|
+        module main (f)
+        class Tally f where
+          tally :: f a -> Str
+        record Box a where
+          val :: [a]
+        mkB :: [a] -> Box a
+        mkB xs = {val = xs}
+        instance Tally List where
+          tally xs = tally (mkB xs)
+        instance Tally Box where
+          tally b = "box"
+        f :: Int -> Str
+        f n = tally []
+        |]
+    , rejectSaying
+        "spec-cls-2-13"
+        "Polymorphic recursion"
+        [r|
+        module main (f)
+        class Tally f where
+          tally :: f a -> Str
+        instance Tally List where
+          tally xs = "t"
+        class Render a where
+          render :: a -> Str
+        wrap :: [a] -> [[a]]
+        instance Render [a] where
+          render xs = render (wrap xs)
+        pair :: Str -> Str -> Str
+        f :: [Int] -> Str
+        f n = pair (tally []) (render n)
+        |]
+    ]
+
 cls18Tests :: TestTree
 cls18Tests =
   testGroup
     "CLS-18"
-    [ reject
+    [ rejectSaying
+        "spec-cls-18-2"
+        "does not mention"
+        [r|
+        module main (count)
+        class Named a where
+          name :: a -> Str
+        count :: Named a => Str -> Str
+        count n = n
+        |]
+    , rejectSaying
+        "spec-cls-18-7"
+        "does not mention"
+        [r|
+        module main (size)
+        class Conv f a where
+          conv :: f -> a
+        size :: Conv f a => f -> Int
+        size x = 1
+        |]
+    , acceptTypecheck
+        "spec-cls-18-8"
+        [r|
+        module main (f)
+        class Packable a b where
+          pack :: a -> b
+          unpack :: b -> a
+        f :: Packable a b => b -> Int
+        f x = 1
+        |]
+    , rejectSaying
+        "spec-cls-18-9"
+        "does not mention"
+        [r|
+        module main (f)
+        class Packable a b where
+          pack :: a -> b
+          unpack :: b -> a
+        f :: Packable a b => a -> Int
+        f x = 1
+        |]
+    , acceptTypecheck
+        "spec-cls-18-10"
+        [r|
+        module main (f)
+        newtype Vector (n :: Nat) a = List a
+        class Sizeable a where
+          size :: a -> Int
+        f :: Sizeable (Vector n Int) => Int -> Int
+        f x = x
+        |]
+    , rejectSaying
+        "spec-cls-18-11"
+        "does not mention"
+        [r|
+        module main (f)
+        newtype Vector (n :: Nat) a = List a
+        class Sizeable a where
+          size :: a -> Int
+        f :: Sizeable (Vector n a) => Int -> Int
+        f x = x
+        |]
+    , acceptTypecheck
+        "spec-cls-18-12"
+        [r|
+        module main (f)
+        class Handles e where
+          h :: Int -> Int
+        f :: Handles e => <e> Int -> <e> Int
+        f x = x
+        |]
+    , rejectSaying
+        "spec-cls-18-13"
+        "does not mention"
+        [r|
+        module main (g)
+        class Named a where
+          name :: a -> Str
+        g :: Int -> Int
+        g x = y where
+          y :: Named b => Int
+          y = x
+        |]
+    , rejectSaying
+        "spec-cls-18-14"
+        "does not mention"
+        [r|
+        module main (f)
+        class Named a where
+          name :: a -> Str
+        unused :: Named q => Int -> Int
+        f :: Str -> Str
+        f x = x
+        |]
+    , reject
         "spec-cls-18-1"
         [r|
         module main (useIt)

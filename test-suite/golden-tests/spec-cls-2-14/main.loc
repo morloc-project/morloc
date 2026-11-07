@@ -1,0 +1,18 @@
+-- Spec CLS-2, CLS-18: inside a method's own instance, a use whose open position
+-- does not select an instance is refused for that position alone.
+module main (f)
+
+import root-py
+
+source Py from "foo.py" ("isEmpty")
+
+isEmpty :: [a] -> Bool
+
+class Tally f where
+  tally :: f a -> Str
+
+instance Tally List where
+  tally xs = ? isEmpty xs = "empty" : tally []
+
+f :: [Int] -> Str
+f xs = tally xs

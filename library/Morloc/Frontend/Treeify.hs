@@ -645,7 +645,8 @@ collectExprS namer0 (ExprI gi0 e0) = f namer0 e0
         -- types. For specialization it is elaborated at the use's type; a
         -- use of a method inside its own expansion is not a back-edge, since
         -- it may resolve to another instance (in full collection the next
-        -- case makes it one). Validation checks a method use as an
+        -- case makes it one, which Specialize reopens at another type).
+        -- Validation checks a method use as an
         -- obligation and never reads its instances' bodies (they are
         -- checked where the use is elaborated), so it never expands one.
         (Just k, GMapJust (Polymorphic cls clsName t))

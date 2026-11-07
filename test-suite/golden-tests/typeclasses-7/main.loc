@@ -28,14 +28,11 @@ instance Showable Str where
   source Cpp from "foo.hpp" ("showStr" as toStr)
   source Py from "foo.py" ("showStr" as toStr)
 
--- single constraint, concrete Int
-appendAllInt :: Semigroup a => Int -> Int -> Int -> Int
+appendAllInt :: Int -> Int -> Int -> Int
 appendAllInt x y z = append x (append y z)
 
--- single constraint, concrete Str
-appendAllStr :: Semigroup a => Str -> Str -> Str -> Str
+appendAllStr :: Str -> Str -> Str -> Str
 appendAllStr x y z = append x (append y z)
 
--- multiple constraints, uses methods from both Showable and Semigroup
-showAppend :: (Semigroup a, Showable a) => Int -> Int -> Str
+showAppend :: Int -> Int -> Str
 showAppend x y = toStr (append x y)

@@ -10,7 +10,7 @@ Replaced by CLS-7: a class may give a method a default body.
 
 ### CLS-2 The type at the use site selects the instance
 Intent: proposed
-Tests: spec-cls-2-1, spec-cls-2-2, spec-cls-2-3, spec-cls-2-4, spec-cls-2-5, spec-cls-2-6, spec-cls-2-7, spec-cls-2-8, spec-cls-2-9
+Tests: spec-cls-2-1, spec-cls-2-2, spec-cls-2-3, spec-cls-2-4, spec-cls-2-5, spec-cls-2-6, spec-cls-2-7, spec-cls-2-8, spec-cls-2-9, spec-cls-2-10, spec-cls-2-11, spec-cls-2-12, spec-cls-2-13, spec-cls-2-14
 Code: deviates (issues/typeclasses.md)
 
 A method used at type `T` runs an implementation of the instance for `T`.
@@ -42,7 +42,7 @@ Code: conforms 2026-10-21
 
 ### CLS-5 Superclasses and instance contexts are obligations
 Intent: ruled 2026-10-29
-Tests: spec-cls-5-1, spec-cls-5-2, spec-cls-5-3, spec-cls-5-4, spec-cls-5-5, spec-cls-5-6, spec-cls-5-7, spec-cls-5-8, spec-cls-5-9, spec-cls-5-10, spec-cls-5-11, spec-cls-5-12, spec-cls-5-13, spec-cls-5-14, spec-cls-5-15
+Tests: spec-cls-5-1, spec-cls-5-2, spec-cls-5-3, spec-cls-5-4, spec-cls-5-5, spec-cls-5-6, spec-cls-5-7, spec-cls-5-8, spec-cls-5-9, spec-cls-5-10, spec-cls-5-11, spec-cls-5-12, spec-cls-5-13, spec-cls-5-14, spec-cls-5-15, spec-cls-5-16, spec-cls-5-17
 Code: conforms 2026-11-05
 
 `class C a => D a` requires an instance `C T` for every instance `D T`, and
@@ -202,8 +202,8 @@ applies to a selected method's value as to any other term.
 
 ### CLS-18 A constraint nothing determines is a compile error
 Intent: ruled 2026-11-05
-Tests: spec-cls-18-1, spec-cls-18-3, spec-cls-18-4, spec-cls-18-5, spec-cls-18-6
-Code: deviates (issues/typecheck.md)
+Tests: spec-cls-18-1, spec-cls-18-2, spec-cls-18-3, spec-cls-18-4, spec-cls-18-5, spec-cls-18-6, spec-cls-18-7, spec-cls-18-8, spec-cls-18-9, spec-cls-18-10, spec-cls-18-11, spec-cls-18-12, spec-cls-18-13, spec-cls-18-14
+Code: conforms 2026-11-07
 
 A constrained type variable that does not occur in the signature's type
 outside its constraints is an error at the signature. One that occurs but
@@ -227,7 +227,7 @@ some types is an instance at those types.
 
 ### CLS-20 Packable's wire argument is determined by the packed type
 Intent: ruled 2026-11-05
-Tests: spec-cls-20-1, spec-cls-20-2, spec-cls-20-3, spec-cls-20-4, spec-cls-20-5, spec-cls-20-6, spec-cls-20-7, spec-cls-20-8, spec-cls-20-9, spec-cls-20-10, spec-cls-20-11, spec-cls-20-12, spec-cls-20-13
+Tests: spec-cls-20-1, spec-cls-20-2, spec-cls-20-3, spec-cls-20-4, spec-cls-20-5, spec-cls-20-6, spec-cls-20-7, spec-cls-20-8, spec-cls-20-9, spec-cls-20-10, spec-cls-20-11, spec-cls-20-12, spec-cls-20-13, spec-cls-20-14
 Code: conforms 2026-11-05
 
 `Packable a b` has the dependency `b -> a`: the instance selected by `b`

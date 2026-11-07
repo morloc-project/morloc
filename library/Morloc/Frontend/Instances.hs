@@ -55,6 +55,8 @@ module Morloc.Frontend.Instances
   , superclassObligations
   , fixOpenVars
   , couldMatch
+  , givenFixes
+  , keyConstraintAt
   , hasOpenVars
   , fixRigidVars
   , explainResolveError
@@ -71,7 +73,7 @@ import qualified Data.Text as DT
 import qualified Morloc.BaseTypes as BT
 import qualified Morloc.System as MS
 import Morloc.Data.Doc
-import Morloc.Data.Zip (indexed, zipExact, zipPrefix)
+import Morloc.Data.Zip (indexed, zipExact, zipPrefix, zipSame)
 import Morloc.Namespace.Expr
 import Morloc.Namespace.Prim
 import Morloc.Namespace.State (Gamma)
@@ -660,6 +662,15 @@ couldMatch scope env (Constraint cls args0)
             _ -> False
 couldMatch _ _ _ = True
 
+-- | A given of the signature matches the constraint on every argument that
+-- selects, so that it fixes the dependent ones (CLS-20).
+givenFixes :: InstanceEnv -> [Constraint] -> Constraint -> Bool
+givenFixes env givens (Constraint cls args) =
+  let deps = Map.findWithDefault [] cls (ieFundeps env)
+      selecting ts = [a | (i, a) <- indexed ts, i `notElem` deps]
+   in not (null deps) && or [selecting args == selecting ts | Constraint cls' ts <- superClosure env givens, cls' == cls]
+givenFixes _ _ _ = False
+
 -- | A constraint whose generated variables in @rigid@ (a signature's,
 -- renamed by the checker) no longer read as open.
 fixRigidVars :: Set.Set TVar -> Constraint -> Constraint
@@ -678,6 +689,10 @@ constraintTypes (CSubset a b) = [a, b]
 constraintTypes (CDisjoint a b) = [a, b]
 
 -- | An instance as a constraint, its variables named for reading.
+-- | An instance's head with its variables at the evidence's types.
+keyConstraintAt :: InstanceKey -> [TypeU] -> Constraint
+keyConstraintAt (InstanceKey cls (vs, hs)) tys = Constraint cls (map (substituteAll (Map.fromList (zipSame vs tys))) hs)
+
 keyConstraint :: InstanceKey -> Constraint
 keyConstraint k@(InstanceKey cls (_, hs)) = renameConstraint (keyNames k) (Constraint cls hs)
 

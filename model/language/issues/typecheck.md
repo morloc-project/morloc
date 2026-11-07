@@ -108,16 +108,6 @@ literal and record gaps. Reproduced on 0.109.0 unless marked.
   subtype path solves it to `<> Unit`. With the signature `pick2 :: Bool ->
   (Int -> <e> ()) -> <e> ()` it typechecks. Open: instantiate an
   existential branch to a suspension with a fresh row before joining.
-- **A class variable that only a constraint mentions.** [reproduced,
-  2026-11-05] Violates the first sentence of CLS-18. In `count :: Named a
-  => Int -> Int; count n = n`, nothing at any use can fix `a`, but the
-  signature is accepted and the program typechecks. Where the body uses a
-  method at `a` (`render n = showList (gen n)`), the use inside the body is
-  rejected as undetermined, but the error is at that use, not at the
-  signature. The two-parameter case `size :: Conv f a => f -> Int; size x
-  = length (conv x)` is rejected at validation "This definition needs Conv
-  f (a) but its signature does not declare it", which reads as a missing
-  constraint the signature visibly has.
 - **A newtype over a `type` alias reports a phantom instance.** [reproduced,
   2026-10-21] `type Meters = Int; newtype Wrapped = Meters` fails "Cannot
   declare instance on transparent alias 'Meters'" though no instance is
@@ -146,11 +136,6 @@ literal and record gaps. Reproduced on 0.109.0 unless marked.
   POLY-4, which rules `where` signatures: `let g :: a -> a` fails
   "unexpected '::'".
   Repro: /work/plans/model-audit-2026-10-21/repro/D/poly4d.
-- **Literal defaulting exports a constrained generic at Int.**
-  [reproduced, 2026-10-21] Violates SIG-5 and CLS-18 (no defaulting).
-  `f :: Integral a => a -> a; f x = x + x` is skipped with a warning, but
-  `f x = x + 1` is exported at Int with no warning: `f 1.5` fails
-  "expected integer for Int", while `g y = f y` at Real gives 2.5. Repro: /work/plans/model-audit-2026-10-21/repro/D/sig5b, sig5c.
 - **SIG-4's premise is stale.** [reproduced, 2026-10-21] It says
   inference fails for a point-free use of class methods; `g = (+)` and
   `concatTo = fold (<>)` build and run unsigned. Only constructor matching
@@ -239,3 +224,10 @@ literal and record gaps. Reproduced on 0.109.0 unless marked.
   and with a function field `.f (mkr k) 5` is rejected while `(.f (mkr k)) 5`
   runs, against APP-1 (`applyPattern` decides by argument count; only the
   setter syntax should build a setter).
+- **Full expansion of a definition using a comparison does not terminate.**
+  [reproduced, 2026-11-07] Spec gap in cost.md: nothing bounds what expanding in
+  place may cost. `f n = tally [] <> g (n > 0)`, with `tally :: f a -> Str` and
+  `import root-py`, is still typechecking after 300 s at 2.6 GiB; `n == 0` in its
+  place takes 0.2 s. An open element type (`tally []`) sends the whole definition to
+  `collectRoot Nothing`, which expands every instance body of `Ord` in root. A
+  signature on `f` does not help. Replacing `tally []` removes it.

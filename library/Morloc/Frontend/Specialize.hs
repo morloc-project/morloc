@@ -21,7 +21,10 @@ every term was expanded in place, and every later pass is unchanged.
 
 A reference whose key is not fully solved (an existential remains) cannot be
 elaborated on its own: the definition, or export, it occurs in is instead
-checked with every term expanded in place. A generic export is never realized
+checked with every term expanded in place. There, a use of a method inside its
+own expansion is at first a back-edge; one at another type becomes a reference
+again, since that type may select another instance (CLS-2). A generic export is
+never realized
 (SIG-5), so it is checked with its references left as their signatures and
 nothing is chosen for it.
 
@@ -31,7 +34,8 @@ to it, and at a different key is polymorphic recursion, which is rejected.
 -}
 module Morloc.Frontend.Specialize (specialize, isGenericExport) where
 
-import Morloc.Data.Zip (indexed)
+import qualified Morloc.BaseTypes as BT
+import Morloc.Data.Zip (indexed, zipWithSame)
 import Data.IORef
 import qualified Data.List as List
 import qualified Data.Map as Map
@@ -45,7 +49,7 @@ import Morloc.Frontend.Treeify (Validation (..), collectRoot, recName)
 import Morloc.Frontend.Typecheck (typecheckRoot, typecheckRootAt)
 import Morloc.Data.Doc
 import qualified Morloc.Monad as MM
-import Morloc.Typecheck.Internal (unqualify)
+import Morloc.Typecheck.Internal (mapTypeUChildren, typeUChildren, unqualify)
 
 type Typed = AnnoS (Indexed TypeU) Many Int
 
@@ -77,6 +81,9 @@ specializeExport :: Spec -> (Int, EVar) -> MorlocMonad Typed
 specializeExport spec (gi, v) = do
   (outcome, typed) <- collectElaborable spec True typecheckRoot (gi, v)
   k0m <- termOf gi
+  let spliceRoot = do
+        backs <- liftIO (newIORef Set.empty)
+        splice spec backs [] typed
   case outcome of
     Elaborable -> case (k0m, typed) of
       -- the export is itself a checked definition: a use of it, at its own
@@ -85,17 +92,16 @@ specializeExport spec (gi, v) = do
         | Map.member k0 (specDefs spec) -> do
             backs <- liftIO (newIORef Set.empty)
             alts' <- mapM (splice spec backs [(k0, canonical (snd (unqualify t)))]) alts
-            back <- Set.member k0 <$> liftIO (readIORef backs)
+            back <- Set.member (k0, canonical (snd (unqualify t))) <$> liftIO (readIORef backs)
             if back
               then do
                 let tok = recName v k0
                 MM.modify' (\st -> st {stateRecursionTargets = Map.insert tok gi (stateRecursionTargets st)})
                 return (AnnoS (Idx gt t) c (VarS tok alts'))
               else return (AnnoS (Idx gt t) c (VarS name alts'))
-      _ -> do
-        backs <- liftIO (newIORef Set.empty)
-        splice spec backs [] typed
-    _ -> return typed
+      _ -> spliceRoot
+    InPlace -> spliceRoot
+    Generic -> return typed
 
 -- | How far a checked tree was taken.
 data Collected
@@ -139,7 +145,52 @@ collectElaborable spec export check root = go (Map.keysSet (specDefs spec))
         | not (null stuck) && Set.size only' < Set.size only -> go only'
         | generic -> return (Generic, typed)
         | null stuck -> return (Elaborable, typed)
-        | otherwise -> (,) InPlace <$> (collectRoot Nothing root >>= check)
+        | otherwise -> (,) InPlace <$> (collectRoot Nothing root >>= check >>= reopenMethodBackEdges)
+
+-- | A method back-edge at another type than the expansion it points to becomes
+-- a reference, for 'splice' to elaborate at its own type. An open position does
+-- not select an instance, so two types that agree elsewhere keep the back-edge;
+-- any other difference needs a type to elaborate at.
+reopenMethodBackEdges :: Typed -> MorlocMonad Typed
+reopenMethodBackEdges = go Map.empty
+  where
+    go :: Map.Map EVar TypeU -> Typed -> MorlocMonad Typed
+    go env (AnnoS idx@(Idx gi t) ci e) = case e of
+      CallS v
+        | Just target <- Map.lookup v env -> do
+            sigs <- MM.gets stateSignatures
+            if
+              | agrees t target -> return (AnnoS idx ci e)
+              | not (isMethodAt sigs ci) ->
+                  if isElaborable t && isElaborable target
+                    then
+                      MM.throwCompilerBugAt gi $
+                        "the call of" <+> squotes (pretty v) <+> "here is bound to its own definition, of type"
+                          <+> pretty target <> ", at another type," <+> pretty t
+                    else return (AnnoS idx ci e)
+              | isElaborable t -> return (AnnoS idx ci (VarS (displayName v) (Many [] [])))
+              | otherwise ->
+                  MM.throwSourcedError gi $
+                    "The type of this use of" <+> squotes (pretty (displayName v))
+                      <+> "inside its own instance is not determined, so it cannot be compiled:"
+                      <+> pretty t <> ". Add a signature or an annotation that fixes it."
+      VarS v _ -> AnnoS idx ci <$> mapExprSM (go (Map.insert v t env)) e
+      _ -> AnnoS idx ci <$> mapExprSM (go env) e
+
+    agrees a b = case (a, b) of
+      (ExistU {}, _) -> True
+      (_, ExistU {}) -> True
+      (ForallU _ x, _) -> agrees x b
+      (_, ForallU _ y) -> agrees a y
+      _ ->
+        let heads = mapTypeUChildren (const BT.unitU)
+         in heads a == heads b && and (zipWithSame agrees (typeUChildren a) (typeUChildren b))
+
+-- | Whether an index names a class method.
+isMethodAt :: GMap Int Int SignatureSet -> Int -> Bool
+isMethodAt (GMap idmap sigmap) ci = case Map.lookup ci idmap >>= (`Map.lookup` sigmap) of
+  Just Polymorphic {} -> True
+  _ -> False
 
 -- | The references to checked definitions in a tree, with the type each is
 -- solved at.
@@ -313,14 +364,14 @@ pinsKey :: SpecKey -> Typed -> Bool
 pinsKey (_, t) (AnnoS (Idx _ t') _ _) = canonical t' /= t
 
 -- | Replace each reference by a copy of its elaboration. @stack@ holds the
--- references being spliced around this point; @backs@ collects the terms a
+-- references being spliced around this point; @backs@ collects the keys a
 -- back-edge was made to.
-splice :: Spec -> IORef (Set.Set Int) -> [SpecKey] -> Typed -> MorlocMonad Typed
+splice :: Spec -> IORef (Set.Set SpecKey) -> [SpecKey] -> Typed -> MorlocMonad Typed
 splice spec backs stack n@(AnnoS (Idx gi t) ci e) = refTerm spec n >>= \r -> let key = canonical t in case r of
   Just (k, target)
     | (k, key) `elem` stack -> do
-        liftIO (modifyIORef' backs (Set.insert k))
-        return (AnnoS (Idx gi t) ci (CallS (token k)))
+        liftIO (modifyIORef' backs (Set.insert (k, key)))
+        return (AnnoS (Idx gi t) ci (CallS (token stack (k, key))))
     -- a definition recursing through others at a different type, or a
     -- method whose instances recurse at ever larger types
     | target == Definition && any ((== k) . fst) stack
@@ -341,8 +392,8 @@ splice spec backs stack n@(AnnoS (Idx gi t) ci e) = refTerm spec n >>= \r -> let
                 inner <- liftIO (newIORef Set.empty)
                 alts' <- mapM (traverse (splice spec inner ((k, key) : stack))) alts
                 innerBacks <- liftIO (readIORef inner)
-                liftIO (modifyIORef' backs (Set.union (Set.delete k innerBacks)))
-                let name' = if Set.member k innerBacks then token k else name
+                liftIO (modifyIORef' backs (Set.union (Set.delete (k, key) innerBacks)))
+                let name' = if Set.member (k, key) innerBacks then token ((k, key) : stack) (k, key) else name
                 -- a body with no back-edge is closed: it means the same
                 -- wherever it is used, so whether it is shared is decided once
                 inlined <- Set.member (k, key) <$> liftIO (readIORef (specInlined spec))
@@ -367,7 +418,13 @@ splice spec backs stack n@(AnnoS (Idx gi t) ci e) = refTerm spec n >>= \r -> let
               _ -> MM.throwCompilerBug "specialize: an elaboration is not a term"
   Nothing -> AnnoS (Idx gi t) ci <$> mapExprSM (splice spec backs stack) e
   where
-    token k = recName (maybe (refName e) snd (Map.lookup k (specDefs spec))) k
+    -- one name per key on the stack: the instances of a method can recurse
+    -- through each other, each its own function
+    token keys sk@(k, _) =
+      let base = recName (maybe (refName e) snd (Map.lookup k (specDefs spec))) k
+       in case length (filter ((== k) . fst) (dropWhile (/= sk) keys)) of
+            n | n > 1 -> EV (unEVar base <> "`" <> T.pack (show n))
+            _ -> base
     refName (VarS v _) = v
     refName _ = EV "?"
     -- the reference's own evidence: how the use meets its constraints
@@ -415,7 +472,7 @@ newSpecName name = do
 shareable :: TypeU -> TypeU -> [Typed] -> MorlocMonad Bool
 shareable key t alts = do
   names <- MM.gets stateSpecNames
-  GMap idmap sigmap <- MM.gets stateSignatures
+  sigs <- MM.gets stateSignatures
   let (params, result) = arrow (snd (unqualify t))
       defined = filter (not . isSourced) alts
       ns = concatMap annoNodes defined
@@ -428,7 +485,7 @@ shareable key t alts = do
       && null (generatedTypeVars key)
       && all (takesAll (length params)) defined
       && all isValue defined
-      && not (any (readsConstant idmap sigmap) ns)
+      && not (any (readsConstant sigs) ns)
       && not (any (\(AnnoS _ _ x) -> recurses names inner x) ns)
   where
     arrow (FunU ts r) = let (ts', r') = arrow r in (ts <> ts', r')
@@ -449,14 +506,11 @@ shareable key t alts = do
     recurses _ _ _ = False
     -- a top-level name, not a class method, whose value is computed once
     -- per command: data, or a function built by a computation
-    readsConstant idmap sigmap (AnnoS (Idx _ ty) ci (VarS (EV v) xs)) =
+    readsConstant sigs (AnnoS (Idx _ ty) ci (VarS (EV v) xs)) =
       not (T.any (== '`') v)
-        && not (isMethod idmap sigmap ci)
+        && not (isMethodAt sigs ci)
         && (not (isArrow ty) || not (all isValue xs))
-    readsConstant _ _ _ = False
-    isMethod idmap sigmap ci = case Map.lookup ci idmap >>= (`Map.lookup` sigmap) of
-      Just (Polymorphic {}) -> True
-      _ -> False
+    readsConstant _ _ = False
 
 
 -- | The node count above which a closed specialization is shared. An applied

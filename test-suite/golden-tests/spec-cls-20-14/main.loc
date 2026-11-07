@@ -1,0 +1,31 @@
+-- Spec CLS-20: the instance a wire-independent argument selects fixes the
+-- dependent argument, for another constraint on it and for a use in the body.
+module main (g, h)
+
+import root-py
+
+source Py from "foo.py" ("mk")
+
+newtype Box = Str
+mk :: Str -> Box
+
+class Named a where
+  name :: a -> Str
+
+instance Named Str where
+  name x = "str:" <> x
+
+instance Packable Str Box where
+  source Py from "foo.py" ("pk" as pack, "un" as unpack)
+
+label :: (Packable a b, Named a) => b -> Str
+label x = "label"
+
+viaUnpack :: (Packable a b, Named a) => b -> Str
+viaUnpack x = name (unpack x)
+
+g :: Str -> Str
+g x = label (mk x)
+
+h :: Str -> Str
+h x = viaUnpack (mk x)

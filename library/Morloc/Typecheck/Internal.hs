@@ -3591,3 +3591,4 @@ peak = insetSay . pretty
 
 peakGen :: (Foldable f) => AnnoS g f c -> MorlocMonad ()
 peakGen = insetSay . pretty
+

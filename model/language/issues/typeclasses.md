@@ -55,24 +55,6 @@
   relies on this for `==` on lists. Option (a) of CLS-12 would make these
   uses errors.
 
-- [reproduced] Violates CLS-2 (#160). Inside an instance body, a use of the
-  class's own method at another type is bound to the instance being
-  defined. With `instance Eq Q where (==) a b = .num a * .den b == .num b
-  * .den a`, `{num = n, den = 2} == {num = 2 * n, den = 4}` lowers the
-  inner Int `==` to a self-call of the Q instance (a `while True:` loop in
-  Python that crashes). The same happens with `Ord` and `<=`; both work
-  when the operands come from a signed `mkq :: Int -> Int -> Q`. [read]
-  Cause: the record literals leave an existential in the method
-  reference's type, so Specialize.collectElaborable falls back to full
-  expansion (`collectRoot Nothing`), where Treeify.collectExprS turns any
-  reference to a term already being expanded into a back-edge
-  (`CallS`); the exemption for methods (a use may resolve to another
-  instance) applies only in shallow mode. The literal trigger is rejected
-  since REC-4, and Typecheck.assertBackEdgeTypes stops a build whose typed
-  tree holds a back-edge at a ground type other than its definition's, so
-  no known program miscompiles; the binding by term id remains in full
-  expansion. Fix direction: after typechecking, re-resolve by type each
-  method back-edge whose type differs from its definition's.
 - **Classes the compiler names still live in `root`.** [read] Violates
   CLS-15. `Functor` (`map`, found by name in
   library/Morloc/Frontend/Treeify.hs for a bracket chain's map) and `Integral`
@@ -183,3 +165,29 @@
   catch-all returns any other FunU as is, and the method type of an instance
   over a partly applied head keeps `(Pairs k) a`. subtype and apply flatten such
   an application when they meet it; no failure is known.
+- **A class variable that no signature of the class can fix.** [reproduced,
+  2026-11-07] Spec gap in CLS-18, whose first sentence speaks of a signature's
+  constraints. `class Gen a where gen :: Str -> Str` is accepted, and every use
+  fails "needs Gen a: no instance gives Gen a", which does not say why. `instance
+  Named b => Foo Int`, whose context names a variable its head lacks, is accepted,
+  and every use fails "nothing fixes #ctx.b in Named (a)". Say whether each is an
+  error where it is declared.
+- **A constraint prints a Nat variable under another name.** [reproduced,
+  2026-11-07] `prettyConstraint` shows `Sizeable (Vector n a)` as `Sizeable (Vector
+  b a)`. Spec gap in diagnostics.md: no item says a message quotes what the
+  user wrote.
+- **A method's result left open inside its own expansion is refused.**
+  [reproduced, 2026-11-07] Code gap against CLS-2. With `konst :: a -> b -> a`,
+  `instance Render Str where render s = konst "str" (render (size s))` and a
+  use on the full-expansion path (`g x = tally [] <> render x`), the inner use
+  fails "inside its own instance is not determined ... Int -> *b", though
+  its argument selects `Render Int` and the class fixes the result as Str. Full
+  collection makes the use a back-edge, which the checker never instantiates at
+  the method's type, and Specialize can only repair the node afterwards. An
+  annotation should work (not run). Leaving a method use inside its own
+  expansion as a reference during full collection would remove the cause and the
+  repair pass, but a use with an open position then has no key to elaborate at.
+- **A class-level error names a same-shape use the instance could select.**
+  [read, 2026-11-07] spec-cls-2-12: `tally (mkB xs)` at `Box ?a` is refused as not
+  determined, though the head `Box` selects an instance. Its key is open, so it
+  cannot be elaborated on its own (CLS-18 does not rule on this case).

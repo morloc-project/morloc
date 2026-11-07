@@ -15,7 +15,8 @@ state-based representation consumed by 'Treeify'.
 -}
 module Morloc.Frontend.Link (link, checkRsize) where
 
-import Morloc.Data.Zip (zipSame)
+import Data.List (partition)
+import Morloc.Data.Zip (indexed, zipSame)
 import Data.Set (Set)
 import qualified Data.Set as Set
 import qualified Morloc.BaseTypes as BT
@@ -24,6 +25,7 @@ import Morloc.Data.Doc
 import Morloc.Data.Map (Map)
 import qualified Morloc.Data.Map as Map
 import qualified Morloc.Data.Text as DT
+import qualified Morloc.Frontend.AST as AST
 import Morloc.Frontend.Instances
   ( MethodTerm (..)
   , ResolveError (..)
@@ -41,9 +43,10 @@ import Morloc.Frontend.Instances
   , superclassObligations
   )
 import Morloc.Frontend.Namespace
+import Morloc.Frontend.Rename (displayName)
 import qualified Morloc.Monad as MM
 import qualified Morloc.TypeEval as TE
-import Morloc.Typecheck.Internal (prettyConstraint, qualify, unqualify)
+import Morloc.Typecheck.Internal (prettyConstraint, qualify, collectEffVarNames, unqualify)
 
 -- The following terms are modified in morloc state
 --  * stateSignatures :: GMap Int Int SignatureSet -- links terms to types
@@ -75,6 +78,43 @@ link d0 = do
       -- CLS-20: Packable's wire argument is the only dependent one.
       MM.modify' (\ms -> let env = stateInstances ms in ms {stateInstances = env {ieFundeps = packableWireFundep (ieClasses env)}})
       checkSuperclasses
+      checkConstrainedVars d0
+
+-- | A constrained type variable occurs in its signature's type, or a dependency
+-- determines it from variables that do (CLS-18, CLS-20). Only a Type-kinded
+-- variable can be undetermined: a Nat or row variable has its own carrier.
+checkConstrainedVars :: DAG MVar [AliasedSymbol] ExprI -> MorlocMonad ()
+checkConstrainedVars d0 = do
+  fundeps <- MM.gets (ieFundeps . stateInstances)
+  let check (ExprI i (SigE s)) = checkSignature fundeps i s
+      check (ExprI i (ClsE (Typeclass _ _ _ ms))) = mapM_ (checkSignature fundeps i) ms
+      check _ = return ()
+  mapM_ (AST.checkExprI check) (DAG.nodes d0)
+  where
+    checkSignature :: Map ClassName [Int] -> Int -> Signature -> MorlocMonad ()
+    checkSignature fundeps i (Signature v _ et) =
+      let cs = Set.toList (econs et)
+          body = snd (unqualify (etype et))
+          known = closure fundeps cs (Set.fromList (map fst (varForms body) <> collectEffVarNames body))
+       in case [(cls, u) | Constraint cls ts <- cs, u <- plainVars ts, Set.notMember u known] of
+            [] -> return ()
+            ((cls, u) : _) ->
+              MM.throwSourcedError i $
+                "The constraint" <+> squotes (pretty cls) <+> "in the signature of" <+> squotes (pretty (displayName v))
+                  <+> "names the type variable" <+> squotes (pretty u)
+                  <> ", which the signature's type does not mention, so no use of the term could determine it (CLS-18)."
+
+    closure fundeps cs known =
+      let known' = Set.union known (Set.fromList (concatMap (determined fundeps known) cs))
+       in if known' == known then known else closure fundeps cs known'
+
+    determined fundeps known (Constraint cls ts) =
+      let deps = Map.findWithDefault [] cls fundeps
+          (dependent, selecting) = partition ((`elem` deps) . fst) (indexed ts)
+       in if all (`Set.member` known) (plainVars (map snd selecting)) then plainVars (map snd dependent) else []
+    determined _ _ _ = []
+
+    plainVars ts = [u | (u@(TV n), VarPlain) <- concatMap varForms ts, isTypeVariableName n]
 
 synth ::
   MVar ->
