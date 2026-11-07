@@ -19,10 +19,8 @@ openN k = step (step (step (step (step (step (step (step (step (step (step (step
 openTwice :: Int -> Int
 openTwice k = nrow (openN k) + ncol (openN k)
 
--- The signature leaves the row open but the body determines it. The
--- elaboration means something narrower than the key, so it belongs at the
--- use rather than in a root every use of the key calls.
-pinnedN :: Int -> Table m r
+-- The body determines the row, so the signature names it (POLY-1).
+pinnedN :: Int -> Table m {x = Int, y = Str}
 pinnedN k = step (step (step (step (step (step (step (step (step (step (step (step (step (step (step (step (step (step (step (step (mkPinned k))))))))))))))))))))
 
 pinnedTwice :: Int -> Int

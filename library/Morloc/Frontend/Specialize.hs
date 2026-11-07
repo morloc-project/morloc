@@ -305,9 +305,9 @@ elaborate spec target use key@(k, t) = do
       let check = typecheckRootAt t
       e <- snd <$> collectElaborable spec False check root
       -- A body may determine a kind-tagged slot that the key it is filed
-      -- under leaves open: a signature's kind variables are not rigid when it
-      -- is checked, so @q :: Int -> Table m r@ whose body has type
-      -- @Int -> Table n {x = Int}@ is accepted. Copied into the use it was
+      -- under leaves open: a length that occurs only in the result is the
+      -- function's to choose (DIM-10), so @q :: Int -> Vector m Int@ whose
+      -- body has type @Int -> Vector 3 Int@ is accepted. Copied into the use it was
       -- checked for, that is what the use asked for. Lifted into a root every
       -- use of the key calls, the root's boundary would be built from the open
       -- key and its interior from the fixed form, and the two would disagree.
@@ -323,11 +323,6 @@ elaborate spec target use key@(k, t) = do
 -- to every annotation before returning, so a slot the body fixed is fixed
 -- there too. A slot solved to another variable is not narrower: both sides
 -- canonicalise to the same name.
---
--- 'Morloc.Typecheck.Internal.recheckDeferred' does not write its solutions
--- back, so a slot fixed only by a deferred constraint reaches here open:
--- either the elaboration shows the value, and the key is not shared, or the
--- program leaves it open.
 pinsKey :: SpecKey -> Typed -> Bool
 pinsKey (_, t) (AnnoS (Idx _ t') _ _) = canonical t' /= t
 

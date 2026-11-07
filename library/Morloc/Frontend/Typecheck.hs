@@ -127,6 +127,11 @@ constrainedVars g =
 everyType :: TypeU -> [TypeU]
 everyType t = t : concatMap everyType (typeUChildren t)
 
+-- | The Str, Rec and List variables of a type, as 'renameWithMap' collects
+-- them. A Set variable is not renamed per signature, so it is not one.
+rigidSlotVars :: TypeU -> Set.Set TVar
+rigidSlotVars t = Set.fromList (collectStrVarNames t <> collectRecVarNames t <> collectListVarNames t)
+
 typecheck ::
   [AnnoS Int ManyPoly Int] ->
   MorlocMonad [AnnoS (Indexed TypeU) Many Int]
@@ -202,7 +207,9 @@ typecheckWith expected = run
 
       let openRecords = openRecordLiterals e2
       (g2, e3) <- resolveTree g1 e2
-      let g3 = apply g2 g2
+      g3 <- case settleDeferred scope (apply g2 g2) of
+        Left (site, err) -> MM.throwSourcedError (fromMaybe (case e0 of AnnoS gi _ _ -> gi) site) err
+        Right g -> return g
       checkShapes g3 e1
 
       -- Decide the Nat and Int conditions left open now that existentials
@@ -1370,7 +1377,7 @@ synthE vi g0 (VarS v (MonomorphicExpr (Just t0) xs0)) = do
       g1Cs
         | contract = g1Base
             { gammaRigidNats = Set.union (gammaRigidNats g1) (Set.fromList sigNats)
-            , gammaRigidRows = Set.union (gammaRigidRows g1) (Set.fromList (collectRecVarNames t1))
+            , gammaRigidSlots = Set.union (gammaRigidSlots g1) (rigidSlotVars t1)
             , gammaRigidDomain = gammaRigidDomain g1 <> [(vi, p) | p <- natPositions t1 <> unsignedLabels]
             , gammaLabelVars = Map.union labelVars (gammaLabelVars g1)
             }
@@ -3550,7 +3557,25 @@ validate = mapM_ one
   where
     one e0@(AnnoS i _ _) = do
       let g0 = emptyGamma {gammaRigid = Just Set.empty}
-      (g1, _, e1) <- synthG g0 e0
+      (g1unsettled, _, e1) <- synthG g0 e0
+      scope <- MM.getGeneralScope
+      g1 <- case settleDeferred scope g1unsettled of
+        Left (site, err) -> MM.throwSourcedError (fromMaybe i site) err
+        Right g -> return g
+      -- An equation over a variable of the signature must hold at every
+      -- value of it; one still undecided is not shown to (POLY-1). Nat
+      -- equations are decided by 'checkRigidNats' (POLY-7).
+      case [ p
+           | p@(t1, t2) <- gammaDeferred g1
+           , not (natDeferred p)
+           , not (Set.null (Set.intersection (gammaRigidSlots g1) (rigidSlotVars (apply g1 t1) <> rigidSlotVars (apply g1 t2))))
+           ] of
+        p@(t1, t2) : _ ->
+          let (d1, d2) = prettyTypeUPair (apply g1 t1) (apply g1 t2)
+           in MM.throwSourcedError (Map.findWithDefault i p (gammaDeferredAt g1)) $
+                "The compiler cannot show that this equation holds for every value of the signature's variables:"
+                  <+> d1 <+> "~" <+> d2
+        [] -> return ()
       let rigid = fromMaybe Set.empty (gammaRigid g1)
           givens = fromMaybe [] (gammaAssumedConstraints g1)
           obligations = [apply g1 c | c@(Constraint _ _) <- gammaConstraints g1]
@@ -3566,9 +3591,8 @@ validate = mapM_ one
         [(v, row) | (v, row) <- Map.toList (gammaEffSubs g1), Set.member v rigid]
       checkRigidNats i g1 [(j, t) | AnnoS (Idx j t) _ _ <- annoNodes e1]
       checkShapes g1 e1
-      scope <- MM.getGeneralScope
       env <- MM.gets stateInstances
-      let fixed = Set.unions [rigid, gammaRigidNats g1, gammaRigidRows g1]
+      let fixed = Set.unions [rigid, gammaRigidNats g1, gammaRigidSlots g1]
           mentionsRigid t = any ((`Set.member` fixed) . fst) (varForms t)
           given = map (FI.fixRigidVars fixed . apply g1) givens
       -- An obligation over none of the signature's variables is resolved
@@ -3696,7 +3720,7 @@ checkRigidNats i g bodyTypes
       | (name, SizeU r) <- Map.toList sizes
       , let rows = Set.fromList (collectRecVarNames r)
       , not (Set.null rows)
-      , rows `Set.isSubsetOf` gammaRigidRows g
+      , rows `Set.isSubsetOf` gammaRigidSlots g
       ]
     rigidAll = Set.unions [rigid, rigidSizes, gammaObserved g]
     nonNegative ts = [ND.NatGe e (NS.NatLit 0) | t <- ts, Just e <- [natPositionExpr t]]

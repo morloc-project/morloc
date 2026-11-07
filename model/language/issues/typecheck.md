@@ -232,13 +232,6 @@ literal and record gaps. Reproduced on 0.109.0 unless marked.
   ground type (`other (mkB [n])` with `n :: Int`) and a `newtype Box a = [a]` in
   place of the record both work. Spec gap or defect against CLS-2: a record is a
   type constructor like any other.
-- **A signature's row variable is not rigid in its body.** [reproduced,
-  2026-11-07, installed 0.112.0] Violates POLY-1 and SIG-1. With `mkPy :: Int ->
-  Table n {x = Int, y = Str}`, `q :: Int -> Table m r; q k = mkPy k` passes the
-  check against its signature; it is refused only when used at another row
-  (`run :: Int -> Table m {z = Real}; run k = q k`), inside `q`'s body: "Rec key
-  sets differ". The Str, Rec, List and Set solvers take no rigid set
-  (Typecheck/Internal.hs); Specialize.hs `pinsKey` relies on this.
 - **A literal at a constrained variable fails inside the body at some
   instances.** [reproduced, 2026-11-07, installed 0.112.0] Violates SIG-1.
   `inc :: Numeric a => a -> a; inc x = x + 1` passes the check against its
@@ -247,3 +240,17 @@ literal and record gaps. Reproduced on 0.109.0 unless marked.
   its body: "Numeric literal cannot have type Vector 3 Real". The signature
   admits a type its body does not. Bound up with the literal ruling (PLAN
   item 4 of /work/plans/typecheck-once).
+- **A Set variable in a signature is never instantiated.** [reproduced,
+  2026-11-07, installed 0.112.0] Violates POLY-1. With `type Tags (s :: Set)`,
+  `size :: Tags s -> Int` and `mkA :: Int -> Tags (Keys {a = Int})`, the
+  definition `f :: Int -> Int; f k = size (mkA k)` fails "expected: Tags s,
+  inferred: Tags {"a"} ... Type mismatch fall through". Typecheck/Internal.hs
+  `renameWithMap` freshens Nat, Str, Rec, List and effect variables per use
+  but not Set variables (there is no Set collector), and the subtype rules do
+  not take the signature's `s` for a Set expression.
+- **A type mismatch can print two variables as one.** [reproduced,
+  2026-11-07] Spec gap in diagnostics.md. `both :: Tag u -> Tag u -> Int; q ::
+  Tag s -> Tag t -> Int; q a b = both a b` reports "expected: Tag a, inferred:
+  Tag a ... a <: a": each side's variables are renamed for display on their
+  own, so `s` and `t` both print as `a`, and the message cannot show which
+  variables collided.

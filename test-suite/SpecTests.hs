@@ -48,6 +48,7 @@ specTests =
     , localOption (mkTimeout 2000000) cls18Tests
     , localOption (mkTimeout 5000000) cls2OwnInstanceTests
     , localOption (mkTimeout 2000000) cls20Tests
+    , localOption (mkTimeout 5000000) poly1Tests
     , localOption (mkTimeout 5000000) poly7Tests
     , localOption (mkTimeout 2000000) bindTests
     , localOption (mkTimeout 2000000) hostTests
@@ -5466,6 +5467,112 @@ cls20Tests =
           pick xs b = sel (size2 def) (size2 (unpack b))
         f :: Box -> Int
         f b = pick [1] b
+        |]
+    ]
+
+poly1Tests :: TestTree
+poly1Tests =
+  testGroup
+    "POLY-1"
+    [ rejectSaying
+        "spec-poly-1-1"
+        "which the body must accept at every value"
+        [r|
+        module main (q)
+          type Table (n :: Nat) (r :: Rec)
+          mk :: Int -> Table n {x = Int, y = Str}
+          q :: Int -> Table m r
+          q k = mk k
+        |]
+    , accept
+        "spec-poly-1-2"
+        [r|
+        module main (q)
+          type Table (n :: Nat) (r :: Rec)
+          mk :: Int -> Table n {x = Int, y = Str}
+          q :: Int -> Table m {x = Int, y = Str}
+          q k = mk k
+        |]
+    , accept
+        "spec-poly-1-3"
+        [r|
+        module main (q)
+          type Table (n :: Nat) (r :: Rec)
+          nrows :: Table n s -> Int
+          q :: Table m r -> Int
+          q t = nrows t
+        |]
+    , rejectSaying
+        "spec-poly-1-4"
+        "which the body must accept at every value"
+        [r|
+        module main (q)
+          type Tag (s :: Str)
+          mk :: Int -> Tag "a"
+          q :: Int -> Tag s
+          q k = mk k
+        |]
+    , accept
+        "spec-poly-1-5"
+        [r|
+        module main (q)
+          type Table (n :: Nat) (r :: Rec)
+          idT :: Table n s -> Table n s
+          q :: Table m r -> Table m r
+          q t = idT t
+        |]
+    , rejectSaying
+        "spec-poly-1-6"
+        "which the body must accept at every value"
+        [r|
+        module main (q)
+          type Table (n :: Nat) (r :: Rec)
+          q :: Table m r -> Table m s
+          q t = t
+        |]
+    , rejectSaying
+        "spec-poly-1-7"
+        "which the body must accept at every value"
+        [r|
+        module main (q)
+          type Table (n :: Nat) (r :: Rec)
+          both :: Table n (u + {b = Int}) -> Table n u -> Int
+          mk :: Table n s -> Table n {a = Int}
+          q :: Table m r -> Int
+          q t = both t (mk t)
+        |]
+    , rejectSaying
+        "spec-poly-1-9"
+        "which the body must accept at every value"
+        [r|
+        module main (q)
+          type Table (n :: Nat) (r :: Rec)
+          two :: Table n (u + w) -> Table n (u + v) -> Table n w -> Table n v -> Int
+          q :: Table m r -> Table m s -> Table m {} -> Int
+          q a b e = two a b e e
+        |]
+    , rejectSaying
+        "spec-poly-1-10"
+        "cannot show that this equation holds"
+        [r|
+        module main (q)
+          type Table (n :: Nat) (r :: Rec)
+          getB :: Table n (u + {b = Int}) -> Int
+          q :: Table m r -> Int
+          q t = getB t
+        |]
+    , rejectSaying
+        "spec-poly-1-8"
+        "needs"
+        [r|
+        module main (q)
+          type Tag (s :: Str)
+          class Lbl a where
+            lbl :: a -> Str
+          instance Lbl (Tag "a") where
+            lbl t = "a"
+          q :: Tag s -> Str
+          q t = lbl t
         |]
     ]
 

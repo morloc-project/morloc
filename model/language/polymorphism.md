@@ -3,11 +3,17 @@
 Quantifiers, instantiation, generalization, scope of type variables. Prefix: POLY.
 
 ### POLY-1 Type variables in a signature are universally quantified
-Intent: proposed
+Intent: ruled 2026-11-07
+Tests: spec-poly-1-1, spec-poly-1-2, spec-poly-1-3, spec-poly-1-4, spec-poly-1-5, spec-poly-1-6, spec-poly-1-7, spec-poly-1-8, spec-poly-1-9, spec-poly-1-10
 Code: deviates (issues/typecheck.md)
 
 A lowercase name in a type signature is a type variable, quantified over
 the whole signature. Every use of the term may instantiate it differently.
+The body must hold for every value of each variable. This holds for
+variables of every kind: a `Str`, `Rec`, `List` or `Set` variable is never
+fixed by the body, even one that occurs only in the result, so
+`mvp :: n@U64 -> Table n r` may not return a table whose row the body
+chooses; the signature names the row. Nat and Int variables follow POLY-7.
 
 ### POLY-2 All polymorphism is resolved before the program runs
 Intent: proposed

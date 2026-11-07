@@ -95,6 +95,9 @@ module Morloc.Typecheck.Internal
   , isSubtypeOf2
   , isSubtypeOfOpen
   , recheckDeferred
+  , settleDeferred
+  , natDeferred
+  , fixedSlot
   , typeUToNatExpr
   , natExprToTypeU
   , natPositions
@@ -165,7 +168,7 @@ emptyGamma =
     , gammaSolved = Map.empty, gammaDeferred = [], gammaDeferredAt = Map.empty, gammaKindSubs = Map.empty
     , gammaEffSubs = Map.empty, gammaConstraints = [], gammaAssumedConstraints = Nothing
     , gammaIntVals = Map.empty, gammaPendingNumLits = [], gammaPositionalReceivers = Set.empty
-    , gammaRigid = Nothing, gammaRigidNats = Set.empty, gammaRigidRows = Set.empty, gammaRigidDomain = [], gammaLabelVars = Map.empty, gammaObserved = Set.empty, gammaDefinitionLambda = Nothing, gammaScoped = Map.empty, gammaUnfolded = Set.empty
+    , gammaRigid = Nothing, gammaRigidNats = Set.empty, gammaRigidSlots = Set.empty, gammaRigidDomain = [], gammaLabelVars = Map.empty, gammaObserved = Set.empty, gammaDefinitionLambda = Nothing, gammaScoped = Map.empty, gammaUnfolded = Set.empty
     }
 
 -- | The type constructor at the head of a type, if it has one.
@@ -618,13 +621,13 @@ instance Applicable TypeU where
   apply g (NatDivU a b) = NatDivU (apply g a) (apply g b)
   apply _ t@NatVoidU = t
   apply g (StrVarU v) = case Map.lookup (v, KindStr) (gammaKindSubs g) of
-    Just t -> t
+    Just t -> apply (g {gammaKindSubs = Map.delete (v, KindStr) (gammaKindSubs g)}) t
     Nothing -> StrVarU v
   apply _ t@(StrLitU _) = t
   apply g (StrConcatU a b) = StrConcatU (apply g a) (apply g b)
   apply _ t@StrVoidU = t
   apply g (RecVarU v) = case Map.lookup (v, KindRec) (gammaKindSubs g) of
-    Just t -> t
+    Just t -> apply (g {gammaKindSubs = Map.delete (v, KindRec) (gammaKindSubs g)}) t
     Nothing -> RecVarU v
   apply _ t@RecEmptyU = t
   apply g (RecExtendU k a b) = RecExtendU k (apply g a) (apply g b)
@@ -642,13 +645,13 @@ instance Applicable TypeU where
   -- (KindSet KindStr) respectively, matching how their solutions are
   -- inserted by the list/set solvers.
   apply g (ListVarU v) = case Map.lookup (v, KindList KindStr) (gammaKindSubs g) of
-    Just t -> t
+    Just t -> apply (g {gammaKindSubs = Map.delete (v, KindList KindStr) (gammaKindSubs g)}) t
     Nothing -> ListVarU v
   apply g (ListLitU es) = ListLitU (map (apply g) es)
   apply g (ListAppU a b) = ListAppU (apply g a) (apply g b)
   apply _ t@ListVoidU = t
   apply g (SetVarU v) = case Map.lookup (v, KindSet KindStr) (gammaKindSubs g) of
-    Just t -> t
+    Just t -> apply (g {gammaKindSubs = Map.delete (v, KindSet KindStr) (gammaKindSubs g)}) t
     Nothing -> SetVarU v
   apply _ t@SetEmptyU = t
   apply g (SetLitU es) = SetLitU (map (apply g) es)
@@ -981,11 +984,19 @@ strExprToTypeU (SS.StrConcat a b) = StrConcatU (strExprToTypeU a) (strExprToType
 -- gamma map. Mirrors applyNatSolutions but the StrSolver only ever
 -- produces ground assignments (per memo 04), so there is no
 -- existential-vs-StrVar dispatch.
+-- | Record a kind variable's solution, resolved through the solutions
+-- already recorded. One that resolves to the variable itself closes a cycle
+-- (a solver equating two variables both ways) and is dropped, so the
+-- variables stay equal.
+insertKindSub :: Kind -> (TVar -> TypeU) -> TVar -> TypeU -> Gamma -> Gamma
+insertKindSub k varU v t g = case apply g t of
+  t' | t' == varU v -> g
+     | otherwise -> g {gammaKindSubs = Map.insert (v, k) t' (gammaKindSubs g)}
+
 applyStrSolutions :: Map.Map TVar SS.StrExpr -> Gamma -> Gamma
 applyStrSolutions subs g0 = foldl insertSub g0 (Map.toList subs)
   where
-    insertSub g (v, se) =
-      g { gammaKindSubs = Map.insert (v, KindStr) (strExprToTypeU se) (gammaKindSubs g) }
+    insertSub g (v, se) = insertKindSub (KindStr) StrVarU v (strExprToTypeU se) g
 
 -- | True iff the TypeU is a Rec-kinded expression (variable, empty,
 -- extension, union, difference, intersection). Mirrors isNatExpr/isStrExpr.
@@ -1019,12 +1030,57 @@ recExprToTypeU (RS.RecUnion a b) = RecUnionU (recExprToTypeU a) (recExprToTypeU 
 recExprToTypeU (RS.RecDiff a ks) = RecDiffU (recExprToTypeU a) ks
 recExprToTypeU (RS.RecIntersect a b) = RecIntersectU (recExprToTypeU a) (recExprToTypeU b)
 
+-- | A kind solver's bindings, checked against the Str, Rec and List
+-- variables of the signatures whose bodies are being checked, which stand for
+-- every value of their kind (POLY-1). The bindings from such a variable are
+-- followed through other variables: when they end at a variable, every
+-- variable on the way is bound to it instead; when they end at anything
+-- else, or pass another such variable, the body fixes it, and it is
+-- returned.
+pinSlots :: Gamma -> (e -> Maybe TVar) -> (TVar -> e) -> Map.Map TVar e -> Either TVar (Map.Map TVar e)
+pinSlots g asVar var subs0 = foldM pin subs0 (filter (`Set.member` fixed) (Map.keys subs0))
+  where
+    fixed = gammaRigidSlots g
+    pin subs v = follow (Set.singleton v) [v] v
+      where
+        follow seen chain w = case Map.lookup w subs of
+          Nothing -> settle chain
+          Just e -> case asVar e of
+            Just u
+              | Set.member u seen -> settle chain
+              | otherwise -> follow (Set.insert u seen) (u : chain) u
+            Nothing -> Left v
+        settle chain
+          | any (\x -> x /= v && Set.member x fixed) chain = Left v
+          | otherwise = Right (foldr (\x acc -> if x == v then Map.delete x acc else Map.insert x (var v) acc) subs chain)
+
+-- | The message for a variable 'pinSlots' refuses, by the name the
+-- signature gave it.
+fixedSlot :: TVar -> MDoc
+fixedSlot (TV v) =
+  "the body fixes" <+> squotes (pretty (MT.takeWhile (/= '@') v)) <> ", a variable of the signature, which the body must accept at every value"
+
+strVar :: SS.StrExpr -> Maybe TVar
+strVar (SS.StrVar v) = Just v
+strVar _ = Nothing
+
+recVar :: RS.RecExpr -> Maybe TVar
+recVar (RS.RecVar v) = Just v
+recVar _ = Nothing
+
+listVar :: LS.ListExpr -> Maybe TVar
+listVar (LS.ListVar v) = Just v
+listVar _ = Nothing
+
+setVar :: SetS.SetExpr -> Maybe TVar
+setVar (SetS.SetVar v) = Just v
+setVar _ = Nothing
+
 -- | Insert solved Rec-tail variable assignments into the kind-tagged gamma map.
 applyRecSolutions :: Map.Map TVar RS.RecExpr -> Gamma -> Gamma
 applyRecSolutions subs g0 = foldl insertSub g0 (Map.toList subs)
   where
-    insertSub g (v, re) =
-      g { gammaKindSubs = Map.insert (v, KindRec) (recExprToTypeU re) (gammaKindSubs g) }
+    insertSub g (v, re) = insertKindSub (KindRec) RecVarU v (recExprToTypeU re) g
 
 -- | True iff the TypeU is a List-kinded expression. Mirrors isRecExpr.
 isListExpr :: TypeU -> Bool
@@ -1049,8 +1105,7 @@ listExprToTypeU (LS.ListApp a b) = ListAppU (listExprToTypeU a) (listExprToTypeU
 applyListSolutions :: Map.Map TVar LS.ListExpr -> Gamma -> Gamma
 applyListSolutions subs g0 = foldl insertSub g0 (Map.toList subs)
   where
-    insertSub g (v, le) =
-      g { gammaKindSubs = Map.insert (v, KindList KindStr) (listExprToTypeU le) (gammaKindSubs g) }
+    insertSub g (v, le) = insertKindSub (KindList KindStr) ListVarU v (listExprToTypeU le) g
 
 -- | True iff the TypeU is a Set-kinded expression. Mirrors isRecExpr.
 isSetExpr :: TypeU -> Bool
@@ -1085,8 +1140,7 @@ setExprToTypeU (SetS.SetDiff a b) = SetDiffU (setExprToTypeU a) (setExprToTypeU 
 applySetSolutions :: Map.Map TVar SetS.SetExpr -> Gamma -> Gamma
 applySetSolutions subs g0 = foldl insertSub g0 (Map.toList subs)
   where
-    insertSub g (v, se) =
-      g { gammaKindSubs = Map.insert (v, KindSet KindStr) (setExprToTypeU se) (gammaKindSubs g) }
+    insertSub g (v, se) = insertKindSub (KindSet KindStr) SetVarU v (setExprToTypeU se) g
 
 -- | Record solutions of Nat equations; @ints@ names the variables of the
 -- equations that are Int-kinded, and @restore@ turns the opaque naturals
@@ -1104,6 +1158,36 @@ applyNatSolutions ints restore subs g0 = foldM applySub g0 (Map.toList subs)
            Right Nothing ->
              Right g { gammaKindSubs = Map.insert (v, k) t (gammaKindSubs g) }
            Left err -> Left err
+
+-- | Compare the deferred equations other than Nat equations again under the
+-- solutions the others give, until a round settles none: each is decided
+-- with every other's solution in force, never alone. A contradiction comes
+-- back with its equation; what is still deferred is undecided. Each
+-- equation deferred again keeps the term it arose at.
+settleDeferred :: Scope -> Gamma -> Either (Maybe Int, MDoc) Gamma
+settleDeferred scope = go
+  where
+    go g = do
+      let (nats, others) = Data.List.partition natDeferred (gammaDeferred g)
+          forms h ps = Set.fromList [(apply h a, apply h b) | (a, b) <- ps]
+      g' <- foldM again g {gammaDeferred = nats} others
+      let left = filter (not . natDeferred) (gammaDeferred g')
+      if null left || forms g' left == forms g others then return g' else go g'
+    again acc p@(t1, t2) =
+      let site = Map.lookup p (gammaDeferredAt acc)
+       in case subtype scope t1 t2 acc {gammaDeferred = []} of
+            Left err -> Left (site, err)
+            Right acc' ->
+              let added = gammaDeferred acc'
+                  at = case site of
+                    Just i -> foldr (\q -> Map.insertWith (\_ old -> old) q i) (gammaDeferredAt acc') added
+                    Nothing -> gammaDeferredAt acc'
+               in Right acc' {gammaDeferred = added <> gammaDeferred acc, gammaDeferredAt = at}
+
+-- | Whether a deferred equation is between Nat positions, decided by the
+-- Nat procedure (DIM-7) rather than by the kind solvers.
+natDeferred :: (TypeU, TypeU) -> Bool
+natDeferred (a, b) = isJust (natPositionExpr a) && isJust (natPositionExpr b)
 
 -- | Re-check deferred kind constraints after all existentials are solved.
 -- Applies the final gamma to each deferred pair, classifies as a Nat, Str,
@@ -1547,9 +1631,11 @@ subtype _ t1 t2 g
       in case (typeUToStrExpr t1', typeUToStrExpr t2') of
            (Just se1, Just se2) ->
              case SS.solveStr se1 se2 of
-               Right subs
-                 | Map.null subs -> return g
-                 | otherwise -> return (applyStrSolutions subs g)
+               Right subs0 -> case pinSlots g strVar SS.StrVar subs0 of
+                 Left v -> subtypeError t1 t2 (fixedSlot v)
+                 Right subs
+                   | Map.null subs -> return g
+                   | otherwise -> return (applyStrSolutions subs g)
                Left (SS.StrContradiction _ _) ->
                  subtypeError t1 t2 "Str constraint mismatch"
                Left SS.StrDeferred ->
@@ -1569,15 +1655,14 @@ subtype scope t1 t2 g
       in case (typeUToRecExpr t1', typeUToRecExpr t2') of
            (Just re1, Just re2) ->
              case RS.solveRec re1 re2 of
-               Right sol ->
+               Right sol -> case pinSlots g recVar RS.RecVar (RS.recSubs sol) of
+                 Left v -> subtypeError t1 t2 (fixedSlot v)
                  -- The solver aligns the rows; the field types it matched
                  -- may still need unifying (one side can be an existential),
                  -- and only subtype can do that.
-                 let g' = if Map.null (RS.recSubs sol)
-                            then g
-                            else applyRecSolutions (RS.recSubs sol) g
-                  in foldM (\gAcc (a, b) -> subtype scope a b gAcc)
-                           g' (RS.recFieldEqs sol)
+                 Right subs ->
+                   let g' = if Map.null subs then g else applyRecSolutions subs g
+                    in foldM (\gAcc (a, b) -> subtype scope a b gAcc) g' (RS.recFieldEqs sol)
                Left (RS.RecContradiction msg) ->
                  subtypeError t1 t2 ("Rec constraint mismatch: " <> pretty msg)
                Left (RS.RecMalformed msg) ->
@@ -1608,9 +1693,11 @@ subtype _ t1 t2 g
       in case (typeUToListExpr t1', typeUToListExpr t2') of
            (Just le1, Just le2) ->
              case LS.solveList le1 le2 of
-               Right subs
-                 | Map.null subs -> return g
-                 | otherwise -> return (applyListSolutions subs g)
+               Right subs0 -> case pinSlots g listVar LS.ListVar subs0 of
+                 Left v -> subtypeError t1 t2 (fixedSlot v)
+                 Right subs
+                   | Map.null subs -> return g
+                   | otherwise -> return (applyListSolutions subs g)
                Left (LS.ListContradiction msg) ->
                  subtypeError t1 t2 ("List constraint mismatch: " <> pretty msg)
                Left LS.ListDeferred ->
@@ -1628,9 +1715,11 @@ subtype _ t1 t2 g
       in case (typeUToSetExpr t1', typeUToSetExpr t2') of
            (Just se1, Just se2) ->
              case SetS.solveSet se1 se2 of
-               Right subs
-                 | Map.null subs -> return g
-                 | otherwise -> return (applySetSolutions subs g)
+               Right subs0 -> case pinSlots g setVar SetS.SetVar subs0 of
+                 Left v -> subtypeError t1 t2 (fixedSlot v)
+                 Right subs
+                   | Map.null subs -> return g
+                   | otherwise -> return (applySetSolutions subs g)
                Left (SetS.SetContradiction msg) ->
                  subtypeError t1 t2 ("Set constraint mismatch: " <> pretty msg)
                Left SetS.SetDeferred ->

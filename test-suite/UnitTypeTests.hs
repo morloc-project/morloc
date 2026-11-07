@@ -517,7 +517,7 @@ listToGamma gs =
     , gammaPendingNumLits = []
     , gammaRigid = Nothing
     , gammaRigidNats = Set.empty
-    , gammaRigidRows = Set.empty
+    , gammaRigidSlots = Set.empty
     , gammaRigidDomain = []
     , gammaLabelVars = Map.empty
     , gammaObserved = Set.empty
@@ -7787,6 +7787,12 @@ typedefKindVarTests =
     -- VarU case in Typecheck/Internal.hs), so a synthetic pair that
     -- classifies as NONE of Nat/Str/Rec/List/Set must use a shape no
     -- classifier accepts: FunU here.
+    , exprTestBad "deferred row equations are decided together, not one by one" $
+        "module main (top)\n\
+        \type Table (n :: Nat) (r :: Rec)\n\
+        \two :: Table n (u + w) -> Table n (u + v) -> Table n w -> Table n v -> Int\n\
+        \top :: Table m {a = Int} -> Table m {c = Int} -> Table m {} -> Int\n\
+        \top x y z = two x y z z\n"
     , testCase "recheckDeferred rejects an unclassifiable pair" $
         let bad = FunU [] (VarU (TV "a"))
             g0 = (listToGamma []) { gammaDeferred = [(bad, bad)] }
