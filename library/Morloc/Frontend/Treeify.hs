@@ -58,10 +58,12 @@ data Namer = Namer
   , namerIndex :: Int
   , namerExpanding :: Map.Map Int EVar  -- terms currently being expanded, by term identity, with the name their back-edges use
   , namerRecursive :: Set.Set Int  -- terms reached through a back-edge while being expanded
-  , namerShallow :: Maybe Int  -- when collecting a definition to check against its signature: its term id
+  , namerShallow :: Int  -- the term id of the definition collected
   , namerShallowOnly :: Maybe (Set.Set Int)
   -- ^ with 'namerShallow': only these terms are referenced by signature;
   -- every other term is expanded
+  , namerInline :: Set.Set Int
+  -- ^ the class methods expanded in place at their uses
   }
   deriving (Show)
 
@@ -511,17 +513,15 @@ linkAndRemoveAnnotations = f
     f (ExprI i (IntrinsicE intr es)) = ExprI i <$> (IntrinsicE intr <$> mapM f es)
     f e@(ExprI _ _) = return e
 
--- | Collect the tree of the term at index @gi@ named @v@. With @Nothing@
--- every term it reaches is expanded. With @Just ts@ a reference to a term in
--- @ts@ other than the root is left as its signature alone, a
--- @VarS v (MonomorphicExpr (Just sig) [])@.
-collectRoot :: Maybe (Set.Set Int) -> (Int, EVar) -> MorlocMonad (AnnoS Int ManyPoly Int)
-collectRoot only (gi, v) = do
+-- | Collect the tree of the term at index @gi@ named @v@. A reference to a
+-- term in @only@ other than the root is left as its signature alone, a
+-- @VarS v (MonomorphicExpr (Just sig) [])@, and a class method is left as its
+-- instances' types unless it is in @inline@.
+collectRoot :: Set.Set Int -> Set.Set Int -> (Int, EVar) -> MorlocMonad (AnnoS Int ManyPoly Int)
+collectRoot only inline (gi, v) = do
   GMap idmap _ <- MM.gets stateSignatures
-  let shallow = case only of
-        Nothing -> Nothing
-        Just _ -> Just (fromMaybe (-1) (Map.lookup gi idmap))
-  snd <$> collect (Namer Map.empty 0 Map.empty Set.empty shallow only) (gi, v)
+  let shallow = fromMaybe (-1) (Map.lookup gi idmap)
+  snd <$> collect (Namer Map.empty 0 Map.empty Set.empty shallow (Just only) inline) (gi, v)
 
 -- | One tree per signed top-level definition of the root module, collected
 -- in shallow mode (see 'namerShallow'), and each such definition's
@@ -538,7 +538,7 @@ contractRoots (ExprI _ (ModE _ es)) = do
           ]
       firstPerTerm = Map.elems (Map.fromListWith (\_ a -> a) [(tid, x) | x@(tid, _, _) <- defs])
   trees <- mapM
-    (\(termId, v, i) -> snd <$> collect (Namer Map.empty 0 Map.empty Set.empty (Just termId) Nothing) (i, v))
+    (\(termId, v, i) -> snd <$> collect (Namer Map.empty 0 Map.empty Set.empty termId Nothing Set.empty) (i, v))
     firstPerTerm
   -- each method an instance of the module defines, checked against the
   -- method's type at the instance's types, its body assuming the instance's
@@ -553,7 +553,7 @@ contractRoots (ExprI _ (ModE _ es)) = do
       bodyType = Map.fromList methodTypes
   instanceTrees <- sequence
     [ do
-        (_, body') <- collectAnnoS (Namer Map.empty 0 Map.empty Set.empty (Just k) Nothing) body
+        (_, body') <- collectAnnoS (Namer Map.empty 0 Map.empty Set.empty k Nothing Set.empty) body
         let et' = et {econs = Set.union (econs et) (Set.fromList ctx)}
         return (AnnoS i i (VarS v (MonomorphicExpr (Just et') [body'])))
     | ExprI _ (IstE _ _ ctx _ ies) <- es
@@ -644,15 +644,13 @@ collectExprS namer0 (ExprI gi0 e0) = f namer0 e0
         -- Shallow collection: a class method is left as its instances'
         -- types. For specialization it is elaborated at the use's type; a
         -- use of a method inside its own expansion is not a back-edge, since
-        -- it may resolve to another instance (in full collection the next
-        -- case makes it one, which Specialize reopens at another type).
-        -- Validation checks a method use as an
+        -- it may resolve to another instance. Validation checks a method use as an
         -- obligation and never reads its instances' bodies (they are
         -- checked where the use is elaborated), so it never expands one.
         (Just k, GMapJust (Polymorphic cls clsName t))
-          | Just r <- namerShallow namer
-          , Nothing <- Map.lookup v (namerMap namer)
-          , isNothing (namerShallowOnly namer) || k /= r || Map.member k (namerExpanding namer) -> do
+          | Nothing <- Map.lookup v (namerMap namer)
+          , isNothing (namerShallowOnly namer) || k /= namerShallow namer || Map.member k (namerExpanding namer)
+          , Set.notMember k (namerInline namer) || Map.member k (namerExpanding namer) -> do
               env <- MM.gets stateInstances
               return (namer, VarS v (PolymorphicExpr cls clsName t [(mtKey x, mtType x, []) | x <- FI.methodTerms env cls clsName]))
         -- A reference to a term that is being expanded is a recursive
@@ -667,8 +665,7 @@ collectExprS namer0 (ExprI gi0 e0) = f namer0 e0
         -- top-level term is referenced by its signature, not expanded (it is
         -- checked against its signature on its own).
         (Just k, GMapJust (Monomorphic t))
-          | Just r <- namerShallow namer
-          , r /= k
+          | namerShallow namer /= k
           , maybe True (Set.member k) (namerShallowOnly namer)
           , Just _ <- termGeneral t
           , not (MT.isInfixOf "`" (unEVar v)) ->

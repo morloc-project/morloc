@@ -10,7 +10,7 @@ Replaced by CLS-7: a class may give a method a default body.
 
 ### CLS-2 The type at the use site selects the instance
 Intent: proposed
-Tests: spec-cls-2-1, spec-cls-2-2, spec-cls-2-3, spec-cls-2-4, spec-cls-2-5, spec-cls-2-6, spec-cls-2-7, spec-cls-2-8, spec-cls-2-9, spec-cls-2-10, spec-cls-2-11, spec-cls-2-12, spec-cls-2-13, spec-cls-2-14
+Tests: spec-cls-2-1, spec-cls-2-2, spec-cls-2-3, spec-cls-2-4, spec-cls-2-5, spec-cls-2-6, spec-cls-2-7, spec-cls-2-8, spec-cls-2-9, spec-cls-2-10, spec-cls-2-11, spec-cls-2-12, spec-cls-2-13, spec-cls-2-14, spec-cls-2-15
 Code: deviates (issues/typeclasses.md)
 
 A method used at type `T` runs an implementation of the instance for `T`.

@@ -224,10 +224,11 @@ literal and record gaps. Reproduced on 0.109.0 unless marked.
   and with a function field `.f (mkr k) 5` is rejected while `(.f (mkr k)) 5`
   runs, against APP-1 (`applyPattern` decides by argument count; only the
   setter syntax should build a setter).
-- **Full expansion of a definition using a comparison does not terminate.**
-  [reproduced, 2026-11-07] Spec gap in cost.md: nothing bounds what expanding in
-  place may cost. `f n = tally [] <> g (n > 0)`, with `tally :: f a -> Str` and
-  `import root-py`, is still typechecking after 300 s at 2.6 GiB; `n == 0` in its
-  place takes 0.2 s. An open element type (`tally []`) sends the whole definition to
-  `collectRoot Nothing`, which expands every instance body of `Ord` in root. A
-  signature on `f` does not help. Replacing `tally []` removes it.
+- **A record applied to a variable does not match a class variable.**
+  [reproduced, 2026-11-07, also on b05f877b5] With `class Other f where other ::
+  f a -> Str`, `record Box a where val :: [a]`, `instance Other Box` and
+  `mkB :: [a] -> Box a`, the definition `k :: [a] -> Str; k xs = other (mkB
+  xs)` fails "Type mismatch: expected: a b, inferred: Box a". The same call at a
+  ground type (`other (mkB [n])` with `n :: Int`) and a `newtype Box a = [a]` in
+  place of the record both work. Spec gap or defect against CLS-2: a record is a
+  type constructor like any other.

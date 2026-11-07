@@ -20,13 +20,9 @@ indices and binder names, so the output has the same shape as a tree whose
 every term was expanded in place, and every later pass is unchanged.
 
 A reference whose key is not fully solved (an existential remains) cannot be
-elaborated on its own: the definition, or export, it occurs in is instead
-checked with every term expanded in place. There, a use of a method inside its
-own expansion is at first a back-edge; one at another type becomes a reference
-again, since that type may select another instance (CLS-2). A generic export is
-never realized
-(SIG-5), so it is checked with its references left as their signatures and
-nothing is chosen for it.
+elaborated on its own: a definition is then expanded in place, and so is a
+method at its uses, its instances' own method uses still references. A generic export is never realized (SIG-5), so it is checked with
+its references left as their signatures and nothing is chosen for it.
 
 Recursion between definitions is found while splicing: a reference to a
 definition already being spliced at the same key becomes a 'CallS' back-edge
@@ -34,8 +30,7 @@ to it, and at a different key is polymorphic recursion, which is rejected.
 -}
 module Morloc.Frontend.Specialize (specialize, isGenericExport) where
 
-import qualified Morloc.BaseTypes as BT
-import Morloc.Data.Zip (indexed, zipWithSame)
+import Morloc.Data.Zip (indexed)
 import Data.IORef
 import qualified Data.List as List
 import qualified Data.Map as Map
@@ -49,7 +44,7 @@ import Morloc.Frontend.Treeify (Validation (..), collectRoot, recName)
 import Morloc.Frontend.Typecheck (typecheckRoot, typecheckRootAt)
 import Morloc.Data.Doc
 import qualified Morloc.Monad as MM
-import Morloc.Typecheck.Internal (mapTypeUChildren, typeUChildren, unqualify)
+import Morloc.Typecheck.Internal (unqualify)
 
 type Typed = AnnoS (Indexed TypeU) Many Int
 
@@ -100,15 +95,12 @@ specializeExport spec (gi, v) = do
                 return (AnnoS (Idx gt t) c (VarS tok alts'))
               else return (AnnoS (Idx gt t) c (VarS name alts'))
       _ -> spliceRoot
-    InPlace -> spliceRoot
     Generic -> return typed
 
 -- | How far a checked tree was taken.
 data Collected
   = -- | every reference can be elaborated: ready to splice
     Elaborable
-  | -- | checked with every term expanded in place
-    InPlace
   | -- | a generic export (SIG-5), checked with its references left as their
     -- signatures; it is never realized, so nothing is chosen for it
     Generic
@@ -122,69 +114,36 @@ isGenericExport = containsUnk . typeOf
 -- cannot be elaborated on its own, and leaving the rest to be shared.
 --
 -- Each pass expands at least one more term than the last, so this
--- terminates. A stuck reference this pass cannot expand (a class method)
--- leaves the set unchanged, and the final pass expands everything. With
--- @export@ set, an export whose type is still generic once no definition is
--- left to expand is not taken further.
+-- terminates: a stuck definition is expanded, and a method with a stuck use is
+-- expanded at each of its uses, its instances' own uses of it left as
+-- references. A reference still stuck when a pass expands nothing new is
+-- refused. With @export@ set, an export whose type is still generic
+-- once no definition is left to expand is not taken further.
 collectElaborable
   :: Spec
   -> Bool
   -> (AnnoS Int ManyPoly Int -> MorlocMonad Typed)
   -> (Int, EVar)
   -> MorlocMonad (Collected, Typed)
-collectElaborable spec export check root = go (Map.keysSet (specDefs spec))
+collectElaborable spec export check root = go (Map.keysSet (specDefs spec)) Set.empty
   where
-    go only = do
-      typed@(AnnoS (Idx _ rootType) _ _) <- collectRoot (Just only) root >>= check
-      stuck <- map fst . filter (not . isElaborable . snd) <$> references spec typed
-      let only' = Set.difference only (Set.fromList stuck)
+    go only inline = do
+      typed@(AnnoS (Idx _ rootType) _ _) <- collectRoot only inline root >>= check
+      stuck <- filter (\r -> not (isElaborable (refType r))) <$> references spec typed
+      let only' = Set.difference only (Set.fromList (map refKey stuck))
+          inline' = Set.union inline (Set.fromList [refKey r | r <- stuck, refTarget r == Method])
           -- decided only once no definition is left to expand, since a
           -- definition's body can fix what its signature leaves open
           generic = export && isGenericExport rootType
-      if
-        | not (null stuck) && Set.size only' < Set.size only -> go only'
-        | generic -> return (Generic, typed)
-        | null stuck -> return (Elaborable, typed)
-        | otherwise -> (,) InPlace <$> (collectRoot Nothing root >>= check >>= reopenMethodBackEdges)
-
--- | A method back-edge at another type than the expansion it points to becomes
--- a reference, for 'splice' to elaborate at its own type. An open position does
--- not select an instance, so two types that agree elsewhere keep the back-edge;
--- any other difference needs a type to elaborate at.
-reopenMethodBackEdges :: Typed -> MorlocMonad Typed
-reopenMethodBackEdges = go Map.empty
-  where
-    go :: Map.Map EVar TypeU -> Typed -> MorlocMonad Typed
-    go env (AnnoS idx@(Idx gi t) ci e) = case e of
-      CallS v
-        | Just target <- Map.lookup v env -> do
-            sigs <- MM.gets stateSignatures
-            if
-              | agrees t target -> return (AnnoS idx ci e)
-              | not (isMethodAt sigs ci) ->
-                  if isElaborable t && isElaborable target
-                    then
-                      MM.throwCompilerBugAt gi $
-                        "the call of" <+> squotes (pretty v) <+> "here is bound to its own definition, of type"
-                          <+> pretty target <> ", at another type," <+> pretty t
-                    else return (AnnoS idx ci e)
-              | isElaborable t -> return (AnnoS idx ci (VarS (displayName v) (Many [] [])))
-              | otherwise ->
-                  MM.throwSourcedError gi $
-                    "The type of this use of" <+> squotes (pretty (displayName v))
-                      <+> "inside its own instance is not determined, so it cannot be compiled:"
-                      <+> pretty t <> ". Add a signature or an annotation that fixes it."
-      VarS v _ -> AnnoS idx ci <$> mapExprSM (go (Map.insert v t env)) e
-      _ -> AnnoS idx ci <$> mapExprSM (go env) e
-
-    agrees a b = case (a, b) of
-      (ExistU {}, _) -> True
-      (_, ExistU {}) -> True
-      (ForallU _ x, _) -> agrees x b
-      (_, ForallU _ y) -> agrees a y
-      _ ->
-        let heads = mapTypeUChildren (const BT.unitU)
-         in heads a == heads b && and (zipWithSame agrees (typeUChildren a) (typeUChildren b))
+      case stuck of
+        _ | Set.size only' < Set.size only -> go only' inline'
+        _ | generic -> return (Generic, typed)
+        [] -> return (Elaborable, typed)
+        _ | Set.size inline' > Set.size inline -> go only' inline'
+        r : _ ->
+          MM.throwSourcedError (refIndex r) $
+            "The type of this use of" <+> squotes (pretty (refVar r))
+              <+> "is not determined, so it cannot be compiled. Add a signature or an annotation that fixes it."
 
 -- | Whether an index names a class method.
 isMethodAt :: GMap Int Int SignatureSet -> Int -> Bool
@@ -192,16 +151,25 @@ isMethodAt (GMap idmap sigmap) ci = case Map.lookup ci idmap >>= (`Map.lookup` s
   Just Polymorphic {} -> True
   _ -> False
 
--- | The references to checked definitions in a tree, with the type each is
--- solved at.
-references :: Spec -> Typed -> MorlocMonad [(Int, TypeU)]
+-- | A reference in a tree: the term, what it names, the type it is solved at,
+-- and its use.
+data Reference = Reference
+  { refKey :: Int
+  , refTarget :: Target
+  , refType :: TypeU
+  , refIndex :: Int
+  , refVar :: EVar
+  }
+
+-- | The references to checked definitions and methods in a tree.
+references :: Spec -> Typed -> MorlocMonad [Reference]
 references spec = go
   where
-    go n@(AnnoS (Idx _ t) _ e) = do
+    go n@(AnnoS (Idx gi t) _ e) = do
       r <- refTerm spec n
-      case r of
-        Just (k, _) -> return [(k, t)]
-        Nothing -> concat <$> mapM go (foldExprS (: []) e)
+      case (r, e) of
+        (Just (k, target), VarS v _) -> return [Reference k target t gi (displayName v)]
+        _ -> concat <$> mapM go (foldExprS (: []) e)
 
 -- | What a reference names: a checked definition, or a class method.
 data Target = Definition | Method
@@ -423,7 +391,7 @@ splice spec backs stack n@(AnnoS (Idx gi t) ci e) = refTerm spec n >>= \r -> let
     token keys sk@(k, _) =
       let base = recName (maybe (refName e) snd (Map.lookup k (specDefs spec))) k
        in case length (filter ((== k) . fst) (dropWhile (/= sk) keys)) of
-            n | n > 1 -> EV (unEVar base <> "`" <> T.pack (show n))
+            c | c > 1 -> EV (unEVar base <> "`" <> T.pack (show c))
             _ -> base
     refName (VarS v _) = v
     refName _ = EV "?"

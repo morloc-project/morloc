@@ -1,26 +1,5 @@
 # Specialization
 
-- **The in-place fallback expands every instance of every method.**
-  [reproduced, 2026-11-02] When a concrete export still holds a reference
-  whose type is unsolved once no definition is left to expand
-  (Frontend/Specialize.hs `collectElaborable`), the whole tree is collected
-  again with every term expanded in place (`collectRoot Nothing`): each
-  method use brings every instance's body, recursively through the
-  definitions those bodies use, and the result is typechecked. With
-  container instances that use their class again (`Ord a => Ord [a]`,
-  tuples) the tree grows with instances x body raised to the number of
-  methods that reach each other. Reached by POLY-6-exempt variables and by
-  method uses nothing determines (goldens records-complex-1/2,
-  spec-poly-6-1..6, spec-newt-7-12 reach it today). Repro, with a local
-  class of 14 primitive and 8 container instances:
-  `k :: a -> b -> a; f :: Int -> Int; f x = k x (lt [])`. Generic exports
-  no longer reach it (SIG-5). The general fix is S2's instance evidence
-  (/work/plans/error-clusters/s2-instance-evidence.md).
-- **The fallback turns a method's use inside its own expansion into a
-  back-edge.** [read, 2026-11-02] Frontend/Treeify.hs, the `namerExpanding`
-  case: in full collection, the list instance's `<` body using `<` at the
-  element type becomes a `CallS` to the method being expanded, though it
-  resolves to another instance. Not reproduced as a wrong result.
 - **What only generic exports reach is checked only at a concrete use.**
   [read, 2026-11-02] A generic export is checked with its references left
   as signatures and is not realized (SIG-5), so the checks that run over
@@ -65,3 +44,11 @@
   selects by type. Whether the exclusion is still needed, and what lifting
   it saves in copies and compile time, is not measured. Lifting it changes
   which elaborations are shared, hence the generated pools.
+- **A method with one stuck use is expanded at every use.** [read, 2026-11-07]
+  Frontend/Specialize.hs `collectElaborable` expands a method in place at all of
+  its uses in the tree once one use has an unsolved type, each use bringing every
+  instance's body; the cost grows as uses x instances. Expanding only the stuck
+  use needs a key that survives re-collection: expression indices of copied
+  instance bodies are fresh on every pass, so a use-keyed set never stops
+  growing (tried: spec-cls-2-10 did not terminate).
+

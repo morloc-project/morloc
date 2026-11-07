@@ -4965,21 +4965,32 @@ cls2OwnInstanceTests =
     "CLS-2 own instance"
     [ rejectSaying
         "spec-cls-2-12"
-        "inside its own instance is not determined"
+        "is not determined, so it cannot be compiled"
         [r|
         module main (f)
         class Tally f where
           tally :: f a -> Str
-        record Box a where
-          val :: [a]
+        newtype Box a = [a]
         mkB :: [a] -> Box a
-        mkB xs = {val = xs}
         instance Tally List where
           tally xs = tally (mkB xs)
         instance Tally Box where
           tally b = "box"
         f :: Int -> Str
         f n = tally []
+        |]
+    , rejectSaying
+        "spec-cls-2-14"
+        "is not determined, so it cannot be compiled"
+        [r|
+        module main (f)
+        class Tally f where
+          tally :: f a -> Str
+        isEmpty :: [a] -> Bool
+        instance Tally List where
+          tally xs = ? isEmpty xs = "empty" : tally []
+        f :: [Int] -> Str
+        f xs = tally xs
         |]
     , rejectSaying
         "spec-cls-2-13"

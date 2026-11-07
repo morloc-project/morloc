@@ -176,18 +176,13 @@
   2026-11-07] `prettyConstraint` shows `Sizeable (Vector n a)` as `Sizeable (Vector
   b a)`. Spec gap in diagnostics.md: no item says a message quotes what the
   user wrote.
-- **A method's result left open inside its own expansion is refused.**
-  [reproduced, 2026-11-07] Code gap against CLS-2. With `konst :: a -> b -> a`,
-  `instance Render Str where render s = konst "str" (render (size s))` and a
-  use on the full-expansion path (`g x = tally [] <> render x`), the inner use
-  fails "inside its own instance is not determined ... Int -> *b", though
-  its argument selects `Render Int` and the class fixes the result as Str. Full
-  collection makes the use a back-edge, which the checker never instantiates at
-  the method's type, and Specialize can only repair the node afterwards. An
-  annotation should work (not run). Leaving a method use inside its own
-  expansion as a reference during full collection would remove the cause and the
-  repair pass, but a use with an open position then has no key to elaborate at.
-- **A class-level error names a same-shape use the instance could select.**
-  [read, 2026-11-07] spec-cls-2-12: `tally (mkB xs)` at `Box ?a` is refused as not
-  determined, though the head `Box` selects an instance. Its key is open, so it
-  cannot be elaborated on its own (CLS-18 does not rule on this case).
+- **A method used at an open type inside its own instance is refused.**
+  [reproduced, 2026-11-07] Deviates from CLS-2. `instance Tally List where tally
+  xs = ? isEmpty xs = "empty" : tally []` (spec-cls-2-14), or `tally (mkB xs)` at
+  `Box ?a` (spec-cls-2-12), fails "is not determined, so it cannot be compiled",
+  though the class argument (`List`, `Box`) selects the instance and only the
+  method's own variable is open. The same `tally []` outside the instance compiles
+  (spec-cls-2-15): a stuck use there is expanded in place, while a use inside its
+  own expansion must stay a reference to terminate, and a reference needs a solved
+  type. Refusing costs one extra collection pass.
+
