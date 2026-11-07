@@ -48,6 +48,8 @@ specTests =
     , localOption (mkTimeout 2000000) cls18Tests
     , localOption (mkTimeout 5000000) cls2OwnInstanceTests
     , localOption (mkTimeout 2000000) cls20Tests
+    , localOption (mkTimeout 5000000) cls23Tests
+    , localOption (mkTimeout 5000000) cls5ChainTests
     , localOption (mkTimeout 5000000) poly1Tests
     , localOption (mkTimeout 5000000) poly7Tests
     , localOption (mkTimeout 2000000) bindTests
@@ -2212,6 +2214,123 @@ derivTests =
         mkP :: Int -> P
         f :: Int -> (Bool, Bool, Bool, Bool, Bool, Bool)
         f n = (mkP n == mkP 1, mkP n != mkP 1, mkP n < mkP 1, mkP n <= mkP 1, mkP n > mkP 1, mkP n >= mkP 1)
+        |]
+    , rejectSaying
+        "spec-deriv-6-13"
+        "several instances match"
+        [r|
+        module main (lt)
+        class Eq a where
+          (==) :: a -> a -> Bool
+          (!=) :: a -> a -> Bool
+        class Ord a where
+          (<) :: a -> a -> Bool
+          (<=) :: a -> a -> Bool
+          (>) :: a -> a -> Bool
+          (>=) :: a -> a -> Bool
+        record Pair a b where
+          p1 :: a
+          p2 :: b
+        instance Eq (Pair Int b) where
+          (==) x y = True
+          (!=) x y = False
+        instance Eq (Pair a Int) where
+          (==) x y = True
+          (!=) x y = False
+        lt :: Pair Int Int -> Pair Int Int -> Bool
+        lt x y = x < y
+        |]
+    , rejectSaying
+        "spec-cls-23-4"
+        "may match once they are known"
+        [r|
+        module main (ltBox)
+        class Eq a where
+          (==) :: a -> a -> Bool
+          (!=) :: a -> a -> Bool
+        class Ord a where
+          (<) :: a -> a -> Bool
+          (<=) :: a -> a -> Bool
+          (>) :: a -> a -> Bool
+          (>=) :: a -> a -> Bool
+        record Box a where
+          val :: a
+        instance Eq (Box Int) where
+          (==) x y = True
+          (!=) x y = False
+        ltBox :: Box a -> Box a -> Bool
+        ltBox x y = x < y
+        |]
+    , accept
+        "spec-cls-23-5"
+        [r|
+        module main (ltBox)
+        class Eq a where
+          (==) :: a -> a -> Bool
+          (!=) :: a -> a -> Bool
+        class Ord a where
+          (<) :: a -> a -> Bool
+          (<=) :: a -> a -> Bool
+          (>) :: a -> a -> Bool
+          (>=) :: a -> a -> Bool
+        record Box a where
+          val :: a
+        instance Eq (Box Int) where
+          (==) x y = True
+          (!=) x y = False
+        ltBox :: Ord (Box a) => Box a -> Box a -> Bool
+        ltBox x y = x < y
+        |]
+    , rejectNaming
+        "spec-deriv-6-14"
+        ["Eq"]
+        []
+        [r|
+        module main (f)
+        class Eq a where
+          (==) :: a -> a -> Bool
+          (!=) :: a -> a -> Bool
+        class Ord a where
+          (<) :: a -> a -> Bool
+          (<=) :: a -> a -> Bool
+          (>) :: a -> a -> Bool
+          (>=) :: a -> a -> Bool
+        type Id a = a
+        f :: Id a -> Id a -> Bool
+        f x y = x == y
+        |]
+    , rejectNaming
+        "spec-deriv-6-15"
+        ["Ord", "Eq"]
+        []
+        [r|
+        module main (lt)
+        class Eq a where
+          (==) :: a -> a -> Bool
+          (!=) :: a -> a -> Bool
+        class Ord a where
+          (<) :: a -> a -> Bool
+          (<=) :: a -> a -> Bool
+          (>) :: a -> a -> Bool
+          (>=) :: a -> a -> Bool
+        record Pair a b where
+          p1 :: a
+          p2 :: b
+        instance Eq (Pair Int b) where
+          (==) x y = True
+          (!=) x y = False
+        instance Eq (Pair a Int) where
+          (==) x y = True
+          (!=) x y = False
+        record Wrap a where
+          w :: a
+        instance Ord a => Ord (Wrap a) where
+          (<) x y = True
+          (<=) x y = True
+          (>) x y = True
+          (>=) x y = True
+        lt :: Wrap (Pair Int Int) -> Wrap (Pair Int Int) -> Bool
+        lt x y = x < y
         |]
     , rejectNaming
         "spec-deriv-6-2"
@@ -5467,6 +5586,165 @@ cls20Tests =
           pick xs b = sel (size2 def) (size2 (unpack b))
         f :: Box -> Int
         f b = pick [1] b
+        |]
+    ]
+
+cls5ChainTests :: TestTree
+cls5ChainTests =
+  testGroup
+    "CLS-5 chains, CLS-16, CLS-20"
+    [ rejectNaming
+        "spec-cls-5-18"
+        ["Functor"]
+        []
+        [r|
+        module main (h)
+        record R where
+          x :: Int
+        class Functor f where
+          map :: (a -> b) -> f a -> f b
+        class Sliceable f where
+          __get_slice__ :: ?I64 -> ?I64 -> ?I64 -> f a -> f a
+        h :: Sliceable f => f R -> f Int
+        h xs = .[:].x xs
+        |]
+    , accept
+        "spec-cls-5-19"
+        [r|
+        module main (h)
+        record R where
+          x :: Int
+        class Functor f where
+          map :: (a -> b) -> f a -> f b
+        class Sliceable f where
+          __get_slice__ :: ?I64 -> ?I64 -> ?I64 -> f a -> f a
+        h :: (Sliceable f, Functor f) => f R -> f Int
+        h xs = .[:].x xs
+        |]
+    , accept
+        "spec-cls-16-19"
+        [r|
+        module main (f)
+        record R where
+          x :: Int
+        class Functor f where
+          map :: (a -> b) -> f a -> f b
+        class Sliceable f where
+          __get_slice__ :: ?I64 -> ?I64 -> ?I64 -> f a -> f a
+        newtype Bag a = List a
+        instance Sliceable Bag
+        f :: Bag R -> Bag Int
+        f xs = .[:].x xs
+        |]
+    , accept
+        "spec-cls-20-15"
+        [r|
+        module main (k)
+        class Packable a b where
+          pack :: a -> b
+          unpack :: b -> a
+        newtype Bag a = List a
+        instance Packable [a] (Bag a) where
+          source Py from "lib.py" ("pack", "unpack")
+        g :: Packable a (Bag b) => Bag b -> Int
+        k :: Bag Int -> Bag Str -> Int
+        k x y = add (g x) (g y)
+        add :: Int -> Int -> Int
+        |]
+    ]
+
+cls23Tests :: TestTree
+cls23Tests =
+  testGroup
+    "CLS-23"
+    [ rejectSaying
+        "spec-cls-23-1"
+        "may match once they are known"
+        [r|
+        module main (f)
+        class Sh a where
+          sh :: a -> Str
+        instance Sh a where
+          sh x = "any"
+        newtype Box = Int
+        instance Sh Box where
+          sh x = "box"
+        f :: a -> Str
+        f x = sh x
+        |]
+    , accept
+        "spec-cls-23-2"
+        [r|
+        module main (f)
+        class Sh a where
+          sh :: a -> Str
+        instance Sh a where
+          sh x = "any"
+        newtype Box = Int
+        instance Sh Box where
+          sh x = "box"
+        f :: Sh a => a -> Str
+        f x = sh x
+        |]
+    , accept
+        "spec-cls-23-3"
+        [r|
+        module main (f)
+        class Sh a where
+          sh :: a -> Str
+        instance Sh a where
+          sh x = "any"
+        newtype Box = Int
+        instance Sh Box where
+          sh x = "box"
+        f :: Int -> Str
+        f x = sh x
+        |]
+    , rejectNaming
+        "spec-cls-23-6"
+        ["Ord", "Eq"]
+        []
+        [r|
+        module main (ltBox)
+        class Eq a where
+          (==) :: a -> a -> Bool
+          (!=) :: a -> a -> Bool
+        class Ord a where
+          (<) :: a -> a -> Bool
+          (<=) :: a -> a -> Bool
+          (>) :: a -> a -> Bool
+          (>=) :: a -> a -> Bool
+        record Box a where
+          val :: a
+        instance Eq (Box Int) where
+          (==) x y = True
+          (!=) x y = False
+        ltBox :: Eq (Box a) => Box a -> Box a -> Bool
+        ltBox x y = x < y
+        |]
+    , rejectNaming
+        "spec-cls-23-7"
+        ["Eq", "P2"]
+        []
+        [r|
+        module main (f)
+        class Eq a where
+          (==) :: a -> a -> Bool
+          (!=) :: a -> a -> Bool
+        class Ord a where
+          (<) :: a -> a -> Bool
+          (<=) :: a -> a -> Bool
+          (>) :: a -> a -> Bool
+          (>=) :: a -> a -> Bool
+        record Pair a b where
+          p1 :: a
+          p2 :: b
+        type P2 a = Pair a Int
+        instance Eq (Pair Int b) where
+          (==) x y = True
+          (!=) x y = False
+        f :: P2 a -> P2 a -> Bool
+        f x y = x == y
         |]
     ]
 

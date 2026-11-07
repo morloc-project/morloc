@@ -42,7 +42,7 @@ Code: conforms 2026-10-21
 
 ### CLS-5 Superclasses and instance contexts are obligations
 Intent: ruled 2026-10-29
-Tests: spec-cls-5-1, spec-cls-5-2, spec-cls-5-3, spec-cls-5-4, spec-cls-5-5, spec-cls-5-6, spec-cls-5-7, spec-cls-5-8, spec-cls-5-9, spec-cls-5-10, spec-cls-5-11, spec-cls-5-12, spec-cls-5-13, spec-cls-5-14, spec-cls-5-15, spec-cls-5-16, spec-cls-5-17
+Tests: spec-cls-5-1, spec-cls-5-2, spec-cls-5-3, spec-cls-5-4, spec-cls-5-5, spec-cls-5-6, spec-cls-5-7, spec-cls-5-8, spec-cls-5-9, spec-cls-5-10, spec-cls-5-11, spec-cls-5-12, spec-cls-5-13, spec-cls-5-14, spec-cls-5-15, spec-cls-5-16, spec-cls-5-17, spec-cls-5-18, spec-cls-5-19
 Code: conforms 2026-11-05
 
 `class C a => D a` requires an instance `C T` for every instance `D T`, and
@@ -166,7 +166,7 @@ type, bypassing the instance (CLS-21).
 
 ### CLS-16 The most specific matching instance is selected
 Intent: ruled 2026-10-29
-Tests: spec-cls-16-1, spec-cls-16-2, spec-cls-16-3, spec-cls-16-5, spec-cls-16-6, spec-cls-16-7, spec-cls-16-8, spec-cls-16-9, spec-cls-16-10, spec-cls-16-11, spec-cls-16-12, spec-cls-16-13, spec-cls-16-14, spec-cls-16-15, spec-cls-16-16, spec-cls-16-17, spec-cls-16-18
+Tests: spec-cls-16-1, spec-cls-16-2, spec-cls-16-3, spec-cls-16-5, spec-cls-16-6, spec-cls-16-7, spec-cls-16-8, spec-cls-16-9, spec-cls-16-10, spec-cls-16-11, spec-cls-16-12, spec-cls-16-13, spec-cls-16-14, spec-cls-16-15, spec-cls-16-16, spec-cls-16-17, spec-cls-16-18, spec-cls-16-19
 Code: deviates (issues/typeclasses.md)
 
 Instances may overlap. At a use at type `T`, the instances whose heads match
@@ -231,7 +231,7 @@ some types is an instance at those types.
 
 ### CLS-20 Packable's wire argument is determined by the packed type
 Intent: ruled 2026-11-05
-Tests: spec-cls-20-1, spec-cls-20-2, spec-cls-20-3, spec-cls-20-4, spec-cls-20-5, spec-cls-20-6, spec-cls-20-7, spec-cls-20-8, spec-cls-20-9, spec-cls-20-10, spec-cls-20-11, spec-cls-20-12, spec-cls-20-13, spec-cls-20-14
+Tests: spec-cls-20-1, spec-cls-20-2, spec-cls-20-3, spec-cls-20-4, spec-cls-20-5, spec-cls-20-6, spec-cls-20-7, spec-cls-20-8, spec-cls-20-9, spec-cls-20-10, spec-cls-20-11, spec-cls-20-12, spec-cls-20-13, spec-cls-20-14, spec-cls-20-15
 Code: conforms 2026-11-05
 
 `Packable a b` has the dependency `b -> a`: the instance selected by `b`
@@ -270,3 +270,23 @@ Code: conforms 2026-11-05
 
 A signature inside an instance body is a compile error at the signature;
 a method's type comes from its class.
+
+### CLS-23 At a signature's variables, an instance is selected only if every value of them selects it
+Intent: ruled 2026-11-07
+Tests: spec-cls-23-1, spec-cls-23-2, spec-cls-23-3, spec-cls-23-4, spec-cls-23-5, spec-cls-23-6, spec-cls-23-7
+Code: conforms 2026-11-07
+
+A class constraint a body owes over its signature's variables is met by an
+instance only if no other instance could match once those variables are
+known. With `instance Sh a` and `instance Sh Box`, the definition
+
+```morloc
+f :: a -> Str
+f x = sh x
+```
+
+is a compile error: at `Box` another instance would be selected. Writing
+the constraint, `f :: Sh a => a -> Str`, moves the choice to each use. A
+derived comparison (DERIV-6) is selected at such a type only if no
+hand-written instance of its class could match. This is GHC's rule for
+overlapping instances.

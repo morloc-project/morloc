@@ -133,13 +133,6 @@
   instance (probes q5, v2 in the step 3 r2 scratch); a broken instance is
   accepted until something uses it. Spec gap in CLS-2/CLS-5: say whether an
   instance body must check on its own.
-- **stdlib time fails typecheck: `addSat`/`subSat` at I64.** [reproduced
-  2026-11-06, on base too] lib/stdlib/time/main.loc's `after`, `before`,
-  `since` and `instance Semigroup Duration` call root's `addSat`/`subSat` at
-  `I64`, which needs `Integral I64`; root has `Integral` only at `Int` and
-  `Real`: "No instance found for Integral::zero at type I64". A stdlib
-  defect (CLS-2 holds); root needs `Integral` at the fixed-width integers
-  or time must not use them there.
 - **The standard list map is recognised by module name and install path.**
   [reproduced 2026-11-06, narrowed] A bracket chain over a list stays in the
   nexus when the selected `Functor List` is sourced from root-cpp, root-py,
@@ -192,24 +185,13 @@
   list of pairs, but map-r's sources at `Map a b` (`keys`, `lookup`, ...) assume
   names and would then receive pairs: they must handle both forms or become
   instances at `Map Str b` (CLS-21) first.
-- **A bracket chain's map needs no Functor constraint in a signature.**
-  [reproduced, 2026-11-07, installed 0.112.0] Violates CLS-5. With `newtype Bag a
-  = List a` and `instance Functor Bag` as in spec-cls-16-11, `h :: Sliceable f =>
-  f R -> f Int; h xs = .[:].x xs` is accepted, while `h xs = map (\r -> .x r) xs`
-  under the same signature is refused: "This definition needs Functor f but its
-  signature does not declare it". Checked against its signature, the chain's
-  `map` use is dropped (Typecheck.hs, IntrinsicS under rigid gamma), so no
-  obligation is recorded.
-- **Ord is derived at a type whose Eq is ambiguous.** [reproduced, 2026-11-07,
-  installed 0.112.0] Violates DERIV-6 (Ord is derived only where Eq is). With
-  `record Pair a b`, `instance Eq (Pair Int b)` and `instance Eq (Pair a Int)`,
-  `x == y` at `Pair Int Int` is refused as ambiguous, but `lt x y = x < y` at
-  `Pair Int Int` is accepted with the derived Ord: Typecheck.hs `derivedAt`
-  reads every result other than an instance, Ambiguous included, as "no
-  hand-written Eq".
-- **A signature without Ord is accepted, then fails inside its body at a use.**
-  [reproduced, 2026-11-07, installed 0.112.0] Violates signatures as contracts
-  (SIG-1, CLS-5). With `instance Eq (Box Int)` written, `ltBox :: Box a -> Box a
-  -> Bool; ltBox x y = x < y` passes validation (`validate` asks `derivableAt`,
-  with no overlap guard) and is accepted when used at `Box Str`; used at `Box
-  Int` it fails at the `<` in its own body: "no instance gives Ord (Box Int)".
+- **Conversion instances exist only in language modules.** [reproduced,
+  2026-11-07] Gap in CLS-2 and MOD-11 for the standard library. root declares
+  `TotalInto` and `PartialInto` but none of their instances at the numeric
+  types; root-py, root-cpp, root-r and root-rust each declare them. A
+  language-independent module that converts (`multiplier = tryInto (48271 ::
+  Int)` at `I64`, /work/tests/sumtypes/03-procgen-bsp-dungeon/core/cli.loc)
+  is refused checked on its own: "needs PartialInto Int I64: no instance
+  gives" it, though every program that imports a language module compiles. root
+  declares `Integral` at every numeric type for this reason; the conversions
+  could be declared there the same way.

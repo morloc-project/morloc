@@ -166,7 +166,7 @@ emptyGamma =
   Gamma
     { gammaCounter = 0, gammaSlot = 0, gammaContext = IntMap.empty, gammaExist = Map.empty, gammaAnn = Map.empty
     , gammaSolved = Map.empty, gammaDeferred = [], gammaDeferredAt = Map.empty, gammaKindSubs = Map.empty
-    , gammaEffSubs = Map.empty, gammaConstraints = [], gammaAssumedConstraints = Nothing
+    , gammaEffSubs = Map.empty, gammaConstraints = [], gammaWanteds = [], gammaAssumedConstraints = Nothing
     , gammaIntVals = Map.empty, gammaPendingNumLits = [], gammaPositionalReceivers = Set.empty
     , gammaRigid = Nothing, gammaRigidNats = Set.empty, gammaRigidSlots = Set.empty, gammaRigidDomain = [], gammaLabelVars = Map.empty, gammaObserved = Set.empty, gammaDefinitionLambda = Nothing, gammaScoped = Map.empty, gammaUnfolded = Set.empty
     }
@@ -696,6 +696,7 @@ instance Applicable Gamma where
       , gammaKindSubs = Map.map (apply g1) (gammaKindSubs g2)
       , gammaEffSubs = Map.map (applyEff g1) (gammaEffSubs g2)
       , gammaConstraints = map (apply g1) (gammaConstraints g2)
+      , gammaWanteds = [w {wPred = apply g1 (wPred w)} | w <- gammaWanteds g2]
       }
     where
       f :: GammaIndex -> GammaIndex

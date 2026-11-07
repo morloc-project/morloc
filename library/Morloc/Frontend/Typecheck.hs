@@ -35,6 +35,7 @@ import Morloc.Frontend.PatternCheck (missingKeyError, receiverShape, rowFields, 
 import qualified Morloc.Monad as MM
 import qualified Morloc.TypeEval as TE
 import Morloc.Typecheck.Internal
+import Morloc.Typecheck.Solve (Residual (..), Solution (..), solve)
 import qualified Data.IntMap.Strict as IntMap
 import qualified Morloc.Typecheck.NatSolver as NS
 import qualified Morloc.Typecheck.NatDecide as ND
@@ -55,7 +56,7 @@ isPrimitiveConstraint (CDisjoint _ _) = True
 -- whose existential is one of the given signature variables stays open.
 resolvePendingNumLits :: Set.Set TVar -> Gamma -> [(Int, TVar, NumLitKind)] -> MorlocMonad Gamma
 resolvePendingNumLits held g0 entries = do
-  closed <- superclassClosure [c | c@(Constraint _ [_]) <- gammaConstraints g0]
+  closed <- superclassClosure [c | c@(Constraint _ [_]) <- wantedConstraints g0]
   let numericVars = Set.fromList
         [ v
         | Constraint cls [t] <- closed
@@ -117,7 +118,7 @@ constrainedVars :: Gamma -> Set.Set TVar
 constrainedVars g =
   Set.fromList
     [ end
-    | Constraint _ ts <- gammaConstraints g
+    | Constraint _ ts <- wantedConstraints g
     , VarU v <- concatMap everyType ts
     , end <- case apply g (ExistU v ([], Open) ([], Open)) of
         ExistU v' _ _ -> [v, v']
@@ -1316,10 +1317,10 @@ synthE _ g0 (NamS rs) = do
 -- constraints becoming obligations. A reference's type never keeps its
 -- quantifier: one left in place would meet an expected type inside a
 -- record or tuple as a rigid variable.
-synthE _ g0 (VarS v (MonomorphicExpr (Just t0) []))
+synthE si g0 (VarS v (MonomorphicExpr (Just t0) []))
   | Just _ <- gammaAssumedConstraints g0 = do
       let (g1, t0') = renameEType g0 t0
-          (g2, t2) = instantiateObligations g1 (etype t0') (Set.toList (econs t0'))
+          (g2, t2) = instantiateObligations si g1 (etype t0') (Set.toList (econs t0'))
       return (g2, t2, VarS v (MonomorphicExpr (Just t0) []))
 -- A signature's variables are its own, quantified over it alone, even where
 -- an enclosing signature writes the same name (POLY-4).
@@ -1362,7 +1363,8 @@ synthE vi g0 (VarS v (MonomorphicExpr (Just t0) xs0)) = do
       -- are rigid and its constraints are given to its body. Both stay in
       -- gamma after the body, over names no other signature uses.
       g1Base = g1
-        { gammaConstraints = gammaConstraints g1 ++ newCs
+        { gammaConstraints = gammaConstraints g1 ++ filter isPrimitiveConstraint newCs
+        , gammaWanteds = reverse [Wanted vi c False | c@(Constraint _ _) <- newCs] <> gammaWanteds g1
         , gammaAssumedConstraints = case gammaAssumedConstraints g1 of
             Nothing -> Just given
             Just old
@@ -1395,7 +1397,7 @@ synthE vi g0 (VarS v (MonomorphicExpr (Just t0) xs0)) = do
       (g3, tUse)
         | contract && not outermost =
             let (ga, t0'') = renameEType g2 t0
-             in instantiateObligations ga (etype t0'') (Set.toList (econs t0''))
+             in instantiateObligations vi ga (etype t0'') (Set.toList (econs t0''))
         | otherwise = (g2, t2)
   return (g3, tUse, xs2)
 synthE _ g (VarS v (MonomorphicExpr Nothing (x : xs))) = do
@@ -1410,13 +1412,13 @@ synthE _ g (VarS v (MonomorphicExpr Nothing [])) = do
   return (g', t, VarS v (MonomorphicExpr Nothing []))
 -- Against a signature, a method use only records its constraint as an
 -- obligation; the instance is not chosen here.
-synthE _ g0 (VarS v (PolymorphicExpr cls clsName t0 _))
+synthE mi g0 (VarS v (PolymorphicExpr cls clsName t0 _))
   | Just _ <- gammaRigid g0 = do
       methods <- MM.gets (ieMethods . stateInstances)
       let (g1, t1, rw) = renameWithMap g0 (etype t0)
           cvars = maybe [] snd (Map.lookup clsName methods)
           obligation = Constraint cls [rw (VarU cv) | cv <- cvars]
-          (g2, t2) = instantiateObligations g1 t1 [obligation]
+          (g2, t2) = instantiateObligations mi g1 t1 [obligation]
       return (g2, t2, VarS v (PolymorphicExpr cls clsName t0 []))
 synthE i g0 (VarS v (PolymorphicExpr cls clsName t0 rs0)) = do
   (g1, rsChecked) <- checkInstances g0 (etype t0) rs0
@@ -1584,8 +1586,8 @@ synthE i g (EvalS e) = do
 -- existentials that never bind @b@.
 --
 -- A third argument is the use of @map@ the map becomes (Treeify), checked
--- here at the map's own type; a contract tree checks no method's instances,
--- so it goes without.
+-- here at the map's own type, so that the chain owes the class constraint a
+-- written @map@ owes (CLS-5).
 synthE _ g (IntrinsicS IntrMap (funcE : listE : mapUse)) = do
   let (g1, a) = newvar "map_elem_"      g
       (g2, b) = newvar "map_result_"    g1
@@ -1595,10 +1597,12 @@ synthE _ g (IntrinsicS IntrMap (funcE : listE : mapUse)) = do
   (g4, _, listE') <- checkG g3 listE listExpectedT
   let funcExpectedT = FunU [apply g4 a] (apply g4 b)
   (g5, _, funcE') <- checkG g4 funcE funcExpectedT
-  case (mapUse, gammaRigid g5) of
-    ([use], Nothing) -> do
+  case mapUse of
+    [use] -> do
       (g6, _, use') <- checkG g5 use (apply g5 (FunU [funcExpectedT, listExpectedT] resultT))
-      return (g6, apply g6 resultT, IntrinsicS IntrMap [funcE', listE', use'])
+      let added = length (gammaWanteds g6) - length (gammaWanteds g5)
+          g7 = g6 {gammaWanteds = [w {wIntrinsic = True} | w <- take added (gammaWanteds g6)] <> drop added (gammaWanteds g6)}
+      return (g7, apply g7 resultT, IntrinsicS IntrMap [funcE', listE', use'])
     _ -> return (g5, apply g5 resultT, IntrinsicS IntrMap [funcE', listE'])
 -- IntrEq / IntrLe: two values of one type, compared on the wire (INTR-7).
 synthE _ g (IntrinsicS intr [aE, bE])
@@ -3578,7 +3582,6 @@ validate = mapM_ one
         [] -> return ()
       let rigid = fromMaybe Set.empty (gammaRigid g1)
           givens = fromMaybe [] (gammaAssumedConstraints g1)
-          obligations = [apply g1 c | c@(Constraint _ _) <- gammaConstraints g1]
       -- a signature's effect variable may be passed through, never fixed
       mapM_
         (\(v, row) -> case applyEff g1 row of
@@ -3595,26 +3598,63 @@ validate = mapM_ one
       let fixed = Set.unions [rigid, gammaRigidNats g1, gammaRigidSlots g1]
           mentionsRigid t = any ((`Set.member` fixed) . fst) (varForms t)
           given = map (FI.fixRigidVars fixed . apply g1) givens
-      -- An obligation over none of the signature's variables is resolved
-      -- at each use.
+          policy = FI.usePolicy {FI.policySkolems = Set.map FI.rigidVarName fixed}
+      -- Literal defaults come first: in @3 <= 5@ only the Int default fixes
+      -- the class argument.
+      g2 <- resolvePendingNumLits rigid g1 (gammaPendingNumLits g1)
+      let (g3, solution) = solve policy scope env given (FI.fixRigidVars fixed) (FI.unfixRigidVars fixed) g2 (gammaWanteds g2)
+          uses = Map.fromList [(j, (ci, v, t)) | AnnoS (Idx j t) ci (VarS v _) <- annoNodes e1]
+          args c = case c of
+            Constraint _ ts -> ts
+            _ -> []
+          -- the use a wanted arose at, as instance resolution at the use
+          -- reports it
+          useError site c e = case Map.lookup site uses of
+            Just (ci, v, t) ->
+              let use = evalOr scope (apply g3 t)
+                  lead = case e of
+                    FI.Undetermined _ _ -> "The type of this term is not determined: the use of"
+                    _ -> "The use of"
+                  advice = case (e, c) of
+                    (FI.Disagrees _ _, _) -> mempty
+                    (_, Constraint cls _) -> noInstanceAdvice scope cls v use
+                    _ -> mempty
+               in throwTypeError ci $
+                    lead <+> squotes (pretty v) <+> "at type" <+> prettyTypeU use
+                      <+> "needs" <+> prettyConstraint c <> ":" <+> FI.explainResolveError prettyConstraint e <> advice
+            Nothing ->
+              MM.throwSourcedError site $
+                "This term needs" <+> prettyConstraint c <> ":" <+> FI.explainResolveError prettyConstraint e <> "."
+          derivedIn ev = case ev of
+            EvDerived {} -> [ev]
+            EvInstance _ _ ctx -> concatMap derivedIn ctx
+            EvGiven _ -> []
+          derivedOrd site cls t = derivedAt scope env cls t >>= \d ->
+            if d then return () else useError site (Constraint cls [t]) (FI.NoInstance (Constraint cls [t]) [])
+      forM_ (solResidual solution) $ \(w@(Wanted site c0 _), residual) ->
+        let c = apply g3 c0
+         in case residual of
+              Unmet (FI.NoInstance _ _)
+                | wIntrinsic w && not (any mentionsRigid (args c)) -> return ()
+                | any mentionsRigid (args c) -> unmet i given [] (FI.fixRigidVars fixed c)
+              Unmet e -> useError site c e
+              Undecided vs -> useError site c (FI.Undetermined c vs)
+      -- DERIV-6, for each derived comparison the evidence holds, an
+      -- instance's context included: the class derives at the type, and Ord
+      -- only where Eq is derived too; at a type holding the signature's
+      -- variables, only where no hand-written Eq could match once they are
+      -- known, whatever the givens say.
       sequence_
-        [ case FI.resolve FI.defaultPolicy scope env given c of
-            Right _ -> return ()
-            -- a head may match once the use fixes the open variables
-            Left (FI.NoInstance _ _)
-              | not (null open), FI.couldMatch scope env c1 || FI.givenFixes env given c1 -> return ()
-            -- each instantiation is resolved where it is used
-            Left (FI.NoInstance _ _)
-              | [t] <- args -> derivableAt scope cls t >>= \d -> if d then return () else unmet i given open c
-            Left (FI.Undetermined _ _) -> return ()
-            Left (FI.NoInstance _ _) -> unmet i given open c
-            Left e ->
-              MM.throwSourcedError i $
-                "This definition needs" <+> prettyConstraint c <> ":" <+> FI.explainResolveError prettyConstraint e <> "."
-        | c0@(Constraint cls args) <- obligations
-        , any mentionsRigid args
-        , let c1 = FI.fixRigidVars fixed c0
-              (c, open) = FI.fixOpenVars c1
+        [ case unClassName cls of
+            "Ord" -> case FI.resolve policy scope env [] (Constraint (ClassName "Eq") [t]) of
+              Right (EvDerived _ _) -> return ()
+              Left (FI.NoInstance _ _) -> derivedOrd site cls t
+              Left e -> useError site (Constraint cls [t]) e
+              Right _ -> derivedOrd site cls t
+            _ -> derivableAt scope cls t >>= \d ->
+              if d then return () else useError site (Constraint cls [t]) (FI.NoInstance (Constraint cls [t]) [])
+        | (site, evs) <- IntMap.toList (solEvidence solution)
+        , EvDerived cls t <- concatMap derivedIn evs
         ]
 
 -- | PAT-1: each destructuring pattern fits the value it destructures. A
@@ -3804,14 +3844,40 @@ scopeType rigid m t
     strip x = x
 
 -- | A quantified type instantiated with fresh existentials; the constraints,
--- rewritten over the same existentials, are recorded as obligations.
-instantiateObligations :: Gamma -> TypeU -> [Constraint] -> (Gamma, TypeU)
-instantiateObligations g (ForallU v t) cs =
-  instantiateObligations (g +> v) (substitute v t) (map (substC v) cs)
+-- rewritten over the same existentials, are recorded as obligations of the
+-- term at @site@.
+instantiateObligations :: Int -> Gamma -> TypeU -> [Constraint] -> (Gamma, TypeU)
+instantiateObligations site g (ForallU v t) cs =
+  instantiateObligations site (g +> v) (substitute v t) (map (substC v) cs)
   where
     substC w (Constraint c ts) = Constraint c (map (substitute w) ts)
     substC _ c = c
-instantiateObligations g t cs = (g {gammaConstraints = gammaConstraints g ++ cs}, t)
+instantiateObligations site g t cs = (owe site (map substC cs) g', t)
+  where
+    -- a variable only the constraints name is one a dependency determines
+    -- (CLS-20): a fresh existential at each use, as a quantified one is
+    dependent =
+      List.nub
+        [ v
+        | Constraint _ ts <- cs
+        , (v@(TV n), VarPlain) <- concatMap varForms ts
+        , isTypeVariableName n
+        ]
+    (g', fresh) = statefulMap (\gx v@(TV n) -> second ((,) v) (newvar (n <> "_dep") gx)) g dependent
+    substC (Constraint c ts) = Constraint c (map (\x -> foldr (\(v, e) acc -> substituteTVar v e acc) x fresh) ts)
+    substC c = c
+
+-- | Record constraints the term at @site@ owes: class constraints as
+-- wanteds, the others as primitive constraints.
+owe :: Int -> [Constraint] -> Gamma -> Gamma
+owe site cs g =
+  g { gammaWanteds = reverse [Wanted site c False | c@(Constraint _ _) <- cs] <> gammaWanteds g
+    , gammaConstraints = gammaConstraints g ++ [c | c <- cs, isPrimitiveConstraint c]
+    }
+
+-- | The class constraints of a gamma's wanteds.
+wantedConstraints :: Gamma -> [Constraint]
+wantedConstraints g = map wPred (gammaWanteds g)
 
 -- | An obligation neither the signature nor an instance meets. @open@: the
 -- variables of it nothing in the definition fixed.

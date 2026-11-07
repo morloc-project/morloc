@@ -58,7 +58,7 @@ deriving clause.
 
 ### DERIV-6 `Eq` and `Ord` are derived where no instance is given
 Intent: ruled 2026-11-03
-Tests: spec-deriv-6-1, spec-deriv-6-2, spec-deriv-6-3, spec-deriv-6-4, spec-deriv-6-5, spec-deriv-6-6, spec-deriv-6-7, spec-deriv-6-8, spec-deriv-6-9, spec-deriv-6-10, spec-deriv-6-11, spec-deriv-6-12
+Tests: spec-deriv-6-1, spec-deriv-6-2, spec-deriv-6-3, spec-deriv-6-4, spec-deriv-6-5, spec-deriv-6-6, spec-deriv-6-7, spec-deriv-6-8, spec-deriv-6-9, spec-deriv-6-10, spec-deriv-6-11, spec-deriv-6-12, spec-deriv-6-13, spec-deriv-6-14, spec-deriv-6-15
 Code: conforms 2026-11-03
 
 A type with no `Eq` instance has the derived one (DERIV-2), as if it had a

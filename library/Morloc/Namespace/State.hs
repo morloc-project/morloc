@@ -61,6 +61,7 @@ module Morloc.Namespace.State
 
     -- * Typechecking
   , Gamma (..)
+  , Wanted (..)
   , GammaIndex (..)
   , ConstVal (..)
   , NumLitKind (..)
@@ -906,6 +907,16 @@ data GammaIndex
   | SrcG Source
   deriving (Ord, Eq, Show)
 
+-- | A class constraint a use owes, at the term it arose at.
+data Wanted = Wanted
+  { wSite :: Int
+  , wPred :: Constraint
+  , wIntrinsic :: Bool
+  -- ^ owed by a bracket chain's map, which the intrinsic map serves where no
+  -- instance does (CLS-16)
+  }
+  deriving (Show, Eq, Ord)
+
 {- | Typechecking context using IntMap for O(log N) operations.
 Entries are keyed by monotonically increasing slot numbers (higher = newer).
 Side-indexes provide O(log N) lookup of ExistG entries by TVar.
@@ -945,6 +956,9 @@ data Gamma = Gamma
   -- typeclass mechanism uses; primitive forms have CMember / CSubset /
   -- CDisjoint constructors.
   , gammaConstraints :: [Constraint]
+  -- | The class constraints the body's uses owe, newest first, each at the
+  -- term it arose at.
+  , gammaWanteds :: [Wanted]
   -- | Constraints declared on the *current* function's signature, taken as
   -- assumptions during this function's body typecheck. A deferred
   -- obligation in @gammaConstraints@ that cannot be decided at end-of-

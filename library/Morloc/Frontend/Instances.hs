@@ -40,6 +40,8 @@ module Morloc.Frontend.Instances
   , declSources
   , instanceReceiverHeads
   , resolve
+  , resolveClosed
+  , superClosure
   , resolveArg
   , resolvePackable
   , packableWireForm
@@ -56,8 +58,11 @@ module Morloc.Frontend.Instances
   , fixOpenVars
   , couldMatch
   , givenFixes
+  , givenFixing
+  , unfixRigidVars
   , keyConstraintAt
   , hasOpenVars
+  , rigidVarName
   , fixRigidVars
   , explainResolveError
   , keyConstraint
@@ -102,6 +107,10 @@ data ResolveError
     Disagrees Constraint InstanceKey
   | -- | DERIV-6 derives no comparison of a function or a suspension.
     NotCrossable Constraint
+  | -- | A constraint over a signature's variables that the instance chosen,
+    -- or the derived comparison (Nothing), meets only while those variables
+    -- are unknown: the others may match once they are instantiated.
+    Overlapping Constraint (Maybe InstanceKey) [InstanceKey]
   | NotAClass Constraint
   deriving (Show, Eq, Ord)
 
@@ -118,6 +127,10 @@ data ResolvePolicy = ResolvePolicy
   , policyDerive :: Bool
   -- ^ DERIV-6: derive Eq and Ord where no instance matches
   , policyOmitted :: OmittedMethods
+  , policySkolems :: Set.Set TVar
+  -- ^ the signature variables a constraint may hold, as it holds them: an
+  -- instance is chosen at them only if no other could match at some value
+  -- of them (GHC's rule for overlapping instances)
   }
   deriving (Show, Eq, Ord)
 
@@ -140,7 +153,7 @@ data OmittedMethods
   deriving (Show, Eq, Ord)
 
 defaultPolicy :: ResolvePolicy
-defaultPolicy = ResolvePolicy OpenArgsUndetermined False OmittedFallThrough
+defaultPolicy = ResolvePolicy OpenArgsUndetermined False OmittedFallThrough Set.empty
 
 -- | Resolution at a use, written or compiler-built: DERIV-6 derives Eq and Ord
 -- where no instance matches.
@@ -256,9 +269,12 @@ instanceReceiverHeads env (ArgMethod cls m pos) = mapMaybe (instanceArgHead pos 
 -- choose the instance, which fixes them, and the constraint's own arguments
 -- there must agree with it, its open variables flexible (CLS-20).
 resolve :: ResolvePolicy -> Scope -> InstanceEnv -> [Constraint] -> Constraint -> Either ResolveError Evidence
-resolve policy scope env givens = go []
+resolve policy scope env givens = resolveClosed policy scope env (superClosure env givens)
+
+-- | 'resolve' with givens already closed under their superclasses.
+resolveClosed :: ResolvePolicy -> Scope -> InstanceEnv -> [Constraint] -> Constraint -> Either ResolveError Evidence
+resolveClosed policy scope env closure = go []
   where
-    closure = superClosure env givens
     recordNames = declaredRecordNames scope
 
     go stack c@(Constraint cls args)
@@ -283,6 +299,7 @@ resolve policy scope env givens = go []
             | erasedNatDecides fundeps d linkArgs -> Left (ErasedNat c (idKey d))
           [(d, sub)]
             | not (null open) && not (skolemUnique fundeps d linkArgs) -> Left (Undetermined c open)
+            | others@(_ : _) <- unstable fundeps d linkArgs -> Left (Overlapping c (Just (idKey d)) others)
             | not (dependentsAgree fundeps d sub linkArgs) -> Left (Disagrees c (idKey d))
             | otherwise -> do
                 let (vs, hs) = ikHead (idKey d)
@@ -304,8 +321,9 @@ resolve policy scope env givens = go []
     noInstance c@(Constraint cls [t])
       | policyDerive policy
       , Just _ <- derivedComparisons (unClassName cls)
-      , not (isRigidVar t) =
-          if crossable t then Right (EvDerived cls t) else Left (NotCrossable c)
+      , not (isRigidVar t) = case [idKey d | d <- instanceDecls env cls, unifiesAtSkolems d [t]] of
+          ks@(_ : _) -> Left (Overlapping c Nothing ks)
+          [] -> if crossable t then Right (EvDerived cls t) else Left (NotCrossable c)
     noInstance c@(Constraint cls _) = Left (NoInstance c (map idKey (instanceDecls env cls)))
     noInstance c = Left (NotAClass c)
 
@@ -365,6 +383,45 @@ resolve policy scope env givens = go []
                 let (vs, hs) = ikHead (idKey x)
                  in length hs == length useFlex && isJust (unifyU (vs <> openNames) (tuple hs) (tuple useFlex))
            in and [generalizes True (selectionPattern fundeps (idKey x)) selected | x <- others, unifies x]
+
+    -- The other instances that could match the use at some value of the
+    -- signature variables it holds and that are not more general than the
+    -- one selected: with any of them, the selection is not the one every
+    -- instantiation makes.
+    unstable fundeps d useArgs
+      | Set.null (Set.intersection (policySkolems policy) (Set.fromList (concatMap (map fst . varForms) useArgs))) = []
+      | otherwise =
+          let selected = selectionPattern fundeps (idKey d)
+           in [ idKey x
+              | x <- instanceDecls env (ikClass (idKey d))
+              , idKey x /= idKey d
+              , unifiesAtSkolems x useArgs
+              , not (generalizes True (selectionPattern fundeps (idKey x)) selected)
+              ]
+
+    -- Whether a head unifies with the use at some link of its alias chain,
+    -- its signature variables and the variables nothing fixed yet standing
+    -- for any type.
+    unifiesAtSkolems x useArgs0 =
+      not (Set.null (Set.intersection (policySkolems policy) (Set.fromList (concatMap (map fst . varForms) useArgs0))))
+        && any unifiesAt (aliasLinks (tuple useArgs0))
+      where
+        (vs, hs) = ikHead (idKey x)
+        unifiesAt t =
+          let useFlex = map (nominal recordNames . flexExist) (untuple t)
+              flex = vs <> concatMap openVars useFlex <> Set.toList (policySkolems policy)
+           in length hs == length useFlex && isJust (unifyU flex (tuple hs) (tuple useFlex))
+
+    -- A type and each reduction of its aliases, as selection walks them.
+    aliasLinks t0 = walk (Map.size scope + depth t0 + 1) t0
+      where
+        walk n t
+          | n <= 0 = [t]
+          | otherwise = t : case TE.reduceType scope t of
+              Just t' | t' /= t -> walk (n - 1) t'
+              _ -> case TE.reduceTypeLeaves scope t of
+                Just t' | t' /= t -> walk (n - 1) t'
+                _ -> []
 
 contextDepth :: Int
 contextDepth = 64
@@ -671,6 +728,18 @@ givenFixes env givens (Constraint cls args) =
    in not (null deps) && or [selecting args == selecting ts | Constraint cls' ts <- superClosure env givens, cls' == cls]
 givenFixes _ _ _ = False
 
+-- | The given, of givens already closed under superclasses, that matches a
+-- constraint of a class with a dependency on every argument that selects:
+-- its dependent arguments are the constraint's (CLS-20).
+givenFixing :: InstanceEnv -> [Constraint] -> Constraint -> Maybe Constraint
+givenFixing env closure (Constraint cls args) =
+  let deps = Map.findWithDefault [] cls (ieFundeps env)
+      selecting ts = [a | (i, a) <- indexed ts, i `notElem` deps]
+   in if null deps
+        then Nothing
+        else listToMaybe [g | g@(Constraint cls' ts) <- closure, cls' == cls, selecting args == selecting ts]
+givenFixing _ _ _ = Nothing
+
 -- | A constraint whose generated variables in @rigid@ (a signature's,
 -- renamed by the checker) no longer read as open.
 fixRigidVars :: Set.Set TVar -> Constraint -> Constraint
@@ -680,7 +749,21 @@ fixRigidVars rigid = mapConstraint fix
       VarU v | Set.member v rigid -> VarU (rigidName v)
       KVarU (v, k) | Set.member v rigid -> KVarU (rigidName v, k)
       _ -> mapChildrenU fix t
-    rigidName (TV n) = TV (DT.replace "@q" "@" n)
+    rigidName = rigidVarName
+
+-- | Undo 'fixRigidVars' for the variables of @rigid@.
+unfixRigidVars :: Set.Set TVar -> TypeU -> TypeU
+unfixRigidVars rigid = unfix
+  where
+    back = Map.fromList [(rigidVarName v, v) | v <- Set.toList rigid]
+    unfix t = case t of
+      VarU v | Just v' <- Map.lookup v back -> VarU v'
+      KVarU (v, k) | Just v' <- Map.lookup v back -> KVarU (v', k)
+      _ -> mapChildrenU unfix t
+
+-- | The name 'fixRigidVars' gives a signature variable.
+rigidVarName :: TVar -> TVar
+rigidVarName (TV n) = TV (DT.replace "@q" "@" n)
 
 constraintTypes :: Constraint -> [TypeU]
 constraintTypes (Constraint _ ts) = ts
@@ -726,6 +809,11 @@ explainResolveError pc e = case e of
   Disagrees c k ->
     pc c <+> "selects the instance" <+> pc (keyConstraint k) <+> "by its other arguments, and that instance fixes the rest otherwise"
   NotCrossable c -> pc c <+> "is not derived for a function or a suspension"
+  Overlapping c chosen ks ->
+    maybe "the derived comparison meets" (\k -> "the instance" <+> pc (keyConstraint k) <+> "meets") chosen
+      <+> pc c <+> "only while the signature's variables are unknown;"
+      <+> hsep (punctuate "," (map (pc . keyConstraint) ks))
+      <+> "may match once they are known. Add the constraint to the signature"
   NotAClass c -> pc c <+> "is not a class constraint"
 
 -- | An existential carrying part of a tuple or record: it is not one type a
