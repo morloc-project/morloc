@@ -193,3 +193,9 @@ on 0.109.0 unless marked.
   marshaller for a value of this C++ type (schema type 18)"; an export
   returning it from a C++ root fails the same way. Violates REAL-3 and
   NEWT-7; the build should refuse it (briefs/S5-steps3-6.md).
+- [read, 2026-11-06] map-r builds a map with `result[[k]] <- v` at any `Map a b`
+  (lib/stdlib/map-r/R/map.R `morloc_from_list`, `morloc_insert`). An integer key
+  assigns by position, so a `Map Int v` built and used only in R, which never
+  reaches a Packable check, would be corrupted (MAP rules, NATIVE). From R's
+  semantics, not run: a NULL value deletes its key (`Map Str (?Int)`, OPT-1) and an
+  empty-string key is lost in unpack, since `x[[""]]` returns NULL.

@@ -995,9 +995,14 @@ patWithInputs i app ts = do
 evidenceSource :: Int -> Lang -> Evidence -> EVar -> MorlocMonad (Indexed Source)
 evidenceSource i lang ev m = do
   env <- MM.gets stateInstances
-  case FI.methodSource env ev m lang of
-    Just src -> return src
-    Nothing -> MM.throwSourcedError i $ case ev of
+  case FI.methodSourcesIn env ev m lang of
+    [src] -> return src
+    many@(_ : _) ->
+      MM.throwSourcedError i $
+        "The instance selected here has several" <+> pretty lang <+> "sources of" <+> squotes (pretty m) <> ":"
+          <+> hsep (map (\(Idx _ s) -> squotes (pretty (srcName s))) many)
+          <> ". Import fewer modules or remove one"
+    [] -> MM.throwSourcedError i $ case ev of
       EvInstance key _ _
         | FI.methodHasBody env ev m ->
             "The instance" <+> prettyConstraint (FI.keyConstraint key) <+> "selected here implements"

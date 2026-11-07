@@ -37,9 +37,10 @@ module Morloc.Frontend.Instances
   , packableWireForm
   , packableClass
   , keyPackedHead
-  , methodSource
+  , methodSourcesIn
   , methodHasBody
   , intrinsicMapServes
+  , nativeServes
   , evidenceMethod
   , methodImpls
   , methodSources
@@ -60,6 +61,7 @@ import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import qualified Data.Text as DT
 import qualified Morloc.BaseTypes as BT
+import qualified Morloc.System as MS
 import Morloc.Data.Doc
 import Morloc.Data.Zip (indexed, zipExact, zipPrefix)
 import Morloc.Namespace.Expr
@@ -384,12 +386,14 @@ keyPackedHead :: InstanceKey -> Maybe TypeU
 keyPackedHead (InstanceKey _ (vs, [_, h])) = Just (quantify vs h)
 keyPackedHead _ = Nothing
 
--- | The source of a method under the evidence in a language, if the instance
--- gives one there.
-methodSource :: InstanceEnv -> Evidence -> EVar -> Lang -> Maybe (Indexed Source)
-methodSource env ev m lang = case methodImpls usePolicy env ev m of
-  Right impls -> listToMaybe [s | ImplSource _ s@(Idx _ src) <- impls, srcLang src == lang]
-  Left _ -> Nothing
+-- | The distinct sources of a method under the evidence in a language.
+methodSourcesIn :: InstanceEnv -> Evidence -> EVar -> Lang -> [Indexed Source]
+methodSourcesIn env ev m lang = case methodImpls usePolicy env ev m of
+  Right impls ->
+    DL.nubBy
+      (\(Idx _ x) (Idx _ y) -> (srcPath x, srcName x) == (srcPath y, srcName y))
+      [s | ImplSource _ s@(Idx _ src) <- impls, srcLang src == lang]
+  Left _ -> []
 
 -- | Whether the instance under the evidence implements a method by a body.
 methodHasBody :: InstanceEnv -> Evidence -> EVar -> Bool
@@ -397,20 +401,33 @@ methodHasBody env ev m = case methodImpls usePolicy env ev m of
   Right impls -> not (null [() | ImplBody _ <- impls])
   Left _ -> False
 
--- | Whether a bracket chain's map does what the instance's @map@ does: the
--- instance implements no @map@, or is the standard library's over a plain
--- list. Any other instance over a list, by a morloc body or by a source in
--- another module, is a method use like one over any other head.
-intrinsicMapServes :: InstanceEnv -> Evidence -> Bool
-intrinsicMapServes env ev = case methodImpls usePolicy env ev (EV "map") of
-  Right impls -> null impls || overList && all standard impls
-  Left _ -> True
+-- | Whether what the nexus does natively on a list does what the instance's
+-- method does: the instance implements none, or every implementation is one
+-- the standard library installs. Any other, by a morloc body or by a source
+-- elsewhere, is a method use like one over any other head (CLS-2).
+nativeServes :: Path -> InstanceEnv -> Evidence -> EVar -> Bool
+nativeServes library env ev m = case methodImpls usePolicy env ev m of
+  Right impls -> all standard impls
+  Left (MethodOmitted _ _) -> True
+  Left (NotAnInstance _) -> False
+  where
+    standard (ImplSource (MV name) (Idx _ src)) =
+      name `elem` ["root-cpp", "root-py", "root-r", "root-rust", "vector-cpp", "vector-py", "vector-r", "vector-rust"]
+        && maybe False installed (srcPath src)
+    standard _ = False
+    installed p = (library <> "/") `DL.isPrefixOf` p && ".." `notElem` MS.splitDirectories p
+
+-- | Whether a bracket chain's map is native: over a plain list, as
+-- 'nativeServes' has it, or under an instance that implements no @map@.
+intrinsicMapServes :: Path -> InstanceEnv -> Evidence -> Bool
+intrinsicMapServes library env ev = nativeServes library env ev (EV "map") && (overList || omitted)
   where
     overList = case ev of
       EvInstance (InstanceKey _ (_, hs)) _ _ -> hs == [VarU BT.list]
       _ -> False
-    standard (ImplSource (MV m) _) = m `elem` ["root-cpp", "root-py", "root-r", "root-rust"]
-    standard _ = False
+    omitted = case methodImpls usePolicy env ev (EV "map") of
+      Left (MethodOmitted _ _) -> True
+      _ -> False
 
 -- | The method of a receiver's evidence that a bracket step calls.
 evidenceMethod :: [ArgMethod] -> Evidence -> Maybe EVar

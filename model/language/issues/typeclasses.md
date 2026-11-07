@@ -122,13 +122,12 @@
   separately: `sort` at `newtype Z = Real deriving (Eq, Ord)` in Python
   gives [0,-0,1] (derived order is totalOrder). Open: rulings Q4/Q6 in
   /work/plans/error-clusters/s2-rulings.md. Fixed by CLS-21's classes.
-- **map-r's specific Packable head serves every language.** [read
+- **map-py and map-cpp have no `Map Str val` head for a `pack` use.** [read
   2026-11-05] map-r/main.loc:35 declares `Packable [(Str, val)] (Map Str
-  val)` with R implementations only. Language plays no part in selection
-  (CLS-16), so a use of `pack` selects it at `Map Str v` in Python and C++
-  too, which then depend on the unruled CLS-12 fall-through to map's general
-  head. Serialization has no such dependency: a pool converts a value by the
-  instances it can run (spec-cls-16-14), all agreeing on the wire (CLS-20).
+  val)` with R implementations only. Language plays no part in a use's
+  selection (CLS-16), so a use of `pack` selects it at `Map Str v` in Python and
+  C++ too, which then depend on the unruled CLS-12 fall-through to map's general
+  head. Ruled fix 2026-11-06: map-py and map-cpp declare the Str head too.
 
 - **A signed term's class constraints cannot be instantiated when its
   signature binds a label.** [reproduced 2026-11-05, latent] Typecheck.hs
@@ -151,16 +150,17 @@
   `Real`: "No instance found for Integral::zero at type I64". A stdlib
   defect (CLS-2 holds); root needs `Integral` at the fixed-width integers
   or time must not use them there.
-- **Serialization selects among the instances a language implements.**
-  [read, 2026-11-06] Needs a ruling on CLS-16. A method use selects with no
-  regard to language, and a compiler-built bracket call with no implementation
-  in its pool is rejected (spec-real-3-1). A value converted in a pool has no
-  use to reject: `selectPackerInstance` (CodeGenerator/Serial.hs) runs the
-  resolver over the Packable instances that pool can call, because root-style
-  families need it (map-r's `Map Str val` is R only, and Python must still
-  read a `Map Str Int`; spec-cls-16-14). So where `Vec 3` is only in Python and
-  `Vec n` in C++, the C++ pool converts a `Vec 3` by `Vec n`. CLS-20 makes the
-  two agree on the wire; nothing says they agree on the native value.
+- **The standard list map is recognised by module name and install path.**
+  [reproduced 2026-11-06, narrowed] A bracket chain over a list stays in the
+  nexus when the selected `Functor List` is sourced from root-cpp, root-py,
+  root-r or root-rust (ruled 2026-11-06: it must not start a pool). A program's
+  own module named `root-py` was taken for the standard one and its map bypassed
+  (spec-cls-16-17, fixed by requiring the source under the module library). An
+  installed module named `root-py` that is not the stdlib's is still trusted, and
+  is bypassed silently: `Instances.intrinsicMapServes`. Closing it needs a
+  declared claim on the source (a pragma beside `%inline`), or root's instance
+  written as the intrinsic itself, so the claim is the definition. Syntax and
+  stdlib change: needs a ruling.
 - **A bracket step cannot call an instance's morloc body.** [reproduced,
   2026-11-06] Violates CLS-2. An `Indexable`, `Sliceable` or `SliceableDim`
   instance implementing its method by a body is refused at build

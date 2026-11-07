@@ -1018,7 +1018,10 @@ rebuildIn dir lang g hv@(HostView scope _ _ _ _) d t0 e = do
       requireDetermined g t
       env <- MM.gets stateInstances
       case FI.resolveArg scope emptyGamma env [functorMapMethod] (type2typeu t) of
-        Right (Just ev) -> return (FI.methodSource env ev (EV "map") lang)
+        Right (Just ev) -> case FI.methodSourcesIn env ev (EV "map") lang of
+          [] -> return Nothing
+          [src] -> return (Just src)
+          _ -> MM.throwSourcedError g $ "The instance selected for" <+> pretty t <+> "has several" <+> pretty lang <+> "sources of 'map'"
         Right Nothing -> return Nothing
         Left e -> MM.throwSourcedError g $ "Cannot map over" <+> pretty t <> ":" <+> FI.explainResolveError prettyConstraint e
 

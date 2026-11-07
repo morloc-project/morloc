@@ -1,0 +1,32 @@
+-- Spec CLS-2, CLS-16: an instance over a list on the wire, or over List, is what
+-- a bracket step runs; the nexus does not slice its own way in its place.
+module main (slice, index, sliceList)
+import root
+
+type Py => Int = "int"
+type Py => I64 = "int"
+type Py => (List a) = "list" a
+type Py => (Optional a) = "Optional" a
+
+newtype L a = [a]
+type Py => (L a) = "list" a
+
+instance IndexLike (?I64) where
+  source Py from "h.py" ("h_id" as __to_index__)
+instance IndexLike Int where
+  source Py from "h.py" ("h_id" as __to_index__)
+instance Sliceable L where
+  source Py from "h.py" ("h_rev_slice" as __get_slice__)
+instance Indexable L where
+  source Py from "h.py" ("h_rev_index" as __access_index__)
+instance Sliceable List where
+  source Py from "h.py" ("h_rev_slice" as __get_slice__)
+
+slice :: L Int -> L Int
+slice xs = .[0:2] xs
+
+index :: L Int -> Int
+index xs = .[0] xs
+
+sliceList :: [Int] -> [Int]
+sliceList xs = .[0:2] xs

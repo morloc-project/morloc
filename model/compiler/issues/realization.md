@@ -104,20 +104,19 @@ preference, then size).
   pin a placement directly (PlacementTests.hs was planned). The consistency
   check of `typecheck -v --realize` runs over every golden program
   (spec-cost-11-1).
-- **The nexus brackets a newtype over a list natively.** [read, 2026-10-21]
-  Gap in PAT-5. `newtype Deque a = List a` with its own `Indexable`
-  instance is a list on the wire, so the nexus indexes it as a list while a
-  pool calls the instance; the two agree only if the instance means list
-  indexing (true of stdlib `Vector`). Needs a ruling: an instance on a
-  list-represented newtype must agree with its representation, or such
-  brackets must go to a pool.
-- **A bracket step on a list-represented newtype is not moved to its instance's
-  language.** [reproduced, 2026-11-06] COST-15 condition 1. With `newtype Vec
-  (n :: Nat) a = [a]`, `SliceableDim Vec` sourced only in Python and `run xs =
-  size2 (.[0:2] xs)` with `size2` in C++, the step stays in C++ and the build
-  stops with "gives no cpp implementation", though Python could run it.
-  `instanceLanguages` (Realize.hs) leaves such a receiver its ambient languages
-  so that the nexus can still bracket it (the entry above).
+- **A surviving map intrinsic resolves its instance again at code generation.**
+  [read, 2026-11-07] Express (`IntrinsicS IntrMap`) and EffectBoundary
+  `functorMapSource` call the resolver on the realized type instead of reading
+  evidence Typecheck selected and dropped, so one use is selected twice. Not
+  reproduced as a wrong selection. Store evidence on the node, as patterns do.
+- **Every bracket chain's map use is fully checked, then dropped.** [read,
+  2026-11-07, not measured] Treeify adds a `map` use to each `.[:]` chain;
+  `checkInstances` checks it on every lenient pass and `resolveInstances` then
+  discards it when the intrinsic stays. Compile time on many chains: measure.
+- **A plugin language's root map starts a pool.** [read, 2026-11-07, not run]
+  `Instances.nativeServes` lists root and vector modules of the four stdlib
+  languages; a plugin's `root-foo` is a method use: correct output, but a pool
+  where the ruling wants none, with nothing failing when a language is missed.
 - **An unapplied pattern passed as a function adds a wrapper call per element.**
   [reproduced, 2026-11-06] pattern-getters: since a pattern is eta-expanded in
   Treeify, generated Python is `morloc_map(lambda n: m(n), xs)` where it was

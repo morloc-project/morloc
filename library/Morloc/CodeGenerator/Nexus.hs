@@ -63,6 +63,8 @@ import qualified Morloc.LangRegistry as LR
 import qualified Morloc.Data.GMap as GMap
 import qualified Morloc.Data.PoolHash as PoolHash
 import qualified Morloc.Language as ML
+import qualified Morloc.Frontend.Instances as FI
+import Morloc.Typecheck.Internal (indexMethods, sliceMethods)
 import qualified Morloc.Monad as MM
 import qualified Morloc.TypeEval as TE
 import qualified Morloc.Version
@@ -576,11 +578,16 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
     -- PAT-5: the nexus brackets only a value that is a list on the wire.
     -- Another receiver an instance accepts is reached only through that
     -- instance, in a pool.
-    requireListReceiver r@(AnnoS (Idx ri rt) _ _) = do
+    requireListReceiver methods pev r@(AnnoS (Idx ri rt) _ _) = do
       Infer.requireDetermined ri rt
       ast <- generalTypeToSerialAST i rt
+      env <- MM.gets stateInstances
+      library <- MM.asks configLibrary
+      let native = case patReceiver pev of
+            Just ev -> maybe False (FI.nativeServes library env ev) (FI.evidenceMethod methods ev)
+            Nothing -> True
       case wireShape ast of
-        WList _ -> return ()
+        WList _ | native -> return ()
         _ -> needsInstance "A bracket step on" r
     needsInstance :: MDoc -> AnnoS (Indexed Type) One () -> MorlocMonad a
     needsInstance what (AnnoS (Idx ri rt) _ _) =
@@ -647,21 +654,21 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
     -- handle, not an in-memory structure; the standard apply_*
     -- functions would cast garbage. Mirrors Express.hs's pool-path
     -- IFile detection.
-    toNexusExpr (AnnoS (Idx _ t) _ (PatS (Idx _ ft) _ _ app@(PatSlice sE eE pE rE))) = do
+    toNexusExpr (AnnoS (Idx _ t) _ (PatS (Idx _ ft) _ pev app@(PatSlice sE eE pE rE))) = do
       validateBracketBound "start" sE
       validateBracketBound "stop"  eE
       validateBracketBound "step"  pE
       if recvIsIFile rE
         then emitIFileWalkX t rE IFile.bracketSliceSteps [sE, eE, pE]
         else do
-          requireListReceiver rE
+          requireListReceiver sliceMethods pev rE
           patAppX t ft app
-    toNexusExpr (AnnoS (Idx _ t) _ (PatS (Idx _ ft) _ _ app@(PatIndex iE rE))) = do
+    toNexusExpr (AnnoS (Idx _ t) _ (PatS (Idx _ ft) _ pev app@(PatIndex iE rE))) = do
       validateBracketBound "index" iE
       if recvIsIFile rE
         then emitIFileWalkX t rE IFile.bracketIndexSteps [iE]
         else do
-          requireListReceiver rE
+          requireListReceiver indexMethods pev rE
           patAppX t ft app
     -- A getter on an IFile receiver routes to the walker. A selector's
     -- bracket bounds are in DFS order.

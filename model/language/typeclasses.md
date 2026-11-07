@@ -164,7 +164,7 @@ type, bypassing the instance (CLS-21).
 
 ### CLS-16 The most specific matching instance is selected
 Intent: ruled 2026-10-29
-Tests: spec-cls-16-1, spec-cls-16-2, spec-cls-16-3, spec-cls-16-5, spec-cls-16-6, spec-cls-16-7, spec-cls-16-8, spec-cls-16-9, spec-cls-16-10, spec-cls-16-11, spec-cls-16-12, spec-cls-16-13, spec-cls-16-14, spec-cls-16-15, spec-cls-16-16
+Tests: spec-cls-16-1, spec-cls-16-2, spec-cls-16-3, spec-cls-16-5, spec-cls-16-6, spec-cls-16-7, spec-cls-16-8, spec-cls-16-9, spec-cls-16-10, spec-cls-16-11, spec-cls-16-12, spec-cls-16-13, spec-cls-16-14, spec-cls-16-15, spec-cls-16-16, spec-cls-16-17, spec-cls-16-18
 Code: deviates (issues/typeclasses.md)
 
 Instances may overlap. At a use at type `T`, the instances whose heads match
@@ -176,6 +176,19 @@ instance has for a method it omits is CLS-12. Function types compare as
 APP-1 has them: `a -> b` covers `a -> b -> c`, so at a function of two
 numbers an instance at `a -> b -> c` is more specific than one at `a -> b`
 (spec-app-4-4).
+
+A method use selects without regard to language. A value a pool converts
+has no use: the pool selects among the `Packable` instances it can call
+(spec-cls-16-14), because the wire form, not the native value, is the
+contract between languages (CLS-20). A type no such instance covers does not
+build: with only `Packable [(Str, v)] (Map Str v)` in R, a `Map Int v` cannot
+enter R.
+
+A bracket step or a bracket chain's `map` on a list on the wire runs natively
+in the nexus when the selected instance implements no such method or is the
+standard library's (root and vector modules, from the module library): no pool
+starts for it (ruled 2026-11-06, spec-cls-16-17). Any other instance is called
+(spec-cls-16-18).
 
 ### CLS-17 An instance is selected by its head alone
 Intent: ruled 2026-10-29

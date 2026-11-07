@@ -702,13 +702,14 @@ resolveInstances mode g (AnnoS gi@(Idx _ gt) ci e0) = do
       (g1, funcE') <- recur g0 funcE
       (g2, listE') <- recur g1 listE
       c <- useConstraint scope g2 env cls (etype t0) (apply g2 useT)
+      library <- MM.asks configLibrary
       let intrinsic = return (g2, IntrinsicS IntrMap [funcE', listE'])
           method = do
             (g3, use') <- recur g2 use
             return (g3, AppS use' [funcE', listE'])
       case FI.resolve FI.usePolicy scope env [] c of
         Left (FI.NoInstance _ _) -> intrinsic
-        Right ev | FI.intrinsicMapServes env ev -> intrinsic
+        Right ev | FI.intrinsicMapServes library env ev -> intrinsic
         _ -> method
     -- Inside an expansion of @map@ itself, the use is a back-edge to it.
     f _ _ g0 (IntrinsicS IntrMap [funcE, listE, use]) = do

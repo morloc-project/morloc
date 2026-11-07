@@ -72,25 +72,26 @@ nodeKind e = case e of
   ExeS (SrcCall (Idx _ src)) -> unEVar (displayName (srcAlias src))
   _ -> "value"
 
--- | The languages a step served by an instance can run in, on a receiver that
--- is not a list on the wire: those whose pools can call the selected instances.
--- Only a pool can call one, so the step leaves the nexus (PAT-5).
-instanceLanguages :: Scope -> InstanceEnv -> Indexed Type -> PatEvidence -> PatApp a -> [Lang]
-instanceLanguages scope env (Idx _ ft) pev app = case (ft, app, patReceiver pev) of
+-- | The languages a step served by an instance can run in: those whose pools
+-- can call the selected instances. Only a pool can call one, so the step leaves
+-- the nexus (PAT-5), unless the receiver is a list on the wire and native
+-- list access does what the instance does.
+instanceLanguages :: Path -> Scope -> InstanceEnv -> Indexed Type -> PatEvidence -> PatApp a -> [Lang]
+instanceLanguages library scope env (Idx _ ft) pev app = case (ft, app, patReceiver pev) of
   (FunT (_ : r : _) _, PatIndex _ _, Just ev) -> onReceiver indexMethods r ev
   (FunT (_ : _ : _ : r : _) _, PatSlice {}, Just ev) -> onReceiver sliceMethods r ev
   (FunT ins _, PatGet _ bs _, Just ev) | r : _ <- drop (length bs) ins -> onReceiver getterMethods r ev
   _ -> []
   where
-    onReceiver methods r ev
-      | isList (TE.wireParentRoot scope (type2typeu r)) = []
-      | otherwise = case FI.evidenceMethod methods ev of
-          Just m ->
+    onReceiver methods r ev = case FI.evidenceMethod methods ev of
+      Just m
+        | isList (TE.wireParentRoot scope (type2typeu r)) && FI.nativeServes library env ev m -> []
+        | otherwise ->
             [ l
             | l <- langsOf ev m
             , and [l `elem` langsOf b (EV "__to_index__") | Just b <- patBounds pev]
             ]
-          Nothing -> []
+      Nothing -> []
     isList t = extractKey t == BT.list
     langsOf ev m = case FI.methodImpls FI.usePolicy env ev m of
       Right impls -> unique [srcLang src | ImplSource _ (Idx _ src) <- impls]
@@ -976,8 +977,9 @@ realizeWithRegistry registry tables pins seedLangs s00 = do
       xs' <- traverse (scoreAnnoS rstat {rLangs = [], rApplied = []}) app
       scope <- MM.getGeneralScope
       env <- MM.gets stateInstances
+      library <- MM.asks configLibrary
       let ambient = [(l, mempty) | l <- rLangs rstat]
-          headTable = case instanceLanguages scope env fg ev app of
+          headTable = case instanceLanguages library scope env fg ev app of
             [] -> ambient
             ls -> [(l, callScore registry l) | l <- ls]
       return (PatS fg (Idx fi []) ev xs', Idx i (scoreApp headTable (map kid (toList xs'))))

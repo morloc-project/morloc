@@ -1,0 +1,12 @@
+-- Spec COST-1, CLS-16: two sources in one language under one instance are refused.
+module main (run)
+import root-py
+
+instance Sliceable List where
+  source Py from "h.py" ("h_rev_slice" as __get_slice__)
+
+source Py from "h.py" ("h_id" as hid)
+hid :: a -> a
+
+run :: [Int] -> [Int]
+run xs = hid (.[0:2] (hid xs))
