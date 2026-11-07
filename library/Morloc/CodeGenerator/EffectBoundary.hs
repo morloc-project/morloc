@@ -618,11 +618,11 @@ declaredSignature origin src = do
 sourceSignature :: SrcOrigin -> Source -> MorlocMonad (Maybe EType)
 sourceSignature origin src = do
   sigs <- GMap.elems <$> MM.gets stateSignatures
-  case [(sg, t) | sg <- sigs, t <- termsOf sg, any atIndex (termConcrete t)] of
-    (Monomorphic _, t) : _ -> return (termGeneral t)
-    (Polymorphic {}, t) : _
-      | Just e <- termGeneral t -> return (Just e)
-      | otherwise -> bug "is an instance method with no signature"
+  env <- MM.gets stateInstances
+  let monomorphic = [termGeneral t | Monomorphic t <- sigs, any atIndex (termConcrete t)]
+      methods = [Just (FI.mtType t) | t <- FI.allMethodTerms env, any atIndex (FI.mtSources t)]
+  case monomorphic <> methods of
+    et : _ -> return et
     [] -> bug "is listed by no term"
   where
     i = srcOriginIndex origin
@@ -631,8 +631,6 @@ sourceSignature origin src = do
       Written _ -> "written"
       Built _ -> "compiler-built"
     atIndex (_, Idx j _) = j == i
-    termsOf (Monomorphic t) = [t]
-    termsOf (Polymorphic _ _ _ ts) = ts
     bug :: MDoc -> MorlocMonad a
     bug what =
       MM.throwCompilerBug $

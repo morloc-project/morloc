@@ -132,6 +132,15 @@ instanceResolveTests =
     , testCase "declarations of one head merge" $
         map (Map.keys . idMethods) (instanceDecls (env [declWith "Sz" [int] "m1", declWith "Sz" [int] "m2"]) (ClassName "Sz"))
           @?= [[EV "m1", EV "m2"]]
+    , testCase "CLS-2: declarations of one head merge the methods they declare, latest type kept" $
+        let bare = mkInstanceDecl Declared (ClassName "Sz") [] [int] (Map.fromList [(EV "m1", (et int, [])), (EV "m2", (et int, []))]) 0
+            given = mkInstanceDecl Declared (ClassName "Sz") [] [int] (Map.singleton (EV "m1") (et str, [body "m1"])) 1
+            terms v = methodTerms (env [bare, given]) (ClassName "Sz") (EV v)
+         in ( map (etype . mtType) (terms "m1")
+            , map (length . mtBodies) (terms "m1")
+            , map (length . mtBodies) (terms "m2")
+            , length (terms "m3") )
+              @?= ([str], [1], [0], 0)
     , testCase "a context is instantiated at once, a use naming the head's own variables" $
         let e = env [decl "C2" [sz (VarU b)] [ForallU a (ForallU b (pair (VarU a) (VarU b)))]]
             k0 = VarU (TV "#0")
@@ -201,9 +210,10 @@ instanceResolveTests =
     sz x = Constraint (ClassName "Sz") [x]
     eq x = Constraint (ClassName "Eq") [x]
     pk x y = Constraint (ClassName "Packable") [x, y]
-    body m = ImplBody (ExprI 0 (VarE defaultValue (EV m)))
+    et t = EType t mempty (ArgDocAlias defaultValue) mempty
+    body m = ImplBody (et int) (ExprI 0 (VarE defaultValue (EV m)))
     decl cls ctx ts = mkInstanceDecl Declared (ClassName cls) ctx ts Map.empty 0
-    declWith cls ts m = mkInstanceDecl Declared (ClassName cls) [] ts (Map.singleton (EV m) [body m]) 0
+    declWith cls ts m = mkInstanceDecl Declared (ClassName cls) [] ts (Map.singleton (EV m) (et int, [body m])) 0
     key cls ts = idKey (decl cls [] ts)
     env ds = foldr insertInstanceDecl defaultValue (reverse ds)
     nat3 = env [decl "Sz" [] [ForallU a (vec n (VarU a))], decl "Sz" [] [vec (NatLitU 3) int]]

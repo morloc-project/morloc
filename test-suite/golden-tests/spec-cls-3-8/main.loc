@@ -1,0 +1,7 @@
+-- A method stays in the conflict check after its class name is declared again.
+module main (h)
+import .a (f)
+import .b (g)
+import .c (k)
+h :: Int -> Int
+h x = k (f (g x))

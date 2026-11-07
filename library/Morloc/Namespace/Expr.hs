@@ -1013,9 +1013,10 @@ data InstanceKey = InstanceKey
 -- | An implementation an instance gives for a method.
 data Impl
   = ImplSource MVar (Indexed Source)
-  | ImplBody ExprI
+  | -- | The method's type in its own declaration's variable names.
+    ImplBody EType ExprI
   | -- | A derived @pack@ or @unpack@, a representation cast (NEWT-7).
-    ImplCast ExprI
+    ImplCast EType ExprI
   deriving (Show, Eq, Ord)
 
 -- | One instance, merged across every declaration of its key (CLS-2).
@@ -1024,7 +1025,9 @@ data InstanceDecl = InstanceDecl
   , idContext :: [Constraint]
   -- ^ written in the key's variable names; a variable the head lacks is an
   -- unsolved existential
-  , idMethods :: Map.Map EVar [Impl]
+  , idMethods :: Map.Map EVar (EType, [Impl])
+  -- ^ each method the instance declares, at the instance's types in the
+  -- variable names of its latest declaration, with its implementations
   , idSites :: [Int]
   , idOrigin :: InstanceOrigin
   }
@@ -1057,13 +1060,15 @@ noPatEvidence = PatEvidence Nothing []
 data InstanceEnv = InstanceEnv
   { ieByClass :: Map.Map ClassName [InstanceDecl]
   , ieClasses :: Map.Map ClassName ClassInfo
+  , ieMethods :: Map.Map EVar (ClassName, [TVar])
+  -- ^ the class each method was declared in, with that class's variables
   , ieFundeps :: Map.Map ClassName [Int]
   -- ^ the class-argument positions the other arguments determine
   }
   deriving (Show, Eq, Ord)
 
 instance Defaultable InstanceEnv where
-  defaultValue = InstanceEnv Map.empty Map.empty Map.empty
+  defaultValue = InstanceEnv Map.empty Map.empty Map.empty Map.empty
 
 -- | How a constraint at a use is met.
 data Evidence

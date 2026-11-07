@@ -4589,6 +4589,51 @@ cls16Tests =
         g :: Vec n Str -> Vec n Str
         g t = pk (unpk t :: [Str])
         |]
+    , acceptTypecheck
+        "spec-cls-5-13"
+        [r|
+        module main (one)
+        class Integral a
+        class Integral a => MyInt a
+        one :: MyInt a => a
+        one = 1
+        |]
+    , acceptTypecheck
+        "spec-cls-5-14"
+        [r|
+        module main (f)
+        class Sz a where
+          sz :: a -> Int
+        class C a where
+          m :: a -> Int
+        hd :: [a] -> a
+        instance Sz Int where
+          source Py from "s.py" ("szi" as sz)
+        instance Sz a => C [a] where
+          m xs = sz (hd xs)
+        instance Sz b => C [b] where
+          source Py from "s.py" ("m2" as m)
+        f :: [Int] -> Int
+        f xs = m xs
+        |]
+    , acceptTypecheck
+        "spec-cls-5-15"
+        [r|
+        module main (f)
+        class Sz a where
+          sz :: a -> Int
+        class C a where
+          m :: a -> Int
+        hd :: [a] -> a
+        instance Sz Int where
+          source Py from "s.py" ("szi" as sz)
+        instance Sz b => C [b] where
+          source Py from "s.py" ("m2" as m)
+        instance Sz a => C [a] where
+          m xs = sz (hd xs)
+        f :: [Int] -> Int
+        f xs = m xs
+        |]
     , reject
         "spec-cls-16-8"
         [r|

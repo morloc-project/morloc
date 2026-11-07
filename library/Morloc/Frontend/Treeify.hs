@@ -21,7 +21,6 @@ module Morloc.Frontend.Treeify
   ) where
 
 import qualified Data.Set as Set
-import qualified Morloc.BaseTypes as BT
 import qualified Morloc.Data.DAG as DAG
 import Morloc.Data.Doc
 import qualified Morloc.Data.GMap as GMap
@@ -32,7 +31,9 @@ import qualified Morloc.Frontend.Link as MFL
 import Morloc.Frontend.Rename (displayName, renameLocals)
 import Morloc.Frontend.Namespace
 import qualified Morloc.Monad as MM
-import Morloc.Typecheck.Internal (collectEffLabels, instanceArgHead)
+import qualified Morloc.Frontend.Instances as FI
+import Morloc.Frontend.Instances (MethodTerm (..))
+import Morloc.Typecheck.Internal (collectEffLabels, instanceArgHead, patternAccessibleMethod, structuralMethods)
 import qualified Morloc.DataFiles as DF
 import qualified Morloc.Config as MC
 import Control.Monad.IO.Class (liftIO)
@@ -431,14 +432,14 @@ leakMessage leaked =
 checkInstanceEffects :: MorlocMonad ()
 checkInstanceEffects = do
   declared <- MM.gets stateEffects
-  tcls <- MM.gets stateTypeclasses
+  env <- MM.gets stateInstances
   sequence_
-    [ throwAt (listToMaybe ([j | (_, Idx j _) <- cs] <> [j | ExprI j _ <- ds])) $
-        "At its instance of" <+> pretty (className inst) <+> squotes (pretty v)
-          <+> "has the type" <+> pretty (etype et) <> "." <+> leakMessage leaked
-    | (v, inst) <- Map.toList tcls
-    , TermTypes (Just et) cs ds _ <- instanceTerms inst
-    , let leaked = inescapableLeak declared (etype et)
+    [ throwAt (FI.methodTermSite t) $
+        "At its instance of" <+> pretty (ikClass (mtKey t))
+          <+> squotes (pretty (mtMethod t))
+          <+> "has the type" <+> pretty (etype (mtType t)) <> "." <+> leakMessage leaked
+    | t <- FI.allMethodTerms env
+    , let leaked = inescapableLeak declared (etype (mtType t))
     , not (Set.null leaked)
     ]
   where
@@ -455,59 +456,34 @@ checkInstanceEffects = do
 -- choice at declaration time.
 checkPatternAccessibleCoherence :: MorlocMonad ()
 checkPatternAccessibleCoherence = do
-  paHeads <- collectReceiverHeads (EV BT.extractPatternMethod) 2
-  -- Fast path: most compiles declare no 'PatternAccessible' instance,
-  -- so skip the structural-class scan entirely.
-  if Map.null paHeads
-    then return ()
-    else do
-      ixHeads <- collectReceiverHeads (EV "__access_index__") 1
-      slHeads <- collectReceiverHeads (EV "__get_slice__") 3
-      sdHeads <- collectReceiverHeads (EV "__get_slice_dim__") 3
-      let structural = Map.unions [ixHeads, slHeads, sdHeads]
-          conflicts  = [ (h, paIdx)
-                       | (h, paIdx) <- Map.toList paHeads
-                       , Map.member h structural
-                       ]
-      case conflicts of
-        [] -> return ()
-        ((h, paIdx) : _) ->
-          MM.throwSourcedError paIdx $
-            "Type" <+> squotes (pretty h)
-              <+> "has a 'PatternAccessible' instance and also has an"
-              <+> "'Indexable', 'Sliceable', or 'SliceableDim' instance."
-              <+> "Both class families dispatch the pattern-accessor"
-              <+> "syntax (.foo, .[i], .[s:e:p]) on the same receiver,"
-              <+> "so silently preferring one would be ambiguous."
-              <+> "Choose one: keep 'PatternAccessible" <+> pretty h <> "'"
-              <+> "for a custom walker, or drop it and let"
-              <+> "'Indexable' / 'Sliceable' provide structural dispatch."
+  env <- MM.gets stateInstances
+  let paHeads = collectReceiverHeads env patternAccessibleMethod
+      structural = Map.unions (map (collectReceiverHeads env) structuralMethods)
+      conflicts = Map.toList (Map.filterWithKey (\h _ -> Map.member h structural) paHeads)
+  case conflicts of
+    [] -> return ()
+    ((h, paIdx) : _) ->
+      MM.throwSourcedError paIdx $
+        "Type" <+> squotes (pretty h)
+          <+> "has a 'PatternAccessible' instance and also has an"
+          <+> "'Indexable', 'Sliceable', or 'SliceableDim' instance."
+          <+> "Both class families dispatch the pattern-accessor"
+          <+> "syntax (.foo, .[i], .[s:e:p]) on the same receiver,"
+          <+> "so silently preferring one would be ambiguous."
+          <+> "Choose one: keep 'PatternAccessible" <+> pretty h <> "'"
+          <+> "for a custom walker, or drop it and let"
+          <+> "'Indexable' / 'Sliceable' provide structural dispatch."
 
--- | Collect the receiver's outermost 'TVar' from every 'TermTypes'
--- entry of a class method's instance list, keyed on that TVar. The
--- 'pos' parameter is the argument index the receiver occupies in the
--- method's function type. The 'Int' value is one representative
--- source index for the instance (used as the caret in error
--- messages). Sourced instances (@source Py from ...@) carry the
--- index in 'termConcrete'; body-declared instances (@__method__ =
--- someExpr@) carry it in 'termDecl'.
-collectReceiverHeads :: EVar -> Int -> MorlocMonad (Map.Map TVar Int)
-collectReceiverHeads method pos = do
-  sigmap <- MM.gets stateTypeclasses
-  case Map.lookup method sigmap of
-    Nothing -> return Map.empty
-    Just inst -> return $ Map.fromList
-      [ (h, i)
-      | tt@(TermTypes (Just et) _ _ _) <- instanceTerms inst
-      , Just h <- [instanceArgHead pos et]
-      , Just i <- [instanceIndex tt]
-      ]
-  where
-
-    instanceIndex :: TermTypes -> Maybe Int
-    instanceIndex (TermTypes _ ((_, Idx ix _) : _) _ _) = Just ix
-    instanceIndex (TermTypes _ _ (ExprI ix _ : _) _) = Just ix
-    instanceIndex _                                    = Nothing
+-- | The receiver head of every instance implementing a method, with one
+-- source index of the instance, for the caret of an error message.
+collectReceiverHeads :: InstanceEnv -> ArgMethod -> Map.Map TVar Int
+collectReceiverHeads env (ArgMethod cls method pos) =
+  Map.fromList
+    [ (h, i)
+    | t <- FI.methodTerms env cls method
+    , Just h <- [instanceArgHead pos (mtType t)]
+    , Just i <- [FI.methodTermSite t]
+    ]
 
 linkAndRemoveAnnotations :: ExprI -> MorlocMonad ExprI
 linkAndRemoveAnnotations = f
@@ -567,12 +543,12 @@ contractRoots (ExprI _ (ModE _ es)) = do
   -- each method an instance of the module defines, checked against the
   -- method's type at the instance's types, its body assuming the instance's
   -- context
+  env <- MM.gets stateInstances
   let methodTypes =
         [ (bodyIdx, (k, et))
-        | (k, Polymorphic _ _ _ tts) <- Map.toList sigmap
-        , tt <- tts
-        , Just et <- [termGeneral tt]
-        , ExprI bodyIdx _ <- termDecl tt
+        | (k, Polymorphic cls v _) <- Map.toList sigmap
+        , t <- FI.methodTerms env cls v
+        , (et, ExprI bodyIdx _) <- mtBodies t
         ]
       bodyType = Map.fromList methodTypes
   instanceTrees <- sequence
@@ -641,11 +617,6 @@ skeletonShape (ExprI i e) = case e of
   NamE rs -> Shape i . FormRecord <$> mapM (\(k, x) -> (,) k <$> skeletonShape x) rs
   _ -> Nothing
 
--- | The instance and type of a method's instance term.
-instanceOf :: EVar -> TermTypes -> MorlocMonad (InstanceKey, EType)
-instanceOf _ (TermTypes (Just et) _ _ (Just key)) = return (key, et)
-instanceOf v _ = MM.throwCompilerBug $ "an instance term of" <+> pretty v <+> "has no type or no instance"
-
 -- | Translate ExprI to ExprS tree
 collectExprS :: Namer -> ExprI -> MorlocMonad (Namer, ExprS Int ManyPoly Int)
 collectExprS namer0 (ExprI gi0 e0) = f namer0 e0
@@ -677,12 +648,12 @@ collectExprS namer0 (ExprI gi0 e0) = f namer0 e0
         -- case makes it one). Validation checks a method use as an
         -- obligation and never reads its instances' bodies (they are
         -- checked where the use is elaborated), so it never expands one.
-        (Just k, GMapJust (Polymorphic cls clsName t ts))
+        (Just k, GMapJust (Polymorphic cls clsName t))
           | Just r <- namerShallow namer
           , Nothing <- Map.lookup v (namerMap namer)
           , isNothing (namerShallowOnly namer) || k /= r || Map.member k (namerExpanding namer) -> do
-              cands <- mapM (instanceOf v) ts
-              return (namer, VarS v (PolymorphicExpr cls clsName t [(k', et, []) | (k', et) <- cands]))
+              env <- MM.gets stateInstances
+              return (namer, VarS v (PolymorphicExpr cls clsName t [(mtKey x, mtType x, []) | x <- FI.methodTerms env cls clsName]))
         -- A reference to a term that is being expanded is a recursive
         -- back-edge. It is recognized by the term's identity, not its name:
         -- two unrelated terms may share a name.
@@ -706,16 +677,15 @@ collectExprS namer0 (ExprI gi0 e0) = f namer0 e0
         -- declaration, then it will have no type.
         (Just k, GMapJust (Monomorphic t)) -> do
           MM.sayVVV $ "  monomorphic term" <+> pretty v <> ":" <+> maybe "?" pretty (termGeneral t)
-          (namer', es) <- expanding k namer (\n -> termtypesToAnnoS gi0 n t)
+          (namer', es) <- expanding k namer (\n -> implsToAnnoS gi0 n (map snd (termConcrete t)) (termDecl t))
           v' <- nameIfRecursive namer' k
           return (namer', VarS v' (MonomorphicExpr (termGeneral t) es))
         -- A polymorphic term should always have a type.
-        (Just k, GMapJust (Polymorphic cls clsName t ts)) -> do
-          MM.sayVVV $
-            "  polymorphic term" <+> pretty v <> ":" <+> list (map (maybe "?" pretty . termGeneral) ts)
-          let typed n' t' = do
-                (key, et) <- instanceOf v t'
-                second ((,,) key et) <$> termtypesToAnnoS gi0 n' t'
+        (Just k, GMapJust (Polymorphic cls clsName t)) -> do
+          env <- MM.gets stateInstances
+          let ts = FI.methodTerms env cls clsName
+              typed n' x = second ((,,) (mtKey x) (mtType x)) <$> implsToAnnoS gi0 n' (map snd (mtSources x)) (map snd (mtBodies x))
+          MM.sayVVV $ "  polymorphic term" <+> pretty v <> ":" <+> list (map (pretty . mtType) ts)
           (namer', ess) <- expanding k namer (\n -> statefulMapM typed n ts)
           v' <- nameIfRecursive namer' k
           return (namer', VarS v' (PolymorphicExpr cls clsName t ess))
@@ -756,11 +726,11 @@ collectExprS namer0 (ExprI gi0 e0) = f namer0 e0
               return token
           | otherwise = return v
 
-        termtypesToAnnoS :: Int -> Namer -> TermTypes -> MorlocMonad (Namer, [AnnoS Int ManyPoly Int])
-        termtypesToAnnoS gi n t = do
-          let calls = [AnnoS gi ci (ExeS (SrcCall isrc)) | (_, isrc@(Idx ci _)) <- termConcrete t]
+        implsToAnnoS :: Int -> Namer -> [Indexed Source] -> [ExprI] -> MorlocMonad (Namer, [AnnoS Int ManyPoly Int])
+        implsToAnnoS gi n srcs bodies = do
+          let calls = [AnnoS gi ci (ExeS (SrcCall isrc)) | isrc@(Idx ci _) <- srcs]
 
-          (n', declarations) <- statefulMapM termExprToAnnoS n (termDecl t)
+          (n', declarations) <- statefulMapM termExprToAnnoS n bodies
           return (n', (calls <> declarations))
 
         termExprToAnnoS :: Namer -> ExprI -> MorlocMonad (Namer, AnnoS Int ManyPoly Int)
@@ -844,7 +814,7 @@ collectExprS namer0 (ExprI gi0 e0) = f namer0 e0
     f namer (IntrinsicE IntrMap es@[_, _]) = do
       (namer1, es') <- statefulMapM collectAnnoS namer es
       GMap idmap sigmap <- MM.gets stateSignatures
-      case [k | (k, Polymorphic cls v _ _) <- Map.toList sigmap, cls == ClassName "Functor", v == EV "map"] of
+      case [k | (k, Polymorphic cls v _) <- Map.toList sigmap, cls == ClassName "Functor", v == EV "map"] of
         [] -> return (namer1, IntrinsicS IntrMap es')
         (k : _) -> do
           i <- MM.getCounterWithPos gi0

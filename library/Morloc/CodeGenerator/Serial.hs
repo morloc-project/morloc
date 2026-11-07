@@ -52,7 +52,7 @@ module Morloc.CodeGenerator.Serial
   , generalTypeToSerialAST
   ) where
 
-import Morloc.Data.Zip (indexed, zipSame)
+import Morloc.Data.Zip (zipSame)
 import qualified Data.Char as C
 import qualified Data.Set as Set
 import qualified Data.ByteString as BS
@@ -66,8 +66,7 @@ import qualified Morloc.Data.Map as Map
 import qualified Morloc.Monad as MM
 import qualified Morloc.TypeEval as TE
 import qualified Morloc.Frontend.Instances as FI
-import Morloc.Typecheck.Internal (apply, emptyGamma, mapTypeUChildren, prettyConstraint, qualify, substitute, subtype, typeUChildren, unqualify)
-import qualified Data.List as List
+import Morloc.Typecheck.Internal (apply, emptyGamma, prettyConstraint, qualify, substitute, subtype, unqualify)
 import Morloc.Frontend.TypeNames (isReservedTypeName)
 
 -- | Classification of how an aliased outer type maps onto the wire form.
@@ -690,6 +689,8 @@ data PackerInstance = PackerInstance
 -- is read by another under a form it was never written with.
 checkPackerCoherence :: MorlocMonad ()
 checkPackerCoherence = do
+  env <- MM.gets stateInstances
+  mapM_ checkPackerSources (FI.instanceDecls env FI.packableClass)
   instances <- findPackerInstances
   let byKey =
         Map.fromListWith
@@ -725,11 +726,22 @@ checkPackerCoherence = do
               <> "\nwritten under one form and read under the other."
               <> "\nGive the type one wire form."
 
+-- CLS-20: in each language an instance has one source of pack and of unpack.
+checkPackerSources :: InstanceDecl -> MorlocMonad ()
+checkPackerSources d =
+  sequence_
+    [ MM.throwSourcedError i $
+        "The instance" <+> prettyConstraint (FI.keyConstraint (idKey d))
+          <+> "has several" <+> pretty lang <+> "sources of" <+> squotes (pretty m) <> ":"
+          <+> hsep [squotes (pretty (srcName s)) | Idx _ s <- srcs]
+          <> ". Import fewer modules or remove one"
+    | m <- [EV "pack", EV "unpack"]
+    , (lang, srcs@(Idx i _ : _ : _)) <- Map.toList (Map.fromListWith (flip (<>)) [(srcLang (val s), [s]) | s <- FI.declSources m d])
+    ]
+
 findPackerInstances :: MorlocMonad [PackerInstance]
 findPackerInstances = do
-  sigmap <- MM.gets stateTypeclasses
-  let packs = methodSignatures (EV "pack") sigmap
-      unpacks = methodSignatures (EV "unpack") sigmap
+  env <- MM.gets stateInstances
   return
     [ PackerInstance
         { piHead = qualify vs1 b1
@@ -737,47 +749,19 @@ findPackerInstances = do
         , piSources = pairByLang packSrcs unpackSrcs
         , piPacks = Map.fromList [(srcLang (val p), p) | p <- packSrcs]
         }
-    | ((vs1, FunU [a1] b1), packSrcs) <- packs
-    , ((vs2, FunU [a2] b2), unpackSrcs) <- unpacks
-    , length vs1 == length vs2
-    , canonical vs1 (FunU [a1] b1) == canonical vs2 (FunU [b2] a2)
+    | d <- FI.instanceDecls env FI.packableClass
+    , Just pack <- [FI.methodTerm (EV "pack") d]
+    , Just unpack <- [FI.methodTerm (EV "unpack") d]
+    , (vs1, FunU [a1] b1) <- [unqualify (etype (FI.mtType pack))]
+    , (vs2, FunU [a2] b2) <- [unqualify (etype (FI.mtType unpack))]
+    , canonicalHead [qualify vs1 (FunU [a1] b1)] == canonicalHead [qualify vs2 (FunU [b2] a2)]
+    , let packSrcs = map snd (FI.mtSources pack)
+    , let unpackSrcs = map snd (FI.mtSources unpack)
     ]
   where
-    -- The two signatures come from one instance, but merging instances with
-    -- equal heads may leave them with different variable names, so they are
-    -- compared up to renaming.
-    canonical :: [TVar] -> TypeU -> TypeU
-    canonical vs t =
-      let order = List.nub [v | v <- occurrences t, v `elem` vs]
-          names = Map.fromList [(v, TV ("_" <> DT.pack (show k))) | (k, v) <- indexed order]
-       in rename names t
-
-    occurrences :: TypeU -> [TVar]
-    occurrences (VarU v) = [v]
-    occurrences (KVarU (v, _)) = [v]
-    occurrences t = concatMap occurrences (typeUChildren t)
-
-    rename :: Map.Map TVar TVar -> TypeU -> TypeU
-    rename m (VarU v) = VarU (Map.findWithDefault v v m)
-    rename m (KVarU (v, k)) = KVarU (Map.findWithDefault v v m, k)
-    rename m t = mapTypeUChildren (rename m) t
-
-    methodSignatures :: EVar -> Map.Map EVar Instance -> [(([TVar], TypeU), [Indexed Source])]
-    methodSignatures name sigmap = case Map.lookup name sigmap of
-      (Just (Instance _ _ _ ts)) -> concatMap sigOf ts
-      Nothing -> []
-
-    sigOf :: TermTypes -> [(([TVar], TypeU), [Indexed Source])]
-    sigOf (TermTypes (Just et) (map snd -> srcs) _ _) =
-      [(unqualify (etype et), srcs)]
-    sigOf (TermTypes Nothing _ _ _) = []
-
-    -- A language declares at most one source per method; two are rejected
-    -- earlier as ambiguous source declarations.
     pairByLang :: [Indexed Source] -> [Indexed Source] -> Map.Map Lang (Indexed Source, Indexed Source)
     pairByLang ps us =
-      Map.fromList
-        [(srcLang (val p), (p, u)) | p <- ps, u <- us, srcLang (val p) == srcLang (val u)]
+      Map.fromList [(srcLang (val p), (p, u)) | p <- ps, u <- us, srcLang (val p) == srcLang (val u)]
 
 -- Takes a map of packers with concrete type names as keys. A single concrete
 -- type name may map to many single types. For example, the python type "dict"

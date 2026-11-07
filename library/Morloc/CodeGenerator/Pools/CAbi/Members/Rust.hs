@@ -86,6 +86,7 @@ import qualified Morloc.Build.Params as BP
 import qualified Morloc.Data.PoolHash as PH
 import qualified Morloc.CodeGenerator.Pools.CAbi.Members.RustPrinter as RP
 import Morloc.CodeGenerator.Serial (containsFunF, serialAstToMsgpackSchema, serialAstToNativeType, serialAstToType, shallowType, wireSerialAstToType)
+import qualified Morloc.Frontend.Instances as FI
 import Morloc.Typecheck.Internal (unqualify)
 import Morloc.CodeGenerator.EffectBoundary (declaredFun, expandT)
 import Morloc.Data.Doc
@@ -1406,20 +1407,20 @@ buildSrcMakers = Set.fromList . map fst . filter snd <$> fromSourceSignatures (\
 fromSourceSignatures :: (Scope -> Set.Set TVar -> Type -> a) -> MorlocMonad [(SrcName, a)]
 fromSourceSignatures f0 = do
   GMap _ sigmap <- MM.gets stateSignatures
-  tcls <- MM.gets stateTypeclasses
+  env <- MM.gets stateInstances
   scope <- MM.getGeneralScope
   let f qs t = f0 scope qs (typeOf t)
-  return . concatMap (fromSig f tcls) . Map.elems $ sigmap
+  return . concatMap (fromSig f env) . Map.elems $ sigmap
   where
-    fromSig f _ (Monomorphic (TermTypes (Just et) srcs _ _)) =
+    fromSig f _ (Monomorphic (TermTypes (Just et) srcs _)) =
       let (qs, t') = unqualify (etype et)
        in entries f (Set.fromList qs) t' srcs
-    fromSig _ _ (Monomorphic (TermTypes Nothing _ _ _)) = []
-    fromSig f tcls (Polymorphic _ methodEV classET tts) =
-      let cvars = maybe [] classVars (Map.lookup methodEV tcls)
+    fromSig _ _ (Monomorphic (TermTypes Nothing _ _)) = []
+    fromSig f env (Polymorphic cls methodEV classET) =
+      let cvars = maybe [] snd (Map.lookup methodEV (ieMethods env))
           (fs, t') = unqualify (etype classET)
           qs = Set.fromList (fs <> cvars)
-       in concat [entries f qs t' srcs | TermTypes _ srcs _ _ <- tts]
+       in concat [entries f qs t' (FI.mtSources m) | m <- FI.methodTerms env cls methodEV]
 
     entries f qs t' srcs =
       [(srcName s, f qs t') | (_, isrc) <- srcs, let s = val isrc, srcLang s == rustLang]

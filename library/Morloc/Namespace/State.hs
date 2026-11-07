@@ -28,7 +28,6 @@ module Morloc.Namespace.State
   , WrapperMode (..)
   , WrapperFile (..)
   , SignatureSet (..)
-  , Instance (..)
   , TermTypes (..)
   , Specs (..)
 
@@ -155,7 +154,6 @@ data MorlocState = MorlocState
     -- from here, seeded above every index the frontend allotted.
   , stateDepth :: Int
   , stateSignatures :: GMap Int Int SignatureSet
-  , stateTypeclasses :: Map.Map EVar Instance
   , stateInstances :: InstanceEnv
   -- ^ One entry per instance, merged across its declarations.
   , stateConcreteTypedefs :: Map Lang Scope
@@ -253,7 +251,6 @@ data MorlocState = MorlocState
   , stateBuildParentDir :: Maybe Path
   -- ^ Parent directory for the @<key>-build@ folder (@--build-dir@).
   -- @Nothing@ = current working directory.
-  , stateClassDefs :: Map ClassName [Constraint]
   , stateEffects :: Map.Map EffectLabel Bool
   -- ^ Declared effects: label -> isEscapable (True = escapable). The
   -- compiler hardcodes none; all entries come from `effect` /
@@ -442,16 +439,7 @@ data SignatureSet
       ClassName
       EVar
       EType
-      [TermTypes]
   deriving (Show)
-
-data Instance = Instance
-  { className :: ClassName
-  , classVars :: [TVar]
-  , classType :: EType
-  , instanceTerms :: [TermTypes]
-  }
-  deriving (Show, Ord, Eq)
 
 -- | The roots of the shared specializations ('stateSpecs').
 newtype Specs = Specs [AnnoS (Indexed TypeU) Many Int]
@@ -463,8 +451,6 @@ data TermTypes = TermTypes
   { termGeneral :: Maybe EType
   , termConcrete :: [(MVar, Indexed Source)]
   , termDecl :: [ExprI]
-  , termInstance :: Maybe InstanceKey
-  -- ^ the instance a method's implementations belong to
   }
   deriving (Show, Ord, Eq)
 
@@ -1109,7 +1095,6 @@ instance Defaultable MorlocState where
       , stateManifoldCounter = 0
       , stateDepth = 0
       , stateSignatures = GMap Map.empty Map.empty
-      , stateTypeclasses = Map.empty
       , stateInstances = defaultValue
       , stateConcreteTypedefs = Map.empty
       , stateGeneralTypedefs = Map.empty
@@ -1145,7 +1130,6 @@ instance Defaultable MorlocState where
       , stateWrapperSpecs = Nothing
       , stateRebuild = Nothing
       , stateBuildParentDir = Nothing
-      , stateClassDefs = Map.empty
       , stateEffects = Map.empty
       , stateLangRegistry = LR.emptyRegistry
       , stateExportGroups = Map.empty
@@ -1309,24 +1293,13 @@ instance FromJSON ExposeSet where
 
 ----- Pretty instances -------------------------------------------------------
 
-instance Pretty Instance where
-  pretty (Instance cls vs et ts) =
-    "Instance"
-      <+> pretty cls
-      <+> pretty vs
-      <+> parens (pretty (etype et))
-      <+> list (map pretty ts)
-
 instance Pretty TermTypes where
-  pretty (TermTypes (Just t) cs es _) = "TermTypes" <+> (align . vsep $ (parens (pretty t) : map pretty cs <> map pretty es))
-  pretty (TermTypes Nothing cs es _) = "TermTypes" <+> "?" <> (align . vsep $ (map pretty cs <> map pretty es))
+  pretty (TermTypes (Just t) cs es) = "TermTypes" <+> (align . vsep $ (parens (pretty t) : map pretty cs <> map pretty es))
+  pretty (TermTypes Nothing cs es) = "TermTypes" <+> "?" <> (align . vsep $ (map pretty cs <> map pretty es))
 
 instance Pretty SignatureSet where
   pretty (Monomorphic t) = pretty t
-  pretty (Polymorphic cls v t ts) =
-    "class"
-      <+> pretty cls
-      <+> (align . vsep $ (pretty v <+> "::" <+> parens (pretty t)) : map pretty ts)
+  pretty (Polymorphic cls v t) = "class" <+> pretty cls <+> pretty v <+> "::" <+> parens (pretty t)
 
 instance Pretty GammaIndex where
   pretty (VarG tv) = "VarG:" <+> pretty tv

@@ -27,12 +27,20 @@
   which names the module but no import line.
 - **Two classes never in one scope may not share a method name.**
   [reproduced 2026-11-04] Violates CLS-3 ("in scope"). Link.hs
-  `insertWithCheck` checks method names against the global
-  `stateTypeclasses`: `ca` declares `class A a where foo :: a -> Int`,
+  `insertWithCheck` checks method names against every class in
+  `ieClasses`: `ca` declares `class A a where foo :: a -> Int`,
   `cb` declares `class B a where foo :: a -> Int`, `main` imports
   `.ca (bar)` and `.cb (baz)`: "The typeclasses 'A' and 'B' have
-  conflicting definitions of the term 'foo'". Instances are keyed by
-  method name, so the fix keys them by class and method.
+  conflicting definitions of the term 'foo'". The instance table is keyed
+  by class, so what remains is a check of the classes in scope.
+- **Same-named classes of unrelated modules are one class.** [reproduced
+  2026-11-07] Violates CLS-16 (candidates are the class's instances).
+  `ieByClass` and `ieClasses` are keyed by class name, and `insertClassInfo`
+  overwrites. `a` declares `class C a` (`m1`) with `instance C (Int, a)`; `b`
+  declares `class C a` (`m2`) with `instance C (a, Int)`; `main` imports `.a (f)`
+  and `.b (g)`, and `f :: (Int, Int) -> Int` using `m1` is refused: "several
+  instances match". Superclasses (`ciSupers`) and `argConstraint`'s method type
+  also read the last class of that name. Fix keys classes by declaration.
 - [speculative, 2026-11-04] An instance whose type extends a method's
   parameters (`mk :: Int -> a` at `Int -> Int` is `Int -> Int -> Int`,
   APP-1) keeps the class signature's argument docs, written for fewer

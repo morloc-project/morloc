@@ -1,0 +1,14 @@
+-- Two pack sources in Python, whose first would pair with the other unpack.
+module main (g)
+import root-py
+
+newtype Wrap = Str
+
+instance Packable Str Wrap where
+  source Py from "p.py" ("pk1" as pack)
+
+instance Packable Str Wrap where
+  source Py from "q.py" ("pk2" as pack, "un2" as unpack)
+
+source Py from "q.py" ("same" as g)
+g :: Wrap -> Wrap

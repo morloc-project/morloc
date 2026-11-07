@@ -1,0 +1,21 @@
+-- A class that is not Packable may name its methods pack and unpack; its
+-- instances say nothing about any type's wire form.
+module main (f)
+
+type Py => Int = "int"
+type Py => Str = "str"
+
+newtype Foo = Str
+
+class Codec a b where
+  pack :: a -> b
+  unpack :: b -> a
+
+instance Codec Str Foo where
+  source Py from "c.py" ("code" as pack, "dec" as unpack)
+
+instance Codec Int Foo where
+  source Py from "c.py" ("code2" as pack, "dec2" as unpack)
+
+source Py from "c.py" ("bump" as f)
+f :: Int -> Int

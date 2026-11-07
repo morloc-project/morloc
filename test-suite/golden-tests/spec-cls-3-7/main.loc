@@ -1,0 +1,6 @@
+-- Unrelated classes of one name keep their own variables.
+module main (h)
+import .a (f)
+import .b (g)
+h :: Int -> Int
+h x = f (g x)

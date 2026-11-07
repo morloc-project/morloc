@@ -33,6 +33,7 @@ import Morloc.CodeGenerator.LambdaEval (reindexTree)
 import Morloc.CodeGenerator.Serial (containsFunT)
 import Morloc.CodeGenerator.Namespace
 import qualified Morloc.Data.GMap as GMap
+import qualified Morloc.Frontend.Instances as FI
 import Morloc.Data.Doc
 import Morloc.Data.Map (Map)
 import qualified Morloc.Data.Map as Map
@@ -919,38 +920,38 @@ uniqueBinders t = evalStateT (go Map.empty t) Set.empty
       put (Set.insert v' seen)
       return v'
 
--- | The sources of each term a signature declares.
-implementations :: SignatureSet -> [[Source]]
-implementations (Monomorphic t) = [[s | (_, Idx _ s) <- termConcrete t]]
-implementations (Polymorphic _ _ _ ts) = [[s | (_, Idx _ s) <- termConcrete t] | t <- ts]
+-- | The sources of each term: every signed term and every instance's
+-- declaration of a method.
+termSources :: MorlocMonad [[Indexed Source]]
+termSources = do
+  sigs <- GMap.elems <$> MM.gets stateSignatures
+  env <- MM.gets stateInstances
+  return $
+    [map snd (termConcrete t) | Monomorphic t <- sigs]
+      <> [map snd (FI.mtSources t) | t <- FI.allMethodTerms env]
 
 -- | The other sources of the term @src@ implements, in other languages, with
 -- the same call groups (HOST-3).
 sameTermSources :: Indexed Source -> MorlocMonad [Indexed Source]
 sameTermSources isrc@(Idx _ src) = do
-  sigs <- GMap.elems <$> MM.gets stateSignatures
+  terms <- termSources
   return $
     List.nubBy (\a b -> val a == val b)
       [ is
-      | srcs <- concatMap indexedImplementations sigs
+      | srcs <- terms
       , isrc `elem` srcs
       , is@(Idx _ s) <- srcs
       , srcLang s /= srcLang src
       , srcRsize s == srcRsize src
       ]
 
-indexedImplementations :: SignatureSet -> [[Indexed Source]]
-indexedImplementations (Monomorphic t) = [map snd (termConcrete t)]
-indexedImplementations (Polymorphic _ _ _ ts) = [map snd (termConcrete t) | t <- ts]
-
 -- | The advice for a function made by @src@: if its term has sources in
 -- other languages, how to have one of those make it instead; otherwise
 -- nothing.
 chooseSourceHint :: Source -> MorlocMonad MDoc
 chooseSourceHint src = do
-  sigs <- GMap.elems <$> MM.gets stateSignatures
-  let terms = concatMap implementations sigs
-      others = unique [srcLang s | srcs <- terms, src `elem` srcs, s <- srcs, srcLang s /= srcLang src]
+  terms <- map (map val) <$> termSources
+  let others = unique [srcLang s | srcs <- terms, src `elem` srcs, s <- srcs, srcLang s /= srcLang src]
       name = squotes (pretty (displayName (srcAlias src)))
   return $ case others of
     [] -> mempty

@@ -10,7 +10,7 @@ Replaced by CLS-7: a class may give a method a default body.
 
 ### CLS-2 The type at the use site selects the instance
 Intent: proposed
-Tests: spec-cls-2-1, spec-cls-2-2, spec-cls-2-3, spec-cls-2-4, spec-cls-2-5, spec-cls-2-6, spec-cls-2-7, spec-cls-2-8
+Tests: spec-cls-2-1, spec-cls-2-2, spec-cls-2-3, spec-cls-2-4, spec-cls-2-5, spec-cls-2-6, spec-cls-2-7, spec-cls-2-8, spec-cls-2-9
 Code: deviates (issues/typeclasses.md)
 
 A method used at type `T` runs an implementation of the instance for `T`.
@@ -20,7 +20,7 @@ of SIG-2.
 
 ### CLS-3 A method name belongs to one class
 Intent: proposed
-Tests: spec-cls-3-1, spec-cls-3-2, spec-cls-3-3, spec-cls-3-4, spec-cls-3-5, spec-cls-3-6
+Tests: spec-cls-3-1, spec-cls-3-2, spec-cls-3-3, spec-cls-3-4, spec-cls-3-5, spec-cls-3-6, spec-cls-3-7, spec-cls-3-8
 Code: deviates (issues/typeclasses.md)
 
 Two classes in scope that declare the same method name are a compile error.
@@ -42,7 +42,7 @@ Code: conforms 2026-10-21
 
 ### CLS-5 Superclasses and instance contexts are obligations
 Intent: ruled 2026-10-29
-Tests: spec-cls-5-1, spec-cls-5-2, spec-cls-5-3, spec-cls-5-4, spec-cls-5-5, spec-cls-5-6, spec-cls-5-7, spec-cls-5-8, spec-cls-5-9, spec-cls-5-10, spec-cls-5-11, spec-cls-5-12
+Tests: spec-cls-5-1, spec-cls-5-2, spec-cls-5-3, spec-cls-5-4, spec-cls-5-5, spec-cls-5-6, spec-cls-5-7, spec-cls-5-8, spec-cls-5-9, spec-cls-5-10, spec-cls-5-11, spec-cls-5-12, spec-cls-5-13, spec-cls-5-14, spec-cls-5-15
 Code: conforms 2026-11-05
 
 `class C a => D a` requires an instance `C T` for every instance `D T`, and
@@ -148,6 +148,7 @@ check needs the whole program.
 
 ### CLS-15 A class the compiler refers to is declared in `internal`
 Intent: ruled 2026-11-02
+Tests: spec-cls-15-1
 Code: deviates (issues/typeclasses.md)
 
 `root` is a prelude a program may replace (MOD-18); `internal` is what the
@@ -226,7 +227,7 @@ some types is an instance at those types.
 
 ### CLS-20 Packable's wire argument is determined by the packed type
 Intent: ruled 2026-11-05
-Tests: spec-cls-20-1, spec-cls-20-2, spec-cls-20-3, spec-cls-20-4, spec-cls-20-5, spec-cls-20-6, spec-cls-20-7, spec-cls-20-8, spec-cls-20-9, spec-cls-20-10, spec-cls-20-11, spec-cls-20-12
+Tests: spec-cls-20-1, spec-cls-20-2, spec-cls-20-3, spec-cls-20-4, spec-cls-20-5, spec-cls-20-6, spec-cls-20-7, spec-cls-20-8, spec-cls-20-9, spec-cls-20-10, spec-cls-20-11, spec-cls-20-12, spec-cls-20-13
 Code: conforms 2026-11-05
 
 `Packable a b` has the dependency `b -> a`: the instance selected by `b`
@@ -239,6 +240,10 @@ variables solved and Nat arithmetic evaluated (`Vector (m * n) a` is
 `Vector 6 Real` at `m = 2`, `n = 3`). No other class has a dependency (a
 class named `Packable` with another number of parameters has none), and
 no other class argument is fixed by instance selection.
+
+In one language an instance has at most one source of `pack` and one of
+`unpack`, across all its declarations (NATIVE-10). More is a compile error
+naming the sources.
 
 ### CLS-21 A host function that agrees only at some types is an instance
 Intent: ruled 2026-11-05

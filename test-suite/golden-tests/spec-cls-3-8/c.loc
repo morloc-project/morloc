@@ -1,0 +1,7 @@
+module c (k)
+class D a where
+  m1 :: a -> Int
+instance D Int where
+  source Py from "h.py" ("one" as m1)
+k :: Int -> Int
+k x = m1 x

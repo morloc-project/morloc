@@ -550,7 +550,7 @@ checkEvidence :: AnnoS (Indexed Type) Many Int -> MorlocMonad ()
 checkEvidence root = do
   GMap idmap sigmap <- MM.gets stateSignatures
   let methodClass i = case Map.lookup i idmap >>= (`Map.lookup` sigmap) of
-        Just (Polymorphic cls _ _ _) -> Just cls
+        Just (Polymorphic cls _ _) -> Just cls
         _ -> Nothing
   sequence_
     [ MM.throwCompilerBugAt gi $ "realize: the use of" <+> squotes (pretty v) <+> problem

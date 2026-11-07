@@ -27,7 +27,6 @@ module Morloc.Typecheck.Internal
   , unqualify
   , headTVar
   , instanceArgHead
-  , instanceReceiverHeads
   , BracketReceiver (..)
   , bracketRule
   , classifyBracketReceiver
@@ -69,6 +68,8 @@ module Morloc.Typecheck.Internal
     -- * Packable wire-form lookup
   , instantiateAll
   , indexMethods
+  , patternAccessibleMethod
+  , structuralMethods
   , sliceMethods
   , getterMethods
   , boundMethods
@@ -179,32 +180,26 @@ headTVar _ = Nothing
 -- container an instance of a class over a type constructor is for.
 instanceArgHead :: Int -> EType -> Maybe TVar
 instanceArgHead pos et = case snd (unqualify (etype et)) of
-  FunU args _ | length args > pos -> headTVar (args !! pos)
-  _                               -> Nothing
-
--- | The containers the instances of @method@ are for, read at argument
--- @pos@ of each instance's type.
-instanceReceiverHeads :: EVar -> Int -> MorlocMonad [TVar]
-instanceReceiverHeads method pos = do
-  sigmap <- MM.gets stateTypeclasses
-  return
-    [ h
-    | Just inst <- [Map.lookup method sigmap]
-    , TermTypes (Just et) _ _ _ <- instanceTerms inst
-    , Just h <- [instanceArgHead pos et]
-    ]
+  FunU args _ -> listToMaybe (drop pos args) >>= headTVar
+  _           -> Nothing
 
 -- | What may serve a bracket step's receiver, in the order tried: a
 -- user-declared walker over the structural classes.
-indexMethods, sliceMethods, getterMethods, boundMethods :: [ArgMethod]
-indexMethods = [patternAccessibleMethod, ArgMethod (ClassName "Indexable") (EV "__access_index__") 1]
-sliceMethods =
-  [ patternAccessibleMethod
-  , ArgMethod (ClassName "Sliceable") (EV "__get_slice__") 3
-  , ArgMethod (ClassName "SliceableDim") (EV "__get_slice_dim__") 3
-  ]
+indexMethods, sliceMethods, getterMethods, boundMethods, structuralMethods :: [ArgMethod]
+indexMethods = [patternAccessibleMethod, indexableMethod]
+sliceMethods = patternAccessibleMethod : sliceableMethods
+structuralMethods = indexableMethod : sliceableMethods
 getterMethods = [patternAccessibleMethod]
 boundMethods = [ArgMethod (ClassName "IndexLike") (EV "__to_index__") 0]
+
+indexableMethod :: ArgMethod
+indexableMethod = ArgMethod (ClassName "Indexable") (EV "__access_index__") 1
+
+sliceableMethods :: [ArgMethod]
+sliceableMethods =
+  [ ArgMethod (ClassName "Sliceable") (EV "__get_slice__") 3
+  , ArgMethod (ClassName "SliceableDim") (EV "__get_slice_dim__") 3
+  ]
 
 functorMapMethod :: ArgMethod
 functorMapMethod = ArgMethod (ClassName "Functor") (EV "map") 1

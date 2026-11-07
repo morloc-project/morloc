@@ -63,8 +63,8 @@ processDocstrings ::
 processDocstrings e@(AnnoS (Idx i t) _ _) = do
   sgmap <- MM.gets stateSignatures
   argdoc <- case GMap.lookup i sgmap of
-    (GMapJust (Monomorphic (TermTypes (Just et) _ _ _))) -> return $ edocs et
-    (GMapJust (Polymorphic _ _ et _)) -> return $ edocs et
+    (GMapJust (Monomorphic (TermTypes (Just et) _ _))) -> return $ edocs et
+    (GMapJust (Polymorphic _ _ et)) -> return $ edocs et
     _ -> case t of
       (FunT ts _) -> return $ ArgDocSig defaultValue (take (length ts) (repeat defaultValue)) defaultValue
       _ -> return $ ArgDocAlias defaultValue

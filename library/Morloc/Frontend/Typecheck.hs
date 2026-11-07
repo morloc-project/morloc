@@ -18,7 +18,7 @@ segregation in the code generator.
 module Morloc.Frontend.Typecheck (typecheck, typecheckRoot, typecheckRootAt, validate, resolveTypes, evaluateAnnoSTypes, peakSExpr) where
 
 import Data.Foldable (toList)
-import Morloc.Data.Zip (indexed, zipPrefix, zipSame, zipWithSame)
+import Morloc.Data.Zip (indexed, zipExact, zipPrefix, zipSame, zipWithSame)
 import Data.IORef (IORef, modifyIORef', newIORef, readIORef)
 import qualified Data.List as List
 import qualified Data.List.NonEmpty as NE
@@ -575,9 +575,9 @@ resolveInstances mode g (AnnoS gi@(Idx _ gt) ci e0) = do
 
     -- CLS-2, CLS-16: the use's class arguments select one instance, whose
     -- implementations of the method are kept.
-    f scope env g0 (VarS v (PolymorphicExpr cls _ t0 rss)) = do
+    f scope env g0 (VarS v (PolymorphicExpr cls method t0 rss)) = do
       let use = apply g0 gt
-      c <- useConstraint scope g0 env cls (etype t0) use
+      c <- useConstraint scope g0 env cls method (etype t0) use
       case FI.resolve FI.usePolicy scope env [] c of
         Right (EvDerived _ arg) ->
           deriveComparison scope env g0 cls v >>= \case
@@ -698,10 +698,10 @@ resolveInstances mode g (AnnoS gi@(Idx _ gt) ci e0) = do
     -- A map is a use of the class's @map@, unless the intrinsic does the same:
     -- the instance selected is the standard one over a plain list, or none
     -- implements it.
-    f scope env g0 (IntrinsicS IntrMap [funcE, listE, use@(AnnoS (Idx _ useT) _ (VarS _ (PolymorphicExpr cls _ t0 _)))]) = do
+    f scope env g0 (IntrinsicS IntrMap [funcE, listE, use@(AnnoS (Idx _ useT) _ (VarS _ (PolymorphicExpr cls method t0 _)))]) = do
       (g1, funcE') <- recur g0 funcE
       (g2, listE') <- recur g1 listE
-      c <- useConstraint scope g2 env cls (etype t0) (apply g2 useT)
+      c <- useConstraint scope g2 env cls method (etype t0) (apply g2 useT)
       library <- MM.asks configLibrary
       let intrinsic = return (g2, IntrinsicS IntrMap [funcE', listE'])
           method = do
@@ -782,14 +782,14 @@ resolveInstances mode g (AnnoS gi@(Idx _ gt) ci e0) = do
 
 -- | The class constraint of a method use: the class's variables as the use's
 -- type instantiates the method's type. No coercion is applied (CLS-17).
-useConstraint :: Scope -> Gamma -> InstanceEnv -> ClassName -> TypeU -> TypeU -> MorlocMonad Constraint
-useConstraint scope g0 env cls method use = case Map.lookup cls (ieClasses env) of
-  Nothing -> MM.throwCompilerBug $ "resolveInstances: no class" <+> pretty cls
-  Just ci -> do
+useConstraint :: Scope -> Gamma -> InstanceEnv -> ClassName -> EVar -> TypeU -> TypeU -> MorlocMonad Constraint
+useConstraint scope g0 env cls v method use = case Map.lookup v (ieMethods env) of
+  Nothing -> MM.throwCompilerBug $ "resolveInstances: no method" <+> pretty v
+  Just (_, vars) -> do
     let (g1, t1, rw) = renameWithMap g0 method
     (g2, sub, body) <- return (instantiateAll g1 t1)
     case subtype scope use body g2 of
-      Right g3 -> return (Constraint cls [apply g3 (sub (rw (VarU v))) | v <- ciVars ci])
+      Right g3 -> return (Constraint cls [apply g3 (sub (rw (VarU cv))) | cv <- vars])
       Left err ->
         MM.throwCompilerBug $
           "resolveInstances: the use type" <+> prettyTypeU use <+> "is not an instance of the method type"
@@ -845,7 +845,7 @@ derivableAt scope cls t = case (derivedComparisons (unClassName cls), evalOr sco
   (_, VarU (TV n)) | isTypeVariableName n -> return False
   (Just methods, _) -> do
     GMap _ sigmap <- MM.gets stateSignatures
-    let declared = Set.fromList [v | Polymorphic c v _ _ <- Map.elems sigmap, c == cls]
+    let declared = Set.fromList [v | Polymorphic c v _ <- Map.elems sigmap, c == cls]
     return (declared == Set.fromList [EV m | (m, _) <- methods])
 
 -- | DERIV-6: whether the comparison of a class with no instance at @t@ is
@@ -859,13 +859,13 @@ derivedAt scope env cls t = do
     handWrittenEq = case FI.resolve FI.defaultPolicy scope env [] (Constraint (ClassName "Eq") [t]) of
       Right ev@(EvInstance k _ _) ->
         let source = either (const k) fst (FI.methodSources FI.defaultPolicy env ev (EV "=="))
-         in not (all isWireEq (concat [Map.findWithDefault [] (EV "==") (idMethods d) | d <- FI.instanceDecls env (ikClass k), idKey d == source]))
+         in not (all isWireEq (concat [FI.declImpls (EV "==") d | d <- FI.instanceDecls env (ikClass k), idKey d == source]))
       _ -> False
 
 -- | An implementation of @==@ that is @eq on its parameters, as a deriving
 -- clause writes it.
 isWireEq :: Impl -> Bool
-isWireEq (ImplBody (ExprI _ (LamE [x, y] (ExprI _ (IntrinsicE IntrEq [ExprI _ (VarE _ x'), ExprI _ (VarE _ y')]))))) =
+isWireEq (ImplBody _ (ExprI _ (LamE [x, y] (ExprI _ (IntrinsicE IntrEq [ExprI _ (VarE _ x'), ExprI _ (VarE _ y')]))))) =
   x == x' && y == y'
 isWireEq _ = False
 
@@ -893,7 +893,8 @@ derivedBody site x y = go
 -- generation (POLY-6).
 checkBracketReceiver :: Scope -> Int -> MDoc -> [ArgMethod] -> TypeU -> MorlocMonad ()
 checkBracketReceiver scope i what methods rcv = do
-  heads <- concat <$> sequence [instanceReceiverHeads m pos | ArgMethod _ m pos <- methods]
+  env <- MM.gets stateInstances
+  let heads = concatMap (FI.instanceReceiverHeads env) methods
   when (classifyBracketReceiver scope heads rcv == ReceiverNone) $
     throwTypeError i $
       "A bracket step needs a receiver with" <+> what <+> "instance, but"
@@ -1399,9 +1400,9 @@ synthE _ g (VarS v (MonomorphicExpr Nothing [])) = do
 -- obligation; the instance is not chosen here.
 synthE _ g0 (VarS v (PolymorphicExpr cls clsName t0 _))
   | Just _ <- gammaRigid g0 = do
-      tcls <- MM.gets stateTypeclasses
+      methods <- MM.gets (ieMethods . stateInstances)
       let (g1, t1, rw) = renameWithMap g0 (etype t0)
-          cvars = maybe [] classVars (Map.lookup clsName tcls)
+          cvars = maybe [] snd (Map.lookup clsName methods)
           obligation = Constraint cls [rw (VarU cv) | cv <- cvars]
           (g2, t2) = instantiateObligations g1 t1 [obligation]
       return (g2, t2, VarS v (PolymorphicExpr cls clsName t0 []))
@@ -3813,15 +3814,11 @@ unmet defIdx givens open c = do
 -- | Constraints together with every superclass constraint they imply.
 superclassClosure :: [Constraint] -> MorlocMonad [Constraint]
 superclassClosure cs0 = do
-  classDefs <- MM.gets stateClassDefs
-  tcls <- MM.gets stateTypeclasses
-  let varsOf cls = case [classVars inst | inst <- Map.elems tcls, className inst == cls] of
-        (vs : _) -> Just vs
-        [] -> Nothing
-      supers (Constraint cls args) = case (Map.lookup cls classDefs, varsOf cls) of
-        (Just scs, Just vs) | length vs == length args ->
-          [ Constraint sc (map (substAll (zipSame vs args)) sargs)
-          | Constraint sc sargs <- scs
+  classes <- MM.gets (ieClasses . stateInstances)
+  let supers (Constraint cls args) = case Map.lookup cls classes of
+        Just ci | Just pairs <- zipExact (ciVars ci) args ->
+          [ Constraint sc (map (substAll pairs) sargs)
+          | Constraint sc sargs <- ciSupers ci
           ]
         _ -> []
       supers _ = []

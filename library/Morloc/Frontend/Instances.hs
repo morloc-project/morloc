@@ -31,6 +31,14 @@ module Morloc.Frontend.Instances
   , insertInstanceDecl
   , insertClassInfo
   , instanceDecls
+  , MethodTerm (..)
+  , methodTerm
+  , methodTermSite
+  , methodTerms
+  , allMethodTerms
+  , declImpls
+  , declSources
+  , instanceReceiverHeads
   , resolve
   , resolveArg
   , resolvePackable
@@ -68,7 +76,7 @@ import Morloc.Namespace.Expr
 import Morloc.Namespace.Prim
 import Morloc.Namespace.State (Gamma)
 import Morloc.Namespace.Type
-import Morloc.Typecheck.Internal (Applicable (..), instantiateAll, natPositionExpr, renameWithMap, subtype, traverseTypeUChildren)
+import Morloc.Typecheck.Internal (Applicable (..), instanceArgHead, instantiateAll, natPositionExpr, renameWithMap, subtype, traverseTypeUChildren)
 import qualified Morloc.Typecheck.NatSolver as NS
 import qualified Morloc.TypeEval as TE
 
@@ -147,7 +155,8 @@ packableWireFundep classes = case Map.lookup (ClassName "Packable") classes of
 -- | An instance as one declaration writes it: the context is renamed with
 -- the head, and a context variable the head lacks becomes an unsolved
 -- existential, which no use can fix.
-mkInstanceDecl :: InstanceOrigin -> ClassName -> [Constraint] -> [TypeU] -> Map.Map EVar [Impl] -> Int -> InstanceDecl
+mkInstanceDecl ::
+  InstanceOrigin -> ClassName -> [Constraint] -> [TypeU] -> Map.Map EVar (EType, [Impl]) -> Int -> InstanceDecl
 mkInstanceDecl origin cls ctx ts methods site =
   InstanceDecl
     { idKey = InstanceKey cls (vs, hs)
@@ -173,15 +182,65 @@ insertInstanceDecl d env = env {ieByClass = Map.alter (Just . maybe [d] add) (ik
     mergeInto old =
       old
         { idContext = DL.nub (idContext old <> idContext d)
-        , idMethods = Map.unionWith (\a b -> DL.nub (a <> b)) (idMethods old) (idMethods d)
+        , idMethods = Map.unionWith (\(_, a) (t, b) -> (t, DL.nub (a <> b))) (idMethods old) (idMethods d)
         , idSites = DL.nub (idSites old <> idSites d)
         }
 
 insertClassInfo :: ClassName -> ClassInfo -> InstanceEnv -> InstanceEnv
-insertClassInfo cls ci env = env {ieClasses = Map.insert cls ci (ieClasses env)}
+insertClassInfo cls ci env =
+  env
+    { ieClasses = Map.insert cls ci (ieClasses env)
+    , ieMethods = Map.union (Map.map (const (cls, ciVars ci)) (ciMethods ci)) (ieMethods env)
+    }
 
 instanceDecls :: InstanceEnv -> ClassName -> [InstanceDecl]
 instanceDecls env cls = Map.findWithDefault [] cls (ieByClass env)
+
+-- | A method as one instance declares it. An instance may declare a method
+-- and implement it nowhere.
+data MethodTerm = MethodTerm
+  { mtKey :: InstanceKey
+  , mtMethod :: EVar
+  , mtType :: EType
+  , mtSources :: [(MVar, Indexed Source)]
+  , mtBodies :: [(EType, ExprI)]
+  -- ^ each with its type in its own declaration's variable names
+  }
+
+methodTerm :: EVar -> InstanceDecl -> Maybe MethodTerm
+methodTerm m d = do
+  (et, impls) <- Map.lookup m (idMethods d)
+  return
+    MethodTerm
+      { mtKey = idKey d
+      , mtMethod = m
+      , mtType = et
+      , mtSources = [(mv, s) | ImplSource mv s <- impls]
+      , mtBodies = concatMap implBody impls
+      }
+  where
+    implBody (ImplBody t e) = [(t, e)]
+    implBody (ImplCast t e) = [(t, e)]
+    implBody (ImplSource _ _) = []
+
+-- | One source index of a method term, for the caret of a message; an instance
+-- with no implementation has none.
+methodTermSite :: MethodTerm -> Maybe Int
+methodTermSite t = listToMaybe ([j | (_, Idx j _) <- mtSources t] <> [j | (_, ExprI j _) <- mtBodies t])
+
+-- | Every instance's declaration of a method of a class.
+methodTerms :: InstanceEnv -> ClassName -> EVar -> [MethodTerm]
+methodTerms env cls m = mapMaybe (methodTerm m) (instanceDecls env cls)
+
+-- | Every method declaration of every instance.
+allMethodTerms :: InstanceEnv -> [MethodTerm]
+allMethodTerms env =
+  [t | ds <- Map.elems (ieByClass env), d <- ds, m <- Map.keys (idMethods d), Just t <- [methodTerm m d]]
+
+-- | The containers the instances declaring a method are for, read at the
+-- method's receiver argument.
+instanceReceiverHeads :: InstanceEnv -> ArgMethod -> [TVar]
+instanceReceiverHeads env (ArgMethod cls m pos) = mapMaybe (instanceArgHead pos . mtType) (methodTerms env cls m)
 
 -- | How a constraint at a use is met, given the constraints of the signature
 -- being checked.
@@ -390,15 +449,13 @@ keyPackedHead _ = Nothing
 methodSourcesIn :: InstanceEnv -> Evidence -> EVar -> Lang -> [Indexed Source]
 methodSourcesIn env ev m lang = case methodImpls usePolicy env ev m of
   Right impls ->
-    DL.nubBy
-      (\(Idx _ x) (Idx _ y) -> (srcPath x, srcName x) == (srcPath y, srcName y))
-      [s | ImplSource _ s@(Idx _ src) <- impls, srcLang src == lang]
+    distinctSources [s | ImplSource _ s@(Idx _ src) <- impls, srcLang src == lang]
   Left _ -> []
 
 -- | Whether the instance under the evidence implements a method by a body.
 methodHasBody :: InstanceEnv -> Evidence -> EVar -> Bool
 methodHasBody env ev m = case methodImpls usePolicy env ev m of
-  Right impls -> not (null [() | ImplBody _ <- impls])
+  Right impls -> not (null [() | ImplBody _ _ <- impls])
   Left _ -> False
 
 -- | Whether what the nexus does natively on a list does what the instance's
@@ -777,8 +834,16 @@ methodImpls policy env ev m = do
   Right (base <> [i | x <- casts, i <- impls x, isCast i, i `notElem` base])
 
 declImpls :: EVar -> InstanceDecl -> [Impl]
-declImpls m d = Map.findWithDefault [] m (idMethods d)
+declImpls m d = maybe [] snd (Map.lookup m (idMethods d))
+
+-- | The distinct sources an instance gives of a method.
+declSources :: EVar -> InstanceDecl -> [Indexed Source]
+declSources m d = distinctSources [s | ImplSource _ s <- declImpls m d]
+
+-- | Sources up to their file and function: two declarations may name one.
+distinctSources :: [Indexed Source] -> [Indexed Source]
+distinctSources = DL.nubBy (\(Idx _ x) (Idx _ y) -> (srcPath x, srcName x) == (srcPath y, srcName y))
 
 isCast :: Impl -> Bool
-isCast (ImplCast _) = True
+isCast (ImplCast _ _) = True
 isCast _ = False
