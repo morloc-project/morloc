@@ -4,7 +4,8 @@ What a signature declares: one term with many implementations, terms without sig
 
 ### SIG-1 A signature declares one term
 Intent: proposed
-Code: conforms 2026-10-21
+Tests: spec-sig-1-1, spec-sig-1-2, spec-sig-1-3, spec-sig-1-4, spec-sig-1-5
+Code: deviates (issues/typecheck.md, issues/typeclasses.md)
 
 `f :: T` declares the term `f` with general type `T`. Every morloc
 definition of `f` and every sourced function named `f` in scope is an

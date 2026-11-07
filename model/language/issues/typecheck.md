@@ -232,11 +232,18 @@ literal and record gaps. Reproduced on 0.109.0 unless marked.
   ground type (`other (mkB [n])` with `n :: Int`) and a `newtype Box a = [a]` in
   place of the record both work. Spec gap or defect against CLS-2: a record is a
   type constructor like any other.
-- **An imported module's definitions are never checked against their
-  signatures.** [reproduced, 2026-11-07, installed 0.112.0] Violates SIG-1 and
-  POLY-1. Treeify `contractRoots` collects the signed definitions and instances
-  of the root module only, so `bad :: a -> a; bad x = 5` in an imported module is
-  accepted wherever it is used at `Int` (`useIt :: Int -> Int; useIt x = bad x`),
-  while the same definition in the root module is rejected ("expected: a,
-  inferred: Int"). An imported body is checked only at the concrete types its
-  uses reach (Specialize `elaborate`), never with its variables rigid.
+- **A signature's row variable is not rigid in its body.** [reproduced,
+  2026-11-07, installed 0.112.0] Violates POLY-1 and SIG-1. With `mkPy :: Int ->
+  Table n {x = Int, y = Str}`, `q :: Int -> Table m r; q k = mkPy k` passes the
+  check against its signature; it is refused only when used at another row
+  (`run :: Int -> Table m {z = Real}; run k = q k`), inside `q`'s body: "Rec key
+  sets differ". The Str, Rec, List and Set solvers take no rigid set
+  (Typecheck/Internal.hs); Specialize.hs `pinsKey` relies on this.
+- **A literal at a constrained variable fails inside the body at some
+  instances.** [reproduced, 2026-11-07, installed 0.112.0] Violates SIG-1.
+  `inc :: Numeric a => a -> a; inc x = x + 1` passes the check against its
+  signature (`literalAtRigid`), and used at `Vector 3 Real` (vector-py's
+  `instance Numeric a => Numeric (Vector n a)`) is refused at the literal in
+  its body: "Numeric literal cannot have type Vector 3 Real". The signature
+  admits a type its body does not. Bound up with the literal ruling (PLAN
+  item 4 of /work/plans/typecheck-once).

@@ -3889,7 +3889,80 @@ sigTests :: TestTree
 sigTests =
   testGroup
     "SIG"
-    [ rejectUser
+    [ rejectSaying
+        "spec-sig-1-1"
+        "Type mismatch"
+        [r|
+        module lib (bad)
+          bad :: a -> a
+          bad x = 5
+
+        module main (useIt)
+          import lib (bad)
+          useIt :: Int -> Int
+          useIt x = bad x
+        |]
+    , accept
+        "spec-sig-1-2"
+        [r|
+        module lib (good)
+          good :: a -> a
+          good x = x
+
+        module main (useIt)
+          import lib (good)
+          useIt :: Int -> Int
+          useIt x = good x
+        |]
+    , rejectSaying
+        "spec-sig-1-3"
+        "Type mismatch"
+        [r|
+        module sigs (bad)
+          bad :: a -> a
+
+        module impl (bad)
+          import sigs (bad)
+          bad x = 5
+
+        module main (useIt)
+          import impl (bad)
+          useIt :: Int -> Int
+          useIt x = bad x
+        |]
+    , rejectSaying
+        "spec-sig-1-5"
+        "Type mismatch"
+        [r|
+        module lib (good)
+          good :: a -> a
+          good x = x
+          bad :: a -> a
+          bad x = 5
+
+        module main (useIt)
+          import lib (good)
+          useIt :: Int -> Int
+          useIt x = good x
+        |]
+    , rejectSaying
+        "spec-sig-1-4"
+        "Type mismatch"
+        [r|
+        module lib (Shift)
+          class Shift a where
+            shift :: a -> a
+          instance Shift Int where
+            shift x = x
+          instance Shift Str where
+            shift x = 5
+
+        module main (useIt)
+          import lib (Shift)
+          useIt :: Int -> Int
+          useIt x = x
+        |]
+    , rejectUser
         "spec-sig-6-1"
         [r|
         module main (bar)

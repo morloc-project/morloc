@@ -82,3 +82,11 @@
   literal, with "No matching implementation found for '==' at type Record
   -> Record -> Bool"; the error should say a bare record literal needs a
   named record type.
+- **spec-rec-4-1 passes on another rule's rejection.** [reproduced, 2026-11-07,
+  installed 0.112.0] Its program is refused by CLS-18 at the use of `same`
+  ("nothing fixes record_2 in Same (a [] [...])"), before Typecheck.hs
+  `rejectInstanceTypedRecords` runs, so the REC-4 check and its message are
+  untested and the error is not at the literal as REC-4 requires. Instance
+  selection never fixes an open class argument (Instances.hs `resolve` returns
+  Undetermined first), so only Packable improvement (CLS-20) can reach the REC-4
+  check. The message also shows the internal name `record_2`.

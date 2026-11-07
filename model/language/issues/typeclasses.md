@@ -192,3 +192,24 @@
   list of pairs, but map-r's sources at `Map a b` (`keys`, `lookup`, ...) assume
   names and would then receive pairs: they must handle both forms or become
   instances at `Map Str b` (CLS-21) first.
+- **A bracket chain's map needs no Functor constraint in a signature.**
+  [reproduced, 2026-11-07, installed 0.112.0] Violates CLS-5. With `newtype Bag a
+  = List a` and `instance Functor Bag` as in spec-cls-16-11, `h :: Sliceable f =>
+  f R -> f Int; h xs = .[:].x xs` is accepted, while `h xs = map (\r -> .x r) xs`
+  under the same signature is refused: "This definition needs Functor f but its
+  signature does not declare it". Checked against its signature, the chain's
+  `map` use is dropped (Typecheck.hs, IntrinsicS under rigid gamma), so no
+  obligation is recorded.
+- **Ord is derived at a type whose Eq is ambiguous.** [reproduced, 2026-11-07,
+  installed 0.112.0] Violates DERIV-6 (Ord is derived only where Eq is). With
+  `record Pair a b`, `instance Eq (Pair Int b)` and `instance Eq (Pair a Int)`,
+  `x == y` at `Pair Int Int` is refused as ambiguous, but `lt x y = x < y` at
+  `Pair Int Int` is accepted with the derived Ord: Typecheck.hs `derivedAt`
+  reads every result other than an instance, Ambiguous included, as "no
+  hand-written Eq".
+- **A signature without Ord is accepted, then fails inside its body at a use.**
+  [reproduced, 2026-11-07, installed 0.112.0] Violates signatures as contracts
+  (SIG-1, CLS-5). With `instance Eq (Box Int)` written, `ltBox :: Box a -> Box a
+  -> Bool; ltBox x y = x < y` passes validation (`validate` asks `derivableAt`,
+  with no overlap guard) and is accepted when used at `Box Str`; used at `Box
+  Int` it fails at the `<` in its own body: "no instance gives Ord (Box Int)".

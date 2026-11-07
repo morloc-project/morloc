@@ -55,7 +55,7 @@ import qualified Morloc.Frontend.AST as AST
 import Morloc.Frontend.Restructure (restructure)
 import Morloc.Frontend.Link (checkRsize)
 import Morloc.Frontend.PatternCheck (checkPatterns)
-import Morloc.Frontend.Treeify (treeify, Validation (..))
+import Morloc.Frontend.Treeify (contractTrees, treeify, Validation (..))
 import Morloc.Frontend.Share (shareBindings)
 import Morloc.Frontend.Specialize (isGenericExport, specialize)
 import qualified Morloc.Data.PoolHash as PoolHash
@@ -81,7 +81,11 @@ typecheckFrontend path code = do
   -- CLS-20: a type's Packable instances agree on its wire form, so the
   -- instance a use selects may fix the wire type.
   checkPackerCoherence
-  F.validate (validationTrees checks)
+  -- Collecting copies index-keyed state (labels, annotations); the trees are
+  -- discarded, so the state is restored.
+  beforeValidation <- MM.get
+  contractTrees (validationModules checks) >>= F.validate
+  MM.put beforeValidation
   es <- specialize checks exports
   specNames <- MM.gets stateSpecNames
   Specs specTrees <- MM.gets stateSpecs

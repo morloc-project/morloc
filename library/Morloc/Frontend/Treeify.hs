@@ -16,6 +16,7 @@ input to the typechecker and code generator.
 module Morloc.Frontend.Treeify
   ( treeify
   , Validation (..)
+  , contractTrees
   , collectRoot
   , recName
   ) where
@@ -80,12 +81,14 @@ data Namer = Namer
 -- All expressions are mapped to integer indices linking expressions to their
 -- ultimate type annotations. The indices also match terms to their signatures
 -- and locations in source code.
--- | What 'Morloc.Frontend.Typecheck.validate' checks: each signed top-level
--- definition of the root module as a tree of its own body.
+-- | What 'Morloc.Frontend.Typecheck.validate' checks, and what
+-- specialization references by signature.
 data Validation = Validation
-  { validationTrees :: [AnnoS Int ManyPoly Int]
+  { validationModules :: [ExprI]
+  -- ^ every module of the program, the root first ('contractTrees')
   , validationDefs :: Map.Map Int (Int, EVar)
-  -- ^ each checked definition by term id: its declaration index and name
+  -- ^ each signed top-level definition of the root module by term id: its
+  -- declaration index and name
   }
 
 treeify ::
@@ -167,12 +170,13 @@ treeify d
                     }
               )
 
-            (checks, defs) <- case DAG.lookupNode k d' of
-              Just node -> do
-                checkBareClassConstraints node
-                contractRoots node
-              Nothing -> return ([], Map.empty)
-            return (Validation checks defs, exports')
+            let modules = [n | (k', (n, _)) <- Map.toList d', k' == k] <> [n | (k', (n, _)) <- Map.toList d', k' /= k]
+            mapM_ checkBareClassConstraints modules
+            sigs <- MM.gets stateSignatures
+            let defs = case DAG.lookupNode k d' of
+                  Just node -> Map.fromList [(termId, (i, v)) | (termId, v, i) <- firstPerTerm (signedDefs sigs node)]
+                  Nothing -> Map.empty
+            return (Validation modules defs, exports')
           (Just _) ->
             error "This should not be possible, all ExportAll cases should have been removed in Restructure.hs"
 
@@ -523,48 +527,54 @@ collectRoot only inline (gi, v) = do
   let shallow = fromMaybe (-1) (Map.lookup gi idmap)
   snd <$> collect (Namer Map.empty 0 Map.empty Set.empty shallow (Just only) inline) (gi, v)
 
--- | One tree per signed top-level definition of the root module, collected
--- in shallow mode (see 'namerShallow'), and each such definition's
--- declaration index and name by term id.
-contractRoots :: ExprI -> MorlocMonad ([AnnoS Int ManyPoly Int], Map.Map Int (Int, EVar))
-contractRoots (ExprI _ (ModE _ es)) = do
-  GMap idmap sigmap <- MM.gets stateSignatures
-  let defs =
-          [ (termId, v, i)
-          | ExprI i (AssE v _ _) <- es
-          , Just termId <- [Map.lookup i idmap]
-          , Just (Monomorphic t) <- [Map.lookup termId sigmap]
-          , Just _ <- [termGeneral t]
-          ]
-      firstPerTerm = Map.elems (Map.fromListWith (\_ a -> a) [(tid, x) | x@(tid, _, _) <- defs])
+-- | The signed top-level definitions of a module: term id, name and
+-- declaration index.
+signedDefs :: GMap Int Int SignatureSet -> ExprI -> [(Int, EVar, Int)]
+signedDefs (GMap idmap sigmap) (ExprI _ (ModE _ es)) =
+  [ (termId, v, i)
+  | ExprI i (AssE v _ _) <- es
+  , Just termId <- [Map.lookup i idmap]
+  , Just (Monomorphic t) <- [Map.lookup termId sigmap]
+  , Just _ <- [termGeneral t]
+  ]
+signedDefs _ _ = []
+
+-- | One entry per term, the first; a term's tree holds every definition of it.
+firstPerTerm :: [(Int, EVar, Int)] -> [(Int, EVar, Int)]
+firstPerTerm defs = Map.elems (Map.fromListWith (\_ a -> a) [(tid, x) | x@(tid, _, _) <- defs])
+
+-- | The trees 'Morloc.Frontend.Typecheck.validate' checks: one per signed
+-- term defined in any of the modules, collected in shallow mode (see
+-- 'namerShallow'), and one per method body of each instance the modules
+-- declare, checked against the method's type at the instance's types with
+-- the instance's context assumed.
+contractTrees :: [ExprI] -> MorlocMonad [AnnoS Int ManyPoly Int]
+contractTrees modules = do
+  sigs@(GMap _ sigmap) <- MM.gets stateSignatures
   trees <- mapM
     (\(termId, v, i) -> snd <$> collect (Namer Map.empty 0 Map.empty Set.empty termId Nothing Set.empty) (i, v))
-    firstPerTerm
-  -- each method an instance of the module defines, checked against the
-  -- method's type at the instance's types, its body assuming the instance's
-  -- context
+    (firstPerTerm (concatMap (signedDefs sigs) modules))
   env <- MM.gets stateInstances
-  let methodTypes =
+  let bodyType = Map.fromList
         [ (bodyIdx, (k, et))
         | (k, Polymorphic cls v _) <- Map.toList sigmap
         , t <- FI.methodTerms env cls v
         , (et, ExprI bodyIdx _) <- mtBodies t
         ]
-      bodyType = Map.fromList methodTypes
   instanceTrees <- sequence
     [ do
         (_, body') <- collectAnnoS (Namer Map.empty 0 Map.empty Set.empty k Nothing Set.empty) body
         let et' = et {econs = Set.union (econs et) (Set.fromList ctx)}
         return (AnnoS i i (VarS v (MonomorphicExpr (Just et') [body'])))
-    | ExprI _ (IstE _ _ ctx _ ies) <- es
+    | ExprI _ (ModE _ es) <- modules
+    , ExprI _ (IstE _ _ ctx _ ies) <- es
     , ExprI i (AssE v body@(ExprI bi _) _) <- ies
     , Just (k, et) <- [Map.lookup bi bodyType]
     ]
-  return (trees <> instanceTrees, Map.fromList [(termId, (i, v)) | (termId, v, i) <- firstPerTerm])
-contractRoots _ = return ([], Map.empty)
+  return (trees <> instanceTrees)
 
 -- | A class constraint names the type it constrains: @Ord a =>@, never a
--- bare @Ord =>@. Checked on the root module's signatures.
+-- bare @Ord =>@.
 checkBareClassConstraints :: ExprI -> MorlocMonad ()
 checkBareClassConstraints = AST.checkExprI check
   where
