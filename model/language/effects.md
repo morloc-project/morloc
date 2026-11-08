@@ -47,6 +47,7 @@ suspension: `do 42 :: <> Int`.
 
 ### EFF-5 There is no coercion between `T` and `<E> T`
 Intent: proposed
+Tests: spec-eff-5-1, spec-eff-5-2
 Code: conforms 2026-10-21
 
 A pure value in a suspension slot is a type error; `do v` is the only lift.

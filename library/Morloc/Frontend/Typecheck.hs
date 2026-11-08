@@ -15,7 +15,7 @@ Implements bidirectional type inference over the 'AnnoS' trees produced by
 aliases. Concrete (language-specific) types are checked later after language
 segregation in the code generator.
 -}
-module Morloc.Frontend.Typecheck (typecheck, typecheckRoot, typecheckRootAt, validate, Checked, checkSigned, checkedAt, chosenLengthsApplied, useConstraint, resolveTypes, evaluateAnnoSTypes, peakSExpr) where
+module Morloc.Frontend.Typecheck (typecheck, typecheckRoot, typecheckRootAt, validate, Checked, checkSigned, inferScheme, defaultedExport, checkedAt, chosenLengthsApplied, useConstraint, resolveTypes, evaluateAnnoSTypes, peakSExpr) where
 
 import Data.Foldable (toList)
 import Morloc.Data.Zip (indexed, zipExact, zipPrefix, zipSame, zipWithSame)
@@ -48,6 +48,16 @@ isPrimitiveConstraint (CMember _ _) = True
 isPrimitiveConstraint (CSubset _ _) = True
 isPrimitiveConstraint (CDisjoint _ _) = True
 
+-- | The type a pending literal's variable has now, its optional and effect
+-- wrappers removed: a literal in a do-block or an optional position is
+-- judged on the payload type.
+literalEnd :: Gamma -> TVar -> TypeU
+literalEnd g v = peel (apply g (ExistU v ([], Open) ([], Open)))
+  where
+    peel (EffectU _ t) = peel t
+    peel (OptionalU t) = peel t
+    peel t = t
+
 -- | Resolve the numeric literals that were checked against an unsolved
 -- existential. Real literals go first, so that an existential shared by a
 -- real and an integer literal becomes @Real@ whatever the argument order;
@@ -69,7 +79,7 @@ resolvePendingNumLits held g0 entries = do
   g1 <- foldlM (resolveOne BT.isRealBaseType BT.realU) g0 realLits
   foldlM (resolveOne acceptableForInt BT.intU) g1 intLits
   where
-    chainEnd v = case peelWrappers (apply g0 (ExistU v ([], Open) ([], Open))) of
+    chainEnd v = case literalEnd g0 v of
       ExistU v' _ _ -> v'
       VarU u -> u
       _ -> v
@@ -88,9 +98,7 @@ resolvePendingNumLits held g0 entries = do
     resolveOne baseOK defaultT g (i, v, _) =
       -- apply walks an existential chain to its end; the default is
       -- solved there.
-      let original = ExistU v ([], Open) ([], Open)
-          resolved = peelWrappers (apply g original)
-      in case resolved of
+      case literalEnd g v of
            ExistU vEnd _ _ ->
              case solveExist vEnd defaultT g of
                Left err        -> MM.throwSourcedError i err
@@ -103,12 +111,70 @@ resolvePendingNumLits held g0 entries = do
                else MM.throwSourcedError i $
                  "Numeric literal cannot have type " <> prettyTypeU t
 
-    -- A literal in a do-block or an optional position is judged on the
-    -- payload type.
-    peelWrappers :: TypeU -> TypeU
-    peelWrappers (EffectU _ t)  = peelWrappers t
-    peelWrappers (OptionalU t)  = peelWrappers t
-    peelWrappers t              = t
+
+-- | NUM-10: the default of the variable @v@ under the class constraints
+-- that mention it, if they are each of a numeric class or a
+-- one-argument class of @internal@, and one of them is numeric on it: @Int@,
+-- or @Real@ under @Numeric@. A constraint over a type holding @v@, as
+-- @Eq [a]@ or @Show (a, b)@, is one instances reduce to constraints on its
+-- variables. @var@ names the variables a type is.
+numericDefault :: Map.Map ClassName ClassInfo -> (TypeU -> Maybe TVar) -> TVar -> [Constraint] -> Maybe TypeU
+numericDefault classes var v cs
+  | all alone cs && any (on BT.numericClass) cs = Just BT.realU
+  | all alone cs && any (on BT.integralClass) cs = Just BT.intU
+  | otherwise = Nothing
+  where
+    plain cls =
+      cls == BT.integralClass
+        || cls == BT.numericClass
+        || maybe False (\ci -> ciModule ci == MV "internal" && length (ciVars ci) == 1) (Map.lookup cls classes)
+    alone c = case c of
+      Constraint cls [_] -> plain cls
+      _ -> False
+    on cls c = case c of
+      Constraint cls' [t] -> cls' == cls && var t == Just v
+      _ -> False
+
+-- | The class constraints mentioning each variable @var@ names.
+constraintsOn :: (TypeU -> Maybe TVar) -> [Constraint] -> Map.Map TVar [Constraint]
+constraintsOn var cs =
+  Map.fromListWith
+    (<>)
+    [ (v, [c])
+    | c@(Constraint _ ts) <- cs
+    , v <- List.nub (mapMaybe var (concatMap everyType ts))
+    ]
+
+-- | NUM-10 at the end of a tree: each existential nothing determines, other
+-- than those in @held@, is solved to its default.
+defaultNumeric :: Set.Set TVar -> Gamma -> MorlocMonad Gamma
+defaultNumeric held g = do
+  classes <- MM.gets (ieClasses . stateInstances)
+  let var t = case t of
+        ExistU w _ _ -> Just w
+        _ -> Nothing
+      defaults =
+        [ (v, t)
+        | (v, cs) <- Map.toList (constraintsOn var (map (apply g) (wantedConstraints g)))
+        , Set.notMember v held
+        , Just t <- [numericDefault classes var v cs]
+        ]
+      solveTo gx (v, t) = case solveExist v t gx of
+        Right (Just g') -> g'
+        _ -> gx
+  return (foldl solveTo g defaults)
+
+-- | NUM-10 at an unsigned export, which is a use of its inferred type: each
+-- quantified variable the rule defaults is replaced by its default.
+defaultedExport :: Map.Map ClassName ClassInfo -> EType -> TypeU
+defaultedExport classes et =
+  let (vs, t) = unqualify (etype et)
+      var u = case u of
+        VarU w | w `elem` vs -> Just w
+        _ -> Nothing
+      on = constraintsOn var (Set.toList (econs et))
+      defaults = [(v, d) | v <- vs, Just d <- [numericDefault classes var v (Map.findWithDefault [] v on)]]
+   in foldr ForallU (foldr (\(v, d) acc -> substituteTVar v d acc) t defaults) [v | v <- vs, v `notElem` map fst defaults]
 
 -- | The unsolved existentials the constrained variables of a signature being
 -- checked became, at the end of their chains. A use's obligations already
@@ -203,7 +269,8 @@ finishRoot g1raw rootT e1 = run
       -- constrained variable left in the root's type is not defaulted, so
       -- the export stays generic (SIG-5).
       let rootVars = Set.fromList (map fst (varForms (apply g1raw rootT)))
-      g1 <- resolvePendingNumLits (Set.intersection rootVars (constrainedVars g1raw)) g1raw (gammaPendingNumLits g1raw)
+      let held = Set.intersection rootVars (constrainedVars g1raw)
+      g1 <- resolvePendingNumLits held g1raw (gammaPendingNumLits g1raw) >>= defaultNumeric held
 
       insetSay "-------- leaving frontend typechecker ------------------"
       insetSay "g1:"
@@ -1066,8 +1133,14 @@ synthE _ g UniS = return (g, BT.unitU, UniS)
 synthE _ g NullS =
   let (g1, v) = newvar "nullType_" g
    in return (g1, OptionalU v, NullS)
-synthE _ g (RealS si x) = return (g, BT.realU, RealS si x)
-synthE _ g (IntS si x) = return (g, BT.intU, IntS si x)
+-- Inferring a most general type, a literal's type is a variable of its
+-- class (NUM-5).
+synthE i g (RealS si x)
+  | gammaGeneralizing g = let (g', t) = literalVar i RealDefault g in return (g', t, RealS si x)
+  | otherwise = return (g, BT.realU, RealS si x)
+synthE i g (IntS si x)
+  | gammaGeneralizing g = let (g', t) = literalVar i IntDefault g in return (g', t, IntS si x)
+  | otherwise = return (g, BT.intU, IntS si x)
 synthE _ g (LogS x) = return (g, BT.boolU, LogS x)
 synthE _ g (StrS x) = return (g, BT.strU, StrS x)
 -- A constructor name is unique, so it alone determines its type. The
@@ -1418,10 +1491,51 @@ synthE vi g0 (VarS v (MonomorphicExpr (Just t0) xs0)) = do
 synthE _ g (VarS v (MonomorphicExpr Nothing (x : xs))) = do
   let (g0', freshT) = newvar (unEVar v <> "_rec") g
       g0'' = g0' ++> [AnnG v freshT]
-  (g', t', x') <- synthG g0'' x
+  (g'rec, t', x') <- synthG g0'' x
+  g' <- if any isBackEdge (annoNodes x') then recursiveUses g'rec t' x' freshT else return g'rec
   (g'', t'', xs') <- foldCheck g' xs t'
   let xs'' = applyCon g'' $ VarS v (MonomorphicExpr Nothing (x' : xs'))
   return (g'', t'', xs'')
+  where
+    isBackEdge (AnnoS _ _ (CallS w)) = w == v
+    isBackEdge _ = False
+
+    -- Without a signature, a recursive call is at the definition's own
+    -- type. A call's effects may widen where it is used, so the call is
+    -- held to the definition, not the reverse; the final call of a do-block
+    -- is typed by its result's payload, and only there may the definition's
+    -- result effect be dropped. Each call observes its own lengths: the Nat
+    -- variables of the definition's type that neither a signature nor the
+    -- enclosing scope fixes are renamed apart, so only the other parts are
+    -- tied.
+    recursiveUses g1 t' x' freshT = do
+      scope <- MM.getGeneralScope
+      let at = case x' of AnnoS (Idx gi _) _ _ -> gi
+          defT = apply g1 t'
+          enclosing = Set.fromList (concat [collectNatVarNames (apply g1 et) | AnnG w et <- IntMap.elems (gammaContext g), w /= v])
+          renamable = [n | NatVarU n <- List.nub (everyType defT), Set.notMember n (gammaRigidNats g1), Set.notMember n enclosing]
+          (g2, natRen) = statefulMap (\gx n -> second (\n' -> (n, NatVarU n')) (tvarname gx (unTVar n <> "_call"))) g1 renamable
+          defT' = foldr (\(n, n') acc -> substituteTVar n n' acc) defT natRen
+          useT = apply g2 freshT
+          payload t = case t of
+            FunU ts (EffectU _ r) -> FunU ts r
+            EffectU _ r -> r
+            _ -> t
+          calls = length (filter isBackEdge (annoNodes x'))
+          finalCalls = length (concatMap doFinal (annoNodes x'))
+          doFinal (AnnoS _ _ (DoBlockS body)) = [() | isFinalCall body]
+          doFinal _ = []
+          isFinalCall (AnnoS _ _ e) = case e of
+            LetS _ _ body -> isFinalCall body
+            EvalS y -> isFinalCall y
+            AppS f _ -> isBackEdge f
+            _ -> False
+      case subtype scope useT defT' g2 of
+        Right gx -> return gx
+        Left _
+          | calls == finalCalls
+          , Right gx <- subtype scope useT (payload defT') g2 -> return gx
+        Left err -> throwTypeError at $ "A recursive use of" <+> squotes (pretty (displayName v)) <+> "is not at the type of its definition:" <+> err
 synthE _ g (VarS v (MonomorphicExpr Nothing [])) = do
   let (g', t) = newvar (unEVar v <> "_u") g
   return (g', t, VarS v (MonomorphicExpr Nothing []))
@@ -2033,6 +2147,13 @@ synthElem g x@(AnnoS _ _ e)
     numLit (RealS _ _) = True
     numLit _ = False
 
+-- | A fresh variable for the type of the literal at @i@, held for its
+-- class.
+literalVar :: Int -> NumLitKind -> Gamma -> (Gamma, TypeU)
+literalVar i k g = case newvar "lit" g of
+  (g', t@(ExistU v _ _)) -> (deferNumLit (i, v, k) g', t)
+  r -> r
+
 -- | Defer a literal of kind @k@ at existential @v@. One entry per variable
 -- and kind decides them all, so the literals of a long list add one.
 deferNumLit :: (Int, TVar, NumLitKind) -> Gamma -> Gamma
@@ -2105,7 +2226,12 @@ etaExpandSynthE i g1 funType0 funExpr0 _f xs0 = do
   -- enclosing application's may still be fixed by its later arguments.
   let before = Set.fromList (gammaPendingNumLits g1)
       own = filter (`Set.notMember` before) (gammaPendingNumLits g2raw)
-  g2 <- resolvePendingNumLits (constrainedVars g2raw) g2raw own
+  -- Checked against a signature, or inferred to be generalized, a literal
+  -- is decided once the whole definition is (NUM-5).
+  g2 <-
+    if gammaGeneralizing g2raw || isJust (gammaRigid g2raw)
+      then return g2raw
+      else resolvePendingNumLits (constrainedVars g2raw) g2raw own
 
   MM.sayVVV $
     "  funType1:" <+> pretty funType1
@@ -2746,31 +2872,57 @@ reconcileSynth i g2 a e2 b = do
   let a' = apply g2 a
       b' = apply g2 b
   scope <- MM.getGeneralScope
-  case subtype scope a' b' g2 of
-    -- Between two record existentials InstLReach solves only the literal's,
-    -- so the expected side can keep a narrower key set.
-    Right g3 ->
-      let aApplied = apply g3 a'
-          bApplied = apply g3 b'
-      in return (g3, pickWiderRecord aApplied bApplied, e2)
-    Left err ->
-      case tryCoerce scope a' b' g2 of
-        Just (coercions, g3) -> do
-          (finalExpr, _) <- foldlM
-            (\(expr, currentType) coercion -> do
-              idx <- MM.getCounterWithPos i
-              let wrappedAnno = AnnoS (Idx idx currentType) i expr
-              return (CoerceS coercion wrappedAnno, applyCoercion coercion currentType))
-            (e2, apply g3 a')
-            coercions
-          return (g3, apply g3 b', finalExpr)
-        Nothing ->
-          MM.throwSourcedError i $
-            "Type mismatch:"
-            <> line <> "  expected: " <> prettyTypeU b'
-            <> line <> "  inferred: " <> prettyTypeU a'
-            <> line <> err
-            <> missingInstanceHint scope a' b'
+  -- A numeric type is never optional, so a value of an unknown numeric type
+  -- expected as an optional is of the payload type, coerced (OPT-7, NUM-10).
+  case (a', b') of
+    (ExistU v ([], _) ([], _), OptionalU _)
+      | numericExist g2 v
+      , Just (coercions, g3) <- tryCoerce scope a' b' g2 -> coerced a' b' g3 coercions
+    _ -> reconciled scope a' b'
+  where
+    coerced a' b' g3 coercions = do
+      (finalExpr, _) <- foldlM
+        (\(expr, currentType) coercion -> do
+          idx <- MM.getCounterWithPos i
+          let wrappedAnno = AnnoS (Idx idx currentType) i expr
+          return (CoerceS coercion wrappedAnno, applyCoercion coercion currentType))
+        (e2, apply g3 a')
+        coercions
+      return (g3, apply g3 b', finalExpr)
+    reconciled scope a' b' =
+      case subtype scope a' b' g2 of
+      -- Between two record existentials InstLReach solves only the literal's,
+      -- so the expected side can keep a narrower key set.
+      Right g3 ->
+        let aApplied = apply g3 a'
+            bApplied = apply g3 b'
+        in return (g3, pickWiderRecord aApplied bApplied, e2)
+      Left err ->
+        case tryCoerce scope a' b' g2 of
+          Just (coercions, g3) -> coerced a' b' g3 coercions
+          Nothing ->
+            MM.throwSourcedError i $
+              "Type mismatch:"
+              <> line <> "  expected: " <> prettyTypeU b'
+              <> line <> "  inferred: " <> prettyTypeU a'
+              <> line <> err
+              <> missingInstanceHint scope a' b'
+
+-- | An unsolved existential a numeric literal is pending at, or that an
+-- @Integral@ or @Numeric@ wanted constrains.
+numericExist :: Gamma -> TVar -> Bool
+numericExist g v =
+  any (\(_, w, _) -> endsAt w) (gammaPendingNumLits g)
+    || any
+      ( \c -> case apply g c of
+          Constraint cls [ExistU w _ _] -> w == v && (cls == BT.integralClass || cls == BT.numericClass)
+          _ -> False
+      )
+      (wantedConstraints g)
+  where
+    endsAt w = case literalEnd g w of
+      ExistU w' _ _ -> w' == v
+      _ -> False
 
 -- | Check a tuple or record literal at @T@ and coerce it to @?T@.
 checkOptionalLit ::
@@ -3757,9 +3909,18 @@ checkSigned e0@(AnnoS i _ _) = do
           mentionsRigid t = any ((`Set.member` fixed) . fst) (varForms t)
           given = map (FI.fixRigidVars fixed . apply g1) givens
           policy = FI.usePolicy {FI.policySkolems = Set.map FI.rigidVarName fixed}
+      -- A literal whose type is a variable of the signature needs that
+      -- variable's class among the signature's constraints.
+      sequence_
+        [ MM.throwSourcedError li ("Numeric literal cannot have type" <+> prettyTypeU (VarU u))
+        | (li, v, k) <- gammaPendingNumLits g1
+        , VarU u <- [literalEnd g1 v]
+        , Set.member u rigid
+        , not (literalAtRigid k g1 (VarU u))
+        ]
       -- Literal defaults come first: in @3 <= 5@ only the Int default fixes
       -- the class argument.
-      g2 <- resolvePendingNumLits rigid g1 (gammaPendingNumLits g1)
+      g2 <- resolvePendingNumLits rigid g1 (gammaPendingNumLits g1) >>= defaultNumeric Set.empty
       let (g3, solution) = solve policy scope env given (FI.fixRigidVars fixed) (FI.unfixRigidVars fixed) g2 (gammaWanteds g2)
           uses = Map.fromList [(j, (ci, v, t)) | AnnoS (Idx j t) ci (VarS v _) <- annoNodes e1]
           args c = case c of
@@ -3815,6 +3976,80 @@ checkSigned e0@(AnnoS i _ _) = do
         , EvDerived cls t <- concatMap derivedIn evs
         ]
       return (Checked g3 rootT e1)
+
+-- | POLY-8, NUM-5: the most general type of an unsigned definition, its
+-- constraints and its literals' classes included. Left, with the reason,
+-- for a type no signature could state: one holding a kind-level or effect
+-- variable, an open shape, an undecided equation, or a constraint neither
+-- an instance nor the type's variables answer.
+inferScheme :: AnnoS Int ManyPoly Int -> MorlocMonad (Either MDoc EType)
+inferScheme e0 = do
+  scope <- MM.getGeneralScope
+  env <- MM.gets stateInstances
+  let g0 = emptyGamma {gammaRigid = Just Set.empty, gammaAssumedConstraints = Just [], gammaGeneralizing = True}
+  (g1u, t0, _) <- synthG g0 e0
+  case settleDeferred scope g1u of
+    Left _ -> return (Left "an undecided kind-level equation")
+    Right g1 -> do
+      let t1 = apply g1 t0
+          exists = List.nub [(v, not (null ps && null rs)) | ExistU v (ps, _) (rs, _) <- everyType t1]
+          gen = map fst exists
+          stated = and
+            [ case form of
+                VarPlain -> not (isTypeVariableName n) || v `elem` gen
+                _ -> False
+            | (v@(TV n), form) <- varForms t1
+            ]
+          chainEnd v = case literalEnd g1 v of
+            ExistU v' _ _ -> Just v'
+            _ -> Nothing
+          (held, rest) = List.partition (\(_, v, _) -> maybe False (`elem` gen) (chainEnd v)) (gammaPendingNumLits g1)
+          litClass k = if k == RealDefault then BT.numericClass else BT.integralClass
+          litWanteds =
+            [ Wanted site (Constraint (litClass k) [ExistU v' ([], Open) ([], Open)]) False
+            | (site, v, k) <- held
+            , Just v' <- [chainEnd v]
+            ]
+          names = take (length gen) [TV n | n <- map MT.singleton ['a' .. 'z'] <> [MT.pack ("t" <> show k) | k <- [(0 :: Int) ..]]]
+          fixed = Set.fromList names
+          policy = FI.usePolicy {FI.policySkolems = Set.map FI.rigidVarName fixed}
+          bind g (v, n) = case solveExist v (VarU n) g of
+            Right (Just g') -> Just g'
+            _ -> Nothing
+          mentionsGen c = case c of
+            Constraint _ ts -> any (\(v, _) -> Set.member v fixed) (concatMap varForms ts)
+            _ -> False
+          generalized g2 =
+            let (g3, solution) = solve policy scope env [] (FI.fixRigidVars fixed) (FI.unfixRigidVars fixed) g2 (gammaWanteds g2)
+                residuals = [(w, apply g3 (wPred w), r) | (w, r) <- solResidual solution]
+                answered (w, c, r) = case r of
+                  Unmet (FI.NoInstance _ _) -> mentionsGen c || wIntrinsic w
+                  _ -> False
+                t2 = apply g3 (apply g2 t1)
+                schemeCs = [c | x@(_, c, _) <- residuals, answered x, mentionsGen c]
+                unknown = not (null [() | Constraint _ ts <- schemeCs, ExistU {} <- concatMap everyType ts])
+             in if all answered residuals && not unknown
+                  then
+                    Right
+                      EType
+                        { etype = foldr ForallU t2 names
+                        , econs = Set.fromList schemeCs
+                        , edocs = ArgDocSig defaultValue (map (const defaultValue) (fst (uncurryU t2))) defaultValue
+                        , enatLabels = Map.empty
+                        }
+                  else Left "a constraint neither an instance nor the type's variables answer"
+      if
+        | any snd exists -> return (Left "an open tuple or record shape")
+        | not stated -> return (Left "a kind-level, effect or annotated variable")
+        | not (null (collectEffVarNames t1)) -> return (Left "an effect variable")
+        | not (null (gammaDeferred g1)) -> return (Left "an undecided equation")
+        | not (null (gammaConstraints g1)) -> return (Left "a set constraint")
+        | not (all (\(_, _, k) -> Map.member (litClass k) (ieClasses env)) held) -> return (Left "a literal whose class is not in scope")
+        | otherwise -> do
+            g2 <- resolvePendingNumLits (Set.fromList gen) g1 rest >>= defaultNumeric (Set.fromList gen)
+            return $ case foldM bind g2 (zipSame gen names) of
+              Nothing -> Left "a variable that cannot be generalized"
+              Just g2b -> generalized g2b {gammaWanteds = litWanteds <> gammaWanteds g2b}
 
 -- | PAT-1: each destructuring pattern fits the value it destructures. A
 -- tuple pattern needs a tuple of its width, a record pattern a record with

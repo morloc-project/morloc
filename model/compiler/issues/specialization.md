@@ -76,11 +76,22 @@
   collection's `only` set, now every module's signed definitions, compared
   element by element; and a chain of stuck imported definitions is expanded one
   layer per collection pass. Cost only.
-- **Unsigned definitions are expanded into each use.** [read, 2026-11-08]
-  Deviates from POLY-5, POLY-8 and NUM-5. Treeify inlines a definition without
-  a signature into each reference and it is inferred there, as a template:
-  it is never generalized, a local is typed at each reference whatever it
-  mentions, and a literal is typed by the context it is inferred in (an `Int`
-  default, or `Real` under a `Numeric` wanted), never generalized with a class
-  constraint. Generalization by dependency group is planned
-  (/work/plans/typecheck-once, step 3.4).
+- **Some unsigned definitions are still expanded into each use.** [read, 2026-11-08]
+  Deviates from POLY-5, POLY-8, NUM-5 and NUM-10. Frontend/Generalize.hs infers
+  each unsigned top-level definition once, exported ones included, and
+  installs its type as its signature, but keeps expansion (Treeify inlines it
+  at each reference, typed there) for every local (`where`, `let`), closed or
+  open, and for a top-level definition whose type holds a Nat, Int, Str, Rec,
+  List, Set or effect variable, an open tuple or record shape (a getter such
+  as `get_fst = .0`), an undecided equation, a set constraint, a constraint
+  neither an instance nor its variables answer, or a literal whose class is not
+  in scope, and for a value cycle. An expanded definition's literals are
+  decided with the definition it is expanded into: once that one is, if it is
+  checked against a signature, else per application. `morloc typecheck -v`
+  prints each top-level definition's outcome. Spec gap (POLY-8): a getter or
+  setter over an unknown tuple or record (`get_fst = .0`) has no type a
+  signature can state, since morloc has no field or width constraints; the DA
+  recommends it stay one type in its module, fixed by its uses
+  (/work/plans/typecheck-once/briefs/generalization-da.md, Finding 1).
+  Unruled; today it is expanded, so a getter used at two tuple types is
+  accepted.

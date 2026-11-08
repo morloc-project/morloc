@@ -1029,6 +1029,10 @@ data Gamma = Gamma
   -- annotation writing one of these names means that variable; a local
   -- signature's are its own (POLY-4).
   , gammaScoped :: Map TVar TVar
+  -- | Inferring a definition's most general type: its literals are not
+  -- defaulted where they occur, since their variables may be generalized
+  -- (NUM-5).
+  , gammaGeneralizing :: Bool
   }
 
 -- | Compile-time constant values tracked during typechecking for nat / str

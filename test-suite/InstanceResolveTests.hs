@@ -79,7 +79,7 @@ instanceResolveTests =
         , isContextUnmet (run withCtx [] (sz (w (VarU a)))) )
           @?= (Right (EvInstance (key "Sz" [ForallU a (w (VarU a))]) [VarU a] [EvGiven (sz (VarU a))]), True)
     , testCase "a superclass of a given is given" $
-        run (insertClassInfo (ClassName "Big") (ClassInfo [a] [sz (VarU a)] Map.empty) (env [])) [Constraint (ClassName "Big") [VarU a]] (sz (VarU a))
+        run (insertClassInfo (ClassName "Big") (ClassInfo [a] [sz (VarU a)] Map.empty (MV "main")) (env [])) [Constraint (ClassName "Big") [VarU a]] (sz (VarU a))
           @?= Right (EvGiven (sz (VarU a)))
     , testCase "a context that does not shrink stops (G5)" $
         isLoop (run (env [decl "Sz" [sz (w (VarU a))] [ForallU a (VarU a)]]) [] (sz int)) @?= True
@@ -149,7 +149,7 @@ instanceResolveTests =
               Right (EvInstance _ _ ctxEv) -> ctxEv @?= [EvGiven (sz k0)]
               r -> assertFailure (show r)
     , testCase "superclass obligations are at the instance's head, its variables fixed" $
-        let e = insertClassInfo (ClassName "Big") (ClassInfo [a] [sz (VarU a)] Map.empty) (env [decl "Big" [] [ForallU a (w (VarU a))]])
+        let e = insertClassInfo (ClassName "Big") (ClassInfo [a] [sz (VarU a)] Map.empty (MV "main")) (env [decl "Big" [] [ForallU a (w (VarU a))]])
          in map (superclassObligations e) (instanceDecls e (ClassName "Big"))
               @?= [[sz (w (VarU (TV "#0")))]]
     , testCase "a signature's generated variables are fixed, an existential is not" $
@@ -246,7 +246,7 @@ instanceResolveTests =
     isDisagrees (Left (Disagrees _ _)) = True
     isDisagrees _ = False
     fundeps vs ds =
-      let e = insertClassInfo (ClassName "Packable") (ClassInfo vs [] Map.empty) (env ds)
+      let e = insertClassInfo (ClassName "Packable") (ClassInfo vs [] Map.empty (MV "main")) (env ds)
        in e {ieFundeps = packableWireFundep (ieClasses e)}
     isNotCrossable (Left (NotCrossable _)) = True
     isNotCrossable _ = False

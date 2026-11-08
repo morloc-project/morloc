@@ -46,7 +46,7 @@ import Morloc.CodeGenerator.Value (isValue)
 import Morloc.Frontend.Rename (displayName, fresh)
 
 import Morloc.Frontend.Treeify (Validation (..), collectRoot, instanceBodySites, instanceBodyTree, recName)
-import Morloc.Frontend.Typecheck (Checked, checkSigned, checkedAt, chosenLengthsApplied, typecheckRoot, typecheckRootAt, useConstraint)
+import Morloc.Frontend.Typecheck (Checked, checkSigned, checkedAt, chosenLengthsApplied, defaultedExport, typecheckRoot, typecheckRootAt, useConstraint)
 import qualified Morloc.Frontend.Instances as FI
 import Morloc.Typecheck.Internal (emptyGamma, typeUChildren)
 import System.Environment (lookupEnv)
@@ -82,6 +82,8 @@ data Spec = Spec
   -- ^ each definition checked against its signature once per collection of
   -- it: its term, the index it is collected at (an export's or its
   -- declaration's), and the collection's sets
+  , specInferred :: Set.Set Int
+  -- ^ the definitions whose type was inferred (POLY-8)
   }
 
 -- | The term an index refers to. Read at each use: collecting and copying
@@ -97,23 +99,28 @@ specialize checks exports = do
   shadow <- isJust <$> liftIO (lookupEnv "MORLOC_SHADOW_ELABORATE")
   GMap _ sigmap <- MM.gets stateSignatures
   let methods = Set.fromList [k | (k, Polymorphic {}) <- Map.toList sigmap]
-  spec <- liftIO (Spec (validationDefs checks) <$> newIORef Map.empty <*> newIORef Map.empty <*> newIORef Set.empty <*> pure shadow <*> pure methods <*> pure (instanceBodySites (validationModules checks)) <*> newIORef Map.empty <*> newIORef Map.empty)
+  spec <- liftIO (Spec (validationDefs checks) <$> newIORef Map.empty <*> newIORef Map.empty <*> newIORef Set.empty <*> pure shadow <*> pure methods <*> pure (instanceBodySites (validationModules checks)) <*> newIORef Map.empty <*> newIORef Map.empty <*> pure (validationInferred checks))
   mapM (specializeExport spec) exports
 
 specializeExport :: Spec -> (Int, EVar) -> MorlocMonad Typed
 specializeExport spec (gi, v) = do
   k0m <- termOf gi
   sigs <- MM.gets stateSignatures
+  classes <- MM.gets (ieClasses . stateInstances)
   -- a signed export at a concrete type is its body checked once against its
-  -- signature, as every signed definition is
+  -- signature, as every signed definition is; an unsigned export is a use
+  -- of its inferred type, whose numeric variables default there (NUM-10)
   let signedAt = case (k0m, GMap.lookup gi sigs) of
         (Just k0, GMapJust (Monomorphic tt))
           | Map.member k0 (specDefs spec)
           , Just et <- termGeneral tt
-          , not (isGenericExport (etype et)) -> Just (k0, etype et)
+          , t <- if Set.member k0 (specInferred spec) then defaultedExport classes et else etype et
+          , not (isGenericExport t) -> Just (k0, t)
         _ -> Nothing
       check only inline tree = case signedAt of
-        Just (k0, st) | Set.null inline -> instantiated spec typecheckRoot (k0, only, inline) st tree
+        Just (k0, st)
+          | Set.null inline -> instantiated spec typecheckRoot (k0, only, inline) st tree
+          | Set.member k0 (specInferred spec) -> typecheckRootAt st tree
         _ -> typecheckRoot tree
   (outcome, typed) <- collectElaborable spec True check (gi, v)
   let spliceRoot = do

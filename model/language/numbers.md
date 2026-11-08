@@ -41,6 +41,7 @@ fails. It is never truncated or wrapped.
 
 ### NUM-5 A numeric literal has any type of its class
 Intent: ruled 2026-11-08
+Tests: spec-num-5-1, spec-num-5-2, spec-num-5-3, spec-num-5-4, spec-num-5-5
 Code: deviates (compiler/issues/specialization.md)
 
 An integer literal has type `a` with `Integral a`; a real literal has type
@@ -53,11 +54,52 @@ inc x = x + 1      -- Integral a => a -> a
 half x = x / 2     -- Numeric a => a -> a
 ```
 
-A literal's type variable that nothing determines defaults, which no other
-type variable does (CLS-18): to `Int`, or to `Real` if `Numeric` is
-required, when every constraint on it is `Integral`, `Numeric` or a class of
-`internal`. So `show 5` is `"5"`, `show (1 / 2)` is `"0.5"`, and `5 == 5` is
-`True`. A literal that does not fit the type it gets is a compile error.
+A literal's type variable that nothing determines defaults (NUM-10), so
+`show 5` is `"5"`. A literal that does not fit the type it gets is a
+compile error.
+
+### NUM-10 An undetermined numeric type variable defaults to `Int` or `Real`
+Intent: ruled 2026-11-08
+Tests: spec-num-10-1, spec-num-10-2, spec-num-10-3, spec-num-10-4, spec-num-10-5
+Code: deviates (compiler/issues/specialization.md)
+
+A type variable that nothing at a use determines (CLS-18) defaults when
+one of its constraints is `Integral` or `Numeric` and each of them is
+`Integral`, `Numeric` or a one-argument class declared in `internal`
+(`Eq`, `Ord`, `Show`, `Hashable`). It becomes `Real` if `Numeric` is among
+them, and `Int` otherwise. Where the constraint came from does not matter:
+a literal (NUM-5), a generalized definition (POLY-8), or a method.
+
+```morloc
+x = 5                     -- Integral a => a
+half y = y / 2            -- Numeric a => a -> a
+
+s1 = show 5               -- "5"
+s2 = show x               -- "5": a defaults to Int
+s3 = show (half 3)        -- "1.5": Numeric, so Real
+s4 = show zero            -- "0": zero is a method of Integral
+s5 = 5 == 5               -- True
+```
+
+These stay errors:
+
+```morloc
+s6 = show mempty          -- Monoid is not a numeric class
+s7 = show (x <> x)        -- Semigroup is declared in root, not internal
+```
+
+No numeric type is optional, so a value whose numeric type is not yet
+known, used where `?T` is expected, has type `T` and is converted to `?T`
+(OPT-7): with `f :: ?Int -> Int -> Bool`, `f e e where e = 3 + 4` is
+accepted, `e` an `Int`.
+
+An unsigned export is a use, so its own type defaults too:
+`foo x y = x + y + 42.0` is a command on `Real`. A variable of a signature
+is never defaulted: a signed generic export stays generic (SIG-5).
+
+Why: this is Haskell's rule (Report 4.3.4). Once `x = 5` is generalized,
+`show x` must mean what `show 5` means; tying defaults to where a variable
+came from would make a definition's meaning change when it is named.
 
 ### NUM-6 Integer `//` and `%` truncate in every language
 Intent: ruled 2026-10-03

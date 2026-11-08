@@ -17,6 +17,9 @@ module Morloc.Frontend.Treeify
   ( treeify
   , Validation (..)
   , contractTrees
+  , definitionTree
+  , unsignedDefs
+  , firstPerTerm
   , instanceBodyTree
   , instanceBodySites
   , collectRoot
@@ -91,13 +94,15 @@ data Validation = Validation
   , validationDefs :: Map.Map Int (Int, EVar)
   -- ^ each signed top-level definition of the program by term id: its
   -- declaration index and name
+  , validationInferred :: Set.Set Int
+  -- ^ the terms among them whose type was inferred, not written (POLY-8)
   }
 
 treeify ::
   DAG MVar [AliasedSymbol] ExprI ->
   MorlocMonad (Validation, [(Int, EVar)])
 treeify d
-  | Map.size d == 0 = return (Validation [] Map.empty, [])
+  | Map.size d == 0 = return (Validation [] Map.empty Set.empty, [])
   | otherwise = case DAG.roots d of
       -- if no parentless element exists, then the graph must be empty or cyclic
       [] -> MM.throwCompilerBug "cyclic import dependency in treeify"
@@ -178,7 +183,7 @@ treeify d
             -- every module's signed definitions, each referenced by its
             -- signature and elaborated once per type it is used at
             let defs = Map.fromList [(termId, (i, v)) | (termId, v, i) <- firstPerTerm (concatMap (signedDefs sigs) modules)]
-            return (Validation modules defs, exports')
+            return (Validation modules defs Set.empty, exports')
           (Just _) ->
             error "This should not be possible, all ExportAll cases should have been removed in Restructure.hs"
 
@@ -541,21 +546,39 @@ signedDefs (GMap idmap sigmap) (ExprI _ (ModE _ es)) =
   ]
 signedDefs _ _ = []
 
+-- | The top-level definitions of a module whose term has no signature and
+-- no source: term id, name and declaration index.
+unsignedDefs :: GMap Int Int SignatureSet -> ExprI -> [(Int, EVar, Int)]
+unsignedDefs (GMap idmap sigmap) (ExprI _ (ModE _ es)) =
+  [ (termId, v, i)
+  | ExprI i (AssE v _ _) <- es
+  , Just termId <- [Map.lookup i idmap]
+  , Just (Monomorphic t) <- [Map.lookup termId sigmap]
+  , Nothing <- [termGeneral t]
+  , null (termConcrete t)
+  ]
+unsignedDefs _ _ = []
+
+-- | The tree of a top-level term's definitions, collected in shallow mode
+-- (see 'namerShallow'): every other signed term is referenced by its
+-- signature.
+definitionTree :: (Int, EVar, Int) -> MorlocMonad (AnnoS Int ManyPoly Int)
+definitionTree (termId, v, i) = snd <$> collect (Namer Map.empty 0 Map.empty Set.empty termId Nothing Set.empty) (i, v)
+
 -- | One entry per term, the first; a term's tree holds every definition of it.
 firstPerTerm :: [(Int, EVar, Int)] -> [(Int, EVar, Int)]
 firstPerTerm defs = Map.elems (Map.fromListWith (\_ a -> a) [(tid, x) | x@(tid, _, _) <- defs])
 
 -- | The trees 'Morloc.Frontend.Typecheck.validate' checks: one per signed
--- term defined in any of the modules, collected in shallow mode (see
+-- term defined in any of the modules, but those in @inferred@, whose types
+-- were checked where they were inferred, collected in shallow mode (see
 -- 'namerShallow'), and one per method body of each instance the modules
 -- declare, checked against the method's type at the instance's types with
 -- the instance's context assumed.
-contractTrees :: [ExprI] -> MorlocMonad [AnnoS Int ManyPoly Int]
-contractTrees modules = do
+contractTrees :: Set.Set Int -> [ExprI] -> MorlocMonad [AnnoS Int ManyPoly Int]
+contractTrees inferred modules = do
   sigs@(GMap _ sigmap) <- MM.gets stateSignatures
-  trees <- mapM
-    (\(termId, v, i) -> snd <$> collect (Namer Map.empty 0 Map.empty Set.empty termId Nothing Set.empty) (i, v))
-    (firstPerTerm (concatMap (signedDefs sigs) modules))
+  trees <- mapM definitionTree [d | d@(k, _, _) <- firstPerTerm (concatMap (signedDefs sigs) modules), Set.notMember k inferred]
   env <- MM.gets stateInstances
   let bodyType = Map.fromList
         [ (bodyIdx, (k, et))

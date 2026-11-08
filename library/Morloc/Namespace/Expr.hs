@@ -1037,6 +1037,8 @@ data ClassInfo = ClassInfo
   { ciVars :: [TVar]
   , ciSupers :: [Constraint]
   , ciMethods :: Map.Map EVar EType
+  , ciModule :: MVar
+  -- ^ the module that declares the class
   }
   deriving (Show, Eq, Ord)
 

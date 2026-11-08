@@ -348,7 +348,7 @@ addLocalState m0 localMethods e0 s0 = do
               { stateSignatures = GMap idmap sigmap'
               , stateInstances =
                   insertClassInfo cls
-                    (ClassInfo vs constraints (Map.fromList [(v, et) | Signature v _ et <- sigs]))
+                    (ClassInfo vs constraints (Map.fromList [(v, et) | Signature v _ et <- sigs]) m0)
                     (stateInstances s)
               }
         )

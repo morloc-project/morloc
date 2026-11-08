@@ -1,0 +1,24 @@
+-- Spec NUM-10: a numeric type variable that nothing determines defaults to
+-- Int, or to Real under Numeric, whether it came from a literal, a
+-- generalized definition or a method.
+module main (s1, s2, s3, s4, s5)
+
+import root-py
+
+x = 5
+half y = y / 2
+
+s1 :: Str
+s1 = show 5
+
+s2 :: Str
+s2 = show x
+
+s3 :: Str
+s3 = show (half 3)
+
+s4 :: Str
+s4 = show zero
+
+s5 :: Bool
+s5 = 5 == 5

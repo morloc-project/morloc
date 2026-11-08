@@ -52,6 +52,7 @@ specTests =
     , localOption (mkTimeout 5000000) cls5ChainTests
     , localOption (mkTimeout 5000000) poly1Tests
     , localOption (mkTimeout 5000000) poly7Tests
+    , localOption (mkTimeout 5000000) poly8Tests
     , localOption (mkTimeout 2000000) bindTests
     , localOption (mkTimeout 2000000) hostTests
     , localOption (mkTimeout 2000000) effTests
@@ -5851,6 +5852,281 @@ poly1Tests =
             lbl t = "a"
           q :: Tag s -> Str
           q t = lbl t
+        |]
+    ]
+
+poly8Tests :: TestTree
+poly8Tests =
+  testGroup
+    "POLY-8, POLY-5, NUM-5, NUM-10, EFF-5"
+    [ accept
+        "spec-poly-8-1"
+        [r|
+        module main (f)
+          class Show a where
+            show :: a -> Str
+          instance Show Int where
+            show x = "i"
+          instance Show Str where
+            show x = "s"
+          map :: (a -> b) -> [a] -> [b]
+          showAll = map show
+          f :: Int -> ([Str], [Str])
+          f x = (showAll [x], showAll ["a"])
+        |]
+    , accept
+        "spec-num-5-1"
+        [r|
+        module main (f)
+          class Integral a where
+            add :: a -> a -> a
+          instance Integral I64, Integral Real where
+            add x y = x
+          x = 5
+          f :: I64 -> Real -> (I64, Real)
+          f a b = (add a x, add b x)
+        |]
+    , accept
+        "spec-num-5-2"
+        [r|
+        module main (f)
+          class Integral a where
+            add :: a -> a -> a
+          instance Integral Int, Integral Real where
+            add x y = x
+          inc z = add z 100
+          f :: Int -> Real -> (Int, Real)
+          f a b = (inc a, inc b)
+        |]
+    , accept
+        "spec-poly-8-2"
+        [r|
+        module main (f)
+          type V (n :: Nat)
+          tl :: V (n + 1) -> V n
+          isEmpty :: V n -> Bool
+          one :: Int
+          ifelse :: Bool -> a -> a -> a
+          count v = ifelse (isEmpty v) one (count (tl v))
+          f :: V 3 -> Int
+          f v = count v
+        |]
+    , reject
+        "spec-poly-8-3"
+        [r|
+        module main (use)
+          newtype V (n :: Nat) = Int
+          mk :: Int -> V n
+          dot :: V n -> V n -> Int
+          bar v = dot (mk 1) v
+          use :: V n -> Int
+          use v = bar v
+        |]
+    , accept
+        "spec-poly-5-2"
+        [r|
+        module main (use)
+          newtype V (n :: Nat) = Int
+          mk :: Int -> V n
+          len :: V n -> Int
+          plus :: Int -> Int -> Int
+          bar k = (g 1, g 2)
+            where
+              g j = mk (plus j k)
+          use :: Int -> Int
+          use k = len (.0 (bar k))
+        |]
+    , accept
+        "spec-num-5-3"
+        [r|
+        module main (s)
+          class Show a where
+            show :: a -> Str
+          instance Show Int where
+            show x = "i"
+          showIt = show 5
+          s :: Str
+          s = showIt
+        |]
+    , accept
+        "spec-num-5-4"
+        [r|
+        module main (f)
+          class Integral a where
+            add :: a -> a -> a
+          instance Integral Int where
+            add x y = x
+          add5 :: Integral a => a -> a
+          add5 = add 5
+          f :: Int -> Int
+          f x = add5 x
+        |]
+    , reject
+        "spec-num-5-5"
+        [r|
+        module main (f)
+          class Integral a where
+            add :: a -> a -> a
+          instance Integral Int where
+            add x y = x
+          pair :: a -> b -> (a, b)
+          bad :: b -> (a, b)
+          bad = pair 5
+          f :: Int -> (Int, Int)
+          f x = bad x
+        |]
+    , accept
+        "spec-num-10-2"
+        [r|
+        module main (y)
+          class Integral a where
+            zero :: a
+          instance Integral Int where
+            zero = 0
+          ignore :: a -> Int
+          y :: Int
+          y = ignore zero
+        |]
+    , reject
+        "spec-num-10-3"
+        [r|
+        module main (y)
+          class Integral a where
+            zero :: a
+          class Show a where
+            show :: a -> Str
+          instance Integral Int where
+            zero = 0
+          instance Show Int where
+            show v = "0"
+          y :: Str
+          y = show zero
+        |]
+    , accept
+        "spec-num-10-4"
+        [r|
+        module main (y)
+          class Integral a where
+            add :: a -> a -> a
+          instance Integral Int where
+            add x y = x
+          f :: ?Int -> Int -> Bool
+          y :: Bool
+          y = f e e
+            where
+              e = add 3 4
+        |]
+    , testCase "spec-num-10-5" $ do
+        -- an unsigned export defaults its numeric variables: a command on Real
+        config <- emptyConfig
+        ((x, msgs), _) <- MM.runMorlocMonad Nothing 0 config defaultValue . typecheck Nothing . Code $
+          [r|
+          module main (foo)
+            class Integral a where
+              add :: a -> a -> a
+            class Integral a => Numeric a where
+              half :: a -> a
+            instance Integral Real where
+              add x y = x
+            instance Numeric Real where
+              half x = x
+            y = 40.0
+            foo x = add x y
+          |]
+        case x of
+          Left e -> assertFailure ("expected acceptance, got: " <> show e)
+          Right _ -> assertBool ("foo skipped: " <> show msgs) (not (any (MT.isInfixOf "skipping generic export 'foo'") msgs))
+    , reject
+        "spec-poly-8-6"
+        [r|
+        module main (g)
+          ifelse :: Bool -> a -> a -> a
+          c :: Bool
+          f x = ifelse c x (f "s")
+          g :: Int -> Int
+          g y = f y
+        |]
+    , reject
+        "spec-poly-8-7"
+        [r|
+        module main (g)
+          class Integral a where
+            add :: a -> a -> a
+          instance Integral Int where
+            add x y = x
+          opt :: a -> ?a
+          h :: b -> b -> b
+          f x = h 5 (opt x)
+          g :: Str -> ?Str
+          g s = f s
+        |]
+    , reject
+        "spec-eff-5-1"
+        [r|
+        module main (g)
+          effect IO
+          noisy :: Int -> <IO> Int
+          add :: Int -> Int -> Int
+          ifelse :: Bool -> a -> a -> a
+          c :: Bool
+          go m = ifelse c (noisy m) (noisy (add 1 (go m)))
+          g :: Int -> <IO> Int
+          g x = go x
+        |]
+    , accept
+        "spec-eff-5-2"
+        [r|
+        module main (g)
+          effect IO
+          noisy :: Int -> <IO> Int
+          dec :: Int -> Int
+          ifelse :: Bool -> a -> a -> a
+          c :: Bool
+          g :: Int -> <IO> Int
+          g n = go n
+            where
+              go m = ifelse c (noisy m) (step m)
+              step :: Int -> <IO> Int
+              step m = do
+                noisy m
+                go (dec m)
+        |]
+    , accept
+        "spec-poly-5-1"
+        [r|
+        module main (f)
+          pairs n s = (dup n, dup s)
+            where
+              dup y = [y, y]
+          f :: Int -> Str -> ([Int], [Str])
+          f n s = pairs n s
+        |]
+    , accept
+        "spec-poly-8-4"
+        [r|
+        module main (f)
+          class Integral a where
+            add :: a -> a -> a
+          instance Integral Int where
+            add x y = x
+          twice g x = g (g x)
+          incTwice = twice (add 1)
+          f :: Int -> Int
+          f x = incTwice x
+        |]
+    , accept
+        "spec-poly-8-5"
+        [r|
+        module main (f)
+          class Integral a where
+            add :: a -> a -> a
+          instance Integral Int, Integral Real where
+            add x y = x
+          ifelse :: Bool -> a -> a -> a
+          evens n = ifelse n [] (odds n)
+          odds n = ifelse n [1] (evens n)
+          f :: Bool -> ([Int], [Real])
+          f b = (evens b, odds b)
         |]
     ]
 
