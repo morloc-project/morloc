@@ -176,8 +176,9 @@ A lambda's type cannot hold a length a call in its body chooses
 signed definition or exported command is exempt in its own parameters and
 at the root of its body (`open :: Table n r -> Table m r; open = sliceRows
 0 3`), as each of its calls applies that root once and observes afresh. An
-unsigned local definition is typed at each reference, so its lambda is
-exempt where that reference applies it to all its parameters.
+unsigned local definition chooses the lengths of its result at each
+application too, though it has one type (POLY-5), so its lambda is exempt
+where an application gives it all its parameters.
 A length a call chooses may not reach the variables around the lambda
 whose body makes the call, nor the input of a command: in `bar v = dot (mk
 1) v`, `v`'s length would have to equal one known only once `mk` runs.

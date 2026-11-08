@@ -50,13 +50,53 @@ its own body and its constraints are given to it. This item does not cover
 an annotation in a body (`(x :: a)`), which still means the enclosing
 signature's variable.
 
-### POLY-5 Generalization of local definitions
-Intent: open
-Code: unaudited
+### POLY-5 A closed local definition is generalized; an open one has one type
+Intent: ruled 2026-11-08
+Code: deviates (compiler/issues/specialization.md)
 
-Is a local definition without a signature (a) generalized, so that each use
-may instantiate it differently, or (b) monomorphic, with one type fixed by
-its uses?
+A local (`where`, `let`) definition without a signature is generalized, as
+a top-level one is (POLY-8), if it is closed: each free variable of its body
+is a top-level or imported term, or a closed local. One that mentions a
+variable bound by an enclosing lambda or pattern, or an open local, has one
+type, fixed by its uses. This is GHC's MonoLocalBinds.
+
+```morloc
+pairs n s = (dup n, dup s)
+  where
+    dup y = [y, y]            -- closed: used at Int and at Str
+
+scale k xs = map step xs
+  where
+    step y = y * k            -- open: one type, fixed by its use
+
+tagBoth t p = (tag (.0 p), tag (.1 p))
+  where
+    tag :: a -> (Str, a)      -- open and used at two types: needs a signature
+    tag y = (t, y)
+```
+
+A length the result of an open local chooses (DIM-10) is still chosen at
+each application: one type for the local does not make its calls return one
+length.
+
+Why: generalizing an open local means splitting its constraints and its
+kind-level variables between it and the enclosing definition; such locals
+are rarely used at two types, and a local signature (POLY-4) covers those.
+
+### POLY-8 An unsigned top-level definition is generalized
+Intent: ruled 2026-11-08
+Code: deviates (compiler/issues/specialization.md)
+
+A top-level definition without a signature is given the most general type
+its body has, its constraints included, and each use instantiates it, with
+or without arguments: `showAll = map show` is `Show a => [a] -> [Str]`. There
+is no monomorphism restriction. Definitions that refer to each other without
+signatures are inferred together; a signed one is referred to by its
+signature.
+
+Why: morloc instantiates a term once per type it is used at, so a
+generalized constant is computed once per type (EVAL-3), not once per use as
+under dictionary passing, the monomorphism restriction's reason.
 
 ### POLY-6 An undetermined type variable is a located error
 Intent: ruled 2026-10-09

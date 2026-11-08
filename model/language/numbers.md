@@ -39,12 +39,25 @@ Code: conforms 2026-10-21
 When an integer crosses into a language whose type cannot hold it, the call
 fails. It is never truncated or wrapped.
 
-### NUM-5 Integer literals are `Int` and are bounds-checked at their type
-Intent: proposed
-Code: conforms 2026-10-21
+### NUM-5 A numeric literal has any type of its class
+Intent: ruled 2026-11-08
+Code: deviates (compiler/issues/specialization.md)
 
-An integer literal is `Int` unless its context gives another integer type.
-A literal that does not fit the type it is given is a compile error.
+An integer literal has type `a` with `Integral a`; a real literal has type
+`a` with `Numeric a`. Every `Numeric` type is `Integral`, so an integer
+literal is accepted at `Real`. The constraint is generalized with the
+definition holding the literal, like any other (POLY-8):
+
+```morloc
+inc x = x + 1      -- Integral a => a -> a
+half x = x / 2     -- Numeric a => a -> a
+```
+
+A literal's type variable that nothing determines defaults, which no other
+type variable does (CLS-18): to `Int`, or to `Real` if `Numeric` is
+required, when every constraint on it is `Integral`, `Numeric` or a class of
+`internal`. So `show 5` is `"5"`, `show (1 / 2)` is `"0.5"`, and `5 == 5` is
+`True`. A literal that does not fit the type it gets is a compile error.
 
 ### NUM-6 Integer `//` and `%` truncate in every language
 Intent: ruled 2026-10-03

@@ -76,3 +76,11 @@
   collection's `only` set, now every module's signed definitions, compared
   element by element; and a chain of stuck imported definitions is expanded one
   layer per collection pass. Cost only.
+- **Unsigned definitions are expanded into each use.** [read, 2026-11-08]
+  Deviates from POLY-5, POLY-8 and NUM-5. Treeify inlines a definition without
+  a signature into each reference and it is inferred there, as a template:
+  it is never generalized, a local is typed at each reference whatever it
+  mentions, and a literal is typed by the context it is inferred in (an `Int`
+  default, or `Real` under a `Numeric` wanted), never generalized with a class
+  constraint. Generalization by dependency group is planned
+  (/work/plans/typecheck-once, step 3.4).

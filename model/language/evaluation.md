@@ -32,8 +32,8 @@ Code: conforms 2026-10-21
 A `where` or `let` binding, a pure `let` in a `do` block, or a top-level
 constant is computed at most once each time its scope is evaluated, at the
 nearest point every use passes through. A top-level value is computed at
-most once per command. A value read by several languages is computed once
-and passed to each.
+most once per command at each type it is used at (POLY-8). A value read by
+several languages is computed once and passed to each.
 
 ### EVAL-4 Placement respects `@try` regions and effect barriers
 Intent: proposed

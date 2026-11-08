@@ -213,7 +213,8 @@ A constrained type variable that does not occur in the signature's type
 outside its constraints is an error at the signature. One that occurs but
 that nothing at a use determines is an error at the use, even when only one
 instance could match (`[] == []`, `showList [gen n]` with one `Gen`
-instance). Neither is defaulted. Nat and effect-row variables are exempt:
+instance). Neither is defaulted, except a variable a numeric literal
+constrains (NUM-5). Nat and effect-row variables are exempt:
 a class argument may hold one that nothing determines (`size` of a `Vector
 n a` whose `n` is unknown). An argument a dependency determines (CLS-20)
 is not undetermined.
