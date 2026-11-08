@@ -2141,7 +2141,7 @@ rustSurround =
 -- | No tag test may follow a take (see the projection-consume golden's
 -- secondMatchRust).
 rustCaps :: OwnCaps
-rustCaps = OwnCaps {ocCheap = rustIsCopy, ocTagAfterTake = False, ocListKeeps = True}
+rustCaps = OwnCaps {ocCheap = rustIsCopy, ocTagAfterTake = False}
 
 translateSegment :: SerialManifold -> RustM MDoc
 translateSegment m0@(SerialManifold root _ _ _ _) = do
@@ -2480,7 +2480,7 @@ rustLowerConfig mask makers consumed =
     , lcPrintStmt = RP.printStmt
     , lcEvalPattern = \t _ -> rustEvalPattern t
     , lcTakeGetter = rustTakeGetter
-    , lcListConstructor = \_ _ es -> "vec![" <> hcat (punctuate ", " es) <> "]"
+    , lcListConstructor = \_ _ _ es -> return ("vec![" <> hcat (punctuate ", " es) <> "]")
     , lcTupleConstructor = tupled
     , lcRecordConstructor = \recType _ _ _ rs -> do
         name <- rustStructCtor recType

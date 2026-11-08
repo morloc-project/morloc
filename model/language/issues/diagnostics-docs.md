@@ -149,3 +149,11 @@
   also underlines the extra arguments; a bare intrinsic eta-expanded with
   no arguments (`f = @throw`) puts one caret under `@`. Desugar.hs
   `etaExpandIntrinsic` has only the expression's span.
+
+- **Renamed type variables named like an English word keep their
+  internal names.** [read, 2026-11-08, c3a7b3bb3] library/Morloc/Monad.hs
+  `sourceNames` (~300-312) writes `a@q0` as `a` only when no plain word
+  `a` appears in the message. The article "a" is such a word, so `a`, the
+  most common variable name, is almost never shown by its source name.
+  Plain words should be matched only where they could be read as the
+  variable (type positions), not against all of the prose.

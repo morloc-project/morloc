@@ -281,7 +281,7 @@ walkN env s e = case e of
   AppExeN _ _ args -> step s (map (\a s' -> walkArg env s' a) args)
   ReturnN x -> walkN env s x
   DeserializeN _ _ x -> walkS env s x
-  ListN _ _ xs -> parts xs
+  ListN _ _ xs -> keeps xs
   TupleN _ xs -> keeps xs
   RecordN _ _ _ kvs -> keeps (map snd kvs)
   VariantN _ _ _ xs -> keeps xs

@@ -145,6 +145,52 @@ inline constexpr bool is_non_vector_container_v =
 
 namespace mlc {
 
+// A list literal of type C, written `mlc::list_of<C>{a, b}.value`. Each
+// element is copy-initialized (no explicit constructors), then appended.
+template <typename T, typename A>
+T list_elem(A&& a) {
+    return std::forward<A>(a);
+}
+
+template <typename T, typename C, typename A>
+void push_one(C& c, A&& a) {
+    if constexpr (std::is_same_v<std::remove_cvref_t<A>, T>) {
+        c.push_back(std::forward<A>(a));
+    } else {
+        c.push_back(list_elem<T>(std::forward<A>(a)));
+    }
+}
+
+template <typename C>
+struct list_of {
+    C value;
+    template <typename... A>
+    list_of(A&&... a) : value(build(std::forward<A>(a)...)) {}
+
+    template <typename... A>
+    static C build(A&&... a) {
+        if constexpr (requires { typename C::value_type; }) {
+            using T = typename C::value_type;
+            if constexpr (requires(C& c, T&& t) { c.push_back(std::move(t)); }) {
+                C c;
+                if constexpr (requires { c.reserve(sizeof...(A)); }) {
+                    c.reserve(sizeof...(A));
+                }
+                (push_one<T>(c, std::forward<A>(a)), ...);
+                return c;
+            } else if constexpr (requires(C& c, T&& t) { c.insert(std::move(t)); }) {
+                C c;
+                (c.insert(list_elem<T>(std::forward<A>(a))), ...);
+                return c;
+            } else {
+                return C{std::forward<A>(a)...};
+            }
+        } else {
+            return C{std::forward<A>(a)...};
+        }
+    }
+};
+
 template<typename T> using is_pointer_shape = is_std_shared_ptr<T>;
 
 // Pointer-shape traits. Primary intentionally undefined; only

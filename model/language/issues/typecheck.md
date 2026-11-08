@@ -254,3 +254,33 @@ literal and record gaps. Reproduced on 0.109.0 unless marked.
   Tag a ... a <: a": each side's variables are renamed for display on their
   own, so `s` and `t` both print as `a`, and the message cannot show which
   variables collided.
+
+- **A definition whose tree cannot be collected is left ungeneralized
+  silently.** [read, 2026-11-08, c3a7b3bb3] library/Morloc/Frontend/Generalize.hs
+  ~118-121: when `definitionTree`/`referenced` raises a program error, `visit`
+  only prints it under `-v` ("not generalized ... could not be collected")
+  and goes on. The user's error is lost, and the definition is expanded at
+  each use, where the failure shows up later in a less specific form, or
+  never if the definition is unused. Also, the doc comment "The unsigned
+  top-level terms a definition's tree expands." appears twice (~156-158).
+- **A NUM-10 default that conflicts is dropped silently.** [read,
+  2026-11-08, c3a7b3bb3] library/Morloc/Frontend/Typecheck.hs ~161:
+  `defaultNumeric`'s `solveTo` discards a `Left` from `solveExist` and keeps
+  gamma, so an existential that NUM-10 says to default, but that cannot
+  be solved to Int or Real, stays unsolved without a message. The failure
+  surfaces later as an unrelated ambiguity error, or not at all.
+- **Outside shadow mode, a definition the instantiated check refuses
+  fails the build, even where checking at the key accepts it.** [read,
+  2026-11-08, c3a7b3bb3] library/Morloc/Frontend/Specialize.hs ~406: the
+  fallback to checking at the key runs only when the result still holds an
+  existential. The shadow mode (`MORLOC_SHADOW_ELABORATE`) reports exactly
+  this divergence, so the case occurs. That mode also ships in the
+  compiler and changes which tree is compiled when it is set (~99): the
+  generated code depends on an environment variable.
+- **Every compile typechecks every imported module.** [read, 2026-11-08,
+  c3a7b3bb3] library/Morloc.hs ~91: each `morloc make` and `typecheck`
+  validates every signed definition and instance body of every imported
+  module, and infers every unsigned definition, where before only the root
+  module's were checked. Generalize collects a definition's tree two or
+  three times. Compile time then grows with the stdlib, not the program;
+  measure it and consider caching per module.

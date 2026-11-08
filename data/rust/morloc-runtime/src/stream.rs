@@ -6611,6 +6611,39 @@ fn ifile_bracket_index_against_slot(
     result
 }
 
+fn cache_hit(local: &mut ProcessLocalSlot, sub_k: usize) -> Result<Option<SubpacketSrc>, MorlocError> {
+    for ce in local.cache.entries.iter_mut() {
+        if ce.subpacket_idx == sub_k as u64 {
+            ce.clock_bit = 1;
+            // SAFETY: SLOT-23: a cached entry holds a live SHM packet.
+            unsafe { shm::shincref(ce.shm_packet) }?;
+            return Ok(Some(SubpacketSrc::Shm { arr_base: ce.shm_packet, acquired: true }));
+        }
+    }
+    Ok(None)
+}
+
+// SLOT-34
+fn slice_ends(mut subs: impl DoubleEndedIterator<Item = usize>) -> (Option<usize>, Option<usize>) {
+    let first = subs.next();
+    (first, subs.next_back().or(first))
+}
+
+// SLOT-34
+fn slice_source(
+    local: &mut ProcessLocalSlot,
+    sub_k: usize,
+    ends: (Option<usize>, Option<usize>),
+) -> Result<SubpacketSrc, MorlocError> {
+    if ends.0 == Some(sub_k) || ends.1 == Some(sub_k) {
+        return cache_get_or_materialize(local, sub_k);
+    }
+    match cache_hit(local, sub_k)? {
+        Some(src) => Ok(src),
+        None => materialize_subpacket(local, sub_k),
+    }
+}
+
 /// Acquire a source descriptor for sub-packet `sub_k`. Uncompressed
 /// sub-packets are zero-copy (`File` variant); compressed sub-packets
 /// are decompressed into SHM and cached (`Shm` variant) with the
@@ -6622,15 +6655,8 @@ fn cache_get_or_materialize(
     local: &mut ProcessLocalSlot,
     sub_k: usize,
 ) -> Result<SubpacketSrc, MorlocError> {
-    // Hit path (compressed only -- uncompressed sub-packets bypass
-    // the cache since the mmap'd region serves the walker directly).
-    for ce in local.cache.entries.iter_mut() {
-        if ce.subpacket_idx == sub_k as u64 {
-            ce.clock_bit = 1;
-            // SAFETY: a cached entry holds a live SHM packet.
-            unsafe { shm::shincref(ce.shm_packet) }?;
-            return Ok(SubpacketSrc::Shm { arr_base: ce.shm_packet, acquired: true });
-        }
+    if let Some(src) = cache_hit(local, sub_k)? {
+        return Ok(src);
     }
     // Miss: materialise. For uncompressed sub-packets this returns a
     // File descriptor pointing at the mmap (no SHM allocation); for
@@ -6890,9 +6916,10 @@ fn ifile_bracket_slice_against_slot(
         // slot. Sub-packets are kept by sub_k for the duration of the walk
         // so a slice spanning many elements within one sub-packet pays
         // only one location cost.
+        let ends = slice_ends(work.plan.iter().map(|p| p.0));
         for (out_i, &(sub_k, local_idx)) in work.plan.iter().enumerate() {
             if !work.materialised.contains_key(&sub_k) {
-                let src = cache_get_or_materialize(local, sub_k)?;
+                let src = slice_source(local, sub_k, ends)?;
                 work.materialised.insert(sub_k, src);
             }
             let src = work.materialised.get(&sub_k).unwrap();
@@ -6984,8 +7011,9 @@ fn slice_runs(
     }
     let mut sources: Vec<SubpacketSrc> = Vec::with_capacity(runs.len());
     let mut located = Ok(());
+    let ends = slice_ends(runs.iter().map(|r| r.0));
     for &(sub_k, _, _) in runs {
-        match cache_get_or_materialize(local, sub_k) {
+        match slice_source(local, sub_k, ends) {
             Ok(src) => sources.push(src),
             Err(e) => {
                 located = Err(e);
@@ -7169,10 +7197,11 @@ fn slice_bulk_pack_str(
     // sum up the total tail size.
     let mut srcs: Vec<(AbsPtr, usize)> = Vec::with_capacity(n_out);
     let mut total_tail: usize = 0;
+    let ends = slice_ends(plan.iter().map(|p| p.0));
     for &(sub_k, local_idx) in plan.iter() {
         if ctx.sub_k != Some(sub_k) {
             if !materialised.contains_key(&sub_k) {
-                let src = cache_get_or_materialize(local, sub_k)?;
+                let src = slice_source(local, sub_k, ends)?;
                 materialised.insert(sub_k, src);
             }
             let src = materialised.get(&sub_k).unwrap();
@@ -10827,6 +10856,37 @@ mod tests {
         let held = with_process_local_slot(f, |local, _| Ok(local.cache.entries.len())).unwrap();
         shared_close_handle(f).unwrap();
         assert_eq!(held, 0, "a cache of capacity 0 kept {held} sub-packets");
+    }
+
+    // SLOT-34
+    #[test]
+    fn a_slice_caches_only_the_sub_packets_at_its_ends() {
+        let _shm = crate::own_test_registry();
+        let dir = concat_test_dir("slice_cache_ends");
+        let path = dir.join("c.idx");
+        write_compressed_runs(&path, 6, 5);
+        for (start, stop, step, want, ends) in [
+            (Some(2), Some(27), None, (2..27).collect::<Vec<i64>>(), vec![0, 5]),
+            (Some(1), Some(29), Some(3), (1..29).step_by(3).collect::<Vec<i64>>(), vec![0, 5]),
+            (Some(6), Some(18), None, (6..18).collect::<Vec<i64>>(), vec![1, 3]),
+            (Some(7), Some(22), Some(3), (7..22).step_by(3).collect::<Vec<i64>>(), vec![1, 3]),
+        ] {
+            let f = open_ifile(path.to_str().unwrap()).unwrap();
+            let r = ifile_bracket_slice(f, start, stop, step).unwrap();
+            let got = unsafe {
+                let a = &*(r as *const shm_types_crate::Array);
+                std::slice::from_raw_parts(shm::rel2abs(a.data).unwrap() as *const i64, a.size).to_vec()
+            };
+            shm::shfree(r).unwrap();
+            assert_eq!(got, want);
+            let mut cached = with_process_local_slot(f, |local, _| {
+                Ok(local.cache.entries.iter().map(|e| e.subpacket_idx).collect::<Vec<_>>())
+            })
+            .unwrap();
+            shared_close_handle(f).unwrap();
+            cached.sort();
+            assert_eq!(cached, ends, "slice {start:?}:{stop:?}:{step:?} cached {cached:?}");
+        }
     }
 
     /// `n` compressed sub-packets of `k` consecutive i64s each, from 0.

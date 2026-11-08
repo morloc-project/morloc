@@ -40,12 +40,11 @@ records and user-mapped types copy deeply.
   taken from a value the frame owns needs the value used once and built by
   a constructor or `@try` (a sourced call's result is never taken), and a
   value matched twice is copied. C++ moves an owned local at its last read
-  into a constructor, tuple, record, optional, loop continue, local closure
-  capture or by-value manifold argument; list literals, conditional arms
+  into a constructor, tuple, record, optional, list literal, loop continue,
+  local closure capture or by-value manifold argument; conditional arms
   and by-value source arguments still copy one (golden copy-census-cpp
   letSource and matchCond: 1 copy each; re-checked 2026-10-19 at
-  25d09170). A C++ list literal copies each element twice (an initializer
-  list).
+  25d09170).
 - **A C++ loop copies a carried value no step changes.** [reproduced] A
   loop slot every continue passes on unchanged is a borrow in Rust (OWN-6)
   but a copy of its start in C++ (golden copy-census-cpp throughLoop,

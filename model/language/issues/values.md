@@ -121,8 +121,12 @@ on 0.109.0 unless marked.
   R/core.R:207-216 adds `length(xs)` and indexes `xs[i + 1]`. Repro:
   /work/plans/model-audit-2026-10-21/repro/C/coll/i-r.loc, /work/plans/model-audit-2026-10-21/repro/C/num/get-cpp.loc.
 - **`size` of a `Str` counts code points in Python and R, bytes in C++ and
-  Rust.** [reproduced, 2026-10-21] BASE-5 is open, but the languages
-  disagree today (COLL-3). `slen s = size s` on U+00E9: 1 in py and r, 2 in
+  Rust.** [reproduced, 2026-10-21] Violates BASE-5, ruled 2026-11-08: a
+  `Str` is text and its length is in characters (bytes belong in
+  `Vector n U8`). C++ `morloc_size` is `x.size()` (root-cpp/core.hpp:331),
+  Rust `String::len` (root-rust/core.rs:240). Every stdlib `Str` operation
+  (index, slice, take, drop, reverse, split positions) needs the same
+  audit (COLL-3). `slen s = size s` on U+00E9: 1 in py and r, 2 in
   cpp and rust. Repro: /work/plans/model-audit-2026-10-21/repro/C/num/, /work/plans/model-audit-2026-10-21/repro/C/lit/nul.loc.
 - **R drops `Null` values from a `Map Str ?v`.** [reproduced, 2026-10-21]
   Violates OPT-1. `optmap xs = pack xs` (`[(Str, ?Int)] -> Map Str ?Int`,
@@ -189,3 +193,14 @@ on 0.109.0 unless marked.
   reaches a Packable check, would be corrupted (MAP rules, NATIVE). From R's
   semantics, not run: a NULL value deletes its key (`Map Str (?Int)`, OPT-1) and an
   empty-string key is lost in unpack, since `x[[""]]` returns NULL.
+
+- **An integer literal that does not fit its type wraps silently.**
+  [reproduced, 2026-11-08, c3a7b3bb3] Violates NUM-5 (ruled 2026-11-08: "A
+  literal that does not fit the type it gets is a compile error") and
+  NUM-4. `f n = ident [300, 1]` with `ident :: [I8] -> [I8]` from C++ builds
+  and prints `[44,1]`: the C++ printer writes `static_cast<int8_t>(300)`.
+  Repro: `module main (f)`, `import root`, `import root-cpp`,
+  `source Cpp from "h.hpp" ("ident")`, `ident :: [I8] -> [I8]`,
+  `f :: Int -> [I8]`, `f n = ident [300, 1]`, with h.hpp defining
+  `inline std::vector<int8_t> ident(const std::vector<int8_t>& x){ return x; }`;
+  `./nexus f 1` prints `[44,1]`.

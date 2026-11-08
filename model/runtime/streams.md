@@ -262,6 +262,16 @@ a slot evicts its own entries to make room, and serves a sub-packet
 uncached when the handle has no room for it.
 
 
+### SLOT-34 A slice caches only the sub-packets at its ends
+Status: implemented
+Checked by: a_slice_caches_only_the_sub_packets_at_its_ends
+
+An IFile slice reads the sub-packets it spans from the handle's cache when
+they are there. Of those it decompresses, it keeps in the cache (SLOT-23)
+only the first and the last, which a neighbouring slice may read again;
+the others are freed when the slice returns. A slice across many
+sub-packets therefore leaves at most two of them cached.
+
 ### SLOT-24 A batch's block outlives every compression job that reads it
 Status: implemented
 Checked by: compressed_subpackets_are_cut_into_frames_fixed_by_the_level, frames_of_a_payload_join_in_order_and_settle_returns

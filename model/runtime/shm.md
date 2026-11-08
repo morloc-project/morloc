@@ -139,15 +139,19 @@ took opens that volume instead and never removes its name.
 
 ### SHM-12 A process grows the program's memory only when no volume has room
 Status: implemented
-Checked by: a_process_out_of_room_uses_a_volume_another_made, a_volume_mapped_twice_keeps_its_first_mapping, tla:NamespaceGrow, tla:NamespaceGrow_no_lock.bug, tla:NamespaceGrow_no_remap.bug, tla:NamespaceGrow_map_uninit.bug, tla:NamespaceGrow_bump_after_init.bug
+Checked by: a_process_out_of_room_uses_a_volume_another_made, a_new_volume_is_sized_to_the_request_beyond_the_growth_step, volumes_grow_in_number_slower_than_the_memory_they_hold, a_volume_mapped_twice_keeps_its_first_mapping, tla:NamespaceGrow, tla:NamespaceGrow_no_lock.bug, tla:NamespaceGrow_no_remap.bug, tla:NamespaceGrow_map_uninit.bug, tla:NamespaceGrow_bump_after_init.bug
 
 Volumes are numbered in order; the primary volume's header holds the next
 number and a growth lock that reports a holder's death rather than
 disabling itself. A process out of room maps every initialised volume
 numbered below the next number and looks again; then it takes the growth
 lock, maps and looks once more, and only then creates the next volume,
-exclusively, at twice the size of the largest, counting it once the
-create succeeds. A name that already exists was made by a creator that
+exclusively, counting it once the create succeeds. The new volume holds
+the request; beyond that it is twice the largest volume, but no more than
+the largest of the request, 64 MiB and a quarter of all volumes' size. So
+a new volume beyond the request costs at most a quarter of the memory the
+program already holds, rather than twice its largest volume, and the
+number of volumes still grows with the logarithm of that memory. A name that already exists was made by a creator that
 died before counting it: it is used if initialised and skipped otherwise,
 and never removed. The growth lock is taken after the process's own growth
 lock (SHM-11) and before any volume's lock. Mapping a volume this process

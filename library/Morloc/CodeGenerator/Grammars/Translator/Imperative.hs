@@ -659,9 +659,10 @@ data LowerConfig m = LowerConfig
   , lcTakeGetter :: TypeF -> Selector -> MDoc -> m (Maybe MDoc)
   -- ^ A getter on a receiver it owns (OWN-5): the receiver's type, the
   -- selector and the receiver. 'Nothing' renders it with 'lcEvalPattern'.
-  , lcListConstructor :: FVar -> [ArgF] -> [MDoc] -> MDoc
-  -- ^ Build a list literal from rendered elements. R needs FVar to choose c() vs list().
-  -- The arguments are the full applied list, kind arguments included.
+  , lcListConstructor :: TypeF -> FVar -> [ArgF] -> [MDoc] -> m MDoc
+  -- ^ Build a list literal of the given type from rendered elements, each
+  -- kept ('lcKeepElem'). R needs FVar to choose c() vs list(). The arguments
+  -- are the full applied list, kind arguments included.
   , lcTupleConstructor :: [MDoc] -> MDoc
   -- ^ Build a tuple literal from rendered elements.
   , lcRecordConstructor :: TypeF -> NamType -> FVar -> [ArgF] -> [(Key, MDoc)] -> m PoolDocs
@@ -1797,8 +1798,8 @@ loopBorrowLocals mayBorrow g root = go g root
 
 -- | The candidate parameters OWN-7 passes by value. The sinks are found
 -- only on the part of the body every evaluation runs.
-consumedParams :: Bool -> (Int -> Set.Set Int) -> (TypeF -> Bool) -> Set.Set Int -> NativeManifold -> Set.Set Int
-consumedParams listKeeps byValue mayBorrow cands nm@(NativeManifold _ _ _ body) =
+consumedParams :: (Int -> Set.Set Int) -> (TypeF -> Bool) -> Set.Set Int -> NativeManifold -> Set.Set Int
+consumedParams byValue mayBorrow cands nm@(NativeManifold _ _ _ body) =
   Set.filter (\p -> Set.member p kept && Map.lookup p counts == Just 1) cands
   where
     counts = readCounts (RN body)
@@ -1813,7 +1814,7 @@ consumedParams listKeeps byValue mayBorrow cands nm@(NativeManifold _ _ _ body) 
     here (RN e) = case e of
       LoopN _ starts _ -> Set.fromList [p | (s, BndVarN _ p _) <- starts, not (Set.member s borrows)]
       VariantN _ _ _ xs -> vars xs
-      ListN _ _ xs | listKeeps -> vars xs
+      ListN _ _ xs -> vars xs
       TupleN _ xs -> vars xs
       RecordN _ _ _ kvs -> vars (map snd kvs)
       AppExeN _ (RecCallP mid _) args -> Set.fromList [p | (j, NativeArgExpr a) <- indexed args, Just p <- [readOf a], Set.member j (byValue mid)]
@@ -2736,9 +2737,10 @@ lowerNativeExprRaw cfg _ (ExeN_ _ (SrcCallP _ src)) = return $ defaultValue {poo
 lowerNativeExprRaw cfg _ (ExeN_ _ (LocalCallP idx)) = return $ defaultValue {poolExpr = (nvar cfg) idx}
 lowerNativeExprRaw cfg _ (ExeN_ _ (PapplyP idx)) = return $ defaultValue {poolExpr = (nvar cfg) idx}
 lowerNativeExprRaw cfg _ (ExeN_ _ (RecCallP mid _)) = return $ defaultValue {poolExpr = lcManifoldName cfg mid}
-lowerNativeExprRaw cfg _ (ListN_ v t xs) = do
-  xs' <- ownedElems cfg False xs
-  return $ mergePoolDocs (lcListConstructor cfg v t) xs'
+lowerNativeExprRaw cfg origExpr (ListN_ v t xs) = do
+  xs' <- ownedElems cfg True xs
+  lit <- lcListConstructor cfg (typeFof origExpr) v t (map poolExpr xs')
+  return $ mergePoolDocs (const lit) xs'
 lowerNativeExprRaw cfg _ (TupleN_ _ xs) = do
   xs' <- ownedElems cfg True xs
   return $ mergePoolDocs (lcTupleConstructor cfg) xs'

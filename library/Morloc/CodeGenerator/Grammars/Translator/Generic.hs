@@ -600,7 +600,7 @@ genericLowerConfig desc srcNamer debugInfo traceInfo debugMode = cfg
         , lcPrintStmt = genericPrintStmt desc
         , lcEvalPattern = \t _ app -> return $ genericEvalPattern desc t app
         , lcTakeGetter = \_ _ _ -> return Nothing
-        , lcListConstructor = \v _ es -> case ldListStyle desc of
+        , lcListConstructor = \_ v _ es -> return $ case ldListStyle desc of
             BracketList -> list es
             FunctionCallList -> pretty (ldGenericListFn desc) <> tupled es
             TypeDependentList -> case v of

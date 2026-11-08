@@ -9,6 +9,8 @@ its issue is fixed.
 From lib/biolib/runtime-bench (runtime/issues/encode-throughput.md):
 
 - [stream-copies.md](stream-copies.md): stream reads and writes: remaining batch copies (S0, W3 encode in place, R2, stdio and frame joins), borrowed views, open rulings
+- [stdout-copies.md](stdout-copies.md): raw stdout copies each batch six or seven times; the custodian and the sink run in series in the nexus
+- [whole-list-gather.md](whole-list-gather.md): a whole-list render gathers its batches through a temp file
 - [stream-compression-pipeline.md](stream-compression-pipeline.md): compressed streams: which process grows at level 3 (unmeasured)
 - [compare-harness.md](compare-harness.md): compare.py never compares a bench with its own past, misses unreported Goals, ignores load, noisy tolerance; five benches never run; Int in benches; XL-2 control optimized away
 - [model-records.md](model-records.md): ZIP-5 limits fail in recorded runs, `Measured: pending` despite runs, ZIP-5/6 frame size mismatch, ZIP-4 answered by data, ZIP-8 title, stale COPY-3/6 prose

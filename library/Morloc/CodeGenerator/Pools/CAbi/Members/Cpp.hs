@@ -200,7 +200,7 @@ renderTemplatedType name argDocs
 -- | No type is cheap enough to copy rather than reference; a tag test may
 -- read a value a field was taken from, since the payload stays in its arm.
 cppCaps :: OwnCaps
-cppCaps = OwnCaps {ocCheap = const False, ocTagAfterTake = True, ocListKeeps = False}
+cppCaps = OwnCaps {ocCheap = const False, ocTagAfterTake = True}
 
 chooseCallSemantics :: TypeM -> CallSemantics
 chooseCallSemantics Passthrough = ConstPtr -- const uint8_t* packet
@@ -1132,7 +1132,11 @@ cppLowerConfig (ClosureGen reifyThunks stageTable papplyHeads) =
         state <- CMS.get
         return $ evaluatePattern state t (listToMaybe argTypes) app
     , lcTakeSetter = cppTakeSetter
-    , lcListConstructor = \_ _ es -> encloseSep "{" "}" "," es
+    , lcListConstructor = \listT _ _ es -> do
+        ty <- cppTypeOf listT
+        return $ case es of
+          [] -> ty <> "{}"
+          _ -> "mlc::list_of<" <> ty <> ">" <> encloseSep "{" "}" ", " es <> ".value"
     , lcTupleConstructor = (<>) "std::make_tuple" . tupled
     , lcRecordConstructor = \recType _ _ _ rs -> do
         t <- cppTypeOf recType
@@ -2158,8 +2162,8 @@ evaluatePattern _ _ _ (PatText s xs) = "interweave_strings" <> tupled [fragments
 -- handle getters
 evaluatePattern _ _ rt (PatGet (ungroup -> [ss]) [] m) =
   readSelector rt m ss
-evaluatePattern _ _ rt (PatGet (ungroup -> sss) [] m) =
-  encloseSep "{" "}" "," (map (readSelector rt m) sss)
+evaluatePattern state t rt (PatGet (ungroup -> sss) [] m) =
+  CMS.evalState (cppTypeOf t) state <> encloseSep "{" "}" "," (map (readSelector rt m) sss)
 -- PatternStruct with bracket steps inside the Selector. App args are
 -- [bracket_bounds..., receiver]. Walk the Selector recursively,
 -- emitting C++ source for each step: `.field`, `std::get<N>(...)`,
@@ -2195,7 +2199,7 @@ setterOf dead state0 t0 s0 m0 xs0 =
       let recT = CMS.evalState (cppTypeOf t) state0
           store ((Key k, OptionalF _), x) = "mlc::wrap_field<decltype(" <> recT <> "::" <> pretty k <> ")>(" <> x <> ")"
           store (_, x) = x
-       in encloseSep "{" "}" ", " (map store fields)
+       in recT <> encloseSep "{" "}" ", " (map store fields)
 
     accessTuple _ m i = "std::get<" <> pretty i <> ">(" <> m <> ")"
     accessRecord _ d k = d <> "." <> pretty k

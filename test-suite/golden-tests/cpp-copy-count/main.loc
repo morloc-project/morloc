@@ -1,4 +1,4 @@
-module main (run, runWrite, runParts)
+module main (run, runWrite, runParts, runSingle)
 
 import root
 import root-cpp
@@ -25,16 +25,21 @@ import root-cpp
 -- batch, the tuple built from the `Try`'s payload (which may be shared, so is
 -- copied), and the projection and suspension copies the sink loop above has.
 --
+-- `runSingle` puts each batch, at its last use, into a one-element list.
+-- Two per batch: the batch, and a copy of `extra` taken by the thunk that
+-- runs the effectful `recordBatches` call (codegen-copies.md).
+--
 -- Large allocations per batch, as the difference between runs of N1 and N2
 -- batches (fixed setup cancels). One is the batch being built; every further
 -- one is a copy.
 
-source Cpp from "count.hpp" ("makeBatch", "recordBatch", "bigAllocs", "makeExtra")
+source Cpp from "count.hpp" ("makeBatch", "recordBatch", "bigAllocs", "makeExtra", "recordBatches")
 
 makeBatch :: Int -> <IO> [Int]
 recordBatch :: [Int] -> [Int] -> <IO> ()
 makeExtra :: Int -> [Int]
 bigAllocs :: Int -> <IO> Int
+recordBatches :: [Int] -> [[Int]] -> <IO> ()
 
 drainT :: ([Int] -> <IO> ()) -> Int -> <IO> ()
 drainT sink n = do
@@ -90,4 +95,19 @@ partsDrain extra n = do
 runParts :: Int -> Int -> <IO> Int
 runParts k n = do
   partsDrain (makeExtra k) n
+  bigAllocs n
+
+singleDrain :: [Int] -> Int -> <IO> ()
+singleDrain extra n = do
+  ? n == 0 = do
+      ()
+  : do
+    xs <- makeBatch n
+    recordBatches extra [xs]
+    singleDrain extra (n - 1)
+
+--' Count allocations of batches passed in one-element lists
+runSingle :: Int -> Int -> <IO> Int
+runSingle k n = do
+  singleDrain (makeExtra k) n
   bigAllocs n

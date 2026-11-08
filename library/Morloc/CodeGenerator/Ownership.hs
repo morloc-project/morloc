@@ -48,8 +48,6 @@ data OwnCaps = OwnCaps
   -- ^ a type whose copy costs nothing
   , ocTagAfterTake :: Bool
   -- ^ whether a tag test may read a value after a field was taken from it
-  , ocListKeeps :: Bool
-  -- ^ whether a list literal's element is kept without a copy of its own
   }
 
 -- | The decisions that span a pool's manifolds.
@@ -84,7 +82,7 @@ planPool caps sms =
         , not (Set.member m asValues)
         , let args = typeMofForm form
               cands = Set.fromList [i | Arg i (Native tf) <- args, not (ocCheap caps tf)]
-              kept = consumedParams (ocListKeeps caps) (\c -> Map.findWithDefault Set.empty c known) (not . ocCheap caps) cands nm
+              kept = consumedParams (\c -> Map.findWithDefault Set.empty c known) (not . ocCheap caps) cands nm
               positions = Set.fromList [j | (j, Arg i _) <- indexed args, Set.member i kept]
         ]
     natives = concatMap (nativeManifoldsUnder . RSM) sms

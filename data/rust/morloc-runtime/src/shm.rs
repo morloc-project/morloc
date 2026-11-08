@@ -2069,18 +2069,15 @@ fn find_free_block(size: usize) -> Result<*mut BlockHeader, MorlocError> {
     if let Some(blk) = find_in_published(size)? {
         return Ok(blk);
     }
-    let largest = {
+    let (largest, total) = {
         let n = PUBLISHED_LEN.load(Ordering::Acquire);
-        PUBLISHED[..n]
+        let sizes = PUBLISHED[..n]
             .iter()
-            .map(|i| MORLOC_VOL_TABLE[i.load(Ordering::Relaxed) as usize].data_size.load(Ordering::Relaxed))
-            .max()
-            .unwrap_or(0xffff)
+            .map(|i| MORLOC_VOL_TABLE[i.load(Ordering::Relaxed) as usize].data_size.load(Ordering::Relaxed));
+        sizes.fold((0usize, 0usize), |(m, t), z| (m.max(z), t.saturating_add(z)))
     };
-    let new_size = std::cmp::max(
-        size.saturating_add(std::mem::size_of::<BlockHeader>()),
-        largest.saturating_mul(2),
-    );
+    let largest = if largest == 0 { 0xffff } else { largest };
+    let new_size = new_volume_size(size, largest, total);
     loop {
         let idx = header.next_index.load(Ordering::Acquire) as usize;
         if idx >= MAX_VOLUME_NUMBER {
@@ -2113,6 +2110,15 @@ fn find_free_block(size: usize) -> Result<*mut BlockHeader, MorlocError> {
             }
         }
     }
+}
+
+// SHM-12
+const GROWTH_STEP: usize = 64 << 20;
+
+// SHM-12
+fn new_volume_size(request: usize, largest: usize, total: usize) -> usize {
+    let step = std::cmp::min(largest.saturating_mul(2), request.max(GROWTH_STEP).max(total / 4));
+    std::cmp::max(request.saturating_add(std::mem::size_of::<BlockHeader>()), step)
 }
 
 // SHM-12: map every initialised volume numbered below the primary's count.
@@ -2440,6 +2446,37 @@ pub(crate) mod tests {
         super::shfree(p).unwrap();
         assert!(after_child > super::PRIMARY_VOLUME as u32 + 1, "the child made no volume");
         assert_eq!(after_parent, after_child, "the parent made a volume of its own");
+    }
+
+    // SHM-12
+    #[test]
+    fn a_new_volume_is_sized_to_the_request_beyond_the_growth_step() {
+        const MIB: usize = 1 << 20;
+        let hdr = std::mem::size_of::<super::BlockHeader>();
+        let size = super::new_volume_size;
+        assert!(size(237 * MIB, 32 * MIB, 64 * MIB) >= 237 * MIB + hdr);
+        assert!(size(237 * MIB, 0xffff, 0xffff) >= 237 * MIB + hdr);
+        assert_eq!(size(16 * MIB, 255 * MIB, 495 * MIB), 495 * MIB / 4);
+        assert_eq!(size(16 * MIB, 120 * MIB, 200 * MIB), super::GROWTH_STEP);
+        assert_eq!(size(1, 237 * MIB, 237 * MIB), super::GROWTH_STEP);
+        assert_eq!(size(1024, 0xffff, 0xffff), 2 * 0xffff);
+        assert_eq!(size(1024, 20 * MIB, 30 * MIB), 40 * MIB);
+        assert_eq!(size(100 * MIB, 255 * MIB, 300 * MIB), 100 * MIB + hdr);
+        assert_eq!(size(16 * MIB, 1024 * MIB, 8192 * MIB), 2048 * MIB);
+    }
+
+    // SHM-12
+    #[test]
+    fn volumes_grow_in_number_slower_than_the_memory_they_hold() {
+        const MIB: usize = 1 << 20;
+        let (mut largest, mut total, mut count) = (0xffff, 0xffff, 1);
+        while total < 10 * 1024 * MIB {
+            let v = super::new_volume_size(16 * MIB, largest, total);
+            largest = largest.max(v);
+            total += v;
+            count += 1;
+        }
+        assert!(count < 30, "{count} volumes to hold 10 GiB");
     }
 
     // SHM-10: mapping a volume this process already maps keeps the first
