@@ -72,7 +72,7 @@ instance.
 
 ### PAT-5 A chain step must fit the shape of its receiver
 Intent: proposed
-Tests: spec-pat-5-1, spec-pat-5-2, spec-pat-5-3, spec-pat-5-4, spec-pat-5-5, spec-pat-5-6, spec-pat-5-7, spec-pat-5-8, spec-pat-5-9, spec-pat-5-10, spec-pat-5-11, spec-pat-5-12, spec-pat-5-13
+Tests: spec-pat-5-1, spec-pat-5-2, spec-pat-5-3, spec-pat-5-4, spec-pat-5-5, spec-pat-5-6, spec-pat-5-7, spec-pat-5-8, spec-pat-5-9, spec-pat-5-10, spec-pat-5-11, spec-pat-5-12, spec-pat-5-13, spec-pat-5-14
 Code: conforms 2026-10-21
 
 The head of a getter or setter chain matches the receiver: a record takes a
@@ -90,3 +90,15 @@ Code: conforms 2026-10-21
 After `.[i:j:k]` the rest of the chain applies to each element of the slice:
 `.[s].t xs` is `map .t (.[s] xs)`. After `.[i]` the tail applies to the one
 element. No other step broadcasts.
+
+### PAT-9 A chain given at run time fits its data as PAT-5 asks
+Intent: proposed
+Tests: spec-pat-9-1
+Code: conforms 2026-11-08
+
+`morloc-nexus view --pattern` checks a chain against the schema of the data
+it reads, before walking it. It applies a chain only where PAT-5 applies it
+at some type that schema encodes, and parses every chain morloc source
+writes. A schema erases newtypes and instances, so a chain on a newtype over
+a list applies to its data. The check may refuse a chain that PAT-5 applies
+only through an instance, or on a table or an optional.

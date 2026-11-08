@@ -291,6 +291,9 @@ data MorlocState = MorlocState
   -- concrete, by name: its index and type. A call that needs one reports
   -- its undetermined variables (POLY-6).
   , stateSkippedGeneric :: Map EVar (Int, Type)
+  -- | The names of the root module's definitions that have no signature
+  -- (POLY-9).
+  , stateRootUnsigned :: Set.Set EVar
   -- | Each staged closure value (by the index of its flat entry): its first
   -- stage point and the index of its stage entry.
   , stateStageEntries :: Map Int (Int, Int)
@@ -1029,10 +1032,6 @@ data Gamma = Gamma
   -- annotation writing one of these names means that variable; a local
   -- signature's are its own (POLY-4).
   , gammaScoped :: Map TVar TVar
-  -- | Inferring a definition's most general type: its literals are not
-  -- defaulted where they occur, since their variables may be generalized
-  -- (NUM-5).
-  , gammaGeneralizing :: Bool
   }
 
 -- | Compile-time constant values tracked during typechecking for nat / str
@@ -1164,6 +1163,7 @@ instance Defaultable MorlocState where
       , stateHoldCache = Map.empty
       , stateUndeterminedSites = Map.empty
       , stateSkippedGeneric = Map.empty
+      , stateRootUnsigned = Set.empty
       , stateStageEntries = Map.empty
       , stateStageContext = Map.empty
       , stateRecStages = Map.empty

@@ -2037,6 +2037,8 @@ instance Pretty TypeU where
       f _ (LitU (LSet es)) = "{" <> hcat (punctuate ", " (map (f True) es)) <> "}"
       f _ (LabeledU (TV n) t) = pretty n <> "@" <> f False t
       f _ (NamU _ n [] _) = pretty n
+      f _ (ExistU _ (ts@(_ : _), pc) ([], _)) = parens (hcat (punctuate ", " (map (f True) ts <> openRest pc)))
+      f _ (ExistU _ ([], _) (rs@(_ : _), rc)) = braces (hcat (punctuate ", " ([pretty k <> "=" <> f False t | (k, t) <- rs] <> openRest rc)))
       f False t = parens (f True t)
       f _ (ExistU v (ts, _) (rs, _)) =
         "*"
@@ -2056,6 +2058,8 @@ instance Pretty TypeU where
       layerU t = f False t
       arrowArgU t@(FunU _ _) = parens (f True t)
       arrowArgU t = f True t
+      openRest Open = ["..."]
+      openRest Closed = []
 
 instance Pretty EType where
   pretty (EType t (Set.toList -> cs) _ _) = case cs of

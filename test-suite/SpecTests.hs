@@ -14,7 +14,9 @@ import Morloc (typecheck, typecheckFrontend)
 import Morloc.Frontend.Namespace
 import Morloc.Data.Doc (render)
 import qualified Data.Char as DC
-import Morloc.Frontend.Typecheck (evaluateAnnoSTypes)
+import Morloc.Frontend.Typecheck (evaluateAnnoSTypes, resolveTypes)
+import Morloc.CodeGenerator.Serial (generalTypeToSerialAST, serialAstToMsgpackSchema)
+import Control.Monad (forM, unless)
 import Morloc.Frontend.Instances (ResolveError (..), defaultPolicy, instanceDecls, resolve)
 import qualified Morloc.TypeEval as TE
 import qualified Morloc.Monad as MM
@@ -53,6 +55,8 @@ specTests =
     , localOption (mkTimeout 5000000) poly1Tests
     , localOption (mkTimeout 5000000) poly7Tests
     , localOption (mkTimeout 5000000) poly8Tests
+    , localOption (mkTimeout 5000000) checkOnceTests
+    , localOption (mkTimeout 20000000) patternConformanceTests
     , localOption (mkTimeout 2000000) bindTests
     , localOption (mkTimeout 2000000) hostTests
     , localOption (mkTimeout 2000000) effTests
@@ -6127,6 +6131,193 @@ poly8Tests =
           odds n = ifelse n [1] (evens n)
           f :: Bool -> ([Int], [Real])
           f b = (evens b, odds b)
+        |]
+    , accept
+        "spec-num-5-6"
+        [r|
+        module main (h)
+          class Integral a where
+            add :: a -> a -> a
+          class Integral a => Numeric a where
+            half :: a -> a
+          instance Integral Real where
+            add x y = x
+          instance Numeric Real where
+            half x = x
+          f :: Numeric a => a -> a
+          f y = add y z
+            where
+              z = 1.0
+          h :: Real
+          h = f 2.0
+        |]
+    ]
+
+-- | The runtime pattern check (morloc-nexus view) agrees with PAT-5: each
+-- row of the table the Rust tests also read names a pattern, a type and
+-- that type's schema, and whether the pattern applies. The schema is the
+-- one morloc writes for the type.
+patternConformanceTests :: TestTree
+patternConformanceTests = testCase "spec-pat-9-1" $ do
+  table <- MT.pack <$> readFile "data/rust/morloc-runtime-types/tests/pattern-conformance.tsv"
+  let rows = [MT.splitOn "\t" l | l <- MT.lines table, not (MT.null l), not ("#" `MT.isPrefixOf` l)]
+      prelude ty = "module main (h)\n  record R = R { x :: Int, y :: Str }\n  const :: a -> b -> a\n  h :: " <> ty <> " -> " <> ty <> "\n"
+  problems <- forM rows $ \case
+    [pat, ty, schema, expected] -> do
+      config <- emptyConfig
+      ((applied, _), _) <-
+        MM.runMorlocMonad Nothing 0 config defaultValue . typecheckFrontend Nothing . Code $
+          prelude ty <> "  h v = const v (" <> pat <> " v)\n"
+      ((written, _), _) <-
+        MM.runMorlocMonad Nothing 0 config defaultValue $ do
+          es <- typecheckFrontend Nothing (Code (prelude ty <> "  h v = v\n"))
+          case map resolveTypes es of
+            [AnnoS (Idx i (FunT [t] _)) _ _] -> render . serialAstToMsgpackSchema <$> generalTypeToSerialAST i t
+            _ -> return "?"
+      let accepted = either (const "no") (const "yes") applied
+          schemaOk = either (const False) (== schema) written
+      return $
+        [MT.unpack (pat <> " on " <> ty <> ": the compiler says " <> accepted) | accepted /= expected]
+          <> [MT.unpack (ty <> ": its schema is " <> either (MT.pack . show) id written) | not schemaOk]
+    row -> return ["malformed row: " <> show row]
+  let found = concat problems
+  unless (null found) (assertFailure (unlines found))
+
+checkOnceTests :: TestTree
+checkOnceTests =
+  testGroup
+    "SIG-10, POLY-9"
+    [ reject
+        "spec-sig-10-1"
+        [r|
+        module main (ok)
+          class Integral a where
+            add :: a -> a -> a
+          instance Integral Int where
+            add x y = x
+          ok :: Int -> Int
+          ok x = x
+          bad x = add x "x"
+        |]
+    , reject
+        "spec-sig-10-2"
+        [r|
+        module main (ok)
+          ok :: Int -> Int
+          ok x = x
+          bad = 1 "x"
+        |]
+    , reject
+        "spec-sig-10-3"
+        [r|
+        module main (ok)
+          ok :: Int -> Int
+          ok x = x
+          a1 = b1
+          b1 = a1
+        |]
+    , accept
+        "spec-sig-10-4"
+        [r|
+        module main (ok)
+          class Integral a where
+            add :: a -> a -> a
+          instance Integral Int where
+            add x y = x
+          ok :: Int -> Int
+          ok x = x
+          good x = add x 1
+        |]
+    , reject
+        "spec-poly-9-1"
+        [r|
+        module main (ok)
+          class Integral a where
+            add :: a -> a -> a
+          instance Integral Int where
+            add x y = x
+          ok :: Int -> Int
+          ok x = x
+          bad t = add (.0 t) "x"
+        |]
+    , reject
+        "spec-sig-10-5"
+        [r|
+        module main (ok)
+          ok :: Int -> Int
+          ok x = x
+          bad = .[0:2] "abc"
+        |]
+    , accept
+        "spec-pat-5-14"
+        [r|
+        module main (h)
+          class Indexable f where
+            __access_index__ :: ?I64 -> f a -> a
+          instance Indexable List
+          get0 :: Indexable f => f a -> a
+          get0 xs = .[0] xs
+          h :: [Int] -> Int
+          h xs = get0 xs
+        |]
+    , accept
+        "spec-poly-8-8"
+        [r|
+        module main (h)
+          class B a => A a where
+            fa :: a -> a
+          class A a => B a where
+            fb :: a -> a
+          instance A Int where
+            fa x = x
+          instance B Int where
+            fb x = x
+          both x = fa (fb x)
+          h :: Int -> Int
+          h x = both x
+        |]
+    , accept
+        "spec-num-10-6"
+        [r|
+        module main (f, k)
+          f :: ?Real
+          f = 5
+          g :: ?Real -> Real
+          g x = 1.0
+          k :: Real
+          k = g 5
+        |]
+    , accept
+        "spec-poly-9-2"
+        [r|
+        module main (f)
+          getFst = .0
+          both p q = (getFst p, getFst q)
+          f :: (Int, Str) -> (Str, Bool, Int) -> (Int, Str)
+          f p q = both p q
+        |]
+    , testCase "spec-poly-9-3" $ do
+        config <- emptyConfig
+        ((x, _), _) <-
+          MM.runMorlocMonad Nothing 0 config defaultValue . typecheck Nothing . Code $
+            "module main (getFst)\n  getFst = .0\n"
+        case x of
+          Left (Rejected _ d) -> assertBool ("diagnostic lacks pattern: " <> MT.unpack (render d)) ("is a pattern" `MT.isInfixOf` render d)
+          Left e -> assertFailure ("expected a user error, got: " <> show e)
+          Right _ -> assertFailure "expected rejection"
+    , testCase "spec-poly-9-5" $ do
+        config <- emptyConfig
+        ((x, msgs), _) <-
+          MM.runMorlocMonad Nothing 0 config defaultValue . typecheck Nothing . Code $
+            "module lib (getFst)\n  getFst = .0\n\nmodule main (getFst, f)\n  import lib (getFst)\n  f :: (Int, Str) -> Int\n  f p = getFst p\n"
+        case x of
+          Left e -> assertFailure ("expected acceptance, got: " <> show e)
+          Right _ -> assertBool ("no warning names getFst: " <> show msgs) (any (MT.isInfixOf "skipping generic export 'getFst'") msgs)
+    , accept
+        "spec-poly-9-4"
+        [r|
+        module main (setX)
+          setX = .(.x = 99) { x = 0, y = "hi" }
         |]
     ]
 

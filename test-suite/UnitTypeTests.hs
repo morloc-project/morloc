@@ -525,7 +525,6 @@ listToGamma gs =
     , gammaObserved = Set.empty
     , gammaDefinitionLambda = Nothing
     , gammaScoped = Map.empty
-    , gammaGeneralizing = False
 
     , gammaPositionalReceivers = Set.empty
     }

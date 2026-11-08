@@ -100,6 +100,7 @@ copyState oldIdx newIdx = do
       , stateHoldCache = stateHoldCache s
       , stateUndeterminedSites = stateUndeterminedSites s
       , stateSkippedGeneric = stateSkippedGeneric s
+      , stateRootUnsigned = stateRootUnsigned s
       , stateStageEntries = stateStageEntries s
       , stateStageContext = stateStageContext s
       , stateRecStages = stateRecStages s

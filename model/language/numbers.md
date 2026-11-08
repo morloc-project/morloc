@@ -41,7 +41,7 @@ fails. It is never truncated or wrapped.
 
 ### NUM-5 A numeric literal has any type of its class
 Intent: ruled 2026-11-08
-Tests: spec-num-5-1, spec-num-5-2, spec-num-5-3, spec-num-5-4, spec-num-5-5
+Tests: spec-num-5-1, spec-num-5-2, spec-num-5-3, spec-num-5-4, spec-num-5-5, spec-num-5-6
 Code: deviates (compiler/issues/specialization.md)
 
 An integer literal has type `a` with `Integral a`; a real literal has type
@@ -60,7 +60,7 @@ compile error.
 
 ### NUM-10 An undetermined numeric type variable defaults to `Int` or `Real`
 Intent: ruled 2026-11-08
-Tests: spec-num-10-1, spec-num-10-2, spec-num-10-3, spec-num-10-4, spec-num-10-5
+Tests: spec-num-10-1, spec-num-10-2, spec-num-10-3, spec-num-10-4, spec-num-10-5, spec-num-10-6
 Code: deviates (compiler/issues/specialization.md)
 
 A type variable that nothing at a use determines (CLS-18) defaults when

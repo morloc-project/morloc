@@ -15,7 +15,7 @@ Implements bidirectional type inference over the 'AnnoS' trees produced by
 aliases. Concrete (language-specific) types are checked later after language
 segregation in the code generator.
 -}
-module Morloc.Frontend.Typecheck (typecheck, typecheckRoot, typecheckRootAt, validate, Checked, checkSigned, inferScheme, defaultedExport, checkedAt, chosenLengthsApplied, useConstraint, resolveTypes, evaluateAnnoSTypes, peakSExpr) where
+module Morloc.Frontend.Typecheck (typecheck, typecheckRoot, isPattern, typecheckRootAt, validate, Checked, checkSigned, inferScheme, defaultedExport, checkedAt, chosenLengthsApplied, useConstraint, resolveTypes, evaluateAnnoSTypes, peakSExpr) where
 
 import Data.Foldable (toList)
 import Morloc.Data.Zip (indexed, zipExact, zipPrefix, zipSame, zipWithSame)
@@ -48,13 +48,12 @@ isPrimitiveConstraint (CMember _ _) = True
 isPrimitiveConstraint (CSubset _ _) = True
 isPrimitiveConstraint (CDisjoint _ _) = True
 
--- | The type a pending literal's variable has now, its optional and effect
--- wrappers removed: a literal in a do-block or an optional position is
--- judged on the payload type.
+-- | The type a pending literal's variable has now, its optional wrapper
+-- removed: a literal in an optional position is judged on the payload type.
+-- An effect is never removed: a literal is pure (EFF-5).
 literalEnd :: Gamma -> TVar -> TypeU
 literalEnd g v = peel (apply g (ExistU v ([], Open) ([], Open)))
   where
-    peel (EffectU _ t) = peel t
     peel (OptionalU t) = peel t
     peel t = t
 
@@ -418,114 +417,114 @@ finishRoot g1raw rootT e1 = run
       rejectInstanceTypedRecords openRecords finalE
       return finalE
 
-    -- Errors visible only once every kind variable is solved: a part of a
-    -- Nat may be negative (KIND-3), so a whole one can come out negative.
-    checkFinalType :: Indexed TypeU -> MorlocMonad (Indexed TypeU)
-    checkFinalType ix@(Idx i t) = case undefinedNats t of
-      (e : _) ->
+-- Errors visible only once every kind variable is solved: a part of a
+-- Nat may be negative (KIND-3), so a whole one can come out negative.
+checkFinalType :: Indexed TypeU -> MorlocMonad (Indexed TypeU)
+checkFinalType ix@(Idx i t) = case undefinedNats t of
+  (e : _) ->
+    MM.throwSourcedError i $
+      "The Nat" <+> squotes (prettyTypeU e) <+> "divides by a number that is not positive"
+  [] -> checkFinalType' ix
+-- A divisor that reduces to a number that is not positive.
+undefinedNats t =
+  [ d
+  | p <- natPositions t
+  , d@(NatDivU _ b) <- universeU p
+  , Just e <- [typeUToNatExpr b]
+  , Just k <- [NS.evalNat Map.empty e]
+  , k <= 0
+  ]
+checkFinalType' :: Indexed TypeU -> MorlocMonad (Indexed TypeU)
+checkFinalType' ix@(Idx i t) = case negativeNats t of
+  (n : _) ->
+    MM.throwSourcedError i $
+      "A dimension may not be negative, but this one is " <> pretty n <> "."
+  [] -> case collidingUnions t of
+    (ks : _) ->
+      MM.throwSourcedError i $
+        "Columns cannot be combined because both sides have: "
+          <> hcat (punctuate ", " (map pretty ks))
+    [] -> case missingFields t of
+      ((k, ks) : _) ->
         MM.throwSourcedError i $
-          "The Nat" <+> squotes (prettyTypeU e) <+> "divides by a number that is not positive"
-      [] -> checkFinalType' ix
-    -- A divisor that reduces to a number that is not positive.
-    undefinedNats t =
-      [ d
-      | p <- natPositions t
-      , d@(NatDivU _ b) <- universeU p
-      , Just e <- [typeUToNatExpr b]
-      , Just k <- [NS.evalNat Map.empty e]
-      , k <= 0
-      ]
-    checkFinalType' :: Indexed TypeU -> MorlocMonad (Indexed TypeU)
-    checkFinalType' ix@(Idx i t) = case negativeNats t of
-      (n : _) ->
-        MM.throwSourcedError i $
-          "A dimension may not be negative, but this one is " <> pretty n <> "."
-      [] -> case collidingUnions t of
-        (ks : _) ->
-          MM.throwSourcedError i $
-            "Columns cannot be combined because both sides have: "
-              <> hcat (punctuate ", " (map pretty ks))
-        [] -> case missingFields t of
-          ((k, ks) : _) ->
-            MM.throwSourcedError i $
-              "There is no field" <+> squotes (pretty k) <+> "among"
-                <+> hsep (punctuate "," (map (squotes . pretty) ks))
-          [] -> return ix
+          "There is no field" <+> squotes (pretty k) <+> "among"
+            <+> hsep (punctuate "," (map (squotes . pretty) ks))
+      [] -> return ix
 
-    -- A field projected from a known row that lacks it.
-    missingFields :: TypeU -> [(Text, [Text])]
-    missingFields t0 =
-      [ (k, ks)
-      | ProjectFieldU r (StrLitU k) <- universeU t0
-      , Just ks <- [groundRowKeys r]
-      , k `notElem` ks
-      ]
+-- A field projected from a known row that lacks it.
+missingFields :: TypeU -> [(Text, [Text])]
+missingFields t0 =
+  [ (k, ks)
+  | ProjectFieldU r (StrLitU k) <- universeU t0
+  , Just ks <- [groundRowKeys r]
+  , k `notElem` ks
+  ]
 
-    universeU :: TypeU -> [TypeU]
-    universeU t0 = t0 : concatMap universeU (typeUChildren t0)
+universeU :: TypeU -> [TypeU]
+universeU t0 = t0 : concatMap universeU (typeUChildren t0)
 
-    -- A union of two known rows that share a key; 'reduceRecUnion' leaves
-    -- it symbolic, so nothing else reports it.
-    collidingUnions :: TypeU -> [[Text]]
-    collidingUnions = go
-      where
-        go (RecUnionU a b)
-          | Just ka <- groundRowKeys a
-          , Just kb <- groundRowKeys b
-          , shared <- [k | k <- ka, k `elem` kb]
-          , not (null shared) = [shared]
-        go (LitU (LRec fs)) = concatMap (go . snd) fs
-        go (LitU (LList es)) = concatMap go es
-        go (LitU (LSet es)) = concatMap go es
-        go (LitU _) = []
-        go (OpU _ ts) = concatMap go ts
-        go (FunU ts t') = concatMap go (t' : ts)
-        go (AppU t' ts) = concatMap go (t' : ts)
-        go (NamU _ _ ps rs) = concatMap go (ps <> map snd rs)
-        go (ForallU _ t') = go t'
-        go (EffectU _ t') = go t'
-        go (OptionalU t') = go t'
-        go (LabeledU _ t') = go t'
-        go (ExistU _ (ts, _) (rs, _)) = concatMap go (ts <> map snd rs)
-        go _ = []
+-- A union of two known rows that share a key; 'reduceRecUnion' leaves
+-- it symbolic, so nothing else reports it.
+collidingUnions :: TypeU -> [[Text]]
+collidingUnions = go
+  where
+    go (RecUnionU a b)
+      | Just ka <- groundRowKeys a
+      , Just kb <- groundRowKeys b
+      , shared <- [k | k <- ka, k `elem` kb]
+      , not (null shared) = [shared]
+    go (LitU (LRec fs)) = concatMap (go . snd) fs
+    go (LitU (LList es)) = concatMap go es
+    go (LitU (LSet es)) = concatMap go es
+    go (LitU _) = []
+    go (OpU _ ts) = concatMap go ts
+    go (FunU ts t') = concatMap go (t' : ts)
+    go (AppU t' ts) = concatMap go (t' : ts)
+    go (NamU _ _ ps rs) = concatMap go (ps <> map snd rs)
+    go (ForallU _ t') = go t'
+    go (EffectU _ t') = go t'
+    go (OptionalU t') = go t'
+    go (LabeledU _ t') = go t'
+    go (ExistU _ (ts, _) (rs, _)) = concatMap go (ts <> map snd rs)
+    go _ = []
 
-    -- The field names of a row, when every field is known.
-    groundRowKeys :: TypeU -> Maybe [Text]
-    groundRowKeys (LitU (LRec fs)) = Just (map fst fs)
-    groundRowKeys (RecExtendU k _ rest) = (k :) <$> groundRowKeys rest
-    groundRowKeys _ = Nothing
+-- The field names of a row, when every field is known.
+groundRowKeys :: TypeU -> Maybe [Text]
+groundRowKeys (LitU (LRec fs)) = Just (map fst fs)
+groundRowKeys (RecExtendU k _ rest) = (k :) <$> groundRowKeys rest
+groundRowKeys _ = Nothing
 
-    -- Every negative Nat literal in a type, in no particular order.
-    negativeNats :: TypeU -> [Integer]
-    negativeNats = go
-      where
-        go (LitU (LNat n)) = [n | n < 0]
-        go (LitU (LRec fs)) = concatMap (go . snd) fs
-        go (LitU (LList es)) = concatMap go es
-        go (LitU (LSet es)) = concatMap go es
-        go (LitU _) = []
-        -- An expression with a free variable may be non-negative for some
-        -- value of it (DIM-6); only a ground one has a value to check.
-        go t@(OpU _ ts) = case typeUToNatExpr t of
-          Just ne
-            | NS.isGround ne -> [c | NS.NatSOP [NS.NatProduct c _] <- [NS.normalize ne], c < 0]
-            | otherwise -> []
-          Nothing -> concatMap go ts
-        go (FunU ts t) = concatMap go (t : ts)
-        go (AppU t ts) = concatMap go (t : ts)
-        go (NamU _ _ ps rs) = concatMap go (ps <> map snd rs)
-        go (ForallU _ t) = go t
-        go (EffectU _ t) = go t
-        go (OptionalU t) = go t
-        go (LabeledU _ t) = go t
-        go (ExistU _ (ts, _) (rs, _)) = concatMap go (ts <> map snd rs)
-        go VarU{} = []
-        go KVarU{} = []
-        go VoidU{} = []
-        go ListVarU{} = []
-        go ListVoidU = []
-        go SetVarU{} = []
-        go SetVoidU = []
+-- Every negative Nat literal in a type, in no particular order.
+negativeNats :: TypeU -> [Integer]
+negativeNats = go
+  where
+    go (LitU (LNat n)) = [n | n < 0]
+    go (LitU (LRec fs)) = concatMap (go . snd) fs
+    go (LitU (LList es)) = concatMap go es
+    go (LitU (LSet es)) = concatMap go es
+    go (LitU _) = []
+    -- An expression with a free variable may be non-negative for some
+    -- value of it (DIM-6); only a ground one has a value to check.
+    go t@(OpU _ ts) = case typeUToNatExpr t of
+      Just ne
+        | NS.isGround ne -> [c | NS.NatSOP [NS.NatProduct c _] <- [NS.normalize ne], c < 0]
+        | otherwise -> []
+      Nothing -> concatMap go ts
+    go (FunU ts t) = concatMap go (t : ts)
+    go (AppU t ts) = concatMap go (t : ts)
+    go (NamU _ _ ps rs) = concatMap go (ps <> map snd rs)
+    go (ForallU _ t) = go t
+    go (EffectU _ t) = go t
+    go (OptionalU t) = go t
+    go (LabeledU _ t) = go t
+    go (ExistU _ (ts, _) (rs, _)) = concatMap go (ts <> map snd rs)
+    go VarU{} = []
+    go KVarU{} = []
+    go VoidU{} = []
+    go ListVarU{} = []
+    go ListVoidU = []
+    go SetVarU{} = []
+    go SetVoidU = []
 
 -- TypeU --> Type
 resolveTypes :: AnnoS (Indexed TypeU) Many Int -> AnnoS (Indexed Type) Many Int
@@ -985,6 +984,18 @@ checkBracketReceiver scope i what methods rcv = do
       "A bracket step needs a receiver with" <+> what <+> "instance, but"
         <+> prettyTypeU rcv <+> "has none"
 
+-- | PAT-5, SIG-10: a bracket step on a receiver whose type is already known
+-- in full is checked where it is written, before its shape is unified, so
+-- the error names the missing instance. A receiver with a variable in it
+-- waits for the check after instance resolution.
+earlyBracketCheck :: Int -> Pattern -> TypeU -> MorlocMonad ()
+earlyBracketCheck i p rcv = case bracketRule p of
+  Just (what, _, methods)
+    | null [() | (TV n, _) <- varForms rcv, isTypeVariableName n] -> do
+        scope <- MM.getGeneralScope
+        checkBracketReceiver scope i what methods rcv
+  _ -> return ()
+
 -- | A derived @pack@ or @unpack@: a lambda over a representation cast,
 -- which no program can write. Instance bodies reach resolution typechecked,
 -- so the cast is already a coercion.
@@ -1133,14 +1144,10 @@ synthE _ g UniS = return (g, BT.unitU, UniS)
 synthE _ g NullS =
   let (g1, v) = newvar "nullType_" g
    in return (g1, OptionalU v, NullS)
--- Inferring a most general type, a literal's type is a variable of its
--- class (NUM-5).
-synthE i g (RealS si x)
-  | gammaGeneralizing g = let (g', t) = literalVar i RealDefault g in return (g', t, RealS si x)
-  | otherwise = return (g, BT.realU, RealS si x)
-synthE i g (IntS si x)
-  | gammaGeneralizing g = let (g', t) = literalVar i IntDefault g in return (g', t, IntS si x)
-  | otherwise = return (g, BT.intU, IntS si x)
+-- A literal's type is a variable of its class (NUM-5), decided once the
+-- definition or root holding it is.
+synthE i g (RealS si x) = let (g', t) = literalVar i RealDefault g in return (g', t, RealS si x)
+synthE i g (IntS si x) = let (g', t) = literalVar i IntDefault g in return (g', t, IntS si x)
 synthE _ g (LogS x) = return (g, BT.boolU, LogS x)
 synthE _ g (StrS x) = return (g, BT.strU, StrS x)
 -- A constructor name is unique, so it alone determines its type. The
@@ -1286,6 +1293,7 @@ synthE _ g0 (PatS fgidx fcidx ev (PatIndex iExpr rcvExpr)) = do
   -- IFile so codegen detects it.
   (gsyn, rcvSyn, rcvSynExpr) <- synthG g0 rcvExpr
   let rcvResolved = apply gsyn rcvSyn
+  earlyBracketCheck fcidx PatternBracketIndex rcvResolved
   case (headTVar rcvResolved, rcvResolved) of
     (Just v, AppU _ (innerType : _)) | v == BT.ifileVar -> do
       let (g1, elemType) = newvar "bidx_elem_" gsyn
@@ -1313,7 +1321,8 @@ synthE _ g0 (PatS fgidx fcidx ev (PatIndex iExpr rcvExpr)) = do
 synthE _ g0 (PatS fgidx fcidx ev (PatSlice startE stopE stepE rcvExpr)) = do
   (g1, rcvType, rcv') <- synthG g0 rcvExpr
   let rcvType' = apply g1 rcvType
-      (g1a, bareResultType) = bracketSliceResultType g1 rcvType'
+  earlyBracketCheck fcidx PatternBracketSlice rcvType'
+  let (g1a, bareResultType) = bracketSliceResultType g1 rcvType'
       (g2, startTy) = newvar "bslice_start_" g1a
       (g3, stopTy)  = newvar "bslice_stop_"  g2
       (g4, stepTy)  = newvar "bslice_step_"  g3
@@ -2218,20 +2227,8 @@ etaExpandSynthE i g1 funType0 funExpr0 _f xs0 = do
           throwTypeError i $ "Invalid function application of type:\n  " <> prettyTypeU funType0
     _ -> return ()
 
-  (g2raw, funType1, inputExprs) <- application' i g1 xs0 normalType
-
-  -- Resolve this application's literals now: an unsolved result could
-  -- otherwise be instantiated to a wrapped type like @<IO> Int@ by an
-  -- enclosing context. Only this application's own literals: an
-  -- enclosing application's may still be fixed by its later arguments.
-  let before = Set.fromList (gammaPendingNumLits g1)
-      own = filter (`Set.notMember` before) (gammaPendingNumLits g2raw)
-  -- Checked against a signature, or inferred to be generalized, a literal
-  -- is decided once the whole definition is (NUM-5).
-  g2 <-
-    if gammaGeneralizing g2raw || isJust (gammaRigid g2raw)
-      then return g2raw
-      else resolvePendingNumLits (constrainedVars g2raw) g2raw own
+  -- A literal argument is decided once the whole definition is (NUM-5).
+  (g2, funType1, inputExprs) <- application' i g1 xs0 normalType
 
   MM.sayVVV $
     "  funType1:" <+> pretty funType1
@@ -2684,7 +2681,10 @@ checkE i g (IntS si x) t = do
       ExistU v _ _ ->
         let g' = deferNumLit (i, v, IntDefault) g
         in return (g', tApplied, IntS si x)
-      _ -> checkEFallback i g (IntS si x) t
+      -- an optional of a numeric type takes the literal as its payload,
+      -- coerced (OPT-7)
+      OptionalU inner | acceptable (apply g inner) -> reconcileSynth i g inner (IntS si x) t
+      _ -> reconcileSynth i g BT.intU (IntS si x) t
 checkE i g (RealS si x) t = do
   scope <- MM.getGeneralScope
   let tApplied = apply g t
@@ -2696,7 +2696,8 @@ checkE i g (RealS si x) t = do
       ExistU v _ _ ->
         let g' = deferNumLit (i, v, RealDefault) g
         in return (g', tApplied, RealS si x)
-      _ -> checkEFallback i g (RealS si x) t
+      OptionalU inner | BT.isRealBaseType (apply g inner) -> reconcileSynth i g inner (RealS si x) t
+      _ -> reconcileSynth i g BT.realU (RealS si x) t
 -- As for IntS, a literal inhabits a type whose wire-parent chain reaches
 -- its primitive.
 checkE i g (StrS x) t = do
@@ -3926,24 +3927,7 @@ checkSigned e0@(AnnoS i _ _) = do
           args c = case c of
             Constraint _ ts -> ts
             _ -> []
-          -- the use a wanted arose at, as instance resolution at the use
-          -- reports it
-          useError site c e = case Map.lookup site uses of
-            Just (ci, v, t) ->
-              let use = evalOr scope (apply g3 t)
-                  lead = case e of
-                    FI.Undetermined _ _ -> "The type of this term is not determined: the use of"
-                    _ -> "The use of"
-                  advice = case (e, c) of
-                    (FI.Disagrees _ _, _) -> mempty
-                    (_, Constraint cls _) -> noInstanceAdvice scope cls v use
-                    _ -> mempty
-               in throwTypeError ci $
-                    lead <+> squotes (pretty v) <+> "at type" <+> prettyTypeU use
-                      <+> "needs" <+> prettyConstraint c <> ":" <+> FI.explainResolveError prettyConstraint e <> advice
-            Nothing ->
-              MM.throwSourcedError site $
-                "This term needs" <+> prettyConstraint c <> ":" <+> FI.explainResolveError prettyConstraint e <> "."
+          useError = unmetAtUse scope uses g3
           derivedIn ev = case ev of
             EvDerived {} -> [ev]
             EvInstance _ _ ctx -> concatMap derivedIn ctx
@@ -3977,6 +3961,72 @@ checkSigned e0@(AnnoS i _ _) = do
         ]
       return (Checked g3 rootT e1)
 
+-- | Report a wanted at @site@ that resolution could not meet at the use it
+-- arose at, as instance resolution at the use reports it.
+unmetAtUse :: Scope -> Map.Map Int (Int, EVar, TypeU) -> Gamma -> Int -> Constraint -> FI.ResolveError -> MorlocMonad a
+unmetAtUse scope uses g3 site c e = case Map.lookup site uses of
+  Just (ci, v, t) ->
+    let use = evalOr scope (apply g3 t)
+        lead = case e of
+          FI.Undetermined _ _ -> "The type of this term is not determined: the use of"
+          _ -> "The use of"
+        advice = case (e, c) of
+          (FI.Disagrees _ _, _) -> mempty
+          (_, Constraint cls _) -> noInstanceAdvice scope cls v use
+          _ -> mempty
+     in throwTypeError ci $
+          lead <+> squotes (pretty v) <+> "at type" <+> prettyTypeU use
+            <+> "needs" <+> prettyConstraint c <> ":" <+> FI.explainResolveError prettyConstraint e <> advice
+  Nothing ->
+    MM.throwSourcedError site $
+      "This term needs" <+> prettyConstraint c <> ":" <+> FI.explainResolveError prettyConstraint e <> "."
+
+-- | SIG-10, POLY-9: what a definition whose type no signature states must
+-- already satisfy, whatever its uses: a literal ends at a type of its class,
+-- and a class constraint over no unknown has an instance. A constraint over
+-- an unknown waits for the use that fixes it.
+groundCheck :: Gamma -> AnnoS (Indexed TypeU) ManyPoly Int -> MorlocMonad ()
+groundCheck g1 e1 = do
+  scope <- MM.getGeneralScope
+  env <- MM.gets stateInstances
+  let open = Set.fromList [v' | (_, v, _) <- gammaPendingNumLits g1, ExistU v' _ _ <- [literalEnd g1 v]]
+  g2 <- resolvePendingNumLits open g1 (gammaPendingNumLits g1)
+  let (g3, solution) = solve FI.usePolicy scope env [] id id g2 (gammaWanteds g2)
+      uses = Map.fromList [(j, (ci, v, t)) | AnnoS (Idx j t) ci (VarS v _) <- annoNodes e1]
+      ground c = case c of
+        Constraint _ ts -> null [() | t <- ts, (TV n, _) <- varForms (apply g3 t), isTypeVariableName n]
+        _ -> False
+  forM_ (solResidual solution) $ \(w@(Wanted site c0 _), residual) ->
+    let c = apply g3 c0
+     in case residual of
+          Unmet e | ground c, not (wIntrinsic w) -> unmetAtUse scope uses g3 site c e
+          _ -> return ()
+  mapM_ (\(AnnoS (Idx j t) _ _) -> checkFinalType (Idx j (apply g3 t))) (annoNodes e1)
+
+-- | POLY-9: whether a type keeps a tuple or record whose other elements or
+-- fields are unknown.
+isPattern :: TypeU -> Bool
+isPattern t = or [open ps pc || open rs rc | ExistU _ (ps, pc) (rs, rc) <- everyType t]
+  where
+    open xs c = not (null xs) && c == Open
+
+-- | PAT-1: a tuple pattern on a value nothing else has determined makes it
+-- a tuple of the pattern's width, so the type a definition is given holds
+-- what its patterns destructure.
+imposeShape :: Gamma -> TypeU -> PatShape -> Gamma
+imposeShape g t sh = case (apply g t, sh) of
+  (ExistU v (ps, _) ([], _), Shape _ (FormTuple ss))
+    | length ps <= length ss ->
+    let (g1, rest) = statefulMap (\gx _ -> newvar "shape_" gx) g (drop (length ps) ss)
+        xs = ps <> rest
+     in case solveExist v (BT.tupleU xs) g1 of
+          Right (Just g2) -> foldl (\gx (x, s') -> imposeShape gx x s') g2 (zipSame xs ss)
+          _ -> g
+  (AppU (VarU tv) ts, Shape _ (FormTuple ss))
+    | tv == BT.tuple (length ts), length ts == length ss ->
+        foldl (\gx (x, s') -> imposeShape gx x s') g (zipSame ts ss)
+  _ -> g
+
 -- | POLY-8, NUM-5: the most general type of an unsigned definition, its
 -- constraints and its literals' classes included. Left, with the reason,
 -- for a type no signature could state: one holding a kind-level or effect
@@ -3986,13 +4036,16 @@ inferScheme :: AnnoS Int ManyPoly Int -> MorlocMonad (Either MDoc EType)
 inferScheme e0 = do
   scope <- MM.getGeneralScope
   env <- MM.gets stateInstances
-  let g0 = emptyGamma {gammaRigid = Just Set.empty, gammaAssumedConstraints = Just [], gammaGeneralizing = True}
-  (g1u, t0, _) <- synthG g0 e0
+  let g0 = emptyGamma {gammaRigid = Just Set.empty, gammaAssumedConstraints = Just [], gammaDefinitionLambda = ownLambda e0}
+  (g1s, t0, e1) <- synthG g0 e0
+  checkShapes g1s e1
+  let g1u = foldl (\g (AnnoS (Idx _ t) _ _, sh) -> imposeShape g t sh) g1s [(r, sh) | AnnoS _ _ (ShapeS _ sh r) <- annoNodes e1]
   case settleDeferred scope g1u of
-    Left _ -> return (Left "an undecided kind-level equation")
-    Right g1 -> do
+    Left _ -> groundCheck g1u e1 >> return (Left "an undecided kind-level equation")
+    Right g1 -> groundCheck g1 e1 >> do
       let t1 = apply g1 t0
           exists = List.nub [(v, not (null ps && null rs)) | ExistU v (ps, _) (rs, _) <- everyType t1]
+          openShape = isPattern t1
           gen = map fst exists
           stated = and
             [ case form of
@@ -4026,7 +4079,11 @@ inferScheme e0 = do
                   Unmet (FI.NoInstance _ _) -> mentionsGen c || wIntrinsic w
                   _ -> False
                 t2 = apply g3 (apply g2 t1)
-                schemeCs = [c | x@(_, c, _) <- residuals, answered x, mentionsGen c]
+                owed = List.nub [c | x@(_, c, _) <- residuals, answered x, mentionsGen c]
+                implies c' c = any (FI.sameConstraint c) (FI.superClosure env [c'])
+                -- a constraint another implies, and does not follow from, is
+                -- not stated
+                schemeCs = [c | c <- owed, not (any (\c' -> implies c' c && not (implies c c')) owed)]
                 unknown = not (null [() | Constraint _ ts <- schemeCs, ExistU {} <- concatMap everyType ts])
              in if all answered residuals && not unknown
                   then
@@ -4039,7 +4096,8 @@ inferScheme e0 = do
                         }
                   else Left "a constraint neither an instance nor the type's variables answer"
       if
-        | any snd exists -> return (Left "an open tuple or record shape")
+        | openShape -> return (Left "an open tuple or record shape")
+        | any snd exists -> return (Left "a tuple or record no named type gives")
         | not stated -> return (Left "a kind-level, effect or annotated variable")
         | not (null (collectEffVarNames t1)) -> return (Left "an effect variable")
         | not (null (gammaDeferred g1)) -> return (Left "an undecided equation")
@@ -4047,9 +4105,9 @@ inferScheme e0 = do
         | not (all (\(_, _, k) -> Map.member (litClass k) (ieClasses env)) held) -> return (Left "a literal whose class is not in scope")
         | otherwise -> do
             g2 <- resolvePendingNumLits (Set.fromList gen) g1 rest >>= defaultNumeric (Set.fromList gen)
-            return $ case foldM bind g2 (zipSame gen names) of
-              Nothing -> Left "a variable that cannot be generalized"
-              Just g2b -> generalized g2b {gammaWanteds = litWanteds <> gammaWanteds g2b}
+            case foldM bind g2 (zipSame gen names) of
+              Nothing -> return (Left "a variable that cannot be generalized")
+              Just g2b -> return (generalized g2b {gammaWanteds = litWanteds <> gammaWanteds g2b})
 
 -- | PAT-1: each destructuring pattern fits the value it destructures. A
 -- tuple pattern needs a tuple of its width, a record pattern a record with

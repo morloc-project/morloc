@@ -273,13 +273,13 @@ makeMorlocError st e = case e of
     srcMap = stateSourceMap st
     noteAt i msg = maybe msg (\note -> note <> line <> msg) (Map.lookup i (stateErrorNotes st))
     located (AtNode i) msg = case Map.lookup i srcMap of
-      Just loc -> pretty loc <> ": error:" <> line <> noteAt i msg <> snippet st loc
+      Just loc -> pretty loc <> ": error:" <> line <> noteAt i (sourceNames msg) <> snippet st loc
       Nothing -> "Compiler bug, broken index" <+> pretty i <+> "with attached error:" <+> msg
     located (AtUnification lhs rhs context) msg =
       case (Map.lookup lhs srcMap, Map.lookup rhs srcMap, Map.lookup context srcMap) of
         (Just lhsLoc, rhsLoc, contextLoc) ->
           maybe mempty (<> line) note
-            <> "Unification error:" <+> msg
+            <> "Unification error:" <+> sourceNames msg
             <> line
             <> "Found while unifying" <+> maybe mempty pretty contextLoc
             <> line
@@ -293,6 +293,53 @@ makeMorlocError st e = case e of
     -- a parse error is rendered with its snippet where it is raised
     located (AtSource _) msg = msg
     located Unplaced msg = msg
+
+-- | A message with each variable the typechecker renamed (@a\@q0@, @*a\@q3@,
+-- @n\@n5@) written as the name the program gave it, where nothing else in
+-- the message is written that way.
+sourceNames :: MDoc -> MDoc
+sourceNames msg =
+  let text = render msg
+      pieces = splitNames (MT.unpack text)
+      renamed = [(t, b) | Renamed t b <- pieces]
+      plain = [w | Plain w <- pieces]
+      alone b = length (nubOrd [t | (t, b') <- renamed, b' == b]) == 1 && b `notElem` plain
+      out p = case p of
+        Renamed t b -> if alone b then b else t
+        Plain w -> w
+        Other c -> [c]
+   in if null renamed then msg else vsep (map pretty (MT.lines (MT.pack (concatMap out pieces))))
+
+data NamePiece = Renamed String String | Plain String | Other Char
+
+-- | Split text into identifiers, noting those with a renaming suffix, and
+-- the characters between them.
+splitNames :: String -> [NamePiece]
+splitNames [] = []
+splitNames s@(c : cs)
+  | c == '*' || isStart c =
+      let (star, rest0) = if c == '*' then ("*", cs) else ("", s)
+          (ident, rest1) = span isIdent rest0
+          (suffix, rest2) = suffixes rest1
+       in case (ident, suffix) of
+            (x : _, _ : _) | isStart x -> Renamed (star <> ident <> suffix) ident : splitNames rest2
+            (x : _, []) | isStart x, null star -> Plain ident : splitNames rest1
+            _ -> Other c : splitNames cs
+  | isIdent c = let (w, rest) = span isIdent s in Plain w : splitNames rest
+  | otherwise = Other c : splitNames cs
+  where
+    isStart x = isAsciiLetter x || x == '_'
+    isIdent x = isAsciiLetter x || isDigitChar x || x == '_' || x == '\''
+    isAsciiLetter x = (x >= 'a' && x <= 'z') || (x >= 'A' && x <= 'Z')
+    isDigitChar x = x >= '0' && x <= '9'
+    -- one or more @tag<digits>, the forms the typechecker's renaming adds
+    -- ('Morloc.Typecheck.Internal.renameWithMap')
+    suffixes str = case str of
+      ('@' : tag : more)
+        | tag `elem` ("qnsrle" :: String)
+        , (ds@(_ : _), more'') <- span isDigitChar more ->
+            let (next, rest) = suffixes more'' in ('@' : tag : ds <> next, rest)
+      _ -> ([], str)
 
 -- | The source location of an index followed by its snippet, for naming a
 -- second site in an error.

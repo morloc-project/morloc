@@ -25,6 +25,8 @@ import Morloc.Namespace.State
 import Morloc.Namespace.Type
 
 import Morloc.Data.Doc (pretty, (<+>), squotes)
+import Morloc.Frontend.Typecheck (isPattern)
+import Morloc.Typecheck.Internal (prettyTypeU)
 import qualified Data.Map as Map
 import qualified Data.Text as T
 import qualified Morloc.Build.Params as BP
@@ -135,10 +137,26 @@ typecheck path code =
 skipGenericExports :: [AnnoS (Indexed TypeU) Many Int] -> MorlocMonad [AnnoS (Indexed TypeU) Many Int]
 skipGenericExports es = do
   let (generic, concrete) = partition (\(AnnoS (Idx _ t) _ _) -> isGenericExport t) es
+  mapM_ refusePatternExport [(i, t) | AnnoS (Idx i t) _ _ <- generic, isPattern t]
   mapM_ (F.valuecheck . F.resolveTypes) generic
   mapM_ warnSkippedExport [i | AnnoS (Idx i _) _ _ <- generic]
   recordSkippedGeneric [(i, typeOf t) | AnnoS (Idx i t) _ _ <- generic]
   return concrete
+
+-- | POLY-9: a pattern the root module defines is not a command. One it
+-- imports and exports is skipped as any generic export is.
+refusePatternExport :: (Int, TypeU) -> MorlocMonad ()
+refusePatternExport (i, t) = do
+  name <- MM.metaName i
+  defined <- MM.gets stateRootUnsigned
+  case name of
+    Just v@(EV n)
+      | Set.member v defined ->
+          MM.throwSourcedError i $
+            squotes (pretty n) <+> "is a pattern, of type" <+> prettyTypeU t
+              <> ", so it cannot be a command: give it a signature that names its tuple or record, or apply it to"
+              <+> "data with 'morloc-nexus view --pattern'"
+    _ -> return ()
 
 warnSkippedExport :: Int -> MorlocMonad ()
 warnSkippedExport i = do

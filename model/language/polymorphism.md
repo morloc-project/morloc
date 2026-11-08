@@ -86,7 +86,7 @@ are rarely used at two types, and a local signature (POLY-4) covers those.
 
 ### POLY-8 An unsigned top-level definition is generalized
 Intent: ruled 2026-11-08
-Tests: spec-poly-8-1, spec-poly-8-2, spec-poly-8-3, spec-poly-8-4, spec-poly-8-5, spec-poly-8-6, spec-poly-8-7
+Tests: spec-poly-8-1, spec-poly-8-2, spec-poly-8-3, spec-poly-8-4, spec-poly-8-5, spec-poly-8-6, spec-poly-8-7, spec-poly-8-8
 Code: deviates (compiler/issues/specialization.md)
 
 A top-level definition without a signature is given the most general type
@@ -99,6 +99,25 @@ signature.
 Why: morloc instantiates a term once per type it is used at, so a
 generalized constant is computed once per type (EVAL-3), not once per use as
 under dictionary passing, the monomorphism restriction's reason.
+
+### POLY-9 A definition over an open tuple or record is a pattern
+Intent: ruled 2026-11-08
+Tests: spec-poly-9-1, spec-poly-9-2, spec-poly-9-3, spec-poly-9-4, spec-poly-9-5
+Code: conforms 2026-11-08
+
+An unsigned definition whose type keeps a tuple or record whose other
+elements or fields are unknown is a pattern, such as `getFst = .0`,
+`setX v r = .(.x = v) r` or `add10Fst = (+) 10 . .0`. No signature can
+state its type. It is checked once, where it is defined, as SIG-10 asks
+of every definition. It is then typed at each use, at the shape that use
+gives, in its own module or one that imports it, so `getFst (1, "a")` and
+`getFst ("b", True, 3)` do not constrain each other. A tuple or record whose
+elements or fields are all known, such as the type of
+`.(.x = 99) { x = 0, y = "hi" }`, is not a pattern.
+
+A pattern is not a command. Naming one defined in the root module among
+the root module's exports is an error. A pattern the root module imports
+and exports is skipped, as a generic export is (SIG-5).
 
 ### POLY-6 An undetermined type variable is a located error
 Intent: ruled 2026-10-09

@@ -42,6 +42,7 @@ module Morloc.Frontend.Instances
   , resolve
   , resolveClosed
   , superClosure
+  , sameConstraint
   , resolveArg
   , resolvePackable
   , packableWireForm

@@ -170,7 +170,7 @@ emptyGamma =
     , gammaSolved = Map.empty, gammaDeferred = [], gammaDeferredAt = Map.empty, gammaKindSubs = Map.empty
     , gammaEffSubs = Map.empty, gammaConstraints = [], gammaWanteds = [], gammaNestedUses = [], gammaAssumedConstraints = Nothing
     , gammaIntVals = Map.empty, gammaPendingNumLits = [], gammaPositionalReceivers = Set.empty
-    , gammaRigid = Nothing, gammaRigidNats = Set.empty, gammaRigidSlots = Set.empty, gammaRigidDomain = [], gammaLabelVars = Map.empty, gammaObserved = Set.empty, gammaDefinitionLambda = Nothing, gammaScoped = Map.empty, gammaGeneralizing = False, gammaUnfolded = Set.empty
+    , gammaRigid = Nothing, gammaRigidNats = Set.empty, gammaRigidSlots = Set.empty, gammaRigidDomain = [], gammaLabelVars = Map.empty, gammaObserved = Set.empty, gammaDefinitionLambda = Nothing, gammaScoped = Map.empty, gammaUnfolded = Set.empty
     }
 
 -- | The type constructor at the head of a type, if it has one.
@@ -3653,6 +3653,8 @@ prettyTypeU = renderClean . cleanTypeName
     f _ (NamU _ n [] rs)
       | n == anonRecordVar = braces (hsep (punctuate "," [pretty k <> "=" <> f True t | (k, t) <- rs]))
       | otherwise = pretty n
+    f _ (ExistU _ (ts@(_ : _), pc) ([], _)) = parens (hcat (punctuate ", " (map (f True) ts <> rest pc)))
+    f _ (ExistU _ ([], _) (rs@(_ : _), rc)) = braces (hcat (punctuate ", " ([pretty k <> "=" <> f False t | (k, t) <- rs] <> rest rc)))
     f False t = parens (f True t)
     f _ (ExistU v (ts, _) (rs, _)) =
       tv v
@@ -3671,6 +3673,8 @@ prettyTypeU = renderClean . cleanTypeName
     layerU t = f False t
     arrowArg t@(FunU _ _) = parens (f True t)
     arrowArg t = f True t
+    rest Open = ["..."]
+    rest Closed = []
 
 -- | Render two TypeUs with a shared rename pool so distinct freshened
 -- variables get distinct clean names. Without this, calling
