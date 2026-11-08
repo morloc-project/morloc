@@ -28,7 +28,8 @@ Code: conforms 2026-10-21
     T <: ?T
 
 The coercion needs no wrapper at the use site and holds across a language
-boundary. Whether it lifts through other type constructors is SUB-5.
+boundary. Whether it lifts through other type constructors is SUB-5. It
+holds for a signature's type variable too (OPT-7).
 
 ### OPT-4 `?T` is the language's own missing value
 Intent: proposed
@@ -63,3 +64,35 @@ rejected). The branches of an `if` are accepted in either order. Candidates:
 and suggests `(x :: ?H)`. (a) leaves the typing of every program accepted
 today unchanged. Haskell and OCaml have no such coercion and reject both
 orders.
+
+### OPT-7 A value of a type variable is accepted where its optional is expected
+Intent: ruled 2026-11-08
+Tests: spec-opt-7-1
+Code: conforms 2026-11-08
+
+In a body checked against its signature, a value of a type variable `a` is
+accepted where `?a` is expected (OPT-3), and the body holds at every `a`.
+At a type `a` that is never null the coercion makes a present value; at an
+optional type it is the identity (OPT-2), so a null stays null:
+
+```morloc
+nullish :: a -> Bool
+nullish x = isNull x       -- always false at Int; at ?Int, true for Null
+
+safeHead :: [a] -> ?a
+safeHead xs
+  ? null xs = Null
+  : head xs                -- at [?Int], a Null head is a Null result
+```
+
+So a generic body is not parametric in nullness: it can tell an optional
+instantiation's `Null` from a value. This is how Kotlin treats `T` and
+`T?`. An implementation of a function taking `?a` always receives the
+language's optional form (OPT-4), whatever `a` is, since the coercion is
+made before the call.
+
+Why: `?T` is each language's own null (OPT-4), which a value of any type
+may be in some languages; and the coercion is how morloc writes a present
+optional value, so without it optional's functor (`mapMaybe f x ? isNull x
+= Null : f (require x)`) could not be written.
+

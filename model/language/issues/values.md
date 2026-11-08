@@ -146,7 +146,9 @@ on 0.109.0 unless marked.
   optionals and need rewriting). Languages also disagree on a value:
   `fromNull :: a -> ?a -> a` at `a = ?Int` with `state2 :: ?(?Int) -> Str`,
   `state2 (fromNull (Null :: ?Int) Null)` is present-with-inner-absent in
-  C++ and Rust and absent in Python.
+  C++ and Rust and absent in Python. Likewise a generic `safeHead :: [a] ->
+  ?a` at `[?Int]` on `[null, 2]`: a C++ `isNull` of the result is false,
+  Python's true (OPT-7); spec-opt-7-1 leaves the C++ form out for this.
 - **R integer rules with no item.** [reproduced, 2026-10-21] The
   2026-10-16 R integer ruling makes `[U8]` an R `raw` and truncates
   fractional doubles at integer slots; no item records either.

@@ -96,6 +96,8 @@ module Morloc.Typecheck.Internal
   , isSubtypeOfOpen
   , recheckDeferred
   , settleDeferred
+  , openRigidGamma
+  , openVars
   , natDeferred
   , fixedSlot
   , typeUToNatExpr
@@ -166,7 +168,7 @@ emptyGamma =
   Gamma
     { gammaCounter = 0, gammaSlot = 0, gammaContext = IntMap.empty, gammaExist = Map.empty, gammaAnn = Map.empty
     , gammaSolved = Map.empty, gammaDeferred = [], gammaDeferredAt = Map.empty, gammaKindSubs = Map.empty
-    , gammaEffSubs = Map.empty, gammaConstraints = [], gammaWanteds = [], gammaAssumedConstraints = Nothing
+    , gammaEffSubs = Map.empty, gammaConstraints = [], gammaWanteds = [], gammaNestedUses = [], gammaAssumedConstraints = Nothing
     , gammaIntVals = Map.empty, gammaPendingNumLits = [], gammaPositionalReceivers = Set.empty
     , gammaRigid = Nothing, gammaRigidNats = Set.empty, gammaRigidSlots = Set.empty, gammaRigidDomain = [], gammaLabelVars = Map.empty, gammaObserved = Set.empty, gammaDefinitionLambda = Nothing, gammaScoped = Map.empty, gammaUnfolded = Set.empty
     }
@@ -2542,6 +2544,51 @@ occursCheck t1 t2 place =
 -}
 substitute :: TVar -> TypeU -> TypeU
 substitute v = substituteTVar v (ExistU v ([], Open) ([], Open))
+
+-- | Each Type variable of @vs@ an existential of its name ('substitute').
+openVars :: Set.Set TVar -> TypeU -> TypeU
+openVars vs t = foldr substitute t (Set.toList vs)
+
+-- | A gamma in which the signature variables @vs@, rigid while a body was
+-- checked, are unknowns: each one's VarG becomes an existential in its own
+-- slot (those of @constrained@, which only constraints name and have none,
+-- are added as one; an effect variable in @vs@ is not a Type variable),
+-- the types and constraints gamma stores read them as those existentials,
+-- and nothing is held rigid any more.
+openRigidGamma :: Set.Set TVar -> Set.Set TVar -> Gamma -> Gamma
+openRigidGamma vs constrained g =
+  g
+    { gammaContext = IntMap.map entry (gammaContext g)
+    , gammaExist = Map.union (Map.fromList [(v, slot) | (slot, VarG v) <- IntMap.toList (gammaContext g), Set.member v vs]) (gammaExist g)
+    , gammaSolved = Map.map open (gammaSolved g)
+    , gammaKindSubs = Map.map open (gammaKindSubs g)
+    , gammaConstraints = map (mapConstraintTypes open) (gammaConstraints g)
+    , gammaWanteds = [w {wPred = mapConstraintTypes open (wPred w)} | w <- gammaWanteds g]
+    , gammaDeferred = [(open a, open b) | (a, b) <- gammaDeferred g]
+    , gammaDeferredAt = Map.mapKeys (\(a, b) -> (open a, open b)) (gammaDeferredAt g)
+    , gammaAssumedConstraints = map (mapConstraintTypes open) <$> gammaAssumedConstraints g
+    , gammaRigid = Nothing
+    , gammaRigidNats = Set.empty
+    , gammaRigidSlots = Set.empty
+    , gammaRigidDomain = []
+    }
+    `addMissing` [v | v <- Set.toList constrained, not (any (isVarG v) (IntMap.elems (gammaContext g)))]
+  where
+    addMissing = foldl (+>)
+    isVarG v (VarG w) = v == w
+    isVarG _ _ = False
+    open = openVars vs
+    entry e = case e of
+      VarG v | Set.member v vs -> ExistG v ([], Open) ([], Open)
+      AnnG x t -> AnnG x (open t)
+      ExistG v (ps, po) (rs, ro) -> ExistG v (map open ps, po) ([(k, open t) | (k, t) <- rs], ro)
+      SolvedG v t -> SolvedG v (open t)
+      _ -> e
+    mapConstraintTypes f c = case c of
+      Constraint cls ts -> Constraint cls (map f ts)
+      CMember a b -> CMember (f a) (f b)
+      CSubset a b -> CSubset (f a) (f b)
+      CDisjoint a b -> CDisjoint (f a) (f b)
 
 -- | Find an unsolved ExistG by TVar. O(log N) via gammaExist index.
 -- Returns the slot and entry if found.

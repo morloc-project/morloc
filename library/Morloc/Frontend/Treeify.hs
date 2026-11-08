@@ -17,6 +17,8 @@ module Morloc.Frontend.Treeify
   ( treeify
   , Validation (..)
   , contractTrees
+  , instanceBodyTree
+  , instanceBodySites
   , collectRoot
   , recName
   ) where
@@ -562,16 +564,35 @@ contractTrees modules = do
         , (et, ExprI bodyIdx _) <- mtBodies t
         ]
   instanceTrees <- sequence
-    [ do
-        (_, body') <- collectAnnoS (Namer Map.empty 0 Map.empty Set.empty k Nothing Set.empty) body
-        let et' = et {econs = Set.union (econs et) (Set.fromList ctx)}
-        return (AnnoS i i (VarS v (MonomorphicExpr (Just et') [body'])))
+    [ instanceBodyTree Nothing k i v et ctx body
     | ExprI _ (ModE _ es) <- modules
     , ExprI _ (IstE _ _ ctx _ ies) <- es
     , ExprI i (AssE v body@(ExprI bi _) _) <- ies
     , Just (k, et) <- [Map.lookup bi bodyType]
     ]
   return (trees <> instanceTrees)
+
+-- | An instance's body of a method as a definition checked against the
+-- method's type at the instance's types, its body assuming the instance's
+-- context: @k@ is the method's term, @i@ the binding's index. With @only@,
+-- only those terms are referenced by their signatures and every other is
+-- expanded, as 'collectRoot' does.
+instanceBodyTree :: Maybe (Set.Set Int) -> Int -> Int -> EVar -> EType -> [Constraint] -> ExprI -> MorlocMonad (AnnoS Int ManyPoly Int)
+instanceBodyTree only k i v et ctx body = do
+  (_, body') <- collectAnnoS (Namer Map.empty 0 Map.empty Set.empty k only Set.empty) body
+  let et' = et {econs = Set.union (econs et) (Set.fromList ctx)}
+  return (AnnoS i i (VarS v (MonomorphicExpr (Just et') [body'])))
+
+-- | Each instance method body of the modules, by its expression's index:
+-- the binding's index and the context of its instance declaration.
+instanceBodySites :: [ExprI] -> Map.Map Int (Int, [Constraint])
+instanceBodySites modules =
+  Map.fromList
+    [ (bi, (i, ctx))
+    | ExprI _ (ModE _ es) <- modules
+    , ExprI _ (IstE _ _ ctx _ ies) <- es
+    , ExprI i (AssE _ (ExprI bi _) _) <- ies
+    ]
 
 -- | A class constraint names the type it constrains: @Ord a =>@, never a
 -- bare @Ord =>@.

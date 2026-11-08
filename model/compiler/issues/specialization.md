@@ -52,3 +52,32 @@
   instance bodies are fresh on every pass, so a use-keyed set never stops
   growing (tried: spec-cls-2-10 did not terminate).
 
+- **Some elaborations still infer the body again at the key.** [read,
+  2026-11-08] Frontend/Specialize.hs: a definition is instantiated from its
+  body checked once against its signature, except where its collection
+  expands a method in place (non-empty `inline`), where the instantiated tree
+  keeps an unsolved type, where the key is not solved, and, for a method, at a
+  derived comparison, a representation cast, or an implementation its check
+  refuses. There the body is checked at the key as before, so a body that
+  holds at its signature but not under inference at the key (OPT-7's
+  `nullish`, a literal defaulted to Real under a Numeric wanted) is refused
+  there. Never a wrong result: the old rule only refuses. In the sweep corpus
+  only exports reach it (an unsolved type).
+- **A nested signature's constraint-only variables are not paired with its
+  use's.** [read, 2026-11-08] Typecheck.hs `signaturePairs` pairs a nested
+  signed definition's quantified and kind variables with its use's, not a
+  variable only its constraints name (CLS-20), which the use makes a fresh
+  existential. Such a variable is solved separately in the body and at the
+  use, or not at all, which falls back to inference at the key.
+- **Each signed definition is checked against its signature twice.**
+  [read, 2026-11-08] `validate` checks every module's definitions in a scratch
+  state and discards the result; Specialize checks the used ones again in its
+  own collection. Method uses still collect every candidate instance's
+  implementations although only the selected instance's are checked.
+- **Opening a checked tree walks every type once per signature variable.**
+  [read, 2026-11-08] Typecheck/Internal.hs `openVars` folds `substitute` over
+  the rigid set, for every annotation and every type gamma stores, at each key.
+  A one-pass walk was tried and refused four unit tests (spec-alias-1-5, the
+  Foldable over newtype tests): `substitute` reaches a variable in a form the
+  walk did not, as the head of an application. Cost grows with the number of
+  nested signatures in a tree.

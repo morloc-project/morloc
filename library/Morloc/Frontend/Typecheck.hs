@@ -15,7 +15,7 @@ Implements bidirectional type inference over the 'AnnoS' trees produced by
 aliases. Concrete (language-specific) types are checked later after language
 segregation in the code generator.
 -}
-module Morloc.Frontend.Typecheck (typecheck, typecheckRoot, typecheckRootAt, validate, resolveTypes, evaluateAnnoSTypes, peakSExpr) where
+module Morloc.Frontend.Typecheck (typecheck, typecheckRoot, typecheckRootAt, validate, Checked, checkSigned, checkedAt, chosenLengthsApplied, useConstraint, resolveTypes, evaluateAnnoSTypes, peakSExpr) where
 
 import Data.Foldable (toList)
 import Morloc.Data.Zip (indexed, zipExact, zipPrefix, zipSame, zipWithSame)
@@ -181,18 +181,23 @@ typecheckRootAt :: TypeU -> AnnoS Int ManyPoly Int -> MorlocMonad (AnnoS (Indexe
 typecheckRootAt t = typecheckWith (Just t) >=> assertStructuralTypesExpanded
 
 typecheckWith :: Maybe TypeU -> AnnoS Int ManyPoly Int -> MorlocMonad (AnnoS (Indexed TypeU) Many Int)
-typecheckWith expected = run
-  where
-    run :: AnnoS Int ManyPoly Int -> MorlocMonad (AnnoS (Indexed TypeU) Many Int)
-    run e0 = do
-      chosenLengthsApplied e0
-      scope <- MM.getGeneralScope
-      -- An exported command's own lambda is applied once per call (DIM-10).
-      let g0 = emptyGamma {gammaDefinitionLambda = ownLambda e0}
-      (g1raw, rootT, e1) <- case expected of
-        Nothing -> synthG g0 e0
-        Just t -> checkG g0 e0 t
+typecheckWith expected e0 = do
+  chosenLengthsApplied e0
+  -- An exported command's own lambda is applied once per call (DIM-10).
+  let g0 = emptyGamma {gammaDefinitionLambda = ownLambda e0}
+  (g1raw, rootT, e1) <- case expected of
+    Nothing -> synthG g0 e0
+    Just t -> checkG g0 e0 t
+  finishRoot g1raw rootT e1
 
+-- | What follows inference of a tree: literal defaults, instance
+-- resolution, and the checks that need every existential solved.
+finishRoot :: Gamma -> TypeU -> AnnoS (Indexed TypeU) ManyPoly Int -> MorlocMonad (AnnoS (Indexed TypeU) Many Int)
+finishRoot g1raw rootT e1 = run
+  where
+    run :: MorlocMonad (AnnoS (Indexed TypeU) Many Int)
+    run = do
+      scope <- MM.getGeneralScope
       -- Literal defaults must precede instance resolution: in @3 <= 5@
       -- the class variable is solved only by the Int default. A signature's
       -- constrained variable left in the root's type is not defaulted, so
@@ -209,7 +214,7 @@ typecheckWith expected = run
       let openRecords = openRecordLiterals e2
       (g2, e3) <- resolveTree g1 e2
       g3 <- case settleDeferred scope (apply g2 g2) of
-        Left (site, err) -> MM.throwSourcedError (fromMaybe (case e0 of AnnoS gi _ _ -> gi) site) err
+        Left (site, err) -> MM.throwSourcedError (fromMaybe (case e1 of AnnoS (Idx gi _) _ _ -> gi) site) err
         Right g -> return g
       checkShapes g3 e1
 
@@ -217,7 +222,7 @@ typecheckWith expected = run
       -- are solved: the deferred equations, each at the term where it
       -- arose, and the non-negativity of every Nat position still open, at
       -- the term whose type holds it (DIM-6, KIND-4, DIM-7).
-      let rootIndex = case e0 of AnnoS gi _ _ -> gi
+      let rootIndex = case e1 of AnnoS (Idx gi _) _ _ -> gi
           site p = Map.findWithDefault rootIndex p (gammaDeferredAt g3)
           natEquation p@(t1, t2) = case (natPositionExpr (apply g3 t1), natPositionExpr (apply g3 t2)) of
             (Just a, Just b) -> Just (site p, p, (a, b))
@@ -330,7 +335,7 @@ typecheckWith expected = run
             [] -> return ()
             cs ->
               let displayed = map (prettyConstraint . apply g3') cs
-                  fnName = case e0 of
+                  fnName = case e1 of
                     AnnoS _ _ (VarS (EV n) _) -> Just n
                     _ -> Nothing
                   prefix = case fnName of
@@ -1394,10 +1399,20 @@ synthE vi g0 (VarS v (MonomorphicExpr (Just t0) xs0)) = do
       -- A local signed definition is checked as a contract with its
       -- variables rigid, but this node is also its use, which instantiates
       -- the signature afresh, constraints included (POLY-4).
+      -- The variables of the two, each against its own, are recorded, so
+      -- that a check finishing at a type can equate them ('checkedAt').
       (g3, tUse)
         | contract && not outermost =
             let (ga, t0'') = renameEType g2 t0
-             in instantiateObligations vi ga (etype t0'') (Set.toList (econs t0''))
+                (gb, tu) = instantiateObligations vi ga (etype t0'') (Set.toList (econs t0''))
+                -- a length only the result holds is chosen at each use, so
+                -- the use observes it (DIM-10)
+                chosen = Set.fromList (outwardNats tu (Map.elems (enatLabelsRenamed t0 (etype t0''))))
+             in ( gb { gammaNestedUses = signaturePairs t1 (etype t0'') <> gammaNestedUses gb
+                     , gammaObserved = Set.union chosen (gammaObserved gb)
+                     }
+                , tu
+                )
         | otherwise = (g2, t2)
   return (g3, tUse, xs2)
 synthE _ g (VarS v (MonomorphicExpr Nothing (x : xs))) = do
@@ -1412,14 +1427,14 @@ synthE _ g (VarS v (MonomorphicExpr Nothing [])) = do
   return (g', t, VarS v (MonomorphicExpr Nothing []))
 -- Against a signature, a method use only records its constraint as an
 -- obligation; the instance is not chosen here.
-synthE mi g0 (VarS v (PolymorphicExpr cls clsName t0 _))
+synthE mi g0 (VarS v (PolymorphicExpr cls clsName t0 rs0))
   | Just _ <- gammaRigid g0 = do
       methods <- MM.gets (ieMethods . stateInstances)
       let (g1, t1, rw) = renameWithMap g0 (etype t0)
           cvars = maybe [] snd (Map.lookup clsName methods)
           obligation = Constraint cls [rw (VarU cv) | cv <- cvars]
           (g2, t2) = instantiateObligations mi g1 t1 [obligation]
-      return (g2, t2, VarS v (PolymorphicExpr cls clsName t0 []))
+      return (g2, t2, VarS v (PolymorphicExpr cls clsName t0 [(k, et, []) | (k, et, _) <- rs0]))
 synthE i g0 (VarS v (PolymorphicExpr cls clsName t0 rs0)) = do
   (g1, rsChecked) <- checkInstances g0 (etype t0) rs0
   let (g2, t1) = rename g1 (etype t0)
@@ -3557,11 +3572,154 @@ peakSExpr (IntrinsicS intr _) = "@" <> pretty (intrinsicName intr)
 -- typed by their signatures ('Treeify'). The results are discarded: this
 -- only rejects programs.
 validate :: [AnnoS Int ManyPoly Int] -> MorlocMonad ()
-validate = mapM_ one
+validate = mapM_ (void . checkSigned)
+
+-- | A definition checked against its signature: the gamma once its body's
+-- constraints are solved, its type, and its typed tree.
+data Checked = Checked Gamma TypeU (AnnoS (Indexed TypeU) ManyPoly Int)
+
+-- | A checked definition at a type it is used at: the signature's variables
+-- become unknowns that the type solves, and checking finishes on the typed
+-- tree, so the body is not inferred again. Each nested signed definition in
+-- the tree has one use, whose type its body is connected to, and a recursive
+-- call is at the definition's own type, as when the body is inferred at the
+-- type.
+checkedAt :: TypeU -> Checked -> MorlocMonad (AnnoS (Indexed TypeU) Many Int)
+checkedAt key (Checked g0 rootT0 e0) = do
+  scope <- MM.getGeneralScope
+  let g1 = apply g0 g0
+      -- the signature's variables, and those only its constraints name
+      dependent =
+        Set.fromList
+          [ v
+          | Constraint _ ts <- fromMaybe [] (gammaAssumedConstraints g1)
+          , (v@(TV n), VarPlain) <- concatMap varForms ts
+          , isTypeVariableName n
+          ]
+      rigid = Set.union (fromMaybe Set.empty (gammaRigid g1)) dependent
+      open = openVars rigid
+      e1@(AnnoS (Idx rootIdx _) _ rootE) = mapAnnoSG (fmap (open . apply g1)) e0
+      rootT = open (apply g1 rootT0)
+      rootName = case rootE of
+        VarS v _ -> Just v
+        _ -> Nothing
+      connect at g (a, b) = case subtype scope a b g of
+        Right g' -> return g'
+        Left err -> throwTypeError at err
+      nested = [(open a, open b) | (a, b) <- gammaNestedUses g1]
+      -- each back-edge with the type of the definition it calls back to: the
+      -- innermost enclosing one of its name (a definition expanded at two
+      -- uses is two copies, each its own type)
+      recursive = backEdges (maybe Map.empty (\v -> Map.singleton v rootT) rootName) e1
+      backEdges scope0 (AnnoS (Idx j t) _ x) = case x of
+        CallS v | Just d <- Map.lookup v scope0 -> [(j, v, d, t)]
+        VarS v (MonomorphicExpr (Just _) xs@(_ : _)) -> concatMap (backEdges (Map.insert v t scope0)) xs
+        _ -> concatMap (backEdges scope0) (foldExprS (: []) x)
+  g2 <- connect rootIdx (openRigidGamma rigid dependent g1) (rootT, key)
+  g3 <- foldM (connect rootIdx) g2 nested
+  g4 <-
+    foldM
+      -- a call's effects may widen where it is used (a do-block), so the
+      -- call's type is held to the definition's, not the reverse
+      ( \g (j, v, d, t) -> case subtype scope t d g of
+          Right g' -> return g'
+          Left err ->
+            MM.throwSourcedError j $
+              "This recursive use of"
+                <+> squotes (pretty (displayName v))
+                <+> "is at" <+> prettyTypeU (apply g t) <> ", not at the type of the definition it recurses to,"
+                <+> prettyTypeU (apply g d) <> " (polymorphic recursion is not supported):" <+> err
+      )
+      g3
+      recursive
+  -- the root is annotated with the key as the use wrote it, as checking
+  -- against the key annotates it
+  let keyed = case e1 of AnnoS (Idx gi _) ci x -> AnnoS (Idx gi key) ci x
+  out <- finishRoot g4 rootT keyed >>= assertStructuralTypesExpanded
+  checkLiteralTypes out
+  -- the coercions to optional the check made of values not optional there
+  let ofPlain = Set.fromList [gi | AnnoS (Idx gi _) _ (CoerceS CoerceToOptional (AnnoS (Idx _ xt) _ _)) <- annoNodes e1, not (isOptionalU xt)]
+  return (collapseOptionals ofPlain out)
+
+-- | The labels of a renaming of a signature, by the renamed variable names.
+enatLabelsRenamed :: EType -> TypeU -> Map.Map Int TVar
+enatLabelsRenamed et renamed =
+  let ren = Map.fromList (zipSame (nub (collectNatVarNames (etype et))) (nub (collectNatVarNames renamed)))
+   in Map.fromList [(idx, Map.findWithDefault lv lv ren) | (lv, idx) <- Map.toList (enatLabels et)]
+
+-- | The variables of two renamings of one signature, each with its
+-- counterpart: the quantified ones, the use's an existential, and the kind
+-- variables of each kind.
+signaturePairs :: TypeU -> TypeU -> [(TypeU, TypeU)]
+signaturePairs a b =
+  pairs VarU (\v -> ExistU v ([], Open) ([], Open)) (fst (unqualify a)) (fst (unqualify b))
+    <> pairs NatVarU NatVarU (natOnly a) (natOnly b)
+    <> pairs IntVarU IntVarU (intOnly a) (intOnly b)
+    <> pairs StrVarU StrVarU (nub (collectStrVarNames a)) (nub (collectStrVarNames b))
+    <> pairs RecVarU RecVarU (nub (collectRecVarNames a)) (nub (collectRecVarNames b))
+    <> pairs ListVarU ListVarU (nub (collectListVarNames a)) (nub (collectListVarNames b))
+    <> pairs row row (nub (collectEffVarNames a)) (nub (collectEffVarNames b))
   where
-    one e0@(AnnoS i _ _) = do
+    row v = EffectU (EffectVar v) BT.unitU
+    pairs f g xs ys = [(f x, g y) | (x, y) <- zipSame xs ys]
+    natOnly t = nub [v | NatVarU v <- everyType t]
+    intOnly t = nub [v | IntVarU v <- everyType t]
+
+-- | Every literal's final type accepts it: an integer literal a numeric base
+-- type, a real one a real type. A type still a variable is not judged.
+checkLiteralTypes :: AnnoS (Indexed TypeU) Many Int -> MorlocMonad ()
+checkLiteralTypes e = do
+  scope <- MM.getGeneralScope
+  let judged t = case t of
+        VarU _ -> False
+        ExistU {} -> False
+        _ -> True
+      accepts baseOK t =
+        let tEval = either (const t) id (TE.evaluateType scope t)
+         in baseOK t || baseOK tEval || baseOK (TE.wireParentRoot scope tEval)
+      peel t = case t of
+        EffectU _ x -> peel x
+        OptionalU x -> peel x
+        _ -> t
+      check :: Int -> TypeU -> (TypeU -> Bool) -> MorlocMonad ()
+      check li t0 baseOK =
+        let t = peel t0
+         in when (judged t && not (accepts baseOK t)) $
+          MM.throwSourcedError li ("Numeric literal cannot have type " <> prettyTypeU t)
+  sequence_
+    [ case x of
+        IntS li _ -> check li t (\u -> BT.isIntegerBaseType u || BT.isRealBaseType u)
+        RealS li _ -> check li t BT.isRealBaseType
+        _ -> return ()
+    | AnnoS (Idx _ t) _ x <- annoNodes e
+    , isLit x
+    ]
+  where
+    isLit IntS {} = True
+    isLit RealS {} = True
+    isLit _ = False
+
+-- | OPT-2: @?(?T)@ is @?T@, so a coercion to optional, of the nodes @ours@,
+-- whose value instantiation made optional is no coercion; the value keeps its
+-- type.
+collapseOptionals :: Set.Set Int -> AnnoS (Indexed TypeU) Many Int -> AnnoS (Indexed TypeU) Many Int
+collapseOptionals ours = go
+  where
+    go (AnnoS (Idx gi t) ci e) = case e of
+      CoerceS CoerceToOptional x@(AnnoS (Idx _ xt) _ _)
+        | Set.member gi ours && isOptionalU xt -> case go x of
+            AnnoS (Idx _ xt') xci xe -> AnnoS (Idx gi xt') xci xe
+      _ -> AnnoS (Idx gi t) ci (MM.runIdentity (mapExprSM (pure . go) e))
+
+isOptionalU :: TypeU -> Bool
+isOptionalU (OptionalU _) = True
+isOptionalU _ = False
+
+-- | Check one definition against its signature ('validate').
+checkSigned :: AnnoS Int ManyPoly Int -> MorlocMonad Checked
+checkSigned e0@(AnnoS i _ _) = do
       let g0 = emptyGamma {gammaRigid = Just Set.empty}
-      (g1unsettled, _, e1) <- synthG g0 e0
+      (g1unsettled, rootT, e1) <- synthG g0 e0
       scope <- MM.getGeneralScope
       g1 <- case settleDeferred scope g1unsettled of
         Left (site, err) -> MM.throwSourcedError (fromMaybe i site) err
@@ -3656,6 +3814,7 @@ validate = mapM_ one
         | (site, evs) <- IntMap.toList (solEvidence solution)
         , EvDerived cls t <- concatMap derivedIn evs
         ]
+      return (Checked g3 rootT e1)
 
 -- | PAT-1: each destructuring pattern fits the value it destructures. A
 -- tuple pattern needs a tuple of its width, a record pattern a record with

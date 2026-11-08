@@ -959,6 +959,9 @@ data Gamma = Gamma
   -- | The class constraints the body's uses owe, newest first, each at the
   -- term it arose at.
   , gammaWanteds :: [Wanted]
+  -- | For each nested signed definition checked against its signature, each
+  -- variable of that check with the variable of the definition's use.
+  , gammaNestedUses :: [(TypeU, TypeU)]
   -- | Constraints declared on the *current* function's signature, taken as
   -- assumptions during this function's body typecheck. A deferred
   -- obligation in @gammaConstraints@ that cannot be decided at end-of-

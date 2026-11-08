@@ -1,0 +1,66 @@
+-- Spec OPT-7: a value of a signature's type variable is accepted where its
+-- optional is expected. Checked once, `nullish` holds at every `a`: at a type
+-- that is never null it is always false; at an optional type the coercion is
+-- the identity (OPT-2), so it tests for null. `safeHead` returns an element
+-- where an optional is promised; at `?Int` a null element is the null result.
+-- Its C++ form is left out: C++ still nests the optional (OPT-2,
+-- model/language/issues/values.md).
+module main
+  ( pyInt, pyOpt, cppInt, cppOpt, rInt, rOpt
+  , pyHeadNull
+  )
+
+type Cpp => Int = "int"
+type Py  => Int = "int"
+type R   => Int = "integer"
+type Cpp => List a = "std::vector<$1>" a
+type Py  => List a = "list" a
+type R   => List a = "list" a
+type Cpp => Bool = "bool"
+type Py  => Bool = "bool"
+type R   => Bool = "logical"
+
+source Cpp from "helpers.hpp" ("is_null" as cppIsNull)
+source Py from "helpers.py" ("is_null" as pyIsNull, "list_is_empty" as pyIsEmpty, "list_at" as pyAt)
+source R from "helpers.R" ("is_null" as rIsNull)
+
+cppIsNull :: ?a -> Bool
+pyIsNull :: ?a -> Bool
+rIsNull :: ?a -> Bool
+pyIsEmpty :: [a] -> Bool
+pyAt :: Int -> [a] -> a
+
+pyNullish :: a -> Bool
+pyNullish x = pyIsNull x
+
+cppNullish :: a -> Bool
+cppNullish x = cppIsNull x
+
+rNullish :: a -> Bool
+rNullish x = rIsNull x
+
+pySafeHead :: [a] -> ?a
+pySafeHead xs
+  ? pyIsEmpty xs = Null
+  : pyAt 0 xs
+
+pyInt :: Int -> Bool
+pyInt x = pyNullish x
+
+pyOpt :: ?Int -> Bool
+pyOpt x = pyNullish x
+
+cppInt :: Int -> Bool
+cppInt x = cppNullish x
+
+cppOpt :: ?Int -> Bool
+cppOpt x = cppNullish x
+
+rInt :: Int -> Bool
+rInt x = rNullish x
+
+rOpt :: ?Int -> Bool
+rOpt x = rNullish x
+
+pyHeadNull :: [?Int] -> Bool
+pyHeadNull xs = pyIsNull (pySafeHead xs)

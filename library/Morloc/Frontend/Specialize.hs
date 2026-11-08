@@ -30,18 +30,24 @@ to it, and at a different key is polymorphic recursion, which is rejected.
 -}
 module Morloc.Frontend.Specialize (specialize, isGenericExport) where
 
-import Morloc.Data.Zip (indexed)
+import Morloc.Data.Zip (indexed, zipPrefix)
 import Data.IORef
 import qualified Data.List as List
 import qualified Data.Map as Map
 import qualified Data.Set as Set
 import qualified Data.Text as T
 import Morloc.Frontend.Namespace
+import qualified Morloc.Data.GMap as GMap
 import Morloc.CodeGenerator.Value (isValue)
 import Morloc.Frontend.Rename (displayName, fresh)
 
-import Morloc.Frontend.Treeify (Validation (..), collectRoot, recName)
-import Morloc.Frontend.Typecheck (typecheckRoot, typecheckRootAt)
+import Morloc.Frontend.Treeify (Validation (..), collectRoot, instanceBodySites, instanceBodyTree, recName)
+import Morloc.Frontend.Typecheck (Checked, checkSigned, checkedAt, chosenLengthsApplied, typecheckRoot, typecheckRootAt, useConstraint)
+import qualified Morloc.Frontend.Instances as FI
+import Morloc.Typecheck.Internal (emptyGamma, typeUChildren)
+import System.Environment (lookupEnv)
+import Control.Monad.Except (catchError, throwError)
+import System.IO (hPutStrLn, stderr)
 import Morloc.Data.Doc
 import qualified Morloc.Monad as MM
 import Morloc.Typecheck.Internal (unqualify)
@@ -57,6 +63,19 @@ data Spec = Spec
   -- ^ the keys shared as a root of their own, by the name uses call
   , specInlined :: IORef (Set.Set SpecKey)
   -- ^ the keys found not to be shareable wherever they are used
+  , specShadow :: Bool
+  -- ^ MORLOC_SHADOW_ELABORATE: also check each instantiated definition at
+  -- its key and report how the two differ
+  , specBodySites :: Map.Map Int (Int, [Constraint])
+  -- ^ each instance method body by its expression's index: its binding's
+  -- index and its instance declaration's context
+  , specBodies :: IORef (Map.Map (Int, Set.Set Int) Checked)
+  -- ^ each instance method implementation checked once against the method's
+  -- type at the instance, per collection of it
+  , specChecked :: IORef (Map.Map (Int, Int, Set.Set Int, Set.Set Int) Checked)
+  -- ^ each definition checked against its signature once per collection of
+  -- it: its term, the index it is collected at (an export's or its
+  -- declaration's), and the collection's sets
   }
 
 -- | The term an index refers to. Read at each use: collecting and copying
@@ -69,13 +88,26 @@ termOf i = do
 -- | Typecheck the tree of each export.
 specialize :: Validation -> [(Int, EVar)] -> MorlocMonad [Typed]
 specialize checks exports = do
-  spec <- liftIO (Spec (validationDefs checks) <$> newIORef Map.empty <*> newIORef Map.empty <*> newIORef Set.empty)
+  shadow <- isJust <$> liftIO (lookupEnv "MORLOC_SHADOW_ELABORATE")
+  spec <- liftIO (Spec (validationDefs checks) <$> newIORef Map.empty <*> newIORef Map.empty <*> newIORef Set.empty <*> pure shadow <*> pure (instanceBodySites (validationModules checks)) <*> newIORef Map.empty <*> newIORef Map.empty)
   mapM (specializeExport spec) exports
 
 specializeExport :: Spec -> (Int, EVar) -> MorlocMonad Typed
 specializeExport spec (gi, v) = do
-  (outcome, typed) <- collectElaborable spec True typecheckRoot (gi, v)
   k0m <- termOf gi
+  sigs <- MM.gets stateSignatures
+  -- a signed export at a concrete type is its body checked once against its
+  -- signature, as every signed definition is
+  let signedAt = case (k0m, GMap.lookup gi sigs) of
+        (Just k0, GMapJust (Monomorphic tt))
+          | Map.member k0 (specDefs spec)
+          , Just et <- termGeneral tt
+          , not (isGenericExport (etype et)) -> Just (k0, etype et)
+        _ -> Nothing
+      check only inline tree = case signedAt of
+        Just (k0, st) | Set.null inline -> instantiated spec typecheckRoot (k0, only, inline) st tree
+        _ -> typecheckRoot tree
+  (outcome, typed) <- collectElaborable spec True check (gi, v)
   let spliceRoot = do
         backs <- liftIO (newIORef Set.empty)
         splice spec backs [] typed
@@ -122,13 +154,13 @@ isGenericExport = containsUnk . typeOf
 collectElaborable
   :: Spec
   -> Bool
-  -> (AnnoS Int ManyPoly Int -> MorlocMonad Typed)
+  -> (Set.Set Int -> Set.Set Int -> AnnoS Int ManyPoly Int -> MorlocMonad Typed)
   -> (Int, EVar)
   -> MorlocMonad (Collected, Typed)
 collectElaborable spec export check root = go (Map.keysSet (specDefs spec)) Set.empty
   where
     go only inline = do
-      typed@(AnnoS (Idx _ rootType) _ _) <- collectRoot only inline root >>= check
+      typed@(AnnoS (Idx _ rootType) _ _) <- collectRoot only inline root >>= check only inline
       stuck <- filter (\r -> not (isElaborable (refType r))) <$> references spec typed
       let only' = Set.difference only (Set.fromList (map refKey stuck))
           inline' = Set.union inline (Set.fromList [refKey r | r <- stuck, refTarget r == Method])
@@ -300,9 +332,15 @@ elaborate spec target use key@(k, t) = do
         Definition -> case Map.lookup k (specDefs spec) of
           Just x -> return x
           Nothing -> MM.throwCompilerBug $ "specialize: no definition for term" <+> pretty k
-      -- checked at the key; a method's result is the implementations of
-      -- the instance the key selects
-      let check = typecheckRootAt t
+      -- A definition at a solved key is its body checked once against its
+      -- signature, instantiated at the key; a method's is the selected
+      -- instance's implementations, each checked once. A collection with a
+      -- method expanded in place is checked at the key: a check against a
+      -- signature does not check instance bodies.
+      let check only inline tree = case target of
+            Definition | isElaborable t, Set.null inline -> instantiated spec (typecheckRootAt t) (k, only, inline) t tree
+            Method | isElaborable t, Set.null inline -> instantiatedMethod spec only t tree
+            _ -> typecheckRootAt t tree
       e <- snd <$> collectElaborable spec False check root
       -- A body may determine a kind-tagged slot that the key it is filed
       -- under leaves open: a length that occurs only in the result is the
@@ -316,6 +354,147 @@ elaborate spec target use key@(k, t) = do
         liftIO (modifyIORef' (specInlined spec) (Set.insert key))
       liftIO (modifyIORef' (specMemo spec) (Map.insert key e))
       return e
+
+-- | A definition's collected tree at a key, from its body checked once
+-- against its signature. A result that keeps an unsolved type cannot be
+-- compiled and is checked at the key instead. In shadow mode the tree is
+-- also checked at the key, and each difference is reported.
+instantiated :: Spec -> (AnnoS Int ManyPoly Int -> MorlocMonad Typed) -> (Int, Set.Set Int, Set.Set Int) -> TypeU -> AnnoS Int ManyPoly Int -> MorlocMonad Typed
+instantiated spec atKeyCheck (k, only, inline) t tree = do
+  chosenLengthsApplied tree
+  let memoKey = (k, case tree of AnnoS gi _ _ -> gi, only, inline)
+  memo <- liftIO (readIORef (specChecked spec))
+  (checked, reused) <- case Map.lookup memoKey memo of
+    Just c -> return (c, True)
+    Nothing -> do
+      c <- checkSigned tree
+      liftIO (modifyIORef' (specChecked spec) (Map.insert memoKey c))
+      return (c, False)
+  -- each key's elaboration is a tree of its own: one checked tree serves
+  -- every key, so a reuse is copied with fresh indices and names
+  let fresh e = if reused then instantiate e else return e
+  if specShadow spec
+    then do
+      via <- (Right <$> checkedAt t checked) `catchError` (return . Left)
+      atKey <- (Right <$> atKeyCheck tree) `catchError` (return . Left)
+      case (via, atKey) of
+        (Right e, Right a) -> do
+          liftIO (reportDifferences (k, only, inline) t e a)
+          when (holdsExistential e) $ say ("unsolved after instantiation at " <> T.unpack (render (pretty t)))
+          if holdsExistential e then return a else fresh e
+        (Left err, Right a) -> say ("refused, where checking at the key accepts: " <> take 300 (show err)) >> return a
+        (Right e, Left err) -> say ("accepted, where checking at the key refuses: " <> take 300 (show err)) >> fresh e
+        (Left err, Left _) -> throwError err
+    else do
+      e <- checkedAt t checked
+      if holdsExistential e then atKeyCheck tree else fresh e
+  where
+    say msg = liftIO (hPutStrLn stderr ("SHADOW term " <> show k <> " " <> msg))
+    holdsExistential e = not (null [() | AnnoS (Idx _ ty) _ _ <- annoNodes e, ExistU {} <- universe ty])
+    universe ty = ty : concatMap universe (typeUChildren ty)
+
+-- | A method use at a key: the instance the key selects, and its
+-- implementations, each body checked once against the method's type at the
+-- instance and instantiated at the key, so no other instance's body is
+-- checked. A derived comparison, a representation cast, or a body its check
+-- refuses is checked at the key instead, with every candidate.
+instantiatedMethod :: Spec -> Set.Set Int -> TypeU -> AnnoS Int ManyPoly Int -> MorlocMonad Typed
+instantiatedMethod spec only t tree = case tree of
+  AnnoS gi ci (VarS v (PolymorphicExpr cls m t0 _)) -> do
+    scope <- MM.getGeneralScope
+    env <- MM.gets stateInstances
+    mk <- termOf ci
+    c <- useConstraint scope emptyGamma env cls m (etype t0) t
+    let selected = case FI.resolve FI.usePolicy scope env [] c of
+          Right ev@(EvInstance {})
+            | Right impls <- FI.methodImpls FI.defaultPolicy env ev m
+            , not (null impls)
+            , not (any isCastImpl impls)
+            , Just k <- mk
+            , Right (primary, _) <- FI.methodSources FI.defaultPolicy env ev m
+            , Just mt <- listToMaybe [FI.mtType x | x <- FI.methodTerms env cls m, FI.mtKey x == primary] ->
+                Just (ev, k, mt, [i | i@(ImplSource {}) <- impls] <> [i | i@(ImplBody {}) <- impls])
+          _ -> Nothing
+    case selected of
+      Nothing -> typecheckRootAt t tree
+      Just (ev, k, mt, impls) -> do
+        alts <- (Just <$> mapM (implAt gi v k mt) impls) `catchError` \err -> case err of
+          Rejected _ _ -> return Nothing
+          _ -> throwError err
+        case alts of
+          Nothing -> do
+            when (specShadow spec) $ liftIO (hPutStrLn stderr ("SHADOW method " <> T.unpack (unEVar m) <> " body refused at " <> T.unpack (render (pretty t))))
+            typecheckRootAt t tree
+          Just as -> do
+            let out = AnnoS (Idx gi t) ci (VarS v (Many [ev] [(evidenceInstance ev, a) | a <- as]))
+            when (specShadow spec) $ do
+              atKey <- (Right <$> typecheckRootAt t tree) `catchError` (return . Left)
+              case atKey of
+                Right a -> liftIO (reportDifferences (-1, Set.empty, Set.empty) t out a)
+                Left err -> liftIO (hPutStrLn stderr ("SHADOW method " <> T.unpack (unEVar m) <> " accepted, where checking at the key refuses: " <> take 300 (show err)))
+            return out
+  _ -> typecheckRootAt t tree
+  where
+    isCastImpl ImplCast {} = True
+    isCastImpl _ = False
+    -- a source is checked against the method's type at the instance, as a
+    -- body is, so that it is shaped (eta-expanded, coerced) as there
+    implAt gi v _ mt (ImplSource _ isrc@(Idx sci _)) =
+      checkedImpl gi (sci, only) $ do
+        let call = AnnoS sci sci (ExeS (SrcCall isrc))
+        return (AnnoS sci sci (VarS v (MonomorphicExpr (Just mt) [call])))
+    implAt gi v k _ (ImplBody et body@(ExprI bi _)) =
+      checkedImpl gi (bi, only) $ do
+        (i, ctx) <- maybe (MM.throwCompilerBug ("specialize: an instance body with no site:" <+> pretty bi)) return (Map.lookup bi (specBodySites spec))
+        instanceBodyTree (Just only) k i v et ctx body
+    implAt _ _ _ _ (ImplCast _ _) = MM.throwCompilerBug "specialize: a representation cast reached instance instantiation"
+    checkedImpl gi memoKey collectIt = do
+      memo <- liftIO (readIORef (specBodies spec))
+      checked <- case Map.lookup memoKey memo of
+        Just c -> return c
+        Nothing -> do
+          c <- collectIt >>= checkSigned
+          liftIO (modifyIORef' (specBodies spec) (Map.insert memoKey c))
+          return c
+      e <- checkedAt t checked >>= instantiate
+      case e of
+        AnnoS _ _ (VarS _ (Many _ [(_, alt)])) -> return (atUse gi alt)
+        _ -> MM.throwCompilerBug "specialize: a checked instance implementation is not one implementation"
+
+-- | The first node at which two elaborations of one tree differ, in shape or
+-- in type, walking both in order (generated nodes take fresh indices in each).
+reportDifferences :: (Int, Set.Set Int, Set.Set Int) -> TypeU -> Typed -> Typed -> IO ()
+reportDifferences (k, _, _) t a b =
+  let walk :: Typed -> [(T.Text, T.Text)]
+      walk e = [(tag x, render (pretty (canonical ty))) | AnnoS (Idx _ ty) _ x <- annoNodes e]
+      tag :: ExprS (Indexed TypeU) Many Int -> T.Text
+      tag x = case x of
+        VarS v _ -> "VarS " <> unEVar v
+        AppS _ _ -> "AppS"
+        LamS _ _ -> "LamS"
+        BndS _ -> "BndS"
+        CallS v -> "CallS " <> unEVar v
+        CoerceS _ _ -> "CoerceS"
+        IntS _ _ -> "IntS"
+        RealS _ _ -> "RealS"
+        ExeS _ -> "ExeS"
+        PatS {} -> "PatS"
+        IntrinsicS _ _ -> "IntrinsicS"
+        LetS v _ _ -> "LetS " <> unEVar v
+        _ -> "other"
+      wa = walk a
+      wb = walk b
+      firstDiff = [(i, x, y) | (i, (x, y)) <- indexed (zipPrefix wa wb), x /= y]
+   in case (firstDiff, length wa == length wb) of
+        ([], True) -> return ()
+        (d, _) ->
+          hPutStrLn stderr . T.unpack $
+            "SHADOW term " <> T.pack (show k) <> " at " <> render (pretty t) <> ": "
+              <> T.pack (show (length wa)) <> " vs " <> T.pack (show (length wb)) <> " nodes"
+              <> case d of
+                (i, (xa, ta), (xb, tb)) : _ ->
+                  "; first at " <> T.pack (show i) <> ": " <> xa <> " " <> ta <> " /= " <> xb <> " " <> tb
+                [] -> ""
 
 -- | Whether an elaboration means something narrower than the key it was
 -- checked at. The check runs over the elaboration's own root type because

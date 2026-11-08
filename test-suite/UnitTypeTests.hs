@@ -513,6 +513,7 @@ listToGamma gs =
     , gammaIntVals = Map.empty
     , gammaConstraints = []
     , gammaWanteds = []
+    , gammaNestedUses = []
     , gammaAssumedConstraints = Nothing
     , gammaUnfolded = Set.empty
     , gammaPendingNumLits = []
