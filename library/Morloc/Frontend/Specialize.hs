@@ -8,12 +8,14 @@ Copyright   : (c) Zebulun Arendsee, 2016-2026
 License     : Apache-2.0
 Maintainer  : z@morloc.io
 
-A signed top-level definition of the root module has been checked against its
+A signed top-level definition of any module has been checked against its
 signature ('Morloc.Frontend.Typecheck.validate'). Its uses therefore need only
 its signature: an export is typechecked with each reference to such a
 definition left as the signature alone, and the type the reference is solved
-at (its key) selects one elaboration of the definition, checked once against
-that type and shared by every reference at the same key.
+at (its key) selects one elaboration of the definition: its body checked once
+against its signature and instantiated at the key, shared by every reference
+at the same key. A method use's elaboration is the implementations of the
+instance its key selects, each checked once and instantiated likewise.
 
 Each reference is then replaced by a copy of its elaboration with fresh
 indices and binder names, so the output has the same shape as a tree whose
@@ -26,7 +28,9 @@ its references left as their signatures and nothing is chosen for it.
 
 Recursion between definitions is found while splicing: a reference to a
 definition already being spliced at the same key becomes a 'CallS' back-edge
-to it, and at a different key is polymorphic recursion, which is rejected.
+to it. At a different key it is polymorphic recursion, which is rejected,
+unless a method lies between the two (an instance calling the definition on a
+component): that is admitted at a key not met on the path, up to a bound.
 -}
 module Morloc.Frontend.Specialize (specialize, isGenericExport) where
 
@@ -66,6 +70,8 @@ data Spec = Spec
   , specShadow :: Bool
   -- ^ MORLOC_SHADOW_ELABORATE: also check each instantiated definition at
   -- its key and report how the two differ
+  , specMethods :: Set.Set Int
+  -- ^ the program's class methods, by term id
   , specBodySites :: Map.Map Int (Int, [Constraint])
   -- ^ each instance method body by its expression's index: its binding's
   -- index and its instance declaration's context
@@ -89,7 +95,9 @@ termOf i = do
 specialize :: Validation -> [(Int, EVar)] -> MorlocMonad [Typed]
 specialize checks exports = do
   shadow <- isJust <$> liftIO (lookupEnv "MORLOC_SHADOW_ELABORATE")
-  spec <- liftIO (Spec (validationDefs checks) <$> newIORef Map.empty <*> newIORef Map.empty <*> newIORef Set.empty <*> pure shadow <*> pure (instanceBodySites (validationModules checks)) <*> newIORef Map.empty <*> newIORef Map.empty)
+  GMap _ sigmap <- MM.gets stateSignatures
+  let methods = Set.fromList [k | (k, Polymorphic {}) <- Map.toList sigmap]
+  spec <- liftIO (Spec (validationDefs checks) <$> newIORef Map.empty <*> newIORef Map.empty <*> newIORef Set.empty <*> pure shadow <*> pure methods <*> pure (instanceBodySites (validationModules checks)) <*> newIORef Map.empty <*> newIORef Map.empty)
   mapM (specializeExport spec) exports
 
 specializeExport :: Spec -> (Int, EVar) -> MorlocMonad Typed
@@ -122,7 +130,9 @@ specializeExport spec (gi, v) = do
             back <- Set.member (k0, canonical (snd (unqualify t))) <$> liftIO (readIORef backs)
             if back
               then do
-                let tok = recName v k0
+                -- named as the splice names a back-edge to it: by the name
+                -- it is declared with, not an alias it is exported under
+                let tok = recName (maybe v snd (Map.lookup k0 (specDefs spec))) k0
                 MM.modify' (\st -> st {stateRecursionTargets = Map.insert tok gi (stateRecursionTargets st)})
                 return (AnnoS (Idx gt t) c (VarS tok alts'))
               else return (AnnoS (Idx gt t) c (VarS name alts'))
@@ -515,8 +525,12 @@ splice spec backs stack n@(AnnoS (Idx gi t) ci e) = refTerm spec n >>= \r -> let
         liftIO (modifyIORef' backs (Set.insert (k, key)))
         return (AnnoS (Idx gi t) ci (CallS (token stack (k, key))))
     -- a definition recursing through others at a different type, or a
-    -- method whose instances recurse at ever larger types
-    | target == Definition && any ((== k) . fst) stack
+    -- method whose instances recurse at ever larger types. A definition met
+    -- again through a method (an instance calling it on a component) is
+    -- admitted at a type not met on this path, as a method is: a recursion
+    -- over finitely many types ends at a back-edge, and the bound stops one
+    -- that does not.
+    | target == Definition && any ((== k) . fst) stack && not (throughMethod k)
         || length (filter ((== k) . fst) stack) >= methodDepth ->
         MM.throwSourcedError gi $
           "Polymorphic recursion is not supported: this use of"
@@ -555,7 +569,9 @@ splice spec backs stack n@(AnnoS (Idx gi t) ci e) = refTerm spec n >>= \r -> let
                   else do
                     when closed $
                       liftIO (modifyIORef' (specInlined spec) (Set.insert (k, key)))
-                    let alts'' = map (fmap (atUse ci)) alts'
+                    -- a copy renamed for its key takes its own self-calls
+                    -- with it, so none binds to a copy at another key
+                    let alts'' = map (fmap (atUse ci . renameSelfCalls name name')) alts'
                     return (AnnoS (Idx gi t) ci (VarS name' (Many (useEvidence ev) alts'')))
               _ -> MM.throwCompilerBug "specialize: an elaboration is not a term"
   Nothing -> AnnoS (Idx gi t) ci <$> mapExprSM (splice spec backs stack) e
@@ -574,6 +590,8 @@ splice spec backs stack n@(AnnoS (Idx gi t) ci e) = refTerm spec n >>= \r -> let
       VarS _ (Many evs _) -> List.nub (evs <> ev)
       _ -> ev
     methodDepth = 64
+    throughMethod k =
+      any ((`Set.member` specMethods spec) . fst) (takeWhile ((/= k) . fst) stack)
     -- a use of a shared specialization: its sourced implementations, each
     -- chosen per use, and a call of the shared one
     sharedUse tok (AnnoS _ _ (VarS name (Many ev alts))) = do
@@ -584,6 +602,18 @@ splice spec backs stack n@(AnnoS (Idx gi t) ci e) = refTerm spec n >>= \r -> let
       let sourced' = map (fmap (atUse ci)) sourced
       call <- AnnoS <$> (Idx <$> plainIndex gi <*> pure t) <*> plainIndex ci <*> pure (CallS tok)
       return (AnnoS (Idx gi t) ci (VarS name (Many (useEvidence ev) (sourced' <> [(Nothing, call)]))))
+
+-- | A tree with each back-edge calling @old@ calling @new@ instead, except
+-- inside a nested definition named @old@, whose own back-edges they are.
+renameSelfCalls :: EVar -> EVar -> Typed -> Typed
+renameSelfCalls old new tree
+  | old == new = tree
+  | otherwise = go tree
+  where
+    go (AnnoS g c e) = AnnoS g c $ case e of
+      CallS v | v == old -> CallS new
+      VarS v _ | v == old -> e
+      _ -> MM.runIdentity (mapExprSM (pure . go) e)
 
 isSourced :: Typed -> Bool
 isSourced (AnnoS _ _ (ExeS (SrcCall _))) = True

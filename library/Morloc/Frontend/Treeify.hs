@@ -89,7 +89,7 @@ data Validation = Validation
   { validationModules :: [ExprI]
   -- ^ every module of the program, the root first ('contractTrees')
   , validationDefs :: Map.Map Int (Int, EVar)
-  -- ^ each signed top-level definition of the root module by term id: its
+  -- ^ each signed top-level definition of the program by term id: its
   -- declaration index and name
   }
 
@@ -175,9 +175,9 @@ treeify d
             let modules = [n | (k', (n, _)) <- Map.toList d', k' == k] <> [n | (k', (n, _)) <- Map.toList d', k' /= k]
             mapM_ checkBareClassConstraints modules
             sigs <- MM.gets stateSignatures
-            let defs = case DAG.lookupNode k d' of
-                  Just node -> Map.fromList [(termId, (i, v)) | (termId, v, i) <- firstPerTerm (signedDefs sigs node)]
-                  Nothing -> Map.empty
+            -- every module's signed definitions, each referenced by its
+            -- signature and elaborated once per type it is used at
+            let defs = Map.fromList [(termId, (i, v)) | (termId, v, i) <- firstPerTerm (concatMap (signedDefs sigs) modules)]
             return (Validation modules defs, exports')
           (Just _) ->
             error "This should not be possible, all ExportAll cases should have been removed in Restructure.hs"

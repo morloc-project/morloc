@@ -14,21 +14,6 @@
   typechecked or installed. Spec gap: PAT-1 and REAL-5 check at the types
   a term is used at, and say nothing of a term no concrete term uses.
   Running these checks over the validated definitions would cover it.
-- **A definition reached again through an instance is rejected as
-  polymorphic recursion.** [reproduced, 2026-11-02] Frontend/Specialize.hs
-  `splice` rejects any definition already in the splice stack at another
-  key. `cmpC :: Cmp a => a -> a -> Int` calling the method `lt`, whose
-  tuple instance calls `cmpC` at each component, fails for
-  `f x = cmpC (x, 2.0) (3, 4.0)` though the types shrink: "Polymorphic
-  recursion is not supported". The root container instances have this
-  shape (`compare` on tuples). Allowing a repeat past a method frame is not
-  enough on its own: back-edges, recursion tokens (`recName v k`) and the
-  deletion of a frame's own back-edge are keyed by term, so a term met at
-  two keys would bind a recursive call to the wrong copy. A fix keys them by
-  term and key, and admits a repeat past a method frame only at a key
-  smaller than every earlier key of that term (the 64-deep method bound
-  stays as a backstop). Analysis:
-  /work/plans/eq-ord-methods/briefs/da-connect-recursion.md.
 - **Every use of a method copies its whole elaboration.** [reproduced,
   2026-11-02] Methods are never shared (Specialize.hs `splice`, `closed`
   requires a definition), so each comparison copies the instance body it
@@ -81,3 +66,13 @@
   Foldable over newtype tests): `substitute` reaches a variable in a form the
   walk did not, as the head of an application. Cost grows with the number of
   nested signatures in a tree.
+- **A method expanded in place is not a method frame for recursion.**
+  [read, 2026-11-08] Frontend/Specialize.hs `splice` admits a definition met
+  again at a new key only past a method frame on its stack; a method expanded
+  in place (a stuck use, `inline`) puts none there, so the same recursion
+  through an instance is refused where the method use was stuck.
+- **Memo keys carry the program's whole set of referenced definitions.**
+  [read, 2026-11-08] Specialize's checked-tree memos are keyed by the
+  collection's `only` set, now every module's signed definitions, compared
+  element by element; and a chain of stuck imported definitions is expanded one
+  layer per collection pass. Cost only.
