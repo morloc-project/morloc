@@ -420,10 +420,7 @@ pub(crate) static VOLUMES: Held<VolumeTable> = Held::new(6, VolumeTable {
 // forked child, so a fork never waits for a growth.
 static GROW: crate::fork_policy::Reset<()> = crate::fork_policy::Reset::new(|| ());
 
-/// Reference-count value marking a block whose last reference has been
-/// dropped and whose bytes are being scrubbed. It reads as in-use, so no
-/// allocator can claim the block until the scrub completes and publishes
-/// zero.
+/// SHM-6, SHM-13: the count of a block being released or claimed.
 const TEARING_DOWN: u32 = u32::MAX;
 
 pub(crate) static COMMON_BASENAME: Held<[u8; MAX_FILENAME_SIZE]> = Held::new(9, [0u8; MAX_FILENAME_SIZE]);
@@ -669,9 +666,9 @@ unsafe fn init_volume(
         Ordering::Relaxed,
     );
     let first_block = (shm as *mut u8).add(std::mem::size_of::<ShmHeader>()) as *mut BlockHeader;
-    (*first_block).set_magic(BLK_MAGIC);
     (*first_block).reference_count.store(0, Ordering::Relaxed);
     (*first_block).set_size(first_size);
+    (*first_block).set_magic(BLK_MAGIC);
     (*shm).magic.store(SHM_MAGIC, Ordering::Release);
     Ok(())
 }
@@ -1120,7 +1117,7 @@ pub(crate) unsafe fn incref_held(vols: &VolumeTable, ptr: AbsPtr) -> bool {
     }
     loop {
         let cur = blk.reference_count.load(Ordering::Acquire);
-        if cur == 0 || cur == TEARING_DOWN {
+        if cur == 0 || cur >= TEARING_DOWN - 1 {
             return false;
         }
         if blk
@@ -1319,8 +1316,11 @@ pub unsafe fn shincref(ptr: AbsPtr) -> Result<(), MorlocError> {
         }
         if cur == TEARING_DOWN {
             return Err(MorlocError::Shm(
-                "Cannot incref a block that is being released".into(),
+                "Cannot incref a block that is being released or claimed".into(),
             ));
+        }
+        if cur == TEARING_DOWN - 1 {
+            return Err(MorlocError::Shm("Cannot incref a block whose reference count is full".into()));
         }
         if blk
             .reference_count
@@ -1953,7 +1953,7 @@ fn shfree_unlocked(ptr: AbsPtr) -> Result<(), MorlocError> {
         if cur == TEARING_DOWN {
             // Another party is mid-scrub and owns the transition to zero.
             return Err(MorlocError::Shm(
-                "Reference count already 0 (block is being released)".into(),
+                "Reference count already 0 (block is being released or claimed)".into(),
             ));
         }
         let next = if cur == 1 { TEARING_DOWN } else { cur - 1 };
@@ -2163,19 +2163,36 @@ fn map_numbered(basename: &str, primary: *mut ShmHeader) {
 /// # Safety
 /// `blk` must be a valid BlockHeader in the volume `_held` locks.
 #[inline]
-unsafe fn claim(_held: &ShmGuard<'_>, blk: *mut BlockHeader) -> Result<*mut BlockHeader, MorlocError> {
-    // SHM-13: never 0, which no packet may record.
-    (*blk).bump_generation();
+// SHM-2, SHM-13: tla:ShmClaim; on a failed split the block is free again.
+unsafe fn claim(
+    held: &ShmGuard<'_>,
+    shm: *mut ShmHeader,
+    blk: *mut BlockHeader,
+    size: usize,
+) -> Result<*mut BlockHeader, MorlocError> {
+    reserve(held, blk)?;
+    if let Err(e) = split_block(held, shm, blk, size) {
+        (*blk).reference_count.store(0, Ordering::Release);
+        return Err(e);
+    }
+    Ok(publish_claim(held, blk))
+}
+
+// SHM-2, SHM-13: tla:ShmClaim; a block in use is left as it is.
+unsafe fn reserve(_held: &ShmGuard<'_>, blk: *mut BlockHeader) -> Result<(), MorlocError> {
     (*blk)
         .reference_count
-        .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Relaxed)
-        .map(|_| {
-            crate::shm_stats::on_claim((*blk).size());
-            blk
-        })
-        .map_err(|n| {
-            MorlocError::Shm(format!("the allocator chose a block already in use (count {n})"))
-        })
+        .compare_exchange(0, TEARING_DOWN, Ordering::AcqRel, Ordering::Relaxed)
+        .map(|_| ())
+        .map_err(|n| MorlocError::Shm(format!("the allocator chose a block already in use (count {n})")))
+}
+
+// SHM-13: tla:ShmClaim; never 0, which no packet may record.
+unsafe fn publish_claim(_held: &ShmGuard<'_>, blk: *mut BlockHeader) -> *mut BlockHeader {
+    (*blk).bump_generation();
+    (*blk).reference_count.store(1, Ordering::Release);
+    crate::shm_stats::on_claim((*blk).size());
+    blk
 }
 
 /// Find a free block of at least `size` bytes, split off the remainder, and
@@ -2228,10 +2245,14 @@ fn find_free_block_in_volume(
         };
 
         let claimed = match found {
-            Some(blk) => {
-                split_block(&held, shm, blk, size)?;
-                Some(claim(&held, blk)?)
-            }
+            Some(blk) => match claim(&held, shm, blk, size) {
+                Ok(b) => Some(b),
+                Err(e) if (*blk).reference_count.load(Ordering::Acquire) == 0 => {
+                    held.release();
+                    return Err(e);
+                }
+                Err(e) => return Err(e),
+            },
             None => None,
         };
         held.release();
@@ -2291,7 +2312,8 @@ unsafe fn scan_volume(
 /// when it is large enough to carry a header.
 ///
 /// # Safety
-/// `blk` must be a free BlockHeader in `shm`, the volume `_held` locks.
+/// `blk` must be a BlockHeader in `shm` reserved for a claim (SHM-13), in
+/// the volume `_held` locks.
 unsafe fn split_block(
     _held: &ShmGuard<'_>,
     shm: *mut ShmHeader,
@@ -2317,11 +2339,11 @@ unsafe fn split_block(
     let new_free = (blk as *mut u8).add(hdr_size + size) as *mut BlockHeader;
 
     if remaining > hdr_size {
-        (*new_free).set_magic(BLK_MAGIC);
         (*new_free).reference_count.store(0, Ordering::Relaxed);
         (*new_free).set_size(remaining - hdr_size);
         // SHM-13
         (*new_free).set_generation((*blk).generation());
+        (*new_free).set_magic(BLK_MAGIC);
 
         // Update cursor
         let data_start = (shm as *const u8).add(std::mem::size_of::<ShmHeader>());
@@ -2962,6 +2984,32 @@ pub(crate) mod tests {
         assert_ne!(first, 0);
         assert_ne!(second, 0);
         assert_ne!(first, second, "the same generation names two allocations");
+    }
+
+    // SHM-2, SHM-13: a claim that finds its block in use leaves the holder's
+    // count and generation as they were.
+    #[test]
+    fn a_claim_that_finds_its_block_in_use_changes_nothing() {
+        let _arena = crate::own_test_shm();
+        let _fallback = small_volume("claim");
+        let p = shmalloc(64).unwrap();
+        let g = unsafe { block_generation(p) }.unwrap();
+        let (_, base, _) = published_volume_of(p).unwrap();
+        let refused = unsafe {
+            let shm = base.sub(std::mem::size_of::<ShmHeader>()) as *mut ShmHeader;
+            let blk = p.sub(std::mem::size_of::<BlockHeader>()) as *mut BlockHeader;
+            let guard = (*shm).lock.lock_live().unwrap().unwrap();
+            let r = claim(&guard, shm, blk, 16).is_err();
+            guard.release();
+            r
+        };
+        let after = unsafe { block_generation(p) };
+        let count = unsafe { reference_count(p) };
+        shfree(p).unwrap();
+        shclose().unwrap();
+        assert!(refused, "a block in use was claimed");
+        assert_eq!(after, Some(g), "a failed claim changed the holder's generation");
+        assert_eq!(count, Some(1), "a failed claim changed the holder's count");
     }
 
     // SHM-13

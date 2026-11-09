@@ -160,13 +160,18 @@ already maps keeps the first mapping.
 
 ### SHM-13 A reference names the allocation it was made for
 Status: implemented
-Checked by: a_packet_naming_a_reused_block_is_refused_every_time, a_packet_naming_a_released_block_is_refused_every_time, bindings_resolve_received_references_only_through_the_check, only_the_check_and_the_builder_touch_a_packets_generation, a_stale_reply_is_refused_when_inherited, a_tracked_release_finds_only_a_live_block, no_reference_packet_is_built_for_an_interior_address, an_unstamped_reference_packet_is_refused, a_block_reads_as_held_only_while_a_holder_holds_it, a_packet_for_a_live_block_is_read, a_reclaimed_address_gets_a_new_generation
+Checked by: a_packet_naming_a_reused_block_is_refused_every_time, a_packet_naming_a_released_block_is_refused_every_time, bindings_resolve_received_references_only_through_the_check, only_the_check_and_the_builder_touch_a_packets_generation, a_stale_reply_is_refused_when_inherited, a_tracked_release_finds_only_a_live_block, no_reference_packet_is_built_for_an_interior_address, an_unstamped_reference_packet_is_refused, a_block_reads_as_held_only_while_a_holder_holds_it, a_packet_for_a_live_block_is_read, a_reclaimed_address_gets_a_new_generation, a_claim_that_finds_its_block_in_use_changes_nothing, tla:ShmClaim, tla:ShmClaim_bump_then_cas.bug, tla:ShmClaim_cas_then_bump.bug
 
 Every block carries a 16-bit generation beside its size. Claiming a block
 for an allocation advances it (skipping 0), a block split off another
 starts at the parent's, and a merge keeps the larger of the two, so a
 header made again at an address starts past every allocation it held
-before. A reference packet records the generation of the block it names
+before. A claim moves the count from 0 to the mark a release uses before
+it splits the block, then advances the generation and stores 1, so a
+claim that finds its block in use changes nothing, and a check that reads
+a count of 1 reads the new generation (tla:ShmClaim checks this order of a claim against a check). A new header's
+other fields are stored before its magic word, with release and acquire
+ordering on the magic. A reference packet records the generation of the block it names
 when it is built, and none is built for an address no held block begins at; a
 packet recording 0 is refused. The runtime reads a received
 reference only through the check that a block still begins there, is

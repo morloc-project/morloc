@@ -355,6 +355,15 @@ pub struct CommandData {
     pub generation: [u8; 2],
 }
 
+impl CommandData {
+    /// SHM-13: the payload now travels inside the packet, which therefore
+    /// records no generation.
+    pub fn set_inline(&mut self) {
+        self.source = PACKET_SOURCE_MESG;
+        self.generation = [0; 2];
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 #[repr(C, packed)]
 pub struct CommandPing {

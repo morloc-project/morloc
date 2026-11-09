@@ -1383,7 +1383,7 @@ pub(crate) unsafe fn normalize_data_packet_for_output(
     }
 
     let mut new_header = *header;
-    new_header.command.data.source = PACKET_SOURCE_MESG;
+    new_header.command.data.set_inline();
     new_header.command.data.compression = final_compression;
     new_header.offset = new_metadata_size as u32;
     let mut hdr_bytes = new_header.to_bytes();
@@ -1779,7 +1779,7 @@ unsafe fn stream_packet_to_fd(
     }
 
     let mut new_header = *header_in;
-    new_header.command.data.source = PACKET_SOURCE_MESG;
+    new_header.command.data.set_inline();
     new_header.command.data.compression = if lvl_opt.is_some() {
         PACKET_COMPRESSION_ZSTD
     } else {
@@ -2204,7 +2204,7 @@ pub(crate) unsafe fn print_morloc_data_packet(
                     };
 
                     let mut new_header = *header;
-                    new_header.command.data.source = PACKET_SOURCE_MESG;
+                    new_header.command.data.set_inline();
                     new_header.command.data.format = PACKET_FORMAT_VOIDSTAR;
                     new_header.length = flat_size as u64;
 

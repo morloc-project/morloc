@@ -100,23 +100,6 @@ Changes here touch locks and ownership: model first.
   2026-11-09] `shincref`, `shfree_unlocked` and `incref_held` (shm.rs)
   find a block header themselves; `shfree_unlocked` has no alignment,
   volume or wrap check.
-- **A header a split is writing can pass the SHM-13 check.** [read,
-  2026-11-09] `split_block` (data/rust/morloc-runtime/src/shm.rs) stores a
-  new free header's magic before its count, size and generation, all
-  relaxed, while readers check the header with no lock. Under
-  `MORLOC_SHM_POISON=1` the count reads as the poison word (nonzero, so
-  held) and the generation can equal the parent's (a merge keeps the
-  larger), so a stale packet racing the split is accepted. Fix with the
-  checked-accessor step: publish a header's magic last with release
-  ordering and read it with acquire (model first).
-- **A claim that finds its block in use still advances its generation.**
-  [read, 2026-11-09] SHM-13. `claim` (shm.rs) bumps the generation before
-  the 0 -> 1 compare-exchange and does not undo it when the exchange
-  fails (the corrupt-list case it reports), so the live holder's stamped
-  packets are refused from then on and its references leak. Fix by undoing
-  the bump on failure, not by bumping after the exchange: the SHM-13 check
-  reads the count before the generation and relies on a claim it sees
-  having already advanced the generation.
 - **An arena entry recorded without a generation is never released.**
   [read, 2026-11-09] SHM-14. `record` (eval_arena.rs) stores generation 0
   when the block's header cannot be read; claimed generations skip 0, so
@@ -143,3 +126,11 @@ Changes here touch locks and ownership: model first.
   generation tells allocations apart, not holders; a late release needs to
   be told apart from the current entry (an entry per packet, or a dispatch
   epoch on each entry).
+- **Generations restart in a volume made again under the same name.**
+  [read, 2026-11-09] SHM-13. A volume's first block starts at generation
+  0 whatever the volume held before (shm.rs `init_volume`), so a reference
+  packet that outlived a namespace recovery (DAEMON-1) checks against
+  low, colliding generations. Whether any packet can outlive a recovery
+  is unsettled. A seed is not a cheap fix: a merge keeps the larger
+  generation without regard to wrapping, so a seeded volume can hand a
+  recently used generation out again after a few claims.

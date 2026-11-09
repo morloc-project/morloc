@@ -1280,13 +1280,13 @@ fn only_the_check_and_the_builder_touch_a_packets_generation() {
          by two tests; anything else must not touch it"
     );
     for f in rust_sources() {
-        if f.ends_with("packet_ffi.rs") || f.ends_with("morloc-runtime-types/src/packet.rs") || f.ends_with("source_rules.rs") {
+        if f.ends_with("morloc-runtime-types/src/packet.rs") || f.ends_with("source_rules.rs") {
             continue;
         }
         let other = std::fs::read_to_string(&f).unwrap();
         assert!(
-            !other.contains("PKT_GENERATION_OFF") && !other.contains("data.generation"),
-            "SHM-13: {} reads a packet's generation",
+            other.contains("PKT_GENERATION_OFF") == f.ends_with("packet_ffi.rs") && !other.contains("data.generation"),
+            "SHM-13: {} touches a packet's generation outside the check, the builder and CommandData",
             f.display()
         );
     }

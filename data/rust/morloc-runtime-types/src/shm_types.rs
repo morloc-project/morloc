@@ -180,10 +180,7 @@ const _: () = assert!(std::mem::size_of::<ShmHeader>() % std::mem::align_of::<Bl
 /// is itself sixteen bytes, so data starts one header past a
 /// sixteen-aligned block and is sixteen-aligned in turn.
 ///
-/// Every field is atomic: a holder of a stale pointer reads the header with
-/// no lock while the allocator rewrites it under the volume lock. Ordering
-/// comes from the lock and the reference count's CAS, so the other two
-/// fields are read and written relaxed.
+/// Every field is atomic (SHM-13).
 #[repr(C, align(16))]
 pub struct BlockHeader {
     magic: AtomicU32,
@@ -194,11 +191,12 @@ pub struct BlockHeader {
 impl BlockHeader {
     #[inline]
     pub fn magic(&self) -> u32 {
-        self.magic.load(std::sync::atomic::Ordering::Relaxed)
+        self.magic.load(std::sync::atomic::Ordering::Acquire)
     }
+    /// SHM-13
     #[inline]
     pub fn set_magic(&self, m: u32) {
-        self.magic.store(m, std::sync::atomic::Ordering::Relaxed)
+        self.magic.store(m, std::sync::atomic::Ordering::Release)
     }
     /// The data bytes the block covers.
     #[inline]
