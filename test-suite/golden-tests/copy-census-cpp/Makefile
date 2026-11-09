@@ -127,6 +127,14 @@ all:
 	./nexus twoLets 100 >> obs.txt 2>> obs.err || echo "failed" >> obs.txt
 	echo "--- aliasKeep ---" >> obs.txt
 	./nexus aliasKeep 100 >> obs.txt 2>> obs.err || echo "failed" >> obs.txt
+	echo "--- tryLet ---" >> obs.txt
+	./nexus tryLet 100 >> obs.txt 2>> obs.err || echo "failed" >> obs.txt
+	echo "--- tryCapture ---" >> obs.txt
+	./nexus tryCapture 100 >> obs.txt 2>> obs.err || echo "failed" >> obs.txt
+	echo "--- doTwice ---" >> obs.txt
+	./nexus doTwice 100 >> obs.txt 2>> obs.err || echo "failed" >> obs.txt
+	echo "--- doLoop ---" >> obs.txt
+	./nexus doLoop 100 >> obs.txt 2>> obs.err || echo "failed" >> obs.txt
 
 clean:
 	rm -rf nexus pools __pycache__

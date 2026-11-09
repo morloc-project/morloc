@@ -30,6 +30,7 @@
 --   matchedTwice               one value matched twice
 --   twoLets                    one value kept by two lets in turn
 --   capStaged capStagedKeep    a staged function capturing a chain, passed as a value
+--   tryLet doTwice             a let kept inside a @try body, a do block run twice
 module main
   ( nestedOut, nestedLoop, tagNested, tagField
   , fieldArg, fieldSrc, fieldSrcLit, fieldRet, tupleArg, tupleFresh
@@ -40,7 +41,7 @@ module main
   , letOnce, letParam, letField, matchUnwrap, matchArg, matchTry
   , throughTwo, throughLoop, throughCli, nonTail
   , guardTwice, guardLoop, guardKeep, mixedLoop, matchedTwice, twoLets
-  , capStaged, capStagedKeep
+  , capStaged, capStagedKeep, tryLet, doTwice
   )
 
 import root-rust
@@ -367,3 +368,17 @@ capStagedKeep :: Int -> (Int, Int)
 capStagedKeep n = clones (applyAfter f 3 + chainLen c) where
   c = mkChain n
   f x = let z = chainLen c + x in \y -> z + y
+
+tryLet :: Int -> (Int, Int)
+tryLet n = clones (match (@try (let c = mkChain n in Good c))
+  | (Ok r) = unwrapCount r
+  | (Err _) = 0)
+
+doTwice :: Int -> <IO> (Int, Int)
+doTwice n = do
+  let d = (do
+    let c = mkChain n
+    chainLen (Link 1 c))
+  a <- d
+  b <- d
+  clones (a + b)

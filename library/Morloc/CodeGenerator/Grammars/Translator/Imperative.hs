@@ -1468,6 +1468,7 @@ markLastReadsSeeded aliases held params =
     onS e@(LoopS t ids b) = maybe e (LoopS t ids . fst) (mkLoopS mk ids b)
     onS e = e
     onN e@(LoopN t starts b) = maybe e (LoopN t starts . fst) (mkLoopN mk (map fst starts) b)
+    onN (DoBlockN t b) = DoBlockN t (fst (mkBlock mk b))
     onN e = e
     onSM (SerialManifold m l f h e) = SerialManifold m l f h (fst (mkSerial mk e))
     onNM (NativeManifold m l f e) = NativeManifold m l f (fst (mkNative mk m e))
@@ -1478,6 +1479,8 @@ data Markers = Markers
   , mkSerial :: SerialExpr -> (SerialExpr, [(Int, Int)])
   , mkLoopN :: [Int] -> LoopBody NativeExpr SerialExpr NativeExpr -> Maybe (LoopBody NativeExpr SerialExpr NativeExpr, [(Int, Int)])
   , mkLoopS :: [Int] -> LoopBody NativeExpr SerialExpr SerialExpr -> Maybe (LoopBody NativeExpr SerialExpr SerialExpr, [(Int, Int)])
+  , mkBlock :: NativeExpr -> (NativeExpr, [(Int, Int)])
+  -- ^ a @do@ block's body (OWN-3)
   }
 
 markers :: Map.Map Int Int -> Set.Set Int -> (Int -> [Int]) -> Markers
@@ -1490,9 +1493,11 @@ markers aliases held params =
     , mkSerial = \e -> let (e', (_, caps)) = markSpineS (env (RS e)) [] e in (e', caps)
     , mkLoopN = \ids b -> Just (markLoopBody (env (RLN b)) RN ids b)
     , mkLoopS = \ids b -> Just (markLoopBody (env (RLS b)) RS ids b)
+    , mkBlock = \e -> let (e', (_, caps)) = markSpineN (env (RN e)) [] [] e in (e', caps)
     }
   where
-    env n = let e = markEnv aliases n in e {meHeld = meHeld e <> held}
+    names = namesOf aliases
+    env n = let e = markEnv names aliases n in e {meHeld = meHeld e <> held}
 
 -- | The (manifold, value) pairs under some segments whose building is the
 -- value's last read at every place the manifold is built (OWN-3), marked as
@@ -1510,6 +1515,7 @@ lastBuilds aliases held params sms =
       RSM (SerialManifold _ _ _ _ e) -> snd (mkSerial mk e)
       RN (LoopN _ starts b) -> maybe [] snd (mkLoopN mk (map fst starts) b)
       RS (LoopS _ ids b) -> maybe [] snd (mkLoopS mk ids b)
+      RN (DoBlockN _ b) -> snd (mkBlock mk b)
       _ -> []
 
 -- | What marking a body needs: the locals whose reads are reads of a value,
@@ -1520,8 +1526,8 @@ data MarkEnv = MarkEnv
   , meHeld :: Set.Set Int
   }
 
-markEnv :: Map.Map Int Int -> RNode -> MarkEnv
-markEnv aliases n = MarkEnv (namesOf aliases) (Set.fromList [t | j <- Set.toList (heldReads n), t <- j : aliasChain aliases j])
+markEnv :: (Int -> [Int]) -> Map.Map Int Int -> RNode -> MarkEnv
+markEnv names aliases n = MarkEnv names (Set.fromList [t | j <- Set.toList (heldReads n), t <- j : aliasChain aliases j])
 
 -- | The variables read in the @do@ blocks a let binds under a node, a block
 -- the let's value holds through a conditional's arm, a nested let or a
@@ -1560,11 +1566,11 @@ namedIn n = here n <> Set.unions (map namedIn (rnodeChildren n))
 
 -- | 'markLastReads' over one serial body, with no aliases.
 markLastReadsInBody :: SerialExpr -> SerialExpr
-markLastReadsInBody e = fst (markSpineS (markEnv Map.empty (RS e)) [] e)
+markLastReadsInBody e = fst (markSpineS (markEnv (namesOf Map.empty) Map.empty (RS e)) [] e)
 
 -- | 'markLastReads' over one native body, with no aliases.
 markLastReadsInNative :: NativeExpr -> NativeExpr
-markLastReadsInNative e = fst (markSpineN (markEnv Map.empty (RN e)) [] [] e)
+markLastReadsInNative e = fst (markSpineN (markEnv (namesOf Map.empty) Map.empty (RN e)) [] [] e)
 
 -- | What marking a body found besides its marks: the reads of owned values
 -- it makes, and the (manifold, value) pairs whose building is the value's

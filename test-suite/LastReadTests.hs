@@ -195,6 +195,16 @@ lastReadCases =
     , testCase "spec-own-3-2" $
         bodyMarks (lets [IntN fv 0, DoBlockN ty (rd 10), tup [rd 10, rd 11]])
           @?= [[], [], [11]]
+    -- a let a do block binds is marked within the block; what the block
+    -- reads from outside is not, nor a read in a block nested in it, nor
+    -- a read in a block a let inside it binds
+    , testCase "spec-own-3-5" $ do
+        blockMarks (NativeLetN 10 (IntN fv 0) (tup [DoBlockN ty (NativeLetN 20 (rd 10) (tup [rd 20, rd 10]))]))
+          @?= [20]
+        blockMarks (tup [DoBlockN ty (NativeLetN 20 (IntN fv 0) (tup [DoBlockN ty (rd 20), rd 20]))])
+          @?= []
+        blockMarks (tup [DoBlockN ty (NativeLetN 20 (IntN fv 0) (NativeLetN 21 (DoBlockN ty (rd 20)) (tup [rd 20, rd 21])))])
+          @?= [21]
     -- a guard is never marked
     , testCase "spec-own-4-1" $
         marks (loop [1] (LoopIf (rd 1) (LoopBase (IntN fv 0)) (LoopBase (IntN fv 1))))
@@ -265,6 +275,11 @@ sealed _ = ([], [])
 -- | The variables a native body marks, in the order they are written.
 nativeMarks :: NativeExpr -> [Int]
 nativeMarks = marked . markLastReadsInNative
+
+-- | The variables the do blocks in a body mark, in the order they are
+-- written.
+blockMarks :: NativeExpr -> [Int]
+blockMarks = marked . markLastReads
 
 -- | 'marks' with locals that refer into other values.
 marksWith :: Map.Map Int Int -> NativeExpr -> [[Int]]

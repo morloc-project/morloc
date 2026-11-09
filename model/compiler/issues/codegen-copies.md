@@ -45,13 +45,6 @@ records and user-mapped types copy deeply.
   and by-value source arguments still copy one (golden copy-census-cpp
   letSource and matchCond: 1 copy each; re-checked 2026-10-19 at
   25d09170).
-- **A C++ `@render @stream` sink copies the rendered value into its list.**
-  [reproduced 2026-11-09] `--' @render -t/--text=render @stream @default`
-  on `streamed n = @collect (\sink -> sink (batch n))` emits, inside the
-  `_mlc_try` thunk, `std::string n13 = render(...);` then
-  `mlc::list_of<...>{n13}`: a copy of a value read once. The same list
-  literal outside the thunk (`use [mk n]`) emits `std::move(n1)`. Cost in
-  mosm `filter -t 1`: 0.17 s of a 1.25 s out stage (1.5 GB copied).
 - **A C++ loop copies a carried value no step changes.** [reproduced] A
   loop slot every continue passes on unchanged is a borrow in Rust (OWN-6)
   but a copy of its start in C++ (golden copy-census-cpp throughLoop,
@@ -121,7 +114,9 @@ records and user-mapped types copy deeply.
   order of the two reads is already right in and out of loops, in C++ and
   Rust; the copy is the nested manifold's parameter mode, which stays a
   borrow although it keeps the value. C++ copies nothing here (`data`
-  arms are shared).
+  arms are shared). A let read once by a constructor copies the same way:
+  `let c = mkChain n in chainLen (Link 1 c)` builds the `Link` in a nested
+  manifold given `&c` (100 clones, reproduced 2026-11-09).
 
 - **Under `--debug` a base case calls its own pool through the socket.**
   [reproduced by review, 2026-10-24] Building golden spec-cost-12-1 with

@@ -91,6 +91,10 @@ all:
 	./nexus capStaged 100 >> obs.txt 2>> obs.err || echo "failed" >> obs.txt
 	echo "--- capStagedKeep ---" >> obs.txt
 	./nexus capStagedKeep 100 >> obs.txt 2>> obs.err || echo "failed" >> obs.txt
+	echo "--- tryLet ---" >> obs.txt
+	./nexus tryLet 100 >> obs.txt 2>> obs.err || echo "failed" >> obs.txt
+	echo "--- doTwice ---" >> obs.txt
+	./nexus doTwice 100 >> obs.txt 2>> obs.err || echo "failed" >> obs.txt
 
 clean:
 	rm -rf nexus pools __pycache__

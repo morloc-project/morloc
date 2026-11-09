@@ -49,8 +49,8 @@ locals, is also a read of that value.
 
 ### OWN-3 A read that may run more than once never moves
 Intent: ruled 2026-10-18
-Tests: spec-own-3-1, spec-own-3-2, spec-own-3-3, spec-own-3-4
-Code: conforms 2026-10-18
+Tests: spec-own-3-1, spec-own-3-2, spec-own-3-3, spec-own-3-4, spec-own-3-5
+Code: conforms 2026-11-09
 
 A read inside a lambda, a nested loop, a separate manifold or a `do` block
 counts as unboundedly many reads. Such a read never moves, and no earlier
@@ -61,7 +61,9 @@ any other read there (OWN-2), while the reads inside read the copy and never
 move it. A block that refers to a value instead of holding a copy reads it
 for as long as it lives: a `do` block bound by a let may hold a reference
 to what it reads for as long as the let lives, so no read of a value such a
-block reads moves, later ones included. In linear logic this is the
+block reads moves, later ones included. A value a `do` block binds is
+a new value each time the block runs; its reads within the block may move
+under OWN-2 and this item as any value's may. In linear logic this is the
 promotion rule: a term that may be duplicated captures only unrestricted
 values.
 
