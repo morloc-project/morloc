@@ -1167,45 +1167,54 @@ fn write_voidstar_raw<W: io::Write>(
     ptr: AbsPtr,
     schema: &Schema,
 ) -> Result<(), MorlocError> {
-    match schema.serial_type {
-        SerialType::String => {
-            let r = unsafe { ShmReader::new(ptr) };
-            write_raw_body(&r, w)
-        }
-        SerialType::Array => {
-            let es = schema.parameters.first().ok_or_else(|| {
-                err("-f raw: array output has no element schema")
-            })?;
-            let r = unsafe { ShmReader::new(ptr) };
+    let shape = raw_shape(schema).ok_or_else(|| {
+        err("-f raw requires Str, [Str], Vector U8, or [Vector U8] output \
+             (a `render` handler's bytes)")
+    })?;
+    let r = unsafe { ShmReader::new(ptr) };
+    match shape {
+        RawShape::Body | RawShape::Bytes => write_raw_body(&r, w),
+        RawShape::Bodies => {
             let arr = r.read_array(0);
             if arr.size == 0 || arr.data == RELNULL {
                 return Ok(());
             }
-            // `Vector U8` / `[U8]`: the array data IS the byte body.
-            if es.serial_type == SerialType::Uint8 {
-                return write_raw_body(&r, w);
-            }
-            // `[Str]` / `[Vector U8]`: emit each element's body in turn.
-            let elem_is_u8_vec = es.serial_type == SerialType::Array
-                && es.parameters.first().map_or(false, |i| i.serial_type == SerialType::Uint8);
-            if es.serial_type != SerialType::String && !elem_is_u8_vec {
-                return Err(err(
-                    "-f raw requires Str, [Str], Vector U8, or [Vector U8] output \
-                     (a `render` handler's bytes)",
-                ));
-            }
             let data = shm::rel2abs(arr.data)?;
             for i in 0..arr.size {
-                let er = unsafe { ShmReader::new(data.add(i * es.width)) };
+                let er = unsafe { ShmReader::new(data.add(i * std::mem::size_of::<Array>())) };
                 write_raw_body(&er, w)?;
             }
             Ok(())
         }
-        SerialType::Nil | SerialType::Bool | SerialType::Sint8 | SerialType::Sint16 | SerialType::Sint32 | SerialType::Sint64 | SerialType::Uint8 | SerialType::Uint16 | SerialType::Uint32 | SerialType::Uint64 | SerialType::Float32 | SerialType::Float64 | SerialType::Tuple | SerialType::Map | SerialType::Optional | SerialType::Int | SerialType::Table | SerialType::Recur | SerialType::IFile | SerialType::OStream | SerialType::IStream | SerialType::Variant | SerialType::Enum => Err(err(
-            "-f raw requires Str, [Str], Vector U8, or [Vector U8] output \
-             (a `render` handler's bytes)",
-        )),
     }
+}
+
+/// The shapes `-f raw` writes.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum RawShape {
+    /// `Str`: one body.
+    Body,
+    /// `[U8]` / `Vector U8`: the array's bytes are the body.
+    Bytes,
+    /// `[Str]` / `[Vector U8]`: each element's body in turn.
+    Bodies,
+}
+
+/// The raw shape of a value of `schema`, or `None` when raw output cannot
+/// carry it.
+pub(crate) fn raw_shape(schema: &Schema) -> Option<RawShape> {
+    let is_bytes = |s: &Schema| {
+        s.serial_type == SerialType::Array && s.parameters.first().is_some_and(|e| e.serial_type == SerialType::Uint8)
+    };
+    if schema.serial_type == SerialType::String {
+        return Some(RawShape::Body);
+    }
+    if is_bytes(schema) {
+        return Some(RawShape::Bytes);
+    }
+    let elem = schema.parameters.first()?;
+    (schema.serial_type == SerialType::Array && (elem.serial_type == SerialType::String || is_bytes(elem)))
+        .then_some(RawShape::Bodies)
 }
 
 /// Verbatim `-f raw` output to stdout -- the output path for `render` terminal

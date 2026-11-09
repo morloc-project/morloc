@@ -14,6 +14,10 @@ use morloc_runtime_types::packet::read_schema_from_meta;
 // ── Runtime FFI ────────────────────────────────────────────────────────────
 
 extern "C" {
+    /// Write a `[Str]`/`[[U8]]`/`[U8]` sub-packet's bodies to `fd` where they
+    /// lie; returns a `morloc_runtime_types::RAW_*` code (`*errmsg` on failure).
+    fn mlc_write_raw_subpacket(bytes: *const u8, n: u64, fd: i32, errmsg: *mut *mut c_char) -> i32;
+
     /// Materialise one voidstar `Array<T>` in SHM from a self-contained
     /// `MORLOC_DATA_PACKET` sub-packet's bytes. `elem_schema` is the
     /// element schema `T` (streams are list-shaped, so the sub-packet's
@@ -364,8 +368,23 @@ pub unsafe fn emit_subpacket_jsonl(bytes: &[u8], value_schema_str: &str) -> Resu
 
 /// Emit one sub-packet's `[Str]` bodies verbatim to fd 1 (the `-f raw`
 /// format for `render` handlers).
-pub unsafe fn emit_subpacket_raw(bytes: &[u8], value_schema_str: &str) -> Result<(), WriteError> {
-    emit_subpacket_with(bytes, value_schema_str, "raw emit", print_voidstar_raw)
+pub unsafe fn emit_subpacket_raw(bytes: &[u8]) -> Result<(), WriteError> {
+    use std::io::Write;
+    let mut out = std::io::stdout().lock();
+    if let Err(e) = out.flush() {
+        return Err(if e.kind() == std::io::ErrorKind::BrokenPipe { WriteError::BrokenPipe } else { WriteError::Other(format!("raw emit: {e}")) });
+    }
+    let mut err: *mut c_char = std::ptr::null_mut();
+    match mlc_write_raw_subpacket(bytes.as_ptr(), bytes.len() as u64, libc::STDOUT_FILENO, &mut err) {
+        morloc_runtime_types::RAW_WRITTEN => Ok(()),
+        morloc_runtime_types::RAW_PIPE_CLOSED => Err(WriteError::BrokenPipe),
+        morloc_runtime_types::RAW_NOT_HANDLED => {
+            drop(out);
+            let schema = subpacket_value_schema_str(bytes)?;
+            emit_subpacket_with(bytes, &schema, "raw emit", print_voidstar_raw)
+        }
+        _ => Err(WriteError::Other(format!("raw emit: {}", take_err(err)))),
+    }
 }
 
 /// Render one sub-packet's `[T]` as a JSON array string and return the

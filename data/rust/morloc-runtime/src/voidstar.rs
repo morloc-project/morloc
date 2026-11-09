@@ -748,6 +748,11 @@ unsafe fn check_text(p: *const u8, n: usize, origin: Option<Origin>) -> Result<(
     }
 }
 
+/// `check_text` of a body read from outside.
+pub(crate) unsafe fn check_outside_text(p: *const u8, n: usize) -> Result<(), MorlocError> {
+    check_text(p, n, Some(Origin::Outside))
+}
+
 /// The width of the elements of a string or array whose elements hold no
 /// pointer, when an array of `s` is a run of such headers that
 /// `RebaseWalk::headers` rebases. When the walk checks values, elements

@@ -1,4 +1,4 @@
-# Raw stdout copies each batch six or seven times
+# Raw stdout copies each batch five times
 
 Child of runtime/issues/encode-throughput.md. The file write path is in
 stream-copies.md; this file covers stdout. Fix plan:
@@ -6,33 +6,28 @@ stream-copies.md; this file covers stdout. Fix plan:
 
 ## Evidence
 
-mosm `filter` (gencode v50, 1.5 GB out, `-t 1`, load 3-4): the out stage
-takes 1.54 s; the C++ baseline's `fwrite` takes 0.16 s. Copies of a batch
-after the handler returns its `Str`:
+mosm `filter` (gencode v50, 1.5 GB out, `-t 1`): copies of a batch after
+the handler returns its `Str`:
 
 1. a list literal copies its element (compiler/issues/codegen-copies.md);
 2. `_mlc_write` stages it with `to_voidstar` into SHM;
 3. `append_one_element` into the slot write buffer;
-4. `compact_sealed_buffer` (custody.rs);
-5. `send_stdio` joins the header and the payload (custody.rs ~801);
-6. the nexus `materialize`s the sub-packet into SHM (stdio_bridge.rs:309);
-7. `print_voidstar_raw`: a UTF-8 scan, then a 64 KiB `BufWriter`.
+4. `compact_sealed_buffer` (custody.rs), no memmove in practice;
+5. `send_stdio` joins the header and the payload (custody.rs ~801).
 
-Items 4-7 run in the nexus. With `-z N -f raw`, the pool also compresses
-each batch and the nexus decompresses it (stream.rs ~3995). The measured
-share of each copy is pending (plan step 0.4).
+Items 4-5 run in the nexus, which then writes the bodies from the joined
+buffer. With `-z N -f raw` the pool also compresses each batch, and the
+nexus decompresses it, materializes it in SHM and renders it.
 
 ## Measurements
 
-2026-11-08, c3a7b3bb3, mosm `filter -t 1`, 1.48 GB raw out, temporary
-timers (/work/plans/output-path-perf/PLAN.md, "Stdout copy timing"):
-
-- pool: stage 0.154 s, append 0.302 s;
-- nexus: compact 0.002 s, join about 0.26 s, materialize 0.294 s, render
-  and write 0.171 s, sink total 0.596 s;
-- scrub on free 0.194 s, split across both processes.
-
-The nexus path (about 0.85 s, serial) is the critical path.
+2026-11-09, mosm `filter -t 1`, 1.48 GB raw out, temporary timers: the
+pool's sink is the critical path of the out stage (1.25 s). The sink
+takes 1.14 s: the `toFastaEntries` render 0.26 s, the list literal copy
+0.17 s (compiler/issues/codegen-copies.md, the render sink), `_mlc_write`
+(stage and append) 0.59 s, frees and `@try` about 0.12 s. The nexus
+join (item 5) costs about 0.26 s of nexus CPU, off the critical path.
+Scrub on free about 0.19 s, split across both processes.
 
 ## Compression on stdio slots
 
@@ -50,8 +45,12 @@ not be made correct that way:
 - a second variable would raise the environment-read ratchet
   (source_rules.rs `MAX_ENV_READS`).
 
-Do it with plan step 2b, on the stdout slot itself, where the nexus
-handles the bytes. Separately, a nexus started without `-z` inherits an
+The raw writer declines a compressed sub-packet, which then takes the
+materialize path (correct, slower). The pool compresses before the nexus
+sees the bytes, so the level has to be chosen where the pool knows the
+output form, not in the nexus. Or the nexus could decompress into a
+local buffer and run the raw writer on it, skipping the materialize.
+Separately, a nexus started without `-z` inherits an
 enclosing run's `MORLOC_STDOUT_COMPRESSION_LEVEL` and passes it on to its
 pools (main.rs ~455), so a nested run's stdout is compressed at the outer
 `-z`.

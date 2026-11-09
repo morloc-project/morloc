@@ -1,0 +1,43 @@
+-- Raw stdout of streamed render bodies: every body is written byte for
+-- byte, in batch order, whatever its size -- an empty batch, a short body,
+-- and one larger than a stream's write buffer -- for text and binary
+-- renders alike, compressed batches included; a reader that closes early
+-- ends the run with status 141. A body that is not UTF-8 is refused by the
+-- C++ encoder, and with the encoder check off by the nexus (FMT-10).
+module main (texts, binary, bad)
+
+import root-cpp
+
+source Cpp from "impl.hpp" ("mk", "render", "renderBytes", "renderBad")
+
+--' One batch: empty for 0, one element otherwise
+mk :: Int -> [Int]
+--' A batch as text; batch 2 holds a 20 MiB body
+render :: [Int] -> Str
+--' A batch as text bytes with a trailing zero
+renderBytes :: [Int] -> [U8]
+--' A batch as text that is not UTF-8
+renderBad :: [Int] -> Str
+
+--' Send batches 0 to 3 to a sink
+produce :: ([Int] -> <IO> ()) -> <IO> ()
+produce sink = do
+  _ <- sink (mk 0)
+  _ <- sink (mk 1)
+  _ <- sink (mk 2)
+  sink (mk 3)
+
+--' Stream each batch as text
+--' @render -t/--text=render @stream @default
+texts :: Int -> <IO> ()
+texts n = @collect produce
+
+--' Stream each batch as bytes
+--' @render -b/--bytes=renderBytes @stream @default
+binary :: Int -> <IO> ()
+binary n = @collect produce
+
+--' Stream each batch as text that is not UTF-8
+--' @render -t/--text=renderBad @stream @default
+bad :: Int -> <IO> ()
+bad n = @collect produce

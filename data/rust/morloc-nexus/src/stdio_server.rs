@@ -767,8 +767,7 @@ fn do_write(slot_id: i64, bytes: &[u8]) -> Resp {
             }
             OutputFormat::Raw => {
                 if is_data {
-                    let schema = br::subpacket_value_schema_str(bytes)?;
-                    unsafe { br::emit_subpacket_raw(bytes, &schema) }
+                    unsafe { br::emit_subpacket_raw(bytes) }
                 } else {
                     Ok(()) // footer: raw has no closing frame
                 }

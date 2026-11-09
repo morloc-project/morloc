@@ -107,6 +107,13 @@ pub const EXIT_SHARED_MEMORY_LOST: i32 = 71;
 /// Back-compat alias for the print path.
 pub const PRINT_RESULT_PIPE_CLOSED: i32 = MLC_RESULT_PIPE_CLOSED;
 
+/// Codes of `mlc_write_raw_subpacket`: the print codes, and one for a
+/// sub-packet it leaves to the general path.
+pub const RAW_WRITTEN: i32 = PRINT_RESULT_OK;
+pub const RAW_FAILED: i32 = PRINT_RESULT_ERR;
+pub const RAW_PIPE_CLOSED: i32 = MLC_RESULT_PIPE_CLOSED;
+pub const RAW_NOT_HANDLED: i32 = 3;
+
 /// Sentinel returned by `normalize_data_packet_to_fd` (an i64 byte count,
 /// negative on error) when the destination fd's downstream closed the pipe
 /// (EPIPE). Distinct from the generic `-1` error so the nexus stdout

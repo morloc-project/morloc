@@ -6,6 +6,7 @@ use std::ffi::{c_char, c_void, CStr, CString};
 use std::ptr;
 
 use crate::cschema::CSchema;
+use crate::schema::SerialType;
 use crate::error::{clear_errmsg, set_errmsg, MorlocError};
 
 // ── quoted ─────────────────────────────────────────────────────────────────
@@ -166,6 +167,138 @@ pub(crate) unsafe fn print_voidstar_jsonl(
         Err(MorlocError::PipeClosed) => PRINT_RESULT_PIPE_CLOSED,
         Err(e) => { set_errmsg(errmsg, &e); PRINT_RESULT_ERR }
     }
+}
+
+use morloc_runtime_types::{RAW_FAILED, RAW_NOT_HANDLED, RAW_PIPE_CLOSED, RAW_WRITTEN};
+
+/// Write the bodies of a `[Str]`, `[[U8]]` or `[U8]` stream sub-packet to
+/// `fd` from where they lie in `bytes`, with no copy into shared memory.
+/// Returns `RAW_NOT_HANDLED` for any other sub-packet (compressed, another
+/// format or schema), which the caller then writes the general way.
+pub(crate) unsafe fn write_raw_subpacket(bytes: &[u8], fd: i32) -> Result<i32, MorlocError> {
+    use crate::json::RawShape;
+    use crate::voidstar::{Local, Space};
+    use morloc_runtime_types::packet as pk;
+    use morloc_runtime_types::shm_types::Array;
+    if bytes.len() < 32 {
+        return Ok(RAW_NOT_HANDLED);
+    }
+    let header = pk::PacketHeader::from_bytes(bytes[..32].try_into().unwrap())?;
+    if !header.is_data() {
+        return Ok(RAW_NOT_HANDLED);
+    }
+    let data = header.command.data;
+    if data.format != pk::PACKET_FORMAT_VOIDSTAR || data.compression != pk::PACKET_COMPRESSION_NONE {
+        return Ok(RAW_NOT_HANDLED);
+    }
+    let meta_end = 32 + header.offset as usize;
+    let Some(end) = meta_end.checked_add(header.length as usize).filter(|&e| e <= bytes.len()) else {
+        return Ok(RAW_NOT_HANDLED);
+    };
+    let Some(schema) = pk::read_schema_from_meta(&bytes[..meta_end])? else {
+        return Ok(RAW_NOT_HANDLED);
+    };
+    let schema = crate::schema::parse_schema(&schema)?;
+    let per_element = match crate::json::raw_shape(&schema) {
+        Some(RawShape::Bodies) => true,
+        Some(RawShape::Bytes) => false,
+        Some(RawShape::Body) | None => return Ok(RAW_NOT_HANDLED),
+    };
+    let payload = &bytes[meta_end..end];
+    if payload.len() < std::mem::size_of::<Array>() {
+        return Err(MorlocError::Packet("a stdout sub-packet is shorter than its root".into()));
+    }
+    let space = Local::new(payload.as_ptr(), payload.len());
+    let root: Array = std::ptr::read_unaligned(payload.as_ptr() as *const Array);
+    let text = schema.parameters[0].serial_type == SerialType::String;
+    let mut bodies: Vec<(*const u8, usize)> = Vec::new();
+    let mut push = |p: *const u8, n: usize| match bodies.last_mut() {
+        Some((q, m)) if (*q).wrapping_add(*m) == p => *m += n,
+        _ => bodies.push((p, n)),
+    };
+    if root.size > 0 {
+        if per_element {
+            let w = std::mem::size_of::<Array>();
+            let elems = space.resolve(root.data, root.size.checked_mul(w).ok_or_else(|| MorlocError::Packet("a stdout sub-packet is too large".into()))?)? as *const u8;
+            for i in 0..root.size {
+                let a: Array = std::ptr::read_unaligned(elems.add(i * w) as *const Array);
+                if a.size > 0 {
+                    let p = space.resolve(a.data, a.size)? as *const u8;
+                    if text {
+                        crate::voidstar::check_outside_text(p, a.size)?;
+                    }
+                    push(p, a.size);
+                }
+            }
+        } else {
+            push(space.resolve(root.data, root.size)? as *const u8, root.size);
+        }
+    }
+    writev_all(fd, &bodies)
+}
+
+/// Write every body in order, resuming after a short write.
+unsafe fn writev_all(fd: i32, bodies: &[(*const u8, usize)]) -> Result<i32, MorlocError> {
+    writev_all_with(fd, bodies, |iov| libc::writev(fd, iov.as_ptr(), iov.len() as i32))
+}
+
+/// `writev_all`, through `write`, which returns as `writev` does.
+unsafe fn writev_all_with(
+    fd: i32,
+    bodies: &[(*const u8, usize)],
+    mut write: impl FnMut(&[libc::iovec]) -> isize,
+) -> Result<i32, MorlocError> {
+    const MAX_IOV: usize = 1024;
+    const MAX_BYTES: usize = 1 << 30;
+    let mut i = 0;
+    let mut done_in_first = 0usize;
+    let mut iov: Vec<libc::iovec> = Vec::with_capacity(MAX_IOV.min(bodies.len()));
+    loop {
+        while i < bodies.len() && bodies[i].1 == done_in_first {
+            i += 1;
+            done_in_first = 0;
+        }
+        if i == bodies.len() {
+            break;
+        }
+        iov.clear();
+        let mut total = 0usize;
+        for (k, &(p, len)) in bodies[i..].iter().take(MAX_IOV).enumerate() {
+            let skip = if k == 0 { done_in_first } else { 0 };
+            let take = (len - skip).min(MAX_BYTES - total);
+            iov.push(libc::iovec { iov_base: p.add(skip) as *mut libc::c_void, iov_len: take });
+            total += take;
+            if total == MAX_BYTES {
+                break;
+            }
+        }
+        let r = write(&iov);
+        if r < 0 {
+            let e = std::io::Error::last_os_error();
+            match e.raw_os_error() {
+                Some(libc::EINTR) => continue,
+                Some(libc::EPIPE) => return Ok(RAW_PIPE_CLOSED),
+                Some(libc::EBADF) if fd == libc::STDOUT_FILENO => return Ok(RAW_WRITTEN),
+                _ => return Err(MorlocError::Io(e)),
+            }
+        }
+        if r == 0 {
+            return Err(MorlocError::Io(std::io::Error::new(std::io::ErrorKind::WriteZero, "stdout accepted no bytes")));
+        }
+        let mut left = r as usize;
+        while left > 0 {
+            let rest = bodies[i].1 - done_in_first;
+            if left >= rest {
+                left -= rest;
+                i += 1;
+                done_in_first = 0;
+            } else {
+                done_in_first += left;
+                left = 0;
+            }
+        }
+    }
+    Ok(RAW_WRITTEN)
 }
 
 /// Emit a `Str`/`[Str]` voidstar as verbatim bytes (the `-f raw` format).
@@ -391,6 +524,20 @@ mod c_abi {
         super::print_voidstar_raw(data, schema, errmsg)
     }
 
+    /// `write_raw_subpacket` over the C ABI: one of the `RAW_*` codes, with
+    /// a message in `*errmsg` for `RAW_FAILED`.
+    #[no_mangle]
+    pub unsafe extern "C" fn mlc_write_raw_subpacket(bytes: *const u8, n: u64, fd: i32, errmsg: *mut *mut c_char) -> i32 {
+        clear_errmsg(errmsg);
+        if bytes.is_null() {
+            return super::RAW_NOT_HANDLED;
+        }
+        match super::write_raw_subpacket(std::slice::from_raw_parts(bytes, n as usize), fd) {
+            Ok(code) => code,
+            Err(e) => { set_errmsg(errmsg, &e); super::RAW_FAILED }
+        }
+    }
+
     #[no_mangle]
     pub extern "C" fn json_buf_new() -> *mut JsonBuf {
         super::json_buf_new()
@@ -459,5 +606,162 @@ mod c_abi {
     #[no_mangle]
     pub unsafe extern "C" fn json_write_raw(jb: *mut JsonBuf, raw: *const c_char) {
         super::json_write_raw(jb, raw)
+    }
+}
+
+#[cfg(test)]
+mod raw_write_tests {
+    use morloc_runtime_types::packet as pk;
+
+    fn subpacket(schema: &str, payload: &[u8], compression: u8) -> Vec<u8> {
+        let meta_len = (8 + schema.len() + 1 + 31) / 32 * 32;
+        let mut hdr = pk::PacketHeader::data_mesg(pk::PACKET_FORMAT_VOIDSTAR, payload.len() as u64);
+        hdr.offset = meta_len as u32;
+        hdr.command.data.compression = compression;
+        let mut out = hdr.to_bytes().to_vec();
+        let mut meta = vec![0u8; meta_len];
+        meta[..3].copy_from_slice(b"mmh");
+        meta[3] = pk::METADATA_TYPE_SCHEMA_STRING;
+        meta[4..8].copy_from_slice(&((schema.len() + 1) as u32).to_le_bytes());
+        meta[8..8 + schema.len()].copy_from_slice(schema.as_bytes());
+        out.extend_from_slice(&meta);
+        out.extend_from_slice(payload);
+        out
+    }
+
+    fn array(size: usize, data: usize) -> [u8; 16] {
+        let mut a = [0u8; 16];
+        a[..8].copy_from_slice(&size.to_ne_bytes());
+        a[8..].copy_from_slice(&(data as i64).to_ne_bytes());
+        a
+    }
+
+    fn list_payload(bodies: &[&[u8]]) -> Vec<u8> {
+        let mut p = array(bodies.len(), 16).to_vec();
+        let mut at = 16 + 16 * bodies.len();
+        for b in bodies {
+            p.extend_from_slice(&array(b.len(), at));
+            at += b.len();
+        }
+        for b in bodies {
+            p.extend_from_slice(b);
+        }
+        p
+    }
+
+    fn written(bytes: &[u8]) -> (i32, Vec<u8>) {
+        let mut fds = [0i32; 2];
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        let code = unsafe { super::write_raw_subpacket(bytes, fds[1]) }.unwrap();
+        unsafe { libc::close(fds[1]) };
+        let mut got = Vec::new();
+        let mut buf = [0u8; 4096];
+        loop {
+            let n = unsafe { libc::read(fds[0], buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
+            if n <= 0 {
+                break;
+            }
+            got.extend_from_slice(&buf[..n as usize]);
+        }
+        unsafe { libc::close(fds[0]) };
+        (code, got)
+    }
+
+    #[test]
+    fn text_and_byte_shapes_are_written_and_every_other_shape_is_declined() {
+        let bodies: &[&[u8]] = &[b"one\n", b"", b"two\n"];
+        let list = list_payload(bodies);
+        for schema in ["as", "aau1"] {
+            assert_eq!(written(&subpacket(schema, &list, 0)), (super::RAW_WRITTEN, b"one\ntwo\n".to_vec()), "{schema}");
+        }
+        let mut flat = array(5, 16).to_vec();
+        flat.extend_from_slice(b"bytes");
+        assert_eq!(written(&subpacket("au1", &flat, 0)), (super::RAW_WRITTEN, b"bytes".to_vec()));
+        assert_eq!(written(&subpacket("as", &array(0, 16), 0)), (super::RAW_WRITTEN, Vec::new()));
+        for schema in ["aai8", "aas", "ai8", "s", "a?s"] {
+            assert_eq!(written(&subpacket(schema, &list, 0)), (super::RAW_NOT_HANDLED, Vec::new()), "{schema}");
+        }
+        assert_eq!(written(&subpacket("as", &list, pk::PACKET_COMPRESSION_ZSTD)), (super::RAW_NOT_HANDLED, Vec::new()));
+    }
+
+    #[test]
+    fn empty_bodies_anywhere_are_written_as_nothing() {
+        let mut fds = [0i32; 2];
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        let (a, b) = (b"ab".to_vec(), b"cd".to_vec());
+        let bodies = [(a.as_ptr(), 0), (a.as_ptr(), 2), (b.as_ptr(), 0), (b.as_ptr(), 2), (b.as_ptr(), 0)];
+        assert_eq!(unsafe { super::writev_all(fds[1], &bodies[..1]) }.unwrap(), super::RAW_WRITTEN);
+        assert_eq!(unsafe { super::writev_all(fds[1], &bodies) }.unwrap(), super::RAW_WRITTEN);
+        unsafe { libc::close(fds[1]) };
+        let mut buf = [0u8; 16];
+        let n = unsafe { libc::read(fds[0], buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
+        unsafe { libc::close(fds[0]) };
+        assert_eq!(&buf[..n as usize], b"abcd");
+    }
+
+    #[test]
+    fn a_body_outside_the_payload_is_refused() {
+        let mut list = list_payload(&[b"abc"]);
+        list[16..24].copy_from_slice(&999usize.to_ne_bytes());
+        assert!(unsafe { super::write_raw_subpacket(&subpacket("as", &list, 0), -1) }.is_err());
+    }
+
+    #[test]
+    fn short_writes_resume_inside_a_body() {
+        let bodies_owned: Vec<Vec<u8>> = (0..2100u32)
+            .map(|i| format!("line {i}\n").into_bytes())
+            .chain([Vec::new(), vec![b'x'; 5000], b"end".to_vec()])
+            .collect();
+        let bodies: Vec<(*const u8, usize)> = bodies_owned.iter().map(|b| (b.as_ptr(), b.len())).collect();
+        for cap in [1usize, 3, 7, 1000, 4096] {
+            let mut got = Vec::new();
+            let code = unsafe {
+                super::writev_all_with(-1, &bodies, |iov| {
+                    let mut left = cap;
+                    for v in iov {
+                        let n = v.iov_len.min(left);
+                        got.extend_from_slice(std::slice::from_raw_parts(v.iov_base as *const u8, n));
+                        left -= n;
+                        if left == 0 {
+                            break;
+                        }
+                    }
+                    (cap - left) as isize
+                })
+            }
+            .unwrap();
+            assert_eq!(code, super::RAW_WRITTEN);
+            assert!(got == bodies_owned.concat(), "cap {cap}: the bytes written differ from the bodies");
+        }
+    }
+
+    #[test]
+    fn bodies_written_through_a_pipe_arrive_whole_and_in_order() {
+        let mut fds = [0i32; 2];
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        let (r, w) = (fds[0], fds[1]);
+        let bodies_owned: Vec<Vec<u8>> = (0..3000u32)
+            .map(|i| format!("line {i}\n").into_bytes())
+            .chain(std::iter::once(vec![b'x'; 1 << 20]))
+            .collect();
+        let want: Vec<u8> = bodies_owned.concat();
+        let reader = std::thread::spawn(move || {
+            let mut got = Vec::new();
+            let mut buf = [0u8; 777];
+            loop {
+                let n = unsafe { libc::read(r, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
+                if n <= 0 {
+                    break;
+                }
+                got.extend_from_slice(&buf[..n as usize]);
+            }
+            unsafe { libc::close(r) };
+            got
+        });
+        let bodies: Vec<(*const u8, usize)> = bodies_owned.iter().map(|b| (b.as_ptr(), b.len())).collect();
+        let code = unsafe { super::writev_all(w, &bodies) }.unwrap();
+        unsafe { libc::close(w) };
+        assert_eq!(code, super::RAW_WRITTEN);
+        assert!(reader.join().unwrap() == want, "the bytes read differ from the bodies written");
     }
 }
