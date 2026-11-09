@@ -3214,18 +3214,11 @@ static PyObject* pybinding__release_packet_shm(PyObject* self, PyObject* args) {
         Py_RETURN_NONE;
     }
 
-    const morloc_packet_header_t* hdr = (const morloc_packet_header_t*)packet;
-    if (hdr->command.data.source != PACKET_SOURCE_RPTR) {
-        Py_RETURN_NONE;
-    }
-
-    size_t relptr = *(size_t*)((const uint8_t*)packet
-        + sizeof(morloc_packet_header_t) + hdr->offset);
-    char* resolve_err = NULL;
-    void* voidstar = rel2abs(relptr, &resolve_err);
-    if (resolve_err) { free(resolve_err); }
-    if (voidstar) {
-        shm_tracker_release_one((absptr_t)voidstar);
+    if (((const morloc_packet_header_t*)packet)->command.data.source == PACKET_SOURCE_RPTR) {
+        absptr_t block = mlc_tracked_block((const uint8_t*)packet);
+        if (block) {
+            shm_tracker_release_one(block);
+        }
     }
 
     Py_RETURN_NONE;
@@ -3331,17 +3324,19 @@ static PyObject* pybinding__foreign_call(PyObject* self, PyObject* args) { MAYFA
     // Track the result's shared memory: the reference the callee donated
     // with it is this pool's now.
     {
-        const morloc_packet_header_t* res_header = (const morloc_packet_header_t*)result;
-        if (res_header->command.data.source == PACKET_SOURCE_RPTR) {
-            size_t relptr = *(size_t*)((uint8_t*)result + res_header->offset + sizeof(morloc_packet_header_t));
-            char* resolve_err = NULL;
-            void* res_voidstar = rel2abs(relptr, &resolve_err);
-            if (resolve_err) { free(resolve_err); resolve_err = NULL; }
-            if (res_voidstar) {
-                // The callee took a reference before sending; it is ours
-                // now. Inherit it rather than adding another.
-                shm_tracker_push((absptr_t)res_voidstar);
-            }
+        char* refused = NULL;
+        absptr_t res_block = mlc_packet_block(result, &refused);
+        if (refused) {
+            morloc_exit_if_shared_memory_lost(refused);
+            PyErr_Format(PyMorlocInternalError, "morloc internal error (Py pool, %s): %s", __func__, refused);
+            free(refused);
+            free(result);
+            result = NULL;
+            goto error;
+        }
+        if (res_block) {
+            // SHM-3, SHM-8
+            shm_tracker_push(res_block);
         }
     }
 

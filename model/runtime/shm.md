@@ -160,7 +160,7 @@ already maps keeps the first mapping.
 
 ### SHM-13 A reference names the allocation it was made for
 Status: implemented
-Checked by: a_packet_naming_a_reused_block_is_refused_and_disarmed, a_packet_naming_a_released_block_is_refused_and_disarmed, no_reference_packet_is_built_for_an_interior_address, an_unstamped_reference_packet_is_refused, a_block_reads_as_held_only_while_a_holder_holds_it, a_packet_for_a_live_block_is_read, a_reclaimed_address_gets_a_new_generation
+Checked by: a_packet_naming_a_reused_block_is_refused_every_time, a_packet_naming_a_released_block_is_refused_every_time, bindings_resolve_received_references_only_through_the_check, only_the_check_and_the_builder_touch_a_packets_generation, a_stale_reply_is_refused_when_inherited, a_tracked_release_finds_only_a_live_block, no_reference_packet_is_built_for_an_interior_address, an_unstamped_reference_packet_is_refused, a_block_reads_as_held_only_while_a_holder_holds_it, a_packet_for_a_live_block_is_read, a_reclaimed_address_gets_a_new_generation
 
 Every block carries a 16-bit generation beside its size. Claiming a block
 for an allocation advances it (skipping 0), a block split off another
@@ -173,13 +173,18 @@ reference only through the check that a block still begins there, is
 held, and has that generation (a released block may keep its generation
 until it is claimed again); the check reads the count before the
 generation, so a claim it observes has already advanced the generation.
-Otherwise the read fails and the packet's relptr is
-cleared, so that no later release through the packet reaches the block's
-new owner. The check detects a reference used after its allocation ended
-(a protocol slip); it does not prevent one: once a slip has happened,
-each later check of the stale packet can match a generation that came
-round again (one in 65535 per check at a busy address). Relptrs nested
-inside values and releases by address are not checked.
+Otherwise the read fails. The packet is not written to: every later read
+or adoption through it is refused the same way, and a release through it
+releases nothing, so none reaches the block's new owner; a pool's late
+release of a packet whose block its tracker already gave back is not
+reported. Every runtime reader, the daemon and each
+binding's release and adoption resolve a received reference only through
+this check; a reply that fails it is an error of the call that received
+it. The check detects a reference used after its allocation ended (a
+protocol slip); it does not prevent one: once a slip has happened, each
+later check of the stale packet can match a generation that came round
+again (one in 65535 per check at a busy address). Relptrs nested inside
+values are not checked.
 
 ### SHM-14 An arena releases only references it alone holds
 Status: implemented

@@ -1352,7 +1352,12 @@ pub(crate) unsafe fn send_and_receive_over_socket(
         drop_conn(client_fd);
     }
     // SHM-8
-    crate::packet_ffi::inherit_reply(result);
+    if let Err(e) = crate::packet_ffi::inherit_reply(result) {
+        crate::shm::exit_if_shared_memory_lost(&e.to_string());
+        libc::free(result as *mut c_void);
+        set_errmsg(errmsg, &e);
+        return ptr::null_mut();
+    }
     result
 }
 
@@ -1481,7 +1486,15 @@ pub(crate) unsafe fn mlc_spawn_watched(
         let result = read_packet(fd, Wait::Forever, true, &mut err);
         close_socket(fd);
         // SHM-8
-        crate::packet_ffi::inherit_reply(result);
+        if let Err(e) = crate::packet_ffi::inherit_reply(result) {
+            crate::shm::exit_if_shared_memory_lost(&e.to_string());
+            libc::free(result as *mut c_void);
+            if !err.is_null() {
+                libc::free(err as *mut c_void);
+            }
+            let _ = crate::stream::shared_channel_fail(handle, &e.to_string());
+            return;
+        }
         if !err.is_null() {
             libc::free(err as *mut c_void);
             let _ = crate::stream::shared_channel_fail(

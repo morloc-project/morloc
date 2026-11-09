@@ -3713,22 +3713,11 @@ SEXP morloc_foreign_call(SEXP socket_path_r, SEXP mid_r, SEXP args_r) { MAYFAIL
         }
     }
 
-    // The callee took a reference on the result's block before the packet
-    // left it, and that reference is ours now. Inherit it so the tracker
-    // releases it at the start of the next request, once R has finished
-    // with the deserialized form.
+    // SHM-3, SHM-8, SHM-13
     {
-        const morloc_packet_header_t* res_header =
-            (const morloc_packet_header_t*)result;
-        if (res_header->command.data.source == PACKET_SOURCE_RPTR) {
-            size_t relptr = *(size_t*)((uint8_t*)result
-                + res_header->offset + sizeof(morloc_packet_header_t));
-            char* resolve_err = NULL;
-            void* res_voidstar = rel2abs(relptr, &resolve_err);
-            if (resolve_err) { free(resolve_err); resolve_err = NULL; }
-            if (res_voidstar) {
-                shm_tracker_push((absptr_t)res_voidstar, NULL);
-            }
+        absptr_t res_block = R_TRY_WITH_INFRA({free(packet); free(result);}, mlc_packet_block, result);
+        if (res_block) {
+            shm_tracker_push(res_block, NULL);
         }
     }
 
@@ -3811,17 +3800,11 @@ SEXP morloc_release_packet_shm(SEXP packet_r) {
         return R_NilValue;
     }
     const uint8_t* packet = (const uint8_t*)RAW(packet_r);
-    const morloc_packet_header_t* hdr = (const morloc_packet_header_t*)packet;
-    if (hdr->command.data.source != PACKET_SOURCE_RPTR) {
-        return R_NilValue;
-    }
-    size_t relptr = *(size_t*)(packet
-        + sizeof(morloc_packet_header_t) + hdr->offset);
-    char* resolve_err = NULL;
-    void* voidstar = rel2abs(relptr, &resolve_err);
-    if (resolve_err) { free(resolve_err); resolve_err = NULL; }
-    if (voidstar) {
-        shm_tracker_release_one((absptr_t)voidstar);
+    if (((const morloc_packet_header_t*)packet)->command.data.source == PACKET_SOURCE_RPTR) {
+        absptr_t block = mlc_tracked_block(packet);
+        if (block) {
+            shm_tracker_release_one(block);
+        }
     }
     return R_NilValue;
 }

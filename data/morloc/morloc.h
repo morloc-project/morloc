@@ -1385,6 +1385,13 @@ uint8_t* morloc_dup_packet(const uint8_t* packet, absptr_t* block_out, ERRMSG);
 uint8_t* return_ping(const uint8_t* packet, ERRMSG);
 uint8_t* make_standard_data_packet(relptr_t ptr, const Schema* schema);
 uint8_t* make_arrow_data_packet(relptr_t ptr, const Schema* schema);
+// SHM-13: the block a received data packet names by reference, checked; NULL
+// for a packet that names none, and NULL with errmsg set for one that may
+// not be read. The only way a binding resolves a received reference.
+absptr_t mlc_packet_block(const uint8_t* packet, ERRMSG);
+// SHM-13: the block a pool's tracker may release for a packet it has
+// finished with; NULL for a packet that names none or may not be read.
+absptr_t mlc_tracked_block(const uint8_t* packet);
 uint8_t* make_data_packet_from_mpk(const char* mpk, size_t mpk_size, const Schema* schema);
 // Returns 1 iff `path` names a file whose first 32 bytes parse as a
 // morloc packet header with `cmd_type = STREAM`. 0 otherwise. Used by

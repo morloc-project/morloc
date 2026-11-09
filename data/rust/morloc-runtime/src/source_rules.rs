@@ -1222,3 +1222,72 @@ fn rust_code_calls_the_rust_function_behind_a_c_entry_point() {
     }
     assert!(found.is_empty(), "DAEMON-9: {}", found.join("\n"));
 }
+
+// SHM-13: a binding resolves a received reference only through
+// mlc_packet_block; every other rel2abs in a binding resolves a relptr
+// nested inside a value or a block the binding made itself. A change here
+// is reviewed against that rule before the count is updated.
+const BINDING_REL2ABS: &[(&str, usize)] = &[
+    ("data/lang/cpp/cppmorloc.cpp", 2),
+    ("data/lang/cpp/cppmorloc.hpp", 3),
+    ("data/lang/cpp/mlc_arrow.hpp", 1),
+    ("data/lang/cpp/pool.cpp", 1),
+    ("data/lang/py/pymorloc.c", 1),
+    ("data/lang/r/rmorloc.c", 10),
+    ("data/rust/rustmorloc/src/lib.rs", 6),
+];
+
+#[test]
+fn bindings_resolve_received_references_only_through_the_check() {
+    let repo = repo_root();
+    let mut files = walk(&repo.join("data").join("lang"), &["c", "cpp", "hpp", "h"], &[]);
+    files.extend(walk(&repo.join("data").join("rust").join("rustmorloc").join("src"), &["rs"], &[]));
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    for f in &files {
+        let text = std::fs::read_to_string(f).unwrap();
+        let n: usize = text
+            .lines()
+            .filter(|l| {
+                let t = l.trim_start();
+                !(t.starts_with("//") || t.starts_with("/*") || t.starts_with("* ") || t.starts_with("*/") || t == "*")
+            })
+            .map(|l| l.matches("rel2abs").count())
+            .sum();
+        if n > 0 {
+            let rel = f.strip_prefix(&repo).unwrap().to_string_lossy().into_owned();
+            counts.insert(rel, n);
+        }
+    }
+    let expected: HashMap<String, usize> = BINDING_REL2ABS.iter().map(|(f, n)| (f.to_string(), *n)).collect();
+    assert_eq!(counts, expected, "SHM-13: rel2abs uses in the bindings changed; a received reference must go through mlc_packet_block");
+    for f in &files {
+        let text = std::fs::read_to_string(f).unwrap();
+        assert!(
+            !text.contains("data.generation") && !text.contains("PKT_GENERATION"),
+            "SHM-13: {} reads a packet's generation; only the runtime's check may",
+            f.display()
+        );
+    }
+}
+
+#[test]
+fn only_the_check_and_the_builder_touch_a_packets_generation() {
+    let text = std::fs::read_to_string(rust_root().join("morloc-runtime/src/packet_ffi.rs")).unwrap();
+    assert_eq!(
+        text.matches("PKT_GENERATION_OFF").count(),
+        5,
+        "SHM-13: a packet's generation is written by make_rptr_data_packet, read by rptr_check, and cleared \
+         by two tests; anything else must not touch it"
+    );
+    for f in rust_sources() {
+        if f.ends_with("packet_ffi.rs") || f.ends_with("morloc-runtime-types/src/packet.rs") || f.ends_with("source_rules.rs") {
+            continue;
+        }
+        let other = std::fs::read_to_string(&f).unwrap();
+        assert!(
+            !other.contains("PKT_GENERATION_OFF") && !other.contains("data.generation"),
+            "SHM-13: {} reads a packet's generation",
+            f.display()
+        );
+    }
+}

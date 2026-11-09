@@ -92,6 +92,8 @@ extern "C" {
                             errmsg: *mut *mut c_char) -> i32;
     fn arrow_validate(header: *const c_void, schema: *const CSchema, errmsg: *mut *mut c_char) -> i32;
     fn make_arrow_data_packet(relptr: isize, schema: *const CSchema) -> *mut u8;
+    fn mlc_packet_block(packet: *const u8, errmsg: *mut *mut c_char) -> *mut c_void;
+    fn mlc_tracked_block(packet: *const u8) -> *mut c_void;
     fn make_inline_data_packet(voidstar: *mut c_void, schema: *const CSchema, errmsg: *mut *mut c_char) -> *mut u8;
     fn make_fail_packet(msg: *const c_char) -> *mut u8;
     fn make_pipe_closed_packet(msg: *const c_char) -> *mut u8;
@@ -900,11 +902,7 @@ pub unsafe fn release_packet(packet: *const u8, owned: bool) {
         return;
     }
     if *packet.add(PKT_SOURCE_OFF) == PKT_SOURCE_RPTR {
-        let offset = core::ptr::read_unaligned(packet.add(PKT_OFFSET_OFF) as *const u32) as usize;
-        let relptr = core::ptr::read_unaligned(packet.add(PKT_HEADER_SIZE + offset) as *const isize);
-        let mut err: *mut c_char = std::ptr::null_mut();
-        let block = rel2abs(relptr, &mut err);
-        discard_err(err);
+        let block = mlc_tracked_block(packet);
         if !block.is_null() {
             release_tracked(block);
         }
@@ -3252,17 +3250,16 @@ unsafe fn finalize_call_result(result: *mut u8) -> *mut u8 {
         morloc_throw(msg);
     }
 
-    if *result.add(PKT_SOURCE_OFF) == PKT_SOURCE_RPTR {
-        let meta = core::ptr::read_unaligned(result.add(PKT_OFFSET_OFF) as *const u32) as usize;
-        let rel = core::ptr::read_unaligned(result.add(PKT_HEADER_SIZE + meta) as *const RelPtr);
-        let mut rerr: *mut c_char = std::ptr::null_mut();
-        let voidstar = rel2abs(rel, &mut rerr);
-        discard_err(rerr);
-        if !voidstar.is_null() {
-            // The callee took a reference before sending; it is ours now.
-            // Inherit it rather than adding another.
-            track(voidstar);
-        }
+    let mut refused: *mut c_char = std::ptr::null_mut();
+    let block = mlc_packet_block(result, &mut refused);
+    if !refused.is_null() {
+        let msg = cstr_take(refused);
+        libc::free(result as *mut c_void);
+        morloc_infra_abort(&msg);
+    }
+    if !block.is_null() {
+        // SHM-3, SHM-8
+        track(block);
     }
 
     result

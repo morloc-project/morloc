@@ -261,15 +261,10 @@ static uint8_t* _dup_packet(const uint8_t* packet) {
 // unconditionally.
 static void _release_packet(const uint8_t* packet, bool owned) {
     if (packet == nullptr) return;
-    const morloc_packet_header_t* hdr = (const morloc_packet_header_t*)packet;
-    if (hdr->command.data.source == PACKET_SOURCE_RPTR) {
-        size_t relptr = *(size_t*)(packet
-            + sizeof(morloc_packet_header_t) + hdr->offset);
-        char* resolve_err = NULL;
-        void* voidstar = rel2abs(relptr, &resolve_err);
-        PROPAGATE_INFRA_ERROR(resolve_err)
-        if (voidstar) {
-            _shm_tracker_release_one((absptr_t)voidstar);
+    if (((const morloc_packet_header_t*)packet)->command.data.source == PACKET_SOURCE_RPTR) {
+        absptr_t block = mlc_tracked_block(packet);
+        if (block) {
+            _shm_tracker_release_one(block);
         }
     }
     if (owned) free((void*)packet);
@@ -1211,20 +1206,15 @@ uint8_t* foreign_call_v(const char* socket_filename, size_t mid, const uint8_t**
         }
     }
 
-    // Incref the result's SHM so the callee's tracker flush won't destroy
-    // data we may still need (mirrors the variadic foreign_call).
+    // SHM-13: the result's block, checked.
     {
-        const morloc_packet_header_t* res_header = (const morloc_packet_header_t*)result;
-        if (res_header->command.data.source == PACKET_SOURCE_RPTR) {
-            size_t relptr = *(size_t*)(result + res_header->offset + sizeof(morloc_packet_header_t));
-            char* resolve_err = NULL;
-            void* res_voidstar = rel2abs(relptr, &resolve_err);
-            PROPAGATE_INFRA_ERROR(resolve_err)
-            if (res_voidstar) {
-                // The callee took a reference before sending; it is ours
-                // now. Inherit it rather than adding another.
-                _shm_tracker_live().push_back({(absptr_t)res_voidstar});
-            }
+        char* resolve_err = NULL;
+        absptr_t res_block = mlc_packet_block(result, &resolve_err);
+        if (resolve_err) { free(result); }
+        PROPAGATE_INFRA_ERROR(resolve_err)
+        if (res_block) {
+            // SHM-3, SHM-8
+            _shm_tracker_live().push_back({res_block});
         }
     }
 

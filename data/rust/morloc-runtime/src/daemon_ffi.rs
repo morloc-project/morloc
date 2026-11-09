@@ -1958,23 +1958,15 @@ impl Drop for ReplyRef {
 /// # Safety
 /// `packet` must be a well-formed morloc packet.
 unsafe fn reply_reference(packet: *const u8) -> ReplyRef {
-    use crate::packet::{PacketHeader, PACKET_SOURCE_RPTR};
-    use crate::shm::RelPtr;
-    let none = ReplyRef(ptr::null_mut());
-    if packet.is_null() {
-        return none;
-    }
-    let header = packet as *const PacketHeader;
-    if (*header).command.data.source != PACKET_SOURCE_RPTR {
-        return none;
-    }
-    let payload_start = 32 + (*header).offset as usize;
-    if ((*header).length as usize) < std::mem::size_of::<RelPtr>() {
-        return none;
-    }
-    let relptr = *(packet.add(payload_start) as *const RelPtr);
     // SHM-3: the pool took this reference for the daemon before the reply left.
-    crate::shm::rel2abs(relptr).map_or(none, ReplyRef)
+    match crate::packet_ffi::packet_rptr_block(packet) {
+        Ok(Some(block)) => ReplyRef(block),
+        Ok(None) => ReplyRef(ptr::null_mut()),
+        Err(e) => {
+            eprintln!("morloc: the daemon could not take the reference a reply carries: {e}");
+            ReplyRef(ptr::null_mut())
+        }
+    }
 }
 
 // -- Dispatch -----------------------------------------------------------------

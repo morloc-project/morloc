@@ -744,9 +744,13 @@ fn run_remote_command(
     }
     // A shared-memory result's donated reference is this process's now (SHM-8).
     extern "C" {
-        fn morloc_inherit_reply(packet: *const u8);
+        fn mlc_inherit_reply(packet: *const u8, errmsg: *mut *mut std::ffi::c_char) -> i32;
     }
-    unsafe { morloc_inherit_reply(full_packet.as_ptr()) };
+    let mut inherit_err: *mut std::ffi::c_char = std::ptr::null_mut();
+    if unsafe { mlc_inherit_reply(full_packet.as_ptr(), &mut inherit_err) } != 0 {
+        let msg = process::take_c_errmsg(inherit_err).unwrap_or_else(|| "unknown error".into());
+        crate::runlog::die_with_error(&format!("the result could not be read: {}", msg));
+    }
 
     if reply_is_pipe_closed(&full_packet) {
         process::exit_broken_pipe();
