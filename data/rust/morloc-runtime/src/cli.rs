@@ -3266,7 +3266,13 @@ unsafe fn packet_of(
         crate::arrow_ffi::is_arrow_table_schema(&rs)
     };
     if arrow {
-        crate::packet_ffi::make_arrow_data_packet(relptr, schema)
+        match crate::packet_ffi::make_rptr_data_packet(relptr, schema, morloc_runtime_types::packet::PACKET_FORMAT_ARROW) {
+            Ok(packet) => packet,
+            Err(e) => {
+                set_errmsg(errmsg, &e);
+                ptr::null_mut()
+            }
+        }
     } else {
         crate::packet_ffi::make_data_packet_with(voidstar, relptr, schema, whole, errmsg)
     }

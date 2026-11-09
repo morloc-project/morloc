@@ -153,3 +153,10 @@ Changes here touch locks and ownership: model first.
   (handle_scan.rs ~352, from the nexus stage.rs ~111) does not test the
   source byte; on a reference packet it would walk the relptr as an
   inline root value.
+- **A value holding the block magic at an interior offset forges a header.**
+  [read, 2026-11-09] SHM-13. A header is recognised by its magic word
+  (`header_at`, shm.rs); data that happens to hold that word just before
+  an interior address reads as a block there, so the check (and the
+  builder's refusal of interior addresses) can accept an address no
+  block begins at. Distinguishing a real header needs more than the magic
+  (e.g. a check that the header lies on the block chain).

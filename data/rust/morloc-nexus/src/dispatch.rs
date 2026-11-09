@@ -1944,11 +1944,13 @@ fn run_pure_command(cmd: &Command, args: &[ArgValue], config: &NexusConfig, mani
     }
 
     let result_relptr = unsafe { abs2rel(result, &mut errmsg) };
+    if let Some(msg) = process::take_c_errmsg(errmsg) {
+        crate::runlog::die_with_error(&format!("evaluation result is not in shared memory: {}", msg));
+    }
     let result_packet = unsafe { make_standard_data_packet(result_relptr, c_return_schema) };
 
     if result_packet.is_null() {
-        eprintln!("Error: failed to create result packet");
-        process::clean_exit(1);
+        crate::runlog::die_with_error("could not build the packet for the evaluation result");
     }
 
     extern "C" {

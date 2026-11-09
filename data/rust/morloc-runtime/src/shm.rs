@@ -2164,7 +2164,7 @@ fn map_numbered(basename: &str, primary: *mut ShmHeader) {
 /// `blk` must be a valid BlockHeader in the volume `_held` locks.
 #[inline]
 unsafe fn claim(_held: &ShmGuard<'_>, blk: *mut BlockHeader) -> Result<*mut BlockHeader, MorlocError> {
-    // SHM-13: published by the CAS below; 0 is left to packets to mean unchecked.
+    // SHM-13: never 0, which no packet may record.
     (*blk).bump_generation();
     (*blk)
         .reference_count

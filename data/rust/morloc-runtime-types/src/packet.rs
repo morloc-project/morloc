@@ -3,7 +3,6 @@
 
 use crate::error::MorlocError;
 use crate::schema::Schema;
-use crate::shm_types::RelPtr;
 
 // ── Magic & version constants ──────────────────────────────────────────────
 
@@ -352,7 +351,7 @@ pub struct CommandData {
     pub encryption: u8,
     pub status: u8,
     /// SHM-13: for a reference packet, the generation of the block it names
-    /// (little endian); 0 means unchecked.
+    /// (little endian); never 0, which is refused.
     pub generation: [u8; 2],
 }
 
@@ -521,7 +520,9 @@ impl PacketHeader {
         )
     }
 
-    /// Create a data packet header for relative pointer (shared memory).
+    /// Create a data packet header for relative pointer (shared memory),
+    /// with no generation: such a packet is refused when read (SHM-13), so
+    /// this serves tests of that refusal and of loaders that reject it.
     pub fn data_rptr(format: u8, payload_len: u64) -> Self {
         Self::new(
             PacketCommand {
@@ -716,45 +717,6 @@ pub fn validate_packet(bytes: &[u8]) -> Result<PacketHeader, MorlocError> {
 }
 
 // ── Full packet construction (header + metadata + payload) ─────────────────
-
-/// Build a complete data packet with schema metadata and relptr payload.
-pub fn make_standard_data_packet(relptr: RelPtr, schema: &Schema) -> Vec<u8> {
-    let schema_str = crate::schema::schema_to_string(schema);
-    let schema_bytes = schema_str.as_bytes();
-    let schema_len = schema_bytes.len() + 1; // +1 for null terminator
-
-    let meta_header_size = std::mem::size_of::<MetadataHeader>();
-    let raw_meta_len = meta_header_size + schema_len;
-    let padded_meta_len = ((raw_meta_len + 31) / 32) * 32;
-
-    let payload_len = std::mem::size_of::<RelPtr>();
-
-    let total = 32 + padded_meta_len + payload_len;
-    let mut packet = vec![0u8; total];
-
-    let header = PacketHeader::data_rptr(PACKET_FORMAT_VOIDSTAR, payload_len as u64);
-    let mut hdr = header;
-    hdr.offset = meta_len_u32(padded_meta_len);
-    let hdr_bytes = hdr.to_bytes();
-    packet[..32].copy_from_slice(&hdr_bytes);
-
-    let meta_start = 32;
-    packet[meta_start] = b'm';
-    packet[meta_start + 1] = b'm';
-    packet[meta_start + 2] = b'h';
-    packet[meta_start + 3] = METADATA_TYPE_SCHEMA_STRING;
-    let meta_size_bytes = meta_len_u32(schema_len).to_le_bytes();
-    packet[meta_start + 4..meta_start + 8].copy_from_slice(&meta_size_bytes);
-
-    let schema_data_start = meta_start + meta_header_size;
-    packet[schema_data_start..schema_data_start + schema_bytes.len()].copy_from_slice(schema_bytes);
-
-    let payload_start = 32 + padded_meta_len;
-    let relptr_bytes = relptr.to_ne_bytes();
-    packet[payload_start..payload_start + relptr_bytes.len()].copy_from_slice(&relptr_bytes);
-
-    packet
-}
 
 /// Build an inline MESG+MSGPACK data packet with schema metadata.
 pub fn make_mesg_data_packet(mpk_data: &[u8], schema: &Schema) -> Vec<u8> {

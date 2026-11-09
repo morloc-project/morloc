@@ -300,55 +300,42 @@ pub(crate) unsafe fn make_standard_data_packet(
     relptr: RelPtr,
     schema: *const CSchema,
 ) -> *mut u8 {
-    let packet = make_data_packet_with_schema(
-        ptr::null(),
-        std::mem::size_of::<RelPtr>(),
-        schema,
-        PACKET_SOURCE_RPTR,
-        PACKET_FORMAT_VOIDSTAR,
-        PACKET_COMPRESSION_NONE,
-        PACKET_ENCRYPTION_NONE,
-        PACKET_STATUS_PASS,
-    );
-    if packet.is_null() { return ptr::null_mut(); }
-
-    let header = &*(packet as *const PacketHeader);
-    let payload_offset = 32 + header.offset as usize;
-    *(packet.add(payload_offset) as *mut RelPtr) = relptr;
-    stamp_generation(packet, relptr);
-
-    packet
+    make_rptr_data_packet(relptr, schema, PACKET_FORMAT_VOIDSTAR).unwrap_or(ptr::null_mut())
 }
 
 pub(crate) unsafe fn make_arrow_data_packet(
     relptr: RelPtr,
     schema: *const CSchema,
 ) -> *mut u8 {
+    make_rptr_data_packet(relptr, schema, PACKET_FORMAT_ARROW).unwrap_or(ptr::null_mut())
+}
+
+// SHM-13: the packet names the allocation the block at `relptr` holds now;
+// refused when no held block begins there.
+pub(crate) unsafe fn make_rptr_data_packet(relptr: RelPtr, schema: *const CSchema, format: u8) -> Result<*mut u8, MorlocError> {
+    let abs = shm::rel2abs(relptr)?;
+    let shm::BlockState::Held(generation @ 1..) = shm::block_state(abs) else {
+        return Err(MorlocError::Shm(
+            "a reference packet was asked for an address no held shared-memory block begins at".into(),
+        ));
+    };
     let packet = make_data_packet_with_schema(
         ptr::null(),
         std::mem::size_of::<RelPtr>(),
         schema,
         PACKET_SOURCE_RPTR,
-        PACKET_FORMAT_ARROW,
+        format,
         PACKET_COMPRESSION_NONE,
         PACKET_ENCRYPTION_NONE,
         PACKET_STATUS_PASS,
     );
-    if packet.is_null() { return ptr::null_mut(); }
-
-    let header = &*(packet as *const PacketHeader);
-    let payload_offset = 32 + header.offset as usize;
-    *(packet.add(payload_offset) as *mut RelPtr) = relptr;
-    stamp_generation(packet, relptr);
-
-    packet
-}
-
-// SHM-13: the packet names the allocation its block holds now.
-unsafe fn stamp_generation(packet: *mut u8, relptr: RelPtr) {
-    if let Some(g) = shm::rel2abs(relptr).ok().and_then(|abs| shm::block_generation(abs)) {
-        ptr::copy_nonoverlapping(g.to_le_bytes().as_ptr(), packet.add(PKT_GENERATION_OFF), 2);
+    if packet.is_null() {
+        return Err(MorlocError::Other("failed to allocate a reference packet".into()));
     }
+    let header = &*(packet as *const PacketHeader);
+    *(packet.add(32 + header.offset as usize) as *mut RelPtr) = relptr;
+    ptr::copy_nonoverlapping(generation.to_le_bytes().as_ptr(), packet.add(PKT_GENERATION_OFF), 2);
+    Ok(packet)
 }
 
 // SHM-13: the block a reference packet names, provided it is still the
@@ -359,7 +346,8 @@ unsafe fn checked_rptr_block(packet: *const u8, payload: *const u8) -> Result<Ab
     let abs = shm::rel2abs(relptr)?;
     let stamp = u16::from_le_bytes([*packet.add(PKT_GENERATION_OFF), *packet.add(PKT_GENERATION_OFF + 1)]);
     if stamp == 0 {
-        return Ok(abs);
+        *(payload as *mut RelPtr) = shm::RELNULL;
+        return Err(MorlocError::Shm("a reference packet records no block generation".into()));
     }
     let state = shm::block_state(abs);
     if state == shm::BlockState::Held(stamp) {
@@ -1130,14 +1118,24 @@ pub(crate) unsafe fn make_data_packet_with(
 
     if crate::packet::shm_enabled() {
         if whole && !crate::voidstar::within_its_block(voidstar as crate::shm::AbsPtr, &rs) {
-            return match crate::voidstar::deep_copy_to_block(voidstar as *const u8, &rs)
-                .and_then(|copy| crate::shm::abs2rel(copy))
-            {
-                Ok(rel) => make_standard_data_packet(rel, schema),
+            return match crate::voidstar::deep_copy_to_block(voidstar as *const u8, &rs) {
+                Ok(copy) => match crate::shm::abs2rel(copy)
+                    .and_then(|rel| make_rptr_data_packet(rel, schema, PACKET_FORMAT_VOIDSTAR))
+                {
+                    Ok(packet) => packet,
+                    Err(e) => {
+                        let _ = crate::shm::shfree(copy);
+                        set_errmsg(errmsg, &e);
+                        ptr::null_mut()
+                    }
+                },
                 Err(e) => { set_errmsg(errmsg, &e); ptr::null_mut() }
             };
         }
-        make_standard_data_packet(relptr, schema)
+        match make_rptr_data_packet(relptr, schema, PACKET_FORMAT_VOIDSTAR) {
+            Ok(packet) => packet,
+            Err(e) => { set_errmsg(errmsg, &e); ptr::null_mut() }
+        }
     } else {
         make_file_data_packet_voidstar(voidstar, schema, &rs, errmsg)
     }
@@ -2694,6 +2692,56 @@ mod generation_tests {
         }
         assert!(got.is_null() && !err.is_null(), "a packet for a released block was read");
         assert!(disarmed, "the refused packet still names the block");
+    }
+
+    // SHM-13: every reference packet records a generation; none is built
+    // for an address no held block begins at.
+    #[test]
+    fn no_reference_packet_is_built_for_an_interior_address() {
+        let _shm = crate::own_test_registry();
+        let schema = crate::schema::Schema::primitive(crate::schema::SerialType::Uint8);
+        let cs = CSchema::from_rust(&schema);
+        let abs = crate::shm::shcalloc(1, 64).expect("allocate");
+        let inner = crate::shm::abs2rel(unsafe { abs.add(16) }).unwrap();
+        let standard = unsafe { make_standard_data_packet(inner, cs) };
+        let arrow = unsafe { make_arrow_data_packet(inner, cs) };
+        let head = crate::shm::abs2rel(abs).unwrap();
+        crate::shm::shfree(abs).unwrap();
+        let released = unsafe { make_standard_data_packet(head, cs) };
+        unsafe {
+            for p in [standard, arrow, released] {
+                if !p.is_null() {
+                    libc::free(p as *mut c_void);
+                }
+            }
+            CSchema::free(cs);
+        }
+        assert!(standard.is_null(), "a standard packet was built for an interior address");
+        assert!(arrow.is_null(), "an arrow packet was built for an interior address");
+        assert!(released.is_null(), "a packet was built for a released block");
+    }
+
+    // SHM-13: a reference packet that records no generation is refused.
+    #[test]
+    fn an_unstamped_reference_packet_is_refused() {
+        let _shm = crate::own_test_registry();
+        let schema = crate::schema::Schema::primitive(crate::schema::SerialType::Uint8);
+        let cs = CSchema::from_rust(&schema);
+        let abs = crate::shm::shmalloc(64).expect("allocate");
+        let packet = unsafe { make_standard_data_packet(crate::shm::abs2rel(abs).unwrap(), cs) };
+        assert!(!packet.is_null());
+        unsafe { ptr::write_bytes(packet.add(PKT_GENERATION_OFF), 0, 2) };
+        let mut err: *mut c_char = ptr::null_mut();
+        let got = unsafe { get_morloc_data_packet_value(packet, cs, &mut err) };
+        crate::shm::shfree(abs).unwrap();
+        unsafe {
+            if !err.is_null() {
+                libc::free(err as *mut c_void);
+            }
+            libc::free(packet as *mut c_void);
+            CSchema::free(cs);
+        }
+        assert!(got.is_null() && !err.is_null(), "an unstamped reference packet was read");
     }
 
     #[test]

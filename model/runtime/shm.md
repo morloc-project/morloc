@@ -160,14 +160,15 @@ already maps keeps the first mapping.
 
 ### SHM-13 A reference names the allocation it was made for
 Status: implemented
-Checked by: a_packet_naming_a_reused_block_is_refused_and_disarmed, a_packet_naming_a_released_block_is_refused_and_disarmed, a_block_reads_as_held_only_while_a_holder_holds_it, a_packet_for_a_live_block_is_read, a_reclaimed_address_gets_a_new_generation
+Checked by: a_packet_naming_a_reused_block_is_refused_and_disarmed, a_packet_naming_a_released_block_is_refused_and_disarmed, no_reference_packet_is_built_for_an_interior_address, an_unstamped_reference_packet_is_refused, a_block_reads_as_held_only_while_a_holder_holds_it, a_packet_for_a_live_block_is_read, a_reclaimed_address_gets_a_new_generation
 
 Every block carries a 16-bit generation beside its size. Claiming a block
 for an allocation advances it (skipping 0), a block split off another
 starts at the parent's, and a merge keeps the larger of the two, so a
 header made again at an address starts past every allocation it held
 before. A reference packet records the generation of the block it names
-when it is built; 0 means unrecorded. The runtime reads a received
+when it is built, and none is built for an address no held block begins at; a
+packet recording 0 is refused. The runtime reads a received
 reference only through the check that a block still begins there, is
 held, and has that generation (a released block may keep its generation
 until it is claimed again); the check reads the count before the
@@ -175,9 +176,10 @@ generation, so a claim it observes has already advanced the generation.
 Otherwise the read fails and the packet's relptr is
 cleared, so that no later release through the packet reaches the block's
 new owner. The check detects a reference used after its allocation ended
-(a protocol slip); it does not prevent one, and a generation repeats
-after 65535 claims of one address. Interior relptrs and releases by
-address are not checked.
+(a protocol slip); it does not prevent one: once a slip has happened,
+each later check of the stale packet can match a generation that came
+round again (one in 65535 per check at a busy address). Relptrs nested
+inside values and releases by address are not checked.
 
 ### SHM-14 An arena releases only references it alone holds
 Status: implemented

@@ -12,8 +12,8 @@ code. Found by the 2026-10-21 audit [read unless marked].
   of the size word. (The manual's arch-build-shm.asc now describes the
   code.)
 - **FMT-2 omits the reference generation.** Data packets carry the SHM-13
-  generation at command bytes 18-19 (little-endian, 0 = unchecked;
-  packet.rs:447). FMT-2 lists data bytes 13-17 only.
+  generation at command bytes 18-19 (little-endian, never 0, refused if 0;
+  morloc-runtime-types packet.rs CommandData.generation). FMT-2 lists data bytes 13-17 only.
 - **SHM-6 does not say who zeroes a new block under poison.** Under
   MORLOC_SHM_POISON=1 a released block holds 0xDB; shcalloc relies on a new
   block reading zero (shm.rs:1203), which holds because shmalloc_unlocked
