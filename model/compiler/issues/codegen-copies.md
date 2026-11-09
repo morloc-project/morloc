@@ -45,6 +45,40 @@ records and user-mapped types copy deeply.
   and by-value source arguments still copy one (golden copy-census-cpp
   letSource and matchCond: 1 copy each; re-checked 2026-10-19 at
   25d09170).
+- **A let no spine reaches is never moved.** [read, 2026-11-09; G1 not
+  reproduced] Gap in OWN-2. Marking finds owned lets only along a spine
+  of let forms starting at a manifold, loop or do-block body (Imperative.hs
+  `markSpineN`/`markSpineS`). Nested lets in arguments, containers and
+  lambdas do not reach marking (`invertSerialManifold` floats them out to
+  weave sites; lambdas are manifolds), so the gaps are weave sites and
+  let forms the spine grammar lacks:
+  G1. `markSpineN` has no `SerialLetN` case, though weave emits one per
+  serial dependency of a native body (Common.hs ~390, Serialize.hs ~1509-
+  1523): everything below it is one step and its native lets own nothing.
+  Three C++ shapes with a Python call (`length [mkL (pyf n)]`, a call
+  beside a list literal, either order) still moved: those calls lower
+  to a helper manifold, not a `SerialLetN`; the shape that produces one
+  is not yet found.
+  G2. A conditional's test is woven (Common.hs ~879) but marked as one
+  step, so lets inside it own nothing.
+  G3. A loop's guard, its fallback-woven base and continue values
+  (`sealLoop` ~369-380) and a `LoopSLet` right-hand side get one step
+  each. Moving a guard-local let needs a ruling: OWN-4 says a read in a
+  guard borrows.
+  Fix shape: every weave site is a spine root and every let form weave
+  emits is a spine node (not a fallback spine for unreached lets, which
+  would hide grammar gaps; assert in a test that every let is visited).
+  Rust first needs parity with C++: it marks with no aliases or held set
+  (Rust.hs ~1430), so wider marking could move a value a reference into
+  it still reads (rustc E0505); and it marks without by-value parameter
+  seeds while finding builds with them (~1460), so a by-value parameter
+  is never moved at its last read (OWN-7; read), and its seeds do not
+  drop loop slots as C++ does (Cpp.hs ~2142).
+  Cost: marking walks each body twice per segment, once to mark and once
+  in `lastBuilds` to collect builds, which returns the same captures; one
+  pass returning both would do. `heldReads` is recomputed per nested
+  root and `stepReads` walks the owned list per step (quadratic in a
+  spine's lets); not measured against g++/rustc time.
 - **A C++ loop copies a carried value no step changes.** [reproduced] A
   loop slot every continue passes on unchanged is a borrow in Rust (OWN-6)
   but a copy of its start in C++ (golden copy-census-cpp throughLoop,
