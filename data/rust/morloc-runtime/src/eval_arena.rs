@@ -95,17 +95,17 @@ pub(crate) fn broken_rules_seen() -> usize {
     BROKEN.with(|n| n.get())
 }
 
-// SHM-14: the arena's own reference, refused once the block was released and claimed again.
+// SHM-14: the arena's own reference, refused once the block is no longer held at its generation.
 fn release_entry(e: Entry) {
     // SAFETY: SHM-14: a recorded block lies in a volume this process mapped.
-    match unsafe { shm::block_generation(e.ptr) } {
-        Some(g) if g == e.generation && unsafe { shm::reference_count(e.ptr) }.is_some_and(|n| n > 0) => {
+    match unsafe { shm::block_state(e.ptr) } {
+        shm::BlockState::Held(g) if g == e.generation => {
             if let Err(err) = shm::release(e.ptr) {
                 eprintln!("eval_arena: release failed for {:p}: {:?}", e.ptr, err);
             }
         }
-        Some(_) => stale(e.ptr, "was released behind its arena entry"),
-        None => {}
+        shm::BlockState::NoBlock => {}
+        _ => stale(e.ptr, "was released behind its arena entry"),
     }
 }
 

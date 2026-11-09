@@ -1333,27 +1333,31 @@ pub unsafe fn shincref(ptr: AbsPtr) -> Result<(), MorlocError> {
     }
 }
 
-/// Current reference count of a shared memory block, or `None` when
-/// `ptr` is null or the header magic does not validate. A count of 0
-/// means the block is free and its bytes have been scrubbed.
+/// Current reference count of a shared memory block, or `None` when no
+/// block heads `ptr` (`header_at`). A count of 0 means the block is free
+/// and its bytes have been scrubbed.
 ///
 /// # Safety
 ///
-/// `ptr` must be null or a block returned by the SHM allocator.
+/// `ptr` must be null or point into a mapped volume's data.
 pub unsafe fn reference_count(ptr: AbsPtr) -> Option<u32> {
+    header_at(ptr).map(|blk| blk.reference_count.load(Ordering::Acquire))
+}
+
+/// SHM-13: the header of the block `ptr` heads, if one does.
+///
+/// # Safety
+/// `ptr` must be null or point into a mapped volume's data.
+unsafe fn header_at<'a>(ptr: AbsPtr) -> Option<&'a BlockHeader> {
     if ptr.is_null() {
         return None;
     }
-    // SAFETY: as in `shincref` -- shmalloc places a BlockHeader
-    // immediately before the returned pointer; the magic check
-    // validates that this pointer actually sits at a block start.
-    let blk = unsafe {
-        &*(ptr.sub(std::mem::size_of::<BlockHeader>()) as *const BlockHeader)
-    };
-    if blk.magic() != BLK_MAGIC {
+    let header_ptr = ptr.wrapping_sub(std::mem::size_of::<BlockHeader>());
+    if (header_ptr as usize) % std::mem::align_of::<BlockHeader>() != 0 || !ptr_is_in_any_volume(header_ptr) {
         return None;
     }
-    Some(blk.reference_count.load(Ordering::Acquire))
+    let blk = &*(header_ptr as *const BlockHeader);
+    (blk.magic() == BLK_MAGIC).then_some(blk)
 }
 
 /// Return the allocation size of an SHM block, in O(1), reading the
@@ -1374,18 +1378,7 @@ pub unsafe fn reference_count(ptr: AbsPtr) -> Option<u32> {
 /// later computed `pledgedSrcSize` from the same `calc_voidstar_size_inner`
 /// that this block was sized from.
 pub unsafe fn shm_block_size(ptr: AbsPtr) -> Option<usize> {
-    if ptr.is_null() {
-        return None;
-    }
-    let header_ptr = ptr.sub(std::mem::size_of::<BlockHeader>());
-    if !ptr_is_in_any_volume(header_ptr) {
-        return None;
-    }
-    let header = &*(header_ptr as *const BlockHeader);
-    if header.magic() != BLK_MAGIC {
-        return None;
-    }
-    Some(header.size())
+    header_at(ptr).map(|h| h.size())
 }
 
 /// SHM-13: the generation of the block `ptr` heads, or `None` when no block
@@ -1394,15 +1387,34 @@ pub unsafe fn shm_block_size(ptr: AbsPtr) -> Option<usize> {
 /// # Safety
 /// `ptr` must be null or point into a mapped volume's data.
 pub unsafe fn block_generation(ptr: AbsPtr) -> Option<u16> {
-    if ptr.is_null() {
-        return None;
+    header_at(ptr).map(|h| h.generation())
+}
+
+/// SHM-13: what heads `ptr`, read from one header.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlockState {
+    NoBlock,
+    Unheld,
+    Held(u16),
+}
+
+/// SHM-13: whether a block heads `ptr`, and if a holder holds it, its
+/// generation.
+///
+/// # Safety
+/// `ptr` must be null or point into a mapped volume's data.
+pub unsafe fn block_state(ptr: AbsPtr) -> BlockState {
+    let Some(blk) = header_at(ptr) else {
+        return BlockState::NoBlock;
+    };
+    // SHM-13: count before generation.
+    let n = blk.reference_count.load(Ordering::Acquire);
+    let g = blk.generation();
+    if n == 0 || n == TEARING_DOWN {
+        BlockState::Unheld
+    } else {
+        BlockState::Held(g)
     }
-    let header_ptr = ptr.sub(std::mem::size_of::<BlockHeader>());
-    if !ptr_is_in_any_volume(header_ptr) {
-        return None;
-    }
-    let header = &*(header_ptr as *const BlockHeader);
-    (header.magic() == BLK_MAGIC).then(|| header.generation())
 }
 
 /// Convert relative pointer to absolute pointer. O(1) under the
@@ -2950,6 +2962,30 @@ pub(crate) mod tests {
         assert_ne!(first, 0);
         assert_ne!(second, 0);
         assert_ne!(first, second, "the same generation names two allocations");
+    }
+
+    // SHM-13
+    #[test]
+    fn a_block_reads_as_held_only_while_a_holder_holds_it() {
+        let _arena = crate::own_test_shm();
+        let _fallback = small_volume("state");
+        let p = shmalloc(64).unwrap();
+        let g = unsafe { block_generation(p) }.unwrap();
+        let held = unsafe { block_state(p) };
+        let interior = unsafe { block_state(p.add(16)) };
+        let misaligned = unsafe { block_state(p.add(8)) };
+        let blk = unsafe { &*(p.sub(std::mem::size_of::<BlockHeader>()) as *const BlockHeader) };
+        blk.reference_count.store(TEARING_DOWN, Ordering::Release);
+        let tearing = unsafe { block_state(p) };
+        blk.reference_count.store(1, Ordering::Release);
+        shfree(p).unwrap();
+        let free = unsafe { block_state(p) };
+        shclose().unwrap();
+        assert_eq!(held, BlockState::Held(g));
+        assert_eq!(interior, BlockState::NoBlock);
+        assert_eq!(misaligned, BlockState::NoBlock);
+        assert_eq!(tearing, BlockState::Unheld);
+        assert_eq!(free, BlockState::Unheld);
     }
 
     #[test]

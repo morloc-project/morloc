@@ -95,3 +95,61 @@ Changes here touch locks and ownership: model first.
   direction: stage speculatively and discard. tla/Lease.tla does not model
   the pre-check. Status stays `implemented` until fixed, since the Rust
   model check forbids a deviation that names tests.
+
+- **Many readers and releasers of a reference packet skip the SHM-13
+  check.** [read, 2026-11-09] Code violates SHM-13 ("reads a received
+  reference only through the check"). Unchecked: `read_rptr_payload`,
+  `estimate_payload_size`, `stream_rptr_payload`,
+  `print_morloc_data_packet` (data/rust/morloc-runtime/src/packet_ffi.rs
+  ~1347, ~1569, ~1851, ~2064), which walk a stale block as a value and do
+  not disarm it (each runs only after a checked call on the same packet,
+  so a stale one is already disarmed: protected by order, not by type);
+  the daemon's `reply_reference` (daemon_ffi.rs ~1960), which releases on
+  drop with no check and is safe only because the reply was inherited
+  (checked, disarmed) before it; `shincref`, `shfree_unlocked` and
+  `incref_held` (shm.rs) find a header themselves rather than through
+  `header_at` (shfree_unlocked with no alignment, volume or wrap check);
+  and the bindings, C++ `_release_packet` and foreign-call result
+  adoption (data/lang/cpp/pool.cpp ~262, ~1218) and Python's release and
+  result adoption (pymorloc.c ~3218, ~3335), which resolve and release or
+  adopt with no check (a release by address frees a pool's own tracked
+  block if a stale packet's address matches it; adopt skips silently or,
+  in C++, reports a misleading "sentinel relptr" error). Full inventory
+  and the planned single accessor: /work/plans/output-path-perf/
+  CHECKED-REFS.md.
+- **A release through a stale packet is dropped without a trace.** [read,
+  2026-11-09] `release_received_packet`, `inherit_reply` and
+  `revoke_packet_reference` (packet_ffi.rs ~101, ~796, ~808) discard the
+  SHM-13 refusal with `if let Ok(..)`, so a protocol slip the check
+  detects is never reported (the arena reports its own through `stale`).
+- **Disarming a refused packet writes into memory the caller passed as
+  read-only.** [read, 2026-11-09] `checked_rptr_block` clears the relptr
+  through pointers callers hold as `*const u8`; Python passes the buffer
+  of an immutable `bytes` object (pymorloc.c `_get_value` ~3037), so a
+  refused packet changes a `bytes` value that may be shared or hashed.
+- **A header a split is writing can pass the SHM-13 check.** [read,
+  2026-11-09] `split_block` (data/rust/morloc-runtime/src/shm.rs) stores a
+  new free header's magic before its count, size and generation, all
+  relaxed, while readers check the header with no lock. Under
+  `MORLOC_SHM_POISON=1` the count reads as the poison word (nonzero, so
+  held) and the generation can equal the parent's (a merge keeps the
+  larger), so a stale packet racing the split is accepted. Fix with the
+  checked-accessor step: publish a header's magic last with release
+  ordering and read it with acquire (model first).
+- **A claim that finds its block in use still advances its generation.**
+  [read, 2026-11-09] SHM-13. `claim` (shm.rs) bumps the generation before
+  the 0 -> 1 compare-exchange and does not undo it when the exchange
+  fails (the corrupt-list case it reports), so the live holder's stamped
+  packets are refused from then on and its references leak. Fix by undoing
+  the bump on failure, not by bumping after the exchange: the SHM-13 check
+  reads the count before the generation and relies on a claim it sees
+  having already advanced the generation.
+- **An arena entry recorded without a generation is never released.**
+  [read, 2026-11-09] SHM-14. `record` (eval_arena.rs) stores generation 0
+  when the block's header cannot be read; claimed generations skip 0, so
+  release reports the entry as stale and leaks the arena's reference.
+- **Persisting a packet may misread a reference packet.** [read,
+  speculative, 2026-11-09] `rewrite_data_packet_for_persistence`
+  (handle_scan.rs ~352, from the nexus stage.rs ~111) does not test the
+  source byte; on a reference packet it would walk the relptr as an
+  inline root value.

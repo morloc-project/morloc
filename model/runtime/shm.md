@@ -160,7 +160,7 @@ already maps keeps the first mapping.
 
 ### SHM-13 A reference names the allocation it was made for
 Status: implemented
-Checked by: a_packet_naming_a_reused_block_is_refused_and_disarmed, a_packet_for_a_live_block_is_read, a_reclaimed_address_gets_a_new_generation
+Checked by: a_packet_naming_a_reused_block_is_refused_and_disarmed, a_packet_naming_a_released_block_is_refused_and_disarmed, a_block_reads_as_held_only_while_a_holder_holds_it, a_packet_for_a_live_block_is_read, a_reclaimed_address_gets_a_new_generation
 
 Every block carries a 16-bit generation beside its size. Claiming a block
 for an allocation advances it (skipping 0), a block split off another
@@ -168,8 +168,11 @@ starts at the parent's, and a merge keeps the larger of the two, so a
 header made again at an address starts past every allocation it held
 before. A reference packet records the generation of the block it names
 when it is built; 0 means unrecorded. The runtime reads a received
-reference only through the check that the block still has that
-generation; on a mismatch the read fails and the packet's relptr is
+reference only through the check that a block still begins there, is
+held, and has that generation (a released block may keep its generation
+until it is claimed again); the check reads the count before the
+generation, so a claim it observes has already advanced the generation.
+Otherwise the read fails and the packet's relptr is
 cleared, so that no later release through the packet reaches the block's
 new owner. The check detects a reference used after its allocation ended
 (a protocol slip); it does not prevent one, and a generation repeats
