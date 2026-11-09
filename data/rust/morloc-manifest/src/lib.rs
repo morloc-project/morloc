@@ -97,6 +97,10 @@ pub struct Manifest {
     /// --unsafe-skip-null-check`. Default false: checks enabled.
     #[serde(default)]
     pub unsafe_skip_null_check: bool,
+    /// When true, the pools do not check that a Str they send is valid
+    /// UTF-8 (FMT-10). Set via `morloc make --unsafe-skip-utf8-check`.
+    #[serde(default)]
+    pub unsafe_skip_utf8_check: bool,
     /// Inline-vs-routed threshold in bytes. None = use libmorloc's
     /// compile-time default (64 KiB). 0 = never inline. Set via
     /// `morloc make --inline-size`. The nexus forwards this value to

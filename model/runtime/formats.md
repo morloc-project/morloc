@@ -65,3 +65,21 @@ closed schema of the file's contents, `a` for `IFile a` and `[a]` for
 `IStream a` and `OStream a`. Every point that makes a handle from a path or
 a slot compares it with what the file or slot holds (STRM-1). A type that
 holds itself through a handle has no closed form and is refused at build.
+
+### FMT-10 A Str is valid UTF-8 on the wire, and no output form drops one
+Status: implemented
+Checked by: the_first_invalid_byte_is_found, a_str_that_is_not_text_fails_every_read_of_a_file, a_str_column_that_is_not_text_is_refused, a_msgpack_str_that_is_not_text_is_refused, golden:spec-base-4-1
+
+A `Str` body is valid UTF-8 text (BASE-5). A binding whose language can
+hold other bytes (C++ `std::string`, an R string built from raw bytes or
+marked as bytes, Python `bytes` given for a `Str`) checks each body as it
+encodes it, and an R string marked latin1 (read as CP1252, as R reads it),
+or native in a locale that is neither UTF-8 nor ASCII, is translated to
+UTF-8. A failure names the language and the byte
+position. A body read from outside (a file, standard input, a packet, a
+MessagePack argument) is checked as it is decoded, slice and element reads
+included, and every Arrow column holding text is checked as a table is
+imported. An output form never prints a body it cannot carry as empty: raw
+output writes the bytes, and JSON output fails, naming the byte position.
+`MORLOC_SKIP_UTF8_CHECK=1`, or a program built with `--unsafe-skip-utf8-check`,
+turns off the encoders' check only; a process reads the setting once.

@@ -262,7 +262,8 @@ buildInstalledModules args verbosity conf buildConfig moduleTexts libpath = do
     buildModuleExecutable locFile name verbosity' config buildConfig' forceOverwrite recipe = do
       code <- MT.readFile locFile
       -- `morloc install --build` re-enters the make pipeline. The
-      -- --unsafe-skip-null-check, --inline-size, --no-shm, --tmpdir, and
+      -- --unsafe-skip-null-check, --unsafe-skip-utf8-check, --inline-size,
+      -- --no-shm, --tmpdir, and
       -- --debug flags are `morloc make` opt-ins only, so default them here
       -- (safer). Build parameters, however, still flow from the build
       -- config's `lang-params` and the environment (this path has no `-X`
@@ -287,6 +288,7 @@ buildInstalledModules args verbosity conf buildConfig moduleTexts libpath = do
 -- long, transposition-prone positional tail.
 data MakeOptions = MakeOptions
   { moUnsafeSkipNullCheck :: Bool
+  , moUnsafeSkipUtf8Check :: Bool
   , moInlineSize :: Maybe Int64
   , moNoShm :: Bool
   , moTmpdir :: Maybe Path
@@ -305,6 +307,7 @@ defaultMakeOptions :: MakeOptions
 defaultMakeOptions =
   MakeOptions
     { moUnsafeSkipNullCheck = False
+    , moUnsafeSkipUtf8Check = False
     , moInlineSize = Nothing
     , moNoShm = False
     , moTmpdir = Nothing
@@ -340,6 +343,7 @@ langParamsEnvVar = "MORLOC_LANG_PARAMS"
 applyMakeOptions :: MakeOptions -> MorlocState -> MorlocState
 applyMakeOptions mopts s =
   s { stateUnsafeSkipNullCheck = moUnsafeSkipNullCheck mopts
+    , stateUnsafeSkipUtf8Check = moUnsafeSkipUtf8Check mopts
     , stateInlineSize = moInlineSize mopts
     , stateNoShm = moNoShm mopts
     , stateTmpdir = moTmpdir mopts
@@ -470,6 +474,7 @@ cmdMakeWith args verbosity config buildConfig path code progKey = do
       let mopts =
             MakeOptions
               { moUnsafeSkipNullCheck = makeUnsafeSkipNullCheck args
+              , moUnsafeSkipUtf8Check = makeUnsafeSkipUtf8Check args
               , moInlineSize = makeInlineSize args
               , moNoShm = makeNoShm args
               , moTmpdir = makeTmpdir args

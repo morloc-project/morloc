@@ -2919,6 +2919,7 @@ data ManifestInputs = ManifestInputs
   , miModuleDoc           :: ![Text]
   , miModuleEpilogues     :: ![[Text]]
   , miUnsafeSkipNullCheck :: !Bool
+  , miUnsafeSkipUtf8Check :: !Bool
   , miInlineSize          :: !(Maybe Int64)
   , miNoShm               :: !Bool
   , miTmpdir              :: !(Maybe Path)
@@ -2975,6 +2976,7 @@ buildManifest ManifestInputs{..} =
     , ("desc", jsonStrArr miModuleDoc)
     , ("epilogues", jsonArr (map jsonStrArr miModuleEpilogues))
     , ("unsafe_skip_null_check", jsonBool miUnsafeSkipNullCheck)
+    , ("unsafe_skip_utf8_check", jsonBool miUnsafeSkipUtf8Check)
     , ("inline_size", maybe jsonNull jsonInt64 miInlineSize)
     , ("no_shm", jsonBool miNoShm)
     , ("tmpdir", maybe jsonNull (jsonStr . MT.pack) miTmpdir)
@@ -3450,6 +3452,7 @@ generate cs rASTs helperRASTs = do
   moduleDoc <- MM.gets stateModuleDoc
   moduleEpilogues <- MM.gets stateModuleEpilogues
   unsafeSkipNullCheck <- MM.gets stateUnsafeSkipNullCheck
+  unsafeSkipUtf8Check <- MM.gets stateUnsafeSkipUtf8Check
   inlineSize <- MM.gets stateInlineSize
   noShm <- MM.gets stateNoShm
   tmpdir <- MM.gets stateTmpdir
@@ -3526,6 +3529,7 @@ generate cs rASTs helperRASTs = do
             , miModuleDoc           = moduleDoc
             , miModuleEpilogues     = moduleEpilogues
             , miUnsafeSkipNullCheck = unsafeSkipNullCheck
+            , miUnsafeSkipUtf8Check = unsafeSkipUtf8Check
             , miInlineSize          = inlineSize
             , miNoShm               = noShm
             , miTmpdir              = tmpdir

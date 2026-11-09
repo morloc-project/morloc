@@ -30,4 +30,4 @@ it is solved, and a file when it is empty.
 - [schema-grammar.md](schema-grammar.md): a recursive list alias's schema
 - [kind-arguments.md](kind-arguments.md): Nat-literal record forms conflict, three walks place ground rows, data-argument pairing and erasure on the nexus path
 - [function-types.md](function-types.md): docstrings in a parenthesized result group need a ruling; host call grouping read from the nesting of an instantiated type
-- [strings.md](strings.md): invalid UTF-8 in a `Str` dropped silently by the renders (BASE-4), other lossy value conversions, C++/R/Python-bytes egress unchecked, R native encoding mark on decode, outside bytes unchecked on slice paths and Arrow utf8, native decode errors without position, nexus panic on non-UTF-8 argv
+- [strings.md](strings.md): lossy text conversions left in the nexus and daemon (reached only with the UTF-8 opt-out), Python decode error without the producer; perf: slice results checked twice, Str table columns fully validated on every crossing

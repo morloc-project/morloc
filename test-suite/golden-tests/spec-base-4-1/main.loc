@@ -1,0 +1,65 @@
+-- Spec BASE-4/BASE-5: a Str is valid UTF-8 text. A language that can build
+-- other bytes (C++ std::string, R raw-built strings) fails where such a
+-- value leaves it, naming the language and the byte position; it is never
+-- printed empty or dropped. Valid non-ASCII text passes, and an R string in
+-- latin1 arrives as UTF-8.
+module main (cppGood, cppBad, cppBadToPy, rBad, rLatin, rEuro, rC1, pyBytes, rBytes, echo)
+
+import root
+import root-cpp
+import root-py
+import root-r
+
+source Cpp from "strs.hpp" ("good" as cGood, "bad" as cBad)
+source Py from "strs.py" ("size" as pySize, "pybytes")
+source R from "strs.R" ("rbad", "rlatin", "rbytes", "reuro", "rc1")
+
+cGood :: Int -> Str
+cBad :: Int -> Str
+pySize :: Str -> Int
+rbad :: Int -> Str
+rlatin :: Int -> Str
+pybytes :: Int -> Str
+rbytes :: Int -> Str
+reuro :: Int -> Str
+rc1 :: Int -> Str
+
+--' Valid non-ASCII text from C++
+cppGood :: Int -> Str
+cppGood n = cGood n
+
+--' A C++ Str holding the byte 0xFF
+cppBad :: Int -> Str
+cppBad n = cBad n
+
+--' The same Str passed to Python
+cppBadToPy :: Int -> Int
+cppBadToPy n = pySize (cBad n)
+
+--' An R Str built from raw bytes holding 0xFF
+rBad :: Int -> Str
+rBad n = rbad n
+
+--' An R Str marked latin1
+rLatin :: Int -> Str
+rLatin n = rlatin n
+
+--' An R latin1 Str holding 0x80 (the euro sign)
+rEuro :: Int -> Str
+rEuro n = reuro n
+
+--' An R latin1 Str holding 0x90, which CP1252 leaves undefined
+rC1 :: Int -> Str
+rC1 n = rc1 n
+
+--' Python bytes, not text, given for a Str
+pyBytes :: Int -> Str
+pyBytes n = pybytes n
+
+--' An R Str marked as bytes, holding UTF-8 text
+rBytes :: Int -> Str
+rBytes n = rbytes n
+
+--' A Str argument, echoed
+echo :: Str -> Str
+echo s = s

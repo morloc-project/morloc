@@ -16,3 +16,4 @@ twox-hash = { workspace = true }
 thiserror = { workspace = true }
 zstd = { workspace = true }
 memchr = "2"
+simdutf8 = { workspace = true }

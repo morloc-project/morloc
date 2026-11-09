@@ -567,7 +567,13 @@ std::string _mlc_hash(const T& value, Schema* schema) {
 template <typename T>
 int _mlc_compare(const T& a, const T& b, Schema* schema) {
     void* va = to_voidstar(schema, a);
-    void* vb = to_voidstar(schema, b);
+    void* vb = nullptr;
+    try {
+        vb = to_voidstar(schema, b);
+    } catch (...) {
+        shfree_cpp(va);
+        throw;
+    }
     char* errmsg = NULL;
     int order = mlc_compare(va, vb, schema, &errmsg);
     shfree_cpp(va);
@@ -972,7 +978,12 @@ inline void _mlc_write(Schema* schema, int64_t level, const T& value, int64_t ha
     size_t bytes = get_shm_size(schema, value);
     void* voidstar = shmalloc_cpp(bytes);
     void* cursor = (uint8_t*)voidstar + schema->width;
-    to_voidstar(voidstar, &cursor, schema, value);
+    try {
+        to_voidstar(voidstar, &cursor, schema, value);
+    } catch (...) {
+        shfree_cpp(voidstar);
+        throw;
+    }
     int rc = mlc_write(level, handle, voidstar, &errmsg);
     shfree_cpp(voidstar);
     if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }

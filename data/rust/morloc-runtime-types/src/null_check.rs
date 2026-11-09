@@ -11,10 +11,12 @@
 /// once per call; not cached because the flag is meant for ad-hoc benchmarks
 /// and we'd rather respect a mid-run unset than win a few nanoseconds.
 pub fn env_skip_null_check() -> bool {
-    matches!(
-        std::env::var("MORLOC_SKIP_NULL_CHECK").as_deref(),
-        Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes")
-    )
+    env_flag("MORLOC_SKIP_NULL_CHECK")
+}
+
+/// Whether the environment variable `name` is set to a true value.
+pub(crate) fn env_flag(name: &str) -> bool {
+    matches!(std::env::var(name).as_deref(), Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes"))
 }
 
 /// The first string in a JSON text that holds a NUL byte, as a path such

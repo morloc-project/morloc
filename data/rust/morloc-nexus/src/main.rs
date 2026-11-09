@@ -98,6 +98,15 @@ fn main() {
     // must be set up front to cover them too.
     unsafe { libc::signal(libc::SIGPIPE, libc::SIG_IGN); }
 
+    // A command-line argument is text (BASE-5); `std::env::args` panics on
+    // one that is not, so every argument is checked once, here.
+    for arg in std::env::args_os().skip(1) {
+        if arg.to_str().is_none() {
+            eprintln!("Error: an argument is not valid UTF-8: {:?}", arg);
+            std::process::exit(2);
+        }
+    }
+
     // `morloc-nexus --abi-version`: print the ABI/wire-format contract version
     // and exit. Checked as the first argument (a real program runs through the
     // `run <target>` wrapper, so arg[1] is never a bare flag) so provisioning
@@ -471,6 +480,13 @@ fn main() {
         crate::process::set_startup_env("MORLOC_CODE_CHECKS", "1");
     } else {
         crate::process::remove_startup_env("MORLOC_CODE_CHECKS");
+    }
+    // FMT-10: a program built to skip the UTF-8 check skips it in every pool,
+    // and a program run inside it does not inherit that.
+    if manifest.unsafe_skip_utf8_check {
+        crate::process::set_startup_env("MORLOC_PROGRAM_SKIPS_UTF8_CHECK", "1");
+    } else {
+        crate::process::remove_startup_env("MORLOC_PROGRAM_SKIPS_UTF8_CHECK");
     }
 
     // Resolve the per-run identity now so pools inherit a fully-published

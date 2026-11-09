@@ -2376,7 +2376,11 @@ impl FromVoidstar for String {
         let bytes = core::slice::from_raw_parts(p, a.size).to_vec();
         match String::from_utf8(bytes) {
             Ok(s) => s,
-            Err(_) => morloc_throw("Str field is not valid UTF-8"), // I5
+            Err(e) => morloc_throw(&format!(
+                "a Str that is not valid UTF-8 (byte {} of {})",
+                e.utf8_error().valid_up_to(),
+                a.size
+            )), // I5
         }
     }
 }

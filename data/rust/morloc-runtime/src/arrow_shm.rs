@@ -997,6 +997,125 @@ impl BlockView {
     pub fn column_node(&self, j: usize) -> &ArrowNodeDesc {
         self.node(self.node(0).child_index as usize + j)
     }
+
+    // FMT-10
+    ///
+    /// # Safety
+    /// The view is open and its structure validated.
+    pub unsafe fn check_text(&self, k: usize, include_nulls: bool) -> Result<(), MorlocError> {
+        let n = self.node(k);
+        match self.string_str(n.format_offset) {
+            "u" => self.check_text_offsets::<i32>(n, include_nulls)?,
+            "U" => self.check_text_offsets::<i64>(n, include_nulls)?,
+            "vu" => self.check_text_views(n, include_nulls)?,
+            _ => {}
+        }
+        for c in n.child_index as usize..n.child_index as usize + n.n_children as usize {
+            self.check_text(c, include_nulls)?;
+        }
+        Ok(())
+    }
+
+    // FMT-10
+    unsafe fn validity(&self, n: &ArrowNodeDesc, include_nulls: bool) -> Option<impl Fn(usize) -> bool + '_> {
+        if include_nulls || n.null_count == 0 {
+            return None;
+        }
+        let bits = self.local_bytes(n.buffer_index as usize);
+        if bits.is_empty() {
+            return None;
+        }
+        Some(move |i: usize| bits.get(i / 8).is_some_and(|b| b & (1 << (i % 8)) != 0))
+    }
+
+    unsafe fn local_bytes(&self, i: usize) -> &[u8] {
+        let b = self.buffer(i);
+        if b.kind == BUF_LOCAL {
+            std::slice::from_raw_parts(self.base.add(b.offset as usize), b.size as usize)
+        } else {
+            &[]
+        }
+    }
+
+    unsafe fn check_text_offsets<T: arrow_buffer::ArrowNativeType + Into<i64>>(&self, n: &ArrowNodeDesc, include_nulls: bool) -> Result<(), MorlocError> {
+        let len = n.length as usize;
+        if len == 0 {
+            return Ok(());
+        }
+        let bad = |what: String| err(format!("Arrow column holds a Str that is not valid UTF-8: {what}"));
+        let offs = self.local_bytes(n.buffer_index as usize + 1);
+        let data = self.local_bytes(n.buffer_index as usize + 2);
+        let w = std::mem::size_of::<T>();
+        if offs.len() < (len + 1) * w {
+            return Err(bad("its offsets are shorter than its length".into()));
+        }
+        let off = |i: usize| -> i64 { ptr::read_unaligned(offs.as_ptr().add(i * w) as *const T).into() };
+        let (first, last) = (off(0), off(len));
+        if first < 0 || last < first || last as usize > data.len() {
+            return Err(bad("its offsets leave its data".into()));
+        }
+        // FMT-10: without `include_nulls`, null slots are skipped.
+        if let Some(valid) = self.validity(n, include_nulls) {
+            for i in 0..len {
+                if !valid(i) {
+                    continue;
+                }
+                let (a, b) = (off(i), off(i + 1));
+                if a < first || b < a || b > last {
+                    return Err(bad(format!("offset {i} leaves its data")));
+                }
+                if let Some(x) = morloc_runtime_types::utf8::first_invalid(&data[a as usize..b as usize]) {
+                    return Err(bad(format!("value {i}, byte {x}")));
+                }
+            }
+            return Ok(());
+        }
+        let text = &data[first as usize..last as usize];
+        if let Some(b) = morloc_runtime_types::utf8::first_invalid(text) {
+            return Err(bad(format!("byte {}", first as usize + b)));
+        }
+        let mut prev = first;
+        for i in 1..len {
+            let o = off(i);
+            if o < prev || o > last {
+                return Err(bad(format!("offset {i} leaves its data")));
+            }
+            prev = o;
+            if o < last && (data[o as usize] & 0xc0) == 0x80 {
+                return Err(bad(format!("value {i} starts inside a character")));
+            }
+        }
+        Ok(())
+    }
+
+    unsafe fn check_text_views(&self, n: &ArrowNodeDesc, include_nulls: bool) -> Result<(), MorlocError> {
+        let bad = |what: String| err(format!("Arrow column holds a Str that is not valid UTF-8: {what}"));
+        let views = self.local_bytes(n.buffer_index as usize + 1);
+        let n_data = (n.n_buffers as usize).saturating_sub(3);
+        let valid = self.validity(n, include_nulls);
+        for i in 0..n.length as usize {
+            if valid.as_ref().is_some_and(|f| !f(i)) {
+                continue;
+            }
+            let v = views.get(i * 16..i * 16 + 16).ok_or_else(|| bad("its views are shorter than its length".into()))?;
+            let len = u32::from_le_bytes(v[0..4].try_into().unwrap()) as usize;
+            let bytes = if len <= 12 {
+                &v[4..4 + len]
+            } else {
+                let b = u32::from_le_bytes(v[8..12].try_into().unwrap()) as usize;
+                let o = u32::from_le_bytes(v[12..16].try_into().unwrap()) as usize;
+                if b >= n_data {
+                    return Err(bad(format!("value {i} names a missing buffer")));
+                }
+                let d = self.local_bytes(n.buffer_index as usize + 2 + b);
+                o.checked_add(len).and_then(|end| d.get(o..end)).ok_or_else(|| bad(format!("value {i} leaves its buffer")))?
+            };
+            if let Some(b) = morloc_runtime_types::utf8::first_invalid(bytes) {
+                return Err(bad(format!("value {i}, byte {b}")));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// The child types of a nested Arrow type, in child order.
@@ -1323,6 +1442,9 @@ pub unsafe fn block_size(header: *const ArrowShmHeader) -> Result<usize, MorlocE
 /// # Safety
 /// `header` must be a live block.
 pub unsafe fn shm_to_batch(header: *const ArrowShmHeader) -> Result<RecordBatch, MorlocError> {
+    // FMT-10: no imported column holds text that is not UTF-8.
+    // FMT-10: arrow-rs reads every slot as text, null slots included.
+    BlockView::open(header)?.check_text(0, true)?;
     let mut s = FFI_ArrowSchema::empty();
     let mut a = FFI_ArrowArray::empty();
     shm_to_ffi(header, &mut s as *mut _, &mut a as *mut _)?;
@@ -1562,7 +1684,10 @@ pub unsafe fn try_borrow(
 /// # Safety
 /// `header` must be a live block.
 pub unsafe fn validate(header: *const ArrowShmHeader, declared: &Schema) -> Result<(), MorlocError> {
-    validate_view(&BlockView::open(header)?, declared)
+    let view = BlockView::open(header)?;
+    validate_view(&view, declared)?;
+    // FMT-10: every column that holds text holds UTF-8, declared or not.
+    view.check_text(0, false)
 }
 
 /// `validate` over an already checked view.
@@ -1739,6 +1864,38 @@ mod tests {
             let back = unsafe { shm_to_batch(base as *const ArrowShmHeader) }.unwrap();
             let col = back.column(0).as_any().downcast_ref::<Int64Array>().unwrap();
             assert_eq!(col.values(), &[10, 20]);
+        });
+    }
+
+    // FMT-10
+    #[test]
+    fn a_str_column_that_is_not_text_is_refused() {
+        with_shm(|| {
+            let declared = Schema {
+                serial_type: SerialType::Table,
+                size: 1,
+                width: std::mem::size_of::<shm::Array>(),
+                offsets: vec![],
+                hint: None,
+                parameters: vec![Schema::primitive(SerialType::String)],
+                keys: vec!["s".into()],
+                name: None,
+            };
+            let table = |bytes: &[u8], ends: Vec<i32>| {
+                let offsets = arrow_buffer::OffsetBuffer::new(arrow_buffer::ScalarBuffer::from(ends));
+                // SAFETY: FMT-10: the test builds a column that is not text.
+                let col = unsafe { arrow_array::StringArray::new_unchecked(offsets, arrow_buffer::Buffer::from(bytes), None) };
+                let schema = ArrowSchema::new(vec![Field::new("s", DataType::Utf8, false)]);
+                let batch = RecordBatch::try_new(Arc::new(schema), vec![Arc::new(col)]).unwrap();
+                let rel = write_batch(&batch, Some(&declared)).unwrap();
+                let base = shm::rel2abs(rel).unwrap();
+                unsafe { validate(base as *const ArrowShmHeader, &declared) }
+            };
+            assert!(table(b"okfine", vec![0, 2, 6]).is_ok());
+            let bad = table(b"ab\xffc", vec![0, 2, 4]).unwrap_err().to_string();
+            assert!(bad.to_lowercase().contains("utf8") || bad.to_lowercase().contains("utf-8"), "{bad}");
+            let split = table("\u{e9}".as_bytes(), vec![0, 1, 2]).unwrap_err().to_string();
+            assert!(split.to_lowercase().contains("utf-8"), "{split}");
         });
     }
 

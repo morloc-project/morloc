@@ -43,7 +43,14 @@ pub(crate) unsafe fn read_json_with_schema(
     }
 
     let rs = CSchema::to_rust(schema);
-    let json = CStr::from_ptr(json_str).to_string_lossy();
+    let json = match CStr::from_ptr(json_str).to_str() {
+        Ok(s) => s,
+        Err(e) => {
+            let msg = format!("JSON text is not valid UTF-8 (byte {})", e.valid_up_to());
+            set_errmsg(errmsg, &MorlocError::Serialization(msg));
+            return ptr::null_mut();
+        }
+    };
 
     let dest_opt = if dest.is_null() { None } else { Some(dest) };
     match crate::json::read_json_with_schema_dest(dest_opt, &json, &rs) {

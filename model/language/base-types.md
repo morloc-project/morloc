@@ -29,6 +29,7 @@ Used as a value, each is the function of two `Bool`s it denotes. `&&` is
 
 ### BASE-4 A `Str` value survives every language that can hold it
 Intent: proposed
+Tests: spec-base-4-1
 Code: deviates 2026-11-08 (runtime/issues/strings.md)
 
 A `Str` is a sequence of Unicode characters that may include U+0000. Passed
@@ -38,7 +39,7 @@ naming the language and the position of the offending character.
 
 ### BASE-5 A `Str` is a sequence of Unicode characters
 Intent: ruled 2026-11-08
-Code: deviates 2026-11-08 (runtime/issues/strings.md, language/issues/values.md)
+Code: deviates 2026-11-08 (language/issues/values.md: Str length per language)
 
 A `Str` is text: a sequence of Unicode code points, held as valid UTF-8.
 Bytes that are not valid UTF-8 are not a `Str`; a value that carries them

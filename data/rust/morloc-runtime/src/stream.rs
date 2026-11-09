@@ -5464,7 +5464,8 @@ fn shared_ifile_general(
             ));
         }
         let src = materialize_subpacket(local, 0)?;
-        let r = walk_into_fresh(&local.value_schema, &src, &steps, args);
+        let schema = crate::stream_walk::infer_chain_schema(&local.value_schema, &steps)?;
+        let r = walk_into_fresh(&local.value_schema, &src, &steps, args).and_then(|p| require_text(p, &schema));
         src.release();
         r
     })
@@ -6608,7 +6609,7 @@ fn ifile_bracket_index_against_slot(
     let src = cache_get_or_materialize(local, sub_k)?;
     let result = ifile_extract_element(&local.elem_schema, &src, local_idx);
     src.release();
-    result
+    result.and_then(|p| require_text(p, &local.elem_schema))
 }
 
 fn cache_hit(local: &mut ProcessLocalSlot, sub_k: usize) -> Result<Option<SubpacketSrc>, MorlocError> {
@@ -6621,6 +6622,21 @@ fn cache_hit(local: &mut ProcessLocalSlot, sub_k: usize) -> Result<Option<Subpac
         }
     }
     Ok(None)
+}
+
+// FMT-10
+fn require_text(p: AbsPtr, schema: &Schema) -> Result<AbsPtr, MorlocError> {
+    if !voidstar::schema_holds(schema, SerialType::String) {
+        return Ok(p);
+    }
+    // SAFETY: FMT-10: `p` is the live SHM block of `schema` just built.
+    match unsafe { voidstar::check_text_in_block(p, schema) } {
+        Ok(()) => Ok(p),
+        Err(e) => {
+            let _ = shm::shfree(p);
+            Err(e)
+        }
+    }
 }
 
 // SLOT-34
@@ -6837,7 +6853,8 @@ fn ifile_bracket_slice_against_slot(
         (slice, runs)
     };
     if let Some(runs) = runs {
-        return slice_runs(local, &runs);
+        let schema = array_schema(&local.elem_schema);
+        return slice_runs(local, &runs).and_then(|p| require_text(p, &schema));
     }
 
     let mut work: SliceWork = {
@@ -6899,7 +6916,7 @@ fn ifile_bracket_slice_against_slot(
             s.release();
         }
         let _ = shm::shfree(arr_ptr);
-        return r;
+        return r.and_then(|p| require_text(p, &array_schema(&work.proj_schema)));
     }
     // The generic route copies element by element and cannot know the
     // result's size until it has, so it builds with a recorded block per
@@ -6964,7 +6981,7 @@ fn ifile_bracket_slice_against_slot(
     let out_schema = array_schema(&work.proj_schema);
     // SAFETY: `parts` lists every block the copies above took and the
     // element bank they were written into; nothing else points into them.
-    unsafe { voidstar::consolidate(arr_ptr, &out_schema, &parts) }
+    unsafe { voidstar::consolidate(arr_ptr, &out_schema, &parts) }.and_then(|p| require_text(p, &out_schema))
 }
 
 /// Allocate one block holding an `Array` header followed by `data_size`
@@ -10887,6 +10904,42 @@ mod tests {
             cached.sort();
             assert_eq!(cached, ends, "slice {start:?}:{stop:?}:{step:?} cached {cached:?}");
         }
+    }
+
+    // FMT-10
+    #[test]
+    fn a_str_that_is_not_text_fails_every_read_of_a_file() {
+        let _shm = crate::own_test_registry();
+        let dir = concat_test_dir("not_text");
+        let path = dir.join("t.idx");
+        let p = path.to_str().unwrap().to_string();
+        crate::write_behind::set_test_depth(Some(0));
+        let w = shared_open_ostream_with_schema(&p, "as").unwrap();
+        let list = parse_schema("as").unwrap();
+        let level = crate::compression::CompressionLevel::from_u8(0).unwrap();
+        let v = crate::json::read_json_with_schema(r#"["okay", "xyzQxyz", "fine"]"#, &list).unwrap();
+        shared_write_subpacket(w, level, v).unwrap();
+        shm::shfree(v).unwrap();
+        shared_close_handle(w).unwrap();
+        crate::write_behind::set_test_depth(None);
+        let mut bytes = std::fs::read(&path).unwrap();
+        let at = bytes.windows(7).position(|w| w == b"xyzQxyz").unwrap();
+        bytes[at + 3] = 0xff;
+        std::fs::write(&path, &bytes).unwrap();
+
+        let f = open_ifile(&p).unwrap();
+        let slice = ifile_bracket_slice(f, Some(0), Some(3), None).map(|r| shm::shfree(r));
+        let index = ifile_bracket_index(f, 1).map(|r| shm::shfree(r));
+        let fine = ifile_bracket_index(f, 2).map(|r| shm::shfree(r));
+        shared_close_handle(f).unwrap();
+        let s = open_istream(&p).unwrap();
+        let next = shared_next_subpacket(s).map(|r| shm::shfree(r));
+        shared_close_handle(s).unwrap();
+        for (what, r) in [("slice", slice), ("index", index), ("next", next)] {
+            let e = r.err().unwrap_or_else(|| panic!("{what} read a Str that is not text"));
+            assert!(e.to_string().contains("not valid UTF-8"), "{what}: {e}");
+        }
+        assert!(fine.is_ok(), "a text element failed: {fine:?}");
     }
 
     /// `n` compressed sub-packets of `k` consecutive i64s each, from 0.

@@ -344,6 +344,13 @@ pub fn serve(
                 );
                 continue;
             }
+            Err(LineError::NotText) => {
+                write_message(
+                    protocol_fd,
+                    &error_response(Value::Null, JSONRPC_PARSE_ERROR, "request line is not valid UTF-8"),
+                );
+                continue;
+            }
             Err(LineError::Io(e)) => {
                 eprintln!("morloc mcp: input read error: {}", e);
                 break;
@@ -876,6 +883,7 @@ fn write_message(protocol_fd: RawFd, msg: &Value) {
 enum LineError {
     Eof,
     TooLong,
+    NotText,
     Io(std::io::Error),
 }
 
@@ -904,8 +912,7 @@ fn read_lines_capped<R: BufRead>(mut reader: R) -> impl Iterator<Item = Result<S
                 if buf.is_empty() {
                     return Some(Err(LineError::Eof));
                 }
-                let s = String::from_utf8_lossy(&buf).into_owned();
-                return Some(Ok(s));
+                return Some(String::from_utf8(buf).map_err(|_| LineError::NotText));
             }
             if let Some(pos) = available.iter().position(|&b| b == b'\n') {
                 if overflow {
@@ -918,8 +925,7 @@ fn read_lines_capped<R: BufRead>(mut reader: R) -> impl Iterator<Item = Result<S
                 if buf.len() > MAX_LINE_BYTES {
                     return Some(Err(LineError::TooLong));
                 }
-                let s = String::from_utf8_lossy(&buf).into_owned();
-                return Some(Ok(s));
+                return Some(String::from_utf8(buf).map_err(|_| LineError::NotText));
             } else {
                 let consumed = available.len();
                 if !overflow {
@@ -2334,7 +2340,10 @@ fn frontend_eval_api(req: &HttpRequest, fe: &Frontend, keep_alive: bool) -> Vec<
         use morloc_runtime_types::daemon_error::{error_body, EVAL_NOT_EXPOSED, NOT_FOUND};
         return http_json(404, error_body(NOT_FOUND, EVAL_NOT_EXPOSED).as_bytes(), keep_alive);
     }
-    let body = String::from_utf8_lossy(&req.body);
+    let Ok(body) = std::str::from_utf8(&req.body) else {
+        use morloc_runtime_types::daemon_error::{error_body, BAD_REQUEST};
+        return http_json(400, error_body(BAD_REQUEST, "the request body is not valid UTF-8").as_bytes(), keep_alive);
+    };
     let expr: Option<String> = if body.trim_start().starts_with('{') {
         serde_json::from_str::<HashMap<String, Raw>>(&body).ok().and_then(|o| {
             let r = o.get("expr").or_else(|| o.get("expression"))?;

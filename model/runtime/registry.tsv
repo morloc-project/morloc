@@ -233,6 +233,7 @@ morloc-runtime/custody.rs::-::TEST_SOCK	test-only
 morloc-runtime/stream.rs::-::SINK	test-only		
 morloc-runtime-types/wait_word.rs::a_waiter_wakes_when_the_word_changes_on_another_thread::WORD	test-only		
 morloc-runtime-types/compression.rs::frame_workers::CACHED	lazy		
+morloc-runtime-types/utf8.rs::-::SKIP	lazy		
 morloc-runtime-types/owner_word.rs::-::HELD	thread		
 morloc-runtime-types/panic.rs::-::IN_SCOPE	thread		
 morloc-runtime-types/panic.rs::-::UNWINDING	thread		

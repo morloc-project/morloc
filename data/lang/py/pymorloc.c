@@ -1034,7 +1034,22 @@ static int py_size_step(py_walk_t* w, const Schema* schema, PyObject* obj, size_
                     return 0;
                 } else if (PyUnicode_Check(obj)) {
                     Py_ssize_t len = 0;
-                    if (PyUnicode_AsUTF8AndSize(obj, &len) == NULL) return -1;
+                    if (PyUnicode_AsUTF8AndSize(obj, &len) == NULL) {
+                        if (!PyErr_ExceptionMatches(PyExc_UnicodeEncodeError)) {
+                            return -1;
+                        }
+                        // FMT-10: the failure names the producing language.
+                        PyObject *et, *ev, *tb;
+                        PyErr_Fetch(&et, &ev, &tb);
+                        PyObject* why = ev ? PyObject_Str(ev) : NULL;
+                        PyErr_Format(PyExc_RuntimeError, "Python produced a Str that is not valid UTF-8: %S",
+                                     why ? why : Py_None);
+                        Py_XDECREF(why);
+                        Py_XDECREF(et);
+                        Py_XDECREF(ev);
+                        Py_XDECREF(tb);
+                        return -1;
+                    }
                     w->total += (ssize_t)len;
                     return 0;
                 } else {
@@ -1550,6 +1565,12 @@ static int py_write_step(py_walk_t* w, const Schema* schema, void* dest, PyObjec
                     }
 
                 } else if (PyBytes_Check(obj) || PyByteArray_Check(obj)){
+                    if (schema->type == MORLOC_STRING) {
+                        int64_t bad = mlc_utf8_check((const uint8_t*)mutable_data, (size_t)size);
+                        if (bad >= 0) {
+                            PyRAISE("Python produced a Str that is not valid UTF-8 (byte %lld of %zd)", (long long)bad, size);
+                        }
+                    }
                     memcpy(start, mutable_data, size);
                 }
                 else if (np_route == NPY_ROUTE_CAST) {

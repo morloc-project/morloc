@@ -645,6 +645,19 @@ size_t mlc_leaf_size(const Schema* schema, const T& data) {
     }
 }
 
+// A Str leaves C++ only as valid UTF-8 (BASE-5). `[U8]` bytes are not checked.
+inline void mlc_check_str(const Schema* schema, const uint8_t* data, size_t size) {
+    if (schema->type != MORLOC_STRING) {
+        return;
+    }
+    int64_t bad = mlc_utf8_check(data, size);
+    if (bad >= 0) {
+        std::ostringstream oss;
+        oss << "C++ produced a Str that is not valid UTF-8 (byte " << bad << " of " << size << ")";
+        throw std::runtime_error(oss.str());
+    }
+}
+
 // Write raw bytes as an array: the header at dest, the bytes at the cursor.
 inline void* bytes_to_voidstar(void* dest, void** cursor, const Schema* schema, const uint8_t* data, size_t size) {
     Array* result = static_cast<Array*>(dest);
@@ -669,9 +682,12 @@ void mlc_leaf_write(void* dest, void** cursor, const Schema* schema, const T& da
         return;
     }
     if constexpr (std::is_same_v<T, std::string>) {
+        mlc_check_str(schema, (const uint8_t*)data.c_str(), data.size());
         bytes_to_voidstar(dest, cursor, schema, (const uint8_t*)data.c_str(), data.size());
     } else if constexpr (std::is_same_v<T, const char*>) {
-        bytes_to_voidstar(dest, cursor, schema, (const uint8_t*)data, strlen(data));
+        size_t n = strlen(data);
+        mlc_check_str(schema, (const uint8_t*)data, n);
+        bytes_to_voidstar(dest, cursor, schema, (const uint8_t*)data, n);
     } else if constexpr (std::is_same_v<T, std::nullptr_t>) {
         // Nothing else has a nil schema.
     } else if constexpr (std::is_enum_v<T>) {

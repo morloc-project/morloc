@@ -379,6 +379,9 @@ data MorlocState = MorlocState
   -- ^ True when @morloc make --unsafe-skip-null-check@ was given. The
   -- emitted manifest's top-level @unsafe_skip_null_check@ flag is set
   -- from this; the runtime then skips the boundary NUL scan.
+  , stateUnsafeSkipUtf8Check :: Bool
+  -- ^ True when @morloc make --unsafe-skip-utf8-check@ was given; sets the
+  -- manifest's @unsafe_skip_utf8_check@ flag.
   , stateInlineSize :: Maybe Int64
   -- ^ Inline-vs-route threshold, in bytes, from @morloc make
   -- --inline-size@. @Nothing@ = use the libmorloc default; emitted as
@@ -1187,6 +1190,7 @@ instance Defaultable MorlocState where
       , stateSnapshot = Map.empty
       , stateEvalSandbox = Nothing
       , stateUnsafeSkipNullCheck = False
+      , stateUnsafeSkipUtf8Check = False
       , stateInlineSize = Nothing
       , stateNoShm = False
       , stateTmpdir = Nothing

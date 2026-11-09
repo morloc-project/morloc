@@ -428,6 +428,11 @@ impl<'r, 'd> Walker<()> for UnpackWalk<'r, 'd> {
                     if self.reader.len() < len {
                         return Err(MorlocError::Serialization("msgpack str truncated".into()));
                     }
+                    if let Some(i) = morloc_runtime_types::utf8::first_invalid(&self.reader[..len]) {
+                        return Err(MorlocError::Serialization(format!(
+                            "msgpack str is not valid UTF-8 (byte {i} of {len})"
+                        )));
+                    }
                     std::ptr::copy_nonoverlapping(self.reader.as_ptr(), self.cursor, len);
                     self.reader = &self.reader[len..];
                 }
@@ -924,6 +929,17 @@ mod tests {
         let mpk = pack_with_schema(ptr1, &schema).unwrap();
         let ptr2 = unpack_with_schema(&mpk, &schema).unwrap();
         assert_eq!(json::voidstar_to_json_string(ptr2, &schema).unwrap(), "[\"a\",\"\",\"ccc\"]");
+    }
+
+    // FMT-10
+    #[test]
+    fn a_msgpack_str_that_is_not_text_is_refused() {
+        let _shm = setup_shm();
+        let schema = parse_schema("as").unwrap();
+        // fixarray of 2, then fixstr "ok", then fixstr of 3 bytes "a\xffb".
+        let wire = [0x92, 0xa2, b'o', b'k', 0xa3, b'a', 0xff, b'b'];
+        let err = unpack_with_schema(&wire, &schema).unwrap_err().to_string();
+        assert!(err.contains("not valid UTF-8 (byte 1 of 3)"), "{err}");
     }
 
     #[test]

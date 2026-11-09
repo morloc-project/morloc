@@ -381,8 +381,9 @@ pub unsafe fn subpacket_json_inner(bytes: &[u8], value_schema_str: &str) -> Resu
     if s_ptr.is_null() {
         return Err(format!("json render: {}", take_err(err)));
     }
-    let s = std::ffi::CStr::from_ptr(s_ptr).to_string_lossy().into_owned();
+    let text = std::ffi::CStr::from_ptr(s_ptr).to_str().map(str::to_owned);
     libc::free(s_ptr as *mut c_void);
+    let s = text.map_err(|e| format!("json render: output is not valid UTF-8 (byte {})", e.valid_up_to()))?;
     let trimmed = s.trim();
     if !trimmed.starts_with('[') || !trimmed.ends_with(']') {
         return Err(format!(

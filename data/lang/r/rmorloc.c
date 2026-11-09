@@ -5,11 +5,14 @@
 #include <Rinternals.h>
 #include <Rdefines.h>
 #include <R_ext/Arith.h>
+#include <R_ext/Riconv.h>
 #include <Rversion.h>
 
 #include <math.h>
 #include <stdint.h>
 #include <stdbool.h>
+#include <langinfo.h>
+#include <strings.h>
 #include <stdarg.h>
 #include <limits.h>
 #include <string.h>
@@ -151,6 +154,105 @@ static void morloc_error_take(const char* prefix, char* heap_msg) {
     snprintf(msg, n, "%s%s", prefix, body);
     free(heap_msg);
     error("%s", msg);
+}
+
+// Whether the native encoding of this process is UTF-8 or ASCII, so that a
+// string in it is already UTF-8 if it is text at all.
+static bool r_native_is_utf8(void) {
+    const char* cs = nl_langinfo(CODESET);
+    return cs == NULL || strcasecmp(cs, "UTF-8") == 0 || strcasecmp(cs, "utf8") == 0
+        || strcmp(cs, "ANSI_X3.4-1968") == 0 || strcmp(cs, "ASCII") == 0 || strcmp(cs, "US-ASCII") == 0;
+}
+
+// Fail on Str bytes that are not UTF-8 (FMT-10), unless the check is off.
+static void r_require_text(const char* s, size_t n) {
+    int64_t bad = mlc_utf8_check((const uint8_t*)s, n);
+    if (bad >= 0) {
+        MORLOC_ERROR("R produced a Str that is not valid UTF-8 (byte %lld of %zu)", (long long)bad, n);
+    }
+}
+
+// Whether the UTF-8 check is off (FMT-10): the runtime then accepts any
+// bytes, a byte that is never UTF-8 included.
+static bool r_utf8_check_off(void) {
+    return mlc_utf8_check((const uint8_t*)"\xff", 1) < 0;
+}
+
+// Convert n bytes in encoding `from` ("" for the locale's) to UTF-8, or
+// return NULL when they are not text in that encoding.
+static const char* r_iconv_utf8(const char* str, size_t n, const char* from, size_t* out_len, size_t* bad_at) {
+    void* cd = Riconv_open("UTF-8", from);
+    if (cd == (void*)(-1)) {
+        MORLOC_ERROR("R cannot convert its string encoding to UTF-8");
+    }
+    size_t cap = 4 * n + 1;
+    char* out = R_alloc(cap, 1);
+    const char* in = str;
+    size_t in_left = n;
+    char* o = out;
+    size_t o_left = cap - 1;
+    size_t rc = Riconv(cd, &in, &in_left, &o, &o_left);
+    Riconv_close(cd);
+    if (rc == (size_t)(-1)) {
+        *bad_at = n - in_left;
+        return NULL;
+    }
+    *o = '\0';
+    *out_len = (size_t)(o - out);
+    return out;
+}
+
+// Convert to UTF-8 (FMT-10). Bytes that are not text in `from` fail, unless
+// the check is off, when they are passed on as they are.
+static const char* r_to_utf8(const char* str, size_t n, const char* from, size_t* out_len) {
+    size_t bad = 0;
+    const char* out = r_iconv_utf8(str, n, from, out_len, &bad);
+    if (out == NULL && strcmp(from, "CP1252") == 0) {
+        out = r_iconv_utf8(str, n, "ISO-8859-1", out_len, &bad);
+    }
+    if (out != NULL) {
+        return out;
+    }
+    if (r_utf8_check_off()) {
+        *out_len = n;
+        return str;
+    }
+    MORLOC_ERROR("R produced a Str that is not text in its encoding (byte %zu of %zu)", bad, n);
+    return NULL;
+}
+
+static bool r_bytes_ascii(const char* s, size_t n) {
+    for (size_t i = 0; i < n; i++) {
+        if ((unsigned char)s[i] & 0x80) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// The UTF-8 bytes of an R string (FMT-10): one marked latin1 is converted as
+// R reads it (CP1252), and one in the native encoding of a locale that is
+// neither UTF-8 nor ASCII is converted from it; any other (ASCII, marked
+// UTF-8 or bytes, or native in a UTF-8 locale) is used as it is. With
+// `check`, the result must be UTF-8.
+static const char* r_str_utf8(SEXP chr, size_t* len, bool check) {
+    const char* s = CHAR(chr);
+    size_t n = (size_t)LENGTH(chr);
+    if (!r_bytes_ascii(s, n)) {
+        cetype_t ce = Rf_getCharCE(chr);
+        if (ce == CE_LATIN1) {
+            s = r_to_utf8(s, n, "CP1252", &n);
+        } else if (ce == CE_NATIVE && !r_native_is_utf8()) {
+            s = r_to_utf8(s, n, "", &n);
+        }
+        if (check) {
+            r_require_text(s, n);
+        }
+    }
+    if (len != NULL) {
+        *len = n;
+    }
+    return s;
 }
 
 // Reject a voidstar carrying an interior NUL in a Str slot. `guard` is
@@ -725,16 +827,23 @@ static void r_size_step(r_walk_t* w, const Schema* schema, SEXP obj, size_t idx)
 
                 switch (TYPEOF(obj)) {
                     case CHARSXP:
-                        str = CHAR(obj);
-                        size += (size_t)strlen(str);  // Do not include null terminator
+                        if (schema->type == MORLOC_STRING) {
+                            size_t n = 0;
+                            r_str_utf8(obj, &n, true);
+                            size += n;
+                        } else {
+                            str = CHAR(obj);
+                            size += (size_t)strlen(str);  // Do not include null terminator
+                        }
                         break;
                     case STRSXP:
                         if (schema->type == MORLOC_STRING) {
                             if (LENGTH(obj) != 1) {
                                 MORLOC_ERROR("Expected character vector of length 1, but got length %zu", length);
                             }
-                            str = CHAR(STRING_ELT(obj, 0));
-                            size += (size_t)strlen(str);  // Do not include null terminator
+                            size_t n = 0;
+                            r_str_utf8(STRING_ELT(obj, 0), &n, true);
+                            size += n;
                         } else if(elem->type == MORLOC_STRING){
                             for(size_t i = 0; i < length; i++){
                                 r_size_child(w, elem, STRING_ELT(obj, i), 0);
@@ -772,6 +881,9 @@ static void r_size_step(r_walk_t* w, const Schema* schema, SEXP obj, size_t idx)
                                 UNPROTECT(1);
                             }
                         } else {
+                            if (schema->type == MORLOC_STRING && TYPEOF(obj) == RAWSXP) {
+                                r_require_text((const char*)RAW(obj), length);
+                            }
                             // Inline BigInt and fixed-width types: width covers the full element
                             size += length * elem->width;
                         }
@@ -1262,13 +1374,11 @@ static void r_write_step(r_walk_t* w, const Schema* schema, void* dest, SEXP obj
                 size_t length = 0;
                 switch(TYPEOF(obj)){
                     case CHARSXP:
-                        str = CHAR(obj);
-                        length = (size_t)strlen(str);
+                        str = r_str_utf8(obj, &length, false);
                         break;
                     case STRSXP:
                         if (LENGTH(obj) == 1) {
-                            str = CHAR(STRING_ELT(obj, 0));
-                            length = (size_t)strlen(str);
+                            str = r_str_utf8(STRING_ELT(obj, 0), &length, false);
                         } else {
                             MORLOC_ERROR("Expected character of length 1");
                         }
@@ -1284,6 +1394,7 @@ static void r_write_step(r_walk_t* w, const Schema* schema, void* dest, SEXP obj
                       MORLOC_ERROR("Expected a character type");
                       break;
                 }
+
                 Array* array = (Array*)dest;
                 array->size = length;  // Do not include null terminator
                 if(length > 0){
@@ -1953,7 +2064,7 @@ static void r_read_step(r_walk_t* w, const Schema* schema, const void* data, siz
                     Array* str_array = (Array*)data;
                     if(str_array->size > 0){
                         void* tmp_ptr = R_TRY_READ(resolve_array, str_array->data, str_array->size, 1, space);
-                        SEXP chr = PROTECT(mkCharLen(tmp_ptr, str_array->size));
+                        SEXP chr = PROTECT(mkCharLenCE(tmp_ptr, (int)str_array->size, CE_UTF8));
                         obj = PROTECT(ScalarString(chr));
                     } else {
                         SEXP chr = PROTECT(mkChar(""));
@@ -2005,7 +2116,7 @@ static void r_read_step(r_walk_t* w, const Schema* schema, const void* data, siz
                                 item = PROTECT(mkCharLen("", 0));
                             } else {
                                 void* str_ptr = R_TRY_WITH_READ(UNPROTECT(1), resolve_array, str_array->data, str_array->size, 1, space);
-                                item = PROTECT(mkCharLen(str_ptr, str_array->size));
+                                item = PROTECT(mkCharLenCE(str_ptr, (int)str_array->size, CE_UTF8));
                             }
                             UNPROTECT(1);
                             SET_STRING_ELT(obj, i, item);
@@ -2511,7 +2622,7 @@ SEXP morloc_mlc_read(SEXP schema_str_r, SEXP json_str_r) { MAYFAIL
     if (TYPEOF(json_str_r) != STRSXP || LENGTH(json_str_r) != 1) {
         error("mlc_read: json must be a single string");
     }
-    const char* json_str = CHAR(STRING_ELT(json_str_r, 0));
+    const char* json_str = r_str_utf8(STRING_ELT(json_str_r, 0), NULL, false);
 
     char* schema_str = strdup(CHAR(STRING_ELT(schema_str_r, 0)));
     Schema* schema = R_TRY_WITH(free(schema_str), parse_schema, schema_str);
@@ -3178,7 +3289,7 @@ SEXP morloc_mlc_show(SEXP obj_r, SEXP schema_str_r) { MAYFAIL
         MORLOC_ERROR("Failed to convert R object to internal representation");
     }
 
-    char* json = R_TRY_WITH(free_schema(schema), mlc_show, voidstar, schema);
+    char* json = R_TRY_WITH({ char* e_ = NULL; shfree(voidstar, &e_); free(e_); free_schema(schema); }, mlc_show, voidstar, schema);
 
     {
         char* shfree_errmsg = NULL;
@@ -3187,7 +3298,7 @@ SEXP morloc_mlc_show(SEXP obj_r, SEXP schema_str_r) { MAYFAIL
     }
     free_schema(schema);
 
-    SEXP result = PROTECT(mkString(json));
+    SEXP result = PROTECT(ScalarString(mkCharCE(json, CE_UTF8)));
     free(json);
     UNPROTECT(1);
     return result;

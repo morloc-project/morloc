@@ -494,6 +494,17 @@ mod tests {
 mod c_abi {
     use super::*;
 
+    /// The offset of the first byte of `len` bytes at `bytes` that is not
+    /// valid UTF-8, or -1 when they are all valid or the check is off.
+    #[no_mangle]
+    pub unsafe extern "C" fn mlc_utf8_check(bytes: *const u8, len: usize) -> i64 {
+        if bytes.is_null() || len == 0 {
+            return -1;
+        }
+        let slice = std::slice::from_raw_parts(bytes, len);
+        morloc_runtime_types::utf8::checked_first_invalid(slice).map_or(-1, |i| i as i64)
+    }
+
     #[no_mangle]
     pub unsafe extern "C" fn morloc_first_null_in_value(voidstar: *const c_void, schema: *const CSchema, space: MorlocSpace) -> *mut c_char {
         super::morloc_first_null_in_value(voidstar, schema, space)

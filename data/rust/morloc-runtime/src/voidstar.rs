@@ -457,7 +457,8 @@ impl<'a, 'r> RebaseWalk<'a, 'r> {
     ///
     /// # Safety
     /// `first` points at `n` headers, as `step`'s `data` points at one.
-    unsafe fn headers(&self, first: *mut Array, n: usize, elem_w: usize, dim: Option<(usize, Origin)>) -> Result<(), MorlocError> {
+    unsafe fn headers(&self, first: *mut Array, n: usize, elem_w: usize, dim: Option<(usize, Origin)>, text: bool) -> Result<(), MorlocError> {
+        let dim_origin = self.dims;
         let Some(RelWindow { lo, hi }) = self.window else {
             return Err(MorlocError::Shm("a run of headers is rebased only inside a window".into()));
         };
@@ -490,6 +491,9 @@ impl<'a, 'r> RebaseWalk<'a, 'r> {
             match extent.and_then(|e| rel.checked_add(e)) {
                 Some(end) if rel >= lo && end <= hi => {}
                 _ => return self.check(rel, arr.size.checked_mul(elem_w)),
+            }
+            if text {
+                check_text(self.target(rel)?, arr.size, dim_origin)?;
             }
         }
         Ok(())
@@ -556,6 +560,9 @@ impl<'a, 'r> Walker<()> for RebaseWalk<'a, 'r> {
                         if arr.size > 0 {
                             let w = s.parameters.first().map_or(1, |e| e.width);
                             self.check(rel, arr.size.checked_mul(w))?;
+                            if s.serial_type == SerialType::String && self.dims.is_some() {
+                                check_text(self.target(rel)?, arr.size, self.dims)?;
+                            }
                         }
                     }
                     // An empty array points nowhere (its rebased sentinel is
@@ -582,7 +589,8 @@ impl<'a, 'r> Walker<()> for RebaseWalk<'a, 'r> {
                         let inner = self.res.resolve(elem_schema)?;
                         if let Some(ew) = header_elem_width(inner, self.dims.is_some()) {
                             let dim = self.dims.and_then(|o| inner.array_dim().map(|d| (d, o)));
-                            return self.headers(elems.add(f.idx * w) as *mut Array, arr.size - f.idx, ew, dim);
+                            let text = inner.serial_type == SerialType::String && self.dims.is_some();
+                            return self.headers(elems.add(f.idx * w) as *mut Array, arr.size - f.idx, ew, dim, text);
                         }
                     }
                     let flat_elem = self.res.flat(elem_schema);
@@ -723,6 +731,21 @@ unsafe fn check_enum_run(s: &Schema, data: *const u8, n: usize, w: usize, o: Ori
         }
     }
     Ok(())
+}
+
+/// A `Str` body read from outside must be text (FMT-10).
+///
+/// # Safety
+/// `p` addresses `n` readable bytes.
+unsafe fn check_text(p: *const u8, n: usize, origin: Option<Origin>) -> Result<(), MorlocError> {
+    let bytes = std::slice::from_raw_parts(p, n);
+    match morloc_runtime_types::utf8::first_invalid(bytes) {
+        None => Ok(()),
+        Some(i) => {
+            let from = if matches!(origin, Some(Origin::Outside)) { " in data read from outside" } else { "" };
+            Err(MorlocError::Serialization(format!("a Str that is not valid UTF-8 (byte {i} of {n}){from}")))
+        }
+    }
 }
 
 /// The width of the elements of a string or array whose elements hold no
@@ -932,11 +955,12 @@ unsafe fn walk_root_array_parallel(
             }
             if let (Some(ew), Some(inner)) = (header_w, inner) {
                 let dim = dims.and_then(|o| inner.array_dim().map(|d| (d, o)));
+                let text = inner.serial_type == SerialType::String && dims.is_some();
                 let end = (start + chunk).min(n);
                 // SAFETY: elements start..end lie inside the region the
                 // header check admitted.
                 let first = unsafe { (elems as *mut u8).add(start * width) } as *mut Array;
-                if let Err(e) = unsafe { w.headers(first, end - start, ew, dim) } {
+                if let Err(e) = unsafe { w.headers(first, end - start, ew, dim, text) } {
                     failed.lock().unwrap_or_else(|p| p.into_inner()).get_or_insert(e);
                     next.store(n, std::sync::atomic::Ordering::Relaxed);
                     return;
@@ -976,6 +1000,18 @@ unsafe fn walk_root_array_parallel(
 /// inside `bytes`, every variant tag names an arm.
 pub fn check_in_place(bytes: &[u8], schema: &Schema, vol_idx_hint: u16, origin: Origin) -> Result<(), MorlocError> {
     check_window(bytes, schema, -shm::encode_relptr(vol_idx_hint as usize, 0), origin.checked())
+}
+
+/// Check the value of `schema` at the start of `block` as data read from
+/// outside is checked (FMT-10), writing nothing.
+///
+/// # Safety
+/// `block` must be a live shared-memory block holding a value of `schema`.
+pub unsafe fn check_text_in_block(block: AbsPtr, schema: &Schema) -> Result<(), MorlocError> {
+    let (Some(len), Ok(rel)) = (shm::shm_block_size(block), shm::abs2rel(block)) else {
+        return Err(MorlocError::Shm("a value to check is not one shared-memory block".into()));
+    };
+    check_window(std::slice::from_raw_parts(block, len), schema, -rel, Some(Origin::Outside))
 }
 
 /// Whether the value of `schema` at the start of `block` lies wholly inside

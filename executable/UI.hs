@@ -93,6 +93,7 @@ data MakeCommand = MakeCommand
   , makeForce :: Bool
   , makeInclude :: [String]
   , makeUnsafeSkipNullCheck :: Bool
+  , makeUnsafeSkipUtf8Check :: Bool
   , makeInlineSize :: Maybe Int64
   , makeNoShm :: Bool
   , makeTmpdir :: Maybe String
@@ -119,6 +120,7 @@ makeCommandParser =
     <*> optMakeForce
     <*> optMakeInclude
     <*> optUnsafeSkipNullCheck
+    <*> optUnsafeSkipUtf8Check
     <*> optInlineSize
     <*> optNoShm
     <*> optTmpdir
@@ -666,6 +668,19 @@ optDebugTrace =
                 ++ "$MORLOC_DEBUG_DIR (or $MORLOC_RUN_DIR/debug if --log-dir "
                 ++ "is set). Zero cost on the happy path; opt-in only for "
                 ++ "diagnostic builds."
+            )
+    )
+
+optUnsafeSkipUtf8Check :: Parser Bool
+optUnsafeSkipUtf8Check =
+  switch
+    ( long "unsafe-skip-utf8-check"
+        <> help
+            ( "Disable the check that a Str leaving a C++, R or Python pool "
+                ++ "is valid UTF-8. Unsafe: bytes that are not text then "
+                ++ "pass through raw output unchanged, and fail later, far "
+                ++ "from where they were made, in JSON output or in a "
+                ++ "language that decodes text."
             )
     )
 

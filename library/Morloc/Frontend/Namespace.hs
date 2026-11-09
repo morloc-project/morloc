@@ -124,6 +124,7 @@ copyState oldIdx newIdx = do
       , stateSnapshot = stateSnapshot s
       , stateEvalSandbox = stateEvalSandbox s
       , stateUnsafeSkipNullCheck = stateUnsafeSkipNullCheck s
+      , stateUnsafeSkipUtf8Check = stateUnsafeSkipUtf8Check s
       , stateInlineSize = stateInlineSize s
       , stateNoShm = stateNoShm s
       , stateTmpdir = stateTmpdir s

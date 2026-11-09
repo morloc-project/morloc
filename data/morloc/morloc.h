@@ -14,7 +14,7 @@
 // (Morloc.Abi). Provisioning refuses to run a prebuilt libmorloc/nexus whose
 // version differs from the compiler's expected value (fail-closed), preventing
 // silent cross-pool struct/offset corruption.
-#define MORLOC_ABI_VERSION 15
+#define MORLOC_ABI_VERSION 16
 
 // Atomic includes must sit outside any `extern "C"` block because the
 // C++ <atomic> header pulls in <type_traits> et al., which use C++
@@ -1414,6 +1414,10 @@ char* morloc_first_null_in_value(
     const void* voidstar,
     const Schema* schema,
     morloc_space_t space);
+
+// The offset of the first byte of a Str body that is not valid UTF-8, or -1
+// when it is valid or the check is off (FMT-10).
+int64_t mlc_utf8_check(const uint8_t* bytes, size_t len);
 
 uint8_t* make_morloc_local_call_packet(uint32_t midx, const uint8_t* const* arg_packets, size_t nargs, ERRMSG);
 morloc_call_t* read_morloc_call_packet(const uint8_t* packet, ERRMSG);

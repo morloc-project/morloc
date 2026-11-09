@@ -103,5 +103,20 @@
   pays decompression of every interior sub-packet on every call, even
   when the cache has room. This trades CPU for memory: a one-shot slice
   no longer leaves up to `MORLOC_IFILE_CACHE_BYTES` held. Revisit the
-  policy with the piece-wise slice (plan step 3b), for example by caching
-  interior sub-packets while the cache has free room, without evicting.
+  policy with the piece-wise slice (plan step 3b). The user prefers caching
+  interior sub-packets while there is room (2026-11-08). Tried and
+  reverted the same day (patch in /work/plans/output-path-perf/patches/):
+  the bound (`handle_bytes`) is shared by all of a handle's slots, but a
+  slot evicts only its own entries. A slice's interiors then fill the bound
+  for sibling slots, block decode-ahead reservations (SLOT-27, which
+  reserve without evicting), and make the slice's last end evict other
+  reads' entries. Caching interiors needs cross-slot eviction and
+  cold-inserted entries (clock bit 0) first.
+
+- **A field walk reads only the first sub-packet.** [read, 2026-11-09]
+  `shared_ifile_general` (stream.rs) materializes sub-packet 0 and walks it
+  with the value schema. A path that reaches it with a root index
+  (`.[].x`, not special-cased by `shared_ifile_walk`) can only reach
+  elements of the first sub-packet of a multi-sub-packet IFile:
+  `f.[1500].x` over three sub-packets of 1000 fails its bounds check, or
+  reads the wrong element.

@@ -94,3 +94,10 @@
   loop on `listener.incoming()` that never ends; every reuse test leaves
   one blocked thread (and its socket) for the rest of the run. Harmless so
   far, but they were mistaken for stuck tests in a hang's thread list.
+
+- **`compaction_gives_the_same_bytes_whichever_side_moves` fails
+  intermittently.** [reproduced once, 2026-11-08, b55a76cd9 plus uncommitted
+  UTF-8 work] In a full `cargo test --workspace`, write_behind.rs:424
+  panicked with `Shm("Failed to find absptr 0x7f9db8d80110 in shared
+  memory")`. It passed alone and in the next full run. Likely another
+  test's registry teardown or volume reset racing it; unconfirmed.
