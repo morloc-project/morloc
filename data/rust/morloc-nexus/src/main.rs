@@ -461,9 +461,6 @@ fn main() {
     if config.quiet {
         crate::process::set_startup_env("MORLOC_QUIET", "1");
     }
-    if let Some(z) = config.stdout_compression {
-        crate::process::set_startup_env("MORLOC_STDOUT_COMPRESSION_LEVEL", z.to_string());
-    }
     if let Some(n) = config.debug_cache_depth {
         crate::process::set_startup_env("MORLOC_DEBUG_CACHE_DEPTH", n.to_string());
     }
@@ -1131,6 +1128,7 @@ fn stop_frontend_children() {
 fn run_call_packet(config: &dispatch::NexusConfig, tmpdir: &str) {
     use std::ffi::{c_char, c_void, CString};
     use std::ptr;
+    dispatch::publish_stdout_level(config);
 
     extern "C" {
         fn read_binary_file(

@@ -650,6 +650,19 @@ mod c_abi {
         super::stream_registry_init(errmsg)
     }
 
+    /// SLOT-33: `level` 255 means the `@write` level. 0 or 1 with `errmsg` set.
+    #[no_mangle]
+    pub unsafe extern "C" fn mlc_set_stdout_level(level: u8, errmsg: *mut *mut c_char) -> i32 {
+        crate::error::clear_errmsg(errmsg);
+        match crate::stream::set_stdout_level((level != 255).then_some(level)) {
+            Ok(()) => 0,
+            Err(e) => {
+                crate::error::set_errmsg(errmsg, &e);
+                1
+            }
+        }
+    }
+
     #[no_mangle]
     pub unsafe extern "C" fn shm_set_fallback_dir(dir: *const c_char) {
         super::shm_set_fallback_dir(dir)

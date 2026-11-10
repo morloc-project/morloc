@@ -262,6 +262,20 @@ a slot evicts its own entries to make room, and serves a sub-packet
 uncached when the handle has no room for it.
 
 
+### SLOT-33 A stdout batch is compressed only when the output is packets
+Status: implemented
+Checked by: a_stdout_stream_takes_the_level_the_nexus_recorded, golden:stdout-stream-compression, golden:stdout-raw-bodies
+
+Before it dispatches a call, the nexus records in the stream registry the
+level stdout batches are written at, for the form it writes them in: for
+output whose frames it
+forwards (packets, voidstar), its `-z` level, or none, which leaves the
+`@write` level; for every other form, which it decodes before writing,
+level 0, so `@write` levels on `@stdout` need not agree there. A pool
+writing to `@stdout` takes that level; `@stderr` and file streams keep
+theirs. Each run has its own registry, so a nested run takes nothing from
+an enclosing one. A daemon records none: it refuses `@stdout`.
+
 ### SLOT-34 A slice caches only the sub-packets at its ends
 Status: implemented
 Checked by: a_slice_caches_only_the_sub_packets_at_its_ends

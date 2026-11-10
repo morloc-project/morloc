@@ -126,10 +126,12 @@ pub struct DispatchOptions {
     /// flag, so the on-disk packet is self-contained. When N > 0 the
     /// MESG payload is additionally zstd-compressed; the schema
     /// metadata block stays in the clear. 0 = no compression,
-    /// 1 = fastest, 9 = maximum. A returned value defaults to 0; a
-    /// stream written to stdout defaults to its `@write` level, which
-    /// this flag overrides when given.
-    #[arg(short = 'z', long = "compression-level", value_name = "N")]
+    /// 1 = fastest, 9 = maximum. A returned value defaults to 0. A
+    /// stream written to stdout is compressed only for packet or voidstar
+    /// output, at this level when given, else at its `@write` level; any
+    /// other form receives it uncompressed.
+    #[arg(short = 'z', long = "compression-level", value_name = "N",
+          value_parser = clap::value_parser!(u8).range(0..=9))]
     pub compression_level: Option<u8>,
 }
 
@@ -211,10 +213,9 @@ pub struct DaemonArgs {
     pub output_form: Option<DaemonOutputForm>,
 
     /// zstd compression preset (0..=9) for `-f packet` output. A returned
-    /// value defaults to 0; a stream written to stdout defaults to its
-    /// `@write` level, which this flag overrides when given. Ignored for
-    /// `-f json`.
-    #[arg(short = 'z', long = "compression-level", value_name = "N")]
+    /// value defaults to 0. Ignored for `-f json`.
+    #[arg(short = 'z', long = "compression-level", value_name = "N",
+          value_parser = clap::value_parser!(u8).range(0..=9))]
     pub compression_level: Option<u8>,
 
     /// Suppress morloc-emitted log lines on stderr.

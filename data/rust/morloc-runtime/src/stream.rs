@@ -168,8 +168,12 @@ struct RegistryHeader {
     /// drop its own slots for ended streams (SLOT-9).
     release_doorbell:   std::sync::atomic::AtomicU32,
 
+    /// SLOT-33: one more than the level stdout batches are written at; 0
+    /// means the `@write` level.
+    stdout_level:       std::sync::atomic::AtomicU8,
+
     /// Reserved for future use.
-    _reserved:    [u8; 12],
+    _reserved:    [u8; 11],
 }
 
 const _: () = {
@@ -3987,16 +3991,7 @@ pub fn shared_write_subpacket(
 
         let _guard = lock_for_write(slot, gen_claim, "the stream was closed, or its reader stopped")?;
 
-        // The `@write` level is the default; on a stdio-bound stream the
-        // nexus's explicit `-z` overrides it. The pool compresses the
-        // sub-packet itself either way, so the footer's index describes the
-        // bytes the nexus actually forwards and the redirected file is a
-        // valid IFile.
-        let level = if slot.is_stdio.get() != 0 {
-            stdio_compression_override().unwrap_or(level)
-        } else {
-            level
-        };
+        let level = written_level(slot.is_stdio.get() != 0, slot.stdio_kind.get(), level);
 
         // Pin compression level on first @write into this slot
         // (across all pools); subsequent writes must match.
@@ -5666,14 +5661,49 @@ pub(crate) fn pool_reclaim_stdio_after_dispatch() {
     set_current_call_id(CALL_ID_NO_SWEEP);
 }
 
-/// The nexus's explicit `-z N`, published to every pool as
-/// `MORLOC_STDOUT_COMPRESSION_LEVEL`. Unset means the `@write` level
-/// stands; an unparsable value is treated the same way rather than
-/// silently selecting some other level.
+// SLOT-33: the level a batch of `write_level` is written at on a stream.
+fn written_level(is_stdio: bool, stdio_kind: u8, write_level: u8) -> u8 {
+    if is_stdio && stdio_kind == STDIO_KIND_STDOUT {
+        stdio_compression_override().unwrap_or(write_level)
+    } else {
+        write_level
+    }
+}
+
+/// SLOT-33: the level the nexus recorded for stdout batches, or `None`
+/// for the `@write` level.
 pub fn stdio_compression_override() -> Option<u8> {
-    std::env::var("MORLOC_STDOUT_COMPRESSION_LEVEL")
-        .ok()
-        .and_then(|s| s.parse::<u8>().ok())
+    use std::sync::atomic::Ordering;
+    let base = REGISTRY_BASE.load(Ordering::Acquire);
+    if base.is_null() {
+        return None;
+    }
+    // SAFETY: SLOT-9: the registry stays mapped until `registry_teardown`.
+    match unsafe { (*base).stdout_level.load(Ordering::Acquire) } {
+        0 => None,
+        n => Some(n - 1),
+    }
+}
+
+/// SLOT-33: record the level stdout batches are written at.
+pub fn set_stdout_level(level: Option<u8>) -> Result<(), MorlocError> {
+    use std::sync::atomic::Ordering;
+    registry_init()?;
+    let base = REGISTRY_BASE.load(Ordering::Acquire);
+    if base.is_null() {
+        return Err(MorlocError::Other("the stream registry is not mapped".into()));
+    }
+    let stored = match level {
+        None => 0,
+        Some(l) => {
+            morloc_runtime_types::compression::CompressionLevel::from_u8(l)
+                .map_err(|_| MorlocError::Other(format!("compression level {l} is out of range")))?;
+            l + 1
+        }
+    };
+    // SAFETY: SLOT-9: the registry stays mapped until `registry_teardown`.
+    unsafe { (*base).stdout_level.store(stored, Ordering::Release) };
+    Ok(())
 }
 
 pub fn read_write_buffer_bytes_env() -> usize {
@@ -7859,6 +7889,37 @@ pub fn shared_open_ifile_recovered(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // SLOT-33: the level a stdout stream is written at is the one the nexus
+    // recorded in the registry for its output; none recorded means the
+    // `@write` level.
+    #[test]
+    fn a_stdout_stream_takes_the_level_the_nexus_recorded() {
+        let _shm = crate::own_test_registry();
+        registry_init().unwrap();
+        set_stdout_level(None).unwrap();
+        let unset = stdio_compression_override();
+        set_stdout_level(Some(0)).unwrap();
+        let zero = stdio_compression_override();
+        set_stdout_level(Some(3)).unwrap();
+        let three = stdio_compression_override();
+        set_stdout_level(Some(0)).unwrap();
+        let stdout = written_level(true, STDIO_KIND_STDOUT, 5);
+        let stderr = written_level(true, STDIO_KIND_STDERR, 5);
+        let file = written_level(false, 0, 5);
+        let out_of_range = set_stdout_level(Some(40)).is_err();
+        set_stdout_level(None).unwrap();
+        let stdout_unset = written_level(true, STDIO_KIND_STDOUT, 5);
+        assert_eq!(unset, None);
+        assert_eq!(zero, Some(0));
+        assert_eq!(three, Some(3));
+        assert_eq!(stdout, 0, "a stdout batch ignored the recorded level");
+        assert_eq!(stderr, 5, "a stderr batch took the stdout level");
+        assert_eq!(file, 5, "a file stream took the stdout level");
+        assert!(out_of_range, "a level out of range was recorded");
+        assert_eq!(stdout_unset, 5, "an unrecorded level did not leave the @write level");
+    }
+
 
     /// Verify the walk-path parser accepts every shape the Haskell
     /// encoder can produce (and the design's full grammar including

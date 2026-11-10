@@ -83,8 +83,8 @@ pub struct NexusConfig {
     pub debug_recursion_cap: Option<u32>,
     /// zstd level for packet output; 0 is no compression.
     pub compression_level: u8,
-    /// `-z` as given, if it was; published to pools as
-    /// `MORLOC_STDOUT_COMPRESSION_LEVEL`.
+    /// `-z` as given, if it was: the level stdout batches are written at
+    /// for packet output (SLOT-33); also passed on to staged replays.
     pub stdout_compression: Option<u8>,
     /// Every served module: the union of `mcp_programs` and `api_programs`.
     pub programs: Vec<String>,
@@ -296,6 +296,7 @@ pub fn dispatch_command_parsed(
 ) {
     crate::runlog::record_command(&cmd.name);
     crate::runlog::emit_prologue();
+    publish_stdout_level(config);
 
     if !cmd.is_pure() {
         if let Err(e) = process::start_daemons(sockets, &cmd.needed_pools) {
@@ -2189,5 +2190,23 @@ mod tests {
         assert!(res.is_err());
         let checks = vec![Check::Path("rwc".into())];
         assert!(apply_checks("/tmp/anything", &checks).is_err());
+    }
+}
+
+/// SLOT-33: stdout batches are compressed only for output whose frames the
+/// nexus forwards (packets, voidstar); every other form decodes them, so
+/// they travel uncompressed.
+pub(crate) fn publish_stdout_level(config: &NexusConfig) {
+    extern "C" {
+        fn mlc_set_stdout_level(level: u8, errmsg: *mut *mut std::ffi::c_char) -> i32;
+    }
+    let level = match crate::stdio_server::output_format() {
+        OutputFormat::Packet | OutputFormat::VoidStar => config.stdout_compression.unwrap_or(255),
+        _ => 0,
+    };
+    let mut err: *mut std::ffi::c_char = std::ptr::null_mut();
+    if unsafe { mlc_set_stdout_level(level, &mut err) } != 0 {
+        let msg = crate::process::take_c_errmsg(err).unwrap_or_else(|| "unknown error".into());
+        crate::runlog::die_with_error(&format!("cannot record the stdout compression level: {}", msg));
     }
 }

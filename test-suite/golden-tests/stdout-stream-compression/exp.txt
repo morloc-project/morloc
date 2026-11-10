@@ -6,3 +6,5 @@ OK write level compresses
 OK -z overrides
 OK mixed levels refused
 OK -z pins one level
+OK decoded output ignores the levels
+OK -z 10 refused

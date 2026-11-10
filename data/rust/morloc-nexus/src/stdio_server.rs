@@ -126,10 +126,10 @@ static DAEMON_MODE: std::sync::atomic::AtomicBool =
 /// `NexusConfig` at server start. Streamed `@stdout` output is
 /// re-encoded per `format` so it honours `-f` exactly like a returned
 /// value. Compression is not applied here: the pool compresses each
-/// sub-packet at the effective level (its `@write` level, or the nexus
-/// `-z` it reads from the environment), and the packet formats pass the
-/// bytes through so the footer's sub-packet index stays true. stderr is
-/// unaffected (it stays raw stream-packet framing).
+/// sub-packet at the level the nexus records for the format (SLOT-33), and
+/// the packet formats pass the bytes through so the footer's sub-packet
+/// index stays true. stderr is unaffected (it stays raw stream-packet
+/// framing).
 #[derive(Clone, Copy)]
 struct RenderCfg {
     format: OutputFormat,
@@ -154,6 +154,11 @@ pub fn set_output_format(format: OutputFormat) {
     if let Ok(mut g) = RENDER_CFG.lock() {
         g.format = format;
     }
+}
+
+/// The format streamed stdout is written in now.
+pub(crate) fn output_format() -> OutputFormat {
+    render_cfg().format
 }
 
 pub(crate) fn format_name(f: OutputFormat) -> &'static str {
@@ -751,8 +756,8 @@ fn do_write(slot_id: i64, bytes: &[u8]) -> Resp {
                 Ok(())
             }
             // One logical stream per run: the header is written once, data
-            // frames pass through unchanged (the pool already compressed
-            // them), and each pool footer is folded into the single final
+            // frames pass through unchanged (the pool compressed them at
+            // the recorded level), and each pool footer is folded into the single final
             // footer written by `finish_stdout`.
             OutputFormat::Packet | OutputFormat::VoidStar => {
                 write_logical_packet(&mut slot, slot_id, bytes, is_footer, is_data)
