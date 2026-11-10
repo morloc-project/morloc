@@ -104,11 +104,6 @@ Changes here touch locks and ownership: model first.
   [read, 2026-11-09] SHM-14. `record` (eval_arena.rs) stores generation 0
   when the block's header cannot be read; claimed generations skip 0, so
   release reports the entry as stale and leaks the arena's reference.
-- **Persisting a packet may misread a reference packet.** [read,
-  speculative, 2026-11-09] `rewrite_data_packet_for_persistence`
-  (handle_scan.rs ~352, from the nexus stage.rs ~111) does not test the
-  source byte; on a reference packet it would walk the relptr as an
-  inline root value.
 - **A value holding the block magic at an interior offset forges a header.**
   [read, 2026-11-09] SHM-13. A header is recognised by its magic word
   (`header_at`, shm.rs); data that happens to hold that word just before
@@ -134,3 +129,15 @@ Changes here touch locks and ownership: model first.
   is unsettled. A seed is not a cheap fix: a merge keeps the larger
   generation without regard to wrapping, so a seeded volume can hand a
   recently used generation out again after a few claims.
+- **A SLURM worker's result block is never released.** [read, 2026-11-09]
+  SHM-4. The worker's return-egress rewrite (morloc-nexus main.rs ~1280)
+  frees the pool's reply and sends an inline copy, without releasing the
+  block the pool donated with it; only the process's exit cleans it up.
+- **Persisting a stream-bearing value by reference copies it whole.**
+  [read, 2026-11-09] Cost. To rewrite handles to paths, a reference
+  packet whose type can hold a stream field is flattened in portable form
+  into an inline packet in memory (handle_scan.rs
+  `rewrite_data_packet_for_persistence`) and copied once more by its C
+  wrapper, about three times the value at peak counting the block,
+  where a value without stream fields streams to its file. A portable
+  flatten during the streamed write would bound it.

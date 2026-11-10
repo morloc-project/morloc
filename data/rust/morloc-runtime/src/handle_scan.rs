@@ -331,9 +331,10 @@ pub fn rewrite_handles_to_paths(
 }
 
 /// Rewrite a MORLOC_DATA_PACKET so every `TAG_HANDLE` stream-handle
-/// field in its voidstar payload becomes `TAG_PATH`. The header, its
-/// metadata section (including schema), and any non-voidstar payload
-/// pass through unchanged. Returns a fresh `Vec<u8>` sized to the
+/// field in its voidstar payload becomes `TAG_PATH`. The metadata section
+/// (including schema) and any non-voidstar payload pass through
+/// unchanged; a packet by reference whose type can hold a handle comes
+/// back inline, carrying the value. Returns a fresh `Vec<u8>` sized to the
 /// rewritten packet.
 ///
 /// Used at every persistence boundary (SLURM egress, cache write):
@@ -352,6 +353,11 @@ pub fn rewrite_handles_to_paths(
 pub fn rewrite_data_packet_for_persistence(
     packet: &[u8],
 ) -> Result<Vec<u8>, MorlocError> {
+    Ok(rewrite_packet(packet)?.unwrap_or_else(|| packet.to_vec()))
+}
+
+/// The rewritten packet, or `None` when there is nothing to rewrite.
+fn rewrite_packet(packet: &[u8]) -> Result<Option<Vec<u8>>, MorlocError> {
     use morloc_runtime_types::packet::{
         PacketHeader, PACKET_COMPRESSION_NONE, PACKET_FORMAT_VOIDSTAR,
         read_schema_from_meta,
@@ -359,26 +365,59 @@ pub fn rewrite_data_packet_for_persistence(
     use morloc_runtime_types::schema::parse_schema;
 
     if packet.len() < 32 {
-        return Ok(packet.to_vec());
+        return Ok(None);
     }
     let hdr_arr: [u8; 32] = packet[..32].try_into().unwrap();
     let hdr = PacketHeader::from_bytes(&hdr_arr)?;
     if !hdr.is_data() {
-        return Ok(packet.to_vec());
+        return Ok(None);
     }
     // SAFETY: is_data implies CommandData is the active union variant.
     let format = unsafe { hdr.command.data.format };
     if format != PACKET_FORMAT_VOIDSTAR {
         // msgpack / JSON already carry paths as strings; nothing to
         // rewrite for cross-nexus.
-        return Ok(packet.to_vec());
+        return Ok(None);
     }
     // A compressed body is not a voidstar to walk, whatever the format
     // field says about what it will be once expanded. Walking it would
     // read the frame as structure and could rewrite bytes inside it.
     let compression = unsafe { hdr.command.data.compression };
     if compression != PACKET_COMPRESSION_NONE {
-        return Ok(packet.to_vec());
+        return Ok(None);
+    }
+
+    // SAFETY: is_data implies CommandData is the active union variant.
+    if unsafe { hdr.command.data.source } == morloc_runtime_types::packet::PACKET_SOURCE_RPTR {
+        let schema_str = read_schema_from_meta(packet)?
+            .ok_or_else(|| MorlocError::Other(
+                "rewrite_data_packet_for_persistence: packet has no schema metadata".into(),
+            ))?;
+        let schema = parse_schema(&schema_str)?;
+        let can_hold_a_handle = [StreamFieldKind::IFile, StreamFieldKind::OStream, StreamFieldKind::IStream]
+            .into_iter()
+            .any(|k| schema_contains_kind(&schema, k));
+        if !can_hold_a_handle {
+            return Ok(None);
+        }
+        let meta_end = 32usize.checked_add(hdr.offset as usize);
+        let payload_end = meta_end.and_then(|n| n.checked_add(hdr.length as usize));
+        if payload_end.is_none_or(|n| n > packet.len()) {
+            return Err(MorlocError::Other(
+                "rewrite_data_packet_for_persistence: a reference packet is shorter than its header says".into(),
+            ));
+        }
+        // SAFETY: SHM-13: the bounds above hold the header and the reference.
+        let block = unsafe { crate::packet_ffi::packet_rptr_block(packet.as_ptr()) }?
+            .ok_or_else(|| MorlocError::Other(
+                "rewrite_data_packet_for_persistence: a reference packet names no block".into(),
+            ))?;
+        let mut value = Vec::new();
+        crate::voidstar::flatten_into_portable(&mut value, block, &schema)?;
+        let mut new_hdr = hdr;
+        // SAFETY: is_data implies CommandData is the active union variant.
+        unsafe { new_hdr.command.data.set_inline() };
+        return Ok(Some(assemble(new_hdr, &packet[32..meta_end.unwrap()], &value)));
     }
 
     let meta_len = hdr.offset as usize;
@@ -410,29 +449,38 @@ pub fn rewrite_data_packet_for_persistence(
         sh::read_tag(payload_bytes.as_ptr().add(f.offset)) == sh::TAG_HANDLE
     });
     if !has_tag_handle {
-        return Ok(packet.to_vec());
+        return Ok(None);
     }
 
     let mut new_payload = payload_bytes.to_vec();
     rewrite_handles_to_paths(&mut new_payload, &fields)?;
 
-    let mut new_hdr = hdr;
-    new_hdr.length = new_payload.len() as u64;
-    let mut out = Vec::with_capacity(32 + meta_len + new_payload.len());
-    out.extend_from_slice(&new_hdr.to_bytes());
-    out.extend_from_slice(meta_bytes);
-    out.extend_from_slice(&new_payload);
-    Ok(out)
+    Ok(Some(assemble(hdr, meta_bytes, &new_payload)))
+}
+
+/// A packet of `hdr`, with `payload` as its length, its metadata and its payload.
+fn assemble(
+    mut hdr: morloc_runtime_types::packet::PacketHeader,
+    meta: &[u8],
+    payload: &[u8],
+) -> Vec<u8> {
+    hdr.length = payload.len() as u64;
+    let mut out = Vec::with_capacity(32 + meta.len() + payload.len());
+    out.extend_from_slice(&hdr.to_bytes());
+    out.extend_from_slice(meta);
+    out.extend_from_slice(payload);
+    out
 }
 
 /// C-ABI wrapper around [`rewrite_data_packet_for_persistence`] for the
 /// nexus binary, which doesn't link morloc-runtime as a Rust crate.
 ///
 /// On success sets `*out_ptr` to a `libc::malloc`'d buffer holding the
-/// rewritten packet and `*out_len` to its length, and returns 0. If the
-/// packet already contained no `TAG_HANDLE` fields, `*out_ptr` is set to
-/// null and `*out_len` to the original length -- the caller keeps its
-/// own buffer. On error returns -1 and sets `errmsg` to a
+/// rewritten packet and `*out_len` to its length, and returns 0. If there
+/// is nothing to rewrite, `*out_ptr` is set to null and `*out_len` to the
+/// original length -- the caller keeps its own buffer. A packet by
+/// reference whose type can hold a stream field always comes back as a new
+/// inline packet. On error returns -1 and sets `errmsg` to a
 /// `libc::malloc`'d, NUL-terminated string owned by the caller.
 ///
 /// # Safety
@@ -460,14 +508,13 @@ pub(crate) unsafe fn mlc_rewrite_packet_for_persistence(
         return -1;
     }
     let src = std::slice::from_raw_parts(packet, packet_len);
-    match rewrite_data_packet_for_persistence(src) {
-        Ok(rewritten) => {
-            if rewritten.len() == packet_len && rewritten.as_slice() == src {
-                // No-op rewrite: caller keeps its buffer.
-                *out_ptr = std::ptr::null_mut();
-                *out_len = packet_len;
-                return 0;
-            }
+    match rewrite_packet(src) {
+        Ok(None) => {
+            *out_ptr = std::ptr::null_mut();
+            *out_len = packet_len;
+            0
+        }
+        Ok(Some(rewritten)) => {
             let buf = libc::malloc(rewritten.len()) as *mut u8;
             if buf.is_null() {
                 set_errmsg(errmsg, &MorlocError::Other(
@@ -560,6 +607,76 @@ mod tests {
             assert_eq!(fields.len(), depth);
             crate::shm::shfree(ptr).unwrap();
         });
+    }
+
+    /// A packet that names its value by reference is rewritten from the
+    /// value it names, not from the reference's own bytes: a handle in that
+    /// value reaches the rewrite.
+    #[test]
+    fn a_reference_packet_is_rewritten_from_the_value_it_names() {
+        let _shm = crate::init_test_shm();
+        let schema = parse_schema("F2aj").unwrap();
+        let block = crate::shm::shcalloc(1, sh::STREAM_HANDLE_FIELD_SIZE).unwrap();
+        unsafe { sh::write_field(block, sh::TAG_HANDLE, 0x7777_0001) };
+        let cs = crate::cschema::CSchema::from_rust(&schema);
+        let rel = crate::shm::abs2rel(block).unwrap();
+        let packet = unsafe { crate::packet_ffi::make_standard_data_packet(rel, cs) };
+        let got = (!packet.is_null()).then(|| {
+            let len = unsafe { crate::packet_ffi::morloc_packet_size(packet, std::ptr::null_mut()) };
+            let bytes = unsafe { std::slice::from_raw_parts(packet, len) }.to_vec();
+            rewrite_data_packet_for_persistence(&bytes)
+        });
+        unsafe {
+            libc::free(packet as *mut libc::c_void);
+            crate::cschema::CSchema::free(cs);
+        }
+        crate::shm::shfree(block).unwrap();
+        let got = got.expect("no reference packet was built");
+        let err = format!("{:?}", got.expect_err("an unknown handle was rewritten"));
+        assert!(err.contains("0x77770001"), "{err}");
+    }
+
+    /// A live handle in a value by reference comes back as its path, in an
+    /// inline packet that records no generation.
+    #[test]
+    fn a_reference_packets_handle_is_rewritten_to_its_path() {
+        let _shm = crate::own_test_registry();
+        let dir = std::env::temp_dir().join(format!("morloc_rewrite_test_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("values.idx");
+        let elem = morloc_runtime_types::schema::schema_to_string(&parse_schema("aj").unwrap());
+        let out = crate::stream::shared_open_ostream_with_schema(path.to_str().unwrap(), &elem).unwrap();
+        crate::stream::shared_close_handle(out).unwrap();
+        let handle = crate::stream::open_ifile(path.to_str().unwrap()).unwrap();
+        let schema = parse_schema("F2aj").unwrap();
+        let block = crate::shm::shcalloc(1, sh::STREAM_HANDLE_FIELD_SIZE).unwrap();
+        unsafe { sh::write_field(block, sh::TAG_HANDLE, handle as u64) };
+        let cs = crate::cschema::CSchema::from_rust(&schema);
+        let packet = unsafe { crate::packet_ffi::make_standard_data_packet(crate::shm::abs2rel(block).unwrap(), cs) };
+        let got = (!packet.is_null()).then(|| {
+            let len = unsafe { crate::packet_ffi::morloc_packet_size(packet, std::ptr::null_mut()) };
+            let bytes = unsafe { std::slice::from_raw_parts(packet, len) }.to_vec();
+            rewrite_data_packet_for_persistence(&bytes)
+        });
+        unsafe {
+            libc::free(packet as *mut libc::c_void);
+            crate::cschema::CSchema::free(cs);
+        }
+        crate::shm::shfree(block).unwrap();
+        let expected = crate::stream::shared_handle_path(handle).unwrap();
+        crate::stream::shared_close_handle(handle).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        let out = got.expect("no reference packet was built").expect("rewrite failed");
+        let hdr = morloc_runtime_types::packet::PacketHeader::from_bytes(&out[..32].try_into().unwrap()).unwrap();
+        let (source, generation) = unsafe { (hdr.command.data.source, hdr.command.data.generation) };
+        let payload = &out[32 + hdr.offset as usize..];
+        assert_eq!(source, morloc_runtime_types::packet::PACKET_SOURCE_MESG);
+        assert_eq!(generation, [0, 0]);
+        assert_eq!(unsafe { sh::read_tag(payload.as_ptr()) }, sh::TAG_PATH);
+        assert!(
+            payload.windows(expected.len()).any(|w| w == expected.as_bytes()),
+            "the path {expected} is not in the rewritten value"
+        );
     }
 
     #[test]

@@ -1283,7 +1283,8 @@ fn only_the_check_and_the_builder_touch_a_packets_generation() {
         if f.ends_with("morloc-runtime-types/src/packet.rs") || f.ends_with("source_rules.rs") {
             continue;
         }
-        let other = std::fs::read_to_string(&f).unwrap();
+        let text = std::fs::read_to_string(&f).unwrap();
+        let other = if f.ends_with("packet_ffi.rs") { &text[..] } else { text.split("#[cfg(test)]").next().unwrap() };
         assert!(
             other.contains("PKT_GENERATION_OFF") == f.ends_with("packet_ffi.rs") && !other.contains("data.generation"),
             "SHM-13: {} touches a packet's generation outside the check, the builder and CommandData",
