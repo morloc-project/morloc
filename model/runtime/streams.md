@@ -301,6 +301,31 @@ are written as if the call had not been made. A failure that ends the
 stream (a dead reader, a dead custodian) or the process (SHM-17) is
 outside this item.
 
+### SLOT-36 A batch is encoded in place and committed whole
+Status: draft
+Checked by: tla:EncodeInPlace, tla:EncodeInPlace_seal_queues.bug, tla:EncodeInPlace_counters_early.bug, tla:EncodeInPlace_abort_gives_spare.bug, tla:EncodeInPlace_room_free_before_commit.bug, tla:EncodeInPlace_grow_not_kept.bug, tla:EncodeInPlace_abort_no_zero.bug, tla:EncodeInPlace_spare_unscrubbed.bug, tla:EncodeInPlace_gil_held_blocking.bug, tla:EncodeInPlace_gil_released_between_size_and_write.bug
+
+A language binding writes a `@write` batch by encoding each element
+straight into the stream's write buffer, inside one transaction on the
+slot lock, which it begins, places elements into, and commits or aborts.
+An element's room is exactly its portable size, and its bytes are those
+the runtime's own encoding would write. A block that fills is sealed into
+the writer's pending list and a spare or fresh block takes its place;
+pending blocks are queued (SLOT-12) and the element counts change only at
+commit, so an aborted batch leaves no trace (SLOT-35, for every error).
+Growing the block or its index is published to the slot at once. Abort
+frees the writer's private blocks, never giving them to the spare ring,
+whose only producer is the custodian, puts back the first sealed block
+with the counts the batch started from, and zeroes what it placed. Every
+byte of a write buffer past its placed elements is zero: new blocks are
+zero (SHM-6) and the custodian scrubs a block before giving it back as a
+spare. A Python writer encodes holding the GIL from after it takes the
+slot lock to commit, never releasing it between sizing an element and
+writing it, and never waits for a slot lock holding the GIL. A writer
+that dies inside the transaction fails the stream (SLOT-14); its private
+blocks stay allocated until the namespace ends. Pending blocks are
+bytes outside the queue's bound (SLOT-32) for the length of one batch.
+
 ### SLOT-24 A batch's block outlives every compression job that reads it
 Status: implemented
 Checked by: compressed_subpackets_are_cut_into_frames_fixed_by_the_level, frames_of_a_payload_join_in_order_and_settle_returns
