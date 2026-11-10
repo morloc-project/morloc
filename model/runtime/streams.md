@@ -303,7 +303,6 @@ outside this item.
 
 ### SLOT-36 A batch is encoded in place and committed whole
 Status: draft
-Checked by: tla:EncodeInPlace, tla:EncodeInPlace_seal_queues.bug, tla:EncodeInPlace_counters_early.bug, tla:EncodeInPlace_abort_gives_spare.bug, tla:EncodeInPlace_room_free_before_commit.bug, tla:EncodeInPlace_grow_not_kept.bug, tla:EncodeInPlace_abort_no_zero.bug, tla:EncodeInPlace_spare_unscrubbed.bug, tla:EncodeInPlace_gil_held_blocking.bug, tla:EncodeInPlace_gil_released_between_size_and_write.bug
 
 A language binding writes a `@write` batch by encoding each element
 straight into the stream's write buffer, inside one transaction on the
@@ -324,7 +323,8 @@ slot lock to commit, never releasing it between sizing an element and
 writing it, and never waits for a slot lock holding the GIL. A writer
 that dies inside the transaction fails the stream (SLOT-14); its private
 blocks stay allocated until the namespace ends. Pending blocks are
-bytes outside the queue's bound (SLOT-32) for the length of one batch.
+bytes outside the queue's bound (SLOT-32) for the length of one batch. The protocol is modelled in
+`tla/EncodeInPlace.tla`, with a bug variant for each rule above.
 
 ### SLOT-24 A batch's block outlives every compression job that reads it
 Status: implemented
