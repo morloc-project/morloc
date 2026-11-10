@@ -3991,6 +3991,13 @@ pub fn shared_write_subpacket(
 
         let _guard = lock_for_write(slot, gen_claim, "the stream was closed, or its reader stopped")?;
 
+        // SLOT-35
+        let _paths = if crate::handle_scan::holds_stream_fields(&local.elem_schema) {
+            Some(crate::handle_scan::resolve_batch_paths(payload_voidstar, &local.value_schema)?)
+        } else {
+            None
+        };
+
         let level = written_level(slot.is_stdio.get() != 0, slot.stdio_kind.get(), level);
 
         // Pin compression level on first @write into this slot

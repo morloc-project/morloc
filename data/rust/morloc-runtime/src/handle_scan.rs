@@ -24,7 +24,7 @@
 
 use morloc_runtime_types::error::MorlocError;
 use morloc_runtime_types::schema::{Schema, SerialType};
-use morloc_runtime_types::shm_types::{Array, RelPtr, RELNULL};
+use morloc_runtime_types::shm_types::{AbsPtr, Array, RelPtr, RELNULL};
 use morloc_runtime_types::stream_handle as sh;
 use morloc_runtime_types::width;
 
@@ -253,6 +253,51 @@ fn check_bounds(payload: &[u8], offset: usize, len: usize) -> Result<(), MorlocE
 /// stdio is process-scoped and has no path another process could open, so
 /// it is refused.
 pub fn portable_path(handle: i64) -> Result<String, MorlocError> {
+    // SLOT-35
+    if let Ok(Some(path)) = BATCH_PATHS.try_with(|t| t.borrow().as_ref().and_then(|m| m.get(&handle).cloned())) {
+        return Ok(path);
+    }
+    let path = resolve_path(handle)?;
+    let _ = BATCH_PATHS.try_with(|t| {
+        if let Some(m) = t.borrow_mut().as_mut() {
+            m.insert(handle, path.clone());
+        }
+    });
+    Ok(path)
+}
+
+thread_local! {
+    // SLOT-35
+    static BATCH_PATHS: std::cell::RefCell<Option<std::collections::HashMap<i64, String>>> = const { std::cell::RefCell::new(None) };
+}
+
+pub(crate) struct BatchPaths(Option<std::collections::HashMap<i64, String>>);
+
+impl Drop for BatchPaths {
+    fn drop(&mut self) {
+        let outer = self.0.take();
+        let _ = BATCH_PATHS.try_with(|t| *t.borrow_mut() = outer);
+    }
+}
+
+// SLOT-35
+pub(crate) fn resolve_batch_paths(value: AbsPtr, schema: &Schema) -> Result<BatchPaths, MorlocError> {
+    let outer = BATCH_PATHS
+        .try_with(|t| t.borrow_mut().replace(std::collections::HashMap::new()))
+        .map_err(|_| MorlocError::Other("@write: called while its thread is ending".into()))?;
+    let fixed = BatchPaths(outer);
+    let res = crate::recur::Resolver::new(schema);
+    crate::ffi::calc_voidstar_size_portable_with(value, schema, &res)?;
+    Ok(fixed)
+}
+
+pub(crate) fn holds_stream_fields(schema: &Schema) -> bool {
+    [StreamFieldKind::IFile, StreamFieldKind::OStream, StreamFieldKind::IStream]
+        .into_iter()
+        .any(|k| schema_contains_kind(schema, k))
+}
+
+fn resolve_path(handle: i64) -> Result<String, MorlocError> {
     let path = crate::stream::shared_handle_path(handle).map_err(|e| match e {
         MorlocError::Other(m) if m == crate::stream::CHANNEL_HAS_NO_PATH => MorlocError::Other(m),
         e => MorlocError::Other(format!("handle_scan: rewrite handle: {e}")),
@@ -394,10 +439,7 @@ fn rewrite_packet(packet: &[u8]) -> Result<Option<Vec<u8>>, MorlocError> {
                 "rewrite_data_packet_for_persistence: packet has no schema metadata".into(),
             ))?;
         let schema = parse_schema(&schema_str)?;
-        let can_hold_a_handle = [StreamFieldKind::IFile, StreamFieldKind::OStream, StreamFieldKind::IStream]
-            .into_iter()
-            .any(|k| schema_contains_kind(&schema, k));
-        if !can_hold_a_handle {
+        if !holds_stream_fields(&schema) {
             return Ok(None);
         }
         let meta_end = 32usize.checked_add(hdr.offset as usize);

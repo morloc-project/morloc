@@ -120,3 +120,10 @@
   elements of the first sub-packet of a multi-sub-packet IFile:
   `f.[1500].x` over three sub-packets of 1000 fails its bounds check, or
   reads the wrong element.
+- **A field walk infers its result schema twice.** [read, 2026-11-10]
+  Perf, minor. `shared_ifile_general` (data/rust/morloc-runtime/src/
+  stream.rs ~5467) materializes sub-packet 0, then infers the chain's
+  schema, and `walk_into_fresh` infers it again (stream_walk.rs ~389).
+  A path whose schema cannot be inferred first materializes (and may
+  decompress) a sub-packet for nothing. Infer once, before
+  materializing, and pass the schema in.

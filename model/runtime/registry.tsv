@@ -307,6 +307,7 @@ morloc-nexus/stdio_server.rs::pipe_closed_resp::EXITING	exec-only
 morloc-nexus/view.rs::-::STDIN_TEMP_FILES	exec-only		
 morloc-nexus/view.rs::-::STDIN_ATEXIT_REGISTERED	exec-only		
 morloc-runtime/fork_policy.rs::a_fork_from_a_thread_local_destructor_completes::LATE	test-only		
+morloc-runtime/handle_scan.rs::-::BATCH_PATHS	thread		
 morloc-runtime/lib.rs::-::SHM_TEST_ARENA	test-only		
 morloc-runtime/panic_ffi.rs::-::EXIT	startup		
 morloc-runtime/panic_ffi.rs::-::CLASSIFIER	startup		

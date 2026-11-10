@@ -223,3 +223,14 @@ here touch locks and ownership: model first.
   2026-11-02] A source whose final footer says FAILED or PAUSED is merged
   into a file whose footer says CLOSED, so the failure is lost. Which status
   a merge of mixed statuses carries needs a ruling (with SLOT-31).
+- **A batch that fails in allocation mid-batch is written in part.**
+  [read, 2026-11-10] SLOT-35 makes a batch whole or absent only when a
+  stream field fails it. A shared-memory allocation that fails for a
+  reason other than lack of space is an ordinary error (SHM-17), and when
+  it is raised mid-batch (`ensure_write_room`, a channel's landing, an
+  oversize element's block, data/rust/morloc-runtime/src/stream.rs
+  `append_one_element`) the sub-packets already flushed stay queued or
+  pushed and the counts stay advanced. No item says a batch is whole for
+  every error. The fix is step W2's transaction
+  (/work/plans/output-path-perf/W-DESIGN.md): pending sub-packets and
+  counts commit only when the whole batch is placed.

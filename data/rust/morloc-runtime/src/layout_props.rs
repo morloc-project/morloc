@@ -640,3 +640,166 @@ fn handle_paths_are_written_in_place() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Records `(name, handle)` with names of `name_len(k)` bytes; element
+/// `k` names `handles[k % len]`, and the element `bad`, if any, names
+/// `closed`.
+fn handle_records(n: usize, name_len: impl Fn(usize) -> usize, targets: &[String], handles: &[i64], bad: Option<(usize, i64)>) -> crate::shm_types::AbsPtr {
+    use morloc_runtime_types::stream_handle as sh;
+    let list = parse_schema("at2sF3ai8").unwrap();
+    let elem = parse_schema("t2sF3ai8").unwrap();
+    let json = format!(
+        "[{}]",
+        (0..n).map(|k| format!(r#"["{}", "{}"]"#, "n".repeat(name_len(k)), targets[k % targets.len()])).collect::<Vec<_>>().join(",")
+    );
+    let value = read_json_with_schema(&json, &list).unwrap();
+    unsafe {
+        let arr = &*(value as *const crate::shm_types::Array);
+        let data = shm::rel2abs(arr.data).unwrap();
+        for k in 0..n {
+            let h = match bad {
+                Some((at, closed)) if at == k => closed,
+                _ => handles[k % handles.len()],
+            };
+            sh::write_field(data.add(k * elem.width + elem.offsets[1]), sh::TAG_HANDLE, sh::handle_payload(h));
+        }
+    }
+    value
+}
+
+fn refused_for_its_handle(r: Result<(), MorlocError>, k: usize) {
+    match r {
+        Err(e) if e.to_string().contains("rewrite handle") => {}
+        r => panic!("element {k} names a closed stream, yet the write gave {r:?}"),
+    }
+}
+
+/// A `@write` batch is whole or absent: when one element names a closed
+/// stream, no element of the batch reaches the file or the channel, though
+/// the batch spans several sub-packets and holds an oversize element.
+#[test]
+fn a_batch_with_a_failing_element_leaves_no_trace() {
+    struct Restore;
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            crate::stream::set_test_write_buffer_bytes(None);
+        }
+    }
+    let _shm = crate::own_test_registry();
+    let dir = std::env::temp_dir().join(format!("morloc_layout_whole_batch_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    crate::stream::set_test_write_buffer_bytes(Some(4096));
+    let _restore = Restore;
+
+    let targets: Vec<String> = (0..2).map(|k| dir.join(format!("t{k}.stream")).to_str().unwrap().to_string()).collect();
+    for t in &targets {
+        let ints = parse_schema("ai8").unwrap();
+        let v = read_json_with_schema("[1,2,3]", &ints).unwrap();
+        let h = shared_open_ostream_with_schema(t, "ai8").unwrap();
+        shared_write_subpacket(h, crate::compression::CompressionLevel::NONE, v).unwrap();
+        shared_close_handle(h).unwrap();
+        let _ = shm::shfree(v);
+    }
+    let handles: Vec<i64> = targets.iter().map(|t| shared_open_ifile(t).unwrap()).collect();
+    let closed = shared_open_ifile(&targets[0]).unwrap();
+    shared_discard_handle(closed).unwrap();
+
+    let n = 21usize;
+    let name_len = |k: usize| if k == 12 { 5000 } else { 400 };
+    let level = crate::compression::CompressionLevel::NONE;
+    let list = parse_schema("at2sF3ai8").unwrap();
+    let write = |path: &str, failing: Option<usize>| -> (usize, serde_json::Value) {
+        let out = shared_open_ostream_with_schema(path, "at2sF3ai8").unwrap();
+        let before = handle_records(3, |_| 400, &targets, &handles, None);
+        shared_write_subpacket(out, level, before).unwrap();
+        if let Some(k) = failing {
+            let batch = handle_records(n, name_len, &targets, &handles, Some((k, closed)));
+            refused_for_its_handle(shared_write_subpacket(out, level, batch), k);
+            let _ = shm::shfree(batch);
+        }
+        let after = handle_records(2, |_| 400, &targets, &handles, None);
+        shared_write_subpacket(out, level, after).unwrap();
+        shared_close_handle(out).unwrap();
+        let _ = shm::shfree(before);
+        let _ = shm::shfree(after);
+        let len = std::fs::metadata(path).unwrap().len() as usize;
+        (len, render_and_free(shared_load_stream_file_as_array(path, Some(&list)).unwrap(), &list).unwrap())
+    };
+    let reference = write(dir.join("ref.stream").to_str().unwrap(), None);
+    let mut failures = Vec::new();
+    for k in 0..n {
+        let got = write(dir.join(format!("bad{k}.stream")).to_str().unwrap(), Some(k));
+        if got != reference {
+            failures.push(format!("file: element {k} failing leaves {} bytes and {} elements, want {} and {}",
+                got.0, got.1.as_array().map_or(0, |a| a.len()), reference.0, reference.1.as_array().map_or(0, |a| a.len())));
+        }
+    }
+
+    // The failed batch asks for another level than the batch after it, so a
+    // level it pinned would refuse that batch.
+    let three = crate::compression::CompressionLevel::from_u8(3).unwrap();
+    let channel = |failing: Option<usize>| -> Vec<serde_json::Value> {
+        let ch = crate::stream::shared_open_channel("at2sF3ai8").unwrap();
+        let reader = std::thread::spawn(move || {
+            let list = parse_schema("at2sF3ai8").unwrap();
+            let mut frames = Vec::new();
+            while let Some(p) = shared_next_frame(ch).unwrap() {
+                frames.push(render_and_free(p, &list).unwrap());
+            }
+            frames
+        });
+        if let Some(k) = failing {
+            let batch = handle_records(n, name_len, &targets, &handles, Some((k, closed)));
+            refused_for_its_handle(shared_write_subpacket(ch, three, batch), k);
+            let _ = shm::shfree(batch);
+        }
+        let after = handle_records(2, |_| 400, &targets, &handles, None);
+        shared_write_subpacket(ch, level, after).unwrap();
+        shared_flush_buffer(ch).unwrap();
+        shared_close_handle(ch).unwrap();
+        let _ = shm::shfree(after);
+        let frames = reader.join().unwrap();
+        crate::stream::shared_settle_channel(ch).unwrap();
+        frames
+    };
+    let reference = channel(None);
+    for k in [0usize, 9, 12, n - 1] {
+        let frames = channel(Some(k));
+        if frames != reference {
+            failures.push(format!("channel: element {k} failing, the reader saw {} frames, want {}", frames.len(), reference.len()));
+        }
+    }
+
+    // A staged stream writes a batch as one sub-packet at its own level: a
+    // failed first batch pins no level.
+    let staged = |path: &str, failing: Option<usize>| -> (usize, serde_json::Value) {
+        let out = shared_open_ostream_with_schema(path, "at2sF3ai8").unwrap();
+        crate::stream::slot_ref(crate::stream::unpack_handle(out).1).unwrap().staged.store(1, std::sync::atomic::Ordering::SeqCst);
+        if let Some(k) = failing {
+            let batch = handle_records(n, name_len, &targets, &handles, Some((k, closed)));
+            refused_for_its_handle(shared_write_subpacket(out, three, batch), k);
+            let _ = shm::shfree(batch);
+        }
+        let after = handle_records(2, |_| 400, &targets, &handles, None);
+        let r = shared_write_subpacket(out, level, after);
+        shared_close_handle(out).unwrap();
+        let _ = shm::shfree(after);
+        r.unwrap();
+        let len = std::fs::metadata(path).unwrap().len() as usize;
+        (len, render_and_free(shared_load_stream_file_as_array(path, Some(&list)).unwrap(), &list).unwrap())
+    };
+    let reference = staged(dir.join("staged-ref.stream").to_str().unwrap(), None);
+    for k in [0usize, 12, n - 1] {
+        let got = staged(dir.join(format!("staged{k}.stream")).to_str().unwrap(), Some(k));
+        if got != reference {
+            failures.push(format!("staged: element {k} failing leaves {} bytes, want {}", got.0, reference.0));
+        }
+    }
+
+    for h in handles {
+        let _ = shared_discard_handle(h);
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}

@@ -286,6 +286,21 @@ only the first and the last, which a neighbouring slice may read again;
 the others are freed when the slice returns. A slice across many
 sub-packets therefore leaves at most two of them cached.
 
+### SLOT-35 A `@write` refused for a stream field writes none of its batch
+Status: implemented
+Checked by: a_batch_with_a_failing_element_leaves_no_trace
+
+Under the slot lock and before the stream's level is pinned, `@write` to
+an output stream or a channel resolves the path of every handle-form
+stream field in its batch; the elements are then written with those
+paths. A field naming a stream that is closed at that point, or one with
+no path (a channel, stdio), fails the call before any element is
+appended: no element of the batch reaches the file or a reader, the
+stream's counts and level are those before the call, and later batches
+are written as if the call had not been made. A failure that ends the
+stream (a dead reader, a dead custodian) or the process (SHM-17) is
+outside this item.
+
 ### SLOT-24 A batch's block outlives every compression job that reads it
 Status: implemented
 Checked by: compressed_subpackets_are_cut_into_frames_fixed_by_the_level, frames_of_a_payload_join_in_order_and_settle_returns
