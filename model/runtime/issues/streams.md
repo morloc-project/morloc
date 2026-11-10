@@ -233,4 +233,12 @@ here touch locks and ownership: model first.
   pushed and the counts stay advanced. No item says a batch is whole for
   every error. The fix is step W2's transaction
   (/work/plans/output-path-perf/W-DESIGN.md): pending sub-packets and
-  counts commit only when the whole batch is placed.
+  counts commit only when the whole batch is placed. Tried and reverted
+  2026-11-10: roll the counts back when nothing was handed on, else poison
+  the slot. Poison is the dead-process state and brings its behaviour:
+  blocks leaked at release, the close reports a death, a poisoned channel
+  is released under its reader, settle ignores delivery, and the custody
+  queue's own failure (disk full) is masked. Failing a stream belongs in
+  the queue's failure state (OStream) and CHANNEL_FAILED (channel), and
+  whether a writer-set queue failure yields a FAILED footer is unchecked.
+  A rollback must also undo the level pin (pin_level, LEVEL0_DEPTH).
