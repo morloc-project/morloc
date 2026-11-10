@@ -188,6 +188,10 @@ morloc-runtime/shm.rs::-::VOLUMES	held	6
 morloc-runtime/shm.rs::-::MORLOC_VOL_TABLE	counter		
 morloc-runtime/shm.rs::-::PUBLISHED	counter		
 morloc-runtime/shm.rs::-::PUBLISHED_LEN	counter		
+morloc-runtime/shm.rs::-::LARGE_SIZE	counter		
+morloc-runtime/shm.rs::large_capable::CAPABLE	lazy		
+morloc-runtime/shm.rs::-::LARGE_OFF	test-only		
+morloc-runtime/shm.rs::-::LARGE_NO_KEEP	test-only		
 morloc-runtime/shm.rs::-::GROW	reset		
 morloc-runtime/shm.rs::-::COMMON_BASENAME	held	9	
 morloc-runtime/shm.rs::-::FALLBACK_DIR	held	10	

@@ -13,7 +13,8 @@ Status: implemented
 Checked by: processes_allocating_together_never_share_a_block, threads_allocating_together_never_share_a_block, a_child_forked_mid_allocation_can_allocate
 
 A block is claimed under its volume's lock, by moving its count from zero
-to one; the scan that finds it and the claim are one critical section.
+to one; the scan that finds it and the claim are one critical section. A
+large volume's only block is claimed by the exchange alone (SHM-18).
 
 ### SHM-3 A sender hands the recipient its own reference
 Status: implemented
@@ -259,3 +260,36 @@ Only lack of space counts as running out: the file system behind the
 volumes refusing a volume (after a volume of the exact size was tried) or
 the volume table being full. A request larger than that file system, and
 every other allocator failure, is an ordinary error everywhere.
+
+### SHM-18 A large request gets a volume of its own, emptied when freed
+Status: implemented
+Checked by: a_large_request_takes_a_volume_of_its_own, a_large_block_is_found_only_at_its_start_and_read_only_within_it, a_released_large_block_reads_as_zero_kept_or_removed, large_requests_past_a_small_tmpfs_fall_back_cleanly, tla:LargeVolume, tla:LargeVolume_no_cas.bug, tla:LargeVolume_publish_before_commit.bug, tla:LargeVolume_failed_commit_keeps_pages.bug, tla:LargeVolume_punch_header_page.bug, tla:LargeVolume_interior_header_read.bug
+
+On Linux tmpfs, where populating a mapping fails with an error rather
+than a signal, a request of at least the large bound gets a one-block
+volume: its data starts page-aligned after a header that ends the first
+page, the volume is created sparse at the request rounded up to a power
+of two, and its memory is committed only for the request, outside every
+lock, after the block is reserved by moving its count from 0 to the mark
+a release uses (SHM-13). A commit that fails gives back every page it
+took, frees the block and falls to the general path, which owns the
+fallback directory and running out (SHM-17). General volumes neither
+serve nor size themselves by large ones. In a large volume the SHM-13
+check accepts only the block's own offset, without reading memory at any
+other, and a read through a relptr nested in the value is bounded by the
+block's committed bytes (the volume is published with no size, so every
+resolve into it, from any language, takes the runtime's resolve, which
+reads that bound). A large block is
+claimed by the exchange alone: it is the volume's only block, so no lock
+guards a list. Releasing a large block scrubs it and keeps it committed while
+the committed bytes of free large volumes stay within a budget, and
+otherwise removes its pages, which then read as zero (SHM-6); the budget
+is counted over the large volumes a process maps. A refused removal is
+followed by the fill. Under poison a release fills its block with the
+poison byte and keeps it; pages kept so are given back only when room
+runs short, and then read as zero. A process that
+dies while its large block is reserved leaves the volume reserved, with
+its pages, until the namespace is discarded (SHM-8, DAEMON-1). Elsewhere
+(macOS, older kernels, the fallback directory) every request takes the
+general path. The test of falling back past a small tmpfs needs a
+private tmpfs and runs by hand.

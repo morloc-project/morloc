@@ -141,3 +141,12 @@ Changes here touch locks and ownership: model first.
   wrapper, about three times the value at peak counting the block,
   where a value without stream fields streams to its file. A portable
   flatten during the streamed write would bound it.
+- **Every resolve into a large volume takes the runtime's slow path.**
+  [read, 2026-11-10] Cost. SHM-18 publishes a large volume with no size
+  so that a resolve is bounded by the block's committed bytes, which the
+  inline table cannot know; so a C, C++, Python or R pool reading a large
+  value with many nested relptrs (a big list of strings) makes one FFI
+  call per relptr. A per-process cached bound was tried and dropped: the
+  owner's removals and other processes' releases leave it stale. Bounding
+  inline by the block, safely, needs a bound that only the holder's
+  reference keeps valid.
