@@ -33,6 +33,8 @@ const ABANDONED: u32 = 2;
 
 pub(crate) const FAILED_IO: u32 = 1;
 pub(crate) const FAILED_PIPE_CLOSED: u32 = 2;
+// SLOT-35
+const MESSAGE_PENDING: u32 = 1 << 31;
 
 const ERR_BYTES: usize = 240;
 const WAIT_SLICE: Duration = Duration::from_millis(100);
@@ -213,11 +215,35 @@ impl CustodyQueue {
     pub(crate) fn pin_level(&self, slot_level: &AtomicU8, level: u8) -> Result<(), u8> {
         if self.pinned.load(Ordering::Acquire) == 0 {
             slot_level.store(level, Ordering::Relaxed);
-            // SLOT-12: an uncompressed batch needs little room behind its writer.
-            if level == 0 {
-                self.set_depth((self.depth() as usize).min(LEVEL0_DEPTH));
-            }
+            self.clamp_before_pin(level);
             self.pinned.store(1, Ordering::Release);
+            return Ok(());
+        }
+        self.check_level(slot_level, level)
+    }
+
+    // SLOT-12, SLOT-35
+    pub(crate) fn clamp_before_pin(&self, level: u8) -> Option<u32> {
+        if level != 0 || self.pinned.load(Ordering::Acquire) != 0 {
+            return None;
+        }
+        let was = self.depth.load(Ordering::Acquire);
+        self.set_depth((self.depth() as usize).min(LEVEL0_DEPTH));
+        Some(was)
+    }
+
+    pub(crate) fn unclamp(&self, was: u32) {
+        if self.pinned.load(Ordering::Acquire) == 0 {
+            self.set_depth(was as usize);
+        }
+    }
+
+    pub(crate) fn is_failed(&self) -> bool {
+        self.failed.load(Ordering::Acquire) != 0
+    }
+
+    pub(crate) fn check_level(&self, slot_level: &AtomicU8, level: u8) -> Result<(), u8> {
+        if self.pinned.load(Ordering::Acquire) == 0 {
             return Ok(());
         }
         let pinned = slot_level.load(Ordering::Relaxed);
@@ -246,11 +272,13 @@ impl CustodyQueue {
 
 
     pub(crate) fn failure(&self) -> Option<MorlocError> {
-        match self.failed.load(Ordering::Acquire) {
+        let failed = self.failed.load(Ordering::Acquire);
+        match failed & !MESSAGE_PENDING {
             0 => None,
             FAILED_PIPE_CLOSED => Some(MorlocError::PipeClosed),
+            _ if failed & MESSAGE_PENDING != 0 => Some(MorlocError::Other("writing the stream failed".into())),
             _ => {
-                let n = (self.err_len.load(Ordering::Acquire) as usize).min(ERR_BYTES);
+                let n = (self.err_len.load(Ordering::Relaxed) as usize).min(ERR_BYTES);
                 let bytes: Vec<u8> = self.err[..n].iter().map(|b| b.load(Ordering::Relaxed)).collect();
                 Some(MorlocError::Other(format!(
                     "writing the stream failed: {}",
@@ -462,8 +490,9 @@ impl CustodyQueue {
         true
     }
 
+    // SLOT-35
     pub(crate) fn fail(&self, kind: u32, msg: &str) {
-        if self.failed.load(Ordering::Acquire) != 0 {
+        if self.failed.compare_exchange(0, kind | MESSAGE_PENDING, Ordering::AcqRel, Ordering::Acquire).is_err() {
             return;
         }
         let b = msg.as_bytes();
@@ -471,7 +500,7 @@ impl CustodyQueue {
         for (dst, src) in self.err.iter().zip(&b[..n]) {
             dst.store(*src, Ordering::Relaxed);
         }
-        self.err_len.store(n as u32, Ordering::Release);
+        self.err_len.store(n as u32, Ordering::Relaxed);
         self.failed.store(kind, Ordering::Release);
         wait_word::wake_all(&self.done);
     }
@@ -629,6 +658,10 @@ impl Writer {
 
     // SLOT-10
     fn serve(&mut self, item: Item) -> bool {
+        // SLOT-32: a stream its writer failed is no longer counted.
+        if self.q.is_failed() {
+            self.go_idle();
+        }
         match item.kind {
             ENTRY_BUFFER | ENTRY_BLOCK => {
                 if self.failed {
@@ -828,6 +861,8 @@ impl Writer {
 
     // SLOT-14: a failed or discarded stream keeps its temporary footer.
     fn close(&mut self, status: u32) {
+        // SLOT-28: a stream its writer failed keeps its temporary footer.
+        self.failed |= self.q.is_failed();
         if !self.failed && status != STATUS_DISCARD {
             let res = morloc_runtime_types::packet::make_final_footer_packet(&self.diag, &self.entries, status as u8)
                 .map_err(|e| (FAILED_IO, e.to_string()))
@@ -1355,6 +1390,21 @@ mod tests {
         assert!(began.elapsed() >= Duration::from_millis(150));
         taker.join().unwrap();
         assert_eq!(q.pop().unwrap().kind, ENTRY_CLOSE);
+    }
+
+    // SLOT-35
+    #[test]
+    fn the_first_failure_of_a_queue_is_the_one_reported() {
+        let (_a, q) = fresh();
+        q.fail(FAILED_IO, "disk full");
+        q.fail(FAILED_PIPE_CLOSED, "reader gone");
+        let e = q.failure().unwrap();
+        assert!(e.to_string().contains("disk full"), "{e}");
+        q.reset_for_open(3);
+        q.failed.store(FAILED_PIPE_CLOSED | MESSAGE_PENDING, Ordering::Release);
+        assert!(matches!(q.failure(), Some(MorlocError::PipeClosed)));
+        q.fail(FAILED_IO, "late");
+        assert!(matches!(q.failure(), Some(MorlocError::PipeClosed)));
     }
 
     #[test]

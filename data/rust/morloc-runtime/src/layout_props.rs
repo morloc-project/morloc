@@ -803,3 +803,210 @@ fn a_batch_with_a_failing_element_leaves_no_trace() {
     let _ = std::fs::remove_dir_all(&dir);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+/// A `@write` batch that fails while it is placed or handed on is whole or
+/// absent: before any of its elements is handed on it leaves no trace and a
+/// failed first batch pins no level; after, it fails the stream, which then
+/// refuses writes and never gets a final footer, and a channel's reader gets
+/// the failure.
+#[test]
+fn a_batch_failing_in_placement_is_absent_or_fails_the_stream() {
+    use crate::stream::{FAIL_HAND_ON_AT, FAIL_PLACE_AT};
+    struct Restore;
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            crate::stream::set_test_write_buffer_bytes(None);
+            FAIL_PLACE_AT.with(|f| f.set(None));
+            FAIL_HAND_ON_AT.with(|f| f.set(None));
+        }
+    }
+    struct Discard(i64);
+    impl Drop for Discard {
+        fn drop(&mut self) {
+            let _ = shared_discard_handle(self.0);
+        }
+    }
+    #[derive(Clone, Copy, Debug)]
+    enum Fault {
+        Place,
+        HandOn,
+    }
+    let inject = |fault: Fault, k: Option<usize>| match fault {
+        Fault::Place => FAIL_PLACE_AT.with(|f| f.set(k.map(|k| k as u64))),
+        Fault::HandOn => FAIL_HAND_ON_AT.with(|f| f.set(k.map(|k| k as u64))),
+    };
+    let injected = |r: &Result<(), MorlocError>| matches!(r, Err(e) if e.to_string().contains("failed to place") || e.to_string().contains("handing on before"));
+    let _shm = crate::own_test_registry();
+    let dir = std::env::temp_dir().join(format!("morloc_layout_placement_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    crate::stream::set_test_write_buffer_bytes(Some(4096));
+    let _restore = Restore;
+    let none = crate::compression::CompressionLevel::NONE;
+    let three = crate::compression::CompressionLevel::from_u8(3).unwrap();
+
+    type Item = Box<dyn Fn(usize) -> String>;
+    let cases: [(&str, usize, Item); 3] = [
+        ("as", 21, Box::new(|k| format!("\"{}\"", "s".repeat(if k == 12 { 5000 } else { 400 })))),
+        ("ai4", 3000, Box::new(|k| format!("{k}"))),
+        ("aj", 21, Box::new(|k| if k % 5 == 4 { format!("{}", 1u128 << 100) } else { format!("{k}") })),
+    ];
+    let mut failures = Vec::new();
+    for (schema, n, item) in &cases {
+        let n = *n;
+        let list = parse_schema(schema).unwrap();
+        let value = |len: usize, from: usize| {
+            let json = format!("[{}]", (from..from + len).map(|k| item(k)).collect::<Vec<_>>().join(","));
+            read_json_with_schema(&json, &list).unwrap()
+        };
+        // `Ok(None)`: the batch failed the stream; `Ok(Some(..))`: the file;
+        // `Err("")`: no hand-off came at element k.
+        let write = |path: &str, failing: Option<(Fault, usize)>, level| -> Result<Option<(usize, serde_json::Value)>, String> {
+            let out = shared_open_ostream_with_schema(path, schema).unwrap();
+            let _open = Discard(out);
+            // A failed first batch pins no level; later ones carry the pinned one.
+            let first = matches!(failing, Some((_, 0)));
+            if !first {
+                let before = value(3, 100);
+                shared_write_subpacket(out, level, before).unwrap();
+                let _ = shm::shfree(before);
+            }
+            if let Some((fault, k)) = failing {
+                let batch = value(n, 0);
+                inject(fault, Some(k));
+                let r = shared_write_subpacket(out, level, batch);
+                inject(fault, None);
+                let _ = shm::shfree(batch);
+                if matches!(fault, Fault::HandOn) && r.is_ok() {
+                    let _ = shared_close_handle(out);
+                    return Err(String::new());
+                }
+                if !injected(&r) {
+                    return Err(format!("the failing write gave {r:?}"));
+                }
+            }
+            let after = value(2, 200);
+            let r = shared_write_subpacket(out, if first { none } else { level }, after);
+            let _ = shm::shfree(after);
+            let counted = crate::stream::slot_ref(crate::stream::unpack_handle(out).1).unwrap().element_count.load(std::sync::atomic::Ordering::SeqCst);
+            let closed = shared_close_handle(out);
+            match (r, closed) {
+                (Ok(()), Ok(())) => {
+                    let len = std::fs::metadata(path).unwrap().len() as usize;
+                    Ok(Some((len, render_and_free(shared_load_stream_file_as_array(path, Some(&list)).unwrap(), &list).unwrap())))
+                }
+                (Err(e), Err(_)) => {
+                    if !e.to_string().contains("handed on") {
+                        return Err(format!("a write after the stream failed was refused with {e}, not the failure"));
+                    }
+                    let (mp, sz) = crate::stream_format::mmap_file_readonly(path).unwrap();
+                    let footer = crate::stream_format::try_read_footer(mp, sz);
+                    unsafe { libc::munmap(mp as *mut libc::c_void, sz as usize) };
+                    let in_file = match footer {
+                        Ok(Some(f)) if !f.final_footer => f.element_count,
+                        _ => return Err("a stream whose batch failed after a hand-off got a final footer".into()),
+                    };
+                    if in_file != counted {
+                        return Err(format!("the failed stream counts {counted} elements and its file holds {in_file}"));
+                    }
+                    Ok(None)
+                }
+                (r, c) => Err(format!("after the failed batch, a write gave {r:?} and the close {c:?}")),
+            }
+        };
+        let reference = write(dir.join(format!("{schema}-ref.stream")).to_str().unwrap(), None, none).unwrap();
+        for fault in [Fault::Place, Fault::HandOn] {
+            let first = write(dir.join(format!("{schema}-{fault:?}-first.stream")).to_str().unwrap(), Some((fault, 0)), three);
+            match first {
+                Ok(Some((_, got))) if got.as_array().map(|a| a.len()) == Some(2) => {}
+                Err(e) if e.is_empty() => {}
+                r => failures.push(format!("{schema} {fault:?}: a failed first batch at level 3, then a batch at level 0, gave {r:?}")),
+            }
+            let (mut absent, mut failed) = (0, 0);
+            let ks: Vec<usize> = if n > 100 { vec![1, 500, 1019, 1020, 1021, 2047, 2048, n - 1] } else { (1..n).collect() };
+            for &k in &ks {
+                match write(dir.join(format!("{schema}-{fault:?}-bad{k}.stream")).to_str().unwrap(), Some((fault, k)), none) {
+                    Ok(None) => failed += 1,
+                    Ok(got) if got == reference => {
+                        if failed > 0 {
+                            failures.push(format!("{schema} {fault:?}: element {k} left no trace after an earlier one failed the stream"));
+                        }
+                        absent += 1
+                    }
+                    Ok(got) => failures.push(format!("{schema} {fault:?}: element {k} failing leaves {got:?}, want {reference:?}")),
+                    Err(e) if e.is_empty() => {}
+                    Err(e) => failures.push(format!("{schema} {fault:?}: element {k}: {e}")),
+                }
+            }
+            if absent == 0 || failed == 0 {
+                failures.push(format!("{schema}: {absent} failures left no trace and {failed} failed the stream; want both"));
+            }
+        }
+    }
+
+    // A channel's reader sees a batch that failed before a hand-off not at
+    // all, and one that failed after as the stream's failure.
+    let list = parse_schema("as").unwrap();
+    let strs = |len: usize| {
+        let json = format!("[{}]", (0..len).map(|_| format!("\"{}\"", "s".repeat(400))).collect::<Vec<_>>().join(","));
+        read_json_with_schema(&json, &list).unwrap()
+    };
+    let channel = |failing: Option<(Fault, usize)>| -> Option<(Vec<serde_json::Value>, bool)> {
+        let ch = crate::stream::shared_open_channel("as").unwrap();
+        let reader = std::thread::spawn(move || {
+            let list = parse_schema("as").unwrap();
+            let mut frames = Vec::new();
+            loop {
+                match shared_next_frame(ch) {
+                    Ok(Some(p)) => frames.push(render_and_free(p, &list).unwrap()),
+                    Ok(None) => return (frames, false),
+                    Err(_) => return (frames, true),
+                }
+            }
+        });
+        if let Some((fault, k)) = failing {
+            let batch = strs(21);
+            inject(fault, Some(k));
+            let r = shared_write_subpacket(ch, none, batch);
+            inject(fault, None);
+            let _ = shm::shfree(batch);
+            if r.is_ok() && matches!(fault, Fault::HandOn) {
+                let _ = shared_close_handle(ch);
+                let _ = reader.join();
+                let _ = crate::stream::shared_settle_channel(ch);
+                return None;
+            }
+            assert!(injected(&r), "the failing channel write gave {r:?}");
+        }
+        let after = strs(2);
+        if let Err(e) = shared_write_subpacket(ch, none, after) {
+            assert!(e.to_string().contains("handed on"), "a write after the channel failed was refused with {e}, not the failure");
+        }
+        let _ = shared_flush_buffer(ch);
+        let closed = shared_close_handle(ch);
+        let _ = shm::shfree(after);
+        let got = reader.join().unwrap();
+        assert_eq!(got.1, closed.is_err(), "the reader saw a failure {} but the close gave {closed:?}", got.1);
+        let _ = crate::stream::shared_settle_channel(ch);
+        Some(got)
+    };
+    let reference = channel(None).unwrap();
+    for fault in [Fault::Place, Fault::HandOn] {
+        let mut failed = 0;
+        for k in 1..21 {
+            let Some((frames, err)) = channel(Some((fault, k))) else { continue };
+            if err {
+                failed += 1;
+            } else if (frames.clone(), err) != reference {
+                failures.push(format!("channel {fault:?}: element {k} failing, the reader saw {} frames and no failure, want {}", frames.len(), reference.0.len()));
+            } else if failed > 0 {
+                failures.push(format!("channel {fault:?}: element {k} left no trace after an earlier one failed the channel"));
+            }
+        }
+        if failed == 0 {
+            failures.push(format!("channel {fault:?}: no failure reached the reader"));
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}

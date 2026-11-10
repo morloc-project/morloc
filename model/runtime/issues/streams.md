@@ -223,22 +223,3 @@ here touch locks and ownership: model first.
   2026-11-02] A source whose final footer says FAILED or PAUSED is merged
   into a file whose footer says CLOSED, so the failure is lost. Which status
   a merge of mixed statuses carries needs a ruling (with SLOT-31).
-- **A batch that fails in allocation mid-batch is written in part.**
-  [read, 2026-11-10] SLOT-35 makes a batch whole or absent only when a
-  stream field fails it. A shared-memory allocation that fails for a
-  reason other than lack of space is an ordinary error (SHM-17), and when
-  it is raised mid-batch (`ensure_write_room`, a channel's landing, an
-  oversize element's block, data/rust/morloc-runtime/src/stream.rs
-  `append_one_element`) the sub-packets already flushed stay queued or
-  pushed and the counts stay advanced. No item says a batch is whole for
-  every error. The fix is step W2's transaction
-  (/work/plans/output-path-perf/W-DESIGN.md): pending sub-packets and
-  counts commit only when the whole batch is placed. Tried and reverted
-  2026-11-10: roll the counts back when nothing was handed on, else poison
-  the slot. Poison is the dead-process state and brings its behaviour:
-  blocks leaked at release, the close reports a death, a poisoned channel
-  is released under its reader, settle ignores delivery, and the custody
-  queue's own failure (disk full) is masked. Failing a stream belongs in
-  the queue's failure state (OStream) and CHANNEL_FAILED (channel), and
-  whether a writer-set queue failure yields a FAILED footer is unchecked.
-  A rollback must also undo the level pin (pin_level, LEVEL0_DEPTH).

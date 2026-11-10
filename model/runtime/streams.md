@@ -286,9 +286,9 @@ only the first and the last, which a neighbouring slice may read again;
 the others are freed when the slice returns. A slice across many
 sub-packets therefore leaves at most two of them cached.
 
-### SLOT-35 A `@write` refused for a stream field writes none of its batch
+### SLOT-35 A `@write` batch that fails leaves no trace, or fails its stream
 Status: implemented
-Checked by: a_batch_with_a_failing_element_leaves_no_trace
+Checked by: a_batch_with_a_failing_element_leaves_no_trace, a_batch_failing_in_placement_is_absent_or_fails_the_stream, the_first_failure_of_a_queue_is_the_one_reported
 
 Under the slot lock and before the stream's level is pinned, `@write` to
 an output stream or a channel resolves the path of every handle-form
@@ -297,9 +297,23 @@ paths. A field naming a stream that is closed at that point, or one with
 no path (a channel, stdio), fails the call before any element is
 appended: no element of the batch reaches the file or a reader, the
 stream's counts and level are those before the call, and later batches
-are written as if the call had not been made. A failure that ends the
-stream (a dead reader, a dead custodian) or the process (SHM-17) is
-outside this item.
+are written as if the call had not been made. Any other failure while
+the batch is placed is undone the same way so long as none of its elements
+has been handed on (queued for the file or pushed to a reader): the bytes
+it placed are zeroed and uncounted. A buffer handed on that holds only
+earlier batches' elements does not count. The batch's elements are counted
+only once all are placed, and the level is pinned once the batch has
+handed bytes on, or when it ends. A failure after a hand-off fails the
+stream instead: the error
+is returned, the batch's unhanded bytes are dropped, later writes are
+refused with the failure, an output stream keeps its temporary footer
+(SLOT-28) and a channel's reader gets the failure after what was handed
+on. When the writer and the custodian fail a stream at once, the first
+failure recorded is the one reported. A relptr of the write buffer's own bytes
+that will not shift when its index grows is a defect: the writer panics
+inside the slot lock, which fails the stream (SLOT-14). What was
+handed on stays in the file, where a reader reads it as data (SLOT-29).
+A failure that ends the process (SHM-17) is outside this item.
 
 ### SLOT-36 A batch is encoded in place and committed whole
 Status: draft
@@ -315,7 +329,11 @@ commit, so an aborted batch leaves no trace (SLOT-35, for every error).
 Growing the block or its index is published to the slot at once. Abort
 frees the writer's private blocks, never giving them to the spare ring,
 whose only producer is the custodian, puts back the first sealed block
-with the counts the batch started from, and zeroes what it placed. Every
+with the counts the batch started from, and zeroes what it placed. A
+commit cannot be undone once its first block is queued: when the failed
+stream refuses a later one, the writer frees the blocks it did not queue
+and leaves the slot without a buffer. Channels and staged streams are
+written as SLOT-35 says, from the binding's value. Every
 byte of a write buffer past its placed elements is zero: new blocks are
 zero (SHM-6) and the custodian scrubs a block before giving it back as a
 spare. A Python writer encodes holding the GIL from after it takes the
@@ -442,14 +460,14 @@ wrong with it.
 
 ### SLOT-28 A stream file ends in one of five states
 Status: implemented
-Checked by: a_stopped_writer_finishes_its_file_with_the_given_status, a_discarded_stream_keeps_what_was_queued_and_no_final_footer, a_writer_killed_inside_the_slot_lock_fails_the_stream
+Checked by: a_stopped_writer_finishes_its_file_with_the_given_status, a_discarded_stream_keeps_what_was_queued_and_no_final_footer, a_writer_killed_inside_the_slot_lock_fails_the_stream, a_batch_failing_in_placement_is_absent_or_fails_the_stream
 
 | End state | How a file gets it |
 |---|---|
 | final footer, CLOSED | `@close` (SLOT-15) |
 | final footer, PAUSED | a remote child returns the stream without `@close`; the file is complete and may be appended to |
 | final footer, FAILED | the stream's writer died inside the slot lock (SLOT-14), or daemon recovery stopped the custodian (SLOT-13) |
-| temporary footer | the stream is still being written; or it was discarded, its handle dropped or its run ended without `@close`, with its unflushed elements dropped (SLOT-13); or its custodian failed to write (an I/O error such as a full disk), after which it writes nothing more; or its custodian was killed after writing a batch |
+| temporary footer | the stream is still being written; or it was discarded, its handle dropped or its run ended without `@close`, with its unflushed elements dropped (SLOT-13); or its custodian failed to write (an I/O error such as a full disk), after which it writes nothing more; or a batch failed after part of it was queued (SLOT-35), after which what was queued is still written; or its custodian was killed after writing a batch |
 | no footer | the custodian was killed before writing any footer; the machine stopped (power loss, kernel panic); or the file was cut short outside morloc (an interrupted copy, a full disk) |
 
 Every footer follows the last complete sub-packet, so in the first four
