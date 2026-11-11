@@ -3731,7 +3731,8 @@ impl Batch {
             return Ok(());
         }
         let ours = count.saturating_sub(self.start_count);
-        if self.pending.is_some() {
+        // SLOT-36: a buffer holding none of the batch's elements is handed on.
+        if self.pending.is_some() && ours > 0 {
             return self.seal_pending(slot, ours);
         }
         let level = self.level;
@@ -3765,7 +3766,9 @@ impl Batch {
 
     // SLOT-36, SLOT-20
     fn seal_pending(&mut self, slot: &RegistrySlot, ours: u64) -> Result<(), MorlocError> {
-        let fresh = fresh_buffer(slot, self.output_queue())?;
+        let q = self.output_queue();
+        q.wait_room()?;
+        let fresh = fresh_buffer(slot, q)?;
         let item = sealed_item(slot, self.level);
         let Some(p) = self.pending.as_mut() else { unreachable!("seal_pending runs in place") };
         if p.first.is_none() {
@@ -3819,10 +3822,6 @@ impl Batch {
                 }
                 for b in &p.blocks[k..] {
                     free_rel(b.item.block);
-                }
-                if !self.past_undo() {
-                    install_buffer(slot, slot.write_buffer.get());
-                    return Err(e);
                 }
                 free_rel(slot.write_buffer.get());
                 slot.write_buffer.set(shm_types_crate::RELNULL);

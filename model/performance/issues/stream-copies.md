@@ -184,24 +184,23 @@ with a reference; it would be an unchecked lifetime claim.
 Order: S0, W3 (model first), R2; then A for C++ records and B for Rust.
 Whether writes approach `dd` depends on the sync share, unmeasured.
 
-## An in-place batch smaller than the buffer holds a whole buffer [measured]
+## An in-place batch smaller than the buffer holds a sealed buffer [measured]
 
-Writing @write batches in place (SLOT-36) raised peak RSS for 10000-pair
-batches of read pairs: C++ 79 -> 99 MiB (level 0) and 162 -> 182 (level 3),
-Rust 133 -> 160 (level 3); 600 MiB runtime-bench, tmpfs, 2026-11-11. Read,
-not traced: a seal inside an in-place batch keeps the sealed buffer private
-until commit and takes a fresh block without waiting for the queue
-(stream.rs seal_pending -> fresh_buffer), where the copy path's seal waits
-for room and usually gets the custodian's spare back (queue_buffer_then ->
-wait_room). With the 16 MiB default buffer and ~10 MB batches nearly every
-seal is mid-batch, so the cost is about one buffer per stream being
-written, not one batch. Bounded (no ratchet). Candidate fixes: seal through
-the normal hand-on path when the buffer holds none of the batch's elements;
-wait for room before taking a fresh block in seal_pending (check the
-custodian never takes the slot lock); or pass the batch's presized total to
-begin and flush first when it will not fit (changes cuts, needs the copy
-path to cut the same way). Level 3 bytes also measured 2-3% slower in place
-(no compression overlap inside a batch).
+A seal inside an in-place batch (SLOT-36) keeps the sealed buffer private
+until commit, where the copy path would queue it at once and hold the
+batch's own voidstar copy instead. A buffer that fills before the batch
+places anything is now handed on at once, and a seal waits for queue room
+so the custodian's spare is reused (C++ pairs at level 0: 101 -> 82 MiB,
+the copy path's 79). What remains is the sealed buffer (16 MiB by
+default) against the copy path's batch copy, for batches smaller than the
+buffer: at level 3 in-place pairs stay about 20 MiB above the copy path
+(runtime-bench, 2026-11-11; level 3 peaks vary by +-20 MiB run to run).
+Level 3 bytes also measured 2-3% slower in place (no compression overlap
+inside a batch). Open: pass the batch's presized total to begin and seal
+first when it will not fit, which removes the pending buffer for any batch
+smaller than the buffer and restores the overlap, but changes sub-packet
+cuts (the copy path would cut the same way; goldens that print layouts
+change).
 
 ## Tests
 

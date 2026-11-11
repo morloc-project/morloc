@@ -336,9 +336,12 @@ the size's alignment slack, and that tail stays zero. An `Int` placed as
 its slot alone, in a run or a room of that size, that is not written
 inline is a defect too.
 
-A buffer that fills is sealed into the writer's pending list and a spare or
-fresh block takes the slot's place; an element larger than a sub-packet
-gets a pending block of its own. Every block the transaction allocates is
+A buffer that fills is sealed into the writer's pending list and, once the
+queue has room, a spare or fresh block takes the slot's place; a buffer
+that fills before the batch has placed anything in it holds earlier
+batches' elements alone and is handed on at once, as outside a batch, so
+every pending block holds some of the batch's own. An element larger than
+a sub-packet gets a pending block of its own. Every block the transaction allocates is
 the slot's from the start, so no eval arena releases it. Pending blocks
 are queued (SLOT-12) and the element counts and the level pin change only
 at commit, so an aborted batch leaves no trace and pins no level. Growing

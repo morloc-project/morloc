@@ -1191,9 +1191,9 @@ fn an_in_place_batch_that_fails_is_absent_or_fails_its_stream() {
     };
 
     type Item = Box<dyn Fn(usize) -> String>;
-    // A refused push of a block holding only earlier batches' elements
-    // leaves the batch absent: the "as" batch of 3 seals the buffered
-    // elements alone before its oversize first element.
+    // The "as" batch of 3 seals the buffered elements alone before its
+    // oversize first element: that buffer is handed on at the seal, so
+    // every refused push of the commit holds the batch's own elements.
     let cases: [(&str, usize, bool, Item); 6] = [
         ("as", 21, false, Box::new(|k| format!("\"{}\"", "s".repeat(if k == 12 { 5000 } else { 400 })))),
         ("as", 4, false, Box::new(|k| format!("\"{}\"", "s".repeat(if k == 0 { 5000 } else { 10 })))),
@@ -1295,9 +1295,7 @@ fn an_in_place_batch_that_fails_is_absent_or_fails_its_stream() {
             };
             let mut failed = 0;
             for &k in &ks {
-                let absent_only = fault == Fault::Push && n == 3 && k == 1;
                 match write(dir.join(format!("{tag}-{fault:?}-bad{k}.stream")).to_str().unwrap(), Some((fault, k)), none) {
-                    Ok(None) if absent_only => failures.push(format!("{tag}: a refused push of earlier elements alone failed the stream")),
                     Ok(None) if fault == Fault::Push => failed += 1,
                     Ok(Some(got)) if got == reference => {}
                     Ok(got) => failures.push(format!("{tag} {fault:?}: failing at {k} leaves {got:?}, want {reference:?}")),
