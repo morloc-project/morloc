@@ -8,7 +8,7 @@ its issue is fixed.
 
 From lib/biolib/runtime-bench (runtime/issues/encode-throughput.md):
 
-- [stream-copies.md](stream-copies.md): stream reads and writes: remaining batch copies (S0, W3 encode in place, R2, stdio and frame joins), borrowed views, open rulings
+- [stream-copies.md](stream-copies.md): stream reads and writes: remaining batch copies (S0, R2, stdio and frame joins; encode in place done for C++ and Rust), an in-place batch below the buffer size holds a buffer, borrowed views, open rulings
 - [stdout-copies.md](stdout-copies.md): raw stdout copies each batch up to four times; the pool's sink is the critical path of the out stage
 - [whole-list-gather.md](whole-list-gather.md): a whole-list render gathers its batches through a temp file
 - [stream-compression-pipeline.md](stream-compression-pipeline.md): compressed streams: which process grows at level 3 (unmeasured)

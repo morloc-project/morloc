@@ -74,7 +74,8 @@ walks per pair fit the ~0.5 us per pair. [inferred]
 
 ## Write path, `@write` [read]
 
-In the pool:
+The copy path (Python, R, and stdout, channels and tables from every
+language). In the pool:
 1. `_mlc_write`: size walk, `shmalloc` a 10 MiB block, `to_voidstar`
    (bulk memcpy for the vector, C:1323-1330): **copy 1**. After
    `mlc_write`, `shfree` scrubs it: **memset 2**.
@@ -120,15 +121,12 @@ No type or API change, each measurable alone:
 - **S0. Measure first.** Run once with `WORKDIR` on tmpfs and once with
   `dd conv=fdatasync` (or time `@close` separately); print `ru_minflt`
   (measure.py already calls `getrusage`); report the median of 5 runs.
-- **W3. Encode in place (model first).** The pool reserves space in the
-  slot's buffer and C++ encodes into it. C++ must then write
-  buffer-relative pointers (it writes shared-memory relptrs via
-  `abs2rel_cpp` today) and path-form stream handles (`PortablePayload`
-  checks this only in debug builds, `R/stream.rs:3365`); handle encoding
-  (a registry acquire) moves under the slot lock (lock order to model);
-  reserve must not advance counters before commit, and a C++ exception
-  must not unwind through Rust; oversize, staged and channel paths keep
-  staging. Changes SLOT-12's text.
+- **W3. Encode in place.** Done for C++ and Rust writes to an output file
+  (SLOT-36; the bindings rule is the draft SLOT-37): copies 1 and 2 and the
+  runtime's append walk are gone there. Measured on the 600 MiB bench at
+  level 0: C++ pairs 1.60 -> 1.22 s, Rust pairs 1.96 -> 1.61 s. Python
+  and R, and every staged, channel and table write, still take the copy
+  path described above.
 - **R2.** Decompress into a reused, bounded private buffer and decode in
   payload space (with R1's callback), skipping the shared-memory block
   and its scrub. A thread-local buffer needs a STATE-1 registry row.
@@ -185,6 +183,25 @@ with a reference; it would be an unchecked lifetime claim.
 
 Order: S0, W3 (model first), R2; then A for C++ records and B for Rust.
 Whether writes approach `dd` depends on the sync share, unmeasured.
+
+## An in-place batch smaller than the buffer holds a whole buffer [measured]
+
+Writing @write batches in place (SLOT-36) raised peak RSS for 10000-pair
+batches of read pairs: C++ 79 -> 99 MiB (level 0) and 162 -> 182 (level 3),
+Rust 133 -> 160 (level 3); 600 MiB runtime-bench, tmpfs, 2026-11-11. Read,
+not traced: a seal inside an in-place batch keeps the sealed buffer private
+until commit and takes a fresh block without waiting for the queue
+(stream.rs seal_pending -> fresh_buffer), where the copy path's seal waits
+for room and usually gets the custodian's spare back (queue_buffer_then ->
+wait_room). With the 16 MiB default buffer and ~10 MB batches nearly every
+seal is mid-batch, so the cost is about one buffer per stream being
+written, not one batch. Bounded (no ratchet). Candidate fixes: seal through
+the normal hand-on path when the buffer holds none of the batch's elements;
+wait for room before taking a fresh block in seal_pending (check the
+custodian never takes the slot lock); or pass the batch's presized total to
+begin and flush first when it will not fit (changes cuts, needs the copy
+path to cut the same way). Level 3 bytes also measured 2-3% slower in place
+(no compression overlap inside a batch).
 
 ## Tests
 

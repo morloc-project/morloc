@@ -134,6 +134,11 @@ extern "C" {
     fn mlc_stream(ifile_handle: i64, errmsg: *mut *mut c_char) -> i64;
     fn mlc_ifile_walk(handle: i64, path: *const c_char, args_ptr: *const IFileWalkArg, n_args: u64, errmsg: *mut *mut c_char) -> *mut c_void;
     fn mlc_write(level: i64, handle: i64, payload_voidstar: *const c_void, errmsg: *mut *mut c_char) -> i32;
+    fn mlc_write_begin(level: i64, handle: i64, errmsg: *mut *mut c_char) -> i32;
+    fn mlc_write_place(size: u64, reached: *const u8, room: *mut MlcRoom, errmsg: *mut *mut c_char) -> i32;
+    fn mlc_write_place_run(k: u64, reached: *const u8, slots: *mut *mut u8, placed: *mut u64, errmsg: *mut *mut c_char) -> i32;
+    fn mlc_write_commit(reached: *const u8, errmsg: *mut *mut c_char) -> i32;
+    fn mlc_write_abort();
     fn mlc_append(schema_str: *const c_char, path: *const c_char, errmsg: *mut *mut c_char) -> i64;
     fn mlc_concat(paths: *const *const c_char, n_paths: usize, dest: *const c_char, errmsg: *mut *mut c_char) -> i32;
     fn mlc_flush(handle: i64, errmsg: *mut *mut c_char) -> i32;
@@ -1396,6 +1401,29 @@ pub trait ToVoidstar {
         w.child(self, dest, schema);
         w.run();
     }
+    /// Write a leaf from inside a walk, which may be placing the value in a
+    /// stream's buffer (SLOT-36).
+    ///
+    /// # Safety
+    /// As for `write`.
+    unsafe fn write_leaf(&self, w: &mut WriteWalk, dest: *mut u8, schema: &Schema)
+    where
+        Self: Sized,
+    {
+        self.write(dest, w.cursor, schema)
+    }
+    /// Write `self` as one `@write` batch in place (SLOT-37), or say that
+    /// it takes a voidstar copy: not a sequence, or a stream that refuses.
+    ///
+    /// # Safety
+    /// `schema` is the batch's list schema.
+    unsafe fn write_in_place(&self, schema: &Schema, level: i64, handle: u64) -> InPlace
+    where
+        Self: Sized,
+    {
+        let _ = (schema, level, handle);
+        InPlace::Copy(None)
+    }
     /// Add this node's own bytes to the walk and hand it the compound
     /// children. `schema` is resolved; `idx` is the element to visit for a
     /// sequence stepped one element per visit, else 0.
@@ -1544,6 +1572,13 @@ impl SizeWalk {
         self.direct || !schema_has_recur(schema)
     }
 
+    /// Size the next value with the same walk.
+    fn reset(&mut self) {
+        self.stack.clear();
+        self.keep.clear();
+        self.total = 0;
+    }
+
     /// Account for a child. A leaf is summed here; a compound child is
     /// stepped by call or by frame. `inline_slot` says the child's fixed
     /// width lies inside the parent's (tuple and record fields), so only its
@@ -1655,10 +1690,22 @@ pub struct WriteWalk<'a> {
     keep: Vec<Box<dyn std::any::Any>>,
     pub cursor: &'a mut *mut u8,
     pub direct: bool,
+    // SLOT-36: in a stream's buffer, offsets are relative to `base` and
+    // parts aligned relative to `origin`; null for shared-memory relptrs.
+    base: *mut u8,
+    origin: *mut u8,
+    // SLOT-36: deferred child frames, for the layout in a stream's buffer.
+    later: Vec<WriteFrame>,
+    in_step: bool,
+    deferring: bool,
 }
 
 unsafe fn write_thunk<T: ToVoidstar>(w: &mut WriteWalk, s: &Schema, dest: *mut u8, obj: *const u8, idx: usize) {
     (*(obj as *const T)).write_step(w, dest, s, idx)
+}
+
+unsafe fn write_leaf_thunk<T: ToVoidstar>(w: &mut WriteWalk, s: &Schema, dest: *mut u8, obj: *const u8, _idx: usize) {
+    (*(obj as *const T)).write_leaf(w, dest, s)
 }
 
 impl<'a> WriteWalk<'a> {
@@ -1669,11 +1716,56 @@ impl<'a> WriteWalk<'a> {
             keep: Vec::new(),
             cursor,
             direct: !schema_has_recur(root),
+            base: std::ptr::null_mut(),
+            origin: std::ptr::null_mut(),
+            later: Vec::new(),
+            in_step: false,
+            deferring: false,
         }
+    }
+
+    /// Write the next value into a stream buffer's room, its cursor at
+    /// `data`.
+    fn place(&mut self, data: *mut u8, base: *mut u8, origin: *mut u8) {
+        *self.cursor = data;
+        self.base = base;
+        self.origin = origin;
+        self.keep.clear();
+        self.later.clear();
+        self.in_step = false;
+        self.deferring = false;
     }
 
     pub fn flat(&self, schema: &Schema) -> bool {
         self.direct || !schema_has_recur(schema)
+    }
+
+    /// The relative pointer to `p`.
+    ///
+    /// # Safety
+    /// `p` lies in the block the walk writes.
+    pub unsafe fn rel(&self, p: *mut u8) -> RelPtr {
+        if self.base.is_null() {
+            to_rel(p)
+        } else {
+            (p as usize - self.base as usize) as RelPtr
+        }
+    }
+
+    /// The data pointer of an empty array or string.
+    pub fn empty_rel(&self) -> RelPtr {
+        if self.base.is_null() { RELNULL } else { 0 }
+    }
+
+    /// Move the cursor to the next multiple of `align`.
+    pub fn align(&mut self, align: usize) {
+        let c = *self.cursor as usize;
+        *self.cursor = if self.origin.is_null() {
+            align_up(c, align)
+        } else {
+            let o = self.origin as usize;
+            o + align_up(c - o, align)
+        } as *mut u8;
     }
 
     /// Write a child into its slot: a leaf now, a compound node by call or
@@ -1682,20 +1774,32 @@ impl<'a> WriteWalk<'a> {
     /// # Safety
     /// `dest` must be the child's slot in a buffer sized by `shm_size`.
     pub unsafe fn child<T: ToVoidstar>(&mut self, v: &T, dest: *mut u8, schema: &Schema) {
+        let frame = |step: WriteStep| WriteFrame {
+            step: Some(step),
+            schema,
+            dest,
+            obj: v as *const T as *const u8,
+            idx: 0,
+            aux: std::ptr::null_mut(),
+            env_pushed: false,
+        };
         if T::IS_LEAF {
-            v.write(dest, self.cursor, resolve_recur(schema));
+            // A Rust Int is always inline, so it has no tail.
+            let s = resolve_recur(schema);
+            if self.deferring && !s.is_fixed_width() && s.serial_type != SerialType::Int {
+                self.later.push(frame(write_leaf_thunk::<T>));
+            } else {
+                v.write_leaf(self, dest, s);
+            }
+        } else if self.deferring && !resolve_recur(schema).is_fixed_width() {
+            self.later.push(frame(write_thunk::<T>));
         } else if self.flat(schema) {
             v.write_step(self, dest, schema, 0);
+        } else if self.in_step && !self.base.is_null() {
+            self.later.push(frame(write_thunk::<T>));
+            self.deferring = true;
         } else {
-            self.stack.push(WriteFrame {
-                step: Some(write_thunk::<T>),
-                schema,
-                dest,
-                obj: v as *const T as *const u8,
-                idx: 0,
-                aux: std::ptr::null_mut(),
-                env_pushed: false,
-            });
+            self.stack.push(frame(write_thunk::<T>));
         }
     }
 
@@ -1735,8 +1839,7 @@ impl<'a> WriteWalk<'a> {
     /// # Safety
     /// The buffer must have room for it (see `shm_size`).
     pub unsafe fn alloc(&mut self, inner: &Schema) -> *mut u8 {
-        let align = inner.alignment().max(1);
-        *self.cursor = align_up(*self.cursor as usize, align) as *mut u8;
+        self.align(inner.alignment().max(1));
         let slot = *self.cursor;
         *self.cursor = slot.add(inner.width);
         slot
@@ -1753,7 +1856,7 @@ impl<'a> WriteWalk<'a> {
         core::ptr::write_bytes(dest.add(1), 0, VARIANT_PAYLOAD - 1);
         let a = resolve_recur(arm);
         let slot = self.alloc(a);
-        core::ptr::write_unaligned(dest.add(VARIANT_PAYLOAD) as *mut RelPtr, to_rel(slot));
+        core::ptr::write_unaligned(dest.add(VARIANT_PAYLOAD) as *mut RelPtr, self.rel(slot));
         self.child(payload, slot, a);
     }
 
@@ -1782,7 +1885,14 @@ impl<'a> WriteWalk<'a> {
                 f.env_pushed = true;
             }
             self.cur = f;
+            self.in_step = true;
+            self.deferring = false;
             unsafe { step(self, s, f.dest, f.obj, f.idx) };
+            self.in_step = false;
+            self.deferring = false;
+            if !self.later.is_empty() {
+                self.stack.extend(self.later.drain(..).rev());
+            }
         }
     }
 }
@@ -2329,12 +2439,12 @@ impl FromVoidstar for bool {
 }
 
 // ---- Unit () (NIL, the value of `<E> ()` effect results) -------------------
-// NIL occupies a 1-byte inline slot (schema.width) with no variable region;
-// nothing meaningful is written or read.
+// NIL has an empty slot (width 0) and no variable region; nothing is
+// written or read.
 impl ToVoidstar for () {
     const IS_LEAF: bool = true;
     #[inline]
-    fn shm_size(&self, _schema: &Schema) -> usize { 0 }
+    fn shm_size(&self, schema: &Schema) -> usize { schema.width }
     #[inline]
     unsafe fn write(&self, _dest: *mut u8, _cursor: &mut *mut u8, _schema: &Schema) {}
 }
@@ -2359,6 +2469,18 @@ impl ToVoidstar for String {
             core::ptr::copy_nonoverlapping(self.as_ptr(), *cursor, n);
             *cursor = (*cursor).add(n);
             r
+        };
+        core::ptr::write_unaligned(dest as *mut Array, Array { size: n, data: data_rel });
+    }
+    unsafe fn write_leaf(&self, w: &mut WriteWalk, dest: *mut u8, _schema: &Schema) {
+        let n = self.len();
+        let data_rel = if n == 0 {
+            w.empty_rel()
+        } else {
+            let at = *w.cursor;
+            core::ptr::copy_nonoverlapping(self.as_ptr(), at, n);
+            *w.cursor = at.add(n);
+            w.rel(at)
         };
         core::ptr::write_unaligned(dest as *mut Array, Array { size: n, data: data_rel });
     }
@@ -2416,7 +2538,11 @@ impl<T: ToVoidstar> ToVoidstar for $container<T> {
         let elem = resolve_recur(&schema.parameters[0]);
         if idx == 0 {
             // width slot + worst-case cursor alignment padding + element data
-            w.total += (schema.width + (elem.array_data_alignment() - 1)) as isize;
+            w.total += schema.width as isize;
+            if self.is_empty() {
+                return;
+            }
+            w.total += (elem.array_data_alignment() - 1) as isize;
             if elem.is_primitive_numeric() || elem.serial_type == SerialType::Bool {
                 w.total += (self.len() * elem.width) as isize;
                 return;
@@ -2441,14 +2567,14 @@ impl<T: ToVoidstar> ToVoidstar for $container<T> {
         let width = elem.width;
         let start = if idx == 0 {
             if n == 0 {
-                core::ptr::write_unaligned(dest as *mut Array, Array { size: 0, data: RELNULL });
+                core::ptr::write_unaligned(dest as *mut Array, Array { size: 0, data: w.empty_rel() });
                 return;
             }
             // align cursor for element data (bumps to 64 for primitive numerics)
-            *w.cursor = align_up(*w.cursor as usize, elem.array_data_alignment()) as *mut u8;
+            w.align(elem.array_data_alignment());
             let start = *w.cursor;
             *w.cursor = start.add(n * width);
-            core::ptr::write_unaligned(dest as *mut Array, Array { size: n, data: to_rel(start) });
+            core::ptr::write_unaligned(dest as *mut Array, Array { size: n, data: w.rel(start) });
             if T::IS_LEAF || w.flat(elem) {
                 let (a, b) = self.two_slices();
                 if T::write_array(a, elem, start) && T::write_array(b, elem, start.add(a.len() * width)) {
@@ -2467,6 +2593,9 @@ impl<T: ToVoidstar> ToVoidstar for $container<T> {
             w.resume(idx + 1, start);
         }
         w.child(&self[idx], start.add(idx * width), elem);
+    }
+    unsafe fn write_in_place(&self, schema: &Schema, level: i64, handle: u64) -> InPlace {
+        write_seq_in_place(self.two_slices(), schema, level, handle)
     }
 }
 impl<T: FromVoidstar> FromVoidstar for $container<T> {
@@ -2533,7 +2662,7 @@ impl<T: ToVoidstar> ToVoidstar for Option<T> {
             Some(v) => {
                 let inner = resolve_recur(&schema.parameters[0]);
                 let slot = w.alloc(inner);
-                core::ptr::write_unaligned(dest as *mut RelPtr, to_rel(slot));
+                core::ptr::write_unaligned(dest as *mut RelPtr, w.rel(slot));
                 w.child(v, slot, inner);
             }
         }
@@ -2599,6 +2728,9 @@ impl<T: ToVoidstar> ToVoidstar for Box<T> {
     }
     unsafe fn write(&self, dest: *mut u8, cursor: &mut *mut u8, schema: &Schema) {
         (**self).write(dest, cursor, schema)
+    }
+    unsafe fn write_leaf(&self, w: &mut WriteWalk, dest: *mut u8, schema: &Schema) {
+        (**self).write_leaf(w, dest, schema)
     }
     fn size_step(&self, w: &mut SizeWalk, schema: &Schema, idx: usize) {
         (**self).size_step(w, schema, idx)
@@ -2864,6 +2996,9 @@ impl<T: ToVoidstar> ToVoidstar for RecBox<T> {
     }
     unsafe fn write(&self, dest: *mut u8, cursor: &mut *mut u8, schema: &Schema) {
         (**self).write(dest, cursor, schema)
+    }
+    unsafe fn write_leaf(&self, w: &mut WriteWalk, dest: *mut u8, schema: &Schema) {
+        (**self).write_leaf(w, dest, schema)
     }
     fn size_step(&self, w: &mut SizeWalk, schema: &Schema, idx: usize) {
         (**self).size_step(w, schema, idx)
@@ -3375,8 +3510,18 @@ unsafe fn with_voidstar<T: ToVoidstar, R>(
     schema: &Schema,
     f: impl FnOnce(*mut c_void, *const CSchema, &mut *mut c_char) -> R,
 ) -> R {
+    with_voidstar_sized(value, schema, None, f)
+}
+
+/// `with_voidstar` for a value whose size may already be known.
+unsafe fn with_voidstar_sized<T: ToVoidstar, R>(
+    value: &T,
+    schema: &Schema,
+    known: Option<usize>,
+    f: impl FnOnce(*mut c_void, *const CSchema, &mut *mut c_char) -> R,
+) -> R {
     let _recur = RecurScope::enter(schema);
-    let total = value.shm_size(schema).max(1);
+    let total = known.unwrap_or_else(|| value.shm_size(schema)).max(1);
     let mut err: *mut c_char = std::ptr::null_mut();
     let root = shmalloc(total, &mut err) as *mut u8;
     if root.is_null() {
@@ -3385,6 +3530,9 @@ unsafe fn with_voidstar<T: ToVoidstar, R>(
     let guard = ShmGuard::new(root as *mut c_void);
     let mut cursor = root.add(schema.width);
     value.write(root, &mut cursor, schema); // panic -> guard shfree
+    if cursor as usize > root as usize + total {
+        morloc_infra_abort("a value was written past the size computed for it");
+    }
     let r = f(root as *mut c_void, cschema_of(schema), &mut err);
     drop(guard); // the C call has consumed the voidstar; free it now
     if !err.is_null() {
@@ -3687,19 +3835,139 @@ pub unsafe fn stream(ifile_handle: u64) -> u64 {
     handle_or_throw(h, err, "@stream")
 }
 
-/// @write: emit one sub-packet of a value to an OStream handle. `mlc_write`
-/// copies the staged voidstar synchronously and takes no schema, so the
-/// `with_voidstar` closure ignores its CSchema argument.
+/// @write: emit one batch to an OStream handle, in place where the stream
+/// takes it (SLOT-37), else from a voidstar copy, which `mlc_write` copies
+/// synchronously.
 pub unsafe fn write<T: ToVoidstar>(schema: &Schema, level: i64, value: &T, handle: u64) {
-    let rc = with_voidstar(value, schema, |vs, _cs, err| {
+    let total = match value.write_in_place(schema, level, handle) {
+        InPlace::Done => return,
+        InPlace::Copy(total) => total,
+    };
+    let rc = with_voidstar_sized(value, schema, total, |vs, _cs, err| {
         mlc_write(level, handle as i64, vs, err)
     });
+    stream_result(rc, std::ptr::null_mut(), "@write");
+}
+
+/// What `ToVoidstar::write_in_place` did: wrote the batch, or left it to the
+/// voidstar copy, with the copy's size when it already knows it.
+pub enum InPlace {
+    Done,
+    Copy(Option<usize>),
+}
+
+/// The result of an mlc_write_* call: the pipe-closed code is its own
+/// condition, an errmsg a catchable throw.
+unsafe fn stream_result(rc: i32, err: *mut c_char, what: &str) {
     if rc == morloc_runtime_types::MLC_RESULT_PIPE_CLOSED {
         pipe_closed()
     }
+    check_err(err);
     if rc != 0 {
-        failed_without_reason("@write");
+        failed_without_reason(what);
     }
+}
+
+/// SLOT-36: where one element is encoded in a stream's buffer.
+#[repr(C)]
+pub struct MlcRoom {
+    slot: *mut u8,
+    data: *mut u8,
+    end: *mut u8,
+    base: *mut u8,
+    origin: *mut u8,
+}
+
+/// SLOT-37: aborts the open in-place batch unless disarmed.
+struct WriteTxn(bool);
+impl Drop for WriteTxn {
+    fn drop(&mut self) {
+        if self.0 {
+            unsafe { mlc_write_abort() };
+        }
+    }
+}
+
+/// Write the elements `a` then `b` of a batch in place (SLOT-36), or leave
+/// it to the voidstar copy when the stream refuses. Each element is sized
+/// before the batch opens.
+unsafe fn write_seq_in_place<T: ToVoidstar>((a, b): (&[T], &[T]), schema: &Schema, level: i64, handle: u64) -> InPlace {
+    let _recur = RecurScope::enter(schema);
+    let elem = resolve_recur(&schema.parameters[0]);
+    // A table element has no voidstar size; the stream refuses it in place.
+    if elem.serial_type == SerialType::Table {
+        return InPlace::Copy(None);
+    }
+    let w = elem.width;
+    let run = (elem.is_fixed_width() || elem.serial_type == SerialType::Int) && w > 0;
+    let sizes: Vec<usize> = if run {
+        Vec::new()
+    } else {
+        let mut sw = SizeWalk::new(elem);
+        a.iter()
+            .chain(b)
+            .map(|x| {
+                sw.reset();
+                sw.child(x, elem, false);
+                sw.run()
+            })
+            .collect()
+    };
+    let mut err: *mut c_char = std::ptr::null_mut();
+    let rc = mlc_write_begin(level, handle as i64, &mut err);
+    if rc == morloc_runtime_types::MLC_WRITE_FALLBACK {
+        // The list's own size: its header, the data's alignment slack, and
+        // each element's.
+        let n = a.len() + b.len();
+        let total = (!run).then(|| schema.width + if n > 0 { elem.array_data_alignment() - 1 } else { 0 } + sizes.iter().sum::<usize>());
+        return InPlace::Copy(total);
+    }
+    stream_result(rc, err, "@write");
+    let mut txn = WriteTxn(true);
+    let mut reached: *const u8 = std::ptr::null();
+    let mut cursor: *mut u8 = std::ptr::null_mut();
+    let mut ww = WriteWalk::new(elem, &mut cursor);
+    if run {
+        for mut part in [a, b] {
+            while !part.is_empty() {
+                let mut slots: *mut u8 = std::ptr::null_mut();
+                let mut k: u64 = 0;
+                let rc = mlc_write_place_run(part.len() as u64, reached, &mut slots, &mut k, &mut err);
+                stream_result(rc, err, "@write");
+                let (now, rest) = part.split_at(k as usize);
+                if !T::write_array(now, elem, slots) {
+                    ww.place(std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut());
+                    for (m, x) in now.iter().enumerate() {
+                        ww.child(x, slots.add(m * w), elem);
+                    }
+                    ww.run();
+                }
+                reached = slots.add(now.len() * w);
+                part = rest;
+            }
+        }
+    } else {
+        for (x, &size) in a.iter().chain(b).zip(&sizes) {
+            let mut room = MlcRoom {
+                slot: std::ptr::null_mut(),
+                data: std::ptr::null_mut(),
+                end: std::ptr::null_mut(),
+                base: std::ptr::null_mut(),
+                origin: std::ptr::null_mut(),
+            };
+            let rc = mlc_write_place(size as u64, reached, &mut room, &mut err);
+            stream_result(rc, err, "@write");
+            ww.place(room.data, room.base, room.origin);
+            ww.child(x, room.slot, elem);
+            ww.run();
+            reached = *ww.cursor;
+        }
+    }
+    drop(ww);
+    txn.0 = false;
+    let rc = mlc_write_commit(reached, &mut err);
+    stream_result(rc, err, "@write");
+    InPlace::Done
 }
 
 /// @append: open an existing stream file for append, returning a fresh handle.

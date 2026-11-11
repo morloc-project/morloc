@@ -703,7 +703,7 @@ T _mlc_load(Schema* schema, const std::string& path) {
     return result;
 }
 
-// ── Stream-handle wrappers ───────────────────────────────────────────────
+// -- Stream-handle wrappers -------------------------------------------------
 // @close: returns void; the runtime bumps generation and frees the slot.
 inline void _mlc_close(int64_t handle) {
     char* errmsg = NULL;
@@ -974,11 +974,12 @@ inline int64_t _mlc_open_stderr(Schema* schema) {
         } \
     } while (0)
 
-// @write from a voidstar copy of the batch, which the runtime lays out.
+// @write from a voidstar copy of the batch, which the runtime lays out;
+// `known` is its size when the caller has it, else 0.
 template <typename T>
-inline void _mlc_write_copy(Schema* schema, int64_t level, const T& value, int64_t handle) {
+inline void _mlc_write_copy(Schema* schema, int64_t level, const T& value, int64_t handle, size_t known = 0) {
     char* errmsg = NULL;
-    size_t bytes = get_shm_size(schema, value);
+    size_t bytes = known != 0 ? known : get_shm_size(schema, value);
     void* voidstar = shmalloc_cpp(bytes);
     void* cursor = (uint8_t*)voidstar + schema->width;
     try {
@@ -986,6 +987,9 @@ inline void _mlc_write_copy(Schema* schema, int64_t level, const T& value, int64
     } catch (...) {
         shfree_cpp(voidstar);
         throw;
+    }
+    if (static_cast<uint8_t*>(cursor) > static_cast<uint8_t*>(voidstar) + bytes) {
+        mlc_runtime_defect("@write: a value was written past the size computed for it");
     }
     int rc = mlc_write(level, handle, voidstar, &errmsg);
     shfree_cpp(voidstar);
@@ -1000,22 +1004,52 @@ struct MlcWriteTxn {
     }
 };
 
-// Encode each element of `xs` into the room the runtime places it in
-// (SLOT-36); returns where the last encoding ended.
+// Write the batch `xs` in place (SLOT-36), or from a voidstar copy when
+// the stream refuses. Each element is sized before the batch opens.
 template <typename E>
-inline const uint8_t* _mlc_write_elements(const Schema* elem, const std::vector<E>& xs) {
-    const uint8_t* reached = nullptr;
-    char* errmsg = NULL;
+inline void _mlc_write_batch(Schema* schema, int64_t level, const std::vector<E>& xs, int64_t handle) {
+    const Schema* elem = resolve_recur(schema->parameters[0]);
     const size_t n = xs.size();
     const size_t w = elem->width;
+    const bool run = (elem->fixed_width || elem->type == MORLOC_INT) && w > 0;
+    // A table element has no voidstar size; the stream refuses it in place.
+    const bool sized = !run && elem->type != MORLOC_TABLE;
+    std::vector<size_t> sizes;
+    if (sized) {
+        MlcSizeWalk sw(elem);
+        sizes.reserve(n);
+        for (size_t i = 0; i < n; i++) {
+            sw.total = 0;
+            sw.keep.clear();
+            sw.child(elem, xs[i], false);
+            sizes.push_back(static_cast<size_t>(sw.run()));
+        }
+    }
+    char* errmsg = NULL;
+    int rc = mlc_write_begin(level, handle, &errmsg);
+    if (rc == MLC_WRITE_FALLBACK) {
+        // The list's own size: its header, the data's alignment slack, and
+        // each element's.
+        size_t known = 0;
+        if (sized) {
+            known = schema->width + (n > 0 ? elem->data_alignment - 1 : 0);
+            for (size_t s : sizes) known += s;
+        }
+        _mlc_write_copy(schema, level, xs, handle, known);
+        return;
+    }
+    MLC_WRITE_RESULT(rc, errmsg, "mlc_write_begin");
+    if (!run && !sized) mlc_runtime_defect("@write: a table batch was opened in place");
+    MlcWriteTxn txn;
+    const uint8_t* reached = nullptr;
     MlcWriteWalk ww(elem, nullptr);
-    if ((elem->fixed_width || elem->type == MORLOC_INT) && w > 0) {
+    if (run) {
         void* no_cursor = nullptr;
         ww.place(&no_cursor, nullptr, nullptr);
         for (size_t i = 0; i < n;) {
             uint8_t* slots = nullptr;
             uint64_t k = 0;
-            int rc = mlc_write_place_run(n - i, reached, &slots, &k, &errmsg);
+            rc = mlc_write_place_run(n - i, reached, &slots, &k, &errmsg);
             MLC_WRITE_RESULT(rc, errmsg, "mlc_write_place_run");
             char* at = reinterpret_cast<char*>(slots);
             if constexpr (mlc_is_leaf_v<E>) {
@@ -1028,52 +1062,33 @@ inline const uint8_t* _mlc_write_elements(const Schema* elem, const std::vector<
             reached = slots + k * w;
             i += k;
         }
-        return reached;
+    } else {
+        for (size_t i = 0; i < n; i++) {
+            mlc_room_t room;
+            rc = mlc_write_place(sizes[i], reached, &room, &errmsg);
+            MLC_WRITE_RESULT(rc, errmsg, "mlc_write_place");
+            void* cursor = room.data;
+            ww.place(&cursor, reinterpret_cast<char*>(room.base), reinterpret_cast<char*>(room.origin));
+            ww.child(elem, room.slot, xs[i]);
+            ww.run();
+            reached = static_cast<const uint8_t*>(cursor);
+        }
     }
-    MlcSizeWalk sw(elem);
-    for (size_t i = 0; i < n; i++) {
-        sw.total = 0;
-        sw.keep.clear();
-        sw.child(elem, xs[i], false);
-        size_t size = static_cast<size_t>(sw.run());
-        mlc_room_t room;
-        int rc = mlc_write_place(size, reached, &room, &errmsg);
-        MLC_WRITE_RESULT(rc, errmsg, "mlc_write_place");
-        void* cursor = room.data;
-        ww.place(&cursor, reinterpret_cast<char*>(room.base), reinterpret_cast<char*>(room.origin));
-        ww.child(elem, room.slot, xs[i]);
-        ww.run();
-        reached = static_cast<const uint8_t*>(cursor);
-    }
-    return reached;
+    txn.open = false;
+    rc = mlc_write_commit(reached, &errmsg);
+    MLC_WRITE_RESULT(rc, errmsg, "mlc_write_commit");
 }
 
 // @write: emit one batch. An output file's batch is encoded in place
 // (SLOT-37); other streams take a voidstar copy.
 template <typename T>
 inline void _mlc_write(Schema* schema, int64_t level, const T& value, int64_t handle) {
-    constexpr bool listlike = is_std_vector<T>::value || is_non_vector_container_v<T>;
-    if constexpr (!listlike) {
-        _mlc_write_copy(schema, level, value, handle);
+    if constexpr (is_std_vector<T>::value) {
+        _mlc_write_batch(schema, level, value, handle);
+    } else if constexpr (is_non_vector_container_v<T>) {
+        _mlc_write_batch(schema, level, to_vector(value), handle);
     } else {
-        char* errmsg = NULL;
-        int rc = mlc_write_begin(level, handle, &errmsg);
-        if (rc == MLC_WRITE_FALLBACK) {
-            _mlc_write_copy(schema, level, value, handle);
-            return;
-        }
-        MLC_WRITE_RESULT(rc, errmsg, "mlc_write_begin");
-        MlcWriteTxn txn;
-        const Schema* elem = resolve_recur(schema->parameters[0]);
-        const uint8_t* reached;
-        if constexpr (is_std_vector<T>::value) {
-            reached = _mlc_write_elements(elem, value);
-        } else {
-            reached = _mlc_write_elements(elem, to_vector(value));
-        }
-        txn.open = false;
-        rc = mlc_write_commit(reached, &errmsg);
-        MLC_WRITE_RESULT(rc, errmsg, "mlc_write_commit");
+        _mlc_write_copy(schema, level, value, handle);
     }
 }
 

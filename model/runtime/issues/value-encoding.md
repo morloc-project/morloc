@@ -126,3 +126,10 @@
   breaks SLOT-37's canonical bytes once Python writes in place, and a
   C++ reader reports it as "2-limb integer (128 bits)" (reproduced:
   `idcpp (idpy x)` with x = -9223372036854775808).
+- [read, 2026-11-11] A Rust `u64` written under an `Int` schema is cast
+  with `as i64` (data/rust/rustmorloc/src/lib.rs, int_impl, the
+  `SerialType::Int` arm of `write`), so a value above i64::MAX wraps
+  negative. Every other narrowing write refuses an out-of-range value
+  (C++ check_range_narrow, Rust write_int), as the native-width rule for
+  `Int` requires; this one is a gap in that check. Reachable only when a
+  Rust mapping puts a u64 under `Int`.

@@ -34,3 +34,9 @@ CSV input to a `Table` argument (reader: arrow_ipc_reader.rs
   is read by the pool that holds it, so the nexus checks only the header and
   the cell error comes back as the call's failure (golden
   bad-table-cell-fails-the-call).
+- [speculative, 2026-11-11] A Rust `@write` of a batch of tables would
+  size the list through the voidstar size walk, which aborts for a table
+  (rustmorloc `RecordBatch::shm_size`, morloc_infra_abort); the runtime
+  refuses table elements in place, so the copy path is the only route.
+  Not reproduced: whether codegen ever gives a Rust pool an `OStream Table`
+  write is unchecked. SLOT-35 / TAB gap.

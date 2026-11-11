@@ -1,0 +1,707 @@
+-- Every value is written to a stream file in place by C++ and by Rust
+-- (SLOT-36, SLOT-37) and from a voidstar copy by Python, which the runtime
+-- lays out. All three write the same JSON batches, and each in-place file
+-- must agree with Python's byte for byte, sub-packet cuts and footer
+-- included, apart from the writer's pid and times (same.py). The types
+-- cover alignment relative to the element's origin, empty arrays and
+-- strings, size slack, records and data arms with deep fields before
+-- fields with tails (Tree, Chain: laid out in field order), and a rose
+-- tree 10000 deep. The 4096-byte buffer cuts most batches. A few types are
+-- also written with the default buffer, and to standard output, which takes
+-- the voidstar copy in every language (a staged stream); C++ and Rust size
+-- that copy with the sizes they computed for the in-place attempt.
+module main
+  ( wcReal, wrReal, wpReal
+  , wcI8, wrI8, wpI8
+  , wcBool, wrBool, wpBool
+  , wcPair, wrPair, wpPair
+  , wcI64, wrI64, wpI64
+  , wcInt, wrInt, wpInt
+  , wcStr, wrStr, wpStr
+  , wcReals, wrReals, wpReals
+  , wcI8s, wrI8s, wpI8s
+  , wcU8s, wrU8s, wpU8s
+  , wcStrs3, wrStrs3, wpStrs3
+  , wcOptStr, wrOptStr, wpOptStr
+  , wcOptReals, wrOptReals, wpOptReals
+  , wcOptI16s, wrOptI16s, wpOptI16s
+  , wcDir, wrDir, wpDir
+  , wcShape, wrShape, wpShape
+  , wcTwo, wrTwo, wpTwo
+  , wcMixed, wrMixed, wpMixed
+  , wcTree, wrTree, wpTree
+  , wcRose, wrRose, wpRose
+  , wcChain, wrChain, wpChain
+  , wcUnits, wrUnits, wpUnits
+  , wcUnit, wrUnit, wpUnit
+  , scStrs3, srStrs3, spStrs3
+  , scTree, srTree, spTree
+  , scMixed, srMixed, spMixed
+  , scUnits, srUnits, spUnits
+  , scChain, srChain, spChain
+  , scRose, srRose, spRose
+  , scShape, srShape, spShape
+  , scOptReals, srOptReals, spOptReals
+  , scU8s, srU8s, spU8s
+  , scStr, srStr, spStr
+  )
+
+
+import root
+import root-cpp
+import root-py
+import root-rust
+
+data Dir = North | South | East
+
+record Pt where
+  x :: Real
+  label :: Str
+record Cpp => Pt = "struct"
+record Py => Pt = "dict"
+record Rust => Pt = "struct"
+
+data Shape = Dot | Circle Real | Box Pt
+
+record Two where
+  name :: Str
+  tag :: U8
+  xs :: [I16]
+  more :: [Str]
+record Cpp => Two = "struct"
+record Py => Two = "dict"
+record Rust => Two = "struct"
+
+record Units where
+  u :: ()
+  s :: Str
+  v :: ()
+record Cpp => Units = "struct"
+record Py => Units = "dict"
+record Rust => Units = "struct"
+
+data Tree = Leaf | Node Int Tree Tree
+
+data Rose = Rose I32 [Rose]
+
+-- A deep field before fields with tails: laid out in field order.
+data Chain = End | Link Str Chain [I8] Str
+
+drainC :: Int -> OStream a -> [[a]] -> <IO> ()
+drainC z o xss = do
+  ? length xss == 0 = do
+      ()
+  : do
+    @write z o (idcpp (.0 (uncons xss)))
+    drainC z o (.1 (uncons xss))
+
+drainR :: Int -> OStream a -> [[a]] -> <IO> ()
+drainR z o xss = do
+  ? length xss == 0 = do
+      ()
+  : do
+    @write z o (idrust (.0 (uncons xss)))
+    drainR z o (.1 (uncons xss))
+
+drainP :: Int -> OStream a -> [[a]] -> <IO> ()
+drainP z o xss = do
+  ? length xss == 0 = do
+      ()
+  : do
+    @write z o (idpy (.0 (uncons xss)))
+    drainP z o (.1 (uncons xss))
+
+wcReal :: Int -> Str -> [[Real]] -> <IO> ()
+wcReal z path xss = do
+  Ok o <- @open path :: <IO> (Try Str (OStream Real))
+  drainC z o xss
+  @close o
+
+wrReal :: Int -> Str -> [[Real]] -> <IO> ()
+wrReal z path xss = do
+  Ok o <- @open path :: <IO> (Try Str (OStream Real))
+  drainR z o xss
+  @close o
+
+wpReal :: Int -> Str -> [[Real]] -> <IO> ()
+wpReal z path xss = do
+  Ok o <- @open path :: <IO> (Try Str (OStream Real))
+  drainP z o xss
+  @close o
+
+wcI8 :: Int -> Str -> [[I8]] -> <IO> ()
+wcI8 z path xss = do
+  Ok o <- @open path :: <IO> (Try Str (OStream I8))
+  drainC z o xss
+  @close o
+
+wrI8 :: Int -> Str -> [[I8]] -> <IO> ()
+wrI8 z path xss = do
+  Ok o <- @open path :: <IO> (Try Str (OStream I8))
+  drainR z o xss
+  @close o
+
+wpI8 :: Int -> Str -> [[I8]] -> <IO> ()
+wpI8 z path xss = do
+  Ok o <- @open path :: <IO> (Try Str (OStream I8))
+  drainP z o xss
+  @close o
+
+wcBool :: Int -> Str -> [[Bool]] -> <IO> ()
+wcBool z path xss = do
+  Ok o <- @open path :: <IO> (Try Str (OStream Bool))
+  drainC z o xss
+  @close o
+
+wrBool :: Int -> Str -> [[Bool]] -> <IO> ()
+wrBool z path xss = do
+  Ok o <- @open path :: <IO> (Try Str (OStream Bool))
+  drainR z o xss
+  @close o
+
+wpBool :: Int -> Str -> [[Bool]] -> <IO> ()
+wpBool z path xss = do
+  Ok o <- @open path :: <IO> (Try Str (OStream Bool))
+  drainP z o xss
+  @close o
+
+wcPair :: Int -> Str -> [[(I32, Bool)]] -> <IO> ()
+wcPair z path xss = do
+  Ok o <- @open path :: <IO> (Try Str (OStream (I32, Bool)))
+  drainC z o xss
+  @close o
+
+wrPair :: Int -> Str -> [[(I32, Bool)]] -> <IO> ()
+wrPair z path xss = do
+  Ok o <- @open path :: <IO> (Try Str (OStream (I32, Bool)))
+  drainR z o xss
+  @close o
+
+wpPair :: Int -> Str -> [[(I32, Bool)]] -> <IO> ()
+wpPair z path xss = do
+  Ok o <- @open path :: <IO> (Try Str (OStream (I32, Bool)))
+  drainP z o xss
+  @close o
+
+wcI64 :: Int -> Str -> [[I64]] -> <IO> ()
+wcI64 z path xss = do
+  Ok o <- @open path :: <IO> (Try Str (OStream I64))
+  drainC z o xss
+  @close o
+
+wrI64 :: Int -> Str -> [[I64]] -> <IO> ()
+wrI64 z path xss = do
+  Ok o <- @open path :: <IO> (Try Str (OStream I64))
+  drainR z o xss
+  @close o
+
+wpI64 :: Int -> Str -> [[I64]] -> <IO> ()
+wpI64 z path xss = do
+  Ok o <- @open path :: <IO> (Try Str (OStream I64))
+  drainP z o xss
+  @close o
+
+wcInt :: Int -> Str -> [[Int]] -> <IO> ()
+wcInt z path xss = do
+  Ok o <- @open path :: <IO> (Try Str (OStream Int))
+  drainC z o xss
+  @close o
+
+wrInt :: Int -> Str -> [[Int]] -> <IO> ()
+wrInt z path xss = do
+  Ok o <- @open path :: <IO> (Try Str (OStream Int))
+  drainR z o xss
+  @close o
+
+wpInt :: Int -> Str -> [[Int]] -> <IO> ()
+wpInt z path xss = do
+  Ok o <- @open path :: <IO> (Try Str (OStream Int))
+  drainP z o xss
+  @close o
+
+wcStr :: Int -> Str -> [[Str]] -> <IO> ()
+wcStr z path xss = do
+  Ok o <- @open path :: <IO> (Try Str (OStream Str))
+  drainC z o xss
+  @close o
+
+wrStr :: Int -> Str -> [[Str]] -> <IO> ()
+wrStr z path xss = do
+  Ok o <- @open path :: <IO> (Try Str (OStream Str))
+  drainR z o xss
+  @close o
+
+wpStr :: Int -> Str -> [[Str]] -> <IO> ()
+wpStr z path xss = do
+  Ok o <- @open path :: <IO> (Try Str (OStream Str))
+  drainP z o xss
+  @close o
+
+wcReals :: Int -> Str -> [[[Real]]] -> <IO> ()
+wcReals z path xss = do
+  Ok o <- @open path :: <IO> (Try Str (OStream [Real]))
+  drainC z o xss
+  @close o
+
+wrReals :: Int -> Str -> [[[Real]]] -> <IO> ()
+wrReals z path xss = do
+  Ok o <- @open path :: <IO> (Try Str (OStream [Real]))
+  drainR z o xss
+  @close o
+
+wpReals :: Int -> Str -> [[[Real]]] -> <IO> ()
+wpReals z path xss = do
+  Ok o <- @open path :: <IO> (Try Str (OStream [Real]))
+  drainP z o xss
+  @close o
+
+wcI8s :: Int -> Str -> [[[I8]]] -> <IO> ()
+wcI8s z path xss = do
+  Ok o <- @open path :: <IO> (Try Str (OStream [I8]))
+  drainC z o xss
+  @close o
+
+wrI8s :: Int -> Str -> [[[I8]]] -> <IO> ()
+wrI8s z path xss = do
+  Ok o <- @open path :: <IO> (Try Str (OStream [I8]))
+  drainR z o xss
+  @close o
+
+wpI8s :: Int -> Str -> [[[I8]]] -> <IO> ()
+wpI8s z path xss = do
+  Ok o <- @open path :: <IO> (Try Str (OStream [I8]))
+  drainP z o xss
+  @close o
+
+wcU8s :: Int -> Str -> [[[U8]]] -> <IO> ()
+wcU8s z path xss = do
+  Ok o <- @open path :: <IO> (Try Str (OStream [U8]))
+  drainC z o xss
+  @close o
+
+wrU8s :: Int -> Str -> [[[U8]]] -> <IO> ()
+wrU8s z path xss = do
+  Ok o <- @open path :: <IO> (Try Str (OStream [U8]))
+  drainR z o xss
+  @close o
+
+wpU8s :: Int -> Str -> [[[U8]]] -> <IO> ()
+wpU8s z path xss = do
+  Ok o <- @open path :: <IO> (Try Str (OStream [U8]))
+  drainP z o xss
+  @close o
+
+wcStrs3 :: Int -> Str -> [[[[Str]]]] -> <IO> ()
+wcStrs3 z path xss = do
+  Ok o <- @open path :: <IO> (Try Str (OStream [[Str]]))
+  drainC z o xss
+  @close o
+
+wrStrs3 :: Int -> Str -> [[[[Str]]]] -> <IO> ()
+wrStrs3 z path xss = do
+  Ok o <- @open path :: <IO> (Try Str (OStream [[Str]]))
+  drainR z o xss
+  @close o
+
+wpStrs3 :: Int -> Str -> [[[[Str]]]] -> <IO> ()
+wpStrs3 z path xss = do
+  Ok o <- @open path :: <IO> (Try Str (OStream [[Str]]))
+  drainP z o xss
+  @close o
+
+wcOptStr :: Int -> Str -> [[?Str]] -> <IO> ()
+wcOptStr z path xss = do
+  Ok o <- @open path :: <IO> (Try Str (OStream ?Str))
+  drainC z o xss
+  @close o
+
+wrOptStr :: Int -> Str -> [[?Str]] -> <IO> ()
+wrOptStr z path xss = do
+  Ok o <- @open path :: <IO> (Try Str (OStream ?Str))
+  drainR z o xss
+  @close o
+
+wpOptStr :: Int -> Str -> [[?Str]] -> <IO> ()
+wpOptStr z path xss = do
+  Ok o <- @open path :: <IO> (Try Str (OStream ?Str))
+  drainP z o xss
+  @close o
+
+wcOptReals :: Int -> Str -> [[?[Real]]] -> <IO> ()
+wcOptReals z path xss = do
+  Ok o <- @open path :: <IO> (Try Str (OStream ?[Real]))
+  drainC z o xss
+  @close o
+
+wrOptReals :: Int -> Str -> [[?[Real]]] -> <IO> ()
+wrOptReals z path xss = do
+  Ok o <- @open path :: <IO> (Try Str (OStream ?[Real]))
+  drainR z o xss
+  @close o
+
+wpOptReals :: Int -> Str -> [[?[Real]]] -> <IO> ()
+wpOptReals z path xss = do
+  Ok o <- @open path :: <IO> (Try Str (OStream ?[Real]))
+  drainP z o xss
+  @close o
+
+wcOptI16s :: Int -> Str -> [[[?I16]]] -> <IO> ()
+wcOptI16s z path xss = do
+  Ok o <- @open path :: <IO> (Try Str (OStream [?I16]))
+  drainC z o xss
+  @close o
+
+wrOptI16s :: Int -> Str -> [[[?I16]]] -> <IO> ()
+wrOptI16s z path xss = do
+  Ok o <- @open path :: <IO> (Try Str (OStream [?I16]))
+  drainR z o xss
+  @close o
+
+wpOptI16s :: Int -> Str -> [[[?I16]]] -> <IO> ()
+wpOptI16s z path xss = do
+  Ok o <- @open path :: <IO> (Try Str (OStream [?I16]))
+  drainP z o xss
+  @close o
+
+wcDir :: Int -> Str -> [[Dir]] -> <IO> ()
+wcDir z path xss = do
+  Ok o <- @open path :: <IO> (Try Str (OStream Dir))
+  drainC z o xss
+  @close o
+
+wrDir :: Int -> Str -> [[Dir]] -> <IO> ()
+wrDir z path xss = do
+  Ok o <- @open path :: <IO> (Try Str (OStream Dir))
+  drainR z o xss
+  @close o
+
+wpDir :: Int -> Str -> [[Dir]] -> <IO> ()
+wpDir z path xss = do
+  Ok o <- @open path :: <IO> (Try Str (OStream Dir))
+  drainP z o xss
+  @close o
+
+wcShape :: Int -> Str -> [[Shape]] -> <IO> ()
+wcShape z path xss = do
+  Ok o <- @open path :: <IO> (Try Str (OStream Shape))
+  drainC z o xss
+  @close o
+
+wrShape :: Int -> Str -> [[Shape]] -> <IO> ()
+wrShape z path xss = do
+  Ok o <- @open path :: <IO> (Try Str (OStream Shape))
+  drainR z o xss
+  @close o
+
+wpShape :: Int -> Str -> [[Shape]] -> <IO> ()
+wpShape z path xss = do
+  Ok o <- @open path :: <IO> (Try Str (OStream Shape))
+  drainP z o xss
+  @close o
+
+wcTwo :: Int -> Str -> [[Two]] -> <IO> ()
+wcTwo z path xss = do
+  Ok o <- @open path :: <IO> (Try Str (OStream Two))
+  drainC z o xss
+  @close o
+
+wrTwo :: Int -> Str -> [[Two]] -> <IO> ()
+wrTwo z path xss = do
+  Ok o <- @open path :: <IO> (Try Str (OStream Two))
+  drainR z o xss
+  @close o
+
+wpTwo :: Int -> Str -> [[Two]] -> <IO> ()
+wpTwo z path xss = do
+  Ok o <- @open path :: <IO> (Try Str (OStream Two))
+  drainP z o xss
+  @close o
+
+wcMixed :: Int -> Str -> [[(Str, [Real], ?Str, I8)]] -> <IO> ()
+wcMixed z path xss = do
+  Ok o <- @open path :: <IO> (Try Str (OStream (Str, [Real], ?Str, I8)))
+  drainC z o xss
+  @close o
+
+wrMixed :: Int -> Str -> [[(Str, [Real], ?Str, I8)]] -> <IO> ()
+wrMixed z path xss = do
+  Ok o <- @open path :: <IO> (Try Str (OStream (Str, [Real], ?Str, I8)))
+  drainR z o xss
+  @close o
+
+wpMixed :: Int -> Str -> [[(Str, [Real], ?Str, I8)]] -> <IO> ()
+wpMixed z path xss = do
+  Ok o <- @open path :: <IO> (Try Str (OStream (Str, [Real], ?Str, I8)))
+  drainP z o xss
+  @close o
+
+wcTree :: Int -> Str -> [[Tree]] -> <IO> ()
+wcTree z path xss = do
+  Ok o <- @open path :: <IO> (Try Str (OStream Tree))
+  drainC z o xss
+  @close o
+
+wrTree :: Int -> Str -> [[Tree]] -> <IO> ()
+wrTree z path xss = do
+  Ok o <- @open path :: <IO> (Try Str (OStream Tree))
+  drainR z o xss
+  @close o
+
+wpTree :: Int -> Str -> [[Tree]] -> <IO> ()
+wpTree z path xss = do
+  Ok o <- @open path :: <IO> (Try Str (OStream Tree))
+  drainP z o xss
+  @close o
+
+wcRose :: Int -> Str -> [[Rose]] -> <IO> ()
+wcRose z path xss = do
+  Ok o <- @open path :: <IO> (Try Str (OStream Rose))
+  drainC z o xss
+  @close o
+
+wrRose :: Int -> Str -> [[Rose]] -> <IO> ()
+wrRose z path xss = do
+  Ok o <- @open path :: <IO> (Try Str (OStream Rose))
+  drainR z o xss
+  @close o
+
+wpRose :: Int -> Str -> [[Rose]] -> <IO> ()
+wpRose z path xss = do
+  Ok o <- @open path :: <IO> (Try Str (OStream Rose))
+  drainP z o xss
+  @close o
+
+wcChain :: Int -> Str -> [[Chain]] -> <IO> ()
+wcChain z path xss = do
+  Ok o <- @open path :: <IO> (Try Str (OStream Chain))
+  drainC z o xss
+  @close o
+
+wrChain :: Int -> Str -> [[Chain]] -> <IO> ()
+wrChain z path xss = do
+  Ok o <- @open path :: <IO> (Try Str (OStream Chain))
+  drainR z o xss
+  @close o
+
+wpChain :: Int -> Str -> [[Chain]] -> <IO> ()
+wpChain z path xss = do
+  Ok o <- @open path :: <IO> (Try Str (OStream Chain))
+  drainP z o xss
+  @close o
+
+
+wcUnits :: Int -> Str -> [[Units]] -> <IO> ()
+wcUnits z path xss = do
+  Ok o <- @open path :: <IO> (Try Str (OStream Units))
+  drainC z o xss
+  @close o
+
+wrUnits :: Int -> Str -> [[Units]] -> <IO> ()
+wrUnits z path xss = do
+  Ok o <- @open path :: <IO> (Try Str (OStream Units))
+  drainR z o xss
+  @close o
+
+wpUnits :: Int -> Str -> [[Units]] -> <IO> ()
+wpUnits z path xss = do
+  Ok o <- @open path :: <IO> (Try Str (OStream Units))
+  drainP z o xss
+  @close o
+
+wcUnit :: Int -> Str -> [[()]] -> <IO> ()
+wcUnit z path xss = do
+  Ok o <- @open path :: <IO> (Try Str (OStream ()))
+  drainC z o xss
+  @close o
+
+wrUnit :: Int -> Str -> [[()]] -> <IO> ()
+wrUnit z path xss = do
+  Ok o <- @open path :: <IO> (Try Str (OStream ()))
+  drainR z o xss
+  @close o
+
+wpUnit :: Int -> Str -> [[()]] -> <IO> ()
+wpUnit z path xss = do
+  Ok o <- @open path :: <IO> (Try Str (OStream ()))
+  drainP z o xss
+  @close o
+
+scStrs3 :: Int -> [[[[Str]]]] -> <IO> ()
+scStrs3 z xss = do
+  o <- @stdout :: <IO> (OStream [[Str]])
+  drainC z o xss
+  @close o
+
+srStrs3 :: Int -> [[[[Str]]]] -> <IO> ()
+srStrs3 z xss = do
+  o <- @stdout :: <IO> (OStream [[Str]])
+  drainR z o xss
+  @close o
+
+spStrs3 :: Int -> [[[[Str]]]] -> <IO> ()
+spStrs3 z xss = do
+  o <- @stdout :: <IO> (OStream [[Str]])
+  drainP z o xss
+  @close o
+
+scTree :: Int -> [[Tree]] -> <IO> ()
+scTree z xss = do
+  o <- @stdout :: <IO> (OStream Tree)
+  drainC z o xss
+  @close o
+
+srTree :: Int -> [[Tree]] -> <IO> ()
+srTree z xss = do
+  o <- @stdout :: <IO> (OStream Tree)
+  drainR z o xss
+  @close o
+
+spTree :: Int -> [[Tree]] -> <IO> ()
+spTree z xss = do
+  o <- @stdout :: <IO> (OStream Tree)
+  drainP z o xss
+  @close o
+
+scMixed :: Int -> [[(Str, [Real], ?Str, I8)]] -> <IO> ()
+scMixed z xss = do
+  o <- @stdout :: <IO> (OStream (Str, [Real], ?Str, I8))
+  drainC z o xss
+  @close o
+
+srMixed :: Int -> [[(Str, [Real], ?Str, I8)]] -> <IO> ()
+srMixed z xss = do
+  o <- @stdout :: <IO> (OStream (Str, [Real], ?Str, I8))
+  drainR z o xss
+  @close o
+
+spMixed :: Int -> [[(Str, [Real], ?Str, I8)]] -> <IO> ()
+spMixed z xss = do
+  o <- @stdout :: <IO> (OStream (Str, [Real], ?Str, I8))
+  drainP z o xss
+  @close o
+
+scUnits :: Int -> [[Units]] -> <IO> ()
+scUnits z xss = do
+  o <- @stdout :: <IO> (OStream Units)
+  drainC z o xss
+  @close o
+
+srUnits :: Int -> [[Units]] -> <IO> ()
+srUnits z xss = do
+  o <- @stdout :: <IO> (OStream Units)
+  drainR z o xss
+  @close o
+
+spUnits :: Int -> [[Units]] -> <IO> ()
+spUnits z xss = do
+  o <- @stdout :: <IO> (OStream Units)
+  drainP z o xss
+  @close o
+
+scChain :: Int -> [[Chain]] -> <IO> ()
+scChain z xss = do
+  o <- @stdout :: <IO> (OStream Chain)
+  drainC z o xss
+  @close o
+
+srChain :: Int -> [[Chain]] -> <IO> ()
+srChain z xss = do
+  o <- @stdout :: <IO> (OStream Chain)
+  drainR z o xss
+  @close o
+
+spChain :: Int -> [[Chain]] -> <IO> ()
+spChain z xss = do
+  o <- @stdout :: <IO> (OStream Chain)
+  drainP z o xss
+  @close o
+
+scRose :: Int -> [[Rose]] -> <IO> ()
+scRose z xss = do
+  o <- @stdout :: <IO> (OStream Rose)
+  drainC z o xss
+  @close o
+
+srRose :: Int -> [[Rose]] -> <IO> ()
+srRose z xss = do
+  o <- @stdout :: <IO> (OStream Rose)
+  drainR z o xss
+  @close o
+
+spRose :: Int -> [[Rose]] -> <IO> ()
+spRose z xss = do
+  o <- @stdout :: <IO> (OStream Rose)
+  drainP z o xss
+  @close o
+
+scShape :: Int -> [[Shape]] -> <IO> ()
+scShape z xss = do
+  o <- @stdout :: <IO> (OStream Shape)
+  drainC z o xss
+  @close o
+
+srShape :: Int -> [[Shape]] -> <IO> ()
+srShape z xss = do
+  o <- @stdout :: <IO> (OStream Shape)
+  drainR z o xss
+  @close o
+
+spShape :: Int -> [[Shape]] -> <IO> ()
+spShape z xss = do
+  o <- @stdout :: <IO> (OStream Shape)
+  drainP z o xss
+  @close o
+
+scOptReals :: Int -> [[?[Real]]] -> <IO> ()
+scOptReals z xss = do
+  o <- @stdout :: <IO> (OStream ?[Real])
+  drainC z o xss
+  @close o
+
+srOptReals :: Int -> [[?[Real]]] -> <IO> ()
+srOptReals z xss = do
+  o <- @stdout :: <IO> (OStream ?[Real])
+  drainR z o xss
+  @close o
+
+spOptReals :: Int -> [[?[Real]]] -> <IO> ()
+spOptReals z xss = do
+  o <- @stdout :: <IO> (OStream ?[Real])
+  drainP z o xss
+  @close o
+
+scU8s :: Int -> [[[U8]]] -> <IO> ()
+scU8s z xss = do
+  o <- @stdout :: <IO> (OStream [U8])
+  drainC z o xss
+  @close o
+
+srU8s :: Int -> [[[U8]]] -> <IO> ()
+srU8s z xss = do
+  o <- @stdout :: <IO> (OStream [U8])
+  drainR z o xss
+  @close o
+
+spU8s :: Int -> [[[U8]]] -> <IO> ()
+spU8s z xss = do
+  o <- @stdout :: <IO> (OStream [U8])
+  drainP z o xss
+  @close o
+
+scStr :: Int -> [[Str]] -> <IO> ()
+scStr z xss = do
+  o <- @stdout :: <IO> (OStream Str)
+  drainC z o xss
+  @close o
+
+srStr :: Int -> [[Str]] -> <IO> ()
+srStr z xss = do
+  o <- @stdout :: <IO> (OStream Str)
+  drainR z o xss
+  @close o
+
+spStr :: Int -> [[Str]] -> <IO> ()
+spStr z xss = do
+  o <- @stdout :: <IO> (OStream Str)
+  drainP z o xss
+  @close o
