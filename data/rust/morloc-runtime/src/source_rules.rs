@@ -1229,7 +1229,7 @@ fn rust_code_calls_the_rust_function_behind_a_c_entry_point() {
 // is reviewed against that rule before the count is updated.
 const BINDING_REL2ABS: &[(&str, usize)] = &[
     ("data/lang/cpp/cppmorloc.cpp", 2),
-    ("data/lang/cpp/cppmorloc.hpp", 3),
+    ("data/lang/cpp/cppmorloc.hpp", 2),
     ("data/lang/cpp/mlc_arrow.hpp", 1),
     ("data/lang/cpp/pool.cpp", 1),
     ("data/lang/py/pymorloc.c", 1),

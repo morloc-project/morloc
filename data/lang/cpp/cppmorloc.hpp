@@ -609,10 +609,11 @@ size_t mlc_leaf_size(const Schema* schema, const T& data) {
     if (schema->type == MORLOC_NIL) {
         return schema->width;
     }
-    if constexpr (std::is_same_v<T, std::string>) {
-        return schema->width + data.size();
-    } else if constexpr (std::is_same_v<T, const char*>) {
-        return schema->width + strlen(data);
+    if constexpr (std::is_same_v<T, std::string> || std::is_same_v<T, const char*>) {
+        size_t n;
+        if constexpr (std::is_same_v<T, std::string>) n = data.size(); else n = strlen(data);
+        size_t slack = (schema->type == MORLOC_ARRAY && n > 0) ? schema->parameters[0]->data_alignment - 1 : 0;
+        return schema->width + slack + n;
     } else if constexpr (std::is_same_v<T, std::nullptr_t>) {
         return schema->width;
     } else {
@@ -658,36 +659,39 @@ inline void mlc_check_str(const Schema* schema, const uint8_t* data, size_t size
     }
 }
 
-// Write raw bytes as an array: the header at dest, the bytes at the cursor.
-inline void* bytes_to_voidstar(void* dest, void** cursor, const Schema* schema, const uint8_t* data, size_t size) {
+// Write raw bytes as an array: the header at dest, the bytes at the walk's
+// cursor, aligned as an array's data when the schema is an array.
+template<typename W>
+inline void bytes_to_voidstar(void* dest, W& w, const Schema* schema, const uint8_t* data, size_t size) {
     Array* result = static_cast<Array*>(dest);
     result->size = size;
     if(size == 0){
-        result->data = RELNULL;
-        return dest;
+        result->data = w.empty_rel();
+        return;
     }
-    absptr_t data_ptr = static_cast<absptr_t>(*cursor);
-    result->data = abs2rel_cpp(data_ptr);
-    *cursor = static_cast<char*>(*cursor) + size * schema->parameters[0]->width;
+    const Schema* elem = schema->parameters[0];
+    if (schema->type == MORLOC_ARRAY) w.align(elem->data_alignment);
+    char* data_ptr = static_cast<char*>(*w.cursor);
+    result->data = w.rel(data_ptr);
+    *w.cursor = data_ptr + size * elem->width;
     memcpy(data_ptr, data, size);
-    return dest;
 }
 
 // Write a leaf at schema width, so the wire form matches the morloc type
 // regardless of the C++ concrete type's width.
-template<typename T>
-void mlc_leaf_write(void* dest, void** cursor, const Schema* schema, const T& data) {
+template<typename T, typename W>
+void mlc_leaf_write(void* dest, W& w, const Schema* schema, const T& data) {
     // A nil slot has no width; the wire carries nothing for it.
     if (schema->type == MORLOC_NIL) {
         return;
     }
     if constexpr (std::is_same_v<T, std::string>) {
         mlc_check_str(schema, (const uint8_t*)data.c_str(), data.size());
-        bytes_to_voidstar(dest, cursor, schema, (const uint8_t*)data.c_str(), data.size());
+        bytes_to_voidstar(dest, w, schema, (const uint8_t*)data.c_str(), data.size());
     } else if constexpr (std::is_same_v<T, const char*>) {
         size_t n = strlen(data);
         mlc_check_str(schema, (const uint8_t*)data, n);
-        bytes_to_voidstar(dest, cursor, schema, (const uint8_t*)data, n);
+        bytes_to_voidstar(dest, w, schema, (const uint8_t*)data, n);
     } else if constexpr (std::is_same_v<T, std::nullptr_t>) {
         // Nothing else has a nil schema.
     } else if constexpr (std::is_enum_v<T>) {
@@ -700,7 +704,7 @@ void mlc_leaf_write(void* dest, void** cursor, const Schema* schema, const T& da
             }
             *((uint8_t*)dest) = static_cast<uint8_t>(tag);
         } else {
-            mlc_leaf_write(dest, cursor, schema, static_cast<std::underlying_type_t<T>>(data));
+            mlc_leaf_write(dest, w, schema, static_cast<std::underlying_type_t<T>>(data));
         }
     } else {
         guard_scalar_schema(schema, "to_voidstar");
@@ -710,7 +714,7 @@ void mlc_leaf_write(void* dest, void** cursor, const Schema* schema, const T& da
             case MORLOC_ISTREAM: {
                 char* err = NULL;
                 if (mlc_write_handle_voidstar(
-                        static_cast<int64_t>(data), dest, cursor, &err) != 0) {
+                        static_cast<int64_t>(data), dest, w.cursor, &err) != 0) {
                     if (err == NULL) mlc_runtime_defect("mlc_write_handle_voidstar failed without a reason");
                     std::string msg(err);
                     free(err);
@@ -984,29 +988,31 @@ bool mlc_read_leaf_run(const Schema* elem, const char* start, size_t n, std::vec
     }
 }
 
-// Write `n` leaves of `data` as `elem` at stride `elem->width` from `start`,
-// with one type dispatch for the whole run; false when the element type has
-// no such loop. Range checks are those of mlc_leaf_write.
+// Write `n` leaves of `data`, from element `from` on, as `elem` at stride
+// `elem->width` from `start`, with one type dispatch for the whole run; false
+// when the element type has no such loop. Range checks are those of
+// mlc_leaf_write.
 template<typename ElemT>
-bool mlc_write_leaf_run(const Schema* elem, char* start, const std::vector<ElemT>& data) {
+bool mlc_write_leaf_run(const Schema* elem, char* start, const std::vector<ElemT>& all, size_t from, size_t n) {
     const size_t width = elem->width;
-    const size_t n = data.size();
     if constexpr (std::is_same_v<ElemT, bool>) {
         if (elem->type != MORLOC_BOOL) return false;
-        const uint64_t* words = mlc_bool_words(data);
+        const uint64_t* words = mlc_bool_words(all);
         size_t i = 0;
         if (words != nullptr && width == 1) {
+            for (; i < n && (from + i) % 64 != 0; i++) *(uint8_t*)(start + i) = all[from + i] ? 1 : 0;
             for (; i + 64 <= n; i += 64) {
-                uint64_t word = words[i / 64];
+                uint64_t word = words[(from + i) / 64];
                 for (int k = 0; k < 8; k++) {
                     uint64_t x = mlc_bits_to_bytes(word >> (8 * k));
                     std::memcpy(start + i + 8 * k, &x, 8);
                 }
             }
         }
-        for (; i < n; i++) *(uint8_t*)(start + i * width) = data[i] ? 1 : 0;
+        for (; i < n; i++) *(uint8_t*)(start + i * width) = all[from + i] ? 1 : 0;
         return true;
     } else if constexpr (std::is_arithmetic_v<ElemT>) {
+        const ElemT* data = all.data() + from;
         auto run = [&](auto wire, const char* name) {
             using W = decltype(wire);
             for (size_t i = 0; i < n; i++) {
@@ -1041,6 +1047,29 @@ bool mlc_write_leaf_run(const Schema* elem, char* start, const std::vector<ElemT
         }
     } else {
         return false;
+    }
+}
+
+// Write the leaves `xs[from, from + n)` as `elem` at stride `elem->width`
+// from `start`.
+template<typename ElemT, typename W>
+void mlc_write_leaves(W& w, const Schema* elem, char* start, const std::vector<ElemT>& xs, size_t from, size_t n) {
+    const size_t width = elem->width;
+    if constexpr (std::is_arithmetic_v<ElemT> && !std::is_same_v<ElemT, bool>) {
+        // A fixed-width primitive packs identically to the wire layout.
+        if (vector_is_bulk_copyable<ElemT>(elem)) {
+            std::memcpy(start, xs.data() + from, n * width);
+            return;
+        }
+    }
+    if (mlc_write_leaf_run<ElemT>(elem, start, xs, from, n)) return;
+    for (size_t i = 0; i < n; ++i) {
+        if constexpr (std::is_same_v<ElemT, bool>) {
+            // std::vector<bool>::operator[] is a bit proxy.
+            mlc_leaf_write(start + width * i, w, elem, static_cast<bool>(xs[from + i]));
+        } else {
+            mlc_leaf_write(start + width * i, w, elem, xs[from + i]);
+        }
     }
 }
 
@@ -1217,17 +1246,66 @@ struct MlcWriteWalk {
     std::vector<std::shared_ptr<void>> keep;
     void** cursor;
     MlcFlatSet flats;
+    // Pointers are written relative to `base` and parts aligned relative to
+    // `origin`, as the runtime lays out a value in a stream's buffer
+    // (SLOT-36); null for shared-memory relptrs at absolute alignment.
+    char* base = nullptr;
+    char* origin = nullptr;
+    // SLOT-36: deferred child frames, for the layout in a stream's buffer.
+    std::vector<Frame> later;
+    bool in_step = false;
+    bool deferring = false;
 
     MlcWriteWalk(const Schema* root, void** cursor_)
         : cursor(cursor_), flats(root) {}
+
+    // Write the next value into a stream buffer's room.
+    void place(void** cursor_, char* base_, char* origin_) {
+        cursor = cursor_;
+        base = base_;
+        origin = origin_;
+        keep.clear();
+        later.clear();
+        in_step = false;
+        deferring = false;
+    }
 
     bool flat(const Schema* schema) const {
         return flats.flat(schema);
     }
 
+    relptr_t rel(const void* p) const {
+        if (base != nullptr) return static_cast<relptr_t>(static_cast<const char*>(p) - base);
+        return abs2rel_cpp(const_cast<absptr_t>(p));
+    }
+
+    char* at(relptr_t r) const {
+        if (base != nullptr) return base + r;
+        return static_cast<char*>(rel2abs_cpp(r));
+    }
+
+    // The data pointer of an empty array or string.
+    relptr_t empty_rel() const {
+        return base != nullptr ? 0 : RELNULL;
+    }
+
+    void align(size_t a) {
+        uintptr_t c = reinterpret_cast<uintptr_t>(*cursor);
+        if (origin != nullptr) {
+            uintptr_t o = reinterpret_cast<uintptr_t>(origin);
+            *cursor = reinterpret_cast<void*>(o + ALIGN_UP(c - o, a));
+        } else {
+            *cursor = reinterpret_cast<void*>(ALIGN_UP(c, a));
+        }
+    }
+
     template<typename T>
     static void thunk(MlcWriteWalk& w, const Schema* s, void* dest, const void* obj, size_t idx) {
-        MlcNode<T>::write_step(w, s, dest, *static_cast<const T*>(obj), idx);
+        if constexpr (mlc_is_leaf_v<T>) {
+            mlc_leaf_write(dest, w, s, *static_cast<const T*>(obj));
+        } else {
+            MlcNode<T>::write_step(w, s, dest, *static_cast<const T*>(obj), idx);
+        }
     }
 
     // Write a child into its slot: a leaf now, a compound node by call or
@@ -1235,9 +1313,20 @@ struct MlcWriteWalk {
     template<typename T>
     void child(const Schema* schema, void* dest, const T& v) {
         if constexpr (mlc_is_leaf_v<T>) {
-            mlc_leaf_write(dest, cursor, resolve_recur(schema), v);
+            // A C++ Int is always inline, so it has no tail.
+            const Schema* s = resolve_recur(schema);
+            if (deferring && !s->fixed_width && s->type != MORLOC_INT) {
+                later.push_back(Frame{&thunk<T>, schema, dest, &v, 0, false});
+            } else {
+                mlc_leaf_write(dest, *this, s, v);
+            }
+        } else if (deferring && !resolve_recur(schema)->fixed_width) {
+            later.push_back(Frame{&thunk<T>, schema, dest, &v, 0, false});
         } else if (flat(schema)) {
             MlcNode<T>::write_step(*this, schema, dest, v, 0);
+        } else if (in_step && base != nullptr) {
+            later.push_back(Frame{&thunk<T>, schema, dest, &v, 0, false});
+            deferring = true;
         } else {
             stack.push_back(Frame{&thunk<T>, schema, dest, &v, 0, false});
         }
@@ -1252,8 +1341,7 @@ struct MlcWriteWalk {
 
     // Take an aligned slot of `inner`'s width from the cursor.
     void* alloc(const Schema* inner) {
-        size_t align = inner->alignment;
-        *cursor = reinterpret_cast<void*>(ALIGN_UP(reinterpret_cast<uintptr_t>(*cursor), align));
+        align(inner->alignment);
         void* slot = *cursor;
         *cursor = static_cast<char*>(slot) + inner->width;
         return slot;
@@ -1267,14 +1355,22 @@ struct MlcWriteWalk {
         memset((char*)dest + 1, 0, MORLOC_VARIANT_PAYLOAD - 1);
         const Schema* a = resolve_recur(arm);
         void* slot = alloc(a);
-        *((relptr_t*)((char*)dest + MORLOC_VARIANT_PAYLOAD)) =
-            abs2rel_cpp(static_cast<absptr_t>(slot));
+        *((relptr_t*)((char*)dest + MORLOC_VARIANT_PAYLOAD)) = rel(slot);
         child(a, slot, payload);
     }
 
     void run() {
+        later.clear();
         MLC_WALK_RUN({
+            in_step = true;
+            deferring = false;
             f.step(*this, s, f.dest, f.obj, f.idx);
+            in_step = false;
+            deferring = false;
+            if (!later.empty()) {
+                stack.insert(stack.end(), later.rbegin(), later.rend());
+                later.clear();
+            }
         })
     }
 };
@@ -1500,8 +1596,11 @@ struct MlcNode {
             const Schema* elem = resolve_recur(schema->parameters[0]);
             if (idx == 0) {
                 // The header, worst-case cursor alignment for the data
-                // region, and the fixed part of every element.
-                w.total += static_cast<int64_t>(schema->width + elem->data_alignment - 1);
+                // region, and the fixed part of every element. An empty
+                // array has no data region.
+                w.total += static_cast<int64_t>(schema->width);
+                if (data.size() == 0) return;
+                w.total += static_cast<int64_t>(elem->data_alignment - 1);
                 if (elem->fixed_width) {
                     w.total += static_cast<int64_t>(data.size() * elem->width);
                     return;
@@ -1574,15 +1673,15 @@ struct MlcNode {
             if (idx == 0) {
                 result->size = data.size();
                 if (data.size() == 0) {
-                    result->data = RELNULL;
+                    result->data = w.empty_rel();
                     return;
                 }
                 // The data region: aligned (64 for primitive numerics), one
                 // fixed slot per element; tails follow at the cursor.
-                *w.cursor = reinterpret_cast<void*>(ALIGN_UP(reinterpret_cast<uintptr_t>(*w.cursor), elem->data_alignment));
-                result->data = abs2rel_cpp(static_cast<absptr_t>(*w.cursor));
-                *w.cursor = static_cast<char*>(*w.cursor) + data.size() * width;
-                char* start = (char*)rel2abs_cpp(result->data);
+                w.align(elem->data_alignment);
+                char* start = static_cast<char*>(*w.cursor);
+                result->data = w.rel(start);
+                *w.cursor = start + data.size() * width;
                 if (mlc_elem_is_handle(elem)) {
                     // Batched stream-handle write: one registry lock for all N handles.
                     if constexpr (std::is_same_v<ElemT, int64_t>) {
@@ -1597,29 +1696,13 @@ struct MlcNode {
                         return;
                     }
                 }
-                if constexpr (std::is_arithmetic_v<ElemT> && !std::is_same_v<ElemT, bool>) {
-                    // A vector of a fixed-width primitive packs identically to
-                    // the wire layout: one memcpy instead of a call per element.
-                    if (vector_is_bulk_copyable<ElemT>(elem)) {
-                        std::memcpy(start, data.data(), data.size() * width);
-                        return;
-                    }
-                }
                 if constexpr (mlc_is_leaf_v<ElemT>) {
-                    if (mlc_write_leaf_run<ElemT>(elem, start, data)) return;
-                    for (size_t i = 0; i < data.size(); ++i) {
-                        if constexpr (std::is_same_v<ElemT, bool>) {
-                            // std::vector<bool>::operator[] is a bit proxy.
-                            mlc_leaf_write(start + width * i, w.cursor, elem, static_cast<bool>(data[i]));
-                        } else {
-                            mlc_leaf_write(start + width * i, w.cursor, elem, data[i]);
-                        }
-                    }
+                    mlc_write_leaves(w, elem, start, data, 0, data.size());
                     return;
                 }
             }
             if constexpr (!mlc_is_leaf_v<ElemT>) {
-                char* start = (char*)rel2abs_cpp(result->data);
+                char* start = w.at(result->data);
                 if (w.flat(elem)) {
                     for (size_t i = 0; i < data.size(); ++i) w.child(elem, start + width * i, data[i]);
                 } else {
@@ -1643,7 +1726,7 @@ struct MlcNode {
             } else {
                 const Schema* inner = resolve_recur(schema->parameters[0]);
                 void* slot = w.alloc(inner);
-                *(relptr_t*)dest = abs2rel_cpp(static_cast<absptr_t>(slot));
+                *(relptr_t*)dest = w.rel(slot);
                 w.child(inner, slot, *data);
             }
         } else {

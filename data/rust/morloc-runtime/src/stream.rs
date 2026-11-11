@@ -4401,7 +4401,8 @@ struct Txn {
     local: ProcessLocalSlot,
     batch: Batch,
     buf_size: usize,
-    expect: Option<*mut u8>,
+    expect: Option<(*mut u8, *mut u8)>,
+    ints: Option<(*const u8, usize)>,
     fork_epoch: u64,
 }
 
@@ -4521,7 +4522,7 @@ pub fn write_begin(handle: i64, level: crate::compression::CompressionLevel) -> 
         }
     };
     forget_write_room();
-    let txn = Txn { guard, claim, discards: Discards(Vec::new()), local, batch, buf_size, expect: None, fork_epoch: fork_epoch() };
+    let txn = Txn { guard, claim, discards: Discards(Vec::new()), local, batch, buf_size, expect: None, ints: None, fork_epoch: fork_epoch() };
     TXN.with(|t| *t.0.borrow_mut() = Some(txn));
     Ok(Begun::Open)
 }
@@ -4537,12 +4538,13 @@ fn with_txn<R>(reached: *const u8, f: impl FnOnce(&mut Txn) -> Result<R, MorlocE
         let mut cell = c.0.borrow_mut();
         forget_inherited(&mut cell);
         let t = cell.as_mut().ok_or_else(no_txn)?;
-        if !t.reached(reached) {
+        if let Err(what) = t.reached(reached) {
             let t = cell.take();
             drop(cell);
-            overrun(t, reached);
+            overrun(t, what);
         }
         t.expect = None;
+        t.ints = None;
         let r = f(t);
         if r.is_err() {
             let mut t = cell.take().ok_or_else(no_txn)?;
@@ -4567,13 +4569,9 @@ impl Drop for DropOnUnwind<'_> {
 }
 
 // SLOT-36, SLOT-14
-fn overrun(t: Option<Txn>, reached: *const u8) -> ! {
-    let want = t.as_ref().and_then(|t| t.expect).unwrap_or(std::ptr::null_mut());
+fn overrun(t: Option<Txn>, what: String) -> ! {
     let _t = t;
-    panic!(
-        "@write: an element's encoding ended {} bytes from where its size said",
-        (reached as isize).wrapping_sub(want as isize),
-    );
+    panic!("@write: {what}");
 }
 
 impl Txn {
@@ -4585,8 +4583,21 @@ impl Txn {
     }
 
     // SLOT-36
-    fn reached(&self, reached: *const u8) -> bool {
-        self.expect.is_none_or(|want| want as *const u8 == reached)
+    fn reached(&self, reached: *const u8) -> Result<(), String> {
+        let w = self.local.elem_schema.width;
+        if let Some((slots, n)) = self.ints {
+            // SAFETY: SLOT-36: the `n` slots of width `w` are the slot's.
+            if let Some(j) = (0..n).find(|&j| unsafe { std::ptr::read_unaligned(slots.add(j * w) as *const u64) } != 1) {
+                return Err(format!("the Int in slot {j} of a run or single-slot room was not written inline"));
+            }
+        }
+        match self.expect {
+            Some((data, end)) if !(data as *const u8 <= reached && reached <= end as *const u8) => Err(format!(
+                "an element's encoding ended {} bytes from the end of its room, outside it",
+                (reached as isize).wrapping_sub(end as isize),
+            )),
+            _ => Ok(()),
+        }
     }
 }
 
@@ -4650,7 +4661,8 @@ fn place_room(t: &mut Txn, size: usize) -> Result<MlcRoom, MorlocError> {
             }
         }
     };
-    t.expect = Some(room.end);
+    t.expect = Some((room.data, room.end));
+    t.ints = int.then_some((room.slot as *const u8, 1));
     Ok(room)
 }
 
@@ -4658,14 +4670,19 @@ fn place_room(t: &mut Txn, size: usize) -> Result<MlcRoom, MorlocError> {
 pub fn write_place_run(k: usize, reached: *const u8) -> Result<(*mut u8, usize), MorlocError> {
     with_txn(reached, |t| {
         let w = t.local.elem_schema.width;
-        if !t.local.elem_schema.is_fixed_width() {
-            return Err(MorlocError::Other("@write: a run of elements needs a fixed-width element type".into()));
+        let int = t.local.elem_schema.serial_type == SerialType::Int;
+        if !t.local.elem_schema.is_fixed_width() && !int {
+            return Err(MorlocError::Other("@write: a run of elements needs a fixed-width or Int element type".into()));
         }
         if k == 0 {
             return Ok((std::ptr::null_mut(), 0));
         }
-        if !flat_route(&t.local.elem_schema, t.buf_size, false, 0) {
-            return place_room(t, w).map(|room| (room.slot, 1));
+        if !flat_route(&t.local.elem_schema, t.buf_size, int, t.guard.slot.write_buffer_data_used.get()) {
+            let room = place_room(t, w)?;
+            // SAFETY: SLOT-20: the room holds the slot's `w` bytes.
+            let end = unsafe { room.slot.add(w) };
+            t.expect = Some((end, end));
+            return Ok((room.slot, 1));
         }
         let (at, n) = place_flat(t.guard.slot, &mut t.local, &mut t.batch, k, t.buf_size)?;
         let buf = crate::shm::rel2abs(t.guard.slot.write_buffer.get())?;
@@ -4674,7 +4691,9 @@ pub fn write_place_run(k: usize, reached: *const u8) -> Result<(*mut u8, usize),
         // SAFETY: SLOT-20: as above.
         unsafe { std::ptr::write_bytes(slots, 0, n * w) };
         // SAFETY: SLOT-20: as above.
-        t.expect = Some(unsafe { slots.add(n * w) });
+        let end = unsafe { slots.add(n * w) };
+        t.expect = Some((end, end));
+        t.ints = int.then_some((slots as *const u8, n));
         Ok((slots, n))
     })
 }
@@ -4682,8 +4701,8 @@ pub fn write_place_run(k: usize, reached: *const u8) -> Result<(*mut u8, usize),
 // SLOT-36
 pub fn write_commit(reached: *const u8) -> Result<(), MorlocError> {
     let mut t = take_txn().ok_or_else(no_txn)?;
-    if !t.reached(reached) {
-        overrun(Some(t), reached);
+    if let Err(what) = t.reached(reached) {
+        overrun(Some(t), what);
     }
     let committed = t.batch.commit_pending(t.guard.slot);
     if committed.is_ok() {

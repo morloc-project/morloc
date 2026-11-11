@@ -1418,7 +1418,7 @@ pub(crate) unsafe fn mlc_write_place(size: u64, reached: *const u8, room: *mut c
     )
 }
 
-/// SLOT-36: the slots of up to `k` fixed-width elements.
+/// SLOT-36: the slots of up to `k` fixed-width or inline `Int` elements.
 pub(crate) unsafe fn mlc_write_place_run(k: u64, reached: *const u8, slots: *mut *mut u8, placed: *mut u64, errmsg: *mut *mut c_char) -> i32 {
     clear_errmsg(errmsg);
     write_result(

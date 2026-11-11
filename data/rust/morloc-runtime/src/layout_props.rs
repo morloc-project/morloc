@@ -1028,13 +1028,23 @@ pub(crate) fn write_in_place(
         let res = crate::recur::Resolver::new(elem);
         let mut reached: *const u8 = std::ptr::null();
         let mut i = 0;
+        let mut int_end = 0;
         while i < n {
             if give_up_at.is_some_and(|k| i >= k) {
                 return Err(MorlocError::Other(format!("the encoder gave up at element {i}")));
             }
             let src = unsafe { base.add(i * w) };
-            if runs && elem.is_fixed_width() && w > 0 {
-                let want = give_up_at.map_or(n, |k| k.min(n)) - i;
+            let inline = |k: usize| unsafe { *(base.add(k * w) as *const usize) } <= 1;
+            let int_run = elem.serial_type == SerialType::Int && inline(i);
+            if runs && (elem.is_fixed_width() || int_run) && w > 0 {
+                let mut stop = give_up_at.map_or(n, |k| k.min(n));
+                if int_run {
+                    if int_end <= i {
+                        int_end = (i..n).find(|&k| !inline(k)).unwrap_or(n);
+                    }
+                    stop = stop.min(int_end);
+                }
+                let want = stop - i;
                 let (slots, k) = write_place_run(want, reached)?;
                 for o in 0..k * w {
                     let b = unsafe { *(src as *const u8).add(o) };
@@ -1419,25 +1429,69 @@ fn an_arena_rewound_inside_an_in_place_batch_keeps_its_blocks() {
 /// An element whose encoding ends anywhere but where its size said is a
 /// defect: the call panics and the stream is left poisoned (SLOT-36, SLOT-14).
 #[test]
-fn an_in_place_element_that_overruns_its_room_poisons_the_stream() {
+fn an_in_place_element_that_ends_outside_its_room_poisons_the_stream() {
     let _shm = crate::own_test_registry();
     let dir = std::env::temp_dir().join(format!("morloc_in_place_overrun_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let none = crate::compression::CompressionLevel::NONE;
-    let h = shared_open_ostream_with_schema(dir.join("o.stream").to_str().unwrap(), "as").unwrap();
-    let panicked = std::thread::spawn(move || {
-        assert!(matches!(crate::stream::write_begin(h, none).unwrap(), crate::stream::Begun::Open));
-        let room = crate::stream::write_place(16 + 5, std::ptr::null()).unwrap();
-        let _ = crate::stream::write_place(16 + 5, unsafe { room.end.add(8) });
-    })
-    .join();
-    assert!(panicked.is_err(), "an overrun was not a defect");
-    let v = strs_value(1, 1, 0);
-    let e = shared_write_subpacket(h, none, v).expect_err("a poisoned stream took a write").to_string();
-    assert!(e.contains("died"), "{e}");
-    let _ = shm::shfree(v);
-    let _ = shared_discard_handle(h);
+    // Where the encoding ends, from the room's data start and end.
+    let ends: [(&str, fn(&crate::stream::MlcRoom) -> *const u8, bool); 5] = [
+        ("at data", |r| r.data, true),
+        ("short of the end", |r| unsafe { r.data.add(2) }, true),
+        ("at the end", |r| r.end, true),
+        ("past the end", |r| unsafe { r.end.add(1) }, false),
+        ("before data", |r| unsafe { r.data.sub(1) }, false),
+    ];
+    for (k, (what, end, fine)) in ends.into_iter().enumerate() {
+        let h = shared_open_ostream_with_schema(dir.join(format!("{k}.stream")).to_str().unwrap(), "as").unwrap();
+        let panicked = std::thread::spawn(move || {
+            assert!(matches!(crate::stream::write_begin(h, none).unwrap(), crate::stream::Begun::Open));
+            let room = crate::stream::write_place(16 + 5, std::ptr::null()).unwrap();
+            crate::stream::write_commit(end(&room)).unwrap();
+        })
+        .join()
+        .is_err();
+        assert_eq!(panicked, !fine, "an encoding ending {what}");
+        let v = strs_value(1, 1, 0);
+        let w = shared_write_subpacket(h, none, v);
+        let _ = shm::shfree(v);
+        if fine {
+            w.unwrap();
+            shared_close_handle(h).unwrap();
+        } else {
+            let e = w.expect_err("a poisoned stream took a write").to_string();
+            assert!(e.contains("died"), "{e}");
+            let _ = shared_discard_handle(h);
+        }
+    }
+    // An Int placed as inline, in a run or a room of its own, written with limbs.
+    for (limbs, run) in [(1u64, true), (2, true), (0, true), (1, false), (2, false), (0, false)] {
+        let h = shared_open_ostream_with_schema(dir.join(format!("int{limbs}{run}.stream")).to_str().unwrap(), "aj").unwrap();
+        let panicked = std::thread::spawn(move || {
+            assert!(matches!(crate::stream::write_begin(h, none).unwrap(), crate::stream::Begun::Open));
+            let (slot, end) = if run {
+                let (slots, k) = crate::stream::write_place_run(3, std::ptr::null()).unwrap();
+                for j in 0..k {
+                    unsafe { std::ptr::write_unaligned(slots.add(j * 16) as *mut u64, 1) };
+                }
+                (unsafe { slots.add(16) }, unsafe { slots.add(k * 16) })
+            } else {
+                let room = crate::stream::write_place(16, std::ptr::null()).unwrap();
+                (room.slot, room.end as *mut u8)
+            };
+            unsafe { std::ptr::write_unaligned(slot as *mut u64, limbs) };
+            crate::stream::write_commit(end).unwrap();
+        })
+        .join()
+        .is_err();
+        assert_eq!(panicked, limbs != 1, "an Int with {limbs} limbs, run {run}");
+        if panicked {
+            let _ = shared_discard_handle(h);
+        } else {
+            shared_close_handle(h).unwrap();
+        }
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }
 

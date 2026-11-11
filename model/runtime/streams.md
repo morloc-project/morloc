@@ -319,7 +319,7 @@ A failure that ends the process (SHM-17) is outside this item.
 
 ### SLOT-36 A batch is encoded in place and committed whole
 Status: implemented
-Checked by: an_in_place_batch_writes_the_bytes_the_copy_path_writes, in_place_runs_read_as_zero_and_mix_with_single_rooms, an_in_place_batch_that_fails_is_absent_or_fails_its_stream, a_thread_encoding_in_place_does_no_other_stream_operation, an_arena_rewound_inside_an_in_place_batch_keeps_its_blocks, an_in_place_element_that_overruns_its_room_poisons_the_stream, two_threads_writing_in_place_leave_their_batches_whole, an_in_place_batch_does_not_survive_a_fork_or_its_thread, an_arena_ended_inside_an_in_place_batch_discards_its_streams_after, a_run_of_elements_wider_than_a_sub_packet_is_placed_one_by_one, a_batch_left_open_at_the_end_of_its_call_is_aborted
+Checked by: an_in_place_batch_writes_the_bytes_the_copy_path_writes, in_place_runs_read_as_zero_and_mix_with_single_rooms, an_in_place_batch_that_fails_is_absent_or_fails_its_stream, a_thread_encoding_in_place_does_no_other_stream_operation, an_arena_rewound_inside_an_in_place_batch_keeps_its_blocks, an_in_place_element_that_ends_outside_its_room_poisons_the_stream, two_threads_writing_in_place_leave_their_batches_whole, an_in_place_batch_does_not_survive_a_fork_or_its_thread, an_arena_ended_inside_an_in_place_batch_discards_its_streams_after, a_run_of_elements_wider_than_a_sub_packet_is_placed_one_by_one, a_batch_left_open_at_the_end_of_its_call_is_aborted
 
 A language binding may write a `@write` batch to an output file by
 encoding each element straight into the stream's write buffer, inside one
@@ -331,7 +331,10 @@ portable size and is cut into sub-packets as the copy path cuts it, so the
 file's bytes are those the runtime's own encoding writes. Its room is
 zeroed when it is placed, so a field the encoder leaves alone reads as
 zero. The binding reports where its encoding ended at its next call; an
-end other than the room's is a defect.
+end outside the room is a defect. A room may end past the encoding, by
+the size's alignment slack, and that tail stays zero. An `Int` placed as
+its slot alone, in a run or a room of that size, that is not written
+inline is a defect too.
 
 A buffer that fills is sealed into the writer's pending list and a spare or
 fresh block takes the slot's place; an element larger than a sub-packet

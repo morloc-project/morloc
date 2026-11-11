@@ -963,13 +963,21 @@ inline int64_t _mlc_open_stderr(Schema* schema) {
     return h;
 }
 
-// @write: serialize T to voidstar and emit one sub-packet.
+// The result of an mlc_write_* call: an errmsg is a recoverable error, the
+// pipe-closed code its own condition.
+#define MLC_WRITE_RESULT(rc, errmsg, what) \
+    do { \
+        if ((errmsg) != NULL) { PROPAGATE_ERROR(errmsg) } \
+        _mlc_throw_if_pipe_closed(rc); \
+        if ((rc) != 0) { \
+            MLC_INTERNAL_ABORT(what " returned non-zero without setting errmsg (libmorloc contract violation)"); \
+        } \
+    } while (0)
+
+// @write from a voidstar copy of the batch, which the runtime lays out.
 template <typename T>
-inline void _mlc_write(Schema* schema, int64_t level, const T& value, int64_t handle) {
+inline void _mlc_write_copy(Schema* schema, int64_t level, const T& value, int64_t handle) {
     char* errmsg = NULL;
-    // Stage value into a SHM block via to_voidstar so the runtime can
-    // read it as a contiguous voidstar payload. The eval_arena tracks
-    // the allocation; we shfree explicitly after the runtime is done.
     size_t bytes = get_shm_size(schema, value);
     void* voidstar = shmalloc_cpp(bytes);
     void* cursor = (uint8_t*)voidstar + schema->width;
@@ -981,10 +989,91 @@ inline void _mlc_write(Schema* schema, int64_t level, const T& value, int64_t ha
     }
     int rc = mlc_write(level, handle, voidstar, &errmsg);
     shfree_cpp(voidstar);
-    if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
-    _mlc_throw_if_pipe_closed(rc);
-    if (rc != 0) {
-        MLC_INTERNAL_ABORT("mlc_write returned non-zero without setting errmsg (libmorloc contract violation)");
+    MLC_WRITE_RESULT(rc, errmsg, "mlc_write");
+}
+
+// SLOT-37: aborts the open in-place batch unless `open` was cleared.
+struct MlcWriteTxn {
+    bool open = true;
+    ~MlcWriteTxn() {
+        if (open) mlc_write_abort();
+    }
+};
+
+// Encode each element of `xs` into the room the runtime places it in
+// (SLOT-36); returns where the last encoding ended.
+template <typename E>
+inline const uint8_t* _mlc_write_elements(const Schema* elem, const std::vector<E>& xs) {
+    const uint8_t* reached = nullptr;
+    char* errmsg = NULL;
+    const size_t n = xs.size();
+    const size_t w = elem->width;
+    MlcWriteWalk ww(elem, nullptr);
+    if ((elem->fixed_width || elem->type == MORLOC_INT) && w > 0) {
+        void* no_cursor = nullptr;
+        ww.place(&no_cursor, nullptr, nullptr);
+        for (size_t i = 0; i < n;) {
+            uint8_t* slots = nullptr;
+            uint64_t k = 0;
+            int rc = mlc_write_place_run(n - i, reached, &slots, &k, &errmsg);
+            MLC_WRITE_RESULT(rc, errmsg, "mlc_write_place_run");
+            char* at = reinterpret_cast<char*>(slots);
+            if constexpr (mlc_is_leaf_v<E>) {
+                mlc_write_leaves(ww, elem, at, xs, i, k);
+            } else {
+                for (size_t j = 0; j < k; j++) ww.child(elem, at + j * w, xs[i + j]);
+                ww.run();
+                ww.keep.clear();
+            }
+            reached = slots + k * w;
+            i += k;
+        }
+        return reached;
+    }
+    MlcSizeWalk sw(elem);
+    for (size_t i = 0; i < n; i++) {
+        sw.total = 0;
+        sw.keep.clear();
+        sw.child(elem, xs[i], false);
+        size_t size = static_cast<size_t>(sw.run());
+        mlc_room_t room;
+        int rc = mlc_write_place(size, reached, &room, &errmsg);
+        MLC_WRITE_RESULT(rc, errmsg, "mlc_write_place");
+        void* cursor = room.data;
+        ww.place(&cursor, reinterpret_cast<char*>(room.base), reinterpret_cast<char*>(room.origin));
+        ww.child(elem, room.slot, xs[i]);
+        ww.run();
+        reached = static_cast<const uint8_t*>(cursor);
+    }
+    return reached;
+}
+
+// @write: emit one batch. An output file's batch is encoded in place
+// (SLOT-37); other streams take a voidstar copy.
+template <typename T>
+inline void _mlc_write(Schema* schema, int64_t level, const T& value, int64_t handle) {
+    constexpr bool listlike = is_std_vector<T>::value || is_non_vector_container_v<T>;
+    if constexpr (!listlike) {
+        _mlc_write_copy(schema, level, value, handle);
+    } else {
+        char* errmsg = NULL;
+        int rc = mlc_write_begin(level, handle, &errmsg);
+        if (rc == MLC_WRITE_FALLBACK) {
+            _mlc_write_copy(schema, level, value, handle);
+            return;
+        }
+        MLC_WRITE_RESULT(rc, errmsg, "mlc_write_begin");
+        MlcWriteTxn txn;
+        const Schema* elem = resolve_recur(schema->parameters[0]);
+        const uint8_t* reached;
+        if constexpr (is_std_vector<T>::value) {
+            reached = _mlc_write_elements(elem, value);
+        } else {
+            reached = _mlc_write_elements(elem, to_vector(value));
+        }
+        txn.open = false;
+        rc = mlc_write_commit(reached, &errmsg);
+        MLC_WRITE_RESULT(rc, errmsg, "mlc_write_commit");
     }
 }
 
@@ -1024,11 +1113,7 @@ inline void _mlc_concat(const std::vector<std::string>& paths, const std::string
 inline void _mlc_flush(int64_t handle) {
     char* errmsg = NULL;
     int rc = mlc_flush(handle, &errmsg);
-    if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
-    _mlc_throw_if_pipe_closed(rc);
-    if (rc != 0) {
-        MLC_INTERNAL_ABORT("mlc_flush returned non-zero without setting errmsg (libmorloc contract violation)");
-    }
+    MLC_WRITE_RESULT(rc, errmsg, "mlc_flush");
 }
 
 // @tell: elements written to @stdout so far (its element_count). Never fails.
