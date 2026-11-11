@@ -358,6 +358,19 @@ mod tests {
         ]);
     }
 
+    // SLOT-36
+    #[test]
+    fn write_room_matches_the_header() {
+        use crate::stream::MlcRoom;
+        assert_same_layout!(MlcRoom, "mlc_room_s", [
+            slot => "slot",
+            data => "data",
+            end => "end",
+            base => "base",
+            origin => "origin",
+        ]);
+    }
+
     #[test]
     fn fork_pool_config_matches_the_header() {
         use crate::fork_pool::ForkPoolConfig;

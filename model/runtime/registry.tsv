@@ -220,6 +220,8 @@ morloc-runtime/stream.rs::-::CURRENT_CALL_ID	thread
 morloc-runtime/stream.rs::-::WRITE_ROOM	thread		
 morloc-runtime/stream.rs::-::FAIL_PLACE_AT	test-only		
 morloc-runtime/stream.rs::-::FAIL_HAND_ON_AT	test-only		
+morloc-runtime/stream.rs::-::FAIL_COMMIT_PUSH_AT	test-only		
+morloc-runtime/stream.rs::-::TXN	thread		
 morloc-runtime/stream.rs::-::STDIO_SOCK	thread		
 morloc-runtime/stream.rs::generate_call_id::FALLBACK_COUNTER	counter		
 morloc-runtime/stream.rs::a_forked_child_leaves_its_parents_cached_reads_alone::HANDLE	test-only		

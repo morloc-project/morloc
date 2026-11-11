@@ -679,18 +679,11 @@ fn refused_for_its_handle(r: Result<(), MorlocError>, k: usize) {
 /// the batch spans several sub-packets and holds an oversize element.
 #[test]
 fn a_batch_with_a_failing_element_leaves_no_trace() {
-    struct Restore;
-    impl Drop for Restore {
-        fn drop(&mut self) {
-            crate::stream::set_test_write_buffer_bytes(None);
-        }
-    }
     let _shm = crate::own_test_registry();
     let dir = std::env::temp_dir().join(format!("morloc_layout_whole_batch_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    crate::stream::set_test_write_buffer_bytes(Some(4096));
-    let _restore = Restore;
+    let _restore = buffer_bytes(4096);
 
     let targets: Vec<String> = (0..2).map(|k| dir.join(format!("t{k}.stream")).to_str().unwrap().to_string()).collect();
     for t in &targets {
@@ -840,8 +833,8 @@ fn a_batch_failing_in_placement_is_absent_or_fails_the_stream() {
     let dir = std::env::temp_dir().join(format!("morloc_layout_placement_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    crate::stream::set_test_write_buffer_bytes(Some(4096));
-    let _restore = Restore;
+    let _restore = buffer_bytes(4096);
+    let _faults = Restore;
     let none = crate::compression::CompressionLevel::NONE;
     let three = crate::compression::CompressionLevel::from_u8(3).unwrap();
 
@@ -1009,4 +1002,691 @@ fn a_batch_failing_in_placement_is_absent_or_fails_the_stream() {
     }
     let _ = std::fs::remove_dir_all(&dir);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// Write `value` as a binding writes in place: each element is sized, given
+/// its room, and encoded there by the runtime's own flatten, of which only
+/// the nonzero bytes are stored, as an encoder that writes fields alone
+/// would; `runs` places fixed-width elements in runs. True if in place.
+pub(crate) fn write_in_place(
+    h: i64,
+    level: crate::compression::CompressionLevel,
+    value: crate::shm_types::AbsPtr,
+    elem: &Schema,
+    runs: bool,
+    give_up_at: Option<usize>,
+) -> Result<bool, MorlocError> {
+    use crate::stream::{write_abort, write_begin, write_commit, write_place, write_place_run, Begun};
+    use morloc_runtime_types::schema::SerialType;
+    if let Begun::Fallback = write_begin(h, level)? {
+        return shared_write_subpacket(h, level, value).map(|()| false);
+    }
+    let encode = || -> Result<(), MorlocError> {
+        let arr = unsafe { &*(value as *const crate::shm_types::Array) };
+        let (n, w) = (arr.size, elem.width);
+        let base = if n == 0 { std::ptr::null_mut() } else { shm::rel2abs(arr.data)? };
+        let res = crate::recur::Resolver::new(elem);
+        let mut reached: *const u8 = std::ptr::null();
+        let mut i = 0;
+        while i < n {
+            if give_up_at.is_some_and(|k| i >= k) {
+                return Err(MorlocError::Other(format!("the encoder gave up at element {i}")));
+            }
+            let src = unsafe { base.add(i * w) };
+            if runs && elem.is_fixed_width() && w > 0 {
+                let want = give_up_at.map_or(n, |k| k.min(n)) - i;
+                let (slots, k) = write_place_run(want, reached)?;
+                for o in 0..k * w {
+                    let b = unsafe { *(src as *const u8).add(o) };
+                    if b != 0 {
+                        unsafe { *slots.add(o) = b };
+                    }
+                }
+                reached = unsafe { slots.add(k * w) };
+                i += k;
+                continue;
+            }
+            let inline_int = elem.serial_type == SerialType::Int && unsafe { *(src as *const usize) } <= 1;
+            let size = if inline_int { w } else { crate::ffi::calc_voidstar_size_portable_with(src, elem, &res)? };
+            let room = write_place(size, reached)?;
+            let at = |p: *mut u8| p as usize - room.base as usize;
+            let mut scratch = vec![0u64; at(room.end).div_ceil(8)];
+            let sp = scratch.as_mut_ptr() as *mut u8;
+            if inline_int {
+                unsafe { std::ptr::copy_nonoverlapping(src as *const u8, sp.add(at(room.slot)), w) };
+            } else {
+                unsafe { crate::voidstar::flatten_portable_in_place(sp, at(room.slot), at(room.data), size, src, elem, &res)? };
+            }
+            for range in [at(room.slot)..at(room.slot) + w, at(room.data)..at(room.end)] {
+                for o in range {
+                    let b = unsafe { *sp.add(o) };
+                    if b != 0 {
+                        unsafe { *room.base.add(o) = b };
+                    }
+                }
+            }
+            reached = room.end;
+            i += 1;
+        }
+        write_commit(reached)
+    };
+    encode().inspect_err(|_| write_abort()).map(|()| true)
+}
+
+/// An in-place batch is laid out byte for byte as the copy path lays out
+/// the same batch, sub-packet cuts included (SLOT-36).
+#[test]
+fn an_in_place_batch_writes_the_bytes_the_copy_path_writes() {
+    let _shm = crate::own_test_registry();
+    let _restore = buffer_bytes(4096);
+    let dir = std::env::temp_dir().join(format!("morloc_layout_in_place_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let cases: u64 = std::env::var("MORLOC_LAYOUT_PROP_CASES").ok().and_then(|s| s.parse().ok()).unwrap_or(200);
+    let mut failures = Vec::new();
+    let in_place = std::cell::Cell::new(0usize);
+    let seeds: Vec<u64> = match std::env::var(SEED_ENV).ok().and_then(|s| s.parse().ok()) {
+        Some(one) => vec![one],
+        None => (0..cases).collect(),
+    };
+    for &seed in &seeds {
+        let mut r = Rng::new(seed ^ 0x5eed);
+        let g = gen_type(&mut r, 3, false, true);
+        let elem_str = schema_str(&g);
+        let list = parse_schema(&format!("a{elem_str}")).unwrap();
+        let elem = parse_schema(&elem_str).unwrap();
+        let mut lists: Vec<String> = (0..6).map(|k| if k == 3 { "[]".into() } else { gen_list(&mut r, &g, k == 0) }).collect();
+        let long: Vec<String> = (0..400).map(|k| gen_value(&mut r, &g, None, 3, k % 7 == 0)).collect();
+        lists.push(format!("[{}]", long.join(",")));
+        for buf in [4096usize, 1 << 16] {
+            crate::stream::set_test_write_buffer_bytes(Some(buf));
+            for level in [0u8, 3] {
+                let level = crate::compression::CompressionLevel::from_u8(level).unwrap();
+                for runs in [false, true] {
+                    eprintln!("in_place: seed {seed} schema {elem_str} buf {buf} level {level:?} runs {runs}");
+                    let write = |tag: &str, placing: bool| -> Result<Vec<u8>, MorlocError> {
+                        let path = dir.join(format!("{seed}-{tag}.stream"));
+                        let h = shared_open_ostream_with_schema(path.to_str().unwrap(), &format!("a{elem_str}"))?;
+                        for _ in 0..8 {
+                            for l in &lists {
+                                let v = read_json_with_schema(l, &list)?;
+                                let w = if placing {
+                                    write_in_place(h, level, v, &elem, runs, None).map(|p| in_place.set(in_place.get() + p as usize))
+                                } else {
+                                    shared_write_subpacket(h, level, v)
+                                };
+                                let _ = shm::shfree(v);
+                                w?;
+                            }
+                        }
+                        shared_close_handle(h)?;
+                        let (mp, sz) = crate::stream_format::mmap_file_readonly(path.to_str().unwrap())?;
+                        let footer = crate::stream_format::try_read_footer(mp, sz);
+                        unsafe { libc::munmap(mp as *mut libc::c_void, sz as usize) };
+                        let footer = footer?.ok_or_else(|| MorlocError::Other("no footer".into()))?;
+                        let mut bytes = std::fs::read(&path).unwrap();
+                        bytes.truncate(footer.footer_start as usize);
+                        bytes.extend(format!("{:?} {}", footer.subpacket_entries, footer.element_count).into_bytes());
+                        Ok(bytes)
+                    };
+                    match (write("copy", false), write("place", true)) {
+                        (Ok(a), Ok(b)) if a == b => {}
+                        (Ok(a), Ok(b)) => {
+                            let at = a.iter().zip(&b).position(|(x, y)| x != y).unwrap_or(a.len().min(b.len()));
+                            failures.push(format!("seed {seed} {elem_str} buf {buf} {level:?} runs {runs}: files differ at byte {at} ({} vs {} bytes)", a.len(), b.len()));
+                        }
+                        (a, b) => failures.push(format!("seed {seed} {elem_str} buf {buf} {level:?} runs {runs}: copy {:?} in place {:?}", a.err(), b.err())),
+                    }
+                }
+            }
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(in_place.get() > seeds.len() * 8 * 30, "only {} batches went in place", in_place.get());
+    assert!(failures.is_empty(), "{} failures; first 20:\n{}", failures.len(), failures.iter().take(20).cloned().collect::<Vec<_>>().join("\n"));
+}
+
+/// An in-place batch that fails before its commit leaves no trace and pins
+/// no level, whatever block it failed in; a commit refused at its first
+/// push does the same, and one refused later fails the stream, whose file
+/// keeps its temporary footer. No block outlives the stream (SLOT-36).
+#[test]
+fn an_in_place_batch_that_fails_is_absent_or_fails_its_stream() {
+    use crate::stream::{FAIL_COMMIT_PUSH_AT, FAIL_PLACE_AT};
+    struct Restore;
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            crate::stream::set_test_write_buffer_bytes(None);
+            FAIL_PLACE_AT.with(|f| f.set(None));
+            FAIL_COMMIT_PUSH_AT.with(|f| f.set(None));
+        }
+    }
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    enum Fault {
+        Place,
+        GiveUp,
+        Push,
+    }
+    let _shm = crate::own_test_registry();
+    let dir = std::env::temp_dir().join(format!("morloc_layout_in_place_fail_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let _restore = buffer_bytes(4096);
+    let _faults = Restore;
+    let none = crate::compression::CompressionLevel::NONE;
+    let three = crate::compression::CompressionLevel::from_u8(3).unwrap();
+    let live = || {
+        let mut hist = [0usize; 40];
+        shm::live_block_stats(&mut hist).0
+    };
+
+    type Item = Box<dyn Fn(usize) -> String>;
+    // A refused push of a block holding only earlier batches' elements
+    // leaves the batch absent: the "as" batch of 3 seals the buffered
+    // elements alone before its oversize first element.
+    let cases: [(&str, usize, bool, Item); 6] = [
+        ("as", 21, false, Box::new(|k| format!("\"{}\"", "s".repeat(if k == 12 { 5000 } else { 400 })))),
+        ("as", 4, false, Box::new(|k| format!("\"{}\"", "s".repeat(if k == 0 { 5000 } else { 10 })))),
+        ("as", 3, false, Box::new(|k| format!("\"{}\"", "s".repeat(if k == 0 { 5000 } else { 10 })))),
+        ("ai4", 3000, false, Box::new(|k| format!("{k}"))),
+        ("ai4", 3000, true, Box::new(|k| format!("{k}"))),
+        ("aj", 21, false, Box::new(|k| if k % 5 == 4 { format!("{}", 1u128 << 100) } else { format!("{k}") })),
+    ];
+    let mut failures = Vec::new();
+    for (schema, n, runs, item) in &cases {
+        let (n, runs) = (*n, *runs);
+        let list = parse_schema(schema).unwrap();
+        let elem = list.parameters[0].clone();
+        let value = |len: usize, from: usize| {
+            let json = format!("[{}]", (from..from + len).map(|k| item(k)).collect::<Vec<_>>().join(","));
+            read_json_with_schema(&json, &list).unwrap()
+        };
+        // `Ok(None)`: the stream failed; `Ok(Some(..))`: what the file holds.
+        let write = |path: &str, failing: Option<(Fault, usize)>, level| -> Result<Option<serde_json::Value>, String> {
+            let blocks = live();
+            let out = shared_open_ostream_with_schema(path, schema).unwrap();
+            let slot = crate::stream::slot_ref(crate::stream::unpack_handle(out).1).unwrap();
+            // SLOT-10: a slot's first stream allocates the queue it keeps.
+            let blocks = blocks + (crate::custody::queue_at(crate::stream::SlotField::get(&slot.custody)).unwrap().epoch() == 1) as usize;
+            let first = matches!(failing, Some((_, 0)));
+            if !first {
+                let before = value(3, 100);
+                write_in_place(out, level, before, &elem, runs, None).unwrap();
+                let _ = shm::shfree(before);
+                if schema == &"as" && n == 4 {
+                    shared_flush_buffer(out).unwrap();
+                }
+            }
+            let mut may_fail = false;
+            if let Some((fault, k)) = failing {
+                let batch = value(n, 0);
+                match fault {
+                    Fault::Place => FAIL_PLACE_AT.with(|f| f.set(Some(k as u64))),
+                    Fault::Push => FAIL_COMMIT_PUSH_AT.with(|f| f.set(Some(k))),
+                    Fault::GiveUp => {}
+                }
+                let r = write_in_place(out, level, batch, &elem, runs, (fault == Fault::GiveUp).then_some(k));
+                FAIL_PLACE_AT.with(|f| f.set(None));
+                FAIL_COMMIT_PUSH_AT.with(|f| f.set(None));
+                let _ = shm::shfree(batch);
+                match r {
+                    Err(e) if fault == Fault::Push && k > 0 => {
+                        if !e.to_string().contains("pushing block") {
+                            return Err(format!("the refused commit gave {e}"));
+                        }
+                        may_fail = true;
+                    }
+                    Err(_) => {}
+                    Ok(_) if fault == Fault::Push => {
+                        let _ = shared_close_handle(out);
+                        return Err(String::new());
+                    }
+                    Ok(_) => return Err("the failing batch was written".into()),
+                }
+            }
+            let after = value(2, 200);
+            let r = write_in_place(out, if first { none } else { level }, after, &elem, runs, None);
+            let _ = shm::shfree(after);
+            let counted = slot.element_count.load(std::sync::atomic::Ordering::SeqCst);
+            let closed = shared_close_handle(out);
+            if live() != blocks {
+                return Err(format!("{} blocks were live before the stream and {} after", blocks, live()));
+            }
+            match (r, closed, may_fail) {
+                (Ok(_), Ok(()), _) => {
+                    Ok(Some(render_and_free(shared_load_stream_file_as_array(path, Some(&list)).unwrap(), &list).unwrap()))
+                }
+                (Err(e), Err(_), true) => {
+                    if !e.to_string().contains("queued") {
+                        return Err(format!("a write after the stream failed was refused with {e}, not the failure"));
+                    }
+                    let (mp, sz) = crate::stream_format::mmap_file_readonly(path).unwrap();
+                    let footer = crate::stream_format::try_read_footer(mp, sz);
+                    unsafe { libc::munmap(mp as *mut libc::c_void, sz as usize) };
+                    match footer {
+                        Ok(Some(f)) if !f.final_footer && f.element_count == counted => Ok(None),
+                        f => Err(format!("the failed stream counts {counted} elements and has footer {f:?}")),
+                    }
+                }
+                (r, c, may_fail) => Err(format!("after the failed batch (may fail the stream: {may_fail}), a write gave {r:?} and the close {c:?}")),
+            }
+        };
+        let tag = format!("{schema}-{n}-{runs}");
+        let reference = write(dir.join(format!("{tag}-ref.stream")).to_str().unwrap(), None, none).unwrap().unwrap();
+        for fault in [Fault::Place, Fault::GiveUp, Fault::Push] {
+            match write(dir.join(format!("{tag}-{fault:?}-first.stream")).to_str().unwrap(), Some((fault, 0)), three) {
+                Ok(Some(got)) if got.as_array().map(|a| a.len()) == Some(2) => {}
+                r => failures.push(format!("{tag} {fault:?}: a failed first batch at level 3, then a batch at level 0, gave {r:?}")),
+            }
+            let ks: Vec<usize> = match fault {
+                Fault::Push => (1..8).collect(),
+                _ if n > 100 => vec![1, 500, 1019, 1020, 1021, 2047, 2048, n - 1],
+                _ => (1..n).collect(),
+            };
+            let mut failed = 0;
+            for &k in &ks {
+                let absent_only = fault == Fault::Push && n == 3 && k == 1;
+                match write(dir.join(format!("{tag}-{fault:?}-bad{k}.stream")).to_str().unwrap(), Some((fault, k)), none) {
+                    Ok(None) if absent_only => failures.push(format!("{tag}: a refused push of earlier elements alone failed the stream")),
+                    Ok(None) if fault == Fault::Push => failed += 1,
+                    Ok(Some(got)) if got == reference => {}
+                    Ok(got) => failures.push(format!("{tag} {fault:?}: failing at {k} leaves {got:?}, want {reference:?}")),
+                    Err(e) if e.is_empty() => {}
+                    Err(e) => failures.push(format!("{tag} {fault:?}: failing at {k}: {e}")),
+                }
+            }
+            if fault == Fault::Push && n > 4 && failed == 0 {
+                failures.push(format!("{tag}: no refused commit failed the stream"));
+            }
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(failures.is_empty(), "{} failures:\n{}", failures.len(), failures.join("\n"));
+}
+
+fn strs_value(n: usize, len: usize, tag: usize) -> crate::shm_types::AbsPtr {
+    let list = parse_schema("as").unwrap();
+    let json = format!("[{}]", (0..n).map(|k| format!("\"{tag}-{k}-{}\"", "s".repeat(len))).collect::<Vec<_>>().join(","));
+    read_json_with_schema(&json, &list).unwrap()
+}
+
+fn read_back(path: &std::path::Path) -> serde_json::Value {
+    let list = parse_schema("as").unwrap();
+    render_and_free(shared_load_stream_file_as_array(path.to_str().unwrap(), Some(&list)).unwrap(), &list).unwrap()
+}
+
+/// A thread with an in-place batch open does no other stream operation, so
+/// encoder code that writes another stream cannot deadlock two writers
+/// (SLOT-36).
+#[test]
+fn a_thread_encoding_in_place_does_no_other_stream_operation() {
+    use crate::stream::{write_abort, write_begin, write_commit, Begun};
+    let _shm = crate::own_test_registry();
+    let dir = std::env::temp_dir().join(format!("morloc_in_place_refuse_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let none = crate::compression::CompressionLevel::NONE;
+    let s1 = shared_open_ostream_with_schema(dir.join("1.stream").to_str().unwrap(), "as").unwrap();
+    let s2 = shared_open_ostream_with_schema(dir.join("2.stream").to_str().unwrap(), "as").unwrap();
+    let s3 = shared_open_ostream_with_schema(dir.join("3.stream").to_str().unwrap(), "as").unwrap();
+    let refused = |r: Result<(), MorlocError>, what: &str| {
+        let e = r.expect_err(what).to_string();
+        assert!(e.contains("encoding a @write batch") || e.contains("already open"), "{what}: {e}");
+    };
+    assert!(matches!(write_begin(s1, none).unwrap(), Begun::Open));
+    refused(write_begin(s2, none).map(|_| ()), "a second batch");
+    let v = strs_value(3, 4, 0);
+    refused(shared_write_subpacket(s2, none, v), "a copy write to another stream");
+    refused(shared_write_subpacket(s1, none, v), "a copy write to its own stream");
+    refused(shared_flush_buffer(s1), "a flush");
+    shared_close_handle(s3).unwrap();
+    let s3_slot = crate::stream::slot_ref(crate::stream::unpack_handle(s3).1).unwrap();
+    let open = || s3_slot.generation.load(std::sync::atomic::Ordering::Acquire) & crate::stream::GENERATION_MASK == crate::stream::unpack_handle(s3).0;
+    assert!(open(), "a close inside the batch ran before the batch ended");
+    write_commit(std::ptr::null()).unwrap();
+    assert!(!open(), "a close inside the batch never ran");
+    assert!(read_back(&dir.join("3.stream")).as_array().unwrap().is_empty());
+    shared_write_subpacket(s2, none, v).unwrap();
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+    for (mine, other) in [(s1, s2), (s2, s1)] {
+        let (tx, barrier) = (tx.clone(), barrier.clone());
+        let v = v as usize;
+        std::thread::spawn(move || {
+            assert!(matches!(write_begin(mine, none).unwrap(), Begun::Open));
+            barrier.wait();
+            let r = shared_write_subpacket(other, none, v as crate::shm_types::AbsPtr);
+            write_abort();
+            tx.send(r.is_err()).unwrap();
+        });
+    }
+    for _ in 0..2 {
+        let refused = rx.recv_timeout(std::time::Duration::from_secs(20)).expect("two encoders writing each other's stream hung");
+        assert!(refused, "an encoder wrote another stream inside its batch");
+    }
+    let _ = shm::shfree(v);
+    shared_close_handle(s1).unwrap();
+    shared_close_handle(s2).unwrap();
+    assert_eq!(read_back(&dir.join("2.stream")).as_array().unwrap().len(), 3);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Blocks an in-place batch holds are the slot's: an eval arena rewound
+/// between placements frees none of them (SLOT-36, SHM-8).
+#[test]
+fn an_arena_rewound_inside_an_in_place_batch_keeps_its_blocks() {
+    let _shm = crate::own_test_registry();
+    let _restore = buffer_bytes(4096);
+    let dir = std::env::temp_dir().join(format!("morloc_in_place_arena_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("a.stream");
+    let none = crate::compression::CompressionLevel::NONE;
+    let h = shared_open_ostream_with_schema(path.to_str().unwrap(), "as").unwrap();
+    let list = parse_schema("as").unwrap();
+    let elem = list.parameters[0].clone();
+    let lens = [10usize, 300, 2000, 40, 700, 5000, 3];
+    let json = format!("[{}]", lens.iter().map(|&n| format!("\"{}\"", "x".repeat(n))).collect::<Vec<_>>().join(","));
+    let v = read_json_with_schema(&json, &list).unwrap();
+    {
+        let _arena = crate::eval_arena::enter().unwrap();
+        let cp = crate::eval_arena::checkpoint();
+        assert!(matches!(crate::stream::write_begin(h, none).unwrap(), crate::stream::Begun::Open));
+        let arr = unsafe { &*(v as *const crate::shm_types::Array) };
+        let base = shm::rel2abs(arr.data).unwrap();
+        let res = crate::recur::Resolver::new(&elem);
+        let mut reached: *const u8 = std::ptr::null();
+        for i in 0..lens.len() {
+            let src = unsafe { base.add(i * elem.width) };
+            let size = crate::ffi::calc_voidstar_size_portable_with(src, &elem, &res).unwrap();
+            let room = crate::stream::write_place(size, reached).unwrap();
+            let at = |p: *mut u8| p as usize - room.base as usize;
+            unsafe { crate::voidstar::flatten_portable_in_place(room.base, at(room.slot), at(room.data), size, src, &elem, &res).unwrap() };
+            reached = room.end;
+            crate::eval_arena::rollback_to(cp);
+        }
+        crate::stream::write_commit(reached).unwrap();
+    }
+    let _ = shm::shfree(v);
+    shared_close_handle(h).unwrap();
+    let got = read_back(&path);
+    let want: Vec<serde_json::Value> = lens.iter().map(|&n| serde_json::Value::String("x".repeat(n))).collect();
+    assert_eq!(got, serde_json::Value::Array(want));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// An element whose encoding ends anywhere but where its size said is a
+/// defect: the call panics and the stream is left poisoned (SLOT-36, SLOT-14).
+#[test]
+fn an_in_place_element_that_overruns_its_room_poisons_the_stream() {
+    let _shm = crate::own_test_registry();
+    let dir = std::env::temp_dir().join(format!("morloc_in_place_overrun_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let none = crate::compression::CompressionLevel::NONE;
+    let h = shared_open_ostream_with_schema(dir.join("o.stream").to_str().unwrap(), "as").unwrap();
+    let panicked = std::thread::spawn(move || {
+        assert!(matches!(crate::stream::write_begin(h, none).unwrap(), crate::stream::Begun::Open));
+        let room = crate::stream::write_place(16 + 5, std::ptr::null()).unwrap();
+        let _ = crate::stream::write_place(16 + 5, unsafe { room.end.add(8) });
+    })
+    .join();
+    assert!(panicked.is_err(), "an overrun was not a defect");
+    let v = strs_value(1, 1, 0);
+    let e = shared_write_subpacket(h, none, v).expect_err("a poisoned stream took a write").to_string();
+    assert!(e.contains("died"), "{e}");
+    let _ = shm::shfree(v);
+    let _ = shared_discard_handle(h);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Two threads writing one stream in place each leave their batches whole
+/// and in one piece (SLOT-36, SLOT-11).
+#[test]
+fn two_threads_writing_in_place_leave_their_batches_whole() {
+    let _shm = crate::own_test_registry();
+    let _restore = buffer_bytes(4096);
+    let dir = std::env::temp_dir().join(format!("morloc_in_place_two_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("t.stream");
+    let h = shared_open_ostream_with_schema(path.to_str().unwrap(), "as").unwrap();
+    let threads: Vec<_> = (0..2)
+        .map(|t| {
+            std::thread::spawn(move || {
+                let elem = parse_schema("s").unwrap();
+                for b in 0..40 {
+                    let v = strs_value(25, 30, t * 1000 + b);
+                    write_in_place(h, crate::compression::CompressionLevel::NONE, v, &elem, false, None).unwrap();
+                    let _ = shm::shfree(v);
+                }
+            })
+        })
+        .collect();
+    for t in threads {
+        t.join().unwrap();
+    }
+    shared_close_handle(h).unwrap();
+    let got = read_back(&path);
+    let got: Vec<&str> = got.as_array().unwrap().iter().map(|s| s.as_str().unwrap()).collect();
+    assert_eq!(got.len(), 2 * 40 * 25);
+    for batch in got.chunks(25) {
+        let tag = batch[0].split('-').next().unwrap();
+        for (k, s) in batch.iter().enumerate() {
+            assert!(s.starts_with(&format!("{tag}-{k}-")), "batch {tag} is not whole: {batch:?}");
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A forked child forgets the batch its parent's thread had open; a thread
+/// that ends with one open ends its process, which leaves the stream to
+/// the death path (SLOT-36, SLOT-14, FORK-1).
+#[test]
+fn an_in_place_batch_does_not_survive_a_fork_or_its_thread() {
+    let _shm = crate::own_test_registry();
+    let dir = std::env::temp_dir().join(format!("morloc_in_place_fork_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let none = crate::compression::CompressionLevel::NONE;
+    let p1 = dir.join("1.stream");
+    let s1 = shared_open_ostream_with_schema(p1.to_str().unwrap(), "as").unwrap();
+    let s2 = shared_open_ostream_with_schema(dir.join("2.stream").to_str().unwrap(), "as").unwrap();
+    let wait = |pid: libc::pid_t| {
+        let mut status = 0;
+        assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid);
+        status
+    };
+
+    assert!(matches!(crate::stream::write_begin(s1, none).unwrap(), crate::stream::Begun::Open));
+    let pid = unsafe { libc::fork() };
+    if pid == 0 {
+        let forgot = crate::stream::write_place(24, std::ptr::null()).is_err();
+        let v = strs_value(2, 3, 9);
+        let wrote = shared_write_subpacket(s2, none, v).is_ok();
+        unsafe { libc::_exit(if forgot && wrote { 0 } else { 1 }) };
+    }
+    let status = wait(pid);
+    assert!(libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0, "child status {status}");
+    let v = strs_value(2, 3, 1);
+    crate::stream::write_abort();
+    shared_write_subpacket(s1, none, v).unwrap();
+
+    let pid = unsafe { libc::fork() };
+    if pid == 0 {
+        let none_core = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+        unsafe { libc::setrlimit(libc::RLIMIT_CORE, &none_core) };
+        let _ = std::thread::spawn(move || {
+            let _ = crate::stream::write_begin(s1, none);
+        })
+        .join();
+        unsafe { libc::_exit(0) };
+    }
+    let status = wait(pid);
+    assert!(!(libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0), "a thread ended inside a batch and its process went on");
+    let e = shared_write_subpacket(s1, none, v).expect_err("the stream outlived its writer's death").to_string();
+    assert!(e.contains("died"), "{e}");
+    let _ = shm::shfree(v);
+    let _ = shared_discard_handle(s1);
+    shared_close_handle(s2).unwrap();
+    assert_eq!(read_back(&dir.join("2.stream")).as_array().unwrap().len(), 2);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Runs and single rooms mix in one batch, and a run's slots read as zero
+/// though the buffer once held other values (SLOT-36).
+#[test]
+fn in_place_runs_read_as_zero_and_mix_with_single_rooms() {
+    use crate::stream::{write_begin, write_commit, write_place, write_place_run, Begun};
+    let _shm = crate::own_test_registry();
+    let _restore = buffer_bytes(4096);
+    let dir = std::env::temp_dir().join(format!("morloc_in_place_runs_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("r.stream");
+    let none = crate::compression::CompressionLevel::NONE;
+    let h = shared_open_ostream_with_schema(path.to_str().unwrap(), "ai4").unwrap();
+    let list = parse_schema("ai4").unwrap();
+    let elem = list.parameters[0].clone();
+    let ones = format!("[{}]", vec!["16843009"; 3000].join(","));
+    let zeros = format!("[{}]", vec!["0"; 3000].join(","));
+    for json in [&ones, &ones, &zeros, &zeros] {
+        let v = read_json_with_schema(json, &list).unwrap();
+        assert!(write_in_place(h, none, v, &elem, true, None).unwrap());
+        let _ = shm::shfree(v);
+        shared_flush_buffer(h).unwrap();
+    }
+    assert!(matches!(write_begin(h, none).unwrap(), Begun::Open));
+    let room = write_place(4, std::ptr::null()).unwrap();
+    unsafe { *(room.slot as *mut i32) = 7 };
+    let (slots, k) = write_place_run(3, room.end).unwrap();
+    assert_eq!(k, 3);
+    for j in 0..k {
+        unsafe { *(slots as *mut i32).add(j) = 8 + j as i32 };
+    }
+    let room = write_place(4, unsafe { slots.add(k * 4) }).unwrap();
+    unsafe { *(room.slot as *mut i32) = 11 };
+    let (_, none_placed) = write_place_run(0, room.end).unwrap();
+    assert_eq!(none_placed, 0);
+    write_commit(std::ptr::null()).unwrap();
+    shared_close_handle(h).unwrap();
+    let got = render_and_free(shared_load_stream_file_as_array(path.to_str().unwrap(), Some(&list)).unwrap(), &list).unwrap();
+    let got: Vec<i64> = got.as_array().unwrap().iter().map(|v| v.as_i64().unwrap()).collect();
+    let mut want = vec![16843009i64; 6000];
+    want.extend(vec![0; 6000]);
+    want.extend([7, 8, 9, 10, 11]);
+    assert_eq!(got, want);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A stream an eval arena discards while an in-place batch is open on the
+/// thread is discarded when the batch ends (SLOT-36).
+#[test]
+fn an_arena_ended_inside_an_in_place_batch_discards_its_streams_after() {
+    use crate::stream::{write_begin, write_commit, Begun};
+    let _shm = crate::own_test_registry();
+    let dir = std::env::temp_dir().join(format!("morloc_in_place_discard_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let none = crate::compression::CompressionLevel::NONE;
+    let out = shared_open_ostream_with_schema(dir.join("out.stream").to_str().unwrap(), "as").unwrap();
+    let owned;
+    {
+        let _arena = crate::eval_arena::enter().unwrap();
+        let cp = crate::eval_arena::checkpoint();
+        owned = shared_open_ostream_with_schema(dir.join("owned.stream").to_str().unwrap(), "as").unwrap();
+        crate::eval_arena::record_slot_if_active(owned);
+        assert!(matches!(write_begin(out, none).unwrap(), Begun::Open));
+        crate::eval_arena::rollback_to(cp);
+        let slot = crate::stream::slot_ref(crate::stream::unpack_handle(owned).1).unwrap();
+        assert_eq!(
+            slot.generation.load(std::sync::atomic::Ordering::Acquire) & crate::stream::GENERATION_MASK,
+            crate::stream::unpack_handle(owned).0,
+            "the arena's stream was discarded inside the batch",
+        );
+        write_commit(std::ptr::null()).unwrap();
+    }
+    assert!(shared_close_handle(owned).is_err(), "the arena's stream outlived the batch");
+    shared_close_handle(out).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A run of a fixed-width type wider than a sub-packet places one element
+/// at a time, each in a sub-packet of its own, as the copy path writes it
+/// (SLOT-36).
+#[test]
+fn a_run_of_elements_wider_than_a_sub_packet_is_placed_one_by_one() {
+    let _shm = crate::own_test_registry();
+    let _restore = buffer_bytes(4096);
+    let dir = std::env::temp_dir().join(format!("morloc_in_place_wide_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let elem_str = format!("t8{}", format!("t8{}", format!("t8{}", "f8".repeat(8)).repeat(8)).repeat(8));
+    let list = parse_schema(&format!("a{elem_str}")).unwrap();
+    let elem = list.parameters[0].clone();
+    let row = |k: usize| format!("[{}]", (0..8).map(|j| format!("{}.5", k * 8 + j)).collect::<Vec<_>>().join(","));
+    let block = |k: usize| format!("[{}]", (0..8).map(|i| row(k * 8 + i)).collect::<Vec<_>>().join(","));
+    let elem_json = |k: usize| format!("[{}]", (0..8).map(|i| block(k * 8 + i)).collect::<Vec<_>>().join(","));
+    let json = format!("[{}]", (0..3).map(elem_json).collect::<Vec<_>>().join(","));
+    let mut files = Vec::new();
+    for (tag, placing) in [("copy", false), ("place", true)] {
+        let path = dir.join(format!("{tag}.stream"));
+        let h = shared_open_ostream_with_schema(path.to_str().unwrap(), &format!("a{elem_str}")).unwrap();
+        let v = read_json_with_schema(&json, &list).unwrap();
+        if placing {
+            assert!(write_in_place(h, crate::compression::CompressionLevel::NONE, v, &elem, true, None).unwrap());
+        } else {
+            shared_write_subpacket(h, crate::compression::CompressionLevel::NONE, v).unwrap();
+        }
+        let _ = shm::shfree(v);
+        shared_close_handle(h).unwrap();
+        let (mp, sz) = crate::stream_format::mmap_file_readonly(path.to_str().unwrap()).unwrap();
+        let footer = crate::stream_format::try_read_footer(mp, sz).unwrap().unwrap();
+        unsafe { libc::munmap(mp as *mut libc::c_void, sz as usize) };
+        let mut bytes = std::fs::read(&path).unwrap();
+        bytes.truncate(footer.footer_start as usize);
+        files.push((bytes, format!("{:?}", footer.subpacket_entries)));
+    }
+    assert_eq!(files[0], files[1]);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Sub-packets of `n` bytes until the guard drops.
+fn buffer_bytes(n: usize) -> impl Drop {
+    struct Restore;
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            crate::stream::set_test_write_buffer_bytes(None);
+        }
+    }
+    crate::stream::set_test_write_buffer_bytes(Some(n));
+    Restore
+}
+
+/// A batch still open when its call ends is a defect: it is aborted, so the
+/// stream goes on without it, and the call panics (SLOT-36, PANIC-1).
+#[test]
+fn a_batch_left_open_at_the_end_of_its_call_is_aborted() {
+    use crate::stream::{write_begin, write_place, Begun};
+    let _shm = crate::own_test_registry();
+    let dir = std::env::temp_dir().join(format!("morloc_in_place_leak_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let none = crate::compression::CompressionLevel::NONE;
+    let path = dir.join("l.stream");
+    let h = shared_open_ostream_with_schema(path.to_str().unwrap(), "as").unwrap();
+    let ended = std::thread::spawn(move || {
+        assert!(matches!(write_begin(h, none).unwrap(), Begun::Open));
+        let _ = write_place(16 + 3, std::ptr::null()).unwrap();
+        crate::stream::pool_reclaim_stdio_after_dispatch();
+    })
+    .join();
+    assert!(ended.is_err(), "a batch left open was not a defect");
+    let v = strs_value(2, 3, 5);
+    shared_write_subpacket(h, none, v).unwrap();
+    let _ = shm::shfree(v);
+    shared_close_handle(h).unwrap();
+    assert_eq!(read_back(&path).as_array().unwrap().len(), 2);
+    let _ = std::fs::remove_dir_all(&dir);
 }

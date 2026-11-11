@@ -18,7 +18,7 @@ const PID_READ_SITES: &[&str] = &[
     "morloc-runtime/run.rs::publish_run",
     "morloc-runtime/run.rs::gen_id",
     "morloc-runtime/slurm_ffi.rs::make_job_dir",
-    "morloc-runtime/stream.rs::with_process_local_slot",
+    "morloc-runtime/stream.rs::enter_local",
     "morloc-runtime/stream.rs::allocate_slot_cas",
     "morloc-runtime-types/process.rs::own_start_time",
     "morloc-runtime/stream.rs::verify_stdio_opener_pid",

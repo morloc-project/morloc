@@ -96,6 +96,10 @@ pub const PRINT_RESULT_ERR: i32 = 1;
 /// mirrors it as MLC_RESULT_PIPE_CLOSED.
 pub const MLC_RESULT_PIPE_CLOSED: i32 = 2;
 
+/// SLOT-36: `mlc_write_begin` opened no batch; the binding writes the batch
+/// with `mlc_write` instead.
+pub const MLC_WRITE_FALLBACK: i32 = 3;
+
 /// The tag on an error that says this process lost shared memory (SHM-17,
 /// PANIC-14).
 pub const SHARED_MEMORY_LOST: &str = "[SHM-17] shared memory lost: ";

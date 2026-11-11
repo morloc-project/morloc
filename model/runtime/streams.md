@@ -296,11 +296,13 @@ stream field in its batch; the elements are then written with those
 paths. A field naming a stream that is closed at that point, or one with
 no path (a channel, stdio), fails the call before any element is
 appended: no element of the batch reaches the file or a reader, the
-stream's counts and level are those before the call, and later batches
-are written as if the call had not been made. Any other failure while
+stream's counts and level are those before the call, and later batches'
+elements are written as if the call had not been made (an index capacity
+the call grew stays, so later sub-packets may be cut elsewhere; cuts carry
+no meaning, SLOT-11). Any other failure while
 the batch is placed is undone the same way so long as none of its elements
-has been handed on (queued for the file or pushed to a reader): the bytes
-it placed are zeroed and uncounted. A buffer handed on that holds only
+has been handed on (queued for the file or pushed to a reader): what it
+placed is uncounted. A buffer handed on that holds only
 earlier batches' elements does not count. The batch's elements are counted
 only once all are placed, and the level is pinned once the batch has
 handed bytes on, or when it ends. A failure after a hand-off fails the
@@ -316,33 +318,66 @@ handed on stays in the file, where a reader reads it as data (SLOT-29).
 A failure that ends the process (SHM-17) is outside this item.
 
 ### SLOT-36 A batch is encoded in place and committed whole
+Status: implemented
+Checked by: an_in_place_batch_writes_the_bytes_the_copy_path_writes, in_place_runs_read_as_zero_and_mix_with_single_rooms, an_in_place_batch_that_fails_is_absent_or_fails_its_stream, a_thread_encoding_in_place_does_no_other_stream_operation, an_arena_rewound_inside_an_in_place_batch_keeps_its_blocks, an_in_place_element_that_overruns_its_room_poisons_the_stream, two_threads_writing_in_place_leave_their_batches_whole, an_in_place_batch_does_not_survive_a_fork_or_its_thread, an_arena_ended_inside_an_in_place_batch_discards_its_streams_after, a_run_of_elements_wider_than_a_sub_packet_is_placed_one_by_one, a_batch_left_open_at_the_end_of_its_call_is_aborted
+
+A language binding may write a `@write` batch to an output file by
+encoding each element straight into the stream's write buffer, inside one
+transaction on the slot lock, which it begins, places elements into, and
+commits or aborts. Channels, staged streams, and element types that are
+tables or hold stream fields are refused at begin and written as SLOT-35
+says, from the binding's value. An element is placed with exactly its
+portable size and is cut into sub-packets as the copy path cuts it, so the
+file's bytes are those the runtime's own encoding writes. Its room is
+zeroed when it is placed, so a field the encoder leaves alone reads as
+zero. The binding reports where its encoding ended at its next call; an
+end other than the room's is a defect.
+
+A buffer that fills is sealed into the writer's pending list and a spare or
+fresh block takes the slot's place; an element larger than a sub-packet
+gets a pending block of its own. Every block the transaction allocates is
+the slot's from the start, so no eval arena releases it. Pending blocks
+are queued (SLOT-12) and the element counts and the level pin change only
+at commit, so an aborted batch leaves no trace and pins no level. Growing
+the block or its index is published to the slot at once and survives an
+abort. Abort frees the writer's private blocks, never giving them to the
+spare ring, whose only producer is the custodian, and puts back the
+buffer the batch started in with the counts it started from. A commit
+cannot be undone once a block holding its batch's elements is queued:
+when the stream refuses a later one, the writer frees the blocks it did
+not queue, leaves the slot without a buffer and fails the stream. Refused
+before that, the batch is absent.
+
+While a transaction is open its thread does no other stream operation, so
+encoder code that reaches another stream cannot hold two slot locks; a
+close or discard of a stream meanwhile returns at once and runs when the
+transaction ends, reporting a failure on stderr (an exception to SLOT-15);
+one that ends in a defect leaves those streams to the run's end (SLOT-13).
+A transaction still open when its call ends is a defect: it is aborted
+and the process panics (PANIC-1). A thread that ends with a
+transaction open ends its process, and a writer that dies inside the
+transaction fails the stream (SLOT-14); its private blocks stay allocated
+until the namespace ends. A forked child forgets a transaction its
+parent's thread had open. Pending blocks are bytes outside the queue's
+bound (SLOT-32) for the length of one batch.
+
+The protocol of blocks, counts, spares, zeroing and the GIL is modelled in
+`tla/EncodeInPlace.tla`, with a bug variant for each of its rules; the
+refusals, fork and thread rules are checked by the tests above.
+
+### SLOT-37 Every binding writes an output file's batches in place
 Status: draft
 
-A language binding writes a `@write` batch by encoding each element
-straight into the stream's write buffer, inside one transaction on the
-slot lock, which it begins, places elements into, and commits or aborts.
-An element's room is exactly its portable size, and its bytes are those
-the runtime's own encoding would write. A block that fills is sealed into
-the writer's pending list and a spare or fresh block takes its place;
-pending blocks are queued (SLOT-12) and the element counts change only at
-commit, so an aborted batch leaves no trace (SLOT-35, for every error).
-Growing the block or its index is published to the slot at once. Abort
-frees the writer's private blocks, never giving them to the spare ring,
-whose only producer is the custodian, puts back the first sealed block
-with the counts the batch started from, and zeroes what it placed. A
-commit cannot be undone once its first block is queued: when the failed
-stream refuses a later one, the writer frees the blocks it did not queue
-and leaves the slot without a buffer. Channels and staged streams are
-written as SLOT-35 says, from the binding's value. Every
-byte of a write buffer past its placed elements is zero: new blocks are
-zero (SHM-6) and the custodian scrubs a block before giving it back as a
-spare. A Python writer encodes holding the GIL from after it takes the
-slot lock to commit, never releasing it between sizing an element and
-writing it, and never waits for a slot lock holding the GIL. A writer
-that dies inside the transaction fails the stream (SLOT-14); its private
-blocks stay allocated until the namespace ends. Pending blocks are
-bytes outside the queue's bound (SLOT-32) for the length of one batch. The protocol is modelled in
-`tla/EncodeInPlace.tla`, with a bug variant for each rule above.
+The C++, Rust, Python and R bindings write a `@write` batch to an output
+file through SLOT-36's transaction, and with `mlc_write` from their own
+value when begin refuses. Each encodes the canonical bytes, which a test
+per binding and a golden writing the same values from all four compare
+byte for byte. An error in the encoder aborts the batch: C++ and Rust
+through a guard, R in one `R_UnwindProtect` around the batch. A Python
+writer encodes holding the GIL from after it takes the slot lock to
+commit, never releasing it between sizing an element and writing it, and
+never waits for a slot lock holding the GIL (`tla/EncodeInPlace.tla`
+models the GIL with a second Python thread).
 
 ### SLOT-24 A batch's block outlives every compression job that reads it
 Status: implemented

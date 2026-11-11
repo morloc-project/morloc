@@ -1869,6 +1869,26 @@ int64_t mlc_open_stderr(const char* schema_str, ERRMSG);
 void mlc_reclaim_stdio_after_dispatch(void);
 int32_t mlc_write(int64_t level, int64_t handle,
                   const void* payload_voidstar, ERRMSG);
+// SLOT-36: an in-place @write batch. `mlc_write_begin` returns 0 when the
+// batch is open, MLC_WRITE_FALLBACK when it is written with `mlc_write`
+// instead, or the codes of mlc_write. An element is placed with its exact
+// portable size; offsets inside its room are relative to `base` and
+// alignment is taken from `origin`. `reached` is where the previous room's
+// encoding ended.
+#define MLC_WRITE_FALLBACK 3
+typedef struct mlc_room_s {
+    uint8_t* slot;
+    uint8_t* data;
+    uint8_t* end;
+    uint8_t* base;
+    uint8_t* origin;
+} mlc_room_t;
+int32_t mlc_write_begin(int64_t level, int64_t handle, ERRMSG);
+int32_t mlc_write_place(uint64_t size, const uint8_t* reached, mlc_room_t* room, ERRMSG);
+int32_t mlc_write_place_run(uint64_t k, const uint8_t* reached, uint8_t** slots, uint64_t* placed, ERRMSG);
+int32_t mlc_write_commit(const uint8_t* reached, ERRMSG);
+void mlc_write_abort(void);
+bool mlc_write_open(void);
 int64_t mlc_append(const char* schema_str, const char* path, ERRMSG);
 int32_t mlc_concat(const char* const* paths, size_t n_paths,
                    const char* dest, ERRMSG);

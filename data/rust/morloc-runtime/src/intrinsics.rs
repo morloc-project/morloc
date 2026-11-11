@@ -1053,7 +1053,7 @@ pub(crate) unsafe fn mlc_open_stdout(
 /// not wedge the next @stdout open with "already open". The Rust/C++ pool
 /// loop (pool_dispatch_packet) calls the underlying reclaim directly;
 /// Python and R call this C-ABI wrapper from their per-dispatch handlers.
-/// Cheap on the common no-stdio path (a single thread-local read).
+/// Cheap on the common no-stdio path (thread-local reads).
 pub(crate) unsafe fn mlc_reclaim_stdio_after_dispatch() {
     crate::stream::pool_reclaim_stdio_after_dispatch();
 }
@@ -1379,7 +1379,11 @@ pub(crate) unsafe fn mlc_write(
     let written = crate::compression::CompressionLevel::from_int(level).and_then(|l| {
         crate::stream::shared_write_subpacket(handle, l, payload_voidstar as crate::shm::AbsPtr)
     });
-    match written {
+    write_result(written, errmsg)
+}
+
+unsafe fn write_result(r: Result<(), MorlocError>, errmsg: *mut *mut c_char) -> i32 {
+    match r {
         Ok(()) => 0,
         // Broken pipe is an <IO> condition, not a recoverable error: return
         // the reserved code with NO errmsg so the C++ shim throws a distinct
@@ -1392,6 +1396,49 @@ pub(crate) unsafe fn mlc_write(
     }
 }
 
+/// SLOT-36: begin an in-place `@write` batch on `handle`.
+pub(crate) unsafe fn mlc_write_begin(level: i64, handle: i64, errmsg: *mut *mut c_char) -> i32 {
+    clear_errmsg(errmsg);
+    let begun = crate::compression::CompressionLevel::from_int(level).and_then(|l| crate::stream::write_begin(handle, l));
+    match begun {
+        Ok(crate::stream::Begun::Fallback) => morloc_runtime_types::MLC_WRITE_FALLBACK,
+        r => write_result(r.map(|_| ()), errmsg),
+    }
+}
+
+/// SLOT-36: the room for one element of `size` portable bytes.
+pub(crate) unsafe fn mlc_write_place(size: u64, reached: *const u8, room: *mut crate::stream::MlcRoom, errmsg: *mut *mut c_char) -> i32 {
+    clear_errmsg(errmsg);
+    write_result(
+        crate::stream::write_place(size as usize, reached).map(|r| {
+            // SAFETY: SLOT-36: the caller passes room for one MlcRoom.
+            unsafe { *room = r }
+        }),
+        errmsg,
+    )
+}
+
+/// SLOT-36: the slots of up to `k` fixed-width elements.
+pub(crate) unsafe fn mlc_write_place_run(k: u64, reached: *const u8, slots: *mut *mut u8, placed: *mut u64, errmsg: *mut *mut c_char) -> i32 {
+    clear_errmsg(errmsg);
+    write_result(
+        crate::stream::write_place_run(k as usize, reached).map(|(p, n)| {
+            // SAFETY: SLOT-36: the caller passes one pointer and one count.
+            unsafe {
+                *slots = p;
+                *placed = n as u64;
+            }
+        }),
+        errmsg,
+    )
+}
+
+/// SLOT-36
+pub(crate) unsafe fn mlc_write_commit(reached: *const u8, errmsg: *mut *mut c_char) -> i32 {
+    clear_errmsg(errmsg);
+    write_result(crate::stream::write_commit(reached), errmsg)
+}
+
 /// `@flush handle`: force any buffered elements to be written as a
 /// sub-packet now, without closing the stream. No-op when the buffer
 /// is empty. Useful for tests that need deterministic sub-packet
@@ -1402,15 +1449,7 @@ pub(crate) unsafe fn mlc_flush(
     errmsg: *mut *mut c_char,
 ) -> i32 {
     clear_errmsg(errmsg);
-    match crate::stream::shared_flush_buffer(handle) {
-        Ok(()) => 0,
-        // See mlc_write: broken pipe surfaces as the reserved code (no errmsg).
-        Err(MorlocError::PipeClosed) => crate::ipc_ffi::note_pipe_closed(),
-        Err(e) => {
-            set_errmsg(errmsg, &e);
-            1
-        }
-    }
+    write_result(crate::stream::shared_flush_buffer(handle), errmsg)
 }
 
 /// @tell: number of elements written to the process's @stdout OStream so far
@@ -2620,6 +2659,36 @@ mod c_abi {
     #[no_mangle]
     pub unsafe extern "C" fn mlc_write(level: i64, handle: i64, payload_voidstar: *const c_void, errmsg: *mut *mut c_char) -> i32 {
         super::mlc_write(level, handle, payload_voidstar, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn mlc_write_begin(level: i64, handle: i64, errmsg: *mut *mut c_char) -> i32 {
+        super::mlc_write_begin(level, handle, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn mlc_write_place(size: u64, reached: *const u8, room: *mut crate::stream::MlcRoom, errmsg: *mut *mut c_char) -> i32 {
+        super::mlc_write_place(size, reached, room, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn mlc_write_place_run(k: u64, reached: *const u8, slots: *mut *mut u8, placed: *mut u64, errmsg: *mut *mut c_char) -> i32 {
+        super::mlc_write_place_run(k, reached, slots, placed, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn mlc_write_commit(reached: *const u8, errmsg: *mut *mut c_char) -> i32 {
+        super::mlc_write_commit(reached, errmsg)
+    }
+
+    #[no_mangle]
+    pub extern "C" fn mlc_write_abort() {
+        crate::stream::write_abort()
+    }
+
+    #[no_mangle]
+    pub extern "C" fn mlc_write_open() -> bool {
+        crate::stream::write_open()
     }
 
     #[no_mangle]

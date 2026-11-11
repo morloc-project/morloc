@@ -762,16 +762,16 @@ impl<'a, 'r, 't> LoadWalk<'a, 'r, 't> {
         let hdr = std::mem::size_of::<Array>();
         let hw = unsafe { ShmWriter::new(f.data as *mut u8, hdr) };
         if f.idx == 0 {
-            let dp = if f.x == 1 {
+            let dp = if n == 0 {
+                std::ptr::null_mut()
+            } else if f.x == 1 {
                 unsafe { (f.data as *mut u8).add(hdr) }
-            } else if n > 0 {
+            } else {
                 let dp = shm::shmalloc(n * ew)?;
                 self.parts.push(dp);
                 // SAFETY: freshly allocated with n * ew bytes.
                 unsafe { std::ptr::write_bytes(dp, 0, n * ew) };
                 dp
-            } else {
-                std::ptr::null_mut()
             };
             let data_rel = if dp.is_null() { RELNULL } else { shm::abs2rel(dp)? };
             hw.write_array_header(0, n, data_rel);

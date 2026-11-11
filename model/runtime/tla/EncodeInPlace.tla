@@ -4,14 +4,16 @@
 (* Writers take the slot lock and place their batch's elements into the     *)
 (* slot's block, element by element; any element may fail to encode. A      *)
 (* full block is sealed into the writer's private pending list and a spare  *)
-(* or fresh block takes its place. Block growth (a bigger block, the old    *)
+(* or fresh block takes its place in the slot; `kept` holds the earlier     *)
+(* batches' elements a sealed first block carries until it is queued. Block growth (a bigger block, the old    *)
 (* one freed) and index growth (the bytes laid out for a bigger index) are  *)
 (* published to the slot at once; the element counts and the queue are     *)
 (* touched only at commit. Abort frees the writer's private blocks and      *)
-(* puts back the first sealed block with the counts the batch started from, *)
-(* zeroing the bytes it placed. The custodian writes queued sub-packets to  *)
-(* the file, scrubs each block and gives it back as a spare; it is the      *)
-(* spare ring's only producer. With Py, the writers are Python threads of   *)
+(* puts back the first sealed block with the counts the batch started from. *)
+(* Each element's room is zeroed when it is placed, so neither abort nor    *)
+(* the custodian zeroes anything. The custodian writes queued sub-packets   *)
+(* to the file and gives each block back as a spare; it is the spare        *)
+(* ring's only producer. With Py, the writers are Python threads of   *)
 (* one process sharing a GIL with a third thread that mutates their         *)
 (* objects; a writer encodes holding the GIL and never waits for the slot   *)
 (* lock holding it. With Death, a writer can die at any step inside the     *)
@@ -19,7 +21,10 @@
 (* With CustFail, the custodian can fail (a closed pipe, a full disk): it   *)
 (* writes nothing more and every later push is refused. A commit refused    *)
 (* after its first push cannot be undone, since the custodian owns what it  *)
-(* took: the writer frees its unpushed blocks and leaves the slot empty.    *)
+(* took: the writer frees its unpushed blocks and leaves the slot empty;    *)
+(* refused after queueing earlier batches' elements alone, it frees the    *)
+(* blocks it did not queue, empties the slot's buffer and leaves its batch *)
+(* absent.                                                                  *)
 EXTENDS Naturals, Sequences, FiniteSets
 
 CONSTANTS Variant, Py, Death, CustFail, Cap, Depth, NB, K
@@ -30,8 +35,7 @@ CONSTANTS Variant, Py, Death, CustFail, Cap, Depth, NB, K
 \* "room_free_before_commit": a grown block stays private until commit
 \*   (the old one is freed at once).
 \* "grow_not_kept": abort puts back the index capacity it started with.
-\* "abort_no_zero": abort leaves the bytes it placed.
-\* "spare_unscrubbed": the custodian gives a spare back unscrubbed.
+\* "place_no_zero": a room is placed on as it is, not zeroed first.
 \* "gil_held_blocking": one Python writer waits for the slot lock holding
 \*   the GIL.
 \* "gil_released_between_size_and_write": a Python writer releases the GIL
@@ -58,6 +62,7 @@ variables
     qfailed = FALSE,
     slotBlk = 1,
     slotBuf = <<>>,
+    kept = <<>>,
     slotCap = 1,
     slotLayout = 1,
     used = [b \in 1..NB |-> b = 1],
@@ -77,7 +82,7 @@ variables
     sizeMismatch = FALSE;
 
 define
-    View == file \o lost \o Elems(queue) \o slotBuf
+    View == file \o lost \o Elems(queue) \o kept \o slotBuf
     InCommit == IF committing = NONE THEN <<>> ELSE Batch(committing)
     Refd == IF refused = NONE THEN <<>> ELSE Batch(refused)
     BatchWholeOrAbsent ==
@@ -115,7 +120,7 @@ end macro;
 fair process Wr \in W
 variables wbuf = <<>>, wblk = 0, pend = <<>>, sealed = FALSE, i = 1,
     start = <<>>, startBlk = 0, startCap = 1, sz = 0, grown = FALSE, roomed = FALSE,
-    nb = 0, out = <<>>, pt = 0, pushed = FALSE;
+    nb = 0, out = <<>>, pt = 0, pushed = FALSE, own = FALSE, firstBlk = 0;
 begin
   GilFirst:
     if Py /\ Variant = "gil_held_blocking" /\ self = "w2" then
@@ -180,6 +185,11 @@ begin
                 end if;
             else
                 pend := Append(pend, [b |-> wblk, e |-> wbuf]);
+                if ~sealed then
+                    kept := slotBuf;
+                    slotBuf := <<>>;
+                    firstBlk := wblk;
+                end if;
             end if;
             sealed := TRUE;
             wbuf := <<>>;
@@ -190,7 +200,7 @@ begin
       NewBlock:
         if nb /= 0 then
             wblk := nb;
-            if Variant = "seal_queues" /\ slotBlk = 0 then
+            if Variant /= "seal_queues" \/ slotBlk = 0 then
                 slotBlk := nb;
             end if;
             nb := 0;
@@ -210,6 +220,10 @@ begin
                 wblk := b;
             end with;
         end either;
+      Zero:
+        if Variant /= "place_no_zero" then
+            top[wblk] := Len(wbuf);
+        end if;
       Write:
         die();
       Write2:
@@ -233,6 +247,12 @@ begin
         if qfailed then
             if ~pushed \/ Variant = "refused_aborts" then
                 goto Abort;
+            elsif ~own then
+                out := [k \in 1..Len(pend) |-> pend[k].b];
+                pend := <<>>;
+                wblk := 0;
+                slotBuf := <<>>;
+                goto Free;
             else
                 out := [k \in 1..Len(pend) |-> pend[k].b] \o <<wblk>>;
                 pend := <<>>;
@@ -244,9 +264,10 @@ begin
         else
             queue := Append(queue, Head(pend));
             pushed := TRUE;
-            if Head(pend).b = slotBlk then
-                slotBuf := <<>>;
-                slotBlk := 0;
+            own := own \/ \E k \in 1..Len(Head(pend).e) : Head(pend).e[k][1] = self;
+            if Head(pend).b = firstBlk then
+                kept := <<>>;
+                firstBlk := 0;
             end if;
             pend := Tail(pend);
         end if;
@@ -277,6 +298,7 @@ begin
         LAMBDA x: x /= startBlk);
     pend := <<>>;
     wblk := 0;
+    slotBlk := startBlk;
   Drop:
     while out /= <<>> do
         if Variant = "abort_gives_spare" then
@@ -292,11 +314,9 @@ begin
         end if;
     end while;
   Restore:
-    slotBlk := startBlk;
     slotBuf := start;
-    if Variant /= "abort_no_zero" then
-        top[startBlk] := Len(start);
-    end if;
+    kept := <<>>;
+    firstBlk := 0;
     if Variant = "grow_not_kept" then
         slotCap := startCap;
     end if;
@@ -352,10 +372,7 @@ begin
             await pc["closer"] = "Done" /\ queue = <<>>;
             goto Done;
         end either;
-      Scrub:
-        if Variant /= "spare_unscrubbed" then
-            top[cb] := 0;
-        end if;
+      Ring:
         ct := rtail;
       Give:
         rslot[ct + 1] := cb;
@@ -367,12 +384,12 @@ end process;
 end algorithm; *)
 
 \* BEGIN TRANSLATION
-VARIABLES lock, failed, qfailed, slotBlk, slotBuf, slotCap, slotLayout, used, 
-          top, queue, file, lost, refused, rslot, rhead, rtail, done, 
+VARIABLES lock, failed, qfailed, slotBlk, slotBuf, kept, slotCap, slotLayout, 
+          used, top, queue, file, lost, refused, rslot, rhead, rtail, done, 
           committing, gil, obj, badPlace, sizeMismatch, pc
 
 (* define statement *)
-View == file \o lost \o Elems(queue) \o slotBuf
+View == file \o lost \o Elems(queue) \o kept \o slotBuf
 InCommit == IF committing = NONE THEN <<>> ELSE Batch(committing)
 Refd == IF refused = NONE THEN <<>> ELSE Batch(refused)
 BatchWholeOrAbsent ==
@@ -384,13 +401,13 @@ LayoutAgrees == slotCap = slotLayout
 RingFits == rtail <= K
 
 VARIABLES wbuf, wblk, pend, sealed, i, start, startBlk, startCap, sz, grown, 
-          roomed, nb, out, pt, pushed, cb, ct
+          roomed, nb, out, pt, pushed, own, firstBlk, cb, ct
 
-vars == << lock, failed, qfailed, slotBlk, slotBuf, slotCap, slotLayout, used, 
-           top, queue, file, lost, refused, rslot, rhead, rtail, done, 
+vars == << lock, failed, qfailed, slotBlk, slotBuf, kept, slotCap, slotLayout, 
+           used, top, queue, file, lost, refused, rslot, rhead, rtail, done, 
            committing, gil, obj, badPlace, sizeMismatch, pc, wbuf, wblk, pend, 
            sealed, i, start, startBlk, startCap, sz, grown, roomed, nb, out, 
-           pt, pushed, cb, ct >>
+           pt, pushed, own, firstBlk, cb, ct >>
 
 ProcSet == (W) \cup {MUT} \cup {"closer"} \cup {"cust"}
 
@@ -400,6 +417,7 @@ Init == (* Global variables *)
         /\ qfailed = FALSE
         /\ slotBlk = 1
         /\ slotBuf = <<>>
+        /\ kept = <<>>
         /\ slotCap = 1
         /\ slotLayout = 1
         /\ used = [b \in 1..NB |-> b = 1]
@@ -433,6 +451,8 @@ Init == (* Global variables *)
         /\ out = [self \in W |-> <<>>]
         /\ pt = [self \in W |-> 0]
         /\ pushed = [self \in W |-> FALSE]
+        /\ own = [self \in W |-> FALSE]
+        /\ firstBlk = [self \in W |-> 0]
         (* Process Cust *)
         /\ cb = 0
         /\ ct = 0
@@ -449,12 +469,12 @@ GilFirst(self) == /\ pc[self] = "GilFirst"
                              /\ gil' = gil
                   /\ pc' = [pc EXCEPT ![self] = "Lock"]
                   /\ UNCHANGED << lock, failed, qfailed, slotBlk, slotBuf, 
-                                  slotCap, slotLayout, used, top, queue, file, 
-                                  lost, refused, rslot, rhead, rtail, done, 
-                                  committing, obj, badPlace, sizeMismatch, 
-                                  wbuf, wblk, pend, sealed, i, start, startBlk, 
-                                  startCap, sz, grown, roomed, nb, out, pt, 
-                                  pushed, cb, ct >>
+                                  kept, slotCap, slotLayout, used, top, queue, 
+                                  file, lost, refused, rslot, rhead, rtail, 
+                                  done, committing, obj, badPlace, 
+                                  sizeMismatch, wbuf, wblk, pend, sealed, i, 
+                                  start, startBlk, startCap, sz, grown, roomed, 
+                                  nb, out, pt, pushed, own, firstBlk, cb, ct >>
 
 Lock(self) == /\ pc[self] = "Lock"
               /\ lock = NONE
@@ -471,11 +491,12 @@ Lock(self) == /\ pc[self] = "Lock"
                          /\ wblk' = [wblk EXCEPT ![self] = slotBlk]
                          /\ pc' = [pc EXCEPT ![self] = "Gil"]
                          /\ gil' = gil
-              /\ UNCHANGED << failed, qfailed, slotBlk, slotBuf, slotCap, 
+              /\ UNCHANGED << failed, qfailed, slotBlk, slotBuf, kept, slotCap, 
                               slotLayout, used, top, queue, file, lost, 
                               refused, rslot, rhead, rtail, done, committing, 
                               obj, badPlace, sizeMismatch, pend, sealed, i, sz, 
-                              grown, roomed, nb, out, pt, pushed, cb, ct >>
+                              grown, roomed, nb, out, pt, pushed, own, 
+                              firstBlk, cb, ct >>
 
 Gil(self) == /\ pc[self] = "Gil"
              /\ IF Py /\ gil /= self
@@ -484,24 +505,25 @@ Gil(self) == /\ pc[self] = "Gil"
                    ELSE /\ TRUE
                         /\ gil' = gil
              /\ pc' = [pc EXCEPT ![self] = "Place"]
-             /\ UNCHANGED << lock, failed, qfailed, slotBlk, slotBuf, slotCap, 
-                             slotLayout, used, top, queue, file, lost, refused, 
-                             rslot, rhead, rtail, done, committing, obj, 
-                             badPlace, sizeMismatch, wbuf, wblk, pend, sealed, 
-                             i, start, startBlk, startCap, sz, grown, roomed, 
-                             nb, out, pt, pushed, cb, ct >>
+             /\ UNCHANGED << lock, failed, qfailed, slotBlk, slotBuf, kept, 
+                             slotCap, slotLayout, used, top, queue, file, lost, 
+                             refused, rslot, rhead, rtail, done, committing, 
+                             obj, badPlace, sizeMismatch, wbuf, wblk, pend, 
+                             sealed, i, start, startBlk, startCap, sz, grown, 
+                             roomed, nb, out, pt, pushed, own, firstBlk, cb, 
+                             ct >>
 
 Place(self) == /\ pc[self] = "Place"
                /\ IF i[self] <= BL[self]
                      THEN /\ pc' = [pc EXCEPT ![self] = "Choose"]
                      ELSE /\ pc' = [pc EXCEPT ![self] = "Commit"]
-               /\ UNCHANGED << lock, failed, qfailed, slotBlk, slotBuf, 
+               /\ UNCHANGED << lock, failed, qfailed, slotBlk, slotBuf, kept, 
                                slotCap, slotLayout, used, top, queue, file, 
                                lost, refused, rslot, rhead, rtail, done, 
                                committing, gil, obj, badPlace, sizeMismatch, 
                                wbuf, wblk, pend, sealed, i, start, startBlk, 
                                startCap, sz, grown, roomed, nb, out, pt, 
-                               pushed, cb, ct >>
+                               pushed, own, firstBlk, cb, ct >>
 
 Choose(self) == /\ pc[self] = "Choose"
                 /\ IF Death
@@ -513,12 +535,13 @@ Choose(self) == /\ pc[self] = "Choose"
                                  /\ pc' = [pc EXCEPT ![self] = "Done"]
                       ELSE /\ pc' = [pc EXCEPT ![self] = "Choose2"]
                            /\ UNCHANGED << lock, failed >>
-                /\ UNCHANGED << qfailed, slotBlk, slotBuf, slotCap, slotLayout, 
-                                used, top, queue, file, lost, refused, rslot, 
-                                rhead, rtail, done, committing, gil, obj, 
-                                badPlace, sizeMismatch, wbuf, wblk, pend, 
-                                sealed, i, start, startBlk, startCap, sz, 
-                                grown, roomed, nb, out, pt, pushed, cb, ct >>
+                /\ UNCHANGED << qfailed, slotBlk, slotBuf, kept, slotCap, 
+                                slotLayout, used, top, queue, file, lost, 
+                                refused, rslot, rhead, rtail, done, committing, 
+                                gil, obj, badPlace, sizeMismatch, wbuf, wblk, 
+                                pend, sealed, i, start, startBlk, startCap, sz, 
+                                grown, roomed, nb, out, pt, pushed, own, 
+                                firstBlk, cb, ct >>
 
 Choose2(self) == /\ pc[self] = "Choose2"
                  /\ \/ /\ pc' = [pc EXCEPT ![self] = "Abort"]
@@ -532,12 +555,13 @@ Choose2(self) == /\ pc[self] = "Choose2"
                              ELSE /\ TRUE
                                   /\ UNCHANGED << slotCap, slotLayout, grown >>
                        /\ pc' = [pc EXCEPT ![self] = "Size"]
-                 /\ UNCHANGED << lock, failed, qfailed, slotBlk, slotBuf, used, 
-                                 top, queue, file, lost, refused, rslot, rhead, 
-                                 rtail, done, committing, gil, obj, badPlace, 
-                                 sizeMismatch, wbuf, wblk, pend, sealed, i, 
-                                 start, startBlk, startCap, sz, roomed, nb, 
-                                 out, pt, pushed, cb, ct >>
+                 /\ UNCHANGED << lock, failed, qfailed, slotBlk, slotBuf, kept, 
+                                 used, top, queue, file, lost, refused, rslot, 
+                                 rhead, rtail, done, committing, gil, obj, 
+                                 badPlace, sizeMismatch, wbuf, wblk, pend, 
+                                 sealed, i, start, startBlk, startCap, sz, 
+                                 roomed, nb, out, pt, pushed, own, firstBlk, 
+                                 cb, ct >>
 
 Size(self) == /\ pc[self] = "Size"
               /\ sz' = [sz EXCEPT ![self] = obj[self]]
@@ -546,12 +570,13 @@ Size(self) == /\ pc[self] = "Size"
                     ELSE /\ TRUE
                          /\ gil' = gil
               /\ pc' = [pc EXCEPT ![self] = "Regain"]
-              /\ UNCHANGED << lock, failed, qfailed, slotBlk, slotBuf, slotCap, 
-                              slotLayout, used, top, queue, file, lost, 
-                              refused, rslot, rhead, rtail, done, committing, 
-                              obj, badPlace, sizeMismatch, wbuf, wblk, pend, 
-                              sealed, i, start, startBlk, startCap, grown, 
-                              roomed, nb, out, pt, pushed, cb, ct >>
+              /\ UNCHANGED << lock, failed, qfailed, slotBlk, slotBuf, kept, 
+                              slotCap, slotLayout, used, top, queue, file, 
+                              lost, refused, rslot, rhead, rtail, done, 
+                              committing, obj, badPlace, sizeMismatch, wbuf, 
+                              wblk, pend, sealed, i, start, startBlk, startCap, 
+                              grown, roomed, nb, out, pt, pushed, own, 
+                              firstBlk, cb, ct >>
 
 Regain(self) == /\ pc[self] = "Regain"
                 /\ IF Py /\ Variant = "gil_released_between_size_and_write"
@@ -560,13 +585,13 @@ Regain(self) == /\ pc[self] = "Regain"
                       ELSE /\ TRUE
                            /\ gil' = gil
                 /\ pc' = [pc EXCEPT ![self] = "Seal"]
-                /\ UNCHANGED << lock, failed, qfailed, slotBlk, slotBuf, 
+                /\ UNCHANGED << lock, failed, qfailed, slotBlk, slotBuf, kept, 
                                 slotCap, slotLayout, used, top, queue, file, 
                                 lost, refused, rslot, rhead, rtail, done, 
                                 committing, obj, badPlace, sizeMismatch, wbuf, 
                                 wblk, pend, sealed, i, start, startBlk, 
                                 startCap, sz, grown, roomed, nb, out, pt, 
-                                pushed, cb, ct >>
+                                pushed, own, firstBlk, cb, ct >>
 
 Seal(self) == /\ pc[self] = "Seal"
               /\ IF Death
@@ -578,12 +603,13 @@ Seal(self) == /\ pc[self] = "Seal"
                                /\ pc' = [pc EXCEPT ![self] = "Done"]
                     ELSE /\ pc' = [pc EXCEPT ![self] = "Seal2"]
                          /\ UNCHANGED << lock, failed >>
-              /\ UNCHANGED << qfailed, slotBlk, slotBuf, slotCap, slotLayout, 
-                              used, top, queue, file, lost, refused, rslot, 
-                              rhead, rtail, done, committing, gil, obj, 
-                              badPlace, sizeMismatch, wbuf, wblk, pend, sealed, 
-                              i, start, startBlk, startCap, sz, grown, roomed, 
-                              nb, out, pt, pushed, cb, ct >>
+              /\ UNCHANGED << qfailed, slotBlk, slotBuf, kept, slotCap, 
+                              slotLayout, used, top, queue, file, lost, 
+                              refused, rslot, rhead, rtail, done, committing, 
+                              gil, obj, badPlace, sizeMismatch, wbuf, wblk, 
+                              pend, sealed, i, start, startBlk, startCap, sz, 
+                              grown, roomed, nb, out, pt, pushed, own, 
+                              firstBlk, cb, ct >>
 
 Seal2(self) == /\ pc[self] = "Seal2"
                /\ IF Len(wbuf[self]) = Cap
@@ -596,9 +622,16 @@ Seal2(self) == /\ pc[self] = "Seal2"
                                            ELSE /\ TRUE
                                                 /\ UNCHANGED << slotBlk, 
                                                                 slotBuf >>
-                                     /\ pend' = pend
+                                     /\ UNCHANGED << kept, pend, firstBlk >>
                                 ELSE /\ pend' = [pend EXCEPT ![self] = Append(pend[self], [b |-> wblk[self], e |-> wbuf[self]])]
-                                     /\ UNCHANGED << slotBlk, slotBuf, queue >>
+                                     /\ IF ~sealed[self]
+                                           THEN /\ kept' = slotBuf
+                                                /\ slotBuf' = <<>>
+                                                /\ firstBlk' = [firstBlk EXCEPT ![self] = wblk[self]]
+                                           ELSE /\ TRUE
+                                                /\ UNCHANGED << slotBuf, kept, 
+                                                                firstBlk >>
+                                     /\ UNCHANGED << slotBlk, queue >>
                           /\ sealed' = [sealed EXCEPT ![self] = TRUE]
                           /\ wbuf' = [wbuf EXCEPT ![self] = <<>>]
                           /\ IF rhead < rtail
@@ -610,19 +643,19 @@ Seal2(self) == /\ pc[self] = "Seal2"
                                           /\ used' = [used EXCEPT ![b] = TRUE]
                                      /\ rhead' = rhead
                      ELSE /\ nb' = [nb EXCEPT ![self] = 0]
-                          /\ UNCHANGED << slotBlk, slotBuf, used, queue, rhead, 
-                                          wbuf, pend, sealed >>
+                          /\ UNCHANGED << slotBlk, slotBuf, kept, used, queue, 
+                                          rhead, wbuf, pend, sealed, firstBlk >>
                /\ pc' = [pc EXCEPT ![self] = "NewBlock"]
                /\ UNCHANGED << lock, failed, qfailed, slotCap, slotLayout, top, 
                                file, lost, refused, rslot, rtail, done, 
                                committing, gil, obj, badPlace, sizeMismatch, 
                                wblk, i, start, startBlk, startCap, sz, grown, 
-                               roomed, out, pt, pushed, cb, ct >>
+                               roomed, out, pt, pushed, own, cb, ct >>
 
 NewBlock(self) == /\ pc[self] = "NewBlock"
                   /\ IF nb[self] /= 0
                         THEN /\ wblk' = [wblk EXCEPT ![self] = nb[self]]
-                             /\ IF Variant = "seal_queues" /\ slotBlk = 0
+                             /\ IF Variant /= "seal_queues" \/ slotBlk = 0
                                    THEN /\ slotBlk' = nb[self]
                                    ELSE /\ TRUE
                                         /\ UNCHANGED slotBlk
@@ -630,13 +663,13 @@ NewBlock(self) == /\ pc[self] = "NewBlock"
                         ELSE /\ TRUE
                              /\ UNCHANGED << slotBlk, wblk, nb >>
                   /\ pc' = [pc EXCEPT ![self] = "Room"]
-                  /\ UNCHANGED << lock, failed, qfailed, slotBuf, slotCap, 
-                                  slotLayout, used, top, queue, file, lost, 
-                                  refused, rslot, rhead, rtail, done, 
+                  /\ UNCHANGED << lock, failed, qfailed, slotBuf, kept, 
+                                  slotCap, slotLayout, used, top, queue, file, 
+                                  lost, refused, rslot, rhead, rtail, done, 
                                   committing, gil, obj, badPlace, sizeMismatch, 
                                   wbuf, pend, sealed, i, start, startBlk, 
                                   startCap, sz, grown, roomed, out, pt, pushed, 
-                                  cb, ct >>
+                                  own, firstBlk, cb, ct >>
 
 Room(self) == /\ pc[self] = "Room"
               /\ \/ /\ TRUE
@@ -652,13 +685,27 @@ Room(self) == /\ pc[self] = "Room"
                                ELSE /\ TRUE
                                     /\ UNCHANGED << slotBlk, startBlk >>
                          /\ wblk' = [wblk EXCEPT ![self] = b]
-              /\ pc' = [pc EXCEPT ![self] = "Write"]
-              /\ UNCHANGED << lock, failed, qfailed, slotBuf, slotCap, 
+              /\ pc' = [pc EXCEPT ![self] = "Zero"]
+              /\ UNCHANGED << lock, failed, qfailed, slotBuf, kept, slotCap, 
                               slotLayout, queue, file, lost, refused, rslot, 
                               rhead, rtail, done, committing, gil, obj, 
                               badPlace, sizeMismatch, wbuf, pend, sealed, i, 
                               start, startCap, sz, grown, nb, out, pt, pushed, 
-                              cb, ct >>
+                              own, firstBlk, cb, ct >>
+
+Zero(self) == /\ pc[self] = "Zero"
+              /\ IF Variant /= "place_no_zero"
+                    THEN /\ top' = [top EXCEPT ![wblk[self]] = Len(wbuf[self])]
+                    ELSE /\ TRUE
+                         /\ top' = top
+              /\ pc' = [pc EXCEPT ![self] = "Write"]
+              /\ UNCHANGED << lock, failed, qfailed, slotBlk, slotBuf, kept, 
+                              slotCap, slotLayout, used, queue, file, lost, 
+                              refused, rslot, rhead, rtail, done, committing, 
+                              gil, obj, badPlace, sizeMismatch, wbuf, wblk, 
+                              pend, sealed, i, start, startBlk, startCap, sz, 
+                              grown, roomed, nb, out, pt, pushed, own, 
+                              firstBlk, cb, ct >>
 
 Write(self) == /\ pc[self] = "Write"
                /\ IF Death
@@ -670,12 +717,13 @@ Write(self) == /\ pc[self] = "Write"
                                 /\ pc' = [pc EXCEPT ![self] = "Done"]
                      ELSE /\ pc' = [pc EXCEPT ![self] = "Write2"]
                           /\ UNCHANGED << lock, failed >>
-               /\ UNCHANGED << qfailed, slotBlk, slotBuf, slotCap, slotLayout, 
-                               used, top, queue, file, lost, refused, rslot, 
-                               rhead, rtail, done, committing, gil, obj, 
-                               badPlace, sizeMismatch, wbuf, wblk, pend, 
-                               sealed, i, start, startBlk, startCap, sz, grown, 
-                               roomed, nb, out, pt, pushed, cb, ct >>
+               /\ UNCHANGED << qfailed, slotBlk, slotBuf, kept, slotCap, 
+                               slotLayout, used, top, queue, file, lost, 
+                               refused, rslot, rhead, rtail, done, committing, 
+                               gil, obj, badPlace, sizeMismatch, wbuf, wblk, 
+                               pend, sealed, i, start, startBlk, startCap, sz, 
+                               grown, roomed, nb, out, pt, pushed, own, 
+                               firstBlk, cb, ct >>
 
 Write2(self) == /\ pc[self] = "Write2"
                 /\ IF top[wblk[self]] /= Len(wbuf[self])
@@ -694,23 +742,24 @@ Write2(self) == /\ pc[self] = "Write2"
                            /\ UNCHANGED slotBuf
                 /\ i' = [i EXCEPT ![self] = i[self] + 1]
                 /\ pc' = [pc EXCEPT ![self] = "Place"]
-                /\ UNCHANGED << lock, failed, qfailed, slotBlk, slotCap, 
+                /\ UNCHANGED << lock, failed, qfailed, slotBlk, kept, slotCap, 
                                 slotLayout, used, queue, file, lost, refused, 
                                 rslot, rhead, rtail, done, committing, gil, 
                                 obj, wblk, pend, sealed, start, startBlk, 
                                 startCap, sz, grown, roomed, nb, out, pt, 
-                                pushed, cb, ct >>
+                                pushed, own, firstBlk, cb, ct >>
 
 Commit(self) == /\ pc[self] = "Commit"
                 /\ committing' = self
                 /\ gil' = (IF gil = self THEN NONE ELSE gil)
                 /\ pc' = [pc EXCEPT ![self] = "Queue"]
-                /\ UNCHANGED << lock, failed, qfailed, slotBlk, slotBuf, 
+                /\ UNCHANGED << lock, failed, qfailed, slotBlk, slotBuf, kept, 
                                 slotCap, slotLayout, used, top, queue, file, 
                                 lost, refused, rslot, rhead, rtail, done, obj, 
                                 badPlace, sizeMismatch, wbuf, wblk, pend, 
                                 sealed, i, start, startBlk, startCap, sz, 
-                                grown, roomed, nb, out, pt, pushed, cb, ct >>
+                                grown, roomed, nb, out, pt, pushed, own, 
+                                firstBlk, cb, ct >>
 
 Queue(self) == /\ pc[self] = "Queue"
                /\ IF pend[self] /= <<>>
@@ -725,12 +774,13 @@ Queue(self) == /\ pc[self] = "Queue"
                                      /\ UNCHANGED << lock, failed >>
                      ELSE /\ pc' = [pc EXCEPT ![self] = "Install"]
                           /\ UNCHANGED << lock, failed >>
-               /\ UNCHANGED << qfailed, slotBlk, slotBuf, slotCap, slotLayout, 
-                               used, top, queue, file, lost, refused, rslot, 
-                               rhead, rtail, done, committing, gil, obj, 
-                               badPlace, sizeMismatch, wbuf, wblk, pend, 
-                               sealed, i, start, startBlk, startCap, sz, grown, 
-                               roomed, nb, out, pt, pushed, cb, ct >>
+               /\ UNCHANGED << qfailed, slotBlk, slotBuf, kept, slotCap, 
+                               slotLayout, used, top, queue, file, lost, 
+                               refused, rslot, rhead, rtail, done, committing, 
+                               gil, obj, badPlace, sizeMismatch, wbuf, wblk, 
+                               pend, sealed, i, start, startBlk, startCap, sz, 
+                               grown, roomed, nb, out, pt, pushed, own, 
+                               firstBlk, cb, ct >>
 
 Queue2(self) == /\ pc[self] = "Queue2"
                 /\ Len(queue) < Depth \/ qfailed
@@ -739,23 +789,31 @@ Queue2(self) == /\ pc[self] = "Queue2"
                                  THEN /\ pc' = [pc EXCEPT ![self] = "Abort"]
                                       /\ UNCHANGED << slotBlk, slotBuf, wblk, 
                                                       pend, out >>
-                                 ELSE /\ out' = [out EXCEPT ![self] = [k \in 1..Len(pend[self]) |-> pend[self][k].b] \o <<wblk[self]>>]
-                                      /\ pend' = [pend EXCEPT ![self] = <<>>]
-                                      /\ wblk' = [wblk EXCEPT ![self] = 0]
-                                      /\ slotBlk' = 0
-                                      /\ slotBuf' = <<>>
-                                      /\ pc' = [pc EXCEPT ![self] = "Refused"]
-                           /\ UNCHANGED << queue, pushed >>
+                                 ELSE /\ IF ~own[self]
+                                            THEN /\ out' = [out EXCEPT ![self] = [k \in 1..Len(pend[self]) |-> pend[self][k].b]]
+                                                 /\ pend' = [pend EXCEPT ![self] = <<>>]
+                                                 /\ wblk' = [wblk EXCEPT ![self] = 0]
+                                                 /\ slotBuf' = <<>>
+                                                 /\ pc' = [pc EXCEPT ![self] = "Free"]
+                                                 /\ UNCHANGED slotBlk
+                                            ELSE /\ out' = [out EXCEPT ![self] = [k \in 1..Len(pend[self]) |-> pend[self][k].b] \o <<wblk[self]>>]
+                                                 /\ pend' = [pend EXCEPT ![self] = <<>>]
+                                                 /\ wblk' = [wblk EXCEPT ![self] = 0]
+                                                 /\ slotBlk' = 0
+                                                 /\ slotBuf' = <<>>
+                                                 /\ pc' = [pc EXCEPT ![self] = "Refused"]
+                           /\ UNCHANGED << kept, queue, pushed, own, firstBlk >>
                       ELSE /\ queue' = Append(queue, Head(pend[self]))
                            /\ pushed' = [pushed EXCEPT ![self] = TRUE]
-                           /\ IF Head(pend[self]).b = slotBlk
-                                 THEN /\ slotBuf' = <<>>
-                                      /\ slotBlk' = 0
+                           /\ own' = [own EXCEPT ![self] = own[self] \/ \E k \in 1..Len(Head(pend[self]).e) : Head(pend[self]).e[k][1] = self]
+                           /\ IF Head(pend[self]).b = firstBlk[self]
+                                 THEN /\ kept' = <<>>
+                                      /\ firstBlk' = [firstBlk EXCEPT ![self] = 0]
                                  ELSE /\ TRUE
-                                      /\ UNCHANGED << slotBlk, slotBuf >>
+                                      /\ UNCHANGED << kept, firstBlk >>
                            /\ pend' = [pend EXCEPT ![self] = Tail(pend[self])]
                            /\ pc' = [pc EXCEPT ![self] = "Queue"]
-                           /\ UNCHANGED << wblk, out >>
+                           /\ UNCHANGED << slotBlk, slotBuf, wblk, out >>
                 /\ UNCHANGED << lock, failed, qfailed, slotCap, slotLayout, 
                                 used, top, file, lost, refused, rslot, rhead, 
                                 rtail, done, committing, gil, obj, badPlace, 
@@ -770,23 +828,23 @@ Install(self) == /\ pc[self] = "Install"
                  /\ committing' = NONE
                  /\ lock' = NONE
                  /\ pc' = [pc EXCEPT ![self] = "Done"]
-                 /\ UNCHANGED << failed, qfailed, slotCap, slotLayout, used, 
-                                 top, queue, file, lost, refused, rslot, rhead, 
-                                 rtail, gil, obj, badPlace, sizeMismatch, wbuf, 
-                                 pend, sealed, i, start, startBlk, startCap, 
-                                 sz, grown, roomed, nb, out, pt, pushed, cb, 
-                                 ct >>
+                 /\ UNCHANGED << failed, qfailed, kept, slotCap, slotLayout, 
+                                 used, top, queue, file, lost, refused, rslot, 
+                                 rhead, rtail, gil, obj, badPlace, 
+                                 sizeMismatch, wbuf, pend, sealed, i, start, 
+                                 startBlk, startCap, sz, grown, roomed, nb, 
+                                 out, pt, pushed, own, firstBlk, cb, ct >>
 
 Refused(self) == /\ pc[self] = "Refused"
                  /\ refused' = self
                  /\ pc' = [pc EXCEPT ![self] = "Free"]
-                 /\ UNCHANGED << lock, failed, qfailed, slotBlk, slotBuf, 
+                 /\ UNCHANGED << lock, failed, qfailed, slotBlk, slotBuf, kept, 
                                  slotCap, slotLayout, used, top, queue, file, 
                                  lost, rslot, rhead, rtail, done, committing, 
                                  gil, obj, badPlace, sizeMismatch, wbuf, wblk, 
                                  pend, sealed, i, start, startBlk, startCap, 
-                                 sz, grown, roomed, nb, out, pt, pushed, cb, 
-                                 ct >>
+                                 sz, grown, roomed, nb, out, pt, pushed, own, 
+                                 firstBlk, cb, ct >>
 
 Free(self) == /\ pc[self] = "Free"
               /\ IF out[self] /= <<>>
@@ -796,23 +854,24 @@ Free(self) == /\ pc[self] = "Free"
                          /\ pc' = [pc EXCEPT ![self] = "Free"]
                     ELSE /\ pc' = [pc EXCEPT ![self] = "Unlock"]
                          /\ UNCHANGED << used, top, out >>
-              /\ UNCHANGED << lock, failed, qfailed, slotBlk, slotBuf, slotCap, 
-                              slotLayout, queue, file, lost, refused, rslot, 
-                              rhead, rtail, done, committing, gil, obj, 
+              /\ UNCHANGED << lock, failed, qfailed, slotBlk, slotBuf, kept, 
+                              slotCap, slotLayout, queue, file, lost, refused, 
+                              rslot, rhead, rtail, done, committing, gil, obj, 
                               badPlace, sizeMismatch, wbuf, wblk, pend, sealed, 
                               i, start, startBlk, startCap, sz, grown, roomed, 
-                              nb, pt, pushed, cb, ct >>
+                              nb, pt, pushed, own, firstBlk, cb, ct >>
 
 Unlock(self) == /\ pc[self] = "Unlock"
                 /\ committing' = NONE
                 /\ lock' = NONE
                 /\ pc' = [pc EXCEPT ![self] = "Done"]
-                /\ UNCHANGED << failed, qfailed, slotBlk, slotBuf, slotCap, 
-                                slotLayout, used, top, queue, file, lost, 
-                                refused, rslot, rhead, rtail, done, gil, obj, 
-                                badPlace, sizeMismatch, wbuf, wblk, pend, 
+                /\ UNCHANGED << failed, qfailed, slotBlk, slotBuf, kept, 
+                                slotCap, slotLayout, used, top, queue, file, 
+                                lost, refused, rslot, rhead, rtail, done, gil, 
+                                obj, badPlace, sizeMismatch, wbuf, wblk, pend, 
                                 sealed, i, start, startBlk, startCap, sz, 
-                                grown, roomed, nb, out, pt, pushed, cb, ct >>
+                                grown, roomed, nb, out, pt, pushed, own, 
+                                firstBlk, cb, ct >>
 
 Abort(self) == /\ pc[self] = "Abort"
                /\ out' = [out EXCEPT ![self] =    SelectSeq(
@@ -820,13 +879,14 @@ Abort(self) == /\ pc[self] = "Abort"
                                                LAMBDA x: x /= startBlk[self])]
                /\ pend' = [pend EXCEPT ![self] = <<>>]
                /\ wblk' = [wblk EXCEPT ![self] = 0]
+               /\ slotBlk' = startBlk[self]
                /\ pc' = [pc EXCEPT ![self] = "Drop"]
-               /\ UNCHANGED << lock, failed, qfailed, slotBlk, slotBuf, 
-                               slotCap, slotLayout, used, top, queue, file, 
-                               lost, refused, rslot, rhead, rtail, done, 
-                               committing, gil, obj, badPlace, sizeMismatch, 
-                               wbuf, sealed, i, start, startBlk, startCap, sz, 
-                               grown, roomed, nb, pt, pushed, cb, ct >>
+               /\ UNCHANGED << lock, failed, qfailed, slotBuf, kept, slotCap, 
+                               slotLayout, used, top, queue, file, lost, 
+                               refused, rslot, rhead, rtail, done, committing, 
+                               gil, obj, badPlace, sizeMismatch, wbuf, sealed, 
+                               i, start, startBlk, startCap, sz, grown, roomed, 
+                               nb, pt, pushed, own, firstBlk, cb, ct >>
 
 Drop(self) == /\ pc[self] = "Drop"
               /\ IF out[self] /= <<>>
@@ -841,32 +901,29 @@ Drop(self) == /\ pc[self] = "Drop"
                                     /\ pt' = pt
                     ELSE /\ pc' = [pc EXCEPT ![self] = "Restore"]
                          /\ UNCHANGED << used, top, out, pt >>
-              /\ UNCHANGED << lock, failed, qfailed, slotBlk, slotBuf, slotCap, 
-                              slotLayout, queue, file, lost, refused, rslot, 
-                              rhead, rtail, done, committing, gil, obj, 
+              /\ UNCHANGED << lock, failed, qfailed, slotBlk, slotBuf, kept, 
+                              slotCap, slotLayout, queue, file, lost, refused, 
+                              rslot, rhead, rtail, done, committing, gil, obj, 
                               badPlace, sizeMismatch, wbuf, wblk, pend, sealed, 
                               i, start, startBlk, startCap, sz, grown, roomed, 
-                              nb, pushed, cb, ct >>
+                              nb, pushed, own, firstBlk, cb, ct >>
 
 Push(self) == /\ pc[self] = "Push"
               /\ rslot' = [rslot EXCEPT ![pt[self] + 1] = Head(out[self])]
               /\ rtail' = pt[self] + 1
               /\ out' = [out EXCEPT ![self] = Tail(out[self])]
               /\ pc' = [pc EXCEPT ![self] = "Drop"]
-              /\ UNCHANGED << lock, failed, qfailed, slotBlk, slotBuf, slotCap, 
-                              slotLayout, used, top, queue, file, lost, 
-                              refused, rhead, done, committing, gil, obj, 
+              /\ UNCHANGED << lock, failed, qfailed, slotBlk, slotBuf, kept, 
+                              slotCap, slotLayout, used, top, queue, file, 
+                              lost, refused, rhead, done, committing, gil, obj, 
                               badPlace, sizeMismatch, wbuf, wblk, pend, sealed, 
                               i, start, startBlk, startCap, sz, grown, roomed, 
-                              nb, pt, pushed, cb, ct >>
+                              nb, pt, pushed, own, firstBlk, cb, ct >>
 
 Restore(self) == /\ pc[self] = "Restore"
-                 /\ slotBlk' = startBlk[self]
                  /\ slotBuf' = start[self]
-                 /\ IF Variant /= "abort_no_zero"
-                       THEN /\ top' = [top EXCEPT ![startBlk[self]] = Len(start[self])]
-                       ELSE /\ TRUE
-                            /\ top' = top
+                 /\ kept' = <<>>
+                 /\ firstBlk' = [firstBlk EXCEPT ![self] = 0]
                  /\ IF Variant = "grow_not_kept"
                        THEN /\ slotCap' = startCap[self]
                        ELSE /\ TRUE
@@ -875,17 +932,17 @@ Restore(self) == /\ pc[self] = "Restore"
                  /\ lock' = NONE
                  /\ gil' = (IF gil = self THEN NONE ELSE gil)
                  /\ pc' = [pc EXCEPT ![self] = "Done"]
-                 /\ UNCHANGED << failed, qfailed, slotLayout, used, queue, 
-                                 file, lost, refused, rslot, rhead, rtail, 
-                                 done, obj, badPlace, sizeMismatch, wbuf, wblk, 
-                                 pend, sealed, i, start, startBlk, startCap, 
-                                 sz, grown, roomed, nb, out, pt, pushed, cb, 
-                                 ct >>
+                 /\ UNCHANGED << failed, qfailed, slotBlk, slotLayout, used, 
+                                 top, queue, file, lost, refused, rslot, rhead, 
+                                 rtail, done, obj, badPlace, sizeMismatch, 
+                                 wbuf, wblk, pend, sealed, i, start, startBlk, 
+                                 startCap, sz, grown, roomed, nb, out, pt, 
+                                 pushed, own, cb, ct >>
 
 Wr(self) == GilFirst(self) \/ Lock(self) \/ Gil(self) \/ Place(self)
                \/ Choose(self) \/ Choose2(self) \/ Size(self)
                \/ Regain(self) \/ Seal(self) \/ Seal2(self)
-               \/ NewBlock(self) \/ Room(self) \/ Write(self)
+               \/ NewBlock(self) \/ Room(self) \/ Zero(self) \/ Write(self)
                \/ Write2(self) \/ Commit(self) \/ Queue(self)
                \/ Queue2(self) \/ Install(self) \/ Refused(self)
                \/ Free(self) \/ Unlock(self) \/ Abort(self) \/ Drop(self)
@@ -898,33 +955,33 @@ M1 == /\ pc[MUT] = "M1"
                  /\ pc' = [pc EXCEPT ![MUT] = "M2"]
             ELSE /\ pc' = [pc EXCEPT ![MUT] = "Done"]
                  /\ gil' = gil
-      /\ UNCHANGED << lock, failed, qfailed, slotBlk, slotBuf, slotCap, 
+      /\ UNCHANGED << lock, failed, qfailed, slotBlk, slotBuf, kept, slotCap, 
                       slotLayout, used, top, queue, file, lost, refused, rslot, 
                       rhead, rtail, done, committing, obj, badPlace, 
                       sizeMismatch, wbuf, wblk, pend, sealed, i, start, 
                       startBlk, startCap, sz, grown, roomed, nb, out, pt, 
-                      pushed, cb, ct >>
+                      pushed, own, firstBlk, cb, ct >>
 
 M2 == /\ pc[MUT] = "M2"
       /\ \E w \in W:
            obj' = [obj EXCEPT ![w] = obj[w] + 1]
       /\ pc' = [pc EXCEPT ![MUT] = "M3"]
-      /\ UNCHANGED << lock, failed, qfailed, slotBlk, slotBuf, slotCap, 
+      /\ UNCHANGED << lock, failed, qfailed, slotBlk, slotBuf, kept, slotCap, 
                       slotLayout, used, top, queue, file, lost, refused, rslot, 
                       rhead, rtail, done, committing, gil, badPlace, 
                       sizeMismatch, wbuf, wblk, pend, sealed, i, start, 
                       startBlk, startCap, sz, grown, roomed, nb, out, pt, 
-                      pushed, cb, ct >>
+                      pushed, own, firstBlk, cb, ct >>
 
 M3 == /\ pc[MUT] = "M3"
       /\ gil' = NONE
       /\ pc' = [pc EXCEPT ![MUT] = "Done"]
-      /\ UNCHANGED << lock, failed, qfailed, slotBlk, slotBuf, slotCap, 
+      /\ UNCHANGED << lock, failed, qfailed, slotBlk, slotBuf, kept, slotCap, 
                       slotLayout, used, top, queue, file, lost, refused, rslot, 
                       rhead, rtail, done, committing, obj, badPlace, 
                       sizeMismatch, wbuf, wblk, pend, sealed, i, start, 
                       startBlk, startCap, sz, grown, roomed, nb, out, pt, 
-                      pushed, cb, ct >>
+                      pushed, own, firstBlk, cb, ct >>
 
 Mut == M1 \/ M2 \/ M3
 
@@ -938,11 +995,11 @@ C1 == /\ pc["closer"] = "C1"
             ELSE /\ TRUE
                  /\ UNCHANGED << slotBlk, slotBuf, queue >>
       /\ pc' = [pc EXCEPT !["closer"] = "Done"]
-      /\ UNCHANGED << lock, failed, qfailed, slotCap, slotLayout, used, top, 
-                      file, lost, refused, rslot, rhead, rtail, done, 
+      /\ UNCHANGED << lock, failed, qfailed, kept, slotCap, slotLayout, used, 
+                      top, file, lost, refused, rslot, rhead, rtail, done, 
                       committing, gil, obj, badPlace, sizeMismatch, wbuf, wblk, 
                       pend, sealed, i, start, startBlk, startCap, sz, grown, 
-                      roomed, nb, out, pt, pushed, cb, ct >>
+                      roomed, nb, out, pt, pushed, own, firstBlk, cb, ct >>
 
 Closer == C1
 
@@ -955,7 +1012,7 @@ Pop == /\ pc["cust"] = "Pop"
                    ELSE /\ lost' = lost \o Head(queue).e
                         /\ file' = file
              /\ queue' = Tail(queue)
-             /\ pc' = [pc EXCEPT !["cust"] = "Scrub"]
+             /\ pc' = [pc EXCEPT !["cust"] = "Ring"]
              /\ UNCHANGED qfailed
           \/ /\ CustFail /\ ~qfailed
              /\ qfailed' = TRUE
@@ -964,39 +1021,36 @@ Pop == /\ pc["cust"] = "Pop"
           \/ /\ pc["closer"] = "Done" /\ queue = <<>>
              /\ pc' = [pc EXCEPT !["cust"] = "Done"]
              /\ UNCHANGED <<qfailed, queue, file, lost, cb>>
-       /\ UNCHANGED << lock, failed, slotBlk, slotBuf, slotCap, slotLayout, 
-                       used, top, refused, rslot, rhead, rtail, done, 
-                       committing, gil, obj, badPlace, sizeMismatch, wbuf, 
-                       wblk, pend, sealed, i, start, startBlk, startCap, sz, 
-                       grown, roomed, nb, out, pt, pushed, ct >>
+       /\ UNCHANGED << lock, failed, slotBlk, slotBuf, kept, slotCap, 
+                       slotLayout, used, top, refused, rslot, rhead, rtail, 
+                       done, committing, gil, obj, badPlace, sizeMismatch, 
+                       wbuf, wblk, pend, sealed, i, start, startBlk, startCap, 
+                       sz, grown, roomed, nb, out, pt, pushed, own, firstBlk, 
+                       ct >>
 
-Scrub == /\ pc["cust"] = "Scrub"
-         /\ IF Variant /= "spare_unscrubbed"
-               THEN /\ top' = [top EXCEPT ![cb] = 0]
-               ELSE /\ TRUE
-                    /\ top' = top
-         /\ ct' = rtail
-         /\ pc' = [pc EXCEPT !["cust"] = "Give"]
-         /\ UNCHANGED << lock, failed, qfailed, slotBlk, slotBuf, slotCap, 
-                         slotLayout, used, queue, file, lost, refused, rslot, 
-                         rhead, rtail, done, committing, gil, obj, badPlace, 
-                         sizeMismatch, wbuf, wblk, pend, sealed, i, start, 
-                         startBlk, startCap, sz, grown, roomed, nb, out, pt, 
-                         pushed, cb >>
+Ring == /\ pc["cust"] = "Ring"
+        /\ ct' = rtail
+        /\ pc' = [pc EXCEPT !["cust"] = "Give"]
+        /\ UNCHANGED << lock, failed, qfailed, slotBlk, slotBuf, kept, slotCap, 
+                        slotLayout, used, top, queue, file, lost, refused, 
+                        rslot, rhead, rtail, done, committing, gil, obj, 
+                        badPlace, sizeMismatch, wbuf, wblk, pend, sealed, i, 
+                        start, startBlk, startCap, sz, grown, roomed, nb, out, 
+                        pt, pushed, own, firstBlk, cb >>
 
 Give == /\ pc["cust"] = "Give"
         /\ rslot' = [rslot EXCEPT ![ct + 1] = cb]
         /\ rtail' = ct + 1
         /\ cb' = 0
         /\ pc' = [pc EXCEPT !["cust"] = "Pop"]
-        /\ UNCHANGED << lock, failed, qfailed, slotBlk, slotBuf, slotCap, 
+        /\ UNCHANGED << lock, failed, qfailed, slotBlk, slotBuf, kept, slotCap, 
                         slotLayout, used, top, queue, file, lost, refused, 
                         rhead, done, committing, gil, obj, badPlace, 
                         sizeMismatch, wbuf, wblk, pend, sealed, i, start, 
                         startBlk, startCap, sz, grown, roomed, nb, out, pt, 
-                        pushed, ct >>
+                        pushed, own, firstBlk, ct >>
 
-Cust == Pop \/ Scrub \/ Give
+Cust == Pop \/ Ring \/ Give
 
 (* Allow infinite stuttering to prevent deadlock on termination. *)
 Terminating == /\ \A self \in ProcSet: pc[self] = "Done"
@@ -1018,7 +1072,7 @@ Termination == <>(\A self \in ProcSet: pc[self] = "Done")
 
 QB == {queue[k].b : k \in 1..Len(queue)}
 RB == {rslot[k] : k \in (rhead + 1)..rtail}
-WB == UNION {({pend[w][k].b : k \in 1..Len(pend[w])} \cup {wblk[w], nb[w]} \cup Range(out[w])) : w \in W}
+WB == UNION {({pend[w][k].b : k \in 1..Len(pend[w])} \cup {wblk[w], nb[w], firstBlk[w]} \cup Range(out[w])) : w \in W}
 Held == ({slotBlk, cb} \cup QB \cup RB \cup WB) \ {0}
 NoBlockLost == \A b \in 1..NB : used[b] => b \in Held
 NoFreedHeld == \A b \in Held : used[b]
