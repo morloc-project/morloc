@@ -1874,8 +1874,12 @@ int32_t mlc_write(int64_t level, int64_t handle,
 // instead, or the codes of mlc_write. An element is placed with its exact
 // portable size; offsets inside its room are relative to `base` and
 // alignment is taken from `origin`. `reached` is where the previous room's
-// encoding ended.
+// encoding ended. Under the MLC_WRITE_NOWAIT flag, a placement that would
+// wait for queue room places nothing and returns MLC_WRITE_WOULD_BLOCK;
+// the binding then calls `mlc_write_wait` and places again (SLOT-37).
 #define MLC_WRITE_FALLBACK 3
+#define MLC_WRITE_NOWAIT 1
+#define MLC_WRITE_WOULD_BLOCK 4
 typedef struct mlc_room_s {
     uint8_t* slot;
     uint8_t* data;
@@ -1883,9 +1887,10 @@ typedef struct mlc_room_s {
     uint8_t* base;
     uint8_t* origin;
 } mlc_room_t;
-int32_t mlc_write_begin(int64_t level, int64_t handle, ERRMSG);
+int32_t mlc_write_begin(int64_t level, int64_t handle, int32_t flags, ERRMSG);
 int32_t mlc_write_place(uint64_t size, const uint8_t* reached, mlc_room_t* room, ERRMSG);
 int32_t mlc_write_place_run(uint64_t k, const uint8_t* reached, uint8_t** slots, uint64_t* placed, ERRMSG);
+int32_t mlc_write_wait(const uint8_t* reached, ERRMSG);
 int32_t mlc_write_commit(const uint8_t* reached, ERRMSG);
 void mlc_write_abort(void);
 bool mlc_write_open(void);

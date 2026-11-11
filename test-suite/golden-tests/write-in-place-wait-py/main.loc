@@ -1,0 +1,197 @@
+-- A Python list @write batch is written in place (SLOT-36, SLOT-37). With a
+-- write-behind depth of 1, placements often find the queue full: they
+-- return MLC_WRITE_WOULD_BLOCK, the writer waits without the GIL and
+-- places again, in runs and in single rooms; at level 9 the custodian
+-- is slowest. Each file is checked byte for byte, apart from the writer's
+-- pid and times (same.py), against staged standard output
+-- (MORLOC_STDOUT=stage, the voidstar copy), and against the same batches
+-- given as bytes or numpy arrays, which take the copy path. A Bool batch
+-- given as bytes holding a 2 fails and is absent.
+module main (wReals, sReals, wI32s, sI32s, wI8s, sI8s, wU8s, sU8s, wBools, sBools, wI16s, sI16s, wStrs, sStrs, badBools, countBools)
+
+import root
+import root-py
+
+source Py from "forms.py" ("reals", "i32s", "i8s", "u8s", "bools", "i16s", "strs", "bad_bools" as badBools_)
+
+reals :: Str -> Int -> [Real]
+i32s :: Str -> Int -> [I32]
+i8s :: Str -> Int -> [I8]
+u8s :: Str -> Int -> [U8]
+bools :: Str -> Int -> [Bool]
+i16s :: Str -> Int -> [I16]
+strs :: Str -> Int -> [Str]
+badBools_ :: Int -> Int -> [Bool]
+
+dReals :: Int -> OStream Real -> Str -> [Int] -> <IO> ()
+dReals z o kind ns = do
+  ? length ns == 0 = do
+      ()
+  : do
+    @write z o (reals kind (.0 (uncons ns)))
+    dReals z o kind (.1 (uncons ns))
+
+--' Write Reals batches of each size to a file
+wReals :: Str -> Int -> Str -> <IO> ()
+wReals kind z path = do
+  Ok o <- @open path :: <IO> (Try Str (OStream Real))
+  dReals z o kind [0, 1, 7, 5000, 3, 20000, 1]
+  @close o
+
+--' Write Reals batches of each size to standard output
+sReals :: Str -> Int -> <IO> ()
+sReals kind z = do
+  o <- @stdout :: <IO> (OStream Real)
+  dReals z o kind [0, 1, 7, 5000, 3, 20000, 1]
+  @close o
+
+dI32s :: Int -> OStream I32 -> Str -> [Int] -> <IO> ()
+dI32s z o kind ns = do
+  ? length ns == 0 = do
+      ()
+  : do
+    @write z o (i32s kind (.0 (uncons ns)))
+    dI32s z o kind (.1 (uncons ns))
+
+--' Write I32s batches of each size to a file
+wI32s :: Str -> Int -> Str -> <IO> ()
+wI32s kind z path = do
+  Ok o <- @open path :: <IO> (Try Str (OStream I32))
+  dI32s z o kind [0, 1, 7, 5000, 3, 20000, 1]
+  @close o
+
+--' Write I32s batches of each size to standard output
+sI32s :: Str -> Int -> <IO> ()
+sI32s kind z = do
+  o <- @stdout :: <IO> (OStream I32)
+  dI32s z o kind [0, 1, 7, 5000, 3, 20000, 1]
+  @close o
+
+dI8s :: Int -> OStream I8 -> Str -> [Int] -> <IO> ()
+dI8s z o kind ns = do
+  ? length ns == 0 = do
+      ()
+  : do
+    @write z o (i8s kind (.0 (uncons ns)))
+    dI8s z o kind (.1 (uncons ns))
+
+--' Write I8s batches of each size to a file
+wI8s :: Str -> Int -> Str -> <IO> ()
+wI8s kind z path = do
+  Ok o <- @open path :: <IO> (Try Str (OStream I8))
+  dI8s z o kind [0, 1, 7, 5000, 3, 20000, 1]
+  @close o
+
+--' Write I8s batches of each size to standard output
+sI8s :: Str -> Int -> <IO> ()
+sI8s kind z = do
+  o <- @stdout :: <IO> (OStream I8)
+  dI8s z o kind [0, 1, 7, 5000, 3, 20000, 1]
+  @close o
+
+dU8s :: Int -> OStream U8 -> Str -> [Int] -> <IO> ()
+dU8s z o kind ns = do
+  ? length ns == 0 = do
+      ()
+  : do
+    @write z o (u8s kind (.0 (uncons ns)))
+    dU8s z o kind (.1 (uncons ns))
+
+--' Write U8s batches of each size to a file
+wU8s :: Str -> Int -> Str -> <IO> ()
+wU8s kind z path = do
+  Ok o <- @open path :: <IO> (Try Str (OStream U8))
+  dU8s z o kind [0, 1, 7, 5000, 3, 20000, 1]
+  @close o
+
+--' Write U8s batches of each size to standard output
+sU8s :: Str -> Int -> <IO> ()
+sU8s kind z = do
+  o <- @stdout :: <IO> (OStream U8)
+  dU8s z o kind [0, 1, 7, 5000, 3, 20000, 1]
+  @close o
+
+dBools :: Int -> OStream Bool -> Str -> [Int] -> <IO> ()
+dBools z o kind ns = do
+  ? length ns == 0 = do
+      ()
+  : do
+    @write z o (bools kind (.0 (uncons ns)))
+    dBools z o kind (.1 (uncons ns))
+
+--' Write Bools batches of each size to a file
+wBools :: Str -> Int -> Str -> <IO> ()
+wBools kind z path = do
+  Ok o <- @open path :: <IO> (Try Str (OStream Bool))
+  dBools z o kind [0, 1, 7, 5000, 3, 20000, 1]
+  @close o
+
+--' Write Bools batches of each size to standard output
+sBools :: Str -> Int -> <IO> ()
+sBools kind z = do
+  o <- @stdout :: <IO> (OStream Bool)
+  dBools z o kind [0, 1, 7, 5000, 3, 20000, 1]
+  @close o
+
+dI16s :: Int -> OStream I16 -> Str -> [Int] -> <IO> ()
+dI16s z o kind ns = do
+  ? length ns == 0 = do
+      ()
+  : do
+    @write z o (i16s kind (.0 (uncons ns)))
+    dI16s z o kind (.1 (uncons ns))
+
+--' Write I16s batches of each size to a file
+wI16s :: Str -> Int -> Str -> <IO> ()
+wI16s kind z path = do
+  Ok o <- @open path :: <IO> (Try Str (OStream I16))
+  dI16s z o kind [0, 1, 7, 5000, 3, 20000, 1]
+  @close o
+
+--' Write I16s batches of each size to standard output
+sI16s :: Str -> Int -> <IO> ()
+sI16s kind z = do
+  o <- @stdout :: <IO> (OStream I16)
+  dI16s z o kind [0, 1, 7, 5000, 3, 20000, 1]
+  @close o
+
+dStrs :: Int -> OStream Str -> Str -> [Int] -> <IO> ()
+dStrs z o kind ns = do
+  ? length ns == 0 = do
+      ()
+  : do
+    @write z o (strs kind (.0 (uncons ns)))
+    dStrs z o kind (.1 (uncons ns))
+
+--' Write Strs batches of each size to a file
+wStrs :: Str -> Int -> Str -> <IO> ()
+wStrs kind z path = do
+  Ok o <- @open path :: <IO> (Try Str (OStream Str))
+  dStrs z o kind [0, 1, 7, 5000, 3, 20000, 1]
+  @close o
+
+--' Write Strs batches of each size to standard output
+sStrs :: Str -> Int -> <IO> ()
+sStrs kind z = do
+  o <- @stdout :: <IO> (OStream Str)
+  dStrs z o kind [0, 1, 7, 5000, 3, 20000, 1]
+  @close o
+
+ok :: Try Str () -> Bool
+ok r = match r
+  | (Ok _) = True
+  | (Err _) = False
+
+--' Write three Bool batches as bytes, the second failing near its end
+badBools :: Str -> <IO> [Bool]
+badBools path = do
+  Ok o <- @open path :: <IO> (Try Str (OStream Bool))
+  a <- @write 0 o (badBools_ 5000 (-1))
+  b <- @write 0 o (badBools_ 5000 4500)
+  c <- @write 0 o (badBools_ 3000 (-1))
+  @close o
+  [ok a, ok b, ok c]
+
+--' The number of Bools in a written file
+countBools :: [Bool] -> Int
+countBools xs = length xs

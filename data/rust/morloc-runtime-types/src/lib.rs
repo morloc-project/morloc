@@ -100,6 +100,14 @@ pub const MLC_RESULT_PIPE_CLOSED: i32 = 2;
 /// with `mlc_write` instead.
 pub const MLC_WRITE_FALLBACK: i32 = 3;
 
+/// SLOT-37: the `mlc_write_begin` flag under which a placement that would
+/// wait for queue room returns `MLC_WRITE_WOULD_BLOCK` instead.
+pub const MLC_WRITE_NOWAIT: i32 = 1;
+
+/// SLOT-37: nothing was placed; the binding calls `mlc_write_wait`, then
+/// places again.
+pub const MLC_WRITE_WOULD_BLOCK: i32 = 4;
+
 /// The tag on an error that says this process lost shared memory (SHM-17,
 /// PANIC-14).
 pub const SHARED_MEMORY_LOST: &str = "[SHM-17] shared memory lost: ";

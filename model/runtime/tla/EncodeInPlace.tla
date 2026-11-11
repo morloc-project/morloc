@@ -19,8 +19,10 @@
 (* to the file and gives each block back as a spare; it is the spare        *)
 (* ring's only producer. With Py, the writers are Python threads of   *)
 (* one process sharing a GIL with a third thread that mutates their         *)
-(* objects; a writer encodes holding the GIL and never waits for the slot   *)
-(* lock holding it. With Death, a writer can die at any step inside the     *)
+(* objects and then takes the slot lock; a writer encodes holding the GIL, *)
+(* and neither waits for the slot lock nor for queue room holding it: a     *)
+(* placement that would wait releases the GIL, waits, takes it back and     *)
+(* sizes its element again. With Death, a writer can die at any step inside the     *)
 (* lock, which fails the stream (SLOT-14) and leaks its private blocks.     *)
 (* With CustFail, the custodian can fail (a closed pipe, a full disk): it   *)
 (* writes nothing more and every later push is refused. A commit refused    *)
@@ -46,6 +48,12 @@ CONSTANTS Variant, Py, Death, CustFail, Cap, Depth, NB, K
 \*   back its first block.
 \* "hand_on_ours": a first sealed block is handed on at once even when it
 \*   holds the batch's own elements.
+\* "room_wait_holds_gil": a Python writer waits for queue room holding the
+\*   GIL.
+\* "wait_keeps_size": after waiting for queue room, a Python writer writes
+\*   the size it found before the wait.
+\* "lock_wait_holds_gil": the third Python thread waits for the slot lock
+\*   holding the GIL.
 
 W == {"w1", "w2"}
 BL == [w \in W |-> IF CustFail /\ w = "w2" THEN 1 ELSE 3]
@@ -179,6 +187,21 @@ begin
         end if;
       Seal:
         die();
+      RoomWait:
+        if Py /\ Variant /= "room_wait_holds_gil" /\ Len(wbuf) = Cap
+            /\ Len(queue) >= Depth /\ ~qfailed then
+            gil := NONE;
+          RoomWait2:
+            await Len(queue) < Depth \/ qfailed;
+          RoomWait3:
+            await gil = NONE;
+            gil := self;
+            if Variant = "wait_keeps_size" then
+                goto Seal;
+            else
+                goto Size;
+            end if;
+        end if;
       Seal2:
         if Len(wbuf) = Cap then
             if Variant = "seal_queues" then
@@ -356,7 +379,12 @@ begin
       M2:
         with w \in W do obj[w] := obj[w] + 1; end with;
       M3:
+        if Variant = "lock_wait_holds_gil" then
+            await lock = NONE;
+        end if;
         gil := NONE;
+      M4:
+        await lock = NONE;
     end if;
 end process;
 
@@ -619,12 +647,12 @@ Regain(self) == /\ pc[self] = "Regain"
 Seal(self) == /\ pc[self] = "Seal"
               /\ IF Death
                     THEN /\ \/ /\ TRUE
-                               /\ pc' = [pc EXCEPT ![self] = "Seal2"]
+                               /\ pc' = [pc EXCEPT ![self] = "RoomWait"]
                                /\ UNCHANGED <<lock, failed>>
                             \/ /\ failed' = TRUE
                                /\ lock' = NONE
                                /\ pc' = [pc EXCEPT ![self] = "Done"]
-                    ELSE /\ pc' = [pc EXCEPT ![self] = "Seal2"]
+                    ELSE /\ pc' = [pc EXCEPT ![self] = "RoomWait"]
                          /\ UNCHANGED << lock, failed >>
               /\ UNCHANGED << qfailed, slotBlk, slotBuf, kept, slotCap, 
                               slotLayout, used, top, queue, file, lost, 
@@ -633,6 +661,49 @@ Seal(self) == /\ pc[self] = "Seal"
                               pend, sealed, i, start, startBlk, startCap, sz, 
                               grown, roomed, nb, out, pt, pushed, firstBlk, 
                               handed, cb, ct >>
+
+RoomWait(self) == /\ pc[self] = "RoomWait"
+                  /\ IF Py /\ Variant /= "room_wait_holds_gil" /\ Len(wbuf[self]) = Cap
+                         /\ Len(queue) >= Depth /\ ~qfailed
+                        THEN /\ gil' = NONE
+                             /\ pc' = [pc EXCEPT ![self] = "RoomWait2"]
+                        ELSE /\ pc' = [pc EXCEPT ![self] = "Seal2"]
+                             /\ gil' = gil
+                  /\ UNCHANGED << lock, failed, qfailed, slotBlk, slotBuf, 
+                                  kept, slotCap, slotLayout, used, top, queue, 
+                                  file, lost, refused, rslot, rhead, rtail, 
+                                  done, committing, obj, badPlace, 
+                                  sizeMismatch, wbuf, wblk, pend, sealed, i, 
+                                  start, startBlk, startCap, sz, grown, roomed, 
+                                  nb, out, pt, pushed, firstBlk, handed, cb, 
+                                  ct >>
+
+RoomWait2(self) == /\ pc[self] = "RoomWait2"
+                   /\ Len(queue) < Depth \/ qfailed
+                   /\ pc' = [pc EXCEPT ![self] = "RoomWait3"]
+                   /\ UNCHANGED << lock, failed, qfailed, slotBlk, slotBuf, 
+                                   kept, slotCap, slotLayout, used, top, queue, 
+                                   file, lost, refused, rslot, rhead, rtail, 
+                                   done, committing, gil, obj, badPlace, 
+                                   sizeMismatch, wbuf, wblk, pend, sealed, i, 
+                                   start, startBlk, startCap, sz, grown, 
+                                   roomed, nb, out, pt, pushed, firstBlk, 
+                                   handed, cb, ct >>
+
+RoomWait3(self) == /\ pc[self] = "RoomWait3"
+                   /\ gil = NONE
+                   /\ gil' = self
+                   /\ IF Variant = "wait_keeps_size"
+                         THEN /\ pc' = [pc EXCEPT ![self] = "Seal"]
+                         ELSE /\ pc' = [pc EXCEPT ![self] = "Size"]
+                   /\ UNCHANGED << lock, failed, qfailed, slotBlk, slotBuf, 
+                                   kept, slotCap, slotLayout, used, top, queue, 
+                                   file, lost, refused, rslot, rhead, rtail, 
+                                   done, committing, obj, badPlace, 
+                                   sizeMismatch, wbuf, wblk, pend, sealed, i, 
+                                   start, startBlk, startCap, sz, grown, 
+                                   roomed, nb, out, pt, pushed, firstBlk, 
+                                   handed, cb, ct >>
 
 Seal2(self) == /\ pc[self] = "Seal2"
                /\ IF Len(wbuf[self]) = Cap
@@ -1008,12 +1079,13 @@ Restore(self) == /\ pc[self] = "Restore"
 
 Wr(self) == GilFirst(self) \/ Lock(self) \/ Gil(self) \/ Place(self)
                \/ Choose(self) \/ Choose2(self) \/ Size(self)
-               \/ Regain(self) \/ Seal(self) \/ Seal2(self) \/ Alloc(self)
-               \/ NewBlock(self) \/ Room(self) \/ Zero(self) \/ Write(self)
-               \/ Write2(self) \/ Commit(self) \/ Queue(self)
-               \/ Queue2(self) \/ Install(self) \/ Refused(self)
-               \/ Free(self) \/ Unlock(self) \/ Abort(self) \/ Drop(self)
-               \/ Push(self) \/ Restore(self)
+               \/ Regain(self) \/ Seal(self) \/ RoomWait(self)
+               \/ RoomWait2(self) \/ RoomWait3(self) \/ Seal2(self)
+               \/ Alloc(self) \/ NewBlock(self) \/ Room(self) \/ Zero(self)
+               \/ Write(self) \/ Write2(self) \/ Commit(self)
+               \/ Queue(self) \/ Queue2(self) \/ Install(self)
+               \/ Refused(self) \/ Free(self) \/ Unlock(self)
+               \/ Abort(self) \/ Drop(self) \/ Push(self) \/ Restore(self)
 
 M1 == /\ pc[MUT] = "M1"
       /\ IF Py
@@ -1041,8 +1113,11 @@ M2 == /\ pc[MUT] = "M2"
                       pushed, firstBlk, handed, cb, ct >>
 
 M3 == /\ pc[MUT] = "M3"
+      /\ IF Variant = "lock_wait_holds_gil"
+            THEN /\ lock = NONE
+            ELSE /\ TRUE
       /\ gil' = NONE
-      /\ pc' = [pc EXCEPT ![MUT] = "Done"]
+      /\ pc' = [pc EXCEPT ![MUT] = "M4"]
       /\ UNCHANGED << lock, failed, qfailed, slotBlk, slotBuf, kept, slotCap, 
                       slotLayout, used, top, queue, file, lost, refused, rslot, 
                       rhead, rtail, done, committing, obj, badPlace, 
@@ -1050,7 +1125,17 @@ M3 == /\ pc[MUT] = "M3"
                       startBlk, startCap, sz, grown, roomed, nb, out, pt, 
                       pushed, firstBlk, handed, cb, ct >>
 
-Mut == M1 \/ M2 \/ M3
+M4 == /\ pc[MUT] = "M4"
+      /\ lock = NONE
+      /\ pc' = [pc EXCEPT ![MUT] = "Done"]
+      /\ UNCHANGED << lock, failed, qfailed, slotBlk, slotBuf, kept, slotCap, 
+                      slotLayout, used, top, queue, file, lost, refused, rslot, 
+                      rhead, rtail, done, committing, gil, obj, badPlace, 
+                      sizeMismatch, wbuf, wblk, pend, sealed, i, start, 
+                      startBlk, startCap, sz, grown, roomed, nb, out, pt, 
+                      pushed, firstBlk, handed, cb, ct >>
+
+Mut == M1 \/ M2 \/ M3 \/ M4
 
 C1 == /\ pc["closer"] = "C1"
       /\ \A w \in W : pc[w] = "Done"
@@ -1146,4 +1231,7 @@ NoFreedHeld == \A b \in Held : used[b]
 ReturnedSurvive ==
     ((\A p \in ProcSet : pc[p] = "Done") /\ ~failed /\ ~qfailed) => file = Cat(done)
 SlotExclusive == slotBlk /= 0 => slotBlk \notin (QB \cup RB \cup {cb})
+NoGilHeldRoomWait ==
+    \A w \in W : (gil = w /\ pc[w] = "Seal2" /\ Len(wbuf[w]) = Cap)
+        => (Len(queue) < Depth \/ qfailed)
 =============================================================================

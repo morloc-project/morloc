@@ -219,6 +219,7 @@ morloc-runtime/stream.rs::-::BEFORE_STREAM_LOCK	test-only
 morloc-runtime/stream.rs::-::CURRENT_CALL_ID	thread		
 morloc-runtime/stream.rs::-::WRITE_ROOM	thread		
 morloc-runtime/stream.rs::-::FAIL_PLACE_AT	test-only		
+morloc-runtime/stream.rs::-::FORCE_NO_ROOM	test-only		
 morloc-runtime/stream.rs::-::FAIL_HAND_ON_AT	test-only		
 morloc-runtime/stream.rs::-::FAIL_COMMIT_PUSH_AT	test-only		
 morloc-runtime/stream.rs::-::TXN	thread		

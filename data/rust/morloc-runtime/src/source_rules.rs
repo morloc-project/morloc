@@ -1292,3 +1292,66 @@ fn only_the_check_and_the_builder_touch_a_packets_generation() {
         );
     }
 }
+
+// SLOT-37: the libmorloc calls that may wait for an output stream's slot
+// lock or its queue.
+const PY_NOGIL_CALLS: &[&str] = &[
+    "mlc_write_begin",
+    "mlc_write_wait",
+    "mlc_write_commit",
+    "mlc_write",
+    "mlc_flush",
+    "mlc_close",
+    "mlc_open_stdout",
+    "mlc_open_stderr",
+    "mlc_reclaim_stdio_after_dispatch",
+];
+
+fn gil_held_calls(text: &str, names: &[&str]) -> Vec<String> {
+    let mut released = false;
+    let mut found = Vec::new();
+    for (n, line) in text.lines().enumerate() {
+        let t = line.trim_start();
+        if t.starts_with("Py_BEGIN_ALLOW_THREADS") {
+            released = true;
+        } else if t.starts_with("Py_END_ALLOW_THREADS") {
+            released = false;
+        }
+        if released || t.starts_with("//") || t.starts_with("#define") || t.contains("PyTRY_NOGIL(") {
+            continue;
+        }
+        for name in names {
+            let hit = line.match_indices(name).any(|(at, _)| {
+                let before = line[..at].chars().next_back();
+                let after = line[at + name.len()..].chars().next();
+                !before.is_some_and(|c| is_ident_char(c) || c == '"') && matches!(after, Some('(') | Some(','))
+            });
+            if hit {
+                found.push(format!("{}: {}", n + 1, t));
+            }
+        }
+    }
+    found
+}
+
+#[test]
+fn a_python_call_that_may_wait_for_a_stream_lock_is_found() {
+    let text = "    int32_t rc = mlc_close(h, &e);\n    PyTRY(mlc_open_stdout, s);\n    PyTRY_NOGIL(h, mlc_open_stderr, s);\n    Py_BEGIN_ALLOW_THREADS\n    mlc_write_commit(r, &e);\n    Py_END_ALLOW_THREADS\n    {\"mlc_close\", pybinding__mlc_close, 0},\n    rc = mlc_write(1, h, v, &e);\n";
+    let found = gil_held_calls(text, PY_NOGIL_CALLS);
+    assert_eq!(
+        found,
+        vec![
+            "1: int32_t rc = mlc_close(h, &e);".to_string(),
+            "2: PyTRY(mlc_open_stdout, s);".to_string(),
+            "8: rc = mlc_write(1, h, v, &e);".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn python_waits_for_a_stream_lock_only_without_the_gil() {
+    let text = std::fs::read_to_string(repo_root().join("data/lang/py/pymorloc.c")).unwrap();
+    let found = gil_held_calls(&text, PY_NOGIL_CALLS);
+    assert!(found.is_empty(), "SLOT-37: pymorloc.c calls these holding the GIL:\n{}", found.join("\n"));
+    assert!(!text.contains("Py_mod_gil"), "SLOT-37: an in-place batch's sizes hold only while the GIL is held");
+}

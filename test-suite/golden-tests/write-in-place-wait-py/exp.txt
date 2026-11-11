@@ -1,0 +1,32 @@
+py-writes
+Reals np 0 same
+I32s np 0 same
+I8s np 0 same
+U8s np 0 same
+U8s bytes 0 same
+U8s bytearray 0 same
+Bools np 0 same
+Bools bytes 0 same
+I16s np 0 same
+I16s np8 0 same
+Reals np 3 same
+I32s np 3 same
+I8s np 3 same
+U8s np 3 same
+U8s bytes 3 same
+U8s bytearray 3 same
+Bools np 3 same
+Bools bytes 3 same
+I16s np 3 same
+I16s np8 3 same
+staged Reals 0 same
+staged I32s 0 same
+staged Strs 0 same
+staged Reals 3 same
+staged I32s 3 same
+staged Strs 3 same
+staged Reals 9 same
+staged I32s 9 same
+staged Strs 9 same
+[true,false,true]
+8000

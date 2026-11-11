@@ -235,8 +235,8 @@ static PyObject* PyMorlocPipeClosed = NULL;
     }
 
 // PyTRY with the GIL released around the call, for a libmorloc call that
-// may wait on another worker (a channel read or write). `out` receives the
-// result.
+// may wait on another worker (a channel read or write) or on a stream's
+// slot lock (SLOT-37). `out` receives the result.
 #define PyTRY_NOGIL(out, fun, ...) \
     Py_BEGIN_ALLOW_THREADS \
     out = fun(__VA_ARGS__ __VA_OPT__(,) &child_errmsg_); \
@@ -3090,7 +3090,10 @@ static PyObject* pybinding__get_value(PyObject* self, PyObject* args){ MAYFAIL
                 if (rc < 0) goto stream_error;
             }
             {
-                char* cerr = NULL; mlc_close(handle, &cerr);
+                char* cerr = NULL;
+                Py_BEGIN_ALLOW_THREADS
+                mlc_close(handle, &cerr);
+                Py_END_ALLOW_THREADS
                 if (cerr) free(cerr);
             }
             free_schema(schema);
@@ -3098,7 +3101,10 @@ static PyObject* pybinding__get_value(PyObject* self, PyObject* args){ MAYFAIL
 
         stream_error:
             {
-                char* cerr = NULL; mlc_close(handle, &cerr);
+                char* cerr = NULL;
+                Py_BEGIN_ALLOW_THREADS
+                mlc_close(handle, &cerr);
+                Py_END_ALLOW_THREADS
                 if (cerr) free(cerr);
             }
             Py_XDECREF(result);
@@ -3276,7 +3282,10 @@ static PyObject* pybinding__debug_flush_dispatch(PyObject* self, PyObject* args)
 // dispatch so a leaked @stdout claim does not wedge the next open.
 static PyObject* pybinding__reclaim_stdio_after_dispatch(PyObject* self, PyObject* args) {
     (void)self; (void)args;
+    // SLOT-37
+    Py_BEGIN_ALLOW_THREADS
     mlc_reclaim_stdio_after_dispatch();
+    Py_END_ALLOW_THREADS
     Py_RETURN_NONE;
 }
 
@@ -4394,7 +4403,8 @@ static PyObject* pybinding__mlc_open_istream(PyObject* self, PyObject* args) { M
     const char* schema_str;
     const char* path;
     PARSE_ARGS_OR_ABORT(args, "ss", &schema_str, &path);
-    int64_t h = PyTRY(mlc_open_istream, schema_str, path);
+    int64_t h = 0;
+    PyTRY_NOGIL(h, mlc_open_istream, schema_str, path);
     return PyLong_FromLongLong((long long)h);
 error:
     return NULL;
@@ -4407,7 +4417,8 @@ error:
 static PyObject* pybinding__mlc_open_stdin(PyObject* self, PyObject* args) { MAYFAIL
     const char* schema_str;
     PARSE_ARGS_OR_ABORT(args, "s", &schema_str);
-    int64_t h = PyTRY(mlc_open_stdin, schema_str);
+    int64_t h = 0;
+    PyTRY_NOGIL(h, mlc_open_stdin, schema_str);
     return PyLong_FromLongLong((long long)h);
 error:
     return NULL;
@@ -4416,7 +4427,8 @@ error:
 static PyObject* pybinding__mlc_open_stdout(PyObject* self, PyObject* args) { MAYFAIL
     const char* schema_str;
     PARSE_ARGS_OR_ABORT(args, "s", &schema_str);
-    int64_t h = PyTRY(mlc_open_stdout, schema_str);
+    int64_t h = 0;
+    PyTRY_NOGIL(h, mlc_open_stdout, schema_str);
     return PyLong_FromLongLong((long long)h);
 error:
     return NULL;
@@ -4425,7 +4437,8 @@ error:
 static PyObject* pybinding__mlc_open_stderr(PyObject* self, PyObject* args) { MAYFAIL
     const char* schema_str;
     PARSE_ARGS_OR_ABORT(args, "s", &schema_str);
-    int64_t h = PyTRY(mlc_open_stderr, schema_str);
+    int64_t h = 0;
+    PyTRY_NOGIL(h, mlc_open_stderr, schema_str);
     return PyLong_FromLongLong((long long)h);
 error:
     return NULL;
@@ -4458,6 +4471,28 @@ static int py_int_inline(PyObject* obj) {
     return limbs < 0 ? -1 : limbs == 1;
 }
 
+// SLOT-37: before the first wait, a shallow copy of the batch's list
+// replaces it, so that a batch is one state of its list. 0, or -1 with a
+// Python error set.
+static int py_snapshot(PyObject** list, PyObject** snapshot) {
+    if (*snapshot != NULL) return 0;
+    *snapshot = PyList_GetSlice(*list, 0, PyList_GET_SIZE(*list));
+    if (*snapshot == NULL) return -1;
+    *list = *snapshot;
+    return 0;
+}
+
+// SLOT-37: wait, with the GIL released, for the queue room a placement
+// lacked. 0, or -1 with a Python error set (the batch is then aborted).
+static int py_write_wait(const uint8_t* reached) {
+    char* err = NULL;
+    int32_t rc;
+    Py_BEGIN_ALLOW_THREADS
+    rc = mlc_write_wait(reached, &err);
+    Py_END_ALLOW_THREADS
+    return py_stream_result(rc, err);
+}
+
 // Size one element with the batch's walk. -1 with a Python error set.
 static ssize_t py_size_element(py_walk_t* w, const Schema* elem, PyObject* obj) {
     w->total = 0;
@@ -4485,7 +4520,7 @@ static int py_write_in_place(const Schema* schema, long long level, PyObject* li
     char* err = NULL;
     int32_t rc;
     Py_BEGIN_ALLOW_THREADS
-    rc = mlc_write_begin(level, handle, &err);
+    rc = mlc_write_begin(level, handle, MLC_WRITE_NOWAIT, &err);
     Py_END_ALLOW_THREADS
     if (rc == MLC_WRITE_FALLBACK) return 0;
     if (py_stream_result(rc, err) != 0) return -1;
@@ -4498,6 +4533,8 @@ static int py_write_in_place(const Schema* schema, long long level, PyObject* li
     const size_t width = elem->width;
     const int run = (elem->fixed_width || elem->type == MORLOC_INT) && width > 0;
     PyObject* x = NULL;
+    // The list as it was at the first wait, which other threads may change.
+    PyObject* snapshot = NULL;
     // The end of the stretch of inline Ints found at the last scan.
     Py_ssize_t stretch_end = 0;
     for (Py_ssize_t i = 0; i < PyList_GET_SIZE(list);) {
@@ -4519,6 +4556,11 @@ static int py_write_in_place(const Schema* schema, long long level, PyObject* li
             uint8_t* slots = NULL;
             uint64_t placed = 0;
             rc = mlc_write_place_run((uint64_t)k, reached, &slots, &placed, &err);
+            if (rc == MLC_WRITE_WOULD_BLOCK) {
+                if (py_snapshot(&list, &snapshot) != 0 || py_write_wait(reached) != 0) goto error;
+                stretch_end = i;
+                continue;
+            }
             if (py_stream_result(rc, err) != 0) goto error;
             w.base = NULL;
             w.origin = NULL;
@@ -4543,6 +4585,13 @@ static int py_write_in_place(const Schema* schema, long long level, PyObject* li
         if (size < 0) goto error;
         mlc_room_t room;
         rc = mlc_write_place((uint64_t)size, reached, &room, &err);
+        if (rc == MLC_WRITE_WOULD_BLOCK) {
+            Py_CLEAR(x);
+            Py_CLEAR(w.keep);
+            if (py_snapshot(&list, &snapshot) != 0 || py_write_wait(reached) != 0) goto error;
+            stretch_end = i;
+            continue;
+        }
         if (py_stream_result(rc, err) != 0) goto error;
         cursor = room.data;
         w.end = room.end;
@@ -4556,11 +4605,15 @@ static int py_write_in_place(const Schema* schema, long long level, PyObject* li
         i++;
     }
     py_walk_free(&w);
+    Py_XDECREF(snapshot);
+    Py_BEGIN_ALLOW_THREADS
     rc = mlc_write_commit(reached, &err);
+    Py_END_ALLOW_THREADS
     if (py_stream_result(rc, err) != 0) return -1;
     return 1;
 error:
     Py_XDECREF(x);
+    Py_XDECREF(snapshot);
     py_walk_free(&w);
     mlc_write_abort();
     return -1;

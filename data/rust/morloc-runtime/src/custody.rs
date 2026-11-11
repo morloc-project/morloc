@@ -298,12 +298,17 @@ impl CustodyQueue {
 
     // SLOT-12: a producer holds the slot lock; it waits only on the custodian.
     pub(crate) fn push(&self, item: Item) -> Result<u32, MorlocError> {
-        self.push_with(item, true, Closing::Wait)
+        self.push_with(item, true, Closing::Wait, true).map(|t| t.expect("a waiting push queues"))
+    }
+
+    // SLOT-37: `None` where `push` would sleep.
+    pub(crate) fn try_push(&self, item: Item) -> Result<Option<u32>, MorlocError> {
+        self.push_with(item, true, Closing::Wait, false)
     }
 
     /// Queue the close: once queued, nothing more is.
     pub(crate) fn push_close(&self, status: u32, closing: Closing) -> Result<u32, MorlocError> {
-        self.push_with(Item::marker(ENTRY_CLOSE, status), false, closing)
+        self.push_with(Item::marker(ENTRY_CLOSE, status), false, closing, true).map(|t| t.expect("a waiting push queues"))
     }
 
     // SLOT-19: a detached closer, or one that died, leaves the slot to the writer.
@@ -316,6 +321,13 @@ impl CustodyQueue {
     /// then among the spares.
     pub(crate) fn wait_room(&self) -> Result<(), MorlocError> {
         self.wait_room_for(None)
+    }
+
+    // SLOT-37: `wait_room` would sleep.
+    pub(crate) fn lacks_room(&self) -> bool {
+        self.failure().is_none()
+            && !self.is_closed()
+            && self.tail.load(Ordering::Relaxed).wrapping_sub(self.done.load(Ordering::Acquire)) >= self.depth()
     }
 
     // SLOT-12, SLOT-32: `most` outstanding, the depth when `None`.
@@ -338,7 +350,7 @@ impl CustodyQueue {
         }
     }
 
-    fn push_with(&self, item: Item, refuse_failed: bool, closing: Closing) -> Result<u32, MorlocError> {
+    fn push_with(&self, item: Item, refuse_failed: bool, closing: Closing, wait: bool) -> Result<Option<u32>, MorlocError> {
         loop {
             if refuse_failed {
                 if let Some(e) = self.failure() {
@@ -376,10 +388,13 @@ impl CustodyQueue {
                 }
                 self.tail.store(t.wrapping_add(1), Ordering::Release);
                 wake_sleepers(&self.tail, &self.tail_waiters);
-                return Ok(t.wrapping_add(1));
+                return Ok(Some(t.wrapping_add(1)));
             }
             if !self.host_alive() {
                 return Err(Self::gone());
+            }
+            if !wait {
+                return Ok(None);
             }
             sleep_on(&self.done, &self.done_waiters, d, WAIT_SLICE);
         }

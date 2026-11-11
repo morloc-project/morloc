@@ -3542,6 +3542,36 @@ fn queue_buffer_then(slot: &RegistrySlot, refill: bool, level: u8) -> Result<(),
     Ok(())
 }
 
+// SLOT-37
+fn would_block() -> MorlocError {
+    MorlocError::Other("@write: placing would wait for queue room".into())
+}
+
+// SLOT-37: `queue_buffer_then` with a fresh buffer, refused where it would
+// sleep; `would` is then the depth the push saw.
+fn queue_buffer_nowait(slot: &RegistrySlot, level: u8, would: &std::cell::Cell<Option<u32>>) -> Result<(), MorlocError> {
+    let q = slot_queue(slot)?;
+    if q.lacks_room() {
+        would.set(Some(q.depth()));
+        return Err(would_block());
+    }
+    let fresh = fresh_buffer(slot, q)?;
+    match q.try_push(sealed_item(slot, level)) {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            free_rel(fresh);
+            would.set(Some(q.depth()));
+            return Err(would_block());
+        }
+        Err(e) => {
+            free_rel(fresh);
+            return Err(e);
+        }
+    }
+    install_buffer(slot, fresh);
+    Ok(())
+}
+
 // SLOT-12, SLOT-32: the buffer's elements as one queue entry.
 fn sealed_item(slot: &RegistrySlot, level: u8) -> crate::custody::Item {
     crate::custody::Item {
@@ -3643,6 +3673,9 @@ struct Batch {
     placed: u64,
     handed: u64,
     pending: Option<Pending>,
+    nowait: bool,
+    blocked: bool,
+    wait_depth: Option<u32>,
 }
 
 // SLOT-36
@@ -3669,6 +3702,7 @@ thread_local! {
     pub(crate) static FAIL_PLACE_AT: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
     pub(crate) static FAIL_HAND_ON_AT: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
     pub(crate) static FAIL_COMMIT_PUSH_AT: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+    pub(crate) static FORCE_NO_ROOM: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
 }
 
 impl Batch {
@@ -3697,6 +3731,9 @@ impl Batch {
             placed: 0,
             handed: 0,
             pending: None,
+            nowait: false,
+            blocked: false,
+            wait_depth: None,
         })
     }
 
@@ -3742,13 +3779,32 @@ impl Batch {
         if count == 0 {
             return Ok(());
         }
+        // SLOT-37
+        #[cfg(test)]
+        let forced = || FORCE_NO_ROOM.with(|f| f.get().is_some() && f.replace(f.get().map(|b| !b)) == Some(true));
+        #[cfg(not(test))]
+        let forced = || false;
+        if self.nowait && (forced() || self.queue.is_some_and(|q| q.lacks_room())) {
+            self.blocked = true;
+            return Err(would_block());
+        }
         let ours = count.saturating_sub(self.start_count);
         // SLOT-36: a buffer holding none of the batch's elements is handed on.
         if self.pending.is_some() && ours > 0 {
             return self.seal_pending(slot, ours);
         }
         let level = self.level;
-        self.hand_on(slot, ours, || flush_write_buffer_at(slot, local, level))?;
+        if self.nowait {
+            let would = std::cell::Cell::new(None);
+            let handed = self.hand_on(slot, ours, || queue_buffer_nowait(slot, level, &would));
+            if let Some(depth) = would.get() {
+                self.blocked = true;
+                self.wait_depth = Some(depth);
+            }
+            handed?;
+        } else {
+            self.hand_on(slot, ours, || flush_write_buffer_at(slot, local, level))?;
+        }
         self.start_count = 0;
         self.start_data_used = 0;
         Ok(())
@@ -3779,7 +3835,10 @@ impl Batch {
     // SLOT-36, SLOT-20
     fn seal_pending(&mut self, slot: &RegistrySlot, ours: u64) -> Result<(), MorlocError> {
         let q = self.output_queue();
-        q.wait_room()?;
+        // SLOT-37
+        if !self.nowait {
+            q.wait_room()?;
+        }
         let fresh = fresh_buffer(slot, q)?;
         let item = sealed_item(slot, self.level);
         let Some(p) = self.pending.as_mut() else { unreachable!("seal_pending runs in place") };
@@ -4504,7 +4563,7 @@ fn take_txn() -> Option<Txn> {
 }
 
 // SLOT-36
-pub fn write_begin(handle: i64, level: crate::compression::CompressionLevel) -> Result<Begun, MorlocError> {
+pub fn write_begin(handle: i64, level: crate::compression::CompressionLevel, nowait: bool) -> Result<Begun, MorlocError> {
     refuse_inside_txn()
         .map_err(|_| MorlocError::Other("@write: a batch is already open on this thread".into()))?;
     let (gen_claim, _) = unpack_handle(handle);
@@ -4522,6 +4581,7 @@ pub fn write_begin(handle: i64, level: crate::compression::CompressionLevel) -> 
         let level = written_level(slot.is_stdio.get() != 0, slot.stdio_kind.get(), level.raw());
         let mut batch = Batch::begin(slot, level)?;
         batch.pending = Some(Pending::default());
+        batch.nowait = nowait;
         let buf_size = write_buffer_capacity(slot)?;
         Ok((guard, batch, buf_size))
     })();
@@ -4543,7 +4603,7 @@ fn no_txn() -> MorlocError {
 }
 
 // SLOT-36
-fn with_txn<R>(reached: *const u8, f: impl FnOnce(&mut Txn) -> Result<R, MorlocError>) -> Result<R, MorlocError> {
+fn with_txn<R>(reached: *const u8, f: impl FnOnce(&mut Txn) -> Result<R, MorlocError>) -> Result<Option<R>, MorlocError> {
     TXN.with(|c| {
         let _unwinding = DropOnUnwind(c);
         let mut cell = c.0.borrow_mut();
@@ -4556,14 +4616,19 @@ fn with_txn<R>(reached: *const u8, f: impl FnOnce(&mut Txn) -> Result<R, MorlocE
         }
         t.expect = None;
         t.ints = None;
+        let placed = t.batch.placed;
         let r = f(t);
+        if r.is_err() && std::mem::take(&mut t.batch.blocked) {
+            t.batch.placed = placed;
+            return Ok(None);
+        }
         if r.is_err() {
             let mut t = cell.take().ok_or_else(no_txn)?;
             drop(cell);
             t.batch.abort_pending(t.guard.slot);
             t.end();
         }
-        r
+        r.map(Some)
     })
 }
 
@@ -4619,7 +4684,7 @@ fn flat_route(elem: &Schema, buf_size: usize, inline_int: bool, data_used: u64) 
 }
 
 // SLOT-36
-pub fn write_place(size: usize, reached: *const u8) -> Result<MlcRoom, MorlocError> {
+pub fn write_place(size: usize, reached: *const u8) -> Result<Option<MlcRoom>, MorlocError> {
     with_txn(reached, |t| place_room(t, size))
 }
 
@@ -4678,7 +4743,7 @@ fn place_room(t: &mut Txn, size: usize) -> Result<MlcRoom, MorlocError> {
 }
 
 // SLOT-36
-pub fn write_place_run(k: usize, reached: *const u8) -> Result<(*mut u8, usize), MorlocError> {
+pub fn write_place_run(k: usize, reached: *const u8) -> Result<Option<(*mut u8, usize)>, MorlocError> {
     with_txn(reached, |t| {
         let w = t.local.elem_schema.width;
         let int = t.local.elem_schema.serial_type == SerialType::Int;
@@ -4707,6 +4772,15 @@ pub fn write_place_run(k: usize, reached: *const u8) -> Result<(*mut u8, usize),
         t.ints = int.then_some((slots as *const u8, n));
         Ok((slots, n))
     })
+}
+
+// SLOT-37
+pub fn write_wait(reached: *const u8) -> Result<(), MorlocError> {
+    with_txn(reached, |t| {
+        let depth = t.batch.wait_depth.take();
+        t.batch.output_queue().wait_room_for(depth)
+    })
+    .map(|_| ())
 }
 
 // SLOT-36

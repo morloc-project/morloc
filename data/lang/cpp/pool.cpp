@@ -1026,7 +1026,7 @@ inline void _mlc_write_batch(Schema* schema, int64_t level, const std::vector<E>
         }
     }
     char* errmsg = NULL;
-    int rc = mlc_write_begin(level, handle, &errmsg);
+    int rc = mlc_write_begin(level, handle, 0, &errmsg);
     if (rc == MLC_WRITE_FALLBACK) {
         // The list's own size: its header, the data's alignment slack, and
         // each element's.

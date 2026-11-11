@@ -223,3 +223,15 @@ here touch locks and ownership: model first.
   2026-11-02] A source whose final footer says FAILED or PAUSED is merged
   into a file whose footer says CLOSED, so the failure is lost. Which status
   a merge of mixed statuses carries needs a ruling (with SLOT-31).
+- **`@tell` reads 0 inside an in-place batch.** [read, 2026-11-11]
+  SLOT-36 says nothing on it: Python code run while a batch is encoded
+  (a `__index__`, a finalizer) that calls `@tell` reaches
+  stdout_element_count (stream.rs), whose with_process_local_slot is
+  refused by refuse_inside_txn and mapped to 0 by `unwrap_or(0)`, so the
+  count is silently wrong rather than refused.
+- **A stream closed by Python code run mid-encode is refused and leaks.**
+  [read, 2026-11-11] SLOT-36 is silent on it: a finalizer that closes
+  another handle while this thread encodes an in-place batch hits
+  refuse_inside_txn; CPython reports an unraisable error and the stream
+  stays open until the process ends. The arena's deferred-close path
+  (SLOT-36 Discards) is not used for it.

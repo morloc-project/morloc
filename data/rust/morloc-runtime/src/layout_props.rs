@@ -1016,12 +1016,28 @@ pub(crate) fn write_in_place(
     runs: bool,
     give_up_at: Option<usize>,
 ) -> Result<bool, MorlocError> {
-    use crate::stream::{write_abort, write_begin, write_commit, write_place, write_place_run, Begun};
+    write_in_place_as(h, level, value, elem, runs, give_up_at, false).map(|w| w.is_some())
+}
+
+/// `write_in_place`; under `nowait`, a placement that would wait is waited
+/// for and placed again, as the Python binding does (SLOT-37). The number
+/// of waits if in place.
+pub(crate) fn write_in_place_as(
+    h: i64,
+    level: crate::compression::CompressionLevel,
+    value: crate::shm_types::AbsPtr,
+    elem: &Schema,
+    runs: bool,
+    give_up_at: Option<usize>,
+    nowait: bool,
+) -> Result<Option<usize>, MorlocError> {
+    use crate::stream::{write_abort, write_begin, write_commit, write_place, write_place_run, write_wait, Begun};
     use morloc_runtime_types::schema::SerialType;
-    if let Begun::Fallback = write_begin(h, level)? {
-        return shared_write_subpacket(h, level, value).map(|()| false);
+    if let Begun::Fallback = write_begin(h, level, nowait)? {
+        return shared_write_subpacket(h, level, value).map(|()| None);
     }
-    let encode = || -> Result<(), MorlocError> {
+    let mut waits = 0;
+    let mut encode = || -> Result<(), MorlocError> {
         let arr = unsafe { &*(value as *const crate::shm_types::Array) };
         let (n, w) = (arr.size, elem.width);
         let base = if n == 0 { std::ptr::null_mut() } else { shm::rel2abs(arr.data)? };
@@ -1045,7 +1061,12 @@ pub(crate) fn write_in_place(
                     stop = stop.min(int_end);
                 }
                 let want = stop - i;
-                let (slots, k) = write_place_run(want, reached)?;
+                let Some((slots, k)) = write_place_run(want, reached)? else {
+                    assert!(nowait, "a waiting batch was told it would block");
+                    write_wait(reached)?;
+                    waits += 1;
+                    continue;
+                };
                 for o in 0..k * w {
                     let b = unsafe { *(src as *const u8).add(o) };
                     if b != 0 {
@@ -1058,7 +1079,12 @@ pub(crate) fn write_in_place(
             }
             let inline_int = elem.serial_type == SerialType::Int && unsafe { *(src as *const usize) } <= 1;
             let size = if inline_int { w } else { crate::ffi::calc_voidstar_size_portable_with(src, elem, &res)? };
-            let room = write_place(size, reached)?;
+            let Some(room) = write_place(size, reached)? else {
+                assert!(nowait, "a waiting batch was told it would block");
+                write_wait(reached)?;
+                waits += 1;
+                continue;
+            };
             let at = |p: *mut u8| p as usize - room.base as usize;
             let mut scratch = vec![0u64; at(room.end).div_ceil(8)];
             let sp = scratch.as_mut_ptr() as *mut u8;
@@ -1080,11 +1106,13 @@ pub(crate) fn write_in_place(
         }
         write_commit(reached)
     };
-    encode().inspect_err(|_| write_abort()).map(|()| true)
+    let r = encode();
+    r.inspect_err(|_| write_abort()).map(|()| Some(waits))
 }
 
 /// An in-place batch is laid out byte for byte as the copy path lays out
-/// the same batch, sub-packet cuts included (SLOT-36).
+/// the same batch, sub-packet cuts included (SLOT-36), also when every
+/// placement that seals is first refused as one that would block (SLOT-37).
 #[test]
 fn an_in_place_batch_writes_the_bytes_the_copy_path_writes() {
     let _shm = crate::own_test_registry();
@@ -1095,6 +1123,7 @@ fn an_in_place_batch_writes_the_bytes_the_copy_path_writes() {
     let cases: u64 = std::env::var("MORLOC_LAYOUT_PROP_CASES").ok().and_then(|s| s.parse().ok()).unwrap_or(200);
     let mut failures = Vec::new();
     let in_place = std::cell::Cell::new(0usize);
+    let waited = std::cell::Cell::new(0usize);
     let seeds: Vec<u64> = match std::env::var(SEED_ENV).ok().and_then(|s| s.parse().ok()) {
         Some(one) => vec![one],
         None => (0..cases).collect(),
@@ -1114,14 +1143,20 @@ fn an_in_place_batch_writes_the_bytes_the_copy_path_writes() {
                 let level = crate::compression::CompressionLevel::from_u8(level).unwrap();
                 for runs in [false, true] {
                     eprintln!("in_place: seed {seed} schema {elem_str} buf {buf} level {level:?} runs {runs}");
-                    let write = |tag: &str, placing: bool| -> Result<Vec<u8>, MorlocError> {
+                    let write = |tag: &str, placing: bool, nowait: bool| -> Result<Vec<u8>, MorlocError> {
                         let path = dir.join(format!("{seed}-{tag}.stream"));
                         let h = shared_open_ostream_with_schema(path.to_str().unwrap(), &format!("a{elem_str}"))?;
                         for _ in 0..8 {
                             for l in &lists {
                                 let v = read_json_with_schema(l, &list)?;
                                 let w = if placing {
-                                    write_in_place(h, level, v, &elem, runs, None).map(|p| in_place.set(in_place.get() + p as usize))
+                                    crate::stream::FORCE_NO_ROOM.with(|f| f.set(nowait.then_some(true)));
+                                    let r = write_in_place_as(h, level, v, &elem, runs, None, nowait);
+                                    crate::stream::FORCE_NO_ROOM.with(|f| f.set(None));
+                                    r.map(|p| {
+                                        in_place.set(in_place.get() + p.is_some() as usize);
+                                        waited.set(waited.get() + p.unwrap_or(0));
+                                    })
                                 } else {
                                     shared_write_subpacket(h, level, v)
                                 };
@@ -1139,20 +1174,24 @@ fn an_in_place_batch_writes_the_bytes_the_copy_path_writes() {
                         bytes.extend(format!("{:?} {}", footer.subpacket_entries, footer.element_count).into_bytes());
                         Ok(bytes)
                     };
-                    match (write("copy", false), write("place", true)) {
-                        (Ok(a), Ok(b)) if a == b => {}
-                        (Ok(a), Ok(b)) => {
-                            let at = a.iter().zip(&b).position(|(x, y)| x != y).unwrap_or(a.len().min(b.len()));
-                            failures.push(format!("seed {seed} {elem_str} buf {buf} {level:?} runs {runs}: files differ at byte {at} ({} vs {} bytes)", a.len(), b.len()));
+                    let copy = write("copy", false, false);
+                    for (tag, nowait) in [("place", false), ("wait", true)] {
+                        match (&copy, write(tag, true, nowait)) {
+                            (Ok(a), Ok(b)) if *a == b => {}
+                            (Ok(a), Ok(b)) => {
+                                let at = a.iter().zip(&b).position(|(x, y)| x != y).unwrap_or(a.len().min(b.len()));
+                                failures.push(format!("seed {seed} {elem_str} buf {buf} {level:?} runs {runs} {tag}: files differ at byte {at} ({} vs {} bytes)", a.len(), b.len()));
+                            }
+                            (a, b) => failures.push(format!("seed {seed} {elem_str} buf {buf} {level:?} runs {runs} {tag}: copy {:?} in place {:?}", a.as_ref().err(), b.err())),
                         }
-                        (a, b) => failures.push(format!("seed {seed} {elem_str} buf {buf} {level:?} runs {runs}: copy {:?} in place {:?}", a.err(), b.err())),
                     }
                 }
             }
         }
     }
     let _ = std::fs::remove_dir_all(&dir);
-    assert!(in_place.get() > seeds.len() * 8 * 30, "only {} batches went in place", in_place.get());
+    assert!(in_place.get() > seeds.len() * 8 * 60, "only {} batches went in place", in_place.get());
+    assert!(waited.get() > seeds.len() * 8, "only {} placements would have blocked", waited.get());
     assert!(failures.is_empty(), "{} failures; first 20:\n{}", failures.len(), failures.iter().take(20).cloned().collect::<Vec<_>>().join("\n"));
 }
 
@@ -1341,8 +1380,8 @@ fn a_thread_encoding_in_place_does_no_other_stream_operation() {
         let e = r.expect_err(what).to_string();
         assert!(e.contains("encoding a @write batch") || e.contains("already open"), "{what}: {e}");
     };
-    assert!(matches!(write_begin(s1, none).unwrap(), Begun::Open));
-    refused(write_begin(s2, none).map(|_| ()), "a second batch");
+    assert!(matches!(write_begin(s1, none, false).unwrap(), Begun::Open));
+    refused(write_begin(s2, none, false).map(|_| ()), "a second batch");
     let v = strs_value(3, 4, 0);
     refused(shared_write_subpacket(s2, none, v), "a copy write to another stream");
     refused(shared_write_subpacket(s1, none, v), "a copy write to its own stream");
@@ -1362,7 +1401,7 @@ fn a_thread_encoding_in_place_does_no_other_stream_operation() {
         let (tx, barrier) = (tx.clone(), barrier.clone());
         let v = v as usize;
         std::thread::spawn(move || {
-            assert!(matches!(write_begin(mine, none).unwrap(), Begun::Open));
+            assert!(matches!(write_begin(mine, none, false).unwrap(), Begun::Open));
             barrier.wait();
             let r = shared_write_subpacket(other, none, v as crate::shm_types::AbsPtr);
             write_abort();
@@ -1400,7 +1439,7 @@ fn an_arena_rewound_inside_an_in_place_batch_keeps_its_blocks() {
     {
         let _arena = crate::eval_arena::enter().unwrap();
         let cp = crate::eval_arena::checkpoint();
-        assert!(matches!(crate::stream::write_begin(h, none).unwrap(), crate::stream::Begun::Open));
+        assert!(matches!(crate::stream::write_begin(h, none, false).unwrap(), crate::stream::Begun::Open));
         let arr = unsafe { &*(v as *const crate::shm_types::Array) };
         let base = shm::rel2abs(arr.data).unwrap();
         let res = crate::recur::Resolver::new(&elem);
@@ -1408,7 +1447,7 @@ fn an_arena_rewound_inside_an_in_place_batch_keeps_its_blocks() {
         for i in 0..lens.len() {
             let src = unsafe { base.add(i * elem.width) };
             let size = crate::ffi::calc_voidstar_size_portable_with(src, &elem, &res).unwrap();
-            let room = crate::stream::write_place(size, reached).unwrap();
+            let room = crate::stream::write_place(size, reached).unwrap().expect("placed");
             let at = |p: *mut u8| p as usize - room.base as usize;
             unsafe { crate::voidstar::flatten_portable_in_place(room.base, at(room.slot), at(room.data), size, src, &elem, &res).unwrap() };
             reached = room.end;
@@ -1444,8 +1483,8 @@ fn an_in_place_element_that_ends_outside_its_room_poisons_the_stream() {
     for (k, (what, end, fine)) in ends.into_iter().enumerate() {
         let h = shared_open_ostream_with_schema(dir.join(format!("{k}.stream")).to_str().unwrap(), "as").unwrap();
         let panicked = std::thread::spawn(move || {
-            assert!(matches!(crate::stream::write_begin(h, none).unwrap(), crate::stream::Begun::Open));
-            let room = crate::stream::write_place(16 + 5, std::ptr::null()).unwrap();
+            assert!(matches!(crate::stream::write_begin(h, none, false).unwrap(), crate::stream::Begun::Open));
+            let room = crate::stream::write_place(16 + 5, std::ptr::null()).unwrap().expect("placed");
             crate::stream::write_commit(end(&room)).unwrap();
         })
         .join()
@@ -1467,15 +1506,15 @@ fn an_in_place_element_that_ends_outside_its_room_poisons_the_stream() {
     for (limbs, run) in [(1u64, true), (2, true), (0, true), (1, false), (2, false), (0, false)] {
         let h = shared_open_ostream_with_schema(dir.join(format!("int{limbs}{run}.stream")).to_str().unwrap(), "aj").unwrap();
         let panicked = std::thread::spawn(move || {
-            assert!(matches!(crate::stream::write_begin(h, none).unwrap(), crate::stream::Begun::Open));
+            assert!(matches!(crate::stream::write_begin(h, none, false).unwrap(), crate::stream::Begun::Open));
             let (slot, end) = if run {
-                let (slots, k) = crate::stream::write_place_run(3, std::ptr::null()).unwrap();
+                let (slots, k) = crate::stream::write_place_run(3, std::ptr::null()).unwrap().expect("placed");
                 for j in 0..k {
                     unsafe { std::ptr::write_unaligned(slots.add(j * 16) as *mut u64, 1) };
                 }
                 (unsafe { slots.add(16) }, unsafe { slots.add(k * 16) })
             } else {
-                let room = crate::stream::write_place(16, std::ptr::null()).unwrap();
+                let room = crate::stream::write_place(16, std::ptr::null()).unwrap().expect("placed");
                 (room.slot, room.end as *mut u8)
             };
             unsafe { std::ptr::write_unaligned(slot as *mut u64, limbs) };
@@ -1551,7 +1590,7 @@ fn an_in_place_batch_does_not_survive_a_fork_or_its_thread() {
         status
     };
 
-    assert!(matches!(crate::stream::write_begin(s1, none).unwrap(), crate::stream::Begun::Open));
+    assert!(matches!(crate::stream::write_begin(s1, none, false).unwrap(), crate::stream::Begun::Open));
     let pid = unsafe { libc::fork() };
     if pid == 0 {
         let forgot = crate::stream::write_place(24, std::ptr::null()).is_err();
@@ -1570,7 +1609,7 @@ fn an_in_place_batch_does_not_survive_a_fork_or_its_thread() {
         let none_core = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
         unsafe { libc::setrlimit(libc::RLIMIT_CORE, &none_core) };
         let _ = std::thread::spawn(move || {
-            let _ = crate::stream::write_begin(s1, none);
+            let _ = crate::stream::write_begin(s1, none, false);
         })
         .join();
         unsafe { libc::_exit(0) };
@@ -1609,17 +1648,17 @@ fn in_place_runs_read_as_zero_and_mix_with_single_rooms() {
         let _ = shm::shfree(v);
         shared_flush_buffer(h).unwrap();
     }
-    assert!(matches!(write_begin(h, none).unwrap(), Begun::Open));
-    let room = write_place(4, std::ptr::null()).unwrap();
+    assert!(matches!(write_begin(h, none, false).unwrap(), Begun::Open));
+    let room = write_place(4, std::ptr::null()).unwrap().expect("placed");
     unsafe { *(room.slot as *mut i32) = 7 };
-    let (slots, k) = write_place_run(3, room.end).unwrap();
+    let (slots, k) = write_place_run(3, room.end).unwrap().expect("placed");
     assert_eq!(k, 3);
     for j in 0..k {
         unsafe { *(slots as *mut i32).add(j) = 8 + j as i32 };
     }
-    let room = write_place(4, unsafe { slots.add(k * 4) }).unwrap();
+    let room = write_place(4, unsafe { slots.add(k * 4) }).unwrap().expect("placed");
     unsafe { *(room.slot as *mut i32) = 11 };
-    let (_, none_placed) = write_place_run(0, room.end).unwrap();
+    let (_, none_placed) = write_place_run(0, room.end).unwrap().expect("placed");
     assert_eq!(none_placed, 0);
     write_commit(std::ptr::null()).unwrap();
     shared_close_handle(h).unwrap();
@@ -1649,7 +1688,7 @@ fn an_arena_ended_inside_an_in_place_batch_discards_its_streams_after() {
         let cp = crate::eval_arena::checkpoint();
         owned = shared_open_ostream_with_schema(dir.join("owned.stream").to_str().unwrap(), "as").unwrap();
         crate::eval_arena::record_slot_if_active(owned);
-        assert!(matches!(write_begin(out, none).unwrap(), Begun::Open));
+        assert!(matches!(write_begin(out, none, false).unwrap(), Begun::Open));
         crate::eval_arena::rollback_to(cp);
         let slot = crate::stream::slot_ref(crate::stream::unpack_handle(owned).1).unwrap();
         assert_eq!(
@@ -1729,8 +1768,8 @@ fn a_batch_left_open_at_the_end_of_its_call_is_aborted() {
     let path = dir.join("l.stream");
     let h = shared_open_ostream_with_schema(path.to_str().unwrap(), "as").unwrap();
     let ended = std::thread::spawn(move || {
-        assert!(matches!(write_begin(h, none).unwrap(), Begun::Open));
-        let _ = write_place(16 + 3, std::ptr::null()).unwrap();
+        assert!(matches!(write_begin(h, none, false).unwrap(), Begun::Open));
+        let _ = write_place(16 + 3, std::ptr::null()).unwrap().expect("placed");
         crate::stream::pool_reclaim_stdio_after_dispatch();
     })
     .join();

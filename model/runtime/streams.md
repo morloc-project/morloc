@@ -380,15 +380,27 @@ Status: draft
 The C++, Rust, Python and R bindings write a `@write` batch to an output
 file through SLOT-36's transaction, and with `mlc_write` from their own
 value when begin refuses. Each encodes the canonical bytes, which a test
-per binding and a golden writing the same values from all four compare
-byte for byte. An error in the encoder aborts the batch: C++ and Rust
-through a guard, R in one `R_UnwindProtect` around the batch. A Python
-writer waits for the slot lock with the GIL released and then sizes,
-places and writes each element without itself releasing the GIL until the
-commit; Python code that runs during the encode (a dict key's __eq__, a
-finalizer) may still release it, and an element that no longer fits the
-room it was sized for fails the batch (`tla/EncodeInPlace.tla`
-models the GIL with a second Python thread).
+per binding and a golden writing the same values from several languages
+compare byte for byte. An error in the encoder aborts the batch: C++ and
+Rust through a guard, R in one `R_UnwindProtect` around the batch.
+
+A Python writer takes the slot lock with the GIL released, then sizes,
+places and writes each element of a list, or copies a batch given as
+bytes or as a numpy array already in the elements' layout into runs. It
+opens the batch with `MLC_WRITE_NOWAIT`: a placement that would wait for
+queue room places nothing and returns `MLC_WRITE_WOULD_BLOCK`, and the
+writer then waits in `mlc_write_wait` with the GIL released, sizes the
+element again and places it. Before its first wait a list batch is
+replaced by a shallow copy, so the batch is one state of the list (its
+elements as each is written); a bytearray, which another thread could
+change during a wait, takes the copy path. The commit runs with the GIL
+released. Python code that runs during the encode (a dict key's __eq__, a
+finalizer) may release the GIL, and an element that no longer fits the
+room it was sized for fails the batch. So that another Python thread then
+given the GIL cannot deadlock with the writer, pymorloc.c makes no call
+that may wait for an output stream's slot lock or queue with the GIL held
+(`tla/EncodeInPlace.tla` models the GIL with a third Python thread that
+mutates the writers' objects and takes the slot lock).
 
 ### SLOT-24 A batch's block outlives every compression job that reads it
 Status: implemented

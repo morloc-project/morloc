@@ -134,7 +134,7 @@ extern "C" {
     fn mlc_stream(ifile_handle: i64, errmsg: *mut *mut c_char) -> i64;
     fn mlc_ifile_walk(handle: i64, path: *const c_char, args_ptr: *const IFileWalkArg, n_args: u64, errmsg: *mut *mut c_char) -> *mut c_void;
     fn mlc_write(level: i64, handle: i64, payload_voidstar: *const c_void, errmsg: *mut *mut c_char) -> i32;
-    fn mlc_write_begin(level: i64, handle: i64, errmsg: *mut *mut c_char) -> i32;
+    fn mlc_write_begin(level: i64, handle: i64, flags: i32, errmsg: *mut *mut c_char) -> i32;
     fn mlc_write_place(size: u64, reached: *const u8, room: *mut MlcRoom, errmsg: *mut *mut c_char) -> i32;
     fn mlc_write_place_run(k: u64, reached: *const u8, slots: *mut *mut u8, placed: *mut u64, errmsg: *mut *mut c_char) -> i32;
     fn mlc_write_commit(reached: *const u8, errmsg: *mut *mut c_char) -> i32;
@@ -3914,7 +3914,7 @@ unsafe fn write_seq_in_place<T: ToVoidstar>((a, b): (&[T], &[T]), schema: &Schem
             .collect()
     };
     let mut err: *mut c_char = std::ptr::null_mut();
-    let rc = mlc_write_begin(level, handle as i64, &mut err);
+    let rc = mlc_write_begin(level, handle as i64, 0, &mut err);
     if rc == morloc_runtime_types::MLC_WRITE_FALLBACK {
         // The list's own size: its header, the data's alignment slack, and
         // each element's.

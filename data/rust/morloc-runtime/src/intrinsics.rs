@@ -1403,9 +1403,10 @@ unsafe fn write_result(r: Result<(), MorlocError>, errmsg: *mut *mut c_char) -> 
 }
 
 /// SLOT-36: begin an in-place `@write` batch on `handle`.
-pub(crate) unsafe fn mlc_write_begin(level: i64, handle: i64, errmsg: *mut *mut c_char) -> i32 {
+pub(crate) unsafe fn mlc_write_begin(level: i64, handle: i64, flags: i32, errmsg: *mut *mut c_char) -> i32 {
     clear_errmsg(errmsg);
-    let begun = crate::compression::CompressionLevel::from_int(level).and_then(|l| crate::stream::write_begin(handle, l));
+    let nowait = flags & morloc_runtime_types::MLC_WRITE_NOWAIT != 0;
+    let begun = crate::compression::CompressionLevel::from_int(level).and_then(|l| crate::stream::write_begin(handle, l, nowait));
     match begun {
         Ok(crate::stream::Begun::Fallback) => morloc_runtime_types::MLC_WRITE_FALLBACK,
         r => write_result(r.map(|_| ()), errmsg),
@@ -1415,28 +1416,41 @@ pub(crate) unsafe fn mlc_write_begin(level: i64, handle: i64, errmsg: *mut *mut 
 /// SLOT-36: the room for one element of `size` portable bytes.
 pub(crate) unsafe fn mlc_write_place(size: u64, reached: *const u8, room: *mut crate::stream::MlcRoom, errmsg: *mut *mut c_char) -> i32 {
     clear_errmsg(errmsg);
-    write_result(
-        crate::stream::write_place(size as usize, reached).map(|r| {
-            // SAFETY: SLOT-36: the caller passes room for one MlcRoom.
-            unsafe { *room = r }
-        }),
-        errmsg,
-    )
+    match crate::stream::write_place(size as usize, reached) {
+        Ok(None) => morloc_runtime_types::MLC_WRITE_WOULD_BLOCK,
+        r => write_result(
+            r.map(|r| {
+                // SAFETY: SLOT-36: the caller passes room for one MlcRoom.
+                unsafe { *room = r.expect("matched above") }
+            }),
+            errmsg,
+        ),
+    }
 }
 
 /// SLOT-36: the slots of up to `k` fixed-width or inline `Int` elements.
 pub(crate) unsafe fn mlc_write_place_run(k: u64, reached: *const u8, slots: *mut *mut u8, placed: *mut u64, errmsg: *mut *mut c_char) -> i32 {
     clear_errmsg(errmsg);
-    write_result(
-        crate::stream::write_place_run(k as usize, reached).map(|(p, n)| {
-            // SAFETY: SLOT-36: the caller passes one pointer and one count.
-            unsafe {
-                *slots = p;
-                *placed = n as u64;
-            }
-        }),
-        errmsg,
-    )
+    match crate::stream::write_place_run(k as usize, reached) {
+        Ok(None) => morloc_runtime_types::MLC_WRITE_WOULD_BLOCK,
+        r => write_result(
+            r.map(|r| {
+                let (p, n) = r.expect("matched above");
+                // SAFETY: SLOT-36: the caller passes one pointer and one count.
+                unsafe {
+                    *slots = p;
+                    *placed = n as u64;
+                }
+            }),
+            errmsg,
+        ),
+    }
+}
+
+/// SLOT-37: wait for the queue room a would-block placement lacked.
+pub(crate) unsafe fn mlc_write_wait(reached: *const u8, errmsg: *mut *mut c_char) -> i32 {
+    clear_errmsg(errmsg);
+    write_result(crate::stream::write_wait(reached), errmsg)
 }
 
 /// SLOT-36
@@ -2668,8 +2682,8 @@ mod c_abi {
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn mlc_write_begin(level: i64, handle: i64, errmsg: *mut *mut c_char) -> i32 {
-        super::mlc_write_begin(level, handle, errmsg)
+    pub unsafe extern "C" fn mlc_write_begin(level: i64, handle: i64, flags: i32, errmsg: *mut *mut c_char) -> i32 {
+        super::mlc_write_begin(level, handle, flags, errmsg)
     }
 
     #[no_mangle]
@@ -2680,6 +2694,11 @@ mod c_abi {
     #[no_mangle]
     pub unsafe extern "C" fn mlc_write_place_run(k: u64, reached: *const u8, slots: *mut *mut u8, placed: *mut u64, errmsg: *mut *mut c_char) -> i32 {
         super::mlc_write_place_run(k, reached, slots, placed, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn mlc_write_wait(reached: *const u8, errmsg: *mut *mut c_char) -> i32 {
+        super::mlc_write_wait(reached, errmsg)
     }
 
     #[no_mangle]
