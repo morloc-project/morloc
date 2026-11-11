@@ -383,9 +383,11 @@ value when begin refuses. Each encodes the canonical bytes, which a test
 per binding and a golden writing the same values from all four compare
 byte for byte. An error in the encoder aborts the batch: C++ and Rust
 through a guard, R in one `R_UnwindProtect` around the batch. A Python
-writer encodes holding the GIL from after it takes the slot lock to
-commit, never releasing it between sizing an element and writing it, and
-never waits for a slot lock holding the GIL (`tla/EncodeInPlace.tla`
+writer waits for the slot lock with the GIL released and then sizes,
+places and writes each element without itself releasing the GIL until the
+commit; Python code that runs during the encode (a dict key's __eq__, a
+finalizer) may still release it, and an element that no longer fits the
+room it was sized for fails the batch (`tla/EncodeInPlace.tla`
 models the GIL with a second Python thread).
 
 ### SLOT-24 A batch's block outlives every compression job that reads it

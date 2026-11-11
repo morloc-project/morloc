@@ -52,6 +52,8 @@ gens = {
     "Chain": lambda: chain(6),
     "Units": lambda: {"u": None, "s": string(), "v": None},
     "Unit": lambda: None,
+    "Wide": lambda: r.choice([0, -1, 1, 2**63 - 1, -2**63, -2**62, r.randint(-2**63, 2**63 - 1)]),
+    "Big": lambda: r.choice([0, -1, 2**63, -2**63, -2**63 - 1, -2**70, 2**127, -2**127, -2**127 - 1, 2**128, -2**128, 2**200, r.randint(-2**300, 2**300)]),
 }
 for name, g in gens.items():
     batches = [[g() for _ in range(n)] for n in SIZES]
@@ -61,3 +63,6 @@ for name, g in gens.items():
     if name == "Rose":
         text = text[:-1] + ", [" + json.dumps(rose(2)) + ", " + deep_rose(10000) + ", " + json.dumps(rose(2)) + "]]"
     open(f"{name}.json", "w").write(text)
+
+big = json.load(open("Big.json"))
+json.dump([x for b in big for x in b], open("BigOne.json", "w"))

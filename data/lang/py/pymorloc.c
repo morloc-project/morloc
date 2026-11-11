@@ -634,6 +634,16 @@ typedef struct {
     morloc_space_t space;   // read pass: where relptrs lead
     PyObject* result;       // read pass: the root, owned until returned
     PyObject* keep;         // references the walk holds until it ends
+    // SLOT-36: in a stream's buffer, offsets are relative to `base` and
+    // parts aligned relative to `origin`; NULL for shared-memory relptrs.
+    char* base;
+    char* origin;
+    // SLOT-36: deferred child frames, for the layout in a stream's buffer.
+    py_frame_t* later;
+    size_t later_len;
+    size_t later_cap;
+    int in_step;
+    int deferring;
 } py_walk_t;
 
 // True iff a back-reference occurs anywhere under `schema`.
@@ -670,6 +680,10 @@ static void py_walk_init(py_walk_t* w, const Schema* root) {
 static void py_walk_free(py_walk_t* w) {
     free(w->frames);
     w->frames = NULL;
+    free(w->later);
+    w->later = NULL;
+    w->later_len = 0;
+    w->later_cap = 0;
     Py_CLEAR(w->keep);
     for (size_t i = 0; i < w->n_keysets; i++) {
         for (size_t k = 0; k < w->keysets[i].schema->size; k++) {
@@ -733,7 +747,10 @@ static int py_vanished(void) {
 // start; NULL with a Python error set, writing nothing, when they no longer
 // fit the space the size pass measured (the value changed between passes).
 static char* py_take(py_walk_t* w, size_t align, size_t n) {
-    char* at = (char*)ALIGN_UP((uintptr_t)*w->cursor, align);
+    uintptr_t c = (uintptr_t)*w->cursor;
+    char* at = w->origin != NULL
+        ? w->origin + ALIGN_UP(c - (uintptr_t)w->origin, align)
+        : (char*)ALIGN_UP(c, align);
     if (at > (char*)w->end || n > (size_t)((char*)w->end - at)) {
         PyErr_SetString(PyExc_RuntimeError,
             "the value changed while it was being written: it no longer fits the space measured for it");
@@ -741,6 +758,44 @@ static char* py_take(py_walk_t* w, size_t align, size_t n) {
     }
     *w->cursor = at + n;
     return at;
+}
+
+// The relative pointer to `p`: an offset from the walk's base in a
+// stream's buffer, else a shared-memory relptr. -1 with a Python error set.
+static int py_rel(py_walk_t* w, void* p, relptr_t* out) {
+    if (w->base != NULL) {
+        *out = (relptr_t)((char*)p - w->base);
+        return 0;
+    }
+    char* err = NULL;
+    *out = abs2rel(p, &err);
+    if (err != NULL) {
+        PyErr_SetString(PyExc_RuntimeError, err);
+        free(err);
+        return -1;
+    }
+    return 0;
+}
+
+// The data pointer of an empty array or string.
+static relptr_t py_empty_rel(py_walk_t* w) {
+    return w->base != NULL ? 0 : RELNULL;
+}
+
+// Hold a child's frame until the current step returns.
+static int py_defer(py_walk_t* w, const py_frame_t* f) {
+    if (w->later_len >= w->later_cap) {
+        size_t cap = w->later_cap ? w->later_cap * 2 : 16;
+        py_frame_t* grown = (py_frame_t*)realloc(w->later, cap * sizeof(py_frame_t));
+        if (grown == NULL) {
+            PyErr_NoMemory();
+            return -1;
+        }
+        w->later = grown;
+        w->later_cap = cap;
+    }
+    w->later[w->later_len++] = *f;
+    return 0;
 }
 
 static int py_push(py_walk_t* w, const py_frame_t* f) {
@@ -844,6 +899,23 @@ static int extract_ifile_handles_pylist(PyObject* list, int64_t* out, Py_ssize_t
 
 static int py_size_step(py_walk_t* w, const Schema* schema, PyObject* obj, size_t idx);
 
+// The 64-bit limbs of an Int's two's-complement form, as the runtime
+// counts them: one for any value an int64 holds. -1 with a Python error set.
+static ssize_t py_int_limbs(PyObject* obj) {
+    int overflow = 0;
+    PyLong_AsLongLongAndOverflow(obj, &overflow);
+    if (PyErr_Occurred()) return -1;
+    if (overflow == 0) return 1;
+    // bit_length(x) + 1 for x >= 0, bit_length(~x) + 1 for x < 0
+    // int's own invert: a subclass's __invert__ must not run here.
+    PyObject* mag = overflow < 0 ? PyLong_Type.tp_as_number->nb_invert(obj) : (Py_INCREF(obj), obj);
+    if (mag == NULL) return -1;
+    size_t nbits = _PyLong_NumBits(mag);
+    Py_DECREF(mag);
+    if (nbits == (size_t)-1 && PyErr_Occurred()) return -1;
+    return (ssize_t)((nbits + 1 + 63) / 64);
+}
+
 // Account for a child. `inline_slot` says the child's fixed width lies
 // inside the parent's (tuple and record fields), so only its tail is added.
 static int py_size_child(py_walk_t* w, const Schema* schema, PyObject* obj, int inline_slot) {
@@ -889,10 +961,9 @@ static int py_size_step(py_walk_t* w, const Schema* schema, PyObject* obj, size_
             if (!PyLong_Check(obj)) {
                 PyRAISE("Expected int for MORLOC_INT, but got %s", Py_TYPE(obj)->tp_name);
             }
-            size_t nbits = _PyLong_NumBits(obj);
-            if (nbits == (size_t)-1 && PyErr_Occurred()) return -1;
-            size_t nbytes = (nbits + 8) / 8;
-            size_t nlimbs = (nbytes + 7) / 8;
+            ssize_t limbs = py_int_limbs(obj);
+            if (limbs < 0) return -1;
+            size_t nlimbs = (size_t)limbs;
             if (nlimbs <= 1) {
                 w->total += 16;  // inline
             } else {
@@ -942,7 +1013,12 @@ static int py_size_step(py_walk_t* w, const Schema* schema, PyObject* obj, size_
                 size_t buf_align = (schema->type == MORLOC_STRING)
                     ? schema->parameters[0]->alignment
                     : element_schema->data_alignment;
-                w->total += (ssize_t)(sizeof(Array) + buf_align - 1);
+                // An empty array has no data region.
+                int nd0 = py_is_ndarray(obj);
+                if (nd0 < 0) return -1;
+                Py_ssize_t n0 = nd0 ? (Py_ssize_t)PyArray_SIZE((PyArrayObject*)obj) : PyObject_Length(obj);
+                if (n0 < 0) return -1;
+                w->total += (ssize_t)(sizeof(Array) + (n0 > 0 ? buf_align - 1 : 0));
 
                 if (PyList_Check(obj)) {
                     Py_ssize_t list_size = PyList_Size(obj);
@@ -1214,7 +1290,9 @@ static int py_write_child(py_walk_t* w, const Schema* schema, void* dest, PyObje
     if (obj == NULL) return py_vanished();
     const Schema* s = py_resolve(schema);
     if (s == NULL) return -1;
-    if (py_flat(w, s)) {
+    // A child that may write a tail waits behind a deferred sibling.
+    int later = w->deferring && !s->fixed_width;
+    if (!later && py_flat(w, s)) {
         Py_INCREF(obj);
         int r = py_write_step(w, s, dest, obj, 0);
         Py_DECREF(obj);
@@ -1227,6 +1305,11 @@ static int py_write_child(py_walk_t* w, const Schema* schema, void* dest, PyObje
     f.schema = s;
     f.obj = obj;
     f.dest = dest;
+    if (later) return py_defer(w, &f);
+    if (w->in_step && w->base != NULL) {
+        w->deferring = 1;
+        return py_defer(w, &f);
+    }
     return py_push(w, &f);
 }
 
@@ -1312,7 +1395,9 @@ static int py_write_step(py_walk_t* w, const Schema* schema, void* dest, PyObjec
             {
                 *((double*)dest) = PyFloat_AsDouble(obj);
             } else if(PyLong_Check(obj)){
-                *((double*)dest) = (double)PyLong_AsLongLong(obj);
+                double d = PyLong_AsDouble(obj);
+                if (d == -1.0 && PyErr_Occurred()) { goto error; }
+                *((double*)dest) = d;
             } else {
                 PyRAISE("Expected float or int for MORLOC_FLOAT64, but got %s", Py_TYPE(obj)->tp_name);
             }
@@ -1323,35 +1408,22 @@ static int py_write_step(py_walk_t* w, const Schema* schema, void* dest, PyObjec
             if (!PyLong_Check(obj)) {
                 PyRAISE("Expected int for MORLOC_INT, but got %s", Py_TYPE(obj)->tp_name);
             }
-            size_t nbits = _PyLong_NumBits(obj);
-            if (nbits == (size_t)-1 && PyErr_Occurred()) { goto error; }
-            size_t nbytes = (nbits + 8) / 8;
-            size_t nlimbs = (nbytes + 7) / 8;
-            if (nlimbs == 0) nlimbs = 1;
+            ssize_t limbs = py_int_limbs(obj);
+            if (limbs < 0) { goto error; }
+            size_t nlimbs = (size_t)limbs;
 
             int64_t* fields = (int64_t*)dest;
             if (nlimbs <= 1) {
                 // Inline: write value directly
                 fields[0] = 1;
-                int overflow = 0;
-                long long val = PyLong_AsLongLongAndOverflow(obj, &overflow);
-                if (overflow || PyErr_Occurred()) {
-                    PyErr_Clear();
-                    // Shouldn't happen for nlimbs<=1, but fallback
-                    fields[1] = 0;
-                } else {
-                    fields[1] = (int64_t)val;
-                }
+                fields[1] = (int64_t)PyLong_AsLongLong(obj);
+                if (PyErr_Occurred()) { goto error; }
             } else {
                 // Overflow: allocate limb array, store relptr
                 fields[0] = (int64_t)nlimbs;
                 char* limbs = py_take(w, _Alignof(uint64_t), nlimbs * sizeof(uint64_t));
                 if (limbs == NULL) goto error;
-                {
-                    char* rel_err = NULL;
-                    *(relptr_t*)&fields[1] = abs2rel(limbs, &rel_err);
-                    if (rel_err) { free(rel_err); goto error; }
-                }
+                if (py_rel(w, limbs, (relptr_t*)&fields[1]) != 0) goto error;
                 memset(limbs, 0, nlimbs * sizeof(uint64_t));
                 // Python 3.13 added a trailing `with_exceptions` argument to
                 // _PyLong_AsByteArray; pass 1 to keep the exception-raising
@@ -1478,7 +1550,7 @@ static int py_write_step(py_walk_t* w, const Schema* schema, void* dest, PyObjec
                 result->size = (size_t)size;
 
                 if(result->size == 0){
-                    result->data = RELNULL;
+                    result->data = py_empty_rel(w);
                     break;
                 }
 
@@ -1492,7 +1564,7 @@ static int py_write_step(py_walk_t* w, const Schema* schema, void* dest, PyObjec
                 char* start = py_take(w, buf_align, (size_t)size * width);
                 if (start == NULL) goto error;
 
-                result->data = PyTRY(abs2rel, start);
+                if (py_rel(w, start, &result->data) != 0) goto error;
 
                 if (PyList_Check(obj) || numpy_per_element) {
                     // Per-element walk: works for Python lists and numpy
@@ -1647,11 +1719,7 @@ static int py_write_step(py_walk_t* w, const Schema* schema, void* dest, PyObjec
                 size_t warm_align = warm->alignment;
                 void* arm_dest = py_take(w, warm_align, warm->width);
                 if (arm_dest == NULL) goto error;
-                {
-                    char* rel_err = NULL;
-                    *(relptr_t*)((char*)dest + 8) = abs2rel(arm_dest, &rel_err);
-                    if (rel_err) { free(rel_err); goto error; }
-                }
+                if (py_rel(w, arm_dest, (relptr_t*)((char*)dest + 8)) != 0) goto error;
                 if (py_write_child(w, warm, arm_dest, wfields) != 0) {
                     goto error;
                 }
@@ -1673,11 +1741,7 @@ static int py_write_step(py_walk_t* w, const Schema* schema, void* dest, PyObjec
                 size_t inner_align = inner_schema->alignment;
                 void* inner_dest = py_take(w, inner_align, inner_schema->width);
                 if (inner_dest == NULL) goto error;
-                {
-                    char* rel_err = NULL;
-                    *(relptr_t*)dest = abs2rel(inner_dest, &rel_err);
-                    if (rel_err) { free(rel_err); goto error; }
-                }
+                if (py_rel(w, inner_dest, (relptr_t*)dest) != 0) goto error;
                 if (py_write_child(w, inner_schema, inner_dest, obj) != 0) {
                     goto error;
                 }
@@ -1713,6 +1777,25 @@ int to_voidstar_inner(void* dest, void** cursor, void* end, const Schema* schema
 done:
     py_walk_free(&w);
     return result;
+}
+
+// Step the frames of a write walk to the end, laying out the children a
+// step deferred after it returns (SLOT-36). 0, or -1 with a Python error.
+static int py_write_run(py_walk_t* w) {
+    for (;;) {
+        int r = py_next(w);
+        if (r < 0) return -1;
+        if (r == 0) return 0;
+        w->in_step = 1;
+        w->deferring = 0;
+        int s = py_write_step(w, w->cur.schema, w->cur.dest, w->cur.obj, w->cur.idx);
+        w->in_step = 0;
+        w->deferring = 0;
+        if (s != 0) return -1;
+        while (w->later_len > 0) {
+            if (py_push(w, &w->later[--w->later_len]) != 0) return -1;
+        }
+    }
 }
 
 void* to_voidstar(const Schema* schema, PyObject* obj){ MAYFAIL
@@ -4348,9 +4431,144 @@ error:
     return NULL;
 }
 
+// The result of an mlc_write_* call: 0, or -1 with a Python error set.
+static int py_stream_result(int32_t rc, char* err) {
+    if (rc == MLC_RESULT_PIPE_CLOSED) {
+        free(err);
+        PyErr_SetString(PyMorlocPipeClosed, PIPE_CLOSED_MESSAGE);
+        return -1;
+    }
+    if (err != NULL) {
+        PyErr_SetString(PyExc_RuntimeError, err);
+        free(err);
+        return -1;
+    }
+    if (rc != 0) {
+        PyErr_SetString(PyMorlocInternalError, "an in-place @write call failed without a reason");
+        return -1;
+    }
+    return 0;
+}
+
+// Whether an Int element is written as its slot alone (one limb).
+// 1 or 0, or -1 with a Python error set.
+static int py_int_inline(PyObject* obj) {
+    if (!PyLong_Check(obj)) return 1; // the write pass reports the type
+    ssize_t limbs = py_int_limbs(obj);
+    return limbs < 0 ? -1 : limbs == 1;
+}
+
+// Size one element with the batch's walk. -1 with a Python error set.
+static ssize_t py_size_element(py_walk_t* w, const Schema* elem, PyObject* obj) {
+    w->total = 0;
+    if (py_size_child(w, elem, obj, 0) != 0) return -1;
+    for (;;) {
+        int r = py_next(w);
+        if (r < 0) return -1;
+        if (r == 0) return w->total;
+        if (w->cur.inline_slot) w->total -= (ssize_t)w->cur.schema->width;
+        if (py_size_step(w, w->cur.schema, w->cur.obj, w->cur.idx) != 0) return -1;
+    }
+}
+
+// SLOT-36, SLOT-37: write a list batch in place in an output file's
+// buffer. 1 when written, 0 when the stream takes a voidstar copy, -1 with
+// a Python error set.
+static int py_write_in_place(const Schema* schema, long long level, PyObject* list, int64_t handle) {
+    const Schema* elem = schema->parameters[0];
+    if (elem->type == MORLOC_TABLE) return 0;
+    if (mlc_write_open()) {
+        PyErr_SetString(PyExc_RuntimeError,
+            "@write: a batch is already being written on this thread (a @write from code run while encoding one)");
+        return -1;
+    }
+    char* err = NULL;
+    int32_t rc;
+    Py_BEGIN_ALLOW_THREADS
+    rc = mlc_write_begin(level, handle, &err);
+    Py_END_ALLOW_THREADS
+    if (rc == MLC_WRITE_FALLBACK) return 0;
+    if (py_stream_result(rc, err) != 0) return -1;
+
+    py_walk_t w;
+    py_walk_init(&w, elem);
+    void* cursor = NULL;
+    w.cursor = &cursor;
+    const uint8_t* reached = NULL;
+    const size_t width = elem->width;
+    const int run = (elem->fixed_width || elem->type == MORLOC_INT) && width > 0;
+    PyObject* x = NULL;
+    // The end of the stretch of inline Ints found at the last scan.
+    Py_ssize_t stretch_end = 0;
+    for (Py_ssize_t i = 0; i < PyList_GET_SIZE(list);) {
+        int inline_int = 1;
+        if (run && elem->type == MORLOC_INT && i >= stretch_end) {
+            stretch_end = i;
+            while (stretch_end < PyList_GET_SIZE(list)) {
+                int in = py_int_inline(PyList_GET_ITEM(list, stretch_end));
+                if (in < 0) goto error;
+                if (!in) break;
+                stretch_end++;
+            }
+            inline_int = stretch_end > i;
+        }
+        if (run && inline_int) {
+            // The stretch from i that the run may take.
+            Py_ssize_t k = (elem->type == MORLOC_INT ? stretch_end : PyList_GET_SIZE(list)) - i;
+            if (k < 1) k = 1;
+            uint8_t* slots = NULL;
+            uint64_t placed = 0;
+            rc = mlc_write_place_run((uint64_t)k, reached, &slots, &placed, &err);
+            if (py_stream_result(rc, err) != 0) goto error;
+            w.base = NULL;
+            w.origin = NULL;
+            w.end = NULL;
+            for (uint64_t j = 0; j < placed; j++) {
+                if (i + (Py_ssize_t)j >= PyList_GET_SIZE(list)) { py_vanished(); goto error; }
+                x = PyList_GET_ITEM(list, i + (Py_ssize_t)j);
+                Py_INCREF(x);
+                if (py_write_child(&w, elem, slots + j * width, x) != 0) goto error;
+                if (py_write_run(&w) != 0) goto error;
+                Py_CLEAR(x);
+                Py_CLEAR(w.keep);
+            }
+            reached = slots + placed * width;
+            i += (Py_ssize_t)placed;
+            continue;
+        }
+        if (i >= PyList_GET_SIZE(list)) { py_vanished(); goto error; }
+        x = PyList_GET_ITEM(list, i);
+        Py_INCREF(x);
+        ssize_t size = py_size_element(&w, elem, x);
+        if (size < 0) goto error;
+        mlc_room_t room;
+        rc = mlc_write_place((uint64_t)size, reached, &room, &err);
+        if (py_stream_result(rc, err) != 0) goto error;
+        cursor = room.data;
+        w.end = room.end;
+        w.base = (char*)room.base;
+        w.origin = (char*)room.origin;
+        if (py_write_child(&w, elem, room.slot, x) != 0) goto error;
+        if (py_write_run(&w) != 0) goto error;
+        reached = (const uint8_t*)cursor;
+        Py_CLEAR(x);
+        Py_CLEAR(w.keep);
+        i++;
+    }
+    py_walk_free(&w);
+    rc = mlc_write_commit(reached, &err);
+    if (py_stream_result(rc, err) != 0) return -1;
+    return 1;
+error:
+    Py_XDECREF(x);
+    py_walk_free(&w);
+    mlc_write_abort();
+    return -1;
+}
+
 // _mlc_write(schema_str, level, value_obj, handle) -> None
-// value_obj is serialised to voidstar via to_voidstar before being
-// passed to the runtime.
+// A list batch to an output file is written in place; any other value or
+// stream takes a voidstar copy, which the runtime lays out.
 static PyObject* pybinding__mlc_write(PyObject* self, PyObject* args) { MAYFAIL
     const char* schema_str;
     long long level_ll;
@@ -4361,6 +4579,14 @@ static PyObject* pybinding__mlc_write(PyObject* self, PyObject* args) { MAYFAIL
     PARSE_ARGS_OR_ABORT(args, "sLOL",
             &schema_str, &level_ll, &value_obj, &handle_ll);
     schema = PyTRY(parse_schema, schema_str);
+    if (schema->type == MORLOC_ARRAY && PyList_Check(value_obj)) {
+        int placed = py_write_in_place(schema, level_ll, value_obj, (int64_t)handle_ll);
+        if (placed < 0) goto error;
+        if (placed == 1) {
+            free_schema(schema);
+            Py_RETURN_NONE;
+        }
+    }
     ssize_t bytes = get_shm_size(schema, value_obj);
     if (bytes < 0) { goto error; }
     voidstar = PyTRY(shmalloc, (size_t)bytes);

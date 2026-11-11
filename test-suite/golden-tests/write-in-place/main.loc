@@ -1,15 +1,21 @@
--- Every value is written to a stream file in place by C++ and by Rust
--- (SLOT-36, SLOT-37) and from a voidstar copy by Python, which the runtime
--- lays out. All three write the same JSON batches, and each in-place file
--- must agree with Python's byte for byte, sub-packet cuts and footer
--- included, apart from the writer's pid and times (same.py). The types
--- cover alignment relative to the element's origin, empty arrays and
--- strings, size slack, records and data arms with deep fields before
--- fields with tails (Tree, Chain: laid out in field order), and a rose
--- tree 10000 deep. The 4096-byte buffer cuts most batches. A few types are
--- also written with the default buffer, and to standard output, which takes
--- the voidstar copy in every language (a staged stream); C++ and Rust size
--- that copy with the sizes they computed for the in-place attempt.
+-- Each batch of JSON values is written to a stream file in place by the
+-- languages that hold its type (SLOT-36, SLOT-37) and checked byte for
+-- byte, sub-packet cuts and footer included, apart from the writer's pid
+-- and times (same.py):
+--   * against the same language's staged standard output
+--     (MORLOC_STDOUT=stage), which takes the voidstar copy: the runtime
+--     flattens the language's own voidstar, so this pins placement (cuts,
+--     slack, alignment relative to the element's origin) but not the
+--     language's encoding choices;
+--   * across languages, which pins those choices: C++ against Python for
+--     every type, Rust against Python for 64-bit Int (Wide, with -2^63),
+--     and Python against the nexus for Int beyond 64 bits (BigOne: the
+--     nexus writes a batch it holds itself).
+-- The types cover alignment, empty arrays and strings, size slack,
+-- records and data arms with deep fields before fields with tails (Tree,
+-- Chain: laid out in field order), Int values needing limbs, and a rose
+-- tree 10000 deep. The 4096-byte buffer cuts most batches; a few types
+-- are also written with the default buffer.
 module main
   ( wcReal, wrReal, wpReal
   , wcI8, wrI8, wpI8
@@ -34,6 +40,21 @@ module main
   , wcChain, wrChain, wpChain
   , wcUnits, wrUnits, wpUnits
   , wcUnit, wrUnit, wpUnit
+  , wrWide, srWide, wpWide, spWide
+  , wpBig, spBig, wnBigOne, wpBigOne
+  , scReal, srReal, spReal
+  , scI8, srI8, spI8
+  , scBool, srBool, spBool
+  , scPair, srPair, spPair
+  , scI64, srI64, spI64
+  , scInt, srInt, spInt
+  , scReals, srReals, spReals
+  , scI8s, srI8s, spI8s
+  , scOptStr, srOptStr, spOptStr
+  , scOptI16s, srOptI16s, spOptI16s
+  , scDir, srDir, spDir
+  , scTwo, srTwo, spTwo
+  , scUnit, srUnit, spUnit
   , scStrs3, srStrs3, spStrs3
   , scTree, srTree, spTree
   , scMixed, srMixed, spMixed
@@ -704,4 +725,286 @@ spStr :: Int -> [[Str]] -> <IO> ()
 spStr z xss = do
   o <- @stdout :: <IO> (OStream Str)
   drainP z o xss
+  @close o
+
+scReal :: Int -> [[Real]] -> <IO> ()
+scReal z xss = do
+  o <- @stdout :: <IO> (OStream Real)
+  drainC z o xss
+  @close o
+
+srReal :: Int -> [[Real]] -> <IO> ()
+srReal z xss = do
+  o <- @stdout :: <IO> (OStream Real)
+  drainR z o xss
+  @close o
+
+spReal :: Int -> [[Real]] -> <IO> ()
+spReal z xss = do
+  o <- @stdout :: <IO> (OStream Real)
+  drainP z o xss
+  @close o
+
+scI8 :: Int -> [[I8]] -> <IO> ()
+scI8 z xss = do
+  o <- @stdout :: <IO> (OStream I8)
+  drainC z o xss
+  @close o
+
+srI8 :: Int -> [[I8]] -> <IO> ()
+srI8 z xss = do
+  o <- @stdout :: <IO> (OStream I8)
+  drainR z o xss
+  @close o
+
+spI8 :: Int -> [[I8]] -> <IO> ()
+spI8 z xss = do
+  o <- @stdout :: <IO> (OStream I8)
+  drainP z o xss
+  @close o
+
+scBool :: Int -> [[Bool]] -> <IO> ()
+scBool z xss = do
+  o <- @stdout :: <IO> (OStream Bool)
+  drainC z o xss
+  @close o
+
+srBool :: Int -> [[Bool]] -> <IO> ()
+srBool z xss = do
+  o <- @stdout :: <IO> (OStream Bool)
+  drainR z o xss
+  @close o
+
+spBool :: Int -> [[Bool]] -> <IO> ()
+spBool z xss = do
+  o <- @stdout :: <IO> (OStream Bool)
+  drainP z o xss
+  @close o
+
+scPair :: Int -> [[(I32, Bool)]] -> <IO> ()
+scPair z xss = do
+  o <- @stdout :: <IO> (OStream (I32, Bool))
+  drainC z o xss
+  @close o
+
+srPair :: Int -> [[(I32, Bool)]] -> <IO> ()
+srPair z xss = do
+  o <- @stdout :: <IO> (OStream (I32, Bool))
+  drainR z o xss
+  @close o
+
+spPair :: Int -> [[(I32, Bool)]] -> <IO> ()
+spPair z xss = do
+  o <- @stdout :: <IO> (OStream (I32, Bool))
+  drainP z o xss
+  @close o
+
+scI64 :: Int -> [[I64]] -> <IO> ()
+scI64 z xss = do
+  o <- @stdout :: <IO> (OStream I64)
+  drainC z o xss
+  @close o
+
+srI64 :: Int -> [[I64]] -> <IO> ()
+srI64 z xss = do
+  o <- @stdout :: <IO> (OStream I64)
+  drainR z o xss
+  @close o
+
+spI64 :: Int -> [[I64]] -> <IO> ()
+spI64 z xss = do
+  o <- @stdout :: <IO> (OStream I64)
+  drainP z o xss
+  @close o
+
+scInt :: Int -> [[Int]] -> <IO> ()
+scInt z xss = do
+  o <- @stdout :: <IO> (OStream Int)
+  drainC z o xss
+  @close o
+
+srInt :: Int -> [[Int]] -> <IO> ()
+srInt z xss = do
+  o <- @stdout :: <IO> (OStream Int)
+  drainR z o xss
+  @close o
+
+spInt :: Int -> [[Int]] -> <IO> ()
+spInt z xss = do
+  o <- @stdout :: <IO> (OStream Int)
+  drainP z o xss
+  @close o
+
+scReals :: Int -> [[[Real]]] -> <IO> ()
+scReals z xss = do
+  o <- @stdout :: <IO> (OStream [Real])
+  drainC z o xss
+  @close o
+
+srReals :: Int -> [[[Real]]] -> <IO> ()
+srReals z xss = do
+  o <- @stdout :: <IO> (OStream [Real])
+  drainR z o xss
+  @close o
+
+spReals :: Int -> [[[Real]]] -> <IO> ()
+spReals z xss = do
+  o <- @stdout :: <IO> (OStream [Real])
+  drainP z o xss
+  @close o
+
+scI8s :: Int -> [[[I8]]] -> <IO> ()
+scI8s z xss = do
+  o <- @stdout :: <IO> (OStream [I8])
+  drainC z o xss
+  @close o
+
+srI8s :: Int -> [[[I8]]] -> <IO> ()
+srI8s z xss = do
+  o <- @stdout :: <IO> (OStream [I8])
+  drainR z o xss
+  @close o
+
+spI8s :: Int -> [[[I8]]] -> <IO> ()
+spI8s z xss = do
+  o <- @stdout :: <IO> (OStream [I8])
+  drainP z o xss
+  @close o
+
+scOptStr :: Int -> [[?Str]] -> <IO> ()
+scOptStr z xss = do
+  o <- @stdout :: <IO> (OStream ?Str)
+  drainC z o xss
+  @close o
+
+srOptStr :: Int -> [[?Str]] -> <IO> ()
+srOptStr z xss = do
+  o <- @stdout :: <IO> (OStream ?Str)
+  drainR z o xss
+  @close o
+
+spOptStr :: Int -> [[?Str]] -> <IO> ()
+spOptStr z xss = do
+  o <- @stdout :: <IO> (OStream ?Str)
+  drainP z o xss
+  @close o
+
+scOptI16s :: Int -> [[[?I16]]] -> <IO> ()
+scOptI16s z xss = do
+  o <- @stdout :: <IO> (OStream [?I16])
+  drainC z o xss
+  @close o
+
+srOptI16s :: Int -> [[[?I16]]] -> <IO> ()
+srOptI16s z xss = do
+  o <- @stdout :: <IO> (OStream [?I16])
+  drainR z o xss
+  @close o
+
+spOptI16s :: Int -> [[[?I16]]] -> <IO> ()
+spOptI16s z xss = do
+  o <- @stdout :: <IO> (OStream [?I16])
+  drainP z o xss
+  @close o
+
+scDir :: Int -> [[Dir]] -> <IO> ()
+scDir z xss = do
+  o <- @stdout :: <IO> (OStream Dir)
+  drainC z o xss
+  @close o
+
+srDir :: Int -> [[Dir]] -> <IO> ()
+srDir z xss = do
+  o <- @stdout :: <IO> (OStream Dir)
+  drainR z o xss
+  @close o
+
+spDir :: Int -> [[Dir]] -> <IO> ()
+spDir z xss = do
+  o <- @stdout :: <IO> (OStream Dir)
+  drainP z o xss
+  @close o
+
+scTwo :: Int -> [[Two]] -> <IO> ()
+scTwo z xss = do
+  o <- @stdout :: <IO> (OStream Two)
+  drainC z o xss
+  @close o
+
+srTwo :: Int -> [[Two]] -> <IO> ()
+srTwo z xss = do
+  o <- @stdout :: <IO> (OStream Two)
+  drainR z o xss
+  @close o
+
+spTwo :: Int -> [[Two]] -> <IO> ()
+spTwo z xss = do
+  o <- @stdout :: <IO> (OStream Two)
+  drainP z o xss
+  @close o
+
+scUnit :: Int -> [[()]] -> <IO> ()
+scUnit z xss = do
+  o <- @stdout :: <IO> (OStream ())
+  drainC z o xss
+  @close o
+
+srUnit :: Int -> [[()]] -> <IO> ()
+srUnit z xss = do
+  o <- @stdout :: <IO> (OStream ())
+  drainR z o xss
+  @close o
+
+spUnit :: Int -> [[()]] -> <IO> ()
+spUnit z xss = do
+  o <- @stdout :: <IO> (OStream ())
+  drainP z o xss
+  @close o
+
+wrWide :: Int -> Str -> [[Int]] -> <IO> ()
+wrWide z path xss = do
+  Ok o <- @open path :: <IO> (Try Str (OStream Int))
+  drainR z o xss
+  @close o
+
+srWide :: Int -> [[Int]] -> <IO> ()
+srWide z xss = do
+  o <- @stdout :: <IO> (OStream Int)
+  drainR z o xss
+  @close o
+
+wpWide :: Int -> Str -> [[Int]] -> <IO> ()
+wpWide z path xss = do
+  Ok o <- @open path :: <IO> (Try Str (OStream Int))
+  drainP z o xss
+  @close o
+
+spWide :: Int -> [[Int]] -> <IO> ()
+spWide z xss = do
+  o <- @stdout :: <IO> (OStream Int)
+  drainP z o xss
+  @close o
+
+wpBig :: Int -> Str -> [[Int]] -> <IO> ()
+wpBig z path xss = do
+  Ok o <- @open path :: <IO> (Try Str (OStream Int))
+  drainP z o xss
+  @close o
+
+spBig :: Int -> [[Int]] -> <IO> ()
+spBig z xss = do
+  o <- @stdout :: <IO> (OStream Int)
+  drainP z o xss
+  @close o
+
+wnBigOne :: Int -> Str -> [Int] -> <IO> ()
+wnBigOne z path xs = do
+  Ok o <- @open path :: <IO> (Try Str (OStream Int))
+  @write z o xs
+  @close o
+
+wpBigOne :: Int -> Str -> [Int] -> <IO> ()
+wpBigOne z path xs = do
+  Ok o <- @open path :: <IO> (Try Str (OStream Int))
+  @write z o (idpy xs)
   @close o

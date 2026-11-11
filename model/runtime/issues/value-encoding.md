@@ -119,13 +119,6 @@
   per-language statement of which native forms each wire form may become.
   Reproduction:
   /work/plans/error-clusters/repro/newtype-form-no-packer.
-- [reproduced, 2026-11-11] Python writes the `Int` -2^63 as two limbs, where the
-  runtime's JSON loader and C++ write it inline (one limb is enough):
-  pymorloc.c MORLOC_INT case sizes limbs from `_PyLong_NumBits`, which is
-  64 for -2^63, so `nbytes = 9`. One value then has two encodings, which
-  breaks SLOT-37's canonical bytes once Python writes in place, and a
-  C++ reader reports it as "2-limb integer (128 bits)" (reproduced:
-  `idcpp (idpy x)` with x = -9223372036854775808).
 - [read, 2026-11-11] A Rust `u64` written under an `Int` schema is cast
   with `as i64` (data/rust/rustmorloc/src/lib.rs, int_impl, the
   `SerialType::Int` arm of `write`), so a value above i64::MAX wraps

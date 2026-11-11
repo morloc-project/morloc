@@ -1,69 +1,65 @@
 py-writes
 cpp-writes
 rust-writes
-Real 0 cpp same rust same
-Real 3 cpp same rust same
-I8 0 cpp same rust same
-I8 3 cpp same rust same
-Bool 0 cpp same rust same
-Bool 3 cpp same rust same
-Pair 0 cpp same rust same
-Pair 3 cpp same rust same
-I64 0 cpp same rust same
-I64 3 cpp same rust same
-Int 0 cpp same rust same
-Int 3 cpp same rust same
-Str 0 cpp same rust same
-Str 3 cpp same rust same
-Reals 0 cpp same rust same
-Reals 3 cpp same rust same
-I8s 0 cpp same rust same
-I8s 3 cpp same rust same
-U8s 0 cpp same rust same
-U8s 3 cpp same rust same
-Strs3 0 cpp same rust same
-Strs3 3 cpp same rust same
-OptStr 0 cpp same rust same
-OptStr 3 cpp same rust same
-OptReals 0 cpp same rust same
-OptReals 3 cpp same rust same
-OptI16s 0 cpp same rust same
-OptI16s 3 cpp same rust same
-Dir 0 cpp same rust same
-Dir 3 cpp same rust same
-Shape 0 cpp same rust same
-Shape 3 cpp same rust same
-Two 0 cpp same rust same
-Two 3 cpp same rust same
-Mixed 0 cpp same rust same
-Mixed 3 cpp same rust same
-Tree 0 cpp same rust same
-Tree 3 cpp same rust same
-Rose 0 cpp same rust same
-Rose 3 cpp same rust same
-Chain 0 cpp same rust same
-Chain 3 cpp same rust same
-Units 0 cpp same rust same
-Units 3 cpp same rust same
-Unit 0 cpp same rust same
-Unit 3 cpp same rust same
-stdout Strs3 cpp same rust same
-default-buffer Strs3 cpp same rust same
-stdout Tree cpp same rust same
-default-buffer Tree cpp same rust same
-stdout Mixed cpp same rust same
-default-buffer Mixed cpp same rust same
-stdout Units cpp same rust same
-default-buffer Units cpp same rust same
-stdout Chain cpp same rust same
-default-buffer Chain cpp same rust same
-stdout Rose cpp same rust same
-default-buffer Rose cpp same rust same
-stdout Shape cpp same rust same
-default-buffer Shape cpp same rust same
-stdout OptReals cpp same rust same
-default-buffer OptReals cpp same rust same
-stdout U8s cpp same rust same
-default-buffer U8s cpp same rust same
-stdout Str cpp same rust same
-default-buffer Str cpp same rust same
+Real 0 cpp same rust same py same cross same
+Real 3 cpp same rust same py same cross same
+I8 0 cpp same rust same py same cross same
+I8 3 cpp same rust same py same cross same
+Bool 0 cpp same rust same py same cross same
+Bool 3 cpp same rust same py same cross same
+Pair 0 cpp same rust same py same cross same
+Pair 3 cpp same rust same py same cross same
+I64 0 cpp same rust same py same cross same
+I64 3 cpp same rust same py same cross same
+Int 0 cpp same rust same py same cross same
+Int 3 cpp same rust same py same cross same
+Str 0 cpp same rust same py same cross same
+Str 3 cpp same rust same py same cross same
+Reals 0 cpp same rust same py same cross same
+Reals 3 cpp same rust same py same cross same
+I8s 0 cpp same rust same py same cross same
+I8s 3 cpp same rust same py same cross same
+U8s 0 cpp same rust same py same cross same
+U8s 3 cpp same rust same py same cross same
+Strs3 0 cpp same rust same py same cross same
+Strs3 3 cpp same rust same py same cross same
+OptStr 0 cpp same rust same py same cross same
+OptStr 3 cpp same rust same py same cross same
+OptReals 0 cpp same rust same py same cross same
+OptReals 3 cpp same rust same py same cross same
+OptI16s 0 cpp same rust same py same cross same
+OptI16s 3 cpp same rust same py same cross same
+Dir 0 cpp same rust same py same cross same
+Dir 3 cpp same rust same py same cross same
+Shape 0 cpp same rust same py same cross same
+Shape 3 cpp same rust same py same cross same
+Two 0 cpp same rust same py same cross same
+Two 3 cpp same rust same py same cross same
+Mixed 0 cpp same rust same py same cross same
+Mixed 3 cpp same rust same py same cross same
+Tree 0 cpp same rust same py same cross same
+Tree 3 cpp same rust same py same cross same
+Rose 0 cpp same rust same py same cross same
+Rose 3 cpp same rust same py same cross same
+Chain 0 cpp same rust same py same cross same
+Chain 3 cpp same rust same py same cross same
+Units 0 cpp same rust same py same cross same
+Units 3 cpp same rust same py same cross same
+Unit 0 cpp same rust same py same cross same
+Unit 3 cpp same rust same py same cross same
+Wide 0 rust same py same cross same
+Big 0 py same
+BigOne 0 nexus same
+Wide 3 rust same py same cross same
+Big 3 py same
+BigOne 3 nexus same
+default-buffer Strs3 cpp same rust same py same cross same
+default-buffer Tree cpp same rust same py same cross same
+default-buffer Mixed cpp same rust same py same cross same
+default-buffer Units cpp same rust same py same cross same
+default-buffer Chain cpp same rust same py same cross same
+default-buffer Rose cpp same rust same py same cross same
+default-buffer Shape cpp same rust same py same cross same
+default-buffer OptReals cpp same rust same py same cross same
+default-buffer U8s cpp same rust same py same cross same
+default-buffer Str cpp same rust same py same cross same
