@@ -554,12 +554,16 @@ pub(crate) enum Out {
 
 pub(crate) const STOP_NONE: u32 = u32::MAX;
 
+#[cfg(test)]
+pub(crate) static SYNCED: std::sync::Mutex<Vec<i64>> = std::sync::Mutex::new(Vec::new());
+
 pub(crate) struct Writer {
     q: &'static CustodyQueue,
     slot: &'static crate::stream::RegistrySlot,
     slot_idx: usize,
     gen: u64,
     out: Out,
+    durable: bool,
     value_schema: morloc_runtime_types::schema::Schema,
     elem_schema: morloc_runtime_types::schema::Schema,
     cursor: u64,
@@ -588,6 +592,7 @@ pub(crate) struct WriterInit {
     pub slot_idx: usize,
     pub gen: u64,
     pub out: Out,
+    pub durable: bool,
     pub value_schema: morloc_runtime_types::schema::Schema,
     pub elem_schema: morloc_runtime_types::schema::Schema,
     pub cursor: u64,
@@ -598,7 +603,7 @@ pub(crate) struct WriterInit {
 impl Writer {
     pub(crate) fn new(i: WriterInit) -> Writer {
         Writer {
-            q: i.q, slot: i.slot, slot_idx: i.slot_idx, gen: i.gen, out: i.out,
+            q: i.q, slot: i.slot, slot_idx: i.slot_idx, gen: i.gen, out: i.out, durable: i.durable,
             value_schema: i.value_schema, elem_schema: i.elem_schema,
             cursor: i.cursor, entries: i.entries, diag: i.diag,
             inflight: Default::default(),
@@ -870,6 +875,12 @@ impl Writer {
                 Out::File(fd) => crate::stream_format::pwrite_all_fd(fd, &footer, self.cursor)
                     .map_err(|e| (FAILED_IO, e.to_string()))
                     .and_then(|_| {
+                        // SLOT-15
+                        if !self.durable {
+                            return Ok(());
+                        }
+                        #[cfg(test)]
+                        SYNCED.lock().unwrap_or_else(|e| e.into_inner()).push(self.handle());
                         // SAFETY: SLOT-10: fd is the writer's open descriptor.
                         if unsafe { crate::utility::sync_file_data(fd) } != 0 {
                             Err((FAILED_IO, std::io::Error::last_os_error().to_string()))
@@ -886,7 +897,12 @@ impl Writer {
         if let Out::File(fd) = self.out {
             if fd >= 0 {
                 // FORK-3: unlock first; a copy of the descriptor may outlive this one.
-                crate::stream::unlock_and_close(fd);
+                if let Err(e) = crate::stream::unlock_and_close_checked(fd) {
+                    // SLOT-15
+                    if !self.failed && status != STATUS_DISCARD {
+                        self.fail(FAILED_IO, &e.to_string());
+                    }
+                }
             }
             self.out = Out::File(-1);
         }

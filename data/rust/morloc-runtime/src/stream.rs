@@ -1025,11 +1025,20 @@ fn file_identity(fd: libc::c_int) -> (u64, u64) {
 /// Close a descriptor this process locked for a stream that never
 /// opened, releasing the lock for any child forked in between.
 pub(crate) fn unlock_and_close(fd: libc::c_int) {
+    let _ = unlock_and_close_checked(fd);
+}
+
+/// `unlock_and_close`, with the error `close` reports (a filesystem that
+/// writes back at close, such as NFS, reports a failed write there).
+pub(crate) fn unlock_and_close_checked(fd: libc::c_int) -> std::io::Result<()> {
     LOCKED_FDS.lock().retain(|&f| f != fd);
     unsafe {
         libc::flock(fd, libc::LOCK_UN);
-        libc::close(fd);
+        if libc::close(fd) != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
     }
+    Ok(())
 }
 
 // SAFETY: ProcessLocalSlot's only !Send field is `mmap_ptr` (a raw
@@ -3156,6 +3165,7 @@ fn start_custody(
     resume: Resume,
     opener: (u32, u64, u64),
 ) -> Result<i64, MorlocError> {
+    let durable = !crate::intrinsics::is_registered_temp(path);
     let (slot_idx, slot, guard) = match allocate_slot_cas_for(opener.0, opener.1, opener.2) {
         Ok(s) => s,
         Err(e) => {
@@ -3202,6 +3212,7 @@ fn start_custody(
         slot_idx,
         gen: new_gen,
         out: crate::custody::Out::File(fd),
+        durable,
         value_schema,
         elem_schema,
         cursor: resume.cursor,
@@ -3262,6 +3273,7 @@ pub(crate) fn host_adopt(handle: i64) -> Result<(), MorlocError> {
         slot_idx,
         gen,
         out: crate::custody::Out::Stdio,
+        durable: true,
         value_schema,
         elem_schema,
         cursor: body_start,

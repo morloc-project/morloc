@@ -152,13 +152,16 @@ before it are still written, and the footer records the failure.
 
 ### SLOT-15 Close and flush return once their batches are in the file
 Status: implemented
-Checked by: a_flush_makes_its_elements_readable_from_the_open_file, a_closed_stream_refuses_writes_and_its_path_reopens_at_once, a_discarded_stream_keeps_what_was_queued_and_no_final_footer, tla:StreamQueue_reader_no_wait.bug, tla:StreamQueue_close_before_tail.bug
+Checked by: a_flush_makes_its_elements_readable_from_the_open_file, a_closed_stream_refuses_writes_and_its_path_reopens_at_once, a_closed_file_is_synced_unless_it_is_a_call_temp, a_discarded_stream_keeps_what_was_queued_and_no_final_footer, tla:StreamQueue_reader_no_wait.bug, tla:StreamQueue_close_before_tail.bug
 
 A close queues the unflushed elements and a close marker and waits for the
 custodian to write them and the footer; writes after it fail, and its path
 reopens at once. A flush waits likewise, so a reader of the open file sees
-what was flushed. A discard writes what was queued, drops the unflushed
-elements, and leaves the temporary footer. Whether close and flush should
+what was flushed. A close also makes the file's data durable (fdatasync),
+except a file `@tmpfile` made in the writing process, which its call
+removes; an error closing the file (a filesystem that writes back at
+close) fails the stream. A discard writes what was queued, drops the unflushed elements,
+and leaves the temporary footer. Whether close and flush should
 instead return at once, with the wait moved to readers, waits on a
 benchmark (issues/streams.md).
 

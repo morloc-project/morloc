@@ -463,6 +463,12 @@ pub(crate) unsafe fn mlc_tmpfile(errmsg: *mut *mut c_char) -> *mut c_char {
     }
 }
 
+/// SLOT-15: whether `path` is a file @tmpfile made in this process and not
+/// yet removed.
+pub(crate) fn is_registered_temp(path: &str) -> bool {
+    temp_registry().entries.iter().any(|e| e.path.as_os_str() == path)
+}
+
 /// @close on a Str path: unlink a registered temp file and drop it from the
 /// call list. Errors if the path was not created by @tmpfile in this call --
 /// @close is not a general file-removal tool.

@@ -1742,3 +1742,33 @@ fn a_batch_left_open_at_the_end_of_its_call_is_aborted() {
     assert_eq!(read_back(&path).as_array().unwrap().len(), 2);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A closed output file is synced to stable storage, except a file
+/// @tmpfile made in this process, which its call removes (SLOT-15).
+#[test]
+fn a_closed_file_is_synced_unless_it_is_a_call_temp() {
+    let _shm = crate::own_test_registry();
+    let dir = std::env::temp_dir().join(format!("morloc_close_sync_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let synced = |h: i64| crate::custody::SYNCED.lock().unwrap_or_else(|e| e.into_inner()).contains(&h);
+    let write_close = |path: &str| {
+        let h = shared_open_ostream_with_schema(path, "as").unwrap();
+        let v = strs_value(3, 10, 0);
+        shared_write_subpacket(h, crate::compression::CompressionLevel::NONE, v).unwrap();
+        let _ = shm::shfree(v);
+        shared_close_handle(h).unwrap();
+        h
+    };
+    let plain = dir.join("plain.stream");
+    assert!(synced(write_close(plain.to_str().unwrap())), "a closed file was not synced");
+    let mut err: *mut std::os::raw::c_char = std::ptr::null_mut();
+    let tmp = unsafe { crate::intrinsics::mlc_tmpfile(&mut err) };
+    assert!(!tmp.is_null(), "no temp file");
+    let tmp_path = unsafe { std::ffi::CStr::from_ptr(tmp) }.to_str().unwrap().to_string();
+    unsafe { libc::free(tmp as *mut libc::c_void) };
+    assert!(!synced(write_close(&tmp_path)), "a call's temp file was synced");
+    let c = std::ffi::CString::new(tmp_path).unwrap();
+    unsafe { crate::intrinsics::mlc_unlink_tmp(c.as_ptr(), &mut err) };
+    let _ = std::fs::remove_dir_all(&dir);
+}

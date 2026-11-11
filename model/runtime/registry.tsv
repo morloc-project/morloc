@@ -351,3 +351,4 @@ data/lang/r/rmorloc.c::morloc_fork_pool_run_r::ctx	startup
 data/lang/r/rmorloc.c::-::reading_runtime_value	thread		
 rustmorloc/fv.rs::-::REGISTRY	exec-only		
 rustmorloc/fv.rs::-::STAGED_LIVE	exec-only		
+morloc-runtime/custody.rs::-::SYNCED	test-only		
