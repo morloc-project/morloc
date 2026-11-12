@@ -1,0 +1,54 @@
+-- An R batch whose encoding fails partway (NA in a Str has no morloc form)
+-- is absent from the file, whether it failed after filling several
+-- sub-packets or at its first element, and the stream takes later
+-- batches (SLOT-36, SLOT-37); this holds for a batch given as a character
+-- vector and as a list. A run of fixed-width elements that fails after
+-- earlier sub-packets of it were placed is absent too. The error reaches
+-- the caller as a Try.
+module main (run, tally, i8s, countI8s)
+
+import root
+import root-r
+
+source R from "batch.R" ("batch_of" as batchOf, "batch_list" as batchList, "count_tagged" as countTagged, "i8_batch" as i8Batch)
+
+batchOf :: Int -> Int -> Int -> [Str]
+batchList :: Int -> Int -> Int -> [Str]
+countTagged :: Int -> [Str] -> Int
+i8Batch :: Int -> Int -> [I8]
+
+--' Write six batches, three of which fail; which succeeded
+run :: Str -> <IO> [Bool]
+run path = do
+  Ok o <- @open path :: <IO> (Try Str (OStream Str))
+  a <- @write 0 o (batchOf 1 700 (-1))
+  b <- @write 0 o (batchOf 2 700 650)
+  c <- @write 0 o (batchList 3 30 (-1))
+  d <- @write 0 o (batchOf 4 700 0)
+  e <- @write 0 o (batchList 5 700 650)
+  f <- @write 0 o (batchList 6 700 (-1))
+  @close o
+  [ok a, ok b, ok c, ok d, ok e, ok f]
+
+ok :: Try Str () -> Bool
+ok r = match r
+  | (Ok _) = True
+  | (Err _) = False
+
+--' Count the elements of each batch in a written file
+tally :: [Str] -> [Int]
+tally xs = [countTagged 1 xs, countTagged 2 xs, countTagged 3 xs, countTagged 4 xs, countTagged 5 xs, countTagged 6 xs, length xs]
+
+--' Write three I8 batches, the second failing near its end; which succeeded
+i8s :: Str -> <IO> [Bool]
+i8s path = do
+  Ok o <- @open path :: <IO> (Try Str (OStream I8))
+  a <- @write 0 o (i8Batch 5000 (-1))
+  b <- @write 0 o (i8Batch 5000 4500)
+  c <- @write 0 o (i8Batch 3000 (-1))
+  @close o
+  [ok a, ok b, ok c]
+
+--' The number of I8s in a written file
+countI8s :: [I8] -> Int
+countI8s xs = length xs

@@ -610,6 +610,14 @@ typedef struct {
     int flat_answer;
     ssize_t total;          // size pass
     void** cursor;          // write pass
+    // Write pass in a stream's buffer (SLOT-36): offsets are from `base`,
+    // alignment from `origin`, and a step's compound children are laid out
+    // after it, in field order. NULL otherwise.
+    char* base;
+    char* origin;
+    int in_step;
+    int deferring;
+    size_t later_len;
     morloc_space_t space;   // read pass: where relptrs lead
     SEXP result;            // read pass: the root, PROTECTed until returned
 } r_walk_t;
@@ -618,6 +626,8 @@ typedef struct {
 // nothing to free.
 static __thread r_frame_t* r_frames = NULL;
 static __thread size_t r_frames_cap = 0;
+static __thread r_frame_t* r_later = NULL;
+static __thread size_t r_later_cap = 0;
 
 // True iff a back-reference occurs anywhere under `schema`.
 static int r_schema_has_recur(const Schema* schema) {
@@ -659,6 +669,49 @@ static void r_push(r_walk_t* w, const r_frame_t* f) {
         r_frames_cap = cap;
     }
     r_frames[w->len++] = *f;
+}
+
+// Hold a child's frame until the current step returns.
+static void r_defer(r_walk_t* w, const r_frame_t* f) {
+    if (w->later_len >= r_later_cap) {
+        size_t cap = r_later_cap ? r_later_cap * 2 : 16;
+        r_frame_t* grown = (r_frame_t*)realloc(r_later, cap * sizeof(r_frame_t));
+        if (grown == NULL) {
+            MORLOC_ERROR("out of memory growing the marshalling walk");
+        }
+        r_later = grown;
+        r_later_cap = cap;
+    }
+    r_later[w->later_len++] = *f;
+}
+
+// `p` aligned to `align`, from the element's origin when placed.
+static void* r_align(r_walk_t* w, void* p, size_t align) {
+    uintptr_t c = (uintptr_t)p;
+    if (w->origin != NULL) {
+        return w->origin + ALIGN_UP(c - (uintptr_t)w->origin, align);
+    }
+    return (void*)ALIGN_UP(c, align);
+}
+
+// The relative pointer to `p`: an offset from the walk's base in a
+// stream's buffer, else a shared-memory relptr.
+static relptr_t r_rel(r_walk_t* w, void* p) {
+    MAYFAIL
+    if (w->base != NULL) return (relptr_t)((char*)p - w->base);
+    return R_TRY(abs2rel, p);
+}
+
+// Where a relative pointer `r_rel` made leads.
+static char* r_abs(r_walk_t* w, relptr_t rel) {
+    MAYFAIL
+    if (w->base != NULL) return w->base + rel;
+    return (char*)R_TRY(rel2abs, rel);
+}
+
+// The data pointer of an empty array or string.
+static relptr_t r_empty_rel(r_walk_t* w) {
+    return w->base != NULL ? 0 : RELNULL;
 }
 
 // Visit the current node again for element `idx`, carrying `aux`.
@@ -786,7 +839,7 @@ static void r_size_step(r_walk_t* w, const Schema* schema, SEXP obj, size_t idx)
                 size_t buf_align = (schema->type == MORLOC_STRING)
                     ? schema->parameters[0]->alignment
                     : schema->parameters[0]->data_alignment;
-                size += buf_align - 1;
+                if (length > 0) size += buf_align - 1;
                 // Array of IFile handles: each element is wire-encoded as
                 // Array<u8>(path). The REALSXP fast-path below would treat
                 // bit64-backed IFile handles as fixed-width 8-byte ints
@@ -1233,7 +1286,9 @@ static void r_write_step(r_walk_t* w, const Schema* schema, void* dest, SEXP obj
 // frame.
 static void r_write_child(r_walk_t* w, const Schema* schema, void* dest, SEXP obj) {
     const Schema* s = r_resolve(schema);
-    if (r_flat(w, s)) {
+    // A child that may write a tail waits behind a deferred sibling.
+    int later = w->deferring && !s->fixed_width;
+    if (!later && r_flat(w, s)) {
         r_write_step(w, s, dest, obj, 0);
         return;
     }
@@ -1242,6 +1297,15 @@ static void r_write_child(r_walk_t* w, const Schema* schema, void* dest, SEXP ob
     f.schema = s;
     f.obj = obj;
     f.dest = dest;
+    if (later) {
+        r_defer(w, &f);
+        return;
+    }
+    if (w->in_step && w->base != NULL) {
+        w->deferring = 1;
+        r_defer(w, &f);
+        return;
+    }
     r_push(w, &f);
 }
 
@@ -1416,12 +1480,12 @@ static void r_write_step(r_walk_t* w, const Schema* schema, void* dest, SEXP obj
                 array->size = length;  // Do not include null terminator
                 if(length > 0){
                     // String character data: natural alignment (1 byte for chars)
-                    *cursor = (void*)ALIGN_UP((uintptr_t)*cursor, schema->parameters[0]->alignment);
-                    array->data = R_TRY(abs2rel, *cursor);
-                    absptr_t tmp_ptr = R_TRY(rel2abs, array->data);
+                    *cursor = r_align(w, *cursor, schema->parameters[0]->alignment);
+                    array->data = r_rel(w, *cursor);
+                    absptr_t tmp_ptr = r_abs(w, array->data);
                     memcpy(tmp_ptr, str, array->size);
                 } else {
-                    array->data = RELNULL;
+                    array->data = r_empty_rel(w);
                 }
 
                 // move cursor to the location after the copied data
@@ -1445,14 +1509,14 @@ static void r_write_step(r_walk_t* w, const Schema* schema, void* dest, SEXP obj
             }
             array->size = (size_t)length(obj);
             if(array->size == 0){
-                array->data = RELNULL;
+                array->data = r_empty_rel(w);
                 break;
             }
 
             // align cursor for element data placement
             // (bumps to 64 for primitive numerics for SIMD/BLAS)
-            *cursor = (void*)ALIGN_UP((uintptr_t)*cursor, schema->parameters[0]->data_alignment);
-            array->data = R_TRY(abs2rel, *cursor);
+            *cursor = r_align(w, *cursor, schema->parameters[0]->data_alignment);
+            array->data = r_rel(w, *cursor);
             const Schema* element_schema = r_resolve(schema->parameters[0]);
             char* start;
 
@@ -1476,7 +1540,7 @@ static void r_write_step(r_walk_t* w, const Schema* schema, void* dest, SEXP obj
                     handles = scratch;
                 }
                 *cursor = (void*)(*(char**)cursor + array->size * element_schema->width);
-                start = R_TRY(rel2abs, array->data);
+                start = r_abs(w, array->data);
                 R_TRY(mlc_write_handles_voidstar,
                     handles, array->size, start, element_schema->width, cursor);
                 break;
@@ -1491,7 +1555,7 @@ static void r_write_step(r_walk_t* w, const Schema* schema, void* dest, SEXP obj
             if (element_schema->type == MORLOC_ENUM
                 && (isFactor(obj) || TYPEOF(obj) == STRSXP)) {
                 *cursor = (void*)(*(char**)cursor + array->size * element_schema->width);
-                start = R_TRY(rel2abs, array->data);
+                start = r_abs(w, array->data);
                 SEXP levels = isFactor(obj)
                     ? getAttrib(obj, R_LevelsSymbol)
                     : R_NilValue;
@@ -1525,7 +1589,7 @@ static void r_write_step(r_walk_t* w, const Schema* schema, void* dest, SEXP obj
                         if(element_schema->type == MORLOC_STRING){
                             // set the cursor the the location after the array headers
                             *cursor = (void*)(*(char**)cursor + array->size * element_schema->width);
-                            start = R_TRY(rel2abs, array->data);
+                            start = r_abs(w, array->data);
                             for(size_t i = 0; i < array->size; i++){
                                 SEXP elem = STRING_ELT(obj, i);
                                 r_write_child(w, element_schema, start + i * element_schema->width, elem);
@@ -1547,13 +1611,13 @@ static void r_write_step(r_walk_t* w, const Schema* schema, void* dest, SEXP obj
                     } else if (element_schema->type != MORLOC_UINT8) {
                         MORLOC_ERROR("Expected MORLOC_UINT8 for raw vector");
                     }
-                    absptr_t tmp_ptr = R_TRY(rel2abs, array->data);
+                    absptr_t tmp_ptr = r_abs(w, array->data);
                     memcpy(tmp_ptr, RAW(obj), array->size * sizeof(uint8_t));
                     *cursor = (void*)(*(char**)cursor + array->size * sizeof(uint8_t));
                     break;
                 case VECSXP:  // This handles lists
                     *cursor = (void*)(*(char**)cursor + array->size * element_schema->width);
-                    start = R_TRY(rel2abs, array->data);
+                    start = r_abs(w, array->data);
                     if (!r_flat(w, element_schema)) {
                         // One compound element per visit, starting here.
                         if (array->size > 1) r_resume(w, 1, start);
@@ -1569,7 +1633,7 @@ static void r_write_step(r_walk_t* w, const Schema* schema, void* dest, SEXP obj
                 // next is made, never handed to a frame.
                 case LGLSXP:
                     *cursor = (void*)(*(char**)cursor + array->size * element_schema->width);
-                    start = R_TRY(rel2abs, array->data);
+                    start = r_abs(w, array->data);
                     for (int i = 0; i < array->size; i++) {
                         SEXP elem = PROTECT(ScalarLogical(LOGICAL(obj)[i]));
                         r_write_step(w, element_schema, start + i * element_schema->width, elem, 0);
@@ -1578,7 +1642,7 @@ static void r_write_step(r_walk_t* w, const Schema* schema, void* dest, SEXP obj
                     break;
                 case INTSXP:
                     *cursor = (void*)(*(char**)cursor + array->size * element_schema->width);
-                    start = R_TRY(rel2abs, array->data);
+                    start = r_abs(w, array->data);
                     for (int i = 0; i < array->size; i++) {
                         SEXP elem = PROTECT(ScalarInteger(INTEGER(obj)[i]));
                         r_write_step(w, element_schema, start + i * element_schema->width, elem, 0);
@@ -1587,7 +1651,7 @@ static void r_write_step(r_walk_t* w, const Schema* schema, void* dest, SEXP obj
                     break;
                 case REALSXP:
                     *cursor = (void*)(*(char**)cursor + array->size * element_schema->width);
-                    start = R_TRY(rel2abs, array->data);
+                    start = r_abs(w, array->data);
                     // bit64::integer64 storage: REALSXP's 8 bytes per
                     // cell ARE the int64. For SINT64 / UINT64 element
                     // schemas we can memcpy the whole vector directly
@@ -1689,12 +1753,8 @@ static void r_write_step(r_walk_t* w, const Schema* schema, void* dest, SEXP obj
             } else {
                 SEXP wfields = VECTOR_ELT(obj, 1);
                 size_t warm_align = warm->alignment;
-                *cursor = (void*)ALIGN_UP((uintptr_t)*cursor, warm_align);
-                {
-                    char* rel_err = NULL;
-                    *(relptr_t*)((char*)dest + 8) = abs2rel(*cursor, &rel_err);
-                    if (rel_err) { free(rel_err); MORLOC_ERROR("abs2rel failed in MORLOC_VARIANT"); }
-                }
+                *cursor = r_align(w, *cursor, warm_align);
+                *(relptr_t*)((char*)dest + 8) = r_rel(w, *cursor);
                 void* arm_dest = *cursor;
                 *cursor = (void*)((char*)*cursor + warm->width);
                 r_write_child(w, warm, arm_dest, wfields);
@@ -1712,12 +1772,8 @@ static void r_write_step(r_walk_t* w, const Schema* schema, void* dest, SEXP obj
             } else {
                 const Schema* inner_schema = r_resolve(schema->parameters[0]);
                 size_t inner_align = inner_schema->alignment;
-                *cursor = (void*)ALIGN_UP((uintptr_t)*cursor, inner_align);
-                {
-                    char* rel_err = NULL;
-                    *(relptr_t*)dest = abs2rel(*cursor, &rel_err);
-                    if (rel_err) { free(rel_err); MORLOC_ERROR("abs2rel failed in MORLOC_OPTIONAL"); }
-                }
+                *cursor = r_align(w, *cursor, inner_align);
+                *(relptr_t*)dest = r_rel(w, *cursor);
                 void* inner_dest = *cursor;
                 *cursor = (void*)((char*)*cursor + inner_schema->width);
                 r_write_child(w, inner_schema, inner_dest, obj);
@@ -1730,6 +1786,21 @@ static void r_write_step(r_walk_t* w, const Schema* schema, void* dest, SEXP obj
     }
 }
 
+// Step the frames of a write walk to the end, laying out the children a
+// step deferred after it returns (SLOT-36).
+static void r_write_run(r_walk_t* w) {
+    while (r_next(w)) {
+        w->in_step = 1;
+        w->deferring = 0;
+        r_write_step(w, w->cur.schema, w->cur.dest, w->cur.obj, w->cur.idx);
+        w->in_step = 0;
+        w->deferring = 0;
+        while (w->later_len > 0) {
+            r_push(w, &r_later[--w->later_len]);
+        }
+    }
+}
+
 // Write `obj` into the slot at `dest`, appending variable-length parts at
 // the cursor.
 static void* to_voidstar_inner(void* dest, void** cursor, SEXP obj, const Schema* schema){
@@ -1737,9 +1808,7 @@ static void* to_voidstar_inner(void* dest, void** cursor, SEXP obj, const Schema
     r_walk_init(&w, schema);
     w.cursor = cursor;
     r_write_child(&w, schema, dest, obj);
-    while (r_next(&w)) {
-        r_write_step(&w, w.cur.schema, w.cur.dest, w.cur.obj, w.cur.idx);
-    }
+    r_write_run(&w);
     return dest;
 }
 
@@ -3069,6 +3138,119 @@ SEXP morloc_mlc_open_stderr(SEXP schema_str_r) { MAYFAIL
     return make_integer64_scalar(h);
 }
 
+// An in-place @write batch (SLOT-36, SLOT-37): a list, or a character
+// vector of Str elements, written into an output file's buffer.
+typedef struct {
+    const Schema* schema;
+    SEXP value;
+    int64_t level;
+    int64_t handle;
+    int open;
+    int fallback;
+} r_place_t;
+
+// Act on an in-place call's result: a closed pipe unwinds as the
+// pipe-closed condition, any other refusal as an error.
+static void r_place_rc(r_place_t* pl, int rc) {
+    if (rc == 0) return;
+    pl->open = 0;
+    if (rc == MLC_RESULT_PIPE_CLOSED) raise_pipe_closed();
+    MORLOC_ERROR("@write: an in-place call failed with code %d", rc);
+}
+
+static SEXP r_place_body(void* data) { MAYFAIL
+    r_place_t* pl = (r_place_t*)data;
+    const Schema* elem = r_resolve(pl->schema->parameters[0]);
+    SEXP xs = pl->value;
+    const size_t n = (size_t)XLENGTH(xs);
+    const int strs = TYPEOF(xs) == STRSXP;
+    if (mlc_write_open()) {
+        MORLOC_ERROR("@write: a batch is already being written on this thread (a @write from code run while encoding one)");
+    }
+    int rc = R_TRY(mlc_write_begin, pl->level, pl->handle, 0);
+    if (rc == MLC_WRITE_FALLBACK) {
+        pl->fallback = 1;
+        return R_NilValue;
+    }
+    r_place_rc(pl, rc);
+    pl->open = 1;
+    const size_t width = elem->width;
+    const int run = (elem->fixed_width || elem->type == MORLOC_INT) && width > 0;
+    const uint8_t* reached = NULL;
+    r_walk_t w;
+    for (size_t i = 0; i < n;) {
+        if (run) {
+            uint8_t* slots = NULL;
+            uint64_t placed = 0;
+            rc = R_TRY(mlc_write_place_run, (uint64_t)(n - i), reached, &slots, &placed);
+            r_place_rc(pl, rc);
+            r_walk_init(&w, elem);
+            for (uint64_t j = 0; j < placed; j++) {
+                SEXP x = strs ? STRING_ELT(xs, i + j) : VECTOR_ELT(xs, i + j);
+                r_write_child(&w, elem, slots + j * width, x);
+                r_write_run(&w);
+            }
+            reached = slots + placed * width;
+            i += (size_t)placed;
+            continue;
+        }
+        if (strs) {
+            size_t len = 0;
+            const char* str = r_str_value(STRING_ELT(xs, i), &len, true);
+            mlc_room_t room;
+            rc = R_TRY(mlc_write_place, (uint64_t)(width + len), reached, &room);
+            r_place_rc(pl, rc);
+            Array* a = (Array*)room.slot;
+            a->size = len;
+            a->data = len > 0 ? (relptr_t)(room.data - room.base) : 0;
+            memcpy(room.data, str, len);
+            reached = room.data + len;
+            i++;
+            continue;
+        }
+        SEXP x = VECTOR_ELT(xs, i);
+        size_t size = get_shm_size(elem, x);
+        mlc_room_t room;
+        rc = R_TRY(mlc_write_place, (uint64_t)size, reached, &room);
+        r_place_rc(pl, rc);
+        void* cursor = room.data;
+        r_walk_init(&w, elem);
+        w.cursor = &cursor;
+        w.base = (char*)room.base;
+        w.origin = (char*)room.origin;
+        r_write_child(&w, elem, room.slot, x);
+        r_write_run(&w);
+        reached = (const uint8_t*)cursor;
+        i++;
+    }
+    pl->open = 0;
+    rc = R_TRY(mlc_write_commit, reached);
+    r_place_rc(pl, rc);
+    return R_NilValue;
+}
+
+static void r_place_cleanup(void* data, Rboolean jump) {
+    r_place_t* pl = (r_place_t*)data;
+    if (jump && pl->open) {
+        pl->open = 0;
+        mlc_write_abort();
+    }
+}
+
+// 1 when the batch was written in place, 0 when it takes a voidstar copy.
+// An R error aborts the batch and continues to unwind.
+static int r_write_in_place(const Schema* schema, int64_t level, SEXP value, int64_t handle) {
+    if (schema->type != MORLOC_ARRAY) return 0;
+    const Schema* elem = r_resolve(schema->parameters[0]);
+    if (elem->type == MORLOC_TABLE) return 0;
+    if (!(TYPEOF(value) == VECSXP || (TYPEOF(value) == STRSXP && elem->type == MORLOC_STRING))) return 0;
+    r_place_t pl = { schema, value, level, handle, 0, 0 };
+    SEXP cont = PROTECT(R_MakeUnwindCont());
+    R_UnwindProtect(r_place_body, &pl, r_place_cleanup, &pl, cont);
+    UNPROTECT(1);
+    return !pl.fallback;
+}
+
 // One @write's state, freed whether it returns or an R error unwinds it.
 typedef struct {
     Schema* schema;
@@ -3081,6 +3263,7 @@ typedef struct {
 
 static SEXP r_write_body(void* data) { MAYFAIL
     r_write_t* wr = (r_write_t*)data;
+    if (r_write_in_place(wr->schema, wr->level, wr->value, wr->handle)) return R_NilValue;
     size_t bytes = get_shm_size(wr->schema, wr->value);
     wr->voidstar = R_TRY(shmalloc, bytes);
     void* cursor = (uint8_t*)wr->voidstar + wr->schema->width;

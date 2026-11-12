@@ -1,0 +1,4 @@
+[true,false,true,false,false,true]
+[700,0,30,0,0,700,1430]
+[true,false,true]
+8000

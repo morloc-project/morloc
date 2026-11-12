@@ -382,7 +382,11 @@ file through SLOT-36's transaction, and with `mlc_write` from their own
 value when begin refuses. Each encodes the canonical bytes, which a test
 per binding and a golden writing the same values from several languages
 compare byte for byte. An error in the encoder aborts the batch: C++ and
-Rust through a guard, R in one `R_UnwindProtect` around the batch.
+Rust through a guard, R in one `R_UnwindProtect` around the batch, whose
+cleanup aborts the transaction when an R error unwinds it. R writes a
+batch given as a list or as a character vector of Str in place, sizing
+each element as it places it; a batch given as an atomic vector, factor
+or integer64 vector takes the copy path.
 
 A Python writer takes the slot lock with the GIL released, then sizes,
 places and writes each element of a list, or copies a batch given as

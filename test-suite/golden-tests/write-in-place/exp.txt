@@ -1,6 +1,7 @@
 py-writes
 cpp-writes
 rust-writes
+r-writes
 Real 0 cpp same rust same py same cross same
 Real 3 cpp same rust same py same cross same
 I8 0 cpp same rust same py same cross same
@@ -53,6 +54,64 @@ BigOne 0 nexus same
 Wide 3 rust same py same cross same
 Big 3 py same
 BigOne 3 nexus same
+Real 0 r-lang same cross same
+Real 3 r-lang same cross same
+I8 0 r-lang same cross same
+I8 3 r-lang same cross same
+Bool 0 r-lang same cross same
+Bool 3 r-lang same cross same
+Pair 0 r-lang same cross same
+Pair 3 r-lang same cross same
+I64 0 r-lang same cross same
+I64 3 r-lang same cross same
+Int 0 r-lang same cross same
+Int 3 r-lang same cross same
+Str 0 r-lang same cross same
+Str 3 r-lang same cross same
+Reals 0 r-lang same cross same
+Reals 3 r-lang same cross same
+I8s 0 r-lang same cross same
+I8s 3 r-lang same cross same
+U8s 0 r-lang same cross same
+U8s 3 r-lang same cross same
+Strs3 0 r-lang same cross same
+Strs3 3 r-lang same cross same
+OptStr 0 r-lang same cross same
+OptStr 3 r-lang same cross same
+OptReals 0 r-lang same cross same
+OptReals 3 r-lang same cross same
+OptI16s 0 r-lang same cross same
+OptI16s 3 r-lang same cross same
+Dir 0 r-lang same cross same
+Dir 3 r-lang same cross same
+Shape 0 r-lang same cross same
+Shape 3 r-lang same cross same
+Two 0 r-lang same cross same
+Two 3 r-lang same cross same
+Mixed 0 r-lang same cross same
+Mixed 3 r-lang same cross same
+Tree 0 r-lang same cross same
+Tree 3 r-lang same cross same
+Rose 0 r-lang same cross same
+Rose 3 r-lang same cross same
+Chain 0 r-lang same cross same
+Chain 3 r-lang same cross same
+Units 0 r-lang same cross same
+Units 3 r-lang same cross same
+Unit 0 r-lang same cross same
+Unit 3 r-lang same cross same
+Real 0 r-list cross same
+Real 3 r-list cross same
+I8 0 r-list cross same
+I8 3 r-list cross same
+Bool 0 r-list cross same
+Bool 3 r-list cross same
+I64 0 r-list cross same
+I64 3 r-list cross same
+Int 0 r-list cross same
+Int 3 r-list cross same
+Dir 0 r-list cross same
+Dir 3 r-list cross same
 default-buffer Strs3 cpp same rust same py same cross same
 default-buffer Tree cpp same rust same py same cross same
 default-buffer Mixed cpp same rust same py same cross same
