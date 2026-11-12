@@ -6,10 +6,10 @@
   literal as a plain double, so one above 2^53 is rounded. Mapping U64 to
   "bit64" instead makes a U64 list literal `c(5L, bit64::as.integer64(..))`,
   whose `c` dispatches on its first argument and strips the class.
-- **Missing record keys accepted.** [read] Violates REC-2. R
-  (rmorloc.c:826-829, 1535-1538) skips a missing key: a number becomes 0,
-  an optional becomes pointer 0 (volume 0) instead of null. (Python raises
-  a KeyError.)
+- **A record value missing an optional field.** [read, 2026-11-11] Gap
+  (REC-2 covers literals only): R writes a missing `?T` field as null, so
+  that `x$f <- NULL` keeps working; Python raises a KeyError for any
+  missing key. Which a foreign record value may do needs a ruling.
 - [read] morloc-runtime/src/mpack.rs:413-414: Int limbs copied to an
   unaligned cursor.
 - [read] mpack.rs:398-416: an 8-byte `bin` Int stores size 1 and a relptr,

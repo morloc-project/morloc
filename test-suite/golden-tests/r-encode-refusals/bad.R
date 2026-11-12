@@ -1,0 +1,6 @@
+na_strs <- function(bad) if (bad) c("a", NA, "c") else c("a", "b", "c")
+na_bools <- function(bad) if (bad) c(TRUE, NA) else c(TRUE, FALSE)
+empty_bool <- function(bad) list(list(name = "p", ok = if (bad) logical(0) else TRUE))
+no_field <- function(bad) if (bad) list(list(name = "p")) else list(list(name = "p", ok = FALSE))
+no_note <- function(i) list(name = paste0("n", i), ok = TRUE)
+empty_real <- function(bad) if (bad) list(numeric(0)) else list(2.5)

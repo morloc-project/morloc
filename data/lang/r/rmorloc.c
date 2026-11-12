@@ -255,6 +255,15 @@ static const char* r_str_utf8(SEXP chr, size_t* len, bool check) {
     return s;
 }
 
+// A Str value's UTF-8 bytes; NA has no Str form (an absent value is a
+// ?Str's NULL).
+static const char* r_str_value(SEXP chr, size_t* len, bool check) {
+    if (chr == NA_STRING) {
+        MORLOC_ERROR("NA cannot be written as a Str");
+    }
+    return r_str_utf8(chr, len, check);
+}
+
 // Reject a voidstar carrying an interior NUL in a Str slot. `guard` is
 // codegen's per-call decision; `cleanup` releases whatever the caller owns
 // before the longjmp out of error(). The path returned by the runtime names
@@ -532,6 +541,9 @@ static int64_t i64_from_sexp(SEXP obj) {
 // The value of an R integer, double or bit64 integer64 scalar as a double;
 // NA for R's NA in any of them.
 static double r_number(SEXP obj) {
+    if (XLENGTH(obj) != 1) {
+        MORLOC_ERROR("Expected a single number, but got %lld", (long long)XLENGTH(obj));
+    }
     if (is_integer64(obj)) {
         int64_t v;
         memcpy(&v, &REAL(obj)[0], sizeof(int64_t));
@@ -829,7 +841,7 @@ static void r_size_step(r_walk_t* w, const Schema* schema, SEXP obj, size_t idx)
                     case CHARSXP:
                         if (schema->type == MORLOC_STRING) {
                             size_t n = 0;
-                            r_str_utf8(obj, &n, true);
+                            r_str_value(obj, &n, true);
                             size += n;
                         } else {
                             str = CHAR(obj);
@@ -842,7 +854,7 @@ static void r_size_step(r_walk_t* w, const Schema* schema, SEXP obj, size_t idx)
                                 MORLOC_ERROR("Expected character vector of length 1, but got length %zu", length);
                             }
                             size_t n = 0;
-                            r_str_utf8(STRING_ELT(obj, 0), &n, true);
+                            r_str_value(STRING_ELT(obj, 0), &n, true);
                             size += n;
                         } else if(elem->type == MORLOC_STRING){
                             for(size_t i = 0; i < length; i++){
@@ -938,6 +950,8 @@ static void r_size_step(r_walk_t* w, const Schema* schema, SEXP obj, size_t idx)
                         if (index != -1) {
                             SEXP value = VECTOR_ELT(obj, index);
                             r_size_child(w, schema->parameters[i], value, 1);
+                        } else if (schema->parameters[i]->type != MORLOC_OPTIONAL) {
+                            MORLOC_ERROR("the record has no field '%s'", schema->keys[i]);
                         }
                     }
                     return;
@@ -1246,7 +1260,10 @@ static void r_write_step(r_walk_t* w, const Schema* schema, void* dest, SEXP obj
             if (!isLogical(obj)) {
                 MORLOC_ERROR("Expected logical for MORLOC_BOOL, but got %s", type2char(TYPEOF(obj)));
             }
-            *((uint8_t*)dest) = (uint8_t)((LOGICAL(obj)[0] == TRUE) ? 1 : 0);
+            if (XLENGTH(obj) != 1 || LOGICAL(obj)[0] == NA_LOGICAL) {
+                MORLOC_ERROR("Expected one TRUE or FALSE for MORLOC_BOOL");
+            }
+            *((uint8_t*)dest) = (uint8_t)(LOGICAL(obj)[0] == TRUE);
             break;
         case MORLOC_SINT8:
             HANDLE_SINT_TYPE(int8_t, INT8_MIN, INT8_MAX);
@@ -1348,7 +1365,7 @@ static void r_write_step(r_walk_t* w, const Schema* schema, void* dest, SEXP obj
                 MORLOC_ERROR("Expected numeric for MORLOC_FLOAT32, but got %s", type2char(TYPEOF(obj)));
             }
             {
-                double d = asReal(obj);
+                double d = r_number(obj);
                 if (morloc_f32_from_f64(d, (float*)dest) != 0) {
                     MORLOC_ERROR("value %g out of range for F32", d);
                 }
@@ -1359,7 +1376,7 @@ static void r_write_step(r_walk_t* w, const Schema* schema, void* dest, SEXP obj
             if (!(isReal(obj) || isInteger(obj))) {
                 MORLOC_ERROR("Expected numeric for MORLOC_FLOAT64, but got %s", type2char(TYPEOF(obj)));
             }
-            *((double*)dest) = asReal(obj);
+            *((double*)dest) = r_number(obj);
             break;
         case MORLOC_IFILE:
         case MORLOC_OSTREAM:
@@ -1374,11 +1391,11 @@ static void r_write_step(r_walk_t* w, const Schema* schema, void* dest, SEXP obj
                 size_t length = 0;
                 switch(TYPEOF(obj)){
                     case CHARSXP:
-                        str = r_str_utf8(obj, &length, false);
+                        str = r_str_value(obj, &length, false);
                         break;
                     case STRSXP:
                         if (LENGTH(obj) == 1) {
-                            str = r_str_utf8(STRING_ELT(obj, 0), &length, false);
+                            str = r_str_value(STRING_ELT(obj, 0), &length, false);
                         } else {
                             MORLOC_ERROR("Expected character of length 1");
                         }
@@ -1646,6 +1663,10 @@ static void r_write_step(r_walk_t* w, const Schema* schema, void* dest, SEXP obj
                         if (index != -1) {
                             SEXP value = VECTOR_ELT(obj, index);
                             r_write_child(w, schema->parameters[i], (char*)dest + schema->offsets[i], value);
+                        } else if (schema->parameters[i]->type == MORLOC_OPTIONAL) {
+                            *(relptr_t*)((char*)dest + schema->offsets[i]) = RELNULL;
+                        } else {
+                            MORLOC_ERROR("the record has no field '%s'", schema->keys[i]);
                         }
                     }
                 } else {
@@ -3048,6 +3069,42 @@ SEXP morloc_mlc_open_stderr(SEXP schema_str_r) { MAYFAIL
     return make_integer64_scalar(h);
 }
 
+// One @write's state, freed whether it returns or an R error unwinds it.
+typedef struct {
+    Schema* schema;
+    SEXP value;
+    int64_t level;
+    int64_t handle;
+    void* voidstar;
+    int rc;
+} r_write_t;
+
+static SEXP r_write_body(void* data) { MAYFAIL
+    r_write_t* wr = (r_write_t*)data;
+    size_t bytes = get_shm_size(wr->schema, wr->value);
+    wr->voidstar = R_TRY(shmalloc, bytes);
+    void* cursor = (uint8_t*)wr->voidstar + wr->schema->width;
+    to_voidstar_inner(wr->voidstar, &cursor, wr->value, wr->schema);
+    wr->rc = R_TRY(mlc_write, wr->level, wr->handle, wr->voidstar);
+    return R_NilValue;
+}
+
+// Runs again after a normal return, so it frees only once.
+static void r_write_cleanup(void* data, Rboolean jump) {
+    (void)jump;
+    r_write_t* wr = (r_write_t*)data;
+    if (wr->voidstar != NULL) {
+        char* shfree_errmsg = NULL;
+        shfree(wr->voidstar, &shfree_errmsg);
+        free(shfree_errmsg);
+        wr->voidstar = NULL;
+    }
+    if (wr->schema != NULL) {
+        free_schema(wr->schema);
+        wr->schema = NULL;
+    }
+}
+
 // @write: serialise value to voidstar, emit one sub-packet.
 SEXP morloc_mlc_write(SEXP schema_str_r, SEXP level_r, SEXP value_r, SEXP handle_r) { MAYFAIL
     if (TYPEOF(schema_str_r) != STRSXP || LENGTH(schema_str_r) != 1) {
@@ -3065,18 +3122,12 @@ SEXP morloc_mlc_write(SEXP schema_str_r, SEXP level_r, SEXP value_r, SEXP handle
     int64_t handle = i64_from_sexp(handle_r);
     int64_t level = i64_from_sexp(level_r);
     Schema* schema = R_TRY(parse_schema, schema_str);
-    size_t bytes = get_shm_size(schema, value_r);
-    void* voidstar = R_TRY(shmalloc, bytes);
-    void* cursor = (uint8_t*)voidstar + schema->width;
-    to_voidstar_inner(voidstar, &cursor, value_r, schema);
-    int rc = R_TRY(mlc_write, level, handle, voidstar);
-    {
-        char* shfree_errmsg = NULL;
-        shfree(voidstar, &shfree_errmsg);
-        free(shfree_errmsg);
-    }
-    free_schema(schema);
-    if (rc == MLC_RESULT_PIPE_CLOSED) raise_pipe_closed();
+    r_write_t wr = { schema, value_r, level, handle, NULL, 0 };
+    SEXP cont = PROTECT(R_MakeUnwindCont());
+    R_UnwindProtect(r_write_body, &wr, r_write_cleanup, &wr, cont);
+    UNPROTECT(1);
+    r_write_cleanup(&wr, TRUE);
+    if (wr.rc == MLC_RESULT_PIPE_CLOSED) raise_pipe_closed();
     return R_NilValue;
 }
 
