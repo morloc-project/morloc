@@ -546,10 +546,11 @@ pub(crate) fn queue_at(rel: RelPtr) -> Result<&'static CustodyQueue, MorlocError
 }
 
 /// The nexus's stdout and stderr writer: given the stream's handle and the
-/// `len` bytes at `bytes` (a sub-packet or a footer), read before it
-/// returns, it returns `SINK_WRITTEN`, `SINK_PIPE_CLOSED`, or `SINK_FAILED`
-/// with a malloc'd message in `*errmsg`.
-pub type StdioSink = unsafe extern "C" fn(handle: i64, bytes: *const u8, len: u64, errmsg: *mut *mut libc::c_char) -> i32;
+/// `iovcnt` parts at `iov` whose concatenation is one frame (a sub-packet
+/// or a footer), read before it returns, it returns `SINK_WRITTEN`,
+/// `SINK_PIPE_CLOSED`, or `SINK_FAILED` with a malloc'd message in `*errmsg`.
+pub type StdioSink =
+    unsafe extern "C" fn(handle: i64, iov: *const libc::iovec, iovcnt: usize, errmsg: *mut *mut libc::c_char) -> i32;
 
 pub const SINK_WRITTEN: i32 = 0;
 pub const SINK_FAILED: i32 = 1;
@@ -586,7 +587,6 @@ pub(crate) struct Writer {
     diag: morloc_runtime_types::packet::StreamDiag,
     inflight: std::collections::VecDeque<(crate::write_behind::Ticket, Item)>,
     failed: bool,
-    stdio_out: Vec<u8>,
     share: Option<Share>,
 }
 
@@ -623,7 +623,6 @@ impl Writer {
             cursor: i.cursor, entries: i.entries, diag: i.diag,
             inflight: Default::default(),
             failed: false,
-            stdio_out: Vec::new(),
             share: None,
         }
     }
@@ -851,19 +850,17 @@ impl Writer {
         }
     }
 
-    fn send_stdio(&mut self, parts: &[&[u8]]) -> Result<(), (u32, String)> {
+    fn send_stdio(&self, parts: &[&[u8]]) -> Result<(), (u32, String)> {
         let Some(sink) = STDIO_SINK.get() else {
             return Err((FAILED_IO, "no stdout writer in this process".into()));
         };
-        self.stdio_out.clear();
-        for p in parts {
-            self.stdio_out.extend_from_slice(p);
-        }
+        let iov: Vec<libc::iovec> = parts
+            .iter()
+            .map(|p| libc::iovec { iov_base: p.as_ptr() as *mut libc::c_void, iov_len: p.len() })
+            .collect();
         let mut err: *mut libc::c_char = std::ptr::null_mut();
-        // SAFETY: SLOT-16: the sink reads `len` bytes at `bytes` before returning.
-        let res: Result<i32, (u32, String)> = Ok(unsafe {
-            sink(self.handle(), self.stdio_out.as_ptr(), self.stdio_out.len() as u64, &mut err)
-        });
+        // SAFETY: SLOT-16: the sink reads the parts before returning.
+        let res: Result<i32, (u32, String)> = Ok(unsafe { sink(self.handle(), iov.as_ptr(), iov.len(), &mut err) });
         let msg = if err.is_null() {
             String::from("the stdout writer failed")
         } else {

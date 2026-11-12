@@ -167,9 +167,11 @@ benchmark (issues/streams.md).
 
 ### SLOT-16 Stdout and stderr streams go through the queue
 Status: implemented
-Checked by: a_stdout_stream_reaches_the_nexus_before_its_close_returns
+Checked by: a_stdout_stream_reaches_the_nexus_before_its_close_returns, a_stdout_sub_packet_reaches_the_sink_in_parts_that_make_the_packet
 
-The nexus's stdout and stderr writer is the custodian's consumer. A pool
+The nexus's stdout and stderr writer is the custodian's consumer. A
+sub-packet reaches it as its header block, payload and padding, which it
+writes in order without joining them. A pool
 finishes the stdio streams a call left open before replying, so a call's
 output precedes its result. A write returns once its batches are queued,
 not written; text a pool prints to the shared stdout meanwhile may land
@@ -424,7 +426,7 @@ submits it.
 
 ### SLOT-25 A reader decodes its batch inside its claim
 Status: implemented
-Checked by: a_batch_decoded_in_place_is_the_batch_next_returns, a_decoder_that_fails_still_releases_its_claim, golden:next-decode-failure
+Checked by: a_batch_decoded_in_place_is_the_batch_next_returns, a_decoder_that_fails_still_releases_its_claim, golden:next-decode-failure, an_ifile_slice_decoded_in_place_is_the_slice_block, a_slice_checks_only_the_records_it_reads, a_slice_decoder_that_fails_releases_every_copy, a_slice_fails_when_its_handle_closes_between_pieces, a_dropped_slice_page_reads_back, slice_pieces_read_onto_one_list, a_slice_piece_that_fails_is_held_for_after_the_runtime, golden:ifile-slice-in-place, golden:ifile-slice-decode-failure
 
 `@next` from a C++ or Rust pool claims the next sub-packet as SLOT-23's
 readers do and hands it to the pool's decoder while the process keeps the
@@ -436,6 +438,18 @@ outlives the call, since the slot's mapping may be replaced once it is
 released (pages behind the cursor are dropped, idle mappings unmapped). A
 decoder reports failure by return value, never by unwinding through the
 runtime, and the claim is released either way.
+
+A unit-step IFile slice with no field tail, read from a C++ or Rust pool, is
+handed to the same decoder one piece per sub-packet it spans, in order, on
+the calling thread, after a callback with the total count. A piece is that
+sub-packet's run clipped to the slice, under a header of the run's own: read
+where it is mapped when the sub-packet is uncompressed and aligned,
+otherwise from its shared-memory copy (SLOT-34 decides which copies are
+kept). Only the clipped records and what they address are checked. Before
+each piece the handle's generation is checked, so a close between pieces
+fails the slice; nothing a piece is given outlives its callback, and a
+failing callback ends the slice with every copy released. Pages of a wholly
+read uncompressed sub-packet are dropped from the process's mapping.
 
 ### SLOT-26 A reader decodes ahead of its claim without claiming
 Status: implemented

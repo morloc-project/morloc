@@ -108,3 +108,39 @@ Measured: pending
 
 Each sub-packet is rendered to one string by the runtime, and the
 nexus writes the element body from that string without copying it.
+
+### ENC-8 A @stdout stream of large Str bodies writes at a rate near write(2)
+Intent: proposed
+Bench: stdout-raw
+Model: t(n) = c + b*n for 64 bodies of n bytes from a C++ pool to stdout (/dev/null), as raw render output and as a `-f packet` stream, and for building the bodies alone; `<form>.write` = (b_form - b_gen) / 64 in ns per byte, compared with `control.write`, a C++ write(2) of the same bodies
+Measured: pending
+
+The custodian hands the nexus a sub-packet as its header block, payload
+and padding, and the nexus writes them with one `writev` (SLOT-16): no
+buffer joins them, so the nexus holds no copy of the largest sub-packet.
+Raw output writes each body from where it lies in the payload.
+
+### ENC-9 A unit-step IFile slice reads at near an IStream's rate per element
+Intent: proposed
+Bench: ifile-slice
+Model: t(n) = c + b*n for `.[0:n]` of a file of n elements ([Real], [Str]) and for an `@next` loop over it, C++ and Rust, levels 0 and 3; `<lang>.<kind>.z<level>.ratio` = b_slice / b_next
+Measured: 2026-11-12-0510-24a2303bd+dirty, load 2.5-2.6. ratio: cpp Reals z0 1.60, z3 2.14; cpp Strs z0 1.80, z3 1.77; rs Reals z0 1.15, z3 1.74; rs Strs z0 1.37, z3 1.53. Before the in-place slice (2026-11-12 sweep, C++ .[0:16M] of 128 MB): 162 ms against 30 ms by @next, 5.4x.
+Goal: cpp.Reals.z0.ratio <= 1.5, cpp.Reals.z3.ratio <= 1.5, rs.Reals.z0.ratio <= 1.5, rs.Reals.z3.ratio <= 1.5, cpp.Strs.z0.ratio <= 1.5, cpp.Strs.z3.ratio <= 1.5, rs.Strs.z0.ratio <= 1.5, rs.Strs.z3.ratio <= 1.5
+Limit: cpp.Reals.z0.ratio <= 2.5, cpp.Reals.z3.ratio <= 2.5, rs.Reals.z0.ratio <= 2.5, rs.Reals.z3.ratio <= 2.5, cpp.Strs.z0.ratio <= 2.5, cpp.Strs.z3.ratio <= 2.5, rs.Strs.z0.ratio <= 2.5, rs.Strs.z3.ratio <= 2.5
+
+A slice is decoded one sub-packet piece at a time where the piece lies
+(runtime/streams.md SLOT-25), as `@next` decodes its batch, into a list
+sized once; no shared-memory block holds the result. Only the clipped
+records are checked.
+
+### ENC-10 A one-element IFile slice costs the same whatever the file's size
+Intent: proposed
+Bench: ifile-slice
+Model: per = (t(k) - t(0)) / k for k = 10000 one-element slices `.[i:i+1]` of a file of n Reals, n = 1M, 4M, 16M; `<lang>.points.z<level>.growth` = per(16M) / per(1M)
+Measured: 2026-11-12-0510-24a2303bd+dirty, load 2.5-2.6. growth: cpp z0 0.24, z3 0.81; rs z0 0.61, z3 0.97.
+Limit: cpp.points.z0.growth <= 1.5, cpp.points.z3.growth <= 1.5, rs.points.z0.growth <= 1.5, rs.points.z3.growth <= 1.5
+
+A slice locates its sub-packets by two binary searches and checks only
+the records it reads, so neither the file's length nor the size of the
+sub-packet it reads from enters its cost, beyond decompressing a
+sub-packet that SLOT-34 has not kept.

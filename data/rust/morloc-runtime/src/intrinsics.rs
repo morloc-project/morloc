@@ -1275,6 +1275,50 @@ pub(crate) unsafe fn mlc_next_with(
     }
 }
 
+/// A pool's callback for `mlc_ifile_slice_with`, given the slice's length
+/// before any piece: 0 to go on, nonzero having kept its own error.
+pub type SliceBegin = unsafe extern "C" fn(ctx: *mut c_void, n: u64) -> i32;
+
+/// `.[start:stop]` on an IFile decoded piece by piece in place (SLOT-25):
+/// `bounds` holds start and stop. 0 when every piece was decoded, 1 when a
+/// callback failed (whatever the runtime did after), -1 with `errmsg` set
+/// when the runtime failed.
+pub(crate) unsafe fn mlc_ifile_slice_with(
+    handle: i64,
+    bounds: *const IFileWalkArg,
+    on_begin: Option<SliceBegin>,
+    decode: Option<NextDecode>,
+    ctx: *mut c_void,
+    errmsg: *mut *mut c_char,
+) -> i32 {
+    clear_errmsg(errmsg);
+    let (Some(on_begin), Some(decode)) = (on_begin, decode) else {
+        set_errmsg(errmsg, &MorlocError::Other("mlc_ifile_slice_with: no callback".into()));
+        return -1;
+    };
+    if bounds.is_null() {
+        set_errmsg(errmsg, &MorlocError::Other("mlc_ifile_slice_with: no bounds".into()));
+        return -1;
+    }
+    let b = std::slice::from_raw_parts(bounds, 2);
+    let opt = |a: &IFileWalkArg| if a.has != 0 { Some(a.value) } else { None };
+    let res = crate::stream::shared_ifile_slice_with(
+        handle,
+        opt(&b[0]),
+        opt(&b[1]),
+        &mut |n| on_begin(ctx, n as u64) == 0,
+        &mut |data, space| decode(ctx, data as *const c_void, space) == 0,
+    );
+    match res {
+        Ok(true) => 0,
+        Ok(false) => 1,
+        Err(e) => {
+            set_errmsg(errmsg, &e);
+            -1
+        }
+    }
+}
+
 /// Read the next frame (sub-packet) of a file-backed IStream as a fresh SHM
 /// Array<a>. At the end of the stream returns null and sets `*eof` to 1; an
 /// empty frame is an empty Array with `*eof` 0. Used by `@replay`.
@@ -2652,6 +2696,11 @@ mod c_abi {
     #[no_mangle]
     pub unsafe extern "C" fn mlc_next_with(handle: i64, decode: super::NextDecode, ctx: *mut c_void, errmsg: *mut *mut c_char) -> i32 {
         super::mlc_next_with(handle, Some(decode), ctx, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn mlc_ifile_slice_with(handle: i64, bounds: *const IFileWalkArg, on_begin: super::SliceBegin, decode: super::NextDecode, ctx: *mut c_void, errmsg: *mut *mut c_char) -> i32 {
+        super::mlc_ifile_slice_with(handle, bounds, Some(on_begin), Some(decode), ctx, errmsg)
     }
 
     #[no_mangle]

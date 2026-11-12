@@ -1,0 +1,141 @@
+-- A unit-step slice `.[s:e]` of an IFile read from a C++ or Rust pool is
+-- decoded one piece per sub-packet it spans, each where it lies (SLOT-25),
+-- and must equal the slice the Python pool copies out, for Real, Str and a
+-- tuple holding a Str, uncompressed and compressed: within one sub-packet,
+-- across two and three, on their boundaries, the whole file, negative
+-- bounds, the last element, and empty slices. Four @write calls, each
+-- flushed, give sub-packets of 5, 7, 3 and 6 elements.
+
+module main
+  ( realsCpp
+  , realsRust
+  , realsPy
+  , strsCpp
+  , strsRust
+  , strsPy
+  , pairsCpp
+  , pairsRust
+  , pairsPy
+  )
+
+import root
+import root-cpp
+import root-rust
+import root-py
+
+writeReals :: Int -> Str -> <IO> ()
+writeReals z path = do
+  Ok o <- @open path :: <IO> (Try Str (OStream Real))
+  @write z o [0.5, 1.5, 2.5, 3.5, 4.5]
+  @flush o
+  @write z o [5.5, 6.5, 7.5, 8.5, 9.5, 10.5, 11.5]
+  @flush o
+  @write z o [12.5, 13.5, 14.5]
+  @flush o
+  @write z o [15.5, 16.5, 17.5, 18.5, 19.5, 20.5]
+  @close o
+
+sliceReals :: ([[Real]] -> [[Real]]) -> Int -> Str -> <IO> [[Real]]
+sliceReals langId z path = do
+  writeReals z path
+  Ok f <- @open path :: <IO> (Try Str (IFile [Real]))
+  langId
+    [ .[1:4] f
+    , .[3:9] f
+    , .[3:14] f
+    , .[5:12] f
+    , .[12:15] f
+    , .[:] f
+    , .[-8:-2] f
+    , .[-1:] f
+    , .[20:21] f
+    , .[4:4] f
+    , .[10:3] f
+    ]
+
+realsCpp :: Int -> Str -> <IO> [[Real]]
+realsCpp = sliceReals idcpp
+
+realsRust :: Int -> Str -> <IO> [[Real]]
+realsRust = sliceReals idrust
+
+realsPy :: Int -> Str -> <IO> [[Real]]
+realsPy = sliceReals idpy
+
+writeStrs :: Int -> Str -> <IO> ()
+writeStrs z path = do
+  Ok o <- @open path :: <IO> (Try Str (OStream Str))
+  @write z o ["0", "s1", "ss2", "sss3", "4"]
+  @flush o
+  @write z o ["s5", "ss6", "sss7", "8", "s9", "ss10", "sss11"]
+  @flush o
+  @write z o ["12", "s13", "ss14"]
+  @flush o
+  @write z o ["sss15", "16", "s17", "ss18", "sss19", "20"]
+  @close o
+
+sliceStrs :: ([[Str]] -> [[Str]]) -> Int -> Str -> <IO> [[Str]]
+sliceStrs langId z path = do
+  writeStrs z path
+  Ok f <- @open path :: <IO> (Try Str (IFile [Str]))
+  langId
+    [ .[1:4] f
+    , .[3:9] f
+    , .[3:14] f
+    , .[5:12] f
+    , .[12:15] f
+    , .[:] f
+    , .[-8:-2] f
+    , .[-1:] f
+    , .[20:21] f
+    , .[4:4] f
+    , .[10:3] f
+    ]
+
+strsCpp :: Int -> Str -> <IO> [[Str]]
+strsCpp = sliceStrs idcpp
+
+strsRust :: Int -> Str -> <IO> [[Str]]
+strsRust = sliceStrs idrust
+
+strsPy :: Int -> Str -> <IO> [[Str]]
+strsPy = sliceStrs idpy
+
+writePairs :: Int -> Str -> <IO> ()
+writePairs z path = do
+  Ok o <- @open path :: <IO> (Try Str (OStream (Real, Str)))
+  @write z o [(0.25, ""), (1.25, "p"), (2.25, "pp"), (3.25, ""), (4.25, "p")]
+  @flush o
+  @write z o [(5.25, "pp"), (6.25, ""), (7.25, "p"), (8.25, "pp"), (9.25, ""), (10.25, "p"), (11.25, "pp")]
+  @flush o
+  @write z o [(12.25, ""), (13.25, "p"), (14.25, "pp")]
+  @flush o
+  @write z o [(15.25, ""), (16.25, "p"), (17.25, "pp"), (18.25, ""), (19.25, "p"), (20.25, "pp")]
+  @close o
+
+slicePairs :: ([[(Real, Str)]] -> [[(Real, Str)]]) -> Int -> Str -> <IO> [[(Real, Str)]]
+slicePairs langId z path = do
+  writePairs z path
+  Ok f <- @open path :: <IO> (Try Str (IFile [(Real, Str)]))
+  langId
+    [ .[1:4] f
+    , .[3:9] f
+    , .[3:14] f
+    , .[5:12] f
+    , .[12:15] f
+    , .[:] f
+    , .[-8:-2] f
+    , .[-1:] f
+    , .[20:21] f
+    , .[4:4] f
+    , .[10:3] f
+    ]
+
+pairsCpp :: Int -> Str -> <IO> [[(Real, Str)]]
+pairsCpp = slicePairs idcpp
+
+pairsRust :: Int -> Str -> <IO> [[(Real, Str)]]
+pairsRust = slicePairs idrust
+
+pairsPy :: Int -> Str -> <IO> [[(Real, Str)]]
+pairsPy = slicePairs idpy

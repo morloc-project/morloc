@@ -129,6 +129,14 @@ extern "C" {
         ctx: *mut c_void,
         errmsg: *mut *mut c_char,
     ) -> i32;
+    fn mlc_ifile_slice_with(
+        handle: i64,
+        bounds: *const IFileWalkArg,
+        on_begin: unsafe extern "C" fn(*mut c_void, u64) -> i32,
+        decode: unsafe extern "C" fn(*mut c_void, *const c_void, MorlocSpace) -> i32,
+        ctx: *mut c_void,
+        errmsg: *mut *mut c_char,
+    ) -> i32;
     fn mlc_next_frame(handle: i64, eof: *mut i32, errmsg: *mut *mut c_char) -> *mut c_void;
     fn mlc_stream_layout(handle: i64, errmsg: *mut *mut c_char) -> *mut c_void;
     fn mlc_stream(ifile_handle: i64, errmsg: *mut *mut c_char) -> i64;
@@ -1507,6 +1515,22 @@ pub trait FromVoidstar: Sized {
         let _ = (elem, src, n);
         None
     }
+    /// A list type, built from pieces by `seq_with_capacity` and
+    /// `read_append`.
+    const SEQ: bool = false;
+    /// An empty list with room for `n` elements; None when there is no room.
+    fn seq_with_capacity(n: usize) -> Option<Self> {
+        let _ = n;
+        morloc_infra_abort("seq_with_capacity reached a type that is not a list")
+    }
+    /// Read the list of `schema` at `data` onto the end of `acc`.
+    ///
+    /// # Safety
+    /// As for `read`.
+    unsafe fn read_append(acc: &mut Self, schema: &Schema, data: *const u8, space: MorlocSpace) {
+        let _ = (acc, schema, data, space);
+        morloc_infra_abort("read_append reached a type that is not a list")
+    }
 }
 
 // ---- walks ----------------------------------------------------------------
@@ -2602,6 +2626,15 @@ impl<T: ToVoidstar> ToVoidstar for $container<T> {
     }
 }
 impl<T: FromVoidstar> FromVoidstar for $container<T> {
+    const SEQ: bool = true;
+    fn seq_with_capacity(n: usize) -> Option<Self> {
+        let mut v = $container::new();
+        v.try_reserve(n).ok()?;
+        Some(v)
+    }
+    unsafe fn read_append(acc: &mut Self, schema: &Schema, data: *const u8, space: MorlocSpace) {
+        acc.extend(Self::read(schema, data, space));
+    }
     unsafe fn read_step(w: &mut ReadWalk, schema: &Schema, data: *const u8, idx: usize) {
         let a = core::ptr::read_unaligned(data as *const Array);
         let elem = resolve_recur(&schema.parameters[0]);
@@ -4190,6 +4223,9 @@ pub unsafe fn ifile_walk<T: FromVoidstar>(
             None => IFileWalkArg { has: 0, _pad: [0; 7], value: 0 },
         })
         .collect();
+    if T::SEQ && path == ".[:]" && args.len() == 3 && args[2].map_or(true, |step| step == 1) {
+        return ifile_slice::<T>(schema, handle, args[0], args[1]);
+    }
     let path_c = cstr_arg(path, "@ifile_walk");
     let args_ptr = if packed.is_empty() { std::ptr::null() } else { packed.as_ptr() };
     let mut err: *mut c_char = std::ptr::null_mut();
@@ -4201,6 +4237,76 @@ pub unsafe fn ifile_walk<T: FromVoidstar>(
         &mut err,
     );
     read_voidstar(voidstar, err, schema, "@ifile_walk")
+}
+
+struct Sliced<'a, T> {
+    schema: &'a Schema,
+    value: Option<T>,
+    unwinding: Option<Box<dyn std::any::Any + Send>>,
+}
+
+// SLOT-25: a throw in a callback must not unwind through the runtime, so it
+// is held and resumed once the runtime has returned.
+unsafe extern "C" fn slice_begin<T: FromVoidstar>(c: *mut c_void, n: u64) -> i32 {
+    let d = &mut *(c as *mut Sliced<T>);
+    match std::panic::catch_unwind(|| match T::seq_with_capacity(n as usize) {
+        Some(v) => v,
+        None => morloc_throw(format!("@ifile_walk: no memory for a slice of {n} elements")),
+    }) {
+        Ok(v) => {
+            d.value = Some(v);
+            0
+        }
+        Err(p) => {
+            d.unwinding = Some(p);
+            1
+        }
+    }
+}
+
+unsafe extern "C" fn slice_decode<T: FromVoidstar>(c: *mut c_void, data: *const c_void, space: MorlocSpace) -> i32 {
+    let d = &mut *(c as *mut Sliced<T>);
+    let schema = d.schema;
+    let Some(acc) = d.value.as_mut() else {
+        morloc_infra_abort("@ifile_walk: a slice piece came before its length")
+    };
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _recur = RecurScope::enter(schema);
+        T::read_append(acc, schema, data as *const u8, space)
+    })) {
+        Ok(()) => 0,
+        Err(p) => {
+            d.unwinding = Some(p);
+            1
+        }
+    }
+}
+
+/// `.[start:stop]` of a list-valued IFile, each sub-packet's part read
+/// where it lies onto the end of the list (SLOT-25).
+unsafe fn ifile_slice<T: FromVoidstar>(schema: &Schema, handle: u64, start: Option<i64>, stop: Option<i64>) -> T {
+    let arg = |v: Option<i64>| IFileWalkArg { has: v.is_some() as u8, _pad: [0; 7], value: v.unwrap_or(0) };
+    let bounds = [arg(start), arg(stop)];
+    let mut d = Sliced::<T> { schema, value: None, unwinding: None };
+    let mut err: *mut c_char = std::ptr::null_mut();
+    let rc = mlc_ifile_slice_with(
+        handle as i64,
+        bounds.as_ptr(),
+        slice_begin::<T>,
+        slice_decode::<T>,
+        &mut d as *mut Sliced<T> as *mut c_void,
+        &mut err,
+    );
+    if rc < 0 {
+        morloc_throw(format!("@ifile_walk: {}", reason_or_abort(err, "@ifile_walk")));
+    }
+    if let Some(p) = d.unwinding {
+        std::panic::resume_unwind(p);
+    }
+    match d.value {
+        Some(v) if rc == 0 => v,
+        _ => failed_without_reason("@ifile_walk"),
+    }
 }
 
 /// String interpolation: alternate `fragments[0], insertions[0], fragments[1],
@@ -4862,6 +4968,76 @@ mod tests {
         let out = <T as FromVoidstar>::read(&schema, base, MorlocSpace::payload(base, buf.len()));
         TEST_BASE.with(|b| b.set(None));
         out
+    }
+
+    /// `value` written as `schema_str` into a buffer of its own, relptrs
+    /// relative to its start.
+    unsafe fn piece_bytes<T: ToVoidstar>(schema: &Schema, value: &T) -> Vec<u8> {
+        let _recur = RecurScope::enter(schema);
+        let mut buf = vec![0u8; value.shm_size(schema).max(1) + 64];
+        let base = buf.as_mut_ptr();
+        TEST_BASE.with(|b| b.set(Some(base as usize)));
+        let mut cursor = base.add(schema.width);
+        value.write(base, &mut cursor, schema);
+        TEST_BASE.with(|b| b.set(None));
+        buf
+    }
+
+    /// SLOT-25: the pieces of an in-place slice, each in a space of its
+    /// own, read onto the end of one list, which `on_begin` sized.
+    #[test]
+    fn slice_pieces_read_onto_one_list() {
+        unsafe fn pieces<T: ToVoidstar + FromVoidstar + PartialEq + std::fmt::Debug + Clone>(schema_str: &str, parts: &[Vec<T>]) {
+            let schema = parse_schema(schema_str).unwrap();
+            let total: usize = parts.iter().map(|p| p.len()).sum();
+            let mut d = Sliced::<Vec<T>> { schema: &schema, value: None, unwinding: None };
+            let ctx = &mut d as *mut Sliced<Vec<T>> as *mut c_void;
+            assert_eq!(slice_begin::<Vec<T>>(ctx, total as u64), 0);
+            assert!(d.value.as_ref().unwrap().capacity() >= total);
+            for p in parts {
+                let mut bytes = piece_bytes(&schema, p);
+                let space = MorlocSpace::payload(bytes.as_mut_ptr(), bytes.len());
+                assert_eq!(slice_decode::<Vec<T>>(ctx, bytes.as_ptr() as *const c_void, space), 0);
+            }
+            let want: Vec<T> = parts.iter().flatten().cloned().collect();
+            assert_eq!(d.value.unwrap(), want, "{schema_str}");
+        }
+        unsafe {
+            pieces::<f64>("af8", &[vec![1.5, 2.5], vec![], vec![3.5], vec![4.5, 5.5, 6.5]]);
+            pieces::<String>("as", &[vec!["a".into(), "".into()], vec!["bcd".into()], vec!["e".into()]]);
+            pieces::<(String, Vec<i64>)>("at2sai8", &[vec![("x".into(), vec![1, 2])], vec![("yy".into(), vec![]), ("z".into(), vec![3])]]);
+        }
+    }
+
+    /// SLOT-25: a piece that fails to read is held as an unwinding, not
+    /// thrown through the runtime, and fails the callback.
+    #[test]
+    fn a_slice_piece_that_fails_is_held_for_after_the_runtime() {
+        let schema = parse_schema("af8").unwrap();
+        let mut d = Sliced::<Vec<f64>> { schema: &schema, value: None, unwinding: None };
+        let ctx = &mut d as *mut Sliced<Vec<f64>> as *mut c_void;
+        unsafe {
+            assert_eq!(slice_begin::<Vec<f64>>(ctx, 3), 0);
+            let mut good = piece_bytes(&schema, &vec![1.0f64]);
+            let space = MorlocSpace::payload(good.as_mut_ptr(), good.len());
+            assert_eq!(slice_decode::<Vec<f64>>(ctx, good.as_ptr() as *const c_void, space), 0);
+            let mut bad = piece_bytes(&schema, &vec![2.0f64, 3.0]);
+            bad[0..8].copy_from_slice(&1000usize.to_le_bytes());
+            let space = MorlocSpace::payload(bad.as_mut_ptr(), bad.len());
+            assert_eq!(slice_decode::<Vec<f64>>(ctx, bad.as_ptr() as *const c_void, space), 1);
+        }
+        let held = d.unwinding.take().expect("the failure was not held");
+        assert!(held.downcast_ref::<MorlocThrow>().is_some_and(|t| t.0.contains("runs past")), "not the read's throw");
+    }
+
+    /// A list type is read by slices; any other type keeps the copying walk.
+    #[test]
+    fn only_list_types_are_read_by_slices() {
+        assert!(<Vec<f64> as FromVoidstar>::SEQ);
+        assert!(<std::collections::VecDeque<String> as FromVoidstar>::SEQ);
+        assert!(!<f64 as FromVoidstar>::SEQ);
+        assert!(!<String as FromVoidstar>::SEQ);
+        assert!(!<(i64, f64) as FromVoidstar>::SEQ);
     }
 
     /// Lay a flattened voidstar into a packet body and read it back through

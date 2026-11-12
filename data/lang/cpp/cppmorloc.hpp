@@ -1508,6 +1508,36 @@ T from_voidstar(const Schema* schema, const void* data, T* = nullptr, morloc_spa
     return out;
 }
 
+// Read the list piece `data` of `schema` onto the end of `acc`: elements
+// whose wire layout is T's are copied straight from the piece; any others
+// are read into `scratch` and moved over.
+template<typename T>
+void mlc_append_from_voidstar(const Schema* schema, const void* data, morloc_space_t space, T& acc, T& scratch) {
+    using ElemT = typename T::value_type;
+    const Array* array = (const Array*)data;
+    if (array->size == 0) return;
+    if constexpr (std::is_arithmetic_v<ElemT> && !std::is_same_v<ElemT, bool>) {
+        const Schema* elem = resolve_recur(schema->parameters[0]);
+        if (vector_is_bulk_copyable<ElemT>(elem)) {
+            const char* start = (const char*)resolve_array_cpp(array->data, array->size, elem->width, space);
+            if (reinterpret_cast<uintptr_t>(start) % alignof(ElemT) == 0) {
+                const ElemT* first = (const ElemT*)start;
+                acc.insert(acc.end(), first, first + array->size);
+            } else {
+                size_t at = acc.size();
+                acc.resize(at + array->size);
+                std::memcpy(acc.data() + at, start, array->size * sizeof(ElemT));
+            }
+            return;
+        }
+    }
+    scratch.clear();
+    MlcReadWalk w(schema, space);
+    w.child(schema, data, &scratch);
+    w.run();
+    acc.insert(acc.end(), std::make_move_iterator(scratch.begin()), std::make_move_iterator(scratch.end()));
+}
+
 // Read the value an uncompressed inline (MESG+VOIDSTAR) packet carries,
 // where it lies in the packet; every relptr is checked against the payload.
 template<typename T>

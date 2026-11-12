@@ -3,15 +3,12 @@
 Status: analysed 2026-10-13, reviewed by the devil's advocate. W1, R1
 (SLOT-25) and W2 are done; the evidence and path sections below describe
 the code before them. The size walk remains, and compressed batches still
-land in shared memory (R2). Still copied on the write side: a stdout stream joins header and payload
-into one buffer before writing (`send_stdio`, custody.rs), and a
-multi-frame compressed batch joins its frames into one buffer before the
-write (`Ticket::wait`, write_behind.rs); both could hand an iovec to
-`pwritev`/`writev` instead. Both run on the stream's writer thread, off
-the producer's path: the frame join copies only compressed bytes, and the
-stdout join would need the one-buffer sink of SLOT-16 to take parts or
-let other output fall between them; left until a measurement shows the
-writer thread is the bottleneck. Index growth (`grow_index_capacity`)
+land in shared memory (R2). A stdout stream hands the nexus header, payload and padding as parts,
+written with one `writev` (SLOT-16, ENC-8). Still copied on the write
+side: a multi-frame compressed batch joins its frames into one buffer
+before the write (`Ticket::wait`, write_behind.rs); it runs on the
+stream's writer thread, off the producer's path, and copies only
+compressed bytes. Index growth (`grow_index_capacity`)
 moves the data region under the slot lock only in a stream's first
 sub-packet, since the capacity carries over to the next. Others open.
 Parent: runtime/issues/encode-throughput.md sections 1b and 2. Source:
@@ -234,3 +231,9 @@ scoped decode instead of an escaping lease (the lease was mis-specified:
 mappings belong to per-process slots and are unmapped on overflow, sweep
 and close); W3's risks; W4 rejected; B's safety claim narrowed; mapping
 faults and allocator faults added; a measurement step first.
+- **A C++ IFile slice misses its 1.5x goal against @next.** [measured,
+  2026-11-12] ENC-9: the in-place slice (SLOT-25) runs at 1.6-2.1x the
+  @next loop in C++ (Rust 1.15-1.7x), down from 5.4x. Not yet profiled;
+  candidates: the scratch-vector decode and move-append for non-bulk
+  elements in `mlc_append_from_voidstar`, page faults on first touch of
+  each piece (MADV_WILLNEED), and the compressed pieces' SHM landing.

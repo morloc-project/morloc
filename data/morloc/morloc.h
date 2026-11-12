@@ -1807,6 +1807,16 @@ int64_t mlc_stream(int64_t ifile_handle, ERRMSG);
 typedef int32_t (*mlc_next_decode_fn)(void* ctx, const void* data, morloc_space_t space);
 int32_t mlc_next_with(int64_t handle, mlc_next_decode_fn decode, void* ctx, ERRMSG);
 
+// `mlc_ifile_slice_with(handle, bounds, on_begin, decode, ctx)` is the
+// unit-step slice `.[start:stop]` of an IFile (`bounds[0]`, `bounds[1]`)
+// handed to `decode` one piece per sub-packet it spans, in order, after
+// `on_begin` got the slice's length; each piece is an `[a]` decoded as for
+// `mlc_next_with`. Returns as `mlc_next_with`; a failing callback ends the
+// slice (SLOT-25).
+typedef int32_t (*mlc_slice_begin_fn)(void* ctx, uint64_t n);
+int32_t mlc_ifile_slice_with(int64_t handle, const mlc_ifile_walk_arg* bounds,
+    mlc_slice_begin_fn on_begin, mlc_next_decode_fn decode, void* ctx, ERRMSG);
+
 // `mlc_next_frame(handle, eof)` reads the next sub-packet of a file-backed
 // IStream like `mlc_next`, but tells the end of the stream apart from an
 // empty sub-packet: at the end it returns NULL and sets `*eof` to 1.

@@ -429,13 +429,17 @@ fn do_adopt_stream(handle: i64) -> Resp {
 /// The custodian's sink for stdout and stderr streams (SLOT-16).
 pub(crate) unsafe extern "C" fn stdio_sink(
     handle: i64,
-    bytes: *const u8,
-    len: u64,
+    iov: *const libc::iovec,
+    iovcnt: usize,
     errmsg: *mut *mut std::ffi::c_char,
 ) -> i32 {
-    // SAFETY: SLOT-16: the custodian passes `len` readable bytes.
-    let bytes = if len == 0 { &[][..] } else { std::slice::from_raw_parts(bytes, len as usize) };
-    match do_write(handle, bytes) {
+    // SAFETY: SLOT-16: the custodian passes `iovcnt` readable parts.
+    let iov = if iovcnt == 0 { &[][..] } else { std::slice::from_raw_parts(iov, iovcnt) };
+    let parts: Vec<&[u8]> = iov
+        .iter()
+        .map(|v| if v.iov_len == 0 { &[][..] } else { std::slice::from_raw_parts(v.iov_base as *const u8, v.iov_len) })
+        .collect();
+    match do_write(handle, crate::stdio_bridge::Frame(&parts)) {
         Resp::Ack | Resp::Ok(..) | Resp::Eof => 0,
         Resp::PipeClosed => 2,
         Resp::Err(m) => {
@@ -672,7 +676,7 @@ fn check_incoming_schema(meta: &[u8], expected_schema: &str, what: &str) -> Resu
 /// immediately (jsonl / json array / packet / voidstar -- constant
 /// memory) or, for the table/msgpack formats which cannot be produced
 /// chunk-by-chunk, rejected with an actionable error.
-fn do_write(slot_id: i64, bytes: &[u8]) -> Resp {
+fn do_write(slot_id: i64, frame: crate::stdio_bridge::Frame<'_>) -> Resp {
     use crate::stdio_bridge as br;
 
     // Which stdio kind? Read from the SHM registry via the runtime.
@@ -693,7 +697,7 @@ fn do_write(slot_id: i64, bytes: &[u8]) -> Resp {
     };
     let route = if stdio_kind == STDIO_KIND_STDOUT { stdout_route() } else { StdoutRoute::Direct };
     if route == StdoutRoute::Save {
-        if let Err(e) = stage_write(slot_id, bytes) {
+        if let Err(e) = stage_write(slot_id, frame) {
             return Resp::Err(format!("saving the stdout stream: {}", e));
         }
         if !crate::stage::stdout_on()
@@ -717,20 +721,18 @@ fn do_write(slot_id: i64, bytes: &[u8]) -> Resp {
                 Err(br::WriteError::Other(e)) => return Resp::Err(format!("stdio write header: {}", e)),
             }
         }
-        return write_resp(unsafe { br::write_bytes_to_fd(slot.fd, bytes) });
+        return write_resp(unsafe { br::write_frame_to_fd(slot.fd, frame) });
     }
 
     // stdout: transcode per -f. Classify from the 32-byte header only;
     // the transcoding branches read the full sub-packet lazily so the
     // packet pass-through path stays zero-copy for large streams.
     let cfg = render_cfg();
-    if bytes.len() < 32 {
+    let Some(hdr) = frame.header() else {
         return Resp::Err(format!(
-            "stdio write: blob is {} bytes, smaller than a packet header", bytes.len(),
+            "stdio write: blob is {} bytes, smaller than a packet header", frame.len(),
         ));
-    }
-    let mut hdr = [0u8; 32];
-    hdr.copy_from_slice(&bytes[..32]);
+    };
     let header = match PacketHeader::from_bytes(&hdr) {
         Ok(h) => h,
         Err(e) => return Resp::Err(format!("stdio write header parse: {}", e)),
@@ -749,7 +751,7 @@ fn do_write(slot_id: i64, bytes: &[u8]) -> Resp {
                     unsafe { br::write_stream_header_for_slot(slot.fd, slot_id) }?;
                     slot.header_done = true;
                 }
-                unsafe { br::write_bytes_to_fd(slot.fd, bytes) }?;
+                unsafe { br::write_frame_to_fd(slot.fd, frame) }?;
                 if is_footer {
                     slot.header_done = false;
                 }
@@ -760,27 +762,29 @@ fn do_write(slot_id: i64, bytes: &[u8]) -> Resp {
             // the recorded level), and each pool footer is folded into the single final
             // footer written by `finish_stdout`.
             OutputFormat::Packet | OutputFormat::VoidStar => {
-                write_logical_packet(&mut slot, slot_id, bytes, is_footer, is_data)
+                write_logical_packet(&mut slot, slot_id, frame, is_footer, is_data)
             }
             OutputFormat::Jsonl => {
                 if is_data {
-                    let schema = br::subpacket_value_schema_str(bytes)?;
-                    unsafe { br::emit_subpacket_jsonl(bytes, &schema) }
+                    let bytes = frame.joined();
+                    let schema = br::subpacket_value_schema_str(&bytes)?;
+                    unsafe { br::emit_subpacket_jsonl(&bytes, &schema) }
                 } else {
                     Ok(()) // footer: jsonl has no closing frame
                 }
             }
             OutputFormat::Raw => {
                 if is_data {
-                    unsafe { br::emit_subpacket_raw(bytes) }
+                    unsafe { br::emit_subpacket_raw(frame, 32 + header.offset as usize) }
                 } else {
                     Ok(()) // footer: raw has no closing frame
                 }
             }
             OutputFormat::Json => {
                 if is_data {
-                    let schema = br::subpacket_value_schema_str(bytes)?;
-                    let inner = unsafe { br::subpacket_json_inner(bytes, &schema) }?;
+                    let bytes = frame.joined();
+                    let schema = br::subpacket_value_schema_str(&bytes)?;
+                    let inner = unsafe { br::subpacket_json_inner(&bytes, &schema) }?;
                     if !slot.json_open {
                         unsafe { br::write_bytes_to_fd(slot.fd, b"[") }?;
                         slot.json_open = true;
@@ -838,7 +842,7 @@ fn do_write(slot_id: i64, bytes: &[u8]) -> Resp {
 fn write_logical_packet(
     slot: &mut StdioSlot,
     slot_id: i64,
-    bytes: &[u8],
+    frame: crate::stdio_bridge::Frame<'_>,
     is_footer: bool,
     is_data: bool,
 ) -> Result<(), crate::stdio_bridge::WriteError> {
@@ -862,11 +866,11 @@ fn write_logical_packet(
         slot.header_done = true;
     }
     if is_footer {
-        fold_pool_footer(slot, bytes).map_err(br::WriteError::Other)
+        fold_pool_footer(slot, &frame.joined()).map_err(br::WriteError::Other)
     } else {
         let offset = slot.bytes_out;
-        unsafe { br::write_bytes_to_fd(slot.fd, bytes) }?;
-        slot.bytes_out += bytes.len() as u64;
+        unsafe { br::write_frame_to_fd(slot.fd, frame) }?;
+        slot.bytes_out += frame.len() as u64;
         if is_data {
             slot.pending.push(offset);
         }
@@ -875,15 +879,12 @@ fn write_logical_packet(
 }
 
 /// Save one frame of the stdout stream to the stage file.
-fn stage_write(slot_id: i64, bytes: &[u8]) -> Result<(), String> {
+fn stage_write(slot_id: i64, frame: crate::stdio_bridge::Frame<'_>) -> Result<(), String> {
     use crate::stdio_bridge as br;
-    let hdr: [u8; 32] = bytes
-        .get(..32)
-        .and_then(|h| h.try_into().ok())
-        .ok_or("frame smaller than a packet header")?;
+    let hdr = frame.header().ok_or("frame smaller than a packet header")?;
     let header = PacketHeader::from_bytes(&hdr).map_err(|e| e.to_string())?;
     let mut slot = STAGE_SLOT.lock().map_err(|e| e.to_string())?;
-    write_logical_packet(&mut slot, slot_id, bytes, header.is_footer(), header.is_data())
+    write_logical_packet(&mut slot, slot_id, frame, header.is_footer(), header.is_data())
         .map_err(|e| match e {
             br::WriteError::BrokenPipe => "the stage file closed".to_string(),
             br::WriteError::Other(m) => m,

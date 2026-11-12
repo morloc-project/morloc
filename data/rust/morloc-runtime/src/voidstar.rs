@@ -941,12 +941,34 @@ unsafe fn walk_root_array_parallel(
         Ok(p) => p as usize,
         Err(e) => return Some(Err(e)),
     };
-    let n = arr.size;
-    let chunk = n.div_ceil(4 * workers).max(1);
+    // SAFETY: the header check admitted `arr.size` elements at `elems`.
+    Some(unsafe { walk_elements(mode, window, schema, elem_schema, elems, arr.size, dims, workers) })
+}
+
+/// Walk the `n` elements of `elem_schema` at `elems` as records of their
+/// own, in ranges taken by `workers` threads (the calling thread among
+/// them). `root` is the schema `elem_schema` was resolved from.
+///
+/// # Safety
+/// `n` elements of `elem_schema` lie at `elems`; their pointers are walked
+/// in `mode`, checked against `window`.
+#[allow(clippy::too_many_arguments)]
+unsafe fn walk_elements(
+    mode: RebaseMode,
+    window: RelWindow,
+    root: &Schema,
+    elem_schema: &Schema,
+    elems: usize,
+    n: usize,
+    dims: Option<Origin>,
+    workers: usize,
+) -> Result<(), MorlocError> {
+    let width = elem_schema.width;
+    let chunk = n.div_ceil(4 * workers.max(1)).max(1);
     let next = std::sync::atomic::AtomicUsize::new(0);
     let failed: std::sync::Mutex<Option<MorlocError>> = std::sync::Mutex::new(None);
     let work = || {
-        let res = Resolver::new(schema);
+        let res = Resolver::new(root);
         let mut w = RebaseWalk { res: &res, mode: mode.rebase(), window: Some(window), dims };
         let mut st = Stack::new();
         let inner = res.resolve(elem_schema).ok();
@@ -963,7 +985,7 @@ unsafe fn walk_root_array_parallel(
                 let text = inner.serial_type == SerialType::String && dims.is_some();
                 let end = (start + chunk).min(n);
                 // SAFETY: elements start..end lie inside the region the
-                // header check admitted.
+                // caller admitted.
                 let first = unsafe { (elems as *mut u8).add(start * width) } as *mut Array;
                 if let Err(e) = unsafe { w.headers(first, end - start, ew, dim, text) } {
                     failed.lock().unwrap_or_else(|p| p.into_inner()).get_or_insert(e);
@@ -973,7 +995,7 @@ unsafe fn walk_root_array_parallel(
                 continue;
             }
             for i in start..(start + chunk).min(n) {
-                // SAFETY: element i lies inside the region the header check
+                // SAFETY: element i lies inside the region the caller
                 // admitted.
                 st.enter(elem_schema, unsafe { (elems as *const u8).add(i * width) }, ());
                 if let Err(e) = walk::run(&mut w, &mut st) {
@@ -984,19 +1006,68 @@ unsafe fn walk_root_array_parallel(
             }
         }
     };
-    std::thread::scope(|sc| {
-        // The calling thread works too, so a refused spawn only narrows it.
-        for _ in 1..workers {
-            if std::thread::Builder::new().spawn_scoped(sc, &work).is_err() {
-                break;
-            }
-        }
+    if workers < 2 {
         work();
-    });
-    Some(match failed.into_inner().unwrap_or_else(|p| p.into_inner()) {
+    } else {
+        std::thread::scope(|sc| {
+            // The calling thread works too, so a refused spawn only narrows it.
+            for _ in 1..workers {
+                if std::thread::Builder::new().spawn_scoped(sc, &work).is_err() {
+                    break;
+                }
+            }
+            work();
+        });
+    }
+    match failed.into_inner().unwrap_or_else(|p| p.into_inner()) {
         Some(e) => Err(e),
         None => Ok(()),
-    })
+    }
+}
+
+/// Check the `count` records of `elem` at `records`, inside `payload` (a
+/// sub-packet payload in the producer's frame, relptrs carrying
+/// `vol_idx_hint`), as [`check_in_place`] checks a whole payload: every
+/// pointer below them, and the bytes it addresses, lie inside `payload`.
+/// Records outside the range are not read.
+///
+/// # Safety
+/// `records .. records + count * elem.width` must lie inside `payload`.
+pub unsafe fn check_records_in_place(
+    payload: &[u8],
+    records: *const u8,
+    count: usize,
+    elem: &Schema,
+    vol_idx_hint: u16,
+    origin: Origin,
+) -> Result<(), MorlocError> {
+    if count == 0 {
+        return Ok(());
+    }
+    if elem.is_fixed_width() {
+        return match origin.checked() {
+            Some(o) if holds_enum(elem) => unsafe { check_enum_run(elem, records, count, elem.width, o) },
+            _ => Ok(()),
+        };
+    }
+    let hi = isize::try_from(payload.len())
+        .map_err(|_| MorlocError::Serialization("a voidstar value too large to address".into()))?;
+    let window = RelWindow { lo: 0, hi };
+    let shift = -shm::encode_relptr(vol_idx_hint as usize, 0);
+    let mode = RebaseMode::Check { base: payload.as_ptr() as usize, shift };
+    let root = Schema::array(elem.clone());
+    let total = if payload.len() >= std::mem::size_of::<Array>() {
+        // SAFETY: a sub-packet payload begins with its root Array header.
+        unsafe { std::ptr::read_unaligned(payload.as_ptr() as *const Array) }.size.max(count)
+    } else {
+        count
+    };
+    let share = (payload.len() as u128 * count as u128 / total as u128) as isize;
+    let workers = if count >= 2 && share >= PARALLEL_WALK_MIN_BYTES { crate::compression::frame_workers() } else { 1 };
+    // SAFETY: the caller vouches the records lie in `payload`.
+    unsafe {
+        walk_elements(mode, window, &root, &root.parameters[0], records as usize, count, origin.checked(), workers)
+    }
 }
 
 /// Check a value of `schema` that lies in `bytes` (a sub-packet payload in

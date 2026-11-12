@@ -809,6 +809,46 @@ inline int64_t _mlc_ifile_length(int64_t handle) {
     return n;
 }
 
+// `.[start:stop]` of a list-valued IFile, each sub-packet's part decoded
+// where it lies onto the end of the list (SLOT-25).
+template <typename T>
+T _mlc_ifile_slice(Schema* schema, int64_t handle, std::optional<int64_t> start, std::optional<int64_t> stop) {
+    struct Sliced {
+        Schema* schema;
+        T acc;
+        T scratch;
+        std::exception_ptr error;
+    } ctx{schema, T{}, T{}, nullptr};
+    mlc_slice_begin_fn begin = [](void* c, uint64_t n) -> int32_t {
+        Sliced* d = static_cast<Sliced*>(c);
+        try {
+            d->acc.reserve((size_t)n);
+            return 0;
+        } catch (...) {
+            d->error = std::current_exception();
+            return 1;
+        }
+    };
+    mlc_next_decode_fn decode = [](void* c, const void* data, morloc_space_t space) -> int32_t {
+        Sliced* d = static_cast<Sliced*>(c);
+        try {
+            mlc_append_from_voidstar(d->schema, data, space, d->acc, d->scratch);
+            return 0;
+        } catch (...) {
+            d->error = std::current_exception();
+            return 1;
+        }
+    };
+    mlc_ifile_walk_arg bounds[2] = {};
+    if (start.has_value()) { bounds[0].has = 1; bounds[0].value = *start; }
+    if (stop.has_value()) { bounds[1].has = 1; bounds[1].value = *stop; }
+    char* errmsg = NULL;
+    int32_t rc = mlc_ifile_slice_with(handle, bounds, begin, decode, &ctx, &errmsg);
+    if (rc < 0) { PROPAGATE_ERROR(errmsg) }
+    if (ctx.error) { std::rethrow_exception(ctx.error); }
+    return std::move(ctx.acc);
+}
+
 // @ifile_walk: unified IFile pattern walker. The `path` encodes the
 // walk-step chain (".[]", ".[:]", ".1.foo", etc.); `args` carries the
 // runtime bracket bounds (Python-style optional ints; absent slots
@@ -820,6 +860,12 @@ T _mlc_ifile_walk(
     const std::string& path,
     std::initializer_list<std::optional<int64_t>> args
 ) {
+    if constexpr (is_std_vector<T>::value) {
+        const std::optional<int64_t>* a = args.begin();
+        if (path == ".[:]" && args.size() == 3 && (!a[2].has_value() || *a[2] == 1)) {
+            return _mlc_ifile_slice<T>(schema, handle, a[0], a[1]);
+        }
+    }
     // Pack the optional<int64_t> args into the C-ABI struct array. The
     // struct is fixed-size (16 bytes) so a contiguous vector is the
     // natural marshal target. Empty initializer -> nullptr / n_args=0.

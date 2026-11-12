@@ -175,15 +175,32 @@ use morloc_runtime_types::{RAW_FAILED, RAW_NOT_HANDLED, RAW_PIPE_CLOSED, RAW_WRI
 /// `fd` from where they lie in `bytes`, with no copy into shared memory.
 /// Returns `RAW_NOT_HANDLED` for any other sub-packet (compressed, another
 /// format or schema), which the caller then writes the general way.
+#[cfg(test)]
 pub(crate) unsafe fn write_raw_subpacket(bytes: &[u8], fd: i32) -> Result<i32, MorlocError> {
-    use crate::json::RawShape;
-    use crate::voidstar::{Local, Space};
     use morloc_runtime_types::packet as pk;
-    use morloc_runtime_types::shm_types::Array;
     if bytes.len() < 32 {
         return Ok(RAW_NOT_HANDLED);
     }
     let header = pk::PacketHeader::from_bytes(bytes[..32].try_into().unwrap())?;
+    let meta_end = 32 + header.offset as usize;
+    let Some(end) = meta_end.checked_add(header.length as usize).filter(|&e| e <= bytes.len()) else {
+        return Ok(RAW_NOT_HANDLED);
+    };
+    write_raw_parts(&bytes[..meta_end], &bytes[meta_end..end], fd)
+}
+
+/// `write_raw_subpacket` of a sub-packet held in two parts: `head`, its
+/// header and metadata, and `payload`, the region the header's length
+/// describes, whole or less its alignment padding.
+pub(crate) unsafe fn write_raw_parts(head: &[u8], payload: &[u8], fd: i32) -> Result<i32, MorlocError> {
+    use crate::json::RawShape;
+    use crate::voidstar::{Local, Space};
+    use morloc_runtime_types::packet as pk;
+    use morloc_runtime_types::shm_types::Array;
+    if head.len() < 32 {
+        return Ok(RAW_NOT_HANDLED);
+    }
+    let header = pk::PacketHeader::from_bytes(head[..32].try_into().unwrap())?;
     if !header.is_data() {
         return Ok(RAW_NOT_HANDLED);
     }
@@ -192,10 +209,11 @@ pub(crate) unsafe fn write_raw_subpacket(bytes: &[u8], fd: i32) -> Result<i32, M
         return Ok(RAW_NOT_HANDLED);
     }
     let meta_end = 32 + header.offset as usize;
-    let Some(end) = meta_end.checked_add(header.length as usize).filter(|&e| e <= bytes.len()) else {
+    let length = header.length as usize;
+    if head.len() != meta_end || payload.len() > length || length - payload.len() >= 8 {
         return Ok(RAW_NOT_HANDLED);
-    };
-    let Some(schema) = pk::read_schema_from_meta(&bytes[..meta_end])? else {
+    }
+    let Some(schema) = pk::read_schema_from_meta(head)? else {
         return Ok(RAW_NOT_HANDLED);
     };
     let schema = crate::schema::parse_schema(&schema)?;
@@ -204,7 +222,6 @@ pub(crate) unsafe fn write_raw_subpacket(bytes: &[u8], fd: i32) -> Result<i32, M
         Some(RawShape::Bytes) => false,
         Some(RawShape::Body) | None => return Ok(RAW_NOT_HANDLED),
     };
-    let payload = &bytes[meta_end..end];
     if payload.len() < std::mem::size_of::<Array>() {
         return Err(MorlocError::Packet("a stdout sub-packet is shorter than its root".into()));
     }
@@ -524,15 +541,18 @@ mod c_abi {
         super::print_voidstar_raw(data, schema, errmsg)
     }
 
-    /// `write_raw_subpacket` over the C ABI: one of the `RAW_*` codes, with
-    /// a message in `*errmsg` for `RAW_FAILED`.
+    /// `write_raw_parts` over the C ABI: one of the `RAW_*` codes, with a
+    /// message in `*errmsg` for `RAW_FAILED`.
     #[no_mangle]
-    pub unsafe extern "C" fn mlc_write_raw_subpacket(bytes: *const u8, n: u64, fd: i32, errmsg: *mut *mut c_char) -> i32 {
+    pub unsafe extern "C" fn mlc_write_raw_subpacket(
+        head: *const u8, head_len: u64, payload: *const u8, payload_len: u64, fd: i32, errmsg: *mut *mut c_char,
+    ) -> i32 {
         clear_errmsg(errmsg);
-        if bytes.is_null() {
+        if head.is_null() || (payload.is_null() && payload_len > 0) {
             return super::RAW_NOT_HANDLED;
         }
-        match super::write_raw_subpacket(std::slice::from_raw_parts(bytes, n as usize), fd) {
+        let payload = if payload_len == 0 { &[][..] } else { std::slice::from_raw_parts(payload, payload_len as usize) };
+        match super::write_raw_parts(std::slice::from_raw_parts(head, head_len as usize), payload, fd) {
             Ok(code) => code,
             Err(e) => { set_errmsg(errmsg, &e); super::RAW_FAILED }
         }
@@ -682,6 +702,50 @@ mod raw_write_tests {
             assert_eq!(written(&subpacket(schema, &list, 0)), (super::RAW_NOT_HANDLED, Vec::new()), "{schema}");
         }
         assert_eq!(written(&subpacket("as", &list, pk::PACKET_COMPRESSION_ZSTD)), (super::RAW_NOT_HANDLED, Vec::new()));
+    }
+
+    fn written_parts(head: &[u8], payload: &[u8]) -> (i32, Vec<u8>) {
+        let mut fds = [0i32; 2];
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        let code = unsafe { super::write_raw_parts(head, payload, fds[1]) }.unwrap();
+        unsafe { libc::close(fds[1]) };
+        let mut got = Vec::new();
+        let mut buf = [0u8; 4096];
+        loop {
+            let n = unsafe { libc::read(fds[0], buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
+            if n <= 0 {
+                break;
+            }
+            got.extend_from_slice(&buf[..n as usize]);
+        }
+        unsafe { libc::close(fds[0]) };
+        (code, got)
+    }
+
+    #[test]
+    fn a_sub_packet_in_head_and_payload_parts_writes_what_the_joined_one_does() {
+        let bodies: &[&[u8]] = &[b"alpha\n", b"", b"be", b"ta\n"];
+        let list = list_payload(bodies);
+        for (schema, payload) in [("as", list.clone()), ("aau1", list.clone()), ("au1", {
+            let mut flat = array(5, 16).to_vec();
+            flat.extend_from_slice(b"bytes");
+            flat
+        })] {
+            let pad = payload.len().next_multiple_of(8) - payload.len();
+            let mut padded = payload.clone();
+            padded.resize(payload.len() + pad, 0);
+            let joined = subpacket(schema, &padded, 0);
+            let head_len = joined.len() - padded.len();
+            let whole = written(&joined);
+            assert_eq!(whole.0, super::RAW_WRITTEN, "{schema}");
+            assert_eq!(written_parts(&joined[..head_len], &payload), whole, "{schema}: payload without its padding");
+            assert_eq!(written_parts(&joined[..head_len], &padded), whole, "{schema}: payload with its padding");
+        }
+        let joined = subpacket("as", &list, 0);
+        let head_len = joined.len() - list.len();
+        assert_eq!(written_parts(&joined[..head_len - 1], &joined[head_len - 1..]).0, super::RAW_NOT_HANDLED);
+        assert_eq!(written_parts(&joined[..head_len], &list[..list.len() - 8]).0, super::RAW_NOT_HANDLED);
+        assert_eq!(written_parts(&joined[..head_len], &joined[head_len - 8..]).0, super::RAW_NOT_HANDLED);
     }
 
     #[test]

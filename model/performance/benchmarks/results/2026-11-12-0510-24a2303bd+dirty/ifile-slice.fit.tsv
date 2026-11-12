@@ -1,0 +1,58 @@
+# ifile-slice 2026-11-12 05:10 load=2.49 morloc=0.112.0 commit=24a2303bd+dirty cpu=AMD Ryzen 5 7535U with Radeon Graphics cores=12
+item	param	value	unit	note
+ENC-9	cpp.Reals.z0.slice.c	42.7214	ms	r2=0.9996
+ENC-9	cpp.Reals.z0.slice.b	6.31207	ns	r2=0.9996 per element
+ENC-9	cpp.Reals.z0.next.c	41.8838	ms	r2=0.9952
+ENC-9	cpp.Reals.z0.next.b	3.94844	ns	r2=0.9952 per element
+ENC-9	cpp.Reals.z0.ratio	1.59862	x	slice slope over @next slope
+ENC-9	cpp.Strs.z0.slice.c	49.8483	ms	r2=0.9922
+ENC-9	cpp.Strs.z0.slice.b	60.0342	ns	r2=0.9922 per element
+ENC-9	cpp.Strs.z0.next.c	46.1304	ms	r2=0.9939
+ENC-9	cpp.Strs.z0.next.b	33.3987	ns	r2=0.9939 per element
+ENC-9	cpp.Strs.z0.ratio	1.7975	x	slice slope over @next slope
+ENC-10	cpp.points.z0.n1000000	0.76945	us	per one-element slice
+ENC-10	cpp.points.z0.n4000000	0.383922	us	per one-element slice
+ENC-10	cpp.points.z0.n16000000	0.180905	us	per one-element slice
+ENC-10	cpp.points.z0.growth	0.235109	x	per-slice cost at n=16000000 over n=1000000
+ENC-9	cpp.Reals.z3.slice.c	46.8494	ms	r2=0.9948
+ENC-9	cpp.Reals.z3.slice.b	10.5027	ns	r2=0.9948 per element
+ENC-9	cpp.Reals.z3.next.c	50.602	ms	r2=0.9281
+ENC-9	cpp.Reals.z3.next.b	4.90921	ns	r2=0.9281 per element
+ENC-9	cpp.Reals.z3.ratio	2.1394	x	slice slope over @next slope
+ENC-9	cpp.Strs.z3.slice.c	54.5107	ms	r2=0.9926
+ENC-9	cpp.Strs.z3.slice.b	85.7681	ns	r2=0.9926 per element
+ENC-9	cpp.Strs.z3.next.c	48.1446	ms	r2=0.9918
+ENC-9	cpp.Strs.z3.next.b	48.4444	ns	r2=0.9918 per element
+ENC-9	cpp.Strs.z3.ratio	1.77044	x	slice slope over @next slope
+ENC-10	cpp.points.z3.n1000000	1.56422	us	per one-element slice
+ENC-10	cpp.points.z3.n4000000	1.34913	us	per one-element slice
+ENC-10	cpp.points.z3.n16000000	1.27328	us	per one-element slice
+ENC-10	cpp.points.z3.growth	0.813999	x	per-slice cost at n=16000000 over n=1000000
+ENC-9	rs.Reals.z0.slice.c	44.4824	ms	r2=0.9984
+ENC-9	rs.Reals.z0.slice.b	7.84094	ns	r2=0.9984 per element
+ENC-9	rs.Reals.z0.next.c	41.8371	ms	r2=0.9972
+ENC-9	rs.Reals.z0.next.b	6.81836	ns	r2=0.9972 per element
+ENC-9	rs.Reals.z0.ratio	1.14997	x	slice slope over @next slope
+ENC-9	rs.Strs.z0.slice.c	47.8339	ms	r2=0.9960
+ENC-9	rs.Strs.z0.slice.b	72.5139	ns	r2=0.9960 per element
+ENC-9	rs.Strs.z0.next.c	46.044	ms	r2=0.9975
+ENC-9	rs.Strs.z0.next.b	52.7575	ns	r2=0.9975 per element
+ENC-9	rs.Strs.z0.ratio	1.37448	x	slice slope over @next slope
+ENC-10	rs.points.z0.n1000000	0.437281	us	per one-element slice
+ENC-10	rs.points.z0.n4000000	0.198456	us	per one-element slice
+ENC-10	rs.points.z0.n16000000	0.268578	us	per one-element slice
+ENC-10	rs.points.z0.growth	0.614199	x	per-slice cost at n=16000000 over n=1000000
+ENC-9	rs.Reals.z3.slice.c	50.0544	ms	r2=0.9913
+ENC-9	rs.Reals.z3.slice.b	12.314	ns	r2=0.9913 per element
+ENC-9	rs.Reals.z3.next.c	50.6592	ms	r2=0.9624
+ENC-9	rs.Reals.z3.next.b	7.08835	ns	r2=0.9624 per element
+ENC-9	rs.Reals.z3.ratio	1.73722	x	slice slope over @next slope
+ENC-9	rs.Strs.z3.slice.c	52.5018	ms	r2=0.9959
+ENC-9	rs.Strs.z3.slice.b	103.679	ns	r2=0.9959 per element
+ENC-9	rs.Strs.z3.next.c	49.3573	ms	r2=0.9942
+ENC-9	rs.Strs.z3.next.b	67.802	ns	r2=0.9942 per element
+ENC-9	rs.Strs.z3.ratio	1.52914	x	slice slope over @next slope
+ENC-10	rs.points.z3.n1000000	1.52343	us	per one-element slice
+ENC-10	rs.points.z3.n4000000	1.33273	us	per one-element slice
+ENC-10	rs.points.z3.n16000000	1.47953	us	per one-element slice
+ENC-10	rs.points.z3.growth	0.971182	x	per-slice cost at n=16000000 over n=1000000
