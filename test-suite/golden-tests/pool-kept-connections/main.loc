@@ -1,0 +1,41 @@
+-- Many calls on kept connections into Python and R fork pools.
+--
+-- A loop in one language calls a function in another, so each caller thread
+-- sends every call after the first on the connection its callee's worker
+-- holds. The nested chain calls back into pools whose workers wait on the
+-- level above, and the parallel map has four C++ threads calling Python at
+-- once, each call calling R; workers retire as soon as they are idle. Every
+-- result must be exact: a revoked call is retried and runs once.
+
+module main (cppToPy, pyToR, nested, parallel)
+
+import root
+import root-cpp
+import root-py
+import root-r
+
+source Cpp from "lib.hpp" ("cppSum", "cppApply", "cppPar")
+source Py from "lib.py" ("pySum", "pyApply", "pyIncr")
+source R from "lib.R" ("rApply", "rIncr", "rDouble")
+
+cppSum :: (Int -> Int) -> Int -> Int
+cppApply :: (Int -> Int) -> Int -> Int
+cppPar :: (Int -> Int) -> [Int] -> [Int]
+pySum :: (Int -> Int) -> Int -> Int
+pyApply :: (Int -> Int) -> Int -> Int
+pyIncr :: Int -> Int
+rApply :: (Int -> Int) -> Int -> Int
+rIncr :: Int -> Int
+rDouble :: Int -> Int
+
+cppToPy :: Int -> Int
+cppToPy n = cppSum pyIncr n
+
+pyToR :: Int -> Int
+pyToR n = pySum rIncr n
+
+nested :: Int -> Int
+nested n = cppSum (\a -> pyApply (\b -> cppApply (\c -> rApply rIncr c) b) a) n
+
+parallel :: Int -> Int
+parallel n = sum (cppPar (\x -> pyApply (\b -> rApply rDouble b) x) (range 0 n))

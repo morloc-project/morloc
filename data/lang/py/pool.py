@@ -567,8 +567,6 @@ def run_job(client_fd: int) -> None:
         morloc.shm_tracker_flush()
         # Safety-net flush for any output from error handling paths
         sys.stdout.flush()
-        # close child copy
-        morloc.close_socket(client_fd)
 
 
 if __name__ == "__main__":

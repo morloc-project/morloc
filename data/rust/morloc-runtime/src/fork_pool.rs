@@ -8,7 +8,7 @@
 use std::collections::HashSet;
 use std::ffi::{c_char, c_void, CStr};
 use std::ptr;
-use std::sync::atomic::{AtomicI32, AtomicPtr, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicPtr, AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 /// What a language provides to run a fork pool.
@@ -22,8 +22,8 @@ pub struct ForkPoolConfig {
     /// In a new worker: load the user's sources. Non-zero: the worker ends
     /// with that status.
     pub worker_init: Option<unsafe extern "C" fn(*mut c_void) -> i32>,
-    /// Serve one accepted connection and close it. Non-zero: the worker ends
-    /// with that status, unretired.
+    /// Serve one request read from the connection (NET-9). Non-zero: the
+    /// worker ends with that status, unretired.
     pub serve: Option<unsafe extern "C" fn(i32, *mut c_void) -> i32>,
     /// `None`: workers never retire. Otherwise run before a surplus idle
     /// worker checks whether it may retire (SHM-8).
@@ -54,6 +54,23 @@ thread_local! {
     // Waits on another pool this thread is inside, so nested ones count once.
     static DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
 }
+// NET-9: the connection this worker serves or holds.
+static CONN: AtomicI32 = AtomicI32::new(-1);
+// NET-9: the fork generation in which this process is a worker that keeps connections.
+static KEEPS: AtomicU64 = AtomicU64::new(u64::MAX);
+
+pub(crate) fn keeps_connections() -> bool {
+    KEEPS.load(Ordering::Acquire) == crate::fork_policy::generation()
+}
+
+// NET-9: a forked child closes its copy of the worker's connection.
+pub(crate) fn after_fork_in_child() {
+    let fd = CONN.swap(-1, Ordering::AcqRel);
+    if fd >= 0 {
+        unsafe { libc::close(fd) };
+    }
+}
+
 // The coordinator's shared words and wake-up pipe, for its signal handlers.
 static COORDINATOR: AtomicPtr<Shared> = AtomicPtr::new(ptr::null_mut());
 static COORDINATOR_WAKE: AtomicI32 = AtomicI32::new(-1);
@@ -367,6 +384,7 @@ unsafe fn worker(cfg: &ForkPoolConfig, shared: &'static Shared, fds: &Fds) -> ! 
     let born = crate::fork_policy::generation();
     let me = libc::getpid();
     WORKER.store(Box::into_raw(Box::new(Worker { shared, wake_w: fds.wake[1] })), Ordering::Release);
+    KEEPS.store(born, Ordering::Release);
     if let Some(init) = cfg.worker_init {
         let status = init(cfg.ctx);
         if status != 0 {
@@ -377,17 +395,39 @@ unsafe fn worker(cfg: &ForkPoolConfig, shared: &'static Shared, fds: &Fds) -> ! 
     let timeout = crate::pool_ffi::worker_idle_timeout();
     let mut idle_since = Instant::now();
     let mut served_since_idle = false;
+    let mut took_held = false;
     let mut warned = false;
     while shared.shutdown.load(Ordering::Acquire) == 0 {
+        let held = CONN.load(Ordering::Acquire);
         let mut pfds = [
             libc::pollfd { fd: fds.listen, events: libc::POLLIN, revents: 0 },
+            libc::pollfd { fd: held, events: libc::POLLIN, revents: 0 },
             libc::pollfd { fd: fds.life[0], events: libc::POLLIN, revents: 0 },
         ];
-        let ready = libc::poll(pfds.as_mut_ptr(), 2, 1000);
-        if ready > 0 && pfds[1].revents != 0 {
+        let ready = libc::poll(pfds.as_mut_ptr(), 3, 1000);
+        if ready > 0 && pfds[2].revents != 0 {
             break;
         }
-        if ready > 0 && pfds[0].revents & libc::POLLIN != 0 {
+        // NET-9: the held connection and the listen socket take turns.
+        let listen_ready = ready > 0 && pfds[0].revents & libc::POLLIN != 0;
+        if ready > 0 && held >= 0 && pfds[1].revents != 0 && !(listen_ready && took_held) {
+            took_held = true;
+            // FORK-12: a process forked from a worker never takes a call.
+            if crate::fork_policy::generation() != born {
+                libc::_exit(0);
+            }
+            match peek(held) {
+                Peek::Request => {
+                    serve_conn(cfg, held);
+                    served_since_idle = true;
+                }
+                Peek::Closed => let_go(),
+                Peek::Nothing => {}
+            }
+            continue;
+        }
+        if listen_ready {
+            took_held = false;
             // FORK-12: a process forked from a worker never takes a call.
             if crate::fork_policy::generation() != born {
                 libc::_exit(0);
@@ -399,18 +439,10 @@ unsafe fn worker(cfg: &ForkPoolConfig, shared: &'static Shared, fds: &Fds) -> ! 
                 }
                 continue;
             }
-            let status = match cfg.serve {
-                Some(serve) => serve(fd, cfg.ctx),
-                None => {
-                    crate::ipc_ffi::close_socket(fd);
-                    0
-                }
-            };
-            // FORK-12: a process forked during the call leaves as it returns.
-            crate::ipc_ffi::morloc_exit_if_forked();
-            if status != 0 {
-                leave(cfg, status);
-            }
+            // NET-9: a worker never serves one connection while it holds another.
+            revoke();
+            CONN.store(fd, Ordering::Release);
+            serve_conn(cfg, fd);
             served_since_idle = true;
             continue;
         }
@@ -423,13 +455,16 @@ unsafe fn worker(cfg: &ForkPoolConfig, shared: &'static Shared, fds: &Fds) -> ! 
             idle_since = Instant::now();
         }
         let Some(before_retire) = cfg.before_retire else { continue };
-        if shared.total.load(Ordering::Acquire) <= 1 || idle_since.elapsed() <= timeout {
+        // NET-9: a retirement that would leave every worker busy is not surplus.
+        let total = shared.total.load(Ordering::Acquire);
+        if total <= 1 || shared.busy.load(Ordering::Acquire) + 1 >= total || idle_since.elapsed() <= timeout {
             continue;
         }
         before_retire(cfg.ctx);
         // SHM-8: a worker retires only holding no shared memory, and says so.
         let blockers = crate::stream::morloc_retire_blockers();
         if blockers == 0 {
+            revoke();
             crate::intrinsics::morloc_remove_own_temps();
             if let Some(exit) = cfg.worker_exit {
                 exit(cfg.ctx, 0);
@@ -444,7 +479,63 @@ unsafe fn worker(cfg: &ForkPoolConfig, shared: &'static Shared, fds: &Fds) -> ! 
         }
         idle_since = Instant::now();
     }
+    revoke();
     leave(cfg, 0)
+}
+
+unsafe fn serve_conn(cfg: &ForkPoolConfig, fd: i32) {
+    let status = match cfg.serve {
+        Some(serve) => serve(fd, cfg.ctx),
+        None => 0,
+    };
+    // FORK-12: a process forked during the call leaves as it returns.
+    crate::ipc_ffi::morloc_exit_if_forked();
+    // NET-9: held only after the whole reply saying so went out.
+    if !crate::ipc_ffi::take_replied_kept(fd) || status != 0 {
+        let_go();
+    }
+    if status != 0 {
+        leave(cfg, status);
+    }
+}
+
+enum Peek {
+    Request,
+    Closed,
+    Nothing,
+}
+
+unsafe fn peek(fd: i32) -> Peek {
+    let mut b = 0u8;
+    let n = libc::recv(fd, &mut b as *mut u8 as *mut c_void, 1, libc::MSG_PEEK | libc::MSG_DONTWAIT);
+    if n > 0 {
+        return Peek::Request;
+    }
+    if n < 0 && matches!(crate::utility::errno_val(), libc::EAGAIN | libc::EINTR) {
+        return Peek::Nothing;
+    }
+    Peek::Closed
+}
+
+// NET-9
+unsafe fn let_go() {
+    let fd = CONN.swap(-1, Ordering::AcqRel);
+    if fd >= 0 {
+        crate::ipc_ffi::close_socket(fd);
+    }
+}
+
+// NET-9: whatever request the held connection carries was not run.
+unsafe fn revoke() {
+    let fd = CONN.swap(-1, Ordering::AcqRel);
+    if fd < 0 {
+        return;
+    }
+    let mut notice = crate::packet::PacketHeader::ping().to_bytes();
+    let at = morloc_runtime_types::packet::PKT_MODE_OFF;
+    notice[at..at + 2].copy_from_slice(&morloc_runtime_types::packet::MODE_NOT_RUN.to_le_bytes());
+    crate::ipc_ffi::send_all(fd, notice.as_ptr(), notice.len());
+    crate::ipc_ffi::close_socket(fd);
 }
 
 unsafe fn leave(cfg: &ForkPoolConfig, status: i32) -> ! {
@@ -480,9 +571,17 @@ mod tests {
     #[repr(C)]
     struct Ctx {
         calls: AtomicU32,
-        hold_first: AtomicU32,
+        hold_call: AtomicU32,
         release: AtomicU32,
         die_on_call: AtomicU32,
+        // Connections that carried a call: each call on a new one counts.
+        conns: AtomicU32,
+        last_inode: AtomicU64,
+        // The descriptor of call 1, and what a child forked while it was
+        // held saw of it: 1 closed, 2 open.
+        first_fd: AtomicI32,
+        fork_while_held: AtomicU32,
+        child_saw: AtomicU32,
     }
 
     unsafe fn shared_ctx() -> &'static Ctx {
@@ -498,16 +597,42 @@ mod tests {
         &*(p as *const Ctx)
     }
 
+    unsafe fn inode(fd: i32) -> u64 {
+        let mut st: libc::stat = std::mem::zeroed();
+        libc::fstat(fd, &mut st);
+        st.st_ino as u64
+    }
+
     unsafe extern "C" fn serve_ping(fd: i32, ctx: *mut c_void) -> i32 {
         let t = &*(ctx as *const Ctx);
         let mut err: *mut c_char = ptr::null_mut();
         let req = crate::ipc_ffi::stream_from_client(fd, &mut err);
         if req.is_null() {
-            crate::ipc_ffi::close_socket(fd);
+            if !err.is_null() {
+                libc::free(err as *mut c_void);
+            }
             return 0;
         }
+        if t.last_inode.swap(inode(fd), Ordering::SeqCst) != inode(fd) {
+            t.conns.fetch_add(1, Ordering::SeqCst);
+        }
         let n = t.calls.fetch_add(1, Ordering::SeqCst) + 1;
-        if n == 1 && t.hold_first.load(Ordering::SeqCst) != 0 {
+        if n == 1 {
+            t.first_fd.store(fd, Ordering::SeqCst);
+            if t.fork_while_held.load(Ordering::SeqCst) != 0 {
+                std::thread::spawn(move || {
+                    std::thread::sleep(Duration::from_millis(300));
+                    let child = libc::fork();
+                    if child == 0 {
+                        let open = libc::fcntl(fd, libc::F_GETFD) >= 0;
+                        t.child_saw.store(if open { 2 } else { 1 }, Ordering::SeqCst);
+                        libc::_exit(0);
+                    }
+                    libc::waitpid(child, ptr::null_mut(), 0);
+                });
+            }
+        }
+        if n == t.hold_call.load(Ordering::SeqCst) {
             let _busy = busy();
             while t.release.load(Ordering::SeqCst) == 0 {
                 std::thread::sleep(Duration::from_millis(5));
@@ -520,7 +645,9 @@ mod tests {
         crate::ipc_ffi::send_reply_to_foreign_server(fd, pong, None, &mut err);
         libc::free(pong as *mut c_void);
         libc::free(req as *mut c_void);
-        crate::ipc_ffi::close_socket(fd);
+        if !err.is_null() {
+            libc::free(err as *mut c_void);
+        }
         0
     }
 
@@ -639,7 +766,7 @@ mod tests {
     #[test]
     fn a_busy_worker_gets_a_second_worker() {
         let ctx = unsafe { shared_ctx() };
-        ctx.hold_first.store(1, Ordering::SeqCst);
+        ctx.hold_call.store(1, Ordering::SeqCst);
         let pool = start("busy", ctx, false);
         let socket = pool.socket.clone();
         let first = std::thread::spawn(move || {
@@ -668,7 +795,7 @@ mod tests {
     #[test]
     fn a_retiring_worker_leaves_the_pool_running() {
         let ctx = unsafe { shared_ctx() };
-        ctx.hold_first.store(1, Ordering::SeqCst);
+        ctx.hold_call.store(1, Ordering::SeqCst);
         let pool = start("retire", ctx, true);
         let socket = pool.socket.clone();
         let first = std::thread::spawn(move || {
@@ -691,6 +818,216 @@ mod tests {
         assert!(first && second && after, "a call went unanswered after a retirement");
         assert_eq!((both, one), (2, 1), "the surplus worker did not retire");
         assert_eq!(status, Some(0), "a retirement ended the pool");
+    }
+
+    fn other_thread(pool: &Pool) -> (std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<bool>) {
+        let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<bool>();
+        let socket = pool.socket.clone();
+        std::thread::spawn(move || {
+            let p = Pool { coordinator: 0, socket, dir: std::path::PathBuf::new() };
+            while go_rx.recv().is_ok() {
+                if done_tx.send(ping(&p)).is_err() {
+                    break;
+                }
+            }
+        });
+        (go_tx, done_rx)
+    }
+
+    fn wait_for(what: impl Fn() -> bool) -> bool {
+        for _ in 0..500 {
+            if what() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        what()
+    }
+
+    // NET-9: a fork worker keeps its caller's connection.
+    #[test]
+    fn sequential_calls_from_one_thread_use_one_connection() {
+        let ctx = unsafe { shared_ctx() };
+        let pool = start("seq", ctx, false);
+        let served = (0..3).all(|_| ping(&pool));
+        let cached = crate::ipc_ffi::cached_connections();
+        crate::ipc_ffi::drop_cached_connections();
+        crate::signal_test_child(pool.coordinator, libc::SIGTERM);
+        let status = finish(&pool, 10);
+        assert!(served);
+        assert_eq!(ctx.calls.load(Ordering::SeqCst), 3);
+        assert_eq!(ctx.conns.load(Ordering::SeqCst), 1, "each call took a connection of its own");
+        assert_eq!(cached, 1);
+        assert_eq!(status, Some(0));
+    }
+
+    // NET-9: a worker taking another connection revokes the one it holds.
+    #[test]
+    fn a_held_connection_is_revoked_when_its_worker_takes_another() {
+        let ctx = unsafe { shared_ctx() };
+        let pool = start("alt", ctx, false);
+        let (go, done) = other_thread(&pool);
+        let mut answered = 0;
+        for _ in 0..10 {
+            answered += ping(&pool) as u32;
+            go.send(()).unwrap();
+            answered += done.recv().unwrap() as u32;
+        }
+        drop(go);
+        crate::ipc_ffi::drop_cached_connections();
+        crate::signal_test_child(pool.coordinator, libc::SIGTERM);
+        let status = finish(&pool, 10);
+        assert_eq!(answered, 20, "a call went unanswered");
+        assert_eq!(ctx.calls.load(Ordering::SeqCst), 20, "a call ran twice or not at all");
+        assert_eq!(status, Some(0));
+    }
+
+    // NET-8, NET-9: a held connection never leaves a call waiting on a busy worker.
+    #[test]
+    fn a_kept_caller_is_served_while_its_worker_waits_on_another_pool() {
+        let ctx = unsafe { shared_ctx() };
+        ctx.hold_call.store(2, Ordering::SeqCst);
+        let pool = start("pin", ctx, false);
+        let first = ping(&pool);
+        let (go, done) = other_thread(&pool);
+        go.send(()).unwrap();
+        assert!(wait_for(|| ctx.calls.load(Ordering::SeqCst) == 2));
+        let again = ping(&pool);
+        let workers = workers_of(pool.coordinator);
+        ctx.release.store(1, Ordering::SeqCst);
+        let held = done.recv().unwrap();
+        drop(go);
+        crate::ipc_ffi::drop_cached_connections();
+        crate::signal_test_child(pool.coordinator, libc::SIGTERM);
+        let status = finish(&pool, 10);
+        assert!(first && held);
+        assert!(again, "the kept caller's call waited behind a busy worker");
+        assert_eq!(workers, 2);
+        assert_eq!(ctx.calls.load(Ordering::SeqCst), 3);
+        assert_eq!(status, Some(0));
+    }
+
+    fn state_of(pid: libc::pid_t) -> String {
+        let out = std::process::Command::new("ps").args(["-o", "stat=", "-p", &pid.to_string()]).output().unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    // NET-7, SHM-8: the send on the dead worker's connection fails and is
+    // retried, and the retry ends with the pool.
+    #[test]
+    fn a_worker_dying_while_holding_a_kept_connection_fails_the_next_call_cleanly() {
+        let ctx = unsafe { shared_ctx() };
+        let pool = start("hold-die", ctx, false);
+        let first = ping(&pool);
+        let worker = std::process::Command::new("pgrep").arg("-P").arg(pool.coordinator.to_string()).output().unwrap();
+        let worker: libc::pid_t = String::from_utf8_lossy(&worker.stdout).trim().parse().unwrap();
+        crate::signal_test_child(pool.coordinator, libc::SIGSTOP);
+        crate::signal_test_child(worker, libc::SIGKILL);
+        assert!(wait_for(|| state_of(worker).starts_with('Z')), "the worker did not die");
+        let coordinator = pool.coordinator;
+        let resume = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            crate::signal_test_child(coordinator, libc::SIGCONT);
+        });
+        let second = ping(&pool);
+        resume.join().unwrap();
+        crate::ipc_ffi::drop_cached_connections();
+        let status = finish(&pool, 10);
+        assert!(first && !second);
+        assert_eq!(ctx.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(status, Some(1), "the pool did not end when its worker did");
+    }
+
+    // NET-7: a worker that dies on a request read from its held connection
+    // fails that call without running it again.
+    #[test]
+    fn a_worker_dying_mid_request_on_a_kept_connection_fails_without_a_retry() {
+        let ctx = unsafe { shared_ctx() };
+        ctx.die_on_call.store(2, Ordering::SeqCst);
+        let pool = start("kept-die", ctx, false);
+        let first = ping(&pool);
+        let second = ping(&pool);
+        crate::ipc_ffi::drop_cached_connections();
+        let status = finish(&pool, 10);
+        assert!(first && !second);
+        assert_eq!(ctx.calls.load(Ordering::SeqCst), 2, "the request was sent again");
+        assert_eq!(ctx.conns.load(Ordering::SeqCst), 1);
+        assert_eq!(status, Some(1));
+    }
+
+    // NET-9, SHM-8: a retiring worker revokes the connection it holds.
+    #[test]
+    fn a_retiring_worker_revokes_its_held_connection() {
+        let ctx = unsafe { shared_ctx() };
+        ctx.hold_call.store(1, Ordering::SeqCst);
+        let pool = start("revoke-retire", ctx, true);
+        let (go, done) = other_thread(&pool);
+        go.send(()).unwrap();
+        assert!(wait_for(|| ctx.calls.load(Ordering::SeqCst) == 1));
+        let second = ping(&pool);
+        let both = workers_of(pool.coordinator);
+        ctx.release.store(1, Ordering::SeqCst);
+        let first = done.recv().unwrap();
+        assert!(wait_for(|| workers_of(pool.coordinator) == 1), "the surplus worker did not retire");
+        let mine = ping(&pool);
+        go.send(()).unwrap();
+        let theirs = done.recv().unwrap();
+        drop(go);
+        crate::ipc_ffi::drop_cached_connections();
+        crate::signal_test_child(pool.coordinator, libc::SIGTERM);
+        let status = finish(&pool, 10);
+        assert!(first && second);
+        assert!(mine && theirs, "a call on a connection held by the retired worker went unanswered");
+        assert_eq!(both, 2);
+        assert_eq!(ctx.calls.load(Ordering::SeqCst), 4);
+        assert_eq!(status, Some(0), "a retirement ended the pool");
+    }
+
+    #[cfg(target_os = "linux")]
+    fn open_fds(pid: libc::pid_t) -> usize {
+        std::fs::read_dir(format!("/proc/{pid}/fd")).map(|d| d.count()).unwrap_or(0)
+    }
+
+    // NET-9: end of file on a held connection lets it go.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_caller_closing_its_kept_connection_lets_the_worker_go() {
+        let ctx = unsafe { shared_ctx() };
+        let pool = start("eof", ctx, false);
+        let first = ping(&pool);
+        let worker = std::process::Command::new("pgrep").arg("-P").arg(pool.coordinator.to_string()).output().unwrap();
+        let worker: libc::pid_t = String::from_utf8_lossy(&worker.stdout).trim().parse().unwrap();
+        let holding = open_fds(worker);
+        crate::ipc_ffi::drop_cached_connections();
+        let let_go = wait_for(|| open_fds(worker) + 1 == holding);
+        let after = ping(&pool);
+        crate::ipc_ffi::drop_cached_connections();
+        crate::signal_test_child(pool.coordinator, libc::SIGTERM);
+        let status = finish(&pool, 10);
+        assert!(first && after);
+        assert!(let_go, "the worker still holds a connection its caller closed");
+        assert_eq!(ctx.conns.load(Ordering::SeqCst), 2);
+        assert_eq!(status, Some(0));
+    }
+
+    // NET-9, FORK-14: a child forked while the worker holds a connection
+    // does not keep it open.
+    #[test]
+    fn a_child_forked_by_user_code_does_not_hold_the_kept_connection() {
+        let ctx = unsafe { shared_ctx() };
+        ctx.fork_while_held.store(1, Ordering::SeqCst);
+        let pool = start("fork-held", ctx, false);
+        let first = ping(&pool);
+        let saw = wait_for(|| ctx.child_saw.load(Ordering::SeqCst) != 0);
+        let second = ping(&pool);
+        crate::ipc_ffi::drop_cached_connections();
+        crate::signal_test_child(pool.coordinator, libc::SIGTERM);
+        let status = finish(&pool, 10);
+        assert!(first && second && saw);
+        assert_eq!(ctx.child_saw.load(Ordering::SeqCst), 1, "the child kept the held connection open");
+        assert_eq!(ctx.conns.load(Ordering::SeqCst), 1);
+        assert_eq!(status, Some(0));
     }
 
     // NET-9: processes entering and leaving waits at once leave the count

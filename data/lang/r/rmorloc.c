@@ -4492,7 +4492,6 @@ static void run_job_c(int client_fd, SEXP dispatch, SEXP remote_dispatch) {
         mlc_trace("run_job READ-FAIL client=%d err=%s\n", client_fd, errmsg);
         send_fail_to_client(client_fd, errmsg);
         free(errmsg);
-        close_socket(client_fd);
         return;
     }
 
@@ -4531,7 +4530,6 @@ static void run_job_c(int client_fd, SEXP dispatch, SEXP remote_dispatch) {
     mlc_trace("run_job EXIT client=%d\n", client_fd);
 
     free(packet);
-    close_socket(client_fd);
 }
 
 // }}} serving a call

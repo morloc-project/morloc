@@ -8,7 +8,9 @@ chapter describes them in full; these items are the rules a test can check.
 Status: draft
 Magic 0x0707f86d at offset 0; plain/version/flavor reserved 0; mode u16 at
 10, whose bit 0 asks on a request, and answers on a reply, that the
-connection be kept for the next call (NET-7), the other bits reserved 0;
+connection be kept for the next call, and whose bit 1, on a header-only
+reply, says the callee let a kept connection go without running the
+request it carried (NET-7), the other bits reserved 0;
 command at 12 (type byte first); offset u32 at 20; length u64 at 24.
 Integers are little-endian.
 

@@ -454,7 +454,7 @@ unsafe fn serve_one(client_fd: i32, queue: &JobQueue, config: &PoolConfig, kept:
         return Served::Closed;
     }
 
-    let keep = crate::ipc_ffi::take_keep_bit(data);
+    let keep = crate::ipc_ffi::request_asked_keep(client_fd);
     let result = pool_dispatch_packet(data, config.local_dispatch, config.remote_dispatch, config.dispatch_ctx);
     libc::free(data as *mut c_void);
     libc::fflush(ptr::null_mut()); // flush stdout

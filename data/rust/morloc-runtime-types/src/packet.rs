@@ -17,6 +17,10 @@ pub const DEFAULT_MODE: u16 = 0;
 /// The caller clears it from every reply it hands on.
 pub const MODE_KEEP: u16 = 1;
 
+/// Mode bit on a header-only reply on a kept connection: the callee let the
+/// connection go and did not run whatever request it carried (NET-7).
+pub const MODE_NOT_RUN: u16 = 2;
+
 // ── Command type discriminants ─────────────────────────────────────────────
 
 pub const PACKET_TYPE_DATA: u8 = 0;

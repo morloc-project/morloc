@@ -350,6 +350,8 @@ morloc-runtime/fork_pool.rs::-::WORKER	fork-scoped
 morloc-runtime/fork_pool.rs::-::COORDINATOR	fork-scoped		
 morloc-runtime/fork_pool.rs::-::COORDINATOR_WAKE	fork-scoped		
 morloc-runtime/fork_pool.rs::-::DEPTH	thread		
+morloc-runtime/fork_pool.rs::-::CONN	fork-scoped		
+morloc-runtime/fork_pool.rs::-::KEEPS	fork-scoped		
 data/lang/r/rmorloc.c::morloc_fork_pool_run_r::ctx	startup		
 data/lang/r/rmorloc.c::-::reading_runtime_value	thread		
 rustmorloc/fv.rs::-::REGISTRY	exec-only		
