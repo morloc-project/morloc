@@ -785,11 +785,12 @@ fn do_write(slot_id: i64, bytes: &[u8]) -> Resp {
                         unsafe { br::write_bytes_to_fd(slot.fd, b"[") }?;
                         slot.json_open = true;
                     }
+                    let inner = inner.inner();
                     if !inner.is_empty() {
                         if slot.json_any {
                             unsafe { br::write_bytes_to_fd(slot.fd, b",") }?;
                         }
-                        unsafe { br::write_bytes_to_fd(slot.fd, inner.as_bytes()) }?;
+                        unsafe { br::write_bytes_to_fd(slot.fd, inner) }?;
                         slot.json_any = true;
                     }
                     Ok(())

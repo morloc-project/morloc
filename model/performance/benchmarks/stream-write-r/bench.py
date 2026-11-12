@@ -16,7 +16,7 @@ def run(b):
     b.make(loc="r.loc", out="nexus-r")
     b.make(loc="cpp.loc", out="nexus-cpp")
     ns = [0, 1000000] if b.quick else SIZES
-    tmp = tempfile.mkdtemp(prefix="perf-swr-")
+    tmp = tempfile.mkdtemp(prefix="perf-swr-", dir="/dev/shm" if os.path.isdir("/dev/shm") else None)
     try:
         for lang in ("r", "cpp"):
             exe = f"./nexus-{lang}"

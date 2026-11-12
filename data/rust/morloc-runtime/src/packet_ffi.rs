@@ -1941,6 +1941,31 @@ impl std::io::Write for FdWriter {
     fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
 }
 
+// Write the bytes `flatten_to_buffer` gives for the value at `data`, `total`
+// of them, to `fd` without materialising them. Returns `total`, -1 with
+// errmsg set, or PACKET_TO_FD_PIPE_CLOSED without errmsg on EPIPE.
+pub(crate) unsafe fn write_flat_voidstar_to_fd(
+    fd: libc::c_int,
+    data: AbsPtr,
+    schema: &crate::schema::Schema,
+    total: usize,
+    errmsg: *mut *mut c_char,
+) -> i64 {
+    let r = crate::compression::stream_encode_with(FdWriter(fd), None, |sink| {
+        crate::voidstar::write_flat_padded(sink, data, schema, total)
+    });
+    match r {
+        Ok(_) => total as i64,
+        Err(MorlocError::Io(e)) if e.raw_os_error() == Some(libc::EPIPE) => {
+            morloc_runtime_types::PACKET_TO_FD_PIPE_CLOSED
+        }
+        Err(e) => {
+            set_errmsg(errmsg, &e);
+            -1
+        }
+    }
+}
+
 // Returns the frame index; empty when uncompressed.
 unsafe fn stream_rptr_payload(
     packet: *const u8,
@@ -2221,12 +2246,13 @@ pub(crate) unsafe fn print_morloc_data_packet(
                         }
                     }
 
-                    match crate::voidstar::write_binary_to_fd(libc::STDOUT_FILENO, voidstar_ptr, &rs) {
-                        Ok(_) => {}
-                        Err(e) => {
-                            set_errmsg(errmsg, &e);
-                            return if matches!(e, MorlocError::PipeClosed) { crate::ipc_ffi::note_pipe_closed() } else { 1 };
-                        }
+                    let n = write_flat_voidstar_to_fd(libc::STDOUT_FILENO, voidstar_ptr, &rs, flat_size, errmsg);
+                    if n == morloc_runtime_types::PACKET_TO_FD_PIPE_CLOSED {
+                        set_errmsg(errmsg, &MorlocError::PipeClosed);
+                        return crate::ipc_ffi::note_pipe_closed();
+                    }
+                    if n < 0 {
+                        return 1;
                     }
                 }
                 _ => {

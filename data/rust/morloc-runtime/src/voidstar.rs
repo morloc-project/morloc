@@ -2276,13 +2276,36 @@ impl<'a, 'r> Walker<usize> for FlatEmit<'a, 'r> {
     }
 }
 
-// ── write_voidstar_binary (to fd) ──────────────────────────────────────────
+// -- write_flat_padded --
 
-/// Flatten voidstar and write to a file descriptor. Returns bytes written.
-pub fn write_binary_to_fd(fd: i32, data: AbsPtr, schema: &Schema) -> Result<usize, MorlocError> {
-    let buf = flatten_to_buffer(data, schema)?;
-    crate::utility::write_all_to_fd(fd, &buf)?;
-    Ok(buf.len())
+/// Write exactly the bytes of `flatten_to_buffer(data, schema)` to `writer`
+/// without materialising them. `total` is
+/// `calc_voidstar_size_inner(data, schema)`, the length of that buffer.
+pub fn write_flat_padded<W: std::io::Write + ?Sized>(
+    writer: &mut W,
+    data: AbsPtr,
+    schema: &Schema,
+    total: usize,
+) -> Result<(), MorlocError> {
+    if schema.serial_type == SerialType::Table {
+        // SAFETY: a table's flat form is its block of `total` bytes.
+        let block = unsafe { std::slice::from_raw_parts(data, total) };
+        return writer.write_all(block).map_err(MorlocError::Io);
+    }
+    let n = write_flat_to_writer(writer, data, schema)?;
+    if n > total {
+        return Err(MorlocError::Serialization(format!(
+            "flat form is {n} bytes, larger than its measured size {total}"
+        )));
+    }
+    const PAD: [u8; 4096] = [0u8; 4096];
+    let mut left = total - n;
+    while left > 0 {
+        let k = left.min(PAD.len());
+        writer.write_all(&PAD[..k]).map_err(MorlocError::Io)?;
+        left -= k;
+    }
+    Ok(())
 }
 
 // ── Tests: write_flat_to_writer byte-equivalence with flatten_to_buffer ───

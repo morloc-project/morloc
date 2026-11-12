@@ -119,3 +119,11 @@
   per-language statement of which native forms each wire form may become.
   Reproduction:
   /work/plans/error-clusters/repro/newtype-form-no-packer.
+- **A top-level Table may stream as its slot alone.** [speculative,
+  2026-11-12] `write_flat_to_writer` (voidstar.rs) emits only the slot
+  width for a top-level Table, and `-f packet` output of a by-reference
+  result with a voidstar Table streams through it; `normalize` excludes
+  only ARROW-format tables. `write_flat_padded` writes a top-level Table
+  as its whole block, which suggests the plain writer is wrong there. Not
+  reproduced: a CSV-read (Arrow) Table round-trips through `-f packet`;
+  a voidstar Table returned by reference is the untested case.

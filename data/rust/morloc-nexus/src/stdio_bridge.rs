@@ -387,11 +387,48 @@ pub unsafe fn emit_subpacket_raw(bytes: &[u8]) -> Result<(), WriteError> {
     }
 }
 
-/// Render one sub-packet's `[T]` as a JSON array string and return the
-/// comma-joined element body with the outer `[` / `]` stripped, so the
-/// caller can splice it into a single streamed JSON array across
-/// sub-packets. Returns an empty string for an empty sub-packet.
-pub unsafe fn subpacket_json_inner(bytes: &[u8], value_schema_str: &str) -> Result<String, String> {
+/// A sub-packet's `[T]` rendered as JSON, held in the runtime's malloc'd
+/// string; `inner` is the comma-joined element body with the outer `[` /
+/// `]` stripped, so the caller can splice it into a single streamed JSON
+/// array across sub-packets.
+pub struct JsonInner {
+    ptr: *mut c_char,
+    body: std::ops::Range<usize>,
+}
+
+impl JsonInner {
+    pub fn inner(&self) -> &[u8] {
+        // SAFETY: `body` lies within the string `ptr` holds.
+        unsafe {
+            std::slice::from_raw_parts((self.ptr as *const u8).add(self.body.start), self.body.len())
+        }
+    }
+}
+
+impl Drop for JsonInner {
+    fn drop(&mut self) {
+        unsafe { libc::free(self.ptr as *mut c_void) };
+    }
+}
+
+/// The byte range of a rendered JSON array's element body: the text
+/// between its outer brackets, whitespace-trimmed.
+fn json_array_body(s: &str) -> Result<std::ops::Range<usize>, String> {
+    let trimmed = s.trim();
+    if !trimmed.starts_with('[') || !trimmed.ends_with(']') {
+        return Err(format!(
+            "streamed JSON sub-packet did not render as an array (got `{}`)",
+            trimmed,
+        ));
+    }
+    let body = trimmed[1..trimmed.len() - 1].trim();
+    let start = body.as_ptr() as usize - s.as_ptr() as usize;
+    Ok(start..start + body.len())
+}
+
+/// Render one sub-packet's `[T]` as JSON; empty `inner` for an empty
+/// sub-packet.
+pub unsafe fn subpacket_json_inner(bytes: &[u8], value_schema_str: &str) -> Result<JsonInner, String> {
     let (vs, value_c, elem_c) = materialize(bytes, value_schema_str)?;
     let mut err: *mut c_char = std::ptr::null_mut();
     let s_ptr = voidstar_to_json_string(vs.0, value_c, &mut err);
@@ -400,16 +437,36 @@ pub unsafe fn subpacket_json_inner(bytes: &[u8], value_schema_str: &str) -> Resu
     if s_ptr.is_null() {
         return Err(format!("json render: {}", take_err(err)));
     }
-    let text = std::ffi::CStr::from_ptr(s_ptr).to_str().map(str::to_owned);
-    libc::free(s_ptr as *mut c_void);
-    let s = text.map_err(|e| format!("json render: output is not valid UTF-8 (byte {})", e.valid_up_to()))?;
-    let trimmed = s.trim();
-    if !trimmed.starts_with('[') || !trimmed.ends_with(']') {
-        return Err(format!(
-            "streamed JSON sub-packet did not render as an array (got `{}`)",
-            trimmed,
-        ));
-    }
-    Ok(trimmed[1..trimmed.len() - 1].trim().to_string())
+    let mut out = JsonInner { ptr: s_ptr, body: 0..0 };
+    let s = std::ffi::CStr::from_ptr(s_ptr)
+        .to_str()
+        .map_err(|e| format!("json render: output is not valid UTF-8 (byte {})", e.valid_up_to()))?;
+    out.body = json_array_body(s)?;
+    Ok(out)
 }
 
+
+#[cfg(test)]
+mod json_array_body_tests {
+    use super::json_array_body;
+
+    fn copied(s: &str) -> String {
+        let trimmed = s.trim();
+        trimmed[1..trimmed.len() - 1].trim().to_string()
+    }
+
+    #[test]
+    fn the_body_slice_matches_the_trimmed_copy() {
+        for s in ["[]", "[1,2,3]", " [ 1 , 2 ]\n", "[\"a\",\"b\"]", "\t[[1],[2]] ", "[ ]", "[\"\u{e9}\"]"] {
+            let r = json_array_body(s).unwrap();
+            assert_eq!(&s[r], copied(s), "input {s:?}");
+        }
+    }
+
+    #[test]
+    fn a_non_array_is_refused() {
+        for s in ["", "1", "\"x\"", "[1", "1]", "{}"] {
+            assert!(json_array_body(s).is_err(), "input {s:?}");
+        }
+    }
+}

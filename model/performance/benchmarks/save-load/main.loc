@@ -1,0 +1,32 @@
+--' @save and @load of a list, and a JSON @stdout stream
+module main (saveReals, loadReals, countReals, streamReals)
+
+import root-cpp
+
+source Cpp from "gen.hpp" ("gen_reals" as genReals, "len" as lenReals)
+
+genReals :: I64 -> [Real]
+lenReals :: [Real] -> I64
+
+--' Save n Reals to a file at a compression level
+saveReals :: Int -> I64 -> Str -> <IO> I64
+saveReals lvl n path = do
+  @save lvl path (genReals n)
+  n
+
+--' Load a file of Reals and count them
+loadReals :: Str -> <IO> I64
+loadReals path = do
+  Ok xs <- @load path :: <IO> (Try Str [Real])
+  lenReals xs
+
+--' Generate n Reals and count them
+countReals :: I64 -> I64
+countReals n = lenReals (genReals n)
+
+--' Write n Reals to stdout with one @write
+streamReals :: I64 -> <IO> ()
+streamReals n = do
+  o <- @stdout :: <IO> OStream Real
+  @write 0 o (genReals n)
+  @close o

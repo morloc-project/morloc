@@ -86,3 +86,25 @@ Measured: pending
 The R encoder writes a numeric, integer or logical vector straight from
 its storage, with the checks each element's type requires, and allocates
 nothing per element. A `[Real]` that is not bit64 integer64 is one copy.
+
+### ENC-6 @save writes a value at a rate near a stream write
+Intent: proposed
+Bench: save-load
+Model: t(n) = c + b*n for `@save` of n `Real`s from a C++ pool at levels 0 and 3, for `@load` of the file, and for generating the list alone; `save<lvl>.encode` = b_save - b_gen in ns per element
+Measured: pending
+
+At level 0 the flat form goes straight to the file through a buffered
+writer, with no copy of the whole value; compressing flattens the value
+once and compresses that buffer. The file is synced before it is renamed
+into place, which is part of b; the bench writes to tmpfs, so the sync
+costs little there. The bytes match the flattened packet
+exactly (`intrinsics::packet_emit_tests`).
+
+### ENC-7 A JSON @stdout stream costs a rate per element near `-f json`
+Intent: proposed
+Bench: save-load
+Model: t(n) = c + b*n for one `@write` of n `Real`s to `@stdout`, rendered by the nexus as JSON; `stdout.json.render` = b_stream - b_gen in ns per element, compared with ENC-3 out:Reals.json.b
+Measured: pending
+
+Each sub-packet is rendered to one string by the runtime, and the
+nexus writes the element body from that string without copying it.
