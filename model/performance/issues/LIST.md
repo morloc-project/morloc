@@ -15,3 +15,4 @@ From lib/biolib/runtime-bench (runtime/issues/encode-throughput.md):
 - [compare-harness.md](compare-harness.md): compare.py never compares a bench with its own past, misses unreported Goals, ignores load, noisy tolerance; five benches never run; Int in benches; XL-2 control optimized away
 - [model-records.md](model-records.md): ZIP-5 limits fail in recorded runs, `Measured: pending` despite runs, ZIP-5/6 frame size mismatch, ZIP-4 answered by data, ZIP-8 title, stale COPY-3/6 prose
 - [stdlib-algorithms.md](stdlib-algorithms.md): parallel's streaming fold-maps are quadratic for list and Str monoids
+- [call-and-stream-copies.md](call-and-stream-copies.md): per-packet schema rebuilds, small-value crossing copies, Python/R @next not in place, channel landing copy, temp-file gather (a cheaper variant), slices left on the copy path, one JSON render copy
