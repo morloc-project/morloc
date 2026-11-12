@@ -78,18 +78,13 @@
   `from_voidstar` returns, so an exception skips the free. It is unknown
   whether the eval arena reclaims the block.
 
-- **The open-time index walk is debug-only, so an undercounting index
-  gives wrong slice elements in a release build.** [read, 2026-11-08]
-  SLOT-30 (ruled 2026-11-02) walks the sub-packets at open only in a debug
-  build or with `MORLOC_VERIFY_INDEX=1`. A footer index that passes the
-  release checks (order, spacing, total) but gives one sub-packet fewer
-  elements than it holds, and the next one more, maps a global index to
-  the wrong element, with no error. For example, claimed counts [3, 9]
-  over actual [5, 7] read element 5 as element 3. A count larger than
-  the sub-packet fails at `plan_run`'s bound check. Candidate fix at no
-  I/O cost: every slice and index read already loads the sub-packet's
-  root `Array`, so compare its `size` with the index count there and fail
-  on a mismatch.
+- **A release build does not notice a footer that drops a sub-packet.**
+  [read, 2026-11-12] Gap in SLOT-30: each read now checks a sub-packet's
+  root count against its index entry, but a footer whose entries all match
+  their sub-packets while one sub-packet is missing from the index loses
+  that sub-packet's elements with no error, outside the debug-only open
+  walk. Candidate: compare the file's data extent with the sum of the
+  indexed sub-packet lengths at open (no I/O beyond the footer).
 - **Three index tests fail under `cargo test --release`.** [reproduced,
   2026-11-08, c3a7b3bb3] `an_ifile_refuses_permuted_counts`,
   `..._skips_the_first_sub_packet` and `..._skips_the_last_sub_packet`
@@ -112,18 +107,3 @@
   reserve without evicting), and make the slice's last end evict other
   reads' entries. Caching interiors needs cross-slot eviction and
   cold-inserted entries (clock bit 0) first.
-
-- **A field walk reads only the first sub-packet.** [read, 2026-11-09]
-  `shared_ifile_general` (stream.rs) materializes sub-packet 0 and walks it
-  with the value schema. A path that reaches it with a root index
-  (`.[].x`, not special-cased by `shared_ifile_walk`) can only reach
-  elements of the first sub-packet of a multi-sub-packet IFile:
-  `f.[1500].x` over three sub-packets of 1000 fails its bounds check, or
-  reads the wrong element.
-- **A field walk infers its result schema twice.** [read, 2026-11-10]
-  Perf, minor. `shared_ifile_general` (data/rust/morloc-runtime/src/
-  stream.rs ~5467) materializes sub-packet 0, then infers the chain's
-  schema, and `walk_into_fresh` infers it again (stream_walk.rs ~389).
-  A path whose schema cannot be inferred first materializes (and may
-  decompress) a sub-packet for nothing. Infer once, before
-  materializing, and pass the schema in.

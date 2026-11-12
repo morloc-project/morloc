@@ -324,7 +324,8 @@ A failure that ends the process (SHM-17) is outside this item.
 Status: implemented
 Checked by: an_in_place_batch_writes_the_bytes_the_copy_path_writes, in_place_runs_read_as_zero_and_mix_with_single_rooms, an_in_place_batch_that_fails_is_absent_or_fails_its_stream, a_thread_encoding_in_place_does_no_other_stream_operation, an_arena_rewound_inside_an_in_place_batch_keeps_its_blocks, an_in_place_element_that_ends_outside_its_room_poisons_the_stream, two_threads_writing_in_place_leave_their_batches_whole, an_in_place_batch_does_not_survive_a_fork_or_its_thread, an_arena_ended_inside_an_in_place_batch_discards_its_streams_after, a_run_of_elements_wider_than_a_sub_packet_is_placed_one_by_one, a_batch_left_open_at_the_end_of_its_call_is_aborted
 
-A language binding may write a `@write` batch to an output file by
+A language binding may write a `@write` batch to an output stream (a file,
+or an unstaged standard output or error) by
 encoding each element straight into the stream's write buffer, inside one
 transaction on the slot lock, which it begins, places elements into, and
 commits or aborts. Channels, staged streams, and element types that are
@@ -375,7 +376,8 @@ The protocol of blocks, counts, spares, zeroing and the GIL is modelled in
 refusals, fork and thread rules are checked by the tests above.
 
 ### SLOT-37 Every binding writes an output file's batches in place
-Status: draft
+Status: implemented
+Checked by: an_in_place_batch_writes_the_bytes_the_copy_path_writes, python_waits_for_a_stream_lock_only_without_the_gil, golden:write-in-place, golden:write-in-place-failure-cpp, golden:write-in-place-failure-py, golden:write-in-place-failure-r, golden:write-in-place-wait-py
 
 The C++, Rust, Python and R bindings write a `@write` batch to an output
 file through SLOT-36's transaction, and with `mlc_write` from their own
@@ -389,12 +391,13 @@ each element as it places it; a batch given as an atomic vector, factor
 or integer64 vector takes the copy path.
 
 A Python writer takes the slot lock with the GIL released, then sizes,
-places and writes each element of a list, or copies a batch given as
-bytes or as a numpy array already in the elements' layout into runs. It
+places and writes each element of a list; a batch given as bytes or a
+numpy array takes the copy path. It
 opens the batch with `MLC_WRITE_NOWAIT`: a placement that would wait for
 queue room places nothing and returns `MLC_WRITE_WOULD_BLOCK`, and the
 writer then waits in `mlc_write_wait` with the GIL released, sizes the
-element again and places it. Before its first wait a list batch is
+element again and places it; an abort, which runs the closes deferred
+during the batch, runs with the GIL released too. Before its first wait a list batch is
 replaced by a shallow copy, so the batch is one state of the list (its
 elements as each is written); a bytearray, which another thread could
 change during a wait, takes the copy path. The commit runs with the GIL
@@ -550,7 +553,7 @@ flushed when the reader opened it (SLOT-15).
 
 ### SLOT-30 An indexed file opens only with a final footer
 Status: implemented
-Checked by: ifile_rejects_footerless_stream, an_index_out_of_order_is_not_trusted, index_counts_that_disagree_with_the_footer_are_not_trusted, an_ifile_refuses_permuted_counts, an_ifile_refuses_an_index_that_skips_the_first_sub_packet, a_writer_cannot_build_a_footer_whose_counts_disagree_with_its_total, concat_refuses_a_source_without_a_final_footer
+Checked by: ifile_rejects_footerless_stream, an_index_out_of_order_is_not_trusted, index_counts_that_disagree_with_the_footer_are_not_trusted, an_ifile_refuses_permuted_counts, an_ifile_refuses_an_index_that_skips_the_first_sub_packet, a_read_refuses_a_sub_packet_whose_count_differs_from_the_index, a_writer_cannot_build_a_footer_whose_counts_disagree_with_its_total, concat_refuses_a_source_without_a_final_footer
 
 `@open` as an IFile needs the per-sub-packet element counts that only a
 final footer records, so it refuses a file in the temporary-footer or
@@ -562,7 +565,9 @@ apart, the last sub-packet ends before the footer, and the counts add up
 to the footer's total. A file that fails this reads as one without a final
 footer. In a debug build (one with code checks), or with
 `MORLOC_VERIFY_INDEX=1`, the open also walks the sub-packets and refuses a
-file whose footer's index differs from them. `@concat` and `@append`, which
+file whose footer's index differs from them. In every build, a read
+that loads a sub-packet fails when the sub-packet holds a different
+number of elements than the index gives it. `@concat` and `@append`, which
 write a new footer, always walk, and refuse a damaged footer or one that
 differs from the sub-packets; `@concat` also refuses a source without a
 final footer. A writer refuses to write a final footer whose counts do not

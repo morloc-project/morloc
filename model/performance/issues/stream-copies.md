@@ -121,12 +121,14 @@ No type or API change, each measurable alone:
 - **S0. Measure first.** Run once with `WORKDIR` on tmpfs and once with
   `dd conv=fdatasync` (or time `@close` separately); print `ru_minflt`
   (measure.py already calls `getrusage`); report the median of 5 runs.
-- **W3. Encode in place.** Done for C++ and Rust writes to an output file
-  (SLOT-36; the bindings rule is the draft SLOT-37): copies 1 and 2 and the
-  runtime's append walk are gone there. Measured on the 600 MiB bench at
-  level 0: C++ pairs 1.60 -> 1.22 s, Rust pairs 1.96 -> 1.61 s. Python
-  and R, and every staged, channel and table write, still take the copy
-  path described above.
+- **W3. Encode in place.** Done for writes to an output stream (SLOT-36,
+  SLOT-37) from C++, Rust, Python lists, and R lists and character
+  vectors: copies 1 and 2 and the runtime's append walk are gone there.
+  Measured on the 600 MiB bench at level 0: C++ pairs 1.60 -> 1.22 s, Rust
+  pairs 1.96 -> 1.61 s, Python bytes 2.89 -> 2.79 s; R strings (560 MB)
+  2974 -> 2388 ms. numpy, bytes, R atomic vectors, and every staged,
+  channel and table write take the copy path described above (numpy in
+  place was measured slower and dropped).
 - **R2.** Decompress into a reused, bounded private buffer and decode in
   payload space (with R1's callback), skipping the shared-memory block
   and its scrub. A thread-local buffer needs a STATE-1 registry row.

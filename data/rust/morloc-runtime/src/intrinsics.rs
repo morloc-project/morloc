@@ -1476,7 +1476,10 @@ pub(crate) unsafe fn mlc_flush(
 /// (0 if none open). Never fails.
 pub(crate) unsafe fn mlc_tell(errmsg: *mut *mut c_char) -> u64 {
     clear_errmsg(errmsg);
-    crate::stream::stdout_element_count()
+    crate::stream::stdout_element_count().unwrap_or_else(|e| {
+        set_errmsg(errmsg, &e);
+        0
+    })
 }
 
 /// `@append schema_str path`: open an existing stream file for append.

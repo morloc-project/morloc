@@ -525,7 +525,7 @@ pub(crate) unsafe fn read_schema_from_packet_meta(
     while pos + 8 <= meta_end {
         if *packet.add(pos) == b'm' && *packet.add(pos + 1) == b'm' && *packet.add(pos + 2) == b'h' {
             let meta_type = *packet.add(pos + 3);
-            let meta_size = *(packet.add(pos + 4) as *const u32) as usize;
+            let meta_size = std::ptr::read_unaligned(packet.add(pos + 4) as *const u32) as usize;
             if meta_type == METADATA_TYPE_SCHEMA_STRING {
                 return packet.add(pos + 8) as *mut c_char;
             }

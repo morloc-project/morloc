@@ -4615,7 +4615,10 @@ error:
     Py_XDECREF(x);
     Py_XDECREF(snapshot);
     py_walk_free(&w);
+    // SLOT-37: the abort runs the closes deferred during the batch.
+    Py_BEGIN_ALLOW_THREADS
     mlc_write_abort();
+    Py_END_ALLOW_THREADS
     return -1;
 }
 
@@ -4811,12 +4814,17 @@ error:
     return NULL;
 }
 
-// mlc_tell() -> int. Elements written to the @stdout OStream so far. Never
-// fails (returns 0 when no @stdout is open).
+// mlc_tell() -> int. Elements written to the @stdout OStream so far (0 when
+// no @stdout is open).
 static PyObject* pybinding__mlc_tell(PyObject* self, PyObject* args) {
     (void)self; (void)args;
     char* errmsg = NULL;
     uint64_t n = mlc_tell(&errmsg);
+    if (errmsg != NULL) {
+        PyErr_SetString(PyExc_RuntimeError, errmsg);
+        free(errmsg);
+        return NULL;
+    }
     return PyLong_FromUnsignedLongLong((unsigned long long)n);
 }
 

@@ -37,6 +37,8 @@ data/lang/r/rmorloc.c::-::r_gc_next	thread
 data/lang/r/rmorloc.c::-::r_pool_env	startup		
 data/lang/r/rmorloc.c::-::r_frames	thread		
 data/lang/r/rmorloc.c::-::r_frames_cap	thread		
+data/lang/r/rmorloc.c::-::r_later	thread		
+data/lang/r/rmorloc.c::-::r_later_cap	thread		
 data/lang/r/rmorloc.c::-::r_literal_schemas	thread		
 data/lang/r/rmorloc.c::-::r_literal_schemas_len	thread		
 data/lang/r/rmorloc.c::-::r_literal_schemas_cap	thread		

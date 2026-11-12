@@ -1233,7 +1233,7 @@ const BINDING_REL2ABS: &[(&str, usize)] = &[
     ("data/lang/cpp/mlc_arrow.hpp", 1),
     ("data/lang/cpp/pool.cpp", 1),
     ("data/lang/py/pymorloc.c", 1),
-    ("data/lang/r/rmorloc.c", 10),
+    ("data/lang/r/rmorloc.c", 2),
     ("data/rust/rustmorloc/src/lib.rs", 6),
 ];
 
@@ -1299,6 +1299,7 @@ const PY_NOGIL_CALLS: &[&str] = &[
     "mlc_write_begin",
     "mlc_write_wait",
     "mlc_write_commit",
+    "mlc_write_abort",
     "mlc_write",
     "mlc_flush",
     "mlc_close",

@@ -1386,6 +1386,7 @@ fn a_thread_encoding_in_place_does_no_other_stream_operation() {
     refused(shared_write_subpacket(s2, none, v), "a copy write to another stream");
     refused(shared_write_subpacket(s1, none, v), "a copy write to its own stream");
     refused(shared_flush_buffer(s1), "a flush");
+    refused(crate::stream::stdout_element_count().map(|_| ()), "a @tell");
     shared_close_handle(s3).unwrap();
     let s3_slot = crate::stream::slot_ref(crate::stream::unpack_handle(s3).1).unwrap();
     let open = || s3_slot.generation.load(std::sync::atomic::Ordering::Acquire) & crate::stream::GENERATION_MASK == crate::stream::unpack_handle(s3).0;

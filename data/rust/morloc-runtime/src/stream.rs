@@ -500,16 +500,18 @@ pub(crate) fn stdio_claim_slot(
 /// offset-aware `@with`/`@render` synthesis can pass the per-batch element
 /// offset to a handler. The count is already maintained for the stream
 /// footers, so this is a plain field read.
-pub fn stdout_element_count() -> u64 {
+pub fn stdout_element_count() -> Result<u64, MorlocError> {
     use std::sync::atomic::Ordering;
+    // SLOT-36
+    refuse_inside_txn()?;
     let handle = match stdio_claim_slot(STDIO_KIND_STDOUT) {
         Some(a) => a.load(Ordering::Acquire),
-        None => return 0,
+        None => return Ok(0),
     };
     if handle <= 0 {
-        return 0;
+        return Ok(0);
     }
-    with_process_local_slot(handle, |_local, slot| Ok(slot.element_count.get())).unwrap_or(0)
+    Ok(with_process_local_slot(handle, |_local, slot| Ok(slot.element_count.get())).unwrap_or(0))
 }
 
 /// How this process's nexus takes the run's stdout stream, from
@@ -6196,12 +6198,119 @@ fn shared_ifile_general(
                 "IFile has no sub-packets (empty file?)".into(),
             ));
         }
-        let src = materialize_subpacket(local, 0)?;
-        let schema = crate::stream_walk::infer_chain_schema(&local.value_schema, &steps)?;
-        let r = walk_into_fresh(&local.value_schema, &src, &steps, args).and_then(|p| require_text(p, &schema));
-        src.release();
-        r
+        let value_schema = local.value_schema.clone();
+        let schema = crate::stream_walk::infer_chain_schema(&value_schema, &steps)?;
+        let r = if value_schema.serial_type == SerialType::Array {
+            let dst = shm::shcalloc(1, schema.width)?;
+            let mut cursor = ArgsCursor::new(args);
+            let mut parts: Vec<AbsPtr> = Vec::new();
+            let walked = walk_ifile_list(local, &value_schema, &steps, &mut cursor, dst, &schema, &mut parts)
+                .and_then(|()| cursor.finish());
+            one_block(dst, &schema, parts, walked)
+        } else if local.subpacket_entries_local.len() != 1 {
+            Err(MorlocError::Other(format!(
+                "IFile of a single value has {} sub-packets",
+                local.subpacket_entries_local.len(),
+            )))
+        } else {
+            let src = materialize_subpacket(local, 0)?;
+            walk_into_fresh(&value_schema, &schema, &src, &steps, args)
+        };
+        r.and_then(|p| require_text(p, &schema))
     })
+}
+
+/// Walk `steps` from the root list of a list-valued IFile into `out`,
+/// reading each element from the sub-packet that holds it.
+fn walk_ifile_list(
+    local: &mut ProcessLocalSlot,
+    value_schema: &Schema,
+    steps: &[WalkStep],
+    args: &mut ArgsCursor<'_>,
+    out: AbsPtr,
+    out_schema: &Schema,
+    parts: &mut Vec<AbsPtr>,
+) -> Result<(), MorlocError> {
+    let elem_schema = &value_schema.parameters[0];
+    match steps.first() {
+        None => Err(MorlocError::Other("walk: empty chain".into())),
+        Some(WalkStep::Field(_)) => Err(MorlocError::Other(
+            "walk: a field step needs a record or tuple, but the IFile holds a list".into(),
+        )),
+        Some(WalkStep::BracketIndex) => {
+            let idx = args.next_one()?;
+            if idx.has == 0 {
+                return Err(MorlocError::Other(
+                    "walk: bracket-index requires a present index (got None)".into(),
+                ));
+            }
+            let (sub_k, local_idx) = resolve_global_index(local, idx.value)?;
+            let src = cache_get_or_materialize(local, sub_k)?;
+            let elem = ifile_element_ptr(&src, elem_schema.width, local_idx)?;
+            walk_into(&src, elem, elem_schema, &steps[1..], args, out, out_schema, parts)
+        }
+        Some(WalkStep::BracketSlice) => {
+            let (start, stop, step) = args.next_three()?;
+            ensure_elem_cum(local)?;
+            let plan: Vec<(usize, u64)> = {
+                let cum = local
+                    .subpacket_elem_cum
+                    .as_ref()
+                    .expect("ensure_elem_cum populates subpacket_elem_cum");
+                slice::Slice::new(*cum.last().unwrap_or(&0u64), start, stop, step)?
+                    .indices()
+                    .map(|i| {
+                        let k = cum.partition_point(|&c| c <= i) - 1;
+                        (k, i - cum[k])
+                    })
+                    .collect()
+            };
+            let out_elem = &out_schema.parameters[0];
+            let buf = if plan.is_empty() {
+                std::ptr::null_mut()
+            } else {
+                let b = shm::shcalloc(plan.len(), out_elem.width)?;
+                parts.push(b);
+                b
+            };
+            let tail = &steps[1..];
+            let ends = slice_ends(plan.iter().map(|p| p.0));
+            let mut held: Option<(usize, SubpacketSrc)> = None;
+            for_each_broadcast(args, tail, plan.len(), |i, args| {
+                let (sub_k, local_idx) = plan[i];
+                if held.as_ref().map(|h| h.0) != Some(sub_k) {
+                    held = None;
+                    held = Some((sub_k, slice_source(local, sub_k, ends)?));
+                }
+                let src = &held.as_ref().expect("held was just set").1;
+                let elem = ifile_element_ptr(src, elem_schema.width, local_idx)?;
+                let dst = unsafe { (buf as *mut u8).add(i * out_elem.width) as AbsPtr };
+                walk_into(src, elem, elem_schema, tail, args, dst, out_elem, parts)
+            })?;
+            drop(held);
+            write_array_header(out, plan.len(), buf)
+        }
+        Some(WalkStep::Group(chains)) => {
+            for (i, chain) in chains.iter().enumerate() {
+                let dst = unsafe { (out as *mut u8).add(out_schema.offsets[i]) as AbsPtr };
+                walk_ifile_list(local, value_schema, chain, args, dst, &out_schema.parameters[i], parts)?;
+            }
+            Ok(())
+        }
+    }
+}
+
+/// The address of element `local_idx` of a sub-packet's root list.
+fn ifile_element_ptr(src: &SubpacketSrc, elem_width: usize, local_idx: u64) -> Result<AbsPtr, MorlocError> {
+    let (n, records) = src.records(elem_width)?;
+    let idx = width::usize_from_u64(local_idx);
+    if idx >= n {
+        return Err(MorlocError::Other(format!(
+            "local element index {} out of bounds for sub-packet of size {}",
+            local_idx, n,
+        )));
+    }
+    Ok(unsafe { (records as *const u8).add(idx * elem_width) as AbsPtr })
 }
 
 fn shared_ifile_bracket_index(handle: i64, index: i64) -> Result<AbsPtr, MorlocError> {
@@ -7024,8 +7133,18 @@ fn materialize_subpacket(
             sub_k, local.subpacket_entries_local.len(),
         )));
     }
-    let subpacket_off = local.subpacket_entries_local[sub_k].offset;
-    let (src, _on_disk_size) = materialize_subpacket_at_offset(local, subpacket_off)?;
+    let entry = local.subpacket_entries_local[sub_k];
+    let (src, _on_disk_size) = materialize_subpacket_at_offset(local, entry.offset)?;
+    if local.value_schema.serial_type == SerialType::Array {
+        // SLOT-30
+        let held = width::u64_from_usize(src.records(local.elem_schema.width)?.0);
+        if held != entry.elem_count {
+            return Err(MorlocError::Other(format!(
+                "corrupt sub-packet index: sub-packet {} holds {} elements, the index says {}",
+                sub_k, held, entry.elem_count,
+            )));
+        }
+    }
     Ok(src)
 }
 
@@ -11518,6 +11637,104 @@ mod tests {
         assert!(late_gone, "the rollback kept a stream opened after its checkpoint");
         assert!(early_open, "the rollback discarded a stream opened before its checkpoint");
         assert!(early_gone, "the arena's end kept a stream it recorded");
+    }
+
+    fn write_record_batches(path: &std::path::Path, batches: &[std::ops::Range<i64>], level: u8) {
+        crate::write_behind::set_test_depth(Some(0));
+        let w = shared_open_ostream_with_schema(path.to_str().unwrap(), "at2i8ai8").unwrap();
+        let list = parse_schema("at2i8ai8").unwrap();
+        let level = crate::compression::CompressionLevel::from_u8(level).unwrap();
+        for b in batches {
+            let json = format!("[{}]", b.clone().map(|k| format!("[{k},[{k},{}]]", k + 1)).collect::<Vec<_>>().join(","));
+            let v = crate::json::read_json_with_schema(&json, &list).unwrap();
+            shared_write_subpacket(w, level, v).unwrap();
+            shm::shfree(v).unwrap();
+            shared_flush_buffer(w).unwrap();
+        }
+        shared_close_handle(w).unwrap();
+        crate::write_behind::set_test_depth(None);
+    }
+
+    fn walk_json(f: i64, path: &str, args: &[Option<i64>], schema: &str) -> Result<String, MorlocError> {
+        let args: Vec<_> = args.iter().map(|a| crate::intrinsics::IFileWalkArg::opt(*a)).collect();
+        let p = shared_ifile_walk(f, path, &args)?;
+        let r = crate::json::voidstar_to_json_string(p, &parse_schema(schema).unwrap());
+        shm::shfree(p).unwrap();
+        r
+    }
+
+    fn cached_subpackets(f: i64) -> Vec<u64> {
+        let mut ks = with_process_local_slot(f, |local, _| {
+            Ok(local.cache.entries.iter().map(|e| e.subpacket_idx).collect::<Vec<_>>())
+        })
+        .unwrap();
+        ks.sort();
+        ks
+    }
+
+    fn json_ints(xs: impl Iterator<Item = i64>) -> String {
+        format!("[{}]", xs.map(|x| x.to_string()).collect::<Vec<_>>().join(","))
+    }
+
+    #[test]
+    fn a_field_walk_reads_the_sub_packet_that_holds_its_element() {
+        let _shm = crate::own_test_registry();
+        let dir = concat_test_dir("walk_subpackets");
+        for level in [0u8, 3] {
+            let path = dir.join(format!("w{level}.idx"));
+            write_record_batches(&path, &[0..1000, 1000..2000, 2000..3000], level);
+            let f = open_ifile(path.to_str().unwrap()).unwrap();
+            assert_eq!(with_process_local_slot(f, |l, _| Ok(l.subpacket_entries_local.len())).unwrap(), 3);
+            assert_eq!(walk_json(f, ".[].0", &[Some(1500)], "i8").unwrap(), "1500");
+            if level != 0 {
+                assert_eq!(cached_subpackets(f), vec![1], "an index read more than its sub-packet");
+            }
+            assert_eq!(walk_json(f, ".[].1.[]", &[Some(2500), Some(1)], "i8").unwrap(), "2501");
+            assert_eq!(walk_json(f, ".[].0", &[Some(-1)], "i8").unwrap(), "2999");
+            assert!(walk_json(f, ".[].0", &[Some(3000)], "i8").is_err());
+            assert_eq!(
+                walk_json(f, ".(.[].0;.[].1.[])", &[Some(5), Some(2999), Some(0)], "t2i8i8").unwrap(),
+                "[5,2999]",
+            );
+            assert_eq!(
+                walk_json(f, ".[:].1.[]", &[None, None, None, Some(0)], "ai8").unwrap(),
+                json_ints(0..3000),
+            );
+            assert_eq!(
+                walk_json(f, ".[:].1.[]", &[Some(1), Some(2999), Some(1000), Some(1)], "ai8").unwrap(),
+                "[2,1002,2002]",
+            );
+            assert_eq!(
+                walk_json(f, ".[:].1.[]", &[None, None, Some(-997), Some(1)], "ai8").unwrap(),
+                json_ints((0..3000).rev().step_by(997).map(|k| k + 1)),
+            );
+            assert_eq!(walk_json(f, ".[:].1.[]", &[Some(7), Some(7), None, Some(0)], "ai8").unwrap(), "[]");
+            shared_close_handle(f).unwrap();
+        }
+    }
+
+    #[test]
+    fn a_read_refuses_a_sub_packet_whose_count_differs_from_the_index() {
+        let _shm = crate::own_test_registry();
+        let dir = concat_test_dir("count_mismatch");
+        let path = dir.join("m.idx");
+        write_record_batches(&path, &[0..5, 5..12], 3);
+        let f = open_ifile(path.to_str().unwrap()).unwrap();
+        with_process_local_slot(f, |local, _| {
+            local.subpacket_entries_local[0].elem_count = 3;
+            local.subpacket_entries_local[1].elem_count = 9;
+            local.subpacket_elem_cum = None;
+            Ok(())
+        })
+        .unwrap();
+        let msg = ifile_bracket_index(f, 3).unwrap_err().to_string();
+        assert!(msg.contains("corrupt sub-packet index"), "{msg}");
+        assert!(ifile_bracket_index(f, 11).is_err());
+        assert!(ifile_bracket_slice(f, None, None, None).is_err());
+        assert!(ifile_bracket_slice(f, None, None, Some(2)).is_err());
+        assert!(walk_json(f, ".[].0", &[Some(3)], "i8").is_err());
+        assert!(walk_json(f, ".[:].1.[]", &[None, None, None, Some(0)], "ai8").is_err());
+        shared_close_handle(f).unwrap();
     }
 
     // A slice that fails part way gives back the sub-packets it read.

@@ -1131,7 +1131,7 @@ inline void _mlc_flush(int64_t handle) {
     MLC_WRITE_RESULT(rc, errmsg, "mlc_flush");
 }
 
-// @tell: elements written to @stdout so far (its element_count). Never fails.
+// @tell: elements written to @stdout so far (its element_count).
 inline uint64_t _mlc_tell() {
     char* errmsg = NULL;
     uint64_t n = mlc_tell(&errmsg);

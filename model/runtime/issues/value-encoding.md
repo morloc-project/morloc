@@ -9,7 +9,7 @@
 - **A record value missing an optional field.** [read, 2026-11-11] Gap
   (REC-2 covers literals only): R writes a missing `?T` field as null, so
   that `x$f <- NULL` keeps working; Python raises a KeyError for any
-  missing key. Which a foreign record value may do needs a ruling.
+  missing key. Which a foreign record value may do needs a ruling; deferred to the record work (user, 2026-11-12).
 - [read] morloc-runtime/src/mpack.rs:413-414: Int limbs copied to an
   unaligned cursor.
 - [read] mpack.rs:398-416: an 8-byte `bin` Int stores size 1 and a relptr,
@@ -119,10 +119,3 @@
   per-language statement of which native forms each wire form may become.
   Reproduction:
   /work/plans/error-clusters/repro/newtype-form-no-packer.
-- [read, 2026-11-11] A Rust `u64` written under an `Int` schema is cast
-  with `as i64` (data/rust/rustmorloc/src/lib.rs, int_impl, the
-  `SerialType::Int` arm of `write`), so a value above i64::MAX wraps
-  negative. Every other narrowing write refuses an out-of-range value
-  (C++ check_range_narrow, Rust write_int), as the native-width rule for
-  `Int` requires; this one is a gap in that check. Reachable only when a
-  Rust mapping puts a u64 under `Int`.

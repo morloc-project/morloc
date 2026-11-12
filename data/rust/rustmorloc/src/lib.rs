@@ -2237,8 +2237,11 @@ macro_rules! int_impl {
                     // Inline BigInt [size=1, value] (16 bytes); v1 never emits
                     // multi-limb (I6 handles consume).
                     SerialType::Int => {
+                        let v = i64::try_from(*self as i128).unwrap_or_else(|_| {
+                            morloc_throw(format!("{} does not fit the Int this Rust value is written as", *self))
+                        });
                         core::ptr::write_unaligned(dest as *mut i64, 1);
-                        core::ptr::write_unaligned((dest as *mut i64).add(1), *self as i64);
+                        core::ptr::write_unaligned((dest as *mut i64).add(1), v);
                     }
                     SerialType::Nil | SerialType::Bool | SerialType::Sint8 | SerialType::Sint16
                     | SerialType::Sint32 | SerialType::Sint64 | SerialType::Uint8 | SerialType::Uint16
@@ -4739,6 +4742,23 @@ mod runtime_failure_tests {
 mod tests {
     use super::*;
     use morloc_runtime_types::schema::parse_schema;
+
+    /// A u64 above i64::MAX has no inline Int form; it is refused rather
+    /// than wrapped negative.
+    #[test]
+    fn a_u64_too_large_for_an_inline_int_is_refused() {
+        let schema = parse_schema("j").expect("parse schema");
+        let mut slot = [0u8; 16];
+        let mut cursor = slot.as_mut_ptr();
+        let dest = slot.as_mut_ptr();
+        unsafe { (i64::MAX as u64).write(dest, &mut cursor, &schema) };
+        assert_eq!(i64::from_le_bytes(slot[8..16].try_into().unwrap()), i64::MAX);
+        let big = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+            let mut cursor = slot.as_mut_ptr();
+            (i64::MAX as u64 + 1).write(dest, &mut cursor, &schema)
+        }));
+        assert!(big.is_err(), "u64 2^63 was written as an inline Int");
+    }
 
     /// A thread that ends frees the schema conversions it cached. A sourced
     /// function may spawn short-lived threads that call manifolds, so a cache
