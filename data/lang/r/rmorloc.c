@@ -1120,12 +1120,11 @@ static size_t get_shm_size(const Schema* schema, SEXP obj) {
 // below silently admit any NaN (including R's NA_integer_/NA_real_, which
 // asReal collapses to NA_REAL). Casting NaN to an integer is undefined
 // behaviour and typically wraps to INT*_MIN. Reject explicitly.
-#define HANDLE_SINT_TYPE(CTYPE, MIN, MAX) \
-    do { \
-        if (!(isInteger(obj) || isReal(obj))) { \
-            MORLOC_ERROR("Expected integer for %s, but got %s", #CTYPE, type2char(TYPEOF(obj))); \
-        } \
-        double value = r_number(obj); \
+//
+// The r_store_* functions take the value as r_number gives it, so a scalar
+// and an element of an atomic vector go through the same checks.
+#define R_STORE_FIXED(CTYPE, MIN, MAX) \
+    static inline void r_store_##CTYPE(double value, void* dest) { \
         if (ISNAN(value)) { \
             MORLOC_ERROR("Cannot pack NA or NaN into %s", #CTYPE); \
         } \
@@ -1133,6 +1132,21 @@ static size_t get_shm_size(const Schema* schema, SEXP obj) {
             MORLOC_ERROR("Integer overflow for %s", #CTYPE); \
         } \
         *(CTYPE*)dest = (CTYPE)value; \
+    }
+
+R_STORE_FIXED(int8_t, INT8_MIN, INT8_MAX)
+R_STORE_FIXED(int16_t, INT16_MIN, INT16_MAX)
+R_STORE_FIXED(int32_t, INT32_MIN, INT32_MAX)
+R_STORE_FIXED(uint8_t, 0, UINT8_MAX)
+R_STORE_FIXED(uint16_t, 0, UINT16_MAX)
+R_STORE_FIXED(uint32_t, 0, UINT32_MAX)
+
+#define HANDLE_SINT_TYPE(CTYPE, MIN, MAX) \
+    do { \
+        if (!(isInteger(obj) || isReal(obj))) { \
+            MORLOC_ERROR("Expected integer for %s, but got %s", #CTYPE, type2char(TYPEOF(obj))); \
+        } \
+        r_store_##CTYPE(r_number(obj), dest); \
     } while(0)
 
 // An enum's R form is an ordered factor: integer storage plus a levels
@@ -1203,14 +1217,7 @@ static long enum_tag_of_factor_code(const Schema* schema, SEXP levels, int code)
         if (!(isInteger(obj) || isReal(obj))) { \
             MORLOC_ERROR("Expected integer for %s, but got %s", #CTYPE, type2char(TYPEOF(obj))); \
         } \
-        double value = r_number(obj); \
-        if (ISNAN(value)) { \
-            MORLOC_ERROR("Cannot pack NA or NaN into %s", #CTYPE); \
-        } \
-        if (value < 0 || value > MAX) { \
-            MORLOC_ERROR("Integer overflow for %s", #CTYPE); \
-        } \
-        *(CTYPE*)dest = (CTYPE)value; \
+        r_store_##CTYPE(r_number(obj), dest); \
     } while(0)
 
 // 64-bit fixed-width: distinct from HANDLE_*_TYPE because the full 64-bit
@@ -1220,6 +1227,66 @@ static long enum_tag_of_factor_code(const Schema* schema, SEXP levels, int code)
 // range round-trips losslessly. Plain REALSXP / INTSXP still work for
 // convenience (e.g. integer literals from R user code), with the existing
 // 2^53 precision ceiling.
+static inline void r_store_int64_t(double value, void* dest) {
+    if (ISNAN(value)) {
+        MORLOC_ERROR("Cannot pack NA or NaN into int64_t");
+    }
+    value = trunc(value);
+    if (value < -(double)R_DOUBLE_INT_MAX || value > (double)R_DOUBLE_INT_MAX) {
+        MORLOC_ERROR(
+            "Integer %.0f does not fit in R's numeric type"
+            " (max 2^53 = 9007199254740992 for integer precision)."
+            " Wrap with bit64::as.integer64() for the full Int64 range.",
+            value);
+    }
+    *(int64_t*)dest = (int64_t)value;
+}
+
+static inline void r_store_uint64_t(double value, void* dest) {
+    if (ISNAN(value)) {
+        MORLOC_ERROR("Cannot pack NA or NaN into uint64_t");
+    }
+    value = trunc(value);
+    if (value < 0 || value > (double)R_DOUBLE_INT_MAX) {
+        MORLOC_ERROR(
+            "Unsigned integer %.0f does not fit in R's numeric type"
+            " (max 2^53 = 9007199254740992 for integer precision)."
+            " Wrap with bit64::as.integer64() for the full UInt64 range.",
+            value);
+    }
+    *(uint64_t*)dest = (uint64_t)value;
+}
+
+// MORLOC_INT from a number, inline BigInt: [size=1, value]
+static inline void r_store_bigint(double value, void* dest) {
+    if (ISNAN(value)) {
+        MORLOC_ERROR("Cannot pack NA or NaN into MORLOC_INT");
+    }
+    value = trunc(value);
+    // (double)INT64_MAX rounds to 2^63 and defeats the bound check;
+    // anything outside [-2^53, 2^53] cannot have come from R as a
+    // precise integer, so reject rather than silently corrupt.
+    if (value < -(double)R_DOUBLE_INT_MAX || value > (double)R_DOUBLE_INT_MAX) {
+        MORLOC_ERROR(
+            "Integer %.0f does not fit in R's numeric type"
+            " (max 2^53 = 9007199254740992 for integer precision).",
+            value);
+    }
+    int64_t* fields = (int64_t*)dest;
+    fields[0] = 1;
+    fields[1] = (int64_t)value;
+}
+
+static inline void r_store_float(double d, void* dest) {
+    if (morloc_f32_from_f64(d, (float*)dest) != 0) {
+        MORLOC_ERROR("value %g out of range for F32", d);
+    }
+}
+
+static inline void r_store_double(double d, void* dest) {
+    *(double*)dest = d;
+}
+
 #define HANDLE_SINT64() \
     do { \
         if (is_integer64(obj)) { \
@@ -1234,19 +1301,7 @@ static long enum_tag_of_factor_code(const Schema* schema, SEXP levels, int code)
         if (!(isInteger(obj) || isReal(obj))) { \
             MORLOC_ERROR("Expected integer for int64_t, but got %s", type2char(TYPEOF(obj))); \
         } \
-        double value = r_number(obj); \
-        if (ISNAN(value)) { \
-            MORLOC_ERROR("Cannot pack NA or NaN into int64_t"); \
-        } \
-        value = trunc(value); \
-        if (value < -(double)R_DOUBLE_INT_MAX || value > (double)R_DOUBLE_INT_MAX) { \
-            MORLOC_ERROR( \
-                "Integer %.0f does not fit in R's numeric type" \
-                " (max 2^53 = 9007199254740992 for integer precision)." \
-                " Wrap with bit64::as.integer64() for the full Int64 range.", \
-                value); \
-        } \
-        *(int64_t*)dest = (int64_t)value; \
+        r_store_int64_t(r_number(obj), dest); \
     } while(0)
 
 #define HANDLE_UINT64() \
@@ -1263,22 +1318,68 @@ static long enum_tag_of_factor_code(const Schema* schema, SEXP levels, int code)
         if (!(isInteger(obj) || isReal(obj))) { \
             MORLOC_ERROR("Expected integer for uint64_t, but got %s", type2char(TYPEOF(obj))); \
         } \
-        double value = r_number(obj); \
-        if (ISNAN(value)) { \
-            MORLOC_ERROR("Cannot pack NA or NaN into uint64_t"); \
-        } \
-        value = trunc(value); \
-        if (value < 0 || value > (double)R_DOUBLE_INT_MAX) { \
-            MORLOC_ERROR( \
-                "Unsigned integer %.0f does not fit in R's numeric type" \
-                " (max 2^53 = 9007199254740992 for integer precision)." \
-                " Wrap with bit64::as.integer64() for the full UInt64 range.", \
-                value); \
-        } \
-        *(uint64_t*)dest = (uint64_t)value; \
+        r_store_uint64_t(r_number(obj), dest); \
     } while(0)
 
 // {{{ write pass
+
+// Write the n elements of an atomic vector with the checks the scalar path
+// gives each element as a ScalarLogical/ScalarInteger/ScalarReal; 0 when
+// the elements must take the scalar path instead.
+static int r_write_atomic(const Schema* es, char* start, SEXP obj, size_t n) {
+    size_t width = es->width;
+    if (TYPEOF(obj) == LGLSXP) {
+        if (es->type != MORLOC_BOOL) return 0;
+        const int* x = LOGICAL(obj);
+        for (size_t i = 0; i < n; i++) {
+            if (x[i] == NA_LOGICAL) {
+                MORLOC_ERROR("Expected one TRUE or FALSE for MORLOC_BOOL");
+            }
+            *(uint8_t*)(start + i * width) = (uint8_t)(x[i] != 0);
+        }
+        return 1;
+    }
+    const int* ix = NULL;
+    const double* dx = NULL;
+    if (TYPEOF(obj) == INTSXP) {
+        ix = INTEGER(obj);
+    } else if (TYPEOF(obj) == REALSXP && !is_integer64(obj)) {
+        dx = REAL(obj);
+    } else {
+        return 0;
+    }
+    if (dx != NULL && es->type == MORLOC_FLOAT64 && width == sizeof(double)) {
+        memcpy(start, dx, n * sizeof(double));
+        return 1;
+    }
+#define R_ATOMIC_LOOP(STORE) \
+    if (ix != NULL) { \
+        for (size_t i = 0; i < n; i++) { \
+            STORE(ix[i] == NA_INTEGER ? NA_REAL : (double)ix[i], start + i * width); \
+        } \
+    } else { \
+        for (size_t i = 0; i < n; i++) { \
+            STORE(dx[i], start + i * width); \
+        } \
+    } \
+    return 1;
+    switch (es->type) {
+        case MORLOC_SINT8:   R_ATOMIC_LOOP(r_store_int8_t)
+        case MORLOC_SINT16:  R_ATOMIC_LOOP(r_store_int16_t)
+        case MORLOC_SINT32:  R_ATOMIC_LOOP(r_store_int32_t)
+        case MORLOC_SINT64:  R_ATOMIC_LOOP(r_store_int64_t)
+        case MORLOC_UINT8:   R_ATOMIC_LOOP(r_store_uint8_t)
+        case MORLOC_UINT16:  R_ATOMIC_LOOP(r_store_uint16_t)
+        case MORLOC_UINT32:  R_ATOMIC_LOOP(r_store_uint32_t)
+        case MORLOC_UINT64:  R_ATOMIC_LOOP(r_store_uint64_t)
+        case MORLOC_INT:     R_ATOMIC_LOOP(r_store_bigint)
+        case MORLOC_FLOAT32: R_ATOMIC_LOOP(r_store_float)
+        case MORLOC_FLOAT64: R_ATOMIC_LOOP(r_store_double)
+        default:
+            return 0;
+    }
+#undef R_ATOMIC_LOOP
+}
 
 static void r_write_step(r_walk_t* w, const Schema* schema, void* dest, SEXP obj, size_t idx);
 
@@ -1405,42 +1506,21 @@ static void r_write_step(r_walk_t* w, const Schema* schema, void* dest, SEXP obj
             if (!(isInteger(obj) || isReal(obj))) {
                 MORLOC_ERROR("Expected integer or numeric for MORLOC_INT, but got %s", type2char(TYPEOF(obj)));
             }
-            double value = r_number(obj);
-            if (ISNAN(value)) {
-                MORLOC_ERROR("Cannot pack NA or NaN into MORLOC_INT");
-            }
-            value = trunc(value);
-            if (value < -(double)R_DOUBLE_INT_MAX || value > (double)R_DOUBLE_INT_MAX) {
-                // (double)INT64_MAX rounds to 2^63 and defeats the bound check;
-                // anything outside [-2^53, 2^53] cannot have come from R as a
-                // precise integer, so reject rather than silently corrupt.
-                MORLOC_ERROR(
-                    "Integer %.0f does not fit in R's numeric type"
-                    " (max 2^53 = 9007199254740992 for integer precision).",
-                    value);
-            }
-            int64_t* fields = (int64_t*)dest;
-            fields[0] = 1;
-            fields[1] = (int64_t)value;
+            r_store_bigint(r_number(obj), dest);
             break;
         }
         case MORLOC_FLOAT32:
             if (!(isReal(obj) || isInteger(obj))) {
                 MORLOC_ERROR("Expected numeric for MORLOC_FLOAT32, but got %s", type2char(TYPEOF(obj)));
             }
-            {
-                double d = r_number(obj);
-                if (morloc_f32_from_f64(d, (float*)dest) != 0) {
-                    MORLOC_ERROR("value %g out of range for F32", d);
-                }
-            }
+            r_store_float(r_number(obj), dest);
             break;
 
         case MORLOC_FLOAT64:
             if (!(isReal(obj) || isInteger(obj))) {
                 MORLOC_ERROR("Expected numeric for MORLOC_FLOAT64, but got %s", type2char(TYPEOF(obj)));
             }
-            *((double*)dest) = r_number(obj);
+            r_store_double(r_number(obj), dest);
             break;
         case MORLOC_IFILE:
         case MORLOC_OSTREAM:
@@ -1634,6 +1714,7 @@ static void r_write_step(r_walk_t* w, const Schema* schema, void* dest, SEXP obj
                 case LGLSXP:
                     *cursor = (void*)(*(char**)cursor + array->size * element_schema->width);
                     start = r_abs(w, array->data);
+                    if (r_write_atomic(element_schema, start, obj, array->size)) break;
                     for (int i = 0; i < array->size; i++) {
                         SEXP elem = PROTECT(ScalarLogical(LOGICAL(obj)[i]));
                         r_write_step(w, element_schema, start + i * element_schema->width, elem, 0);
@@ -1643,6 +1724,7 @@ static void r_write_step(r_walk_t* w, const Schema* schema, void* dest, SEXP obj
                 case INTSXP:
                     *cursor = (void*)(*(char**)cursor + array->size * element_schema->width);
                     start = r_abs(w, array->data);
+                    if (r_write_atomic(element_schema, start, obj, array->size)) break;
                     for (int i = 0; i < array->size; i++) {
                         SEXP elem = PROTECT(ScalarInteger(INTEGER(obj)[i]));
                         r_write_step(w, element_schema, start + i * element_schema->width, elem, 0);
@@ -1676,6 +1758,7 @@ static void r_write_step(r_walk_t* w, const Schema* schema, void* dest, SEXP obj
                         memcpy(start, REAL(obj), array->size * sizeof(int64_t));
                         break;
                     }
+                    if (r_write_atomic(element_schema, start, obj, array->size)) break;
                     int elem_i64 = is_integer64(obj);
                     for (int i = 0; i < array->size; i++) {
                         SEXP elem = PROTECT(elem_i64
@@ -1812,19 +1895,45 @@ static void* to_voidstar_inner(void* dest, void** cursor, SEXP obj, const Schema
     return dest;
 }
 
-// NOTE: If to_voidstar_inner calls error() (via MORLOC_ERROR or R_TRY), the shared
-// memory at dest leaks. This only happens on type mismatches (a development-time
-// bug) and the memory is reclaimed when the pool process exits.
-static void* to_voidstar(SEXP obj, const Schema* schema) {
-    MAYFAIL
+typedef struct {
+    SEXP obj;
+    Schema* schema;
+    void* held;
+    void* dest;
+} r_encode_t;
 
-    size_t total_size = get_shm_size(schema, obj);
+static SEXP r_encode_body(void* data) { MAYFAIL
+    r_encode_t* e = (r_encode_t*)data;
+    size_t total_size = get_shm_size(e->schema, e->obj);
+    e->dest = R_TRY(shmalloc, total_size);
+    void* cursor = (void*)((char*)e->dest + e->schema->width);
+    to_voidstar_inner(e->dest, &cursor, e->obj, e->schema);
+    return R_NilValue;
+}
 
-    void* dest = R_TRY(shmalloc, total_size);
+static void r_encode_cleanup(void* data, Rboolean jump) {
+    if (!jump) return;
+    r_encode_t* e = (r_encode_t*)data;
+    void* blocks[2] = { e->dest, e->held };
+    for (int i = 0; i < 2; i++) {
+        if (blocks[i] != NULL) {
+            char* errmsg = NULL;
+            shfree(blocks[i], &errmsg);
+            free(errmsg);
+        }
+    }
+    free_schema(e->schema);
+}
 
-    void* cursor = (void*)((char*)dest + schema->width);
-
-    return to_voidstar_inner(dest, &cursor, obj, schema);
+// Encode `obj` into a new SHM block. When the encoding raises an R error,
+// the new block, the caller's block `held` (may be NULL) and `schema` are
+// released before the error continues.
+static void* to_voidstar(SEXP obj, Schema* schema, void* held) {
+    r_encode_t e = { obj, schema, held, NULL };
+    SEXP cont = PROTECT(R_MakeUnwindCont());
+    R_UnwindProtect(r_encode_body, &e, r_encode_cleanup, &e, cont);
+    UNPROTECT(1);
+    return e.dest;
 }
 
 // }}} write pass
@@ -2430,7 +2539,7 @@ SEXP morloc_put_value(SEXP obj_r, SEXP schema_str_r, SEXP self_contained_r) { MA
         return result;
     }
 
-    void* voidstar = to_voidstar(obj_r, schema);
+    void* voidstar = to_voidstar(obj_r, schema, NULL);
     if (!voidstar) {
         free_schema(schema);
         MORLOC_ERROR("Failed to convert R object to internal representation");
@@ -2568,7 +2677,7 @@ static SEXP morloc_mlc_save_dispatch(SEXP obj_r, SEXP schema_str_r,
     Schema* schema = R_TRY_WITH(free(schema_str), parse_schema, schema_str);
     free(schema_str);
 
-    void* voidstar = to_voidstar(obj_r, schema);
+    void* voidstar = to_voidstar(obj_r, schema, NULL);
     if (!voidstar) {
         free_schema(schema);
         MORLOC_ERROR("%s: failed to convert R object to voidstar", fn_name);
@@ -2612,7 +2721,7 @@ SEXP morloc_mlc_hash(SEXP obj_r, SEXP schema_str_r) { MAYFAIL
     Schema* schema = R_TRY_WITH(free(schema_str), parse_schema, schema_str);
     free(schema_str);
 
-    void* voidstar = to_voidstar(obj_r, schema);
+    void* voidstar = to_voidstar(obj_r, schema, NULL);
     if (!voidstar) {
         free_schema(schema);
         MORLOC_ERROR("mlc_hash: failed to convert R object to voidstar");
@@ -2644,12 +2753,12 @@ SEXP morloc_mlc_compare(SEXP a_r, SEXP b_r, SEXP schema_str_r) { MAYFAIL
     Schema* schema = R_TRY_WITH(free(schema_str), parse_schema, schema_str);
     free(schema_str);
 
-    void* va = to_voidstar(a_r, schema);
+    void* va = to_voidstar(a_r, schema, NULL);
     if (!va) {
         free_schema(schema);
         MORLOC_ERROR("mlc_compare: failed to convert R object to voidstar");
     }
-    void* vb = to_voidstar(b_r, schema);
+    void* vb = to_voidstar(b_r, schema, va);
     if (!vb) {
         char* err = NULL;
         shfree(va, &err);
@@ -3325,11 +3434,10 @@ SEXP morloc_mlc_cell_new(SEXP schema_str_r, SEXP init_r) { MAYFAIL
     }
     const char* schema_str = CHAR(STRING_ELT(schema_str_r, 0));
     Schema* schema = R_TRY(parse_schema, schema_str);
-    size_t bytes = get_shm_size(schema, init_r);
-    void* voidstar = R_TRY_WITH(free_schema(schema), shmalloc, bytes);
-    void* cursor = (uint8_t*)voidstar + schema->width;
-    to_voidstar_inner(voidstar, &cursor, init_r, schema);
-    int64_t handle = R_TRY(mlc_cell_new, schema, voidstar);
+    void* voidstar = to_voidstar(init_r, schema, NULL);
+    int64_t handle = R_TRY_WITH(
+        { char* err = NULL; shfree(voidstar, &err); free(err); free_schema(schema); },
+        mlc_cell_new, schema, voidstar);
     {
         char* shfree_errmsg = NULL;
         shfree(voidstar, &shfree_errmsg);
@@ -3370,11 +3478,10 @@ SEXP morloc_mlc_cell_put(SEXP handle_r, SEXP schema_str_r, SEXP value_r) { MAYFA
     int64_t handle = i64_from_sexp(handle_r);
     const char* schema_str = CHAR(STRING_ELT(schema_str_r, 0));
     Schema* schema = R_TRY(parse_schema, schema_str);
-    size_t bytes = get_shm_size(schema, value_r);
-    void* voidstar = R_TRY_WITH(free_schema(schema), shmalloc, bytes);
-    void* cursor = (uint8_t*)voidstar + schema->width;
-    to_voidstar_inner(voidstar, &cursor, value_r, schema);
-    R_TRY(mlc_cell_put, handle, schema, voidstar);
+    void* voidstar = to_voidstar(value_r, schema, NULL);
+    R_TRY_WITH(
+        { char* err = NULL; shfree(voidstar, &err); free(err); free_schema(schema); },
+        mlc_cell_put, handle, schema, voidstar);
     {
         char* shfree_errmsg = NULL;
         shfree(voidstar, &shfree_errmsg);
@@ -3517,7 +3624,7 @@ SEXP morloc_mlc_show(SEXP obj_r, SEXP schema_str_r) { MAYFAIL
     Schema* schema = R_TRY_WITH(free(schema_str), parse_schema, schema_str);
     free(schema_str);
 
-    void* voidstar = to_voidstar(obj_r, schema);
+    void* voidstar = to_voidstar(obj_r, schema, NULL);
     if (!voidstar) {
         free_schema(schema);
         MORLOC_ERROR("Failed to convert R object to internal representation");

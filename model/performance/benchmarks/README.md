@@ -36,6 +36,7 @@ from different hosts compares the hosts; each run's header names its CPU.
 | xl-payload | XL-3, XL-4 |
 | encoding | ENC-1..3 |
 | pure-args | ENC-4 |
+| stream-write-r | ENC-5 |
 | compression | ZIP-1..7, ZIP-10 |
 | table-read | TBL-1, TBL-2 |
 | par-scaling | PAR-1, PAR-2 |

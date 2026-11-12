@@ -355,3 +355,4 @@ data/lang/r/rmorloc.c::-::reading_runtime_value	thread
 rustmorloc/fv.rs::-::REGISTRY	exec-only		
 rustmorloc/fv.rs::-::STAGED_LIVE	exec-only		
 morloc-runtime/custody.rs::-::SYNCED	test-only		
+morloc-runtime/null_check.rs::-::VISITS	test-only		

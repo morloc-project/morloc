@@ -1,0 +1,52 @@
+--' R @write of atomic vectors to a stream file, and generation alone
+module main (writeReals, writeInts, writeBools, countReals, countInts, countBools)
+
+import root-r
+
+source R from "gen.R"
+  ( "gen_reals" as genReals, "gen_ints" as genInts, "gen_bools" as genBools
+  , "len" as lenReals, "len" as lenInts, "len" as lenBools
+  )
+
+genReals :: I64 -> [Real]
+genInts :: I64 -> [I32]
+genBools :: I64 -> [Bool]
+lenReals :: [Real] -> I64
+lenInts :: [I32] -> I64
+lenBools :: [Bool] -> I64
+
+--' Write n Reals to a stream file with one @write
+writeReals :: I64 -> Str -> <IO> I64
+writeReals n path = do
+  Ok o <- @open path :: <IO> (Try Str (OStream Real))
+  @write 0 o (genReals n)
+  @close o
+  n
+
+--' Write n I32s to a stream file with one @write
+writeInts :: I64 -> Str -> <IO> I64
+writeInts n path = do
+  Ok o <- @open path :: <IO> (Try Str (OStream I32))
+  @write 0 o (genInts n)
+  @close o
+  n
+
+--' Write n Bools to a stream file with one @write
+writeBools :: I64 -> Str -> <IO> I64
+writeBools n path = do
+  Ok o <- @open path :: <IO> (Try Str (OStream Bool))
+  @write 0 o (genBools n)
+  @close o
+  n
+
+--' Generate n Reals and count them
+countReals :: I64 -> I64
+countReals n = lenReals (genReals n)
+
+--' Generate n I32s and count them
+countInts :: I64 -> I64
+countInts n = lenInts (genInts n)
+
+--' Generate n Bools and count them
+countBools :: I64 -> I64
+countBools n = lenBools (genBools n)

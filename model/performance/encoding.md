@@ -76,3 +76,13 @@ A value whose elements are separate blocks (strings, present optionals,
 inner lists) is merged into one block inside the command's eval arena;
 the cost of freeing the pieces must not grow with their number
 (runtime/shm.md SHM-14). b includes writing the result.
+
+### ENC-5 An R @write of an atomic vector costs a rate per element near C++'s
+Intent: proposed
+Bench: stream-write-r
+Model: t(n) = c + b*n for `@write` of n elements ([Real], [I32], [Bool]) to a stream file at level 0, and for generating them alone; `<lang>.<kind>.encode` = b_write - b_gen in ns per element, R and C++
+Measured: pending
+
+The R encoder writes a numeric, integer or logical vector straight from
+its storage, with the checks each element's type requires, and allocates
+nothing per element. A `[Real]` that is not bit64 integer64 is one copy.

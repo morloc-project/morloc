@@ -1,0 +1,287 @@
+-- An R atomic vector (logical, integer, double) is encoded element by
+-- element with the checks a scalar of the element type gets, both when
+-- written to a stream with @write and when returned from a call: a double
+-- truncates toward zero into an integer type; NA, NaN and a value outside
+-- the element type are refused. A refused @write leaves no batch in the
+-- file, and the stream takes the batches after it.
+module main
+  ( writeBool, backBool, lglsBool
+  , writeI8, backI8, intsI8, dblsI8
+  , writeI16, backI16, intsI16, dblsI16
+  , writeI32, backI32, intsI32, dblsI32
+  , writeI64, backI64, intsI64, dblsI64
+  , writeU8, backU8, intsU8, dblsU8
+  , writeU16, backU16, intsU16, dblsU16
+  , writeU32, backU32, intsU32, dblsU32
+  , writeU64, backU64, intsU64, dblsU64
+  , writeInt, backInt, intsInt, dblsInt
+  , writeF32, backF32, intsF32, dblsF32
+  , writeF64, backF64, intsF64, dblsF64
+  )
+
+import root
+import root-r
+
+source R from "v.R"
+  ( "lgls" as lglsBool
+  , "ints" as intsI8, "dbls" as dblsI8
+  , "ints" as intsI16, "dbls" as dblsI16
+  , "ints" as intsI32, "dbls" as dblsI32
+  , "ints" as intsI64, "dbls" as dblsI64
+  , "ints" as intsU8, "dbls" as dblsU8
+  , "ints" as intsU16, "dbls" as dblsU16
+  , "ints" as intsU32, "dbls" as dblsU32
+  , "ints" as intsU64, "dbls" as dblsU64
+  , "ints" as intsInt, "dbls" as dblsInt
+  , "ints" as intsF32, "dbls" as dblsF32
+  , "ints" as intsF64, "dbls" as dblsF64
+  )
+
+--' A logical vector: 0 TRUE FALSE TRUE, 1 TRUE NA
+lglsBool :: Int -> [Bool]
+--' An integer vector: 0 [0,1,127], 1 [1,NA], 2 [1,-1]
+intsI8 :: Int -> [I8]
+--' A double vector: 0 [0,1.5,126.25], 1 [1,NaN], 2 [1,5e9]
+dblsI8 :: Int -> [I8]
+--' An integer vector: 0 [0,1,127], 1 [1,NA], 2 [1,-1]
+intsI16 :: Int -> [I16]
+--' A double vector: 0 [0,1.5,126.25], 1 [1,NaN], 2 [1,5e9]
+dblsI16 :: Int -> [I16]
+--' An integer vector: 0 [0,1,127], 1 [1,NA], 2 [1,-1]
+intsI32 :: Int -> [I32]
+--' A double vector: 0 [0,1.5,126.25], 1 [1,NaN], 2 [1,5e9]
+dblsI32 :: Int -> [I32]
+--' An integer vector: 0 [0,1,127], 1 [1,NA], 2 [1,-1]
+intsI64 :: Int -> [I64]
+--' A double vector: 0 [0,1.5,126.25], 1 [1,NaN], 2 [1,5e9]
+dblsI64 :: Int -> [I64]
+--' An integer vector: 0 [0,1,127], 1 [1,NA], 2 [1,-1]
+intsU8 :: Int -> [U8]
+--' A double vector: 0 [0,1.5,126.25], 1 [1,NaN], 2 [1,5e9]
+dblsU8 :: Int -> [U8]
+--' An integer vector: 0 [0,1,127], 1 [1,NA], 2 [1,-1]
+intsU16 :: Int -> [U16]
+--' A double vector: 0 [0,1.5,126.25], 1 [1,NaN], 2 [1,5e9]
+dblsU16 :: Int -> [U16]
+--' An integer vector: 0 [0,1,127], 1 [1,NA], 2 [1,-1]
+intsU32 :: Int -> [U32]
+--' A double vector: 0 [0,1.5,126.25], 1 [1,NaN], 2 [1,5e9]
+dblsU32 :: Int -> [U32]
+--' An integer vector: 0 [0,1,127], 1 [1,NA], 2 [1,-1]
+intsU64 :: Int -> [U64]
+--' A double vector: 0 [0,1.5,126.25], 1 [1,NaN], 2 [1,5e9]
+dblsU64 :: Int -> [U64]
+--' An integer vector: 0 [0,1,127], 1 [1,NA], 2 [1,-1]
+intsInt :: Int -> [Int]
+--' A double vector: 0 [0,1.5,126.25], 1 [1,NaN], 2 [1,5e9]
+dblsInt :: Int -> [Int]
+--' An integer vector: 0 [0,1,127], 1 [1,NA], 2 [1,-1]
+intsF32 :: Int -> [F32]
+--' A double vector: 0 [0,1.5,126.25], 1 [1,NaN], 2 [1,5e9]
+dblsF32 :: Int -> [F32]
+--' An integer vector: 0 [0,1,127], 1 [1,NA], 2 [1,-1]
+intsF64 :: Int -> [F64]
+--' A double vector: 0 [0,1.5,126.25], 1 [1,NaN], 2 [1,5e9]
+dblsF64 :: Int -> [F64]
+
+ok :: Try Str () -> Bool
+ok r = match r
+  | (Ok _) = True
+  | (Err _) = False
+
+--' Write good, NA, good Bool batches; which succeeded
+writeBool :: Str -> <IO> [Bool]
+writeBool path = do
+  Ok o <- @open path :: <IO> (Try Str (OStream Bool))
+  a <- @write 0 o (lglsBool 0)
+  b <- @write 0 o (lglsBool 1)
+  c <- @write 0 o (lglsBool 0)
+  @close o
+  [ok a, ok b, ok c]
+
+--' The Bools in a written file
+backBool :: [Bool] -> [Bool]
+backBool xs = xs
+
+--' Write integer and double batches of each case; which succeeded
+writeI8 :: Str -> <IO> [Bool]
+writeI8 path = do
+  Ok o <- @open path :: <IO> (Try Str (OStream I8))
+  a <- @write 0 o (intsI8 0)
+  b <- @write 0 o (dblsI8 0)
+  c <- @write 0 o (intsI8 1)
+  d <- @write 0 o (dblsI8 1)
+  e <- @write 0 o (intsI8 2)
+  f <- @write 0 o (dblsI8 2)
+  @close o
+  [ok a, ok b, ok c, ok d, ok e, ok f]
+
+--' The values in a written file
+backI8 :: [I8] -> [I8]
+backI8 xs = xs
+
+--' Write integer and double batches of each case; which succeeded
+writeI16 :: Str -> <IO> [Bool]
+writeI16 path = do
+  Ok o <- @open path :: <IO> (Try Str (OStream I16))
+  a <- @write 0 o (intsI16 0)
+  b <- @write 0 o (dblsI16 0)
+  c <- @write 0 o (intsI16 1)
+  d <- @write 0 o (dblsI16 1)
+  e <- @write 0 o (intsI16 2)
+  f <- @write 0 o (dblsI16 2)
+  @close o
+  [ok a, ok b, ok c, ok d, ok e, ok f]
+
+--' The values in a written file
+backI16 :: [I16] -> [I16]
+backI16 xs = xs
+
+--' Write integer and double batches of each case; which succeeded
+writeI32 :: Str -> <IO> [Bool]
+writeI32 path = do
+  Ok o <- @open path :: <IO> (Try Str (OStream I32))
+  a <- @write 0 o (intsI32 0)
+  b <- @write 0 o (dblsI32 0)
+  c <- @write 0 o (intsI32 1)
+  d <- @write 0 o (dblsI32 1)
+  e <- @write 0 o (intsI32 2)
+  f <- @write 0 o (dblsI32 2)
+  @close o
+  [ok a, ok b, ok c, ok d, ok e, ok f]
+
+--' The values in a written file
+backI32 :: [I32] -> [I32]
+backI32 xs = xs
+
+--' Write integer and double batches of each case; which succeeded
+writeI64 :: Str -> <IO> [Bool]
+writeI64 path = do
+  Ok o <- @open path :: <IO> (Try Str (OStream I64))
+  a <- @write 0 o (intsI64 0)
+  b <- @write 0 o (dblsI64 0)
+  c <- @write 0 o (intsI64 1)
+  d <- @write 0 o (dblsI64 1)
+  e <- @write 0 o (intsI64 2)
+  f <- @write 0 o (dblsI64 2)
+  @close o
+  [ok a, ok b, ok c, ok d, ok e, ok f]
+
+--' The values in a written file
+backI64 :: [I64] -> [I64]
+backI64 xs = xs
+
+--' Write integer and double batches of each case; which succeeded
+writeU8 :: Str -> <IO> [Bool]
+writeU8 path = do
+  Ok o <- @open path :: <IO> (Try Str (OStream U8))
+  a <- @write 0 o (intsU8 0)
+  b <- @write 0 o (dblsU8 0)
+  c <- @write 0 o (intsU8 1)
+  d <- @write 0 o (dblsU8 1)
+  e <- @write 0 o (intsU8 2)
+  f <- @write 0 o (dblsU8 2)
+  @close o
+  [ok a, ok b, ok c, ok d, ok e, ok f]
+
+--' The values in a written file
+backU8 :: [U8] -> [U8]
+backU8 xs = xs
+
+--' Write integer and double batches of each case; which succeeded
+writeU16 :: Str -> <IO> [Bool]
+writeU16 path = do
+  Ok o <- @open path :: <IO> (Try Str (OStream U16))
+  a <- @write 0 o (intsU16 0)
+  b <- @write 0 o (dblsU16 0)
+  c <- @write 0 o (intsU16 1)
+  d <- @write 0 o (dblsU16 1)
+  e <- @write 0 o (intsU16 2)
+  f <- @write 0 o (dblsU16 2)
+  @close o
+  [ok a, ok b, ok c, ok d, ok e, ok f]
+
+--' The values in a written file
+backU16 :: [U16] -> [U16]
+backU16 xs = xs
+
+--' Write integer and double batches of each case; which succeeded
+writeU32 :: Str -> <IO> [Bool]
+writeU32 path = do
+  Ok o <- @open path :: <IO> (Try Str (OStream U32))
+  a <- @write 0 o (intsU32 0)
+  b <- @write 0 o (dblsU32 0)
+  c <- @write 0 o (intsU32 1)
+  d <- @write 0 o (dblsU32 1)
+  e <- @write 0 o (intsU32 2)
+  f <- @write 0 o (dblsU32 2)
+  @close o
+  [ok a, ok b, ok c, ok d, ok e, ok f]
+
+--' The values in a written file
+backU32 :: [U32] -> [U32]
+backU32 xs = xs
+
+--' Write integer and double batches of each case; which succeeded
+writeU64 :: Str -> <IO> [Bool]
+writeU64 path = do
+  Ok o <- @open path :: <IO> (Try Str (OStream U64))
+  a <- @write 0 o (intsU64 0)
+  b <- @write 0 o (dblsU64 0)
+  c <- @write 0 o (intsU64 1)
+  d <- @write 0 o (dblsU64 1)
+  e <- @write 0 o (intsU64 2)
+  f <- @write 0 o (dblsU64 2)
+  @close o
+  [ok a, ok b, ok c, ok d, ok e, ok f]
+
+--' The values in a written file
+backU64 :: [U64] -> [U64]
+backU64 xs = xs
+
+--' Write integer and double batches of each case; which succeeded
+writeInt :: Str -> <IO> [Bool]
+writeInt path = do
+  Ok o <- @open path :: <IO> (Try Str (OStream Int))
+  a <- @write 0 o (intsInt 0)
+  b <- @write 0 o (dblsInt 0)
+  c <- @write 0 o (intsInt 1)
+  d <- @write 0 o (dblsInt 1)
+  e <- @write 0 o (intsInt 2)
+  f <- @write 0 o (dblsInt 2)
+  @close o
+  [ok a, ok b, ok c, ok d, ok e, ok f]
+
+--' The values in a written file
+backInt :: [Int] -> [Int]
+backInt xs = xs
+
+--' Write integer and double batches without NA or NaN; which succeeded
+writeF32 :: Str -> <IO> [Bool]
+writeF32 path = do
+  Ok o <- @open path :: <IO> (Try Str (OStream F32))
+  a <- @write 0 o (intsF32 0)
+  b <- @write 0 o (dblsF32 0)
+  e <- @write 0 o (intsF32 2)
+  f <- @write 0 o (dblsF32 2)
+  @close o
+  [ok a, ok b, ok e, ok f]
+
+--' The values in a written file
+backF32 :: [F32] -> [F32]
+backF32 xs = xs
+
+--' Write integer and double batches without NA or NaN; which succeeded
+writeF64 :: Str -> <IO> [Bool]
+writeF64 path = do
+  Ok o <- @open path :: <IO> (Try Str (OStream F64))
+  a <- @write 0 o (intsF64 0)
+  b <- @write 0 o (dblsF64 0)
+  e <- @write 0 o (intsF64 2)
+  f <- @write 0 o (dblsF64 2)
+  @close o
+  [ok a, ok b, ok e, ok f]
+
+--' The values in a written file
+backF64 :: [F64] -> [F64]
+backF64 xs = xs
