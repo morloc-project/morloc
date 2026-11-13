@@ -43,8 +43,9 @@ reserved u64, lock, cursor; padded to 16. Block: magic 0x0CB10DF0 (merged:
 
 ### FMT-6 Voidstar slot layout per schema code
 Status: draft
-Tests: group_result_has_the_fmt6_layout, golden view-pattern-group-layout
-See docs table. `s`/`a` 16 bytes {count, relptr}; `j` {limbs, word|relptr};
+Tests: group_result_has_the_fmt6_layout, golden view-pattern-group-layout, a_unit_field_writes_nothing_past_its_record
+See docs table. `z` (unit) is 0 bytes: nothing is written or read for it.
+`s`/`a` 16 bytes {count, relptr}; `j` {limbs, word|relptr};
 `?` relptr; `v` tag byte, 7 zero bytes, relptr to arm tuple; `t` C-struct
 rules aligned to max field; `m` same with alignment 8 (an open question);
 numeric array data 64-byte aligned.

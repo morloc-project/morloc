@@ -545,7 +545,7 @@ fn write_leaf(
     match schema.serial_type {
         SerialType::Nil => {
             if !is_null(text) { return Err(err(&format!("expected null, got {}", truncate_for_msg(text)))); }
-            let w = alloc(dest, 1)?; w.write_val::<u8>(0, 0); Ok(w.as_ptr())
+            Ok(alloc(dest, 0)?.as_ptr())
         }
         SerialType::Bool => {
             let t = text.trim();
@@ -1943,6 +1943,15 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_unit_field_writes_nothing_past_its_record() {
+        let _shm = setup();
+        let s = parse_schema("am31uz1ss1vz").unwrap();
+        let txt = r#"[{"u":null,"s":"abc","v":null},{"u":null,"s":"defg","v":null}]"#;
+        let p = read_json_with_schema(txt, &s).unwrap();
+        assert_eq!(voidstar_to_json_string(p, &s).unwrap(), txt);
+        crate::shm::shfree(p).unwrap();
+    }
     #[test] fn test_int()     { let _shm = setup(); let s = parse_schema("i4").unwrap(); let p = read_json_with_schema("42", &s).unwrap(); assert_eq!(voidstar_to_json_string(p, &s).unwrap(), "42"); }
     #[test] fn test_string()  { let _shm = setup(); let s = parse_schema("s").unwrap(); let p = read_json_with_schema("\"hello\"", &s).unwrap(); assert_eq!(voidstar_to_json_string(p, &s).unwrap(), "\"hello\""); }
     #[test] fn test_bool()    { let _shm = setup(); let s = parse_schema("b").unwrap(); let p = read_json_with_schema("true", &s).unwrap(); assert_eq!(voidstar_to_json_string(p, &s).unwrap(), "true"); }

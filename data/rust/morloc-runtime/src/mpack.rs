@@ -355,7 +355,6 @@ impl<'r, 'd> Walker<()> for UnpackWalk<'r, 'd> {
             SerialType::Nil => {
                 decode::read_nil(&mut self.reader)
                     .map_err(|e| MorlocError::Serialization(format!("msgpack nil: {}", e)))?;
-                *ptr = 0;
             }
             SerialType::Bool => {
                 let v = decode::read_bool(&mut self.reader)
@@ -727,7 +726,7 @@ impl<'r, 'd> Walker<bool> for SizeWalk<'r, 'd> {
         match s.serial_type {
         SerialType::Nil => {
             rmp::decode::read_nil(&mut self.reader).ok();
-            self.add(1, f.x) }
+            self.add(0, f.x) }
         SerialType::Bool => {
             rmp::decode::read_bool(&mut self.reader).ok();
             self.add(1, f.x) }
@@ -918,6 +917,17 @@ mod tests {
     use super::*;
     use crate::schema::parse_schema;
     use crate::json;
+
+    #[test]
+    fn a_unit_field_writes_nothing_past_its_record() {
+        let _shm = crate::init_test_shm();
+        let s = crate::schema::parse_schema("am31uz1ss1vz").unwrap();
+        let txt = r#"[{"u":null,"s":"abc","v":null},{"u":null,"s":"defg","v":null}]"#;
+        let p = crate::json::read_json_with_schema(txt, &s).unwrap();
+        let wire = pack_with_schema(p, &s).unwrap();
+        let q = unpack_with_schema(&wire, &s).unwrap();
+        assert_eq!(crate::json::voidstar_to_json_string(q, &s).unwrap(), txt);
+    }
 
     #[test]
     fn test_roundtrip_nested_empty_string_via_msgpack() {
