@@ -2557,10 +2557,8 @@ mod tests {
             let _ = std::fs::remove_file(&path);
             assert!(wrong.is_null() && refused, "n={n} level={level} .{ext} loaded at the wrong type");
             assert!(!right.is_null(), "n={n} level={level} .{ext}: {:?}", unsafe { reason(err) });
-            unsafe {
-                let _ = crate::shm::shfree(value as *mut u8);
-                let _ = crate::shm::shfree(right as *mut u8);
-            }
+            let _ = crate::shm::shfree(value as *mut u8);
+            let _ = crate::shm::shfree(right as *mut u8);
         }
         unsafe {
             crate::ffi::free_schema(ints);
