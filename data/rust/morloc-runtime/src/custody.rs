@@ -297,17 +297,17 @@ impl CustodyQueue {
     }
 
     // SLOT-12: a producer holds the slot lock; it waits only on the custodian.
-    pub(crate) fn push(&self, item: Item) -> Result<u32, MorlocError> {
+    fn push(&self, item: Item) -> Result<u32, MorlocError> {
         self.push_with(item, true, Closing::Wait, true).map(|t| t.expect("a waiting push queues"))
     }
 
     // SLOT-37: `None` where `push` would sleep.
-    pub(crate) fn try_push(&self, item: Item) -> Result<Option<u32>, MorlocError> {
+    fn try_push(&self, item: Item) -> Result<Option<u32>, MorlocError> {
         self.push_with(item, true, Closing::Wait, false)
     }
 
     /// Queue the close: once queued, nothing more is.
-    pub(crate) fn push_close(&self, status: u32, closing: Closing) -> Result<u32, MorlocError> {
+    fn push_close(&self, status: u32, closing: Closing) -> Result<u32, MorlocError> {
         self.push_with(Item::marker(ENTRY_CLOSE, status), false, closing, true).map(|t| t.expect("a waiting push queues"))
     }
 
@@ -444,7 +444,7 @@ impl CustodyQueue {
         wait_word::wake_all(&self.done);
     }
 
-    pub(crate) fn take_spare(&self) -> Option<RelPtr> {
+    fn take_spare(&self) -> Option<RelPtr> {
         let sh = self.spare_head.load(Ordering::Relaxed);
         let st = self.spare_tail.load(Ordering::Acquire);
         if sh == st {
@@ -455,7 +455,7 @@ impl CustodyQueue {
         Some(r)
     }
 
-    pub(crate) fn pop(&self) -> Option<Item> {
+    fn pop(&self) -> Option<Item> {
         let h = self.head.load(Ordering::Relaxed);
         let t = self.tail.load(Ordering::Acquire);
         if h == t {
@@ -494,7 +494,7 @@ impl CustodyQueue {
         wake_sleepers(&self.done, &self.done_waiters);
     }
 
-    pub(crate) fn give_spare(&self, block: RelPtr) -> bool {
+    fn give_spare(&self, block: RelPtr) -> bool {
         let st = self.spare_tail.load(Ordering::Relaxed);
         let sh = self.spare_head.load(Ordering::Acquire);
         if st.wrapping_sub(sh) as usize >= QUEUE_SLOTS {
@@ -520,12 +520,52 @@ impl CustodyQueue {
         wait_word::wake_all(&self.done);
     }
 
-    pub(crate) fn drain_spares(&self) -> Vec<RelPtr> {
+    fn drain_spares(&self) -> Vec<RelPtr> {
         let mut out = Vec::new();
         while let Some(r) = self.take_spare() {
             out.push(r);
         }
         out
+    }
+}
+
+// SLOT-39: the producer side of a slot's queue, reached only through a guard of the slot.
+pub(crate) struct Producer<'g> {
+    q: &'static CustodyQueue,
+    _guard: std::marker::PhantomData<&'g ()>,
+}
+
+impl crate::stream::SlotGuard<'_> {
+    // SLOT-39
+    pub(crate) fn custody(&self) -> Result<Producer<'_>, MorlocError> {
+        let q = queue_at(self.slot().custody.get())?;
+        Ok(Producer { q, _guard: std::marker::PhantomData })
+    }
+}
+
+impl Producer<'_> {
+    pub(crate) fn queue(&self) -> &'static CustodyQueue {
+        self.q
+    }
+
+    pub(crate) fn push(&self, item: Item) -> Result<u32, MorlocError> {
+        self.q.push(item)
+    }
+
+    pub(crate) fn try_push(&self, item: Item) -> Result<Option<u32>, MorlocError> {
+        self.q.try_push(item)
+    }
+
+    pub(crate) fn push_close(&self, status: u32, closing: Closing) -> Result<u32, MorlocError> {
+        self.q.push_close(status, closing)
+    }
+
+    pub(crate) fn take_spare(&self) -> Option<RelPtr> {
+        self.q.take_spare()
+    }
+
+    pub(crate) fn drain_spares(&self) -> Vec<RelPtr> {
+        self.q.drain_spares()
     }
 }
 

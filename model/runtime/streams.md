@@ -318,12 +318,18 @@ Checked by: reclaiming_a_poisoned_slot_frees_none_of_its_blocks, a_writer_dying_
 
 A slot's block fields (path, schema, sub-packet entries, write buffer,
 custody queue) change only under the slot's lock, and a guard of that slot
-is the only way to change them. A holder that dies inside an update leaves
-them possibly mid-swap: the next taker poisons the slot (SLOT-4), and its
-reclaim frees none of those blocks. A block already handed to the custody
-queue is released once, by the custodian; the slot's copy leaks. At most
-one write buffer and the path, schema and entries blocks leak per death,
-until the volume is torn down.
+is the only way to change them. So does a channel's graph: its block (in
+the entries field), its nodes and the batches they hold, and its failure
+message change only through the channel view of the slot's guard. The
+producer side of a slot's custody queue (pushes, the close, and taking
+spares) is reached only through the producer capability of the slot's
+guard; the queue's waits and reads need no guard. A holder that dies inside
+an update leaves them possibly mid-swap: the next taker poisons the slot
+(SLOT-4), and its reclaim frees none of those blocks, nor any of a
+channel's graph. A block already handed to the custody queue is released
+once, by the custodian; the slot's copy leaks. At most one write buffer and
+the path, schema and entries blocks (with a channel's queued batches) leak
+per death, until the volume is torn down.
 
 ### SLOT-35 A `@write` batch that fails leaves no trace, or fails its stream
 Status: implemented

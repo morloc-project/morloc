@@ -850,6 +850,7 @@ pub(crate) const GENERATION_MASK: u64 = 0x0000_7FFF_FFFF_FFFF;
 // so operations on the stream fail from then on, and releasing the slot
 // leaks its SHM blocks rather than free pointers that may be mid-swap.
 
+mod channel;
 mod slot_lock;
 pub use slot_lock::BlockField;
 pub(crate) use slot_lock::{Block, SlotGuard};
@@ -1684,8 +1685,8 @@ fn free_slot_blocks(g: &SlotGuard) {
     free_rel(slot.subpacket_entries.get());
     free_rel(slot.write_buffer.get());
     // SLOT-10: the queue itself stays with the slot index, for its next stream.
-    if let Ok(q) = slot_queue(slot) {
-        q.drain_spares().into_iter().for_each(free_rel);
+    if let Ok(p) = g.custody() {
+        p.drain_spares().into_iter().for_each(free_rel);
     }
 }
 
@@ -1709,12 +1710,13 @@ fn close_stream(slot_idx: usize, gen_claim: u64, status: u32, closing: crate::cu
         if !slot_generation_is(slot, gen_claim) || slot.state.load(Ordering::Acquire) != SLOT_STATE_OPEN_SHARED {
             return Err(MorlocError::Other("the stream was closed".into()));
         }
-        let q = if slot.kind.get() == MLC_KIND_OSTREAM {
-            slot_queue(slot).ok().filter(|q| q.hosted() && !q.is_stopped())
+        let p = if slot.kind.get() == MLC_KIND_OSTREAM {
+            guard.custody().ok().filter(|p| p.queue().hosted() && !p.queue().is_stopped())
         } else {
             None
         };
-        if let Some(q) = q {
+        if let Some(p) = p {
+            let q = p.queue();
             let poisoned = slot.poisoned.get() != 0;
             let tail = if poisoned || status == crate::custody::STATUS_DISCARD {
                 Ok(())
@@ -1726,7 +1728,7 @@ fn close_stream(slot_idx: usize, gen_claim: u64, status: u32, closing: crate::cu
             } else {
                 status
             };
-            match q.push_close(status, closing) {
+            match p.push_close(status, closing) {
                 Ok(seq) => Some((q, seq, q.epoch(), tail, poisoned)),
                 // SLOT-10: a writer that is gone reads the slot no more.
                 Err(_) if q.is_stopped() => {
@@ -3351,10 +3353,10 @@ fn close_open_stream(
             }
             flush_channel_or_fail(&guard, local)?;
             // SLOT-35: closing a failed channel reports its failure.
-            if let Some(e) = channel_failure(channel_block(slot)?) {
+            if let Some(e) = guard.channel()?.failure() {
                 return Err(e);
             }
-            channel_finish(slot)
+            channel_finish(&guard)
         });
         invalidate_process_local_slot(handle);
         return closed;
@@ -3493,10 +3495,10 @@ fn lock_for_write<'a>(
             return Err(MorlocError::Other(stale.into()));
         }
     } else if slot.kind.get() == MLC_KIND_CHANNEL {
-        let Ok(b) = channel_block(slot) else {
+        let Ok(c) = guard.channel() else {
             return Err(MorlocError::Other(stale.into()));
         };
-        if let Some(e) = channel_refusal(b, stale) {
+        if let Some(e) = c.refusal(stale) {
             return Err(e);
         }
     }
@@ -3514,12 +3516,12 @@ fn queue_buffer_then(g: &SlotGuard, refill: bool, level: u8) -> Result<(), Morlo
     if slot.write_buffer_index_count.get() == 0 {
         return Ok(());
     }
-    let q = slot_queue(slot)?;
+    let p = g.custody()?;
     if refill {
-        q.wait_room()?;
+        p.queue().wait_room()?;
     }
-    let fresh = if refill { fresh_buffer(slot, q)? } else { shm_types_crate::RELNULL };
-    if let Err(e) = q.push(sealed_item(slot, level)) {
+    let fresh = if refill { fresh_buffer(slot, &p)? } else { shm_types_crate::RELNULL };
+    if let Err(e) = p.push(sealed_item(slot, level)) {
         free_rel(fresh);
         return Err(e);
     }
@@ -3541,13 +3543,14 @@ fn would_block() -> MorlocError {
 // sleep; `would` is then the depth the push saw.
 fn queue_buffer_nowait(g: &SlotGuard, level: u8, would: &std::cell::Cell<Option<u32>>) -> Result<(), MorlocError> {
     let slot = g.slot();
-    let q = slot_queue(slot)?;
+    let p = g.custody()?;
+    let q = p.queue();
     if q.lacks_room() {
         would.set(Some(q.depth()));
         return Err(would_block());
     }
-    let fresh = fresh_buffer(slot, q)?;
-    match q.try_push(sealed_item(slot, level)) {
+    let fresh = fresh_buffer(slot, &p)?;
+    match p.try_push(sealed_item(slot, level)) {
         Ok(Some(_)) => {}
         Ok(None) => {
             free_rel(fresh);
@@ -3594,8 +3597,8 @@ fn block_item(block: RelPtr, len: usize, elems: u64, oversize: bool, level: u8) 
 }
 
 // SLOT-20, SLOT-32: a spare, or a block the size of the current buffer.
-fn fresh_buffer(slot: &RegistrySlot, q: &crate::custody::CustodyQueue) -> Result<RelPtr, MorlocError> {
-    if let Some(r) = q.take_spare() {
+fn fresh_buffer(slot: &RegistrySlot, p: &crate::custody::Producer) -> Result<RelPtr, MorlocError> {
+    if let Some(r) = p.take_spare() {
         return Ok(r);
     }
     let size = write_buffer_block_size(slot)?;
@@ -3623,7 +3626,7 @@ impl Drop for Unqueued {
 // SLOT-12
 #[allow(clippy::too_many_arguments)]
 fn queue_filled_block(
-    slot: &RegistrySlot,
+    g: &SlotGuard,
     local: &ProcessLocalSlot,
     batch: &mut Batch,
     len: usize,
@@ -3631,7 +3634,8 @@ fn queue_filled_block(
     oversize: bool,
     fill: impl FnOnce(*mut u8) -> Result<(), MorlocError>,
 ) -> Result<(), MorlocError> {
-    let q = slot_queue(slot)?;
+    let slot = g.slot();
+    let p = g.custody()?;
     let block = Unqueued(crate::shm::shmalloc(len.max(1))?);
     fill(block.0)?;
     // SAFETY: SLOT-20: `fill` defined all `len` bytes of the block.
@@ -3641,13 +3645,13 @@ fn queue_filled_block(
     batch.hand_on(slot, elems, || {
         // SLOT-32: a block larger than a sub-packet waits for an empty queue.
         if len > cap {
-            q.wait_room_for(Some(1))?;
+            p.queue().wait_room_for(Some(1))?;
         }
         let abs = block.0;
         let rel = slot_owns(crate::shm::abs2rel(abs)?);
         std::mem::forget(block);
         let item = block_item(rel, len, elems, oversize, level);
-        if let Err(e) = q.push(item) {
+        if let Err(e) = p.push(item) {
             free_uncounted(abs);
             return Err(e);
         }
@@ -3837,7 +3841,7 @@ impl Batch {
         if !self.nowait {
             q.wait_room()?;
         }
-        let fresh = fresh_buffer(slot, q)?;
+        let fresh = fresh_buffer(slot, &g.custody()?)?;
         let item = sealed_item(slot, self.level);
         let Some(p) = self.pending.as_mut() else { unreachable!("seal_pending runs in place") };
         if p.first.is_none() {
@@ -3867,7 +3871,7 @@ impl Batch {
     // SLOT-36
     fn commit_pending(&mut self, g: &SlotGuard) -> Result<(), MorlocError> {
         let slot = g.slot();
-        let q = self.output_queue();
+        let producer = g.custody().inspect_err(|_| self.abort_pending(g))?;
         let cap = write_buffer_capacity(slot).inspect_err(|_| self.abort_pending(g))?;
         let p = self.pending.take().unwrap_or_default();
         for (k, b) in p.blocks.iter().enumerate() {
@@ -3881,8 +3885,8 @@ impl Batch {
                     return Err(MorlocError::Other(format!("@write: pushing block {k} of a commit failed")));
                 }
                 // SLOT-32: a block larger than a sub-packet waits for an empty queue.
-                q.wait_room_for(if item.len as usize > cap { Some(1) } else { None })?;
-                q.push(item).map(|_| ())
+                producer.queue().wait_room_for(if item.len as usize > cap { Some(1) } else { None })?;
+                producer.push(item).map(|_| ())
             });
             if let Err(e) = pushed {
                 if k == 0 {
@@ -3897,7 +3901,7 @@ impl Batch {
                 g.set_block(Block::WriteBuffer, shm_types_crate::RELNULL);
                 forget_write_room();
                 slot.element_count.set(slot.element_count.get() + self.handed);
-                fail_stream(slot, &format!("a @write batch failed after part of it was queued: {e}"));
+                fail_stream(g, &format!("a @write batch failed after part of it was queued: {e}"));
                 return Err(e);
             }
         }
@@ -3943,12 +3947,13 @@ fn free_rel(rel: RelPtr) {
 
 // SLOT-35: a batch that cannot be undone fails its stream, which then
 // takes no more writes; what is left of it is never handed on.
-fn fail_stream(slot: &RegistrySlot, msg: &str) {
+fn fail_stream(g: &SlotGuard, msg: &str) {
+    let slot = g.slot();
     if slot.kind.get() == MLC_KIND_OSTREAM {
         slot_queue(slot)
             .unwrap_or_else(|e| panic!("a written stream has no custody queue: {e}"))
             .fail(crate::custody::FAILED_IO, msg);
-    } else if let Err(e) = channel_fail_locked(slot, msg) {
+    } else if let Err(e) = channel_fail_locked(g, msg) {
         panic!("a written channel has no channel block: {e}");
     }
     slot.write_buffer_index_count.set(0);
@@ -3960,7 +3965,7 @@ fn flush_channel_or_fail(g: &SlotGuard, local: &mut ProcessLocalSlot) -> Result<
     let slot = g.slot();
     let dropped = slot.write_buffer_index_count.get();
     flush_write_buffer(g, local).inspect_err(|e| {
-        fail_stream(slot, &format!("the stream's buffered batches could not be handed on: {e}"));
+        fail_stream(g, &format!("the stream's buffered batches could not be handed on: {e}"));
         slot.element_count.set(slot.element_count.get().saturating_sub(dropped));
     })
 }
@@ -4013,7 +4018,7 @@ fn flush_write_buffer_at(
     }
     debug_assert_portable(unsafe { std::slice::from_raw_parts(dst as *const u8, len) }, &local.value_schema)?;
     let arr = landing.relocate(&array_schema(elem), 0, crate::origin::Origin::Program)?;
-    channel_push(slot, arr)?;
+    channel_push(g, arr)?;
     slot.write_buffer_index_count.set(0);
     slot.write_buffer_data_used.set(0);
     Ok(())
@@ -4281,7 +4286,7 @@ fn append_one_element(
                 }
             };
             if slot.kind.get() != MLC_KIND_CHANNEL {
-                return queue_filled_block(slot, local, batch, oversize_len, 1, true, fill);
+                return queue_filled_block(g, local, batch, oversize_len, 1, true, fill);
             }
             let landing = voidstar::Landing::new(oversize_len)?;
             fill(landing.as_mut_ptr())?;
@@ -4290,7 +4295,7 @@ fn append_one_element(
             return batch.hand_on(slot, 1, move || {
                 let abs = arr.0;
                 std::mem::forget(arr);
-                channel_push(slot, abs)
+                channel_push(g, abs)
             });
         }
     };
@@ -4390,7 +4395,7 @@ pub fn shared_write_subpacket(
             Err(e) => {
                 // SLOT-35: what was handed on is counted, though the batch failed.
                 slot.element_count.set(slot.element_count.get() + batch.handed);
-                fail_stream(slot, &format!("a @write batch failed after part of it was handed on: {e}"));
+                fail_stream(&guard, &format!("a @write batch failed after part of it was handed on: {e}"));
                 Err(e)
             }
         }
@@ -4415,7 +4420,7 @@ fn write_batch(
         let total = crate::ffi::calc_voidstar_size_portable_with(payload_voidstar, schema, &res)?;
         let table = schema.serial_type == SerialType::Table;
         batch.placing(n_elements)?;
-        return queue_filled_block(slot, local, batch, total, n_elements, false, |base| unsafe {
+        return queue_filled_block(g, local, batch, total, n_elements, false, |base| unsafe {
             if table {
                 std::ptr::copy_nonoverlapping(payload_voidstar as *const u8, base, total);
                 Ok(())
@@ -4839,8 +4844,9 @@ pub fn shared_flush_buffer(handle: i64) -> Result<(), MorlocError> {
         if slot.kind.get() != MLC_KIND_OSTREAM {
             return Ok(None);
         }
-        let q = slot_queue(slot)?;
-        let seq = q.push(crate::custody::Item::marker(crate::custody::ENTRY_FLUSH, 0))?;
+        let p = guard.custody()?;
+        let q = p.queue();
+        let seq = p.push(crate::custody::Item::marker(crate::custody::ENTRY_FLUSH, 0))?;
         Ok(Some((q, seq, q.epoch())))
     })?;
     match waiting {
@@ -13226,33 +13232,6 @@ pub const CHANNEL_HAS_NO_PATH: &str =
      and cannot leave it (sent to a remote pool, stored, cached or returned); \
      save it to a file first";
 
-const CHANNEL_RUNNING: u32 = 0;
-const CHANNEL_DONE: u32 = 1;
-const CHANNEL_FAILED: u32 = 2;
-
-#[repr(C)]
-struct ChannelBlock {
-    status: u32,
-    /// Set when a reader was handed the failure: the error then belongs to
-    /// the command, not only to the part of the input nobody read.
-    delivered: u32,
-    count: u64,
-    head: RelPtr,
-    tail: RelPtr,
-    fail_msg: RelPtr,
-    fail_len: u64,
-    /// SLOT-21: bumped by every change made under the lock.
-    seq: std::sync::atomic::AtomicU32,
-    /// SLOT-21: sides sleeping on `seq`, counted under the lock.
-    waiters: u32,
-}
-
-#[repr(C)]
-struct ChannelNode {
-    next: RelPtr,
-    arr: RelPtr,
-}
-
 fn channel_depth() -> u64 {
     static DEPTH: morloc_runtime_types::publish_once::PublishOnce<u64> = morloc_runtime_types::publish_once::PublishOnce::new();
     *DEPTH.get_or_init(|| {
@@ -13270,44 +13249,6 @@ const CHANNEL_WAIT_SLICE: std::time::Duration = std::time::Duration::from_millis
 /// Looks, yielding between them, before a channel wait sleeps: a busy
 /// channel changes within a few, and a sleep costs a wake.
 const CHANNEL_YIELDS: u32 = 64;
-
-// SLOT-21: the caller holds the slot lock and has just changed the channel.
-fn channel_changed(b: *mut ChannelBlock) {
-    // SAFETY: SLOT-21: the block is the slot's, held under its lock.
-    let (seq, waiters) = unsafe { (&(*b).seq, (*b).waiters) };
-    seq.fetch_add(1, std::sync::atomic::Ordering::Release);
-    if waiters > 0 {
-        morloc_runtime_types::wait_word::wake_all(seq);
-    }
-}
-
-// SLOT-21: under the slot lock, register as a waiter and read the word; the
-// caller waits after releasing the lock and deregisters at its next look.
-fn channel_seen(b: *mut ChannelBlock) -> (&'static std::sync::atomic::AtomicU32, u32) {
-    // SAFETY: SLOT-21: shared memory stays mapped (DAEMON-1), so the word
-    // stays readable after the block is freed; a wait on it then ends at
-    // the slice and the slot's generation answers.
-    let seq: &'static std::sync::atomic::AtomicU32 = unsafe {
-        (*b).waiters += 1;
-        &(*b).seq
-    };
-    let seen = seq.load(std::sync::atomic::Ordering::Acquire);
-    (seq, seen)
-}
-
-// SLOT-21: under the slot lock, end a registration made under it earlier.
-fn channel_unwait(b: *mut ChannelBlock, registered: &mut bool) {
-    if std::mem::take(registered) {
-        // SAFETY: SLOT-21: the slot still holds the channel this side registered on.
-        unsafe { (*b).waiters = (*b).waiters.saturating_sub(1) };
-    }
-}
-
-/// The channel block of a slot. Caller holds the slot lock and has checked
-/// the slot is a channel.
-fn channel_block(slot: &RegistrySlot) -> Result<*mut ChannelBlock, MorlocError> {
-    Ok(crate::shm::rel2abs(slot.subpacket_entries.get())? as *mut ChannelBlock)
-}
 
 /// The slot a handle names, if it is still that channel.
 /// Whether `handle` names an open channel, whose reads and writes may wait.
@@ -13352,14 +13293,7 @@ pub fn shared_open_channel(schema_str: &str) -> Result<i64, MorlocError> {
         let buf_bytes = read_write_buffer_bytes_env();
         let buf_abs = crate::shm::shmalloc(first_write_buffer(buf_bytes))?;
         let buf_rel = pending.hold(crate::shm::abs2rel(buf_abs)?);
-        let block_abs = crate::shm::shcalloc(1, std::mem::size_of::<ChannelBlock>())?;
-        unsafe {
-            let b = block_abs as *mut ChannelBlock;
-            (*b).status = CHANNEL_RUNNING;
-            (*b).head = shm_types_crate::RELNULL;
-            (*b).tail = shm_types_crate::RELNULL;
-            (*b).fail_msg = shm_types_crate::RELNULL;
-        }
+        let block_abs = channel::new_block()?;
         let block_rel = pending.hold(crate::shm::abs2rel(block_abs)?);
         let new_gen = publish_slot(&guard, &SlotInit {
             kind: MLC_KIND_CHANNEL,
@@ -13415,24 +13349,23 @@ fn channel_wait_room(handle: i64) -> Result<(), MorlocError> {
             return Err(MorlocError::Other("the reader of this stream has stopped".into()));
         };
         let word = {
-            let _g = SlotGuard::lock(slot)?;
+            let g = SlotGuard::lock(slot)?;
             if !slot_generation_is(slot, gen_claim) {
                 return Err(MorlocError::Other("the reader of this stream has stopped".into()));
             }
-            let b = channel_block(slot)?;
-            channel_unwait(b, &mut registered);
-            if let Some(e) = channel_refusal(b, "this stream was already finished") {
+            let c = g.channel()?;
+            c.unwait(&mut registered);
+            if let Some(e) = c.refusal("this stream was already finished") {
                 return Err(e);
             }
-            let count = unsafe { (*b).count };
-            if count < channel_depth() {
+            if c.count() < channel_depth() {
                 return Ok(());
             }
             if yields < CHANNEL_YIELDS {
                 None
             } else {
                 registered = true;
-                Some(channel_seen(b))
+                Some(c.seen())
             }
         };
         match word {
@@ -13448,33 +13381,8 @@ fn channel_wait_room(handle: i64) -> Result<(), MorlocError> {
     }
 }
 
-fn channel_push(slot: &RegistrySlot, arr: AbsPtr) -> Result<(), MorlocError> {
-    let arr = Unqueued(arr);
-    let node = Unqueued(crate::shm::shmalloc(std::mem::size_of::<ChannelNode>())?);
-    let b = channel_block(slot)?;
-    // SAFETY: SLOT-4
-    let tail = match unsafe { (*b).tail } {
-        shm_types_crate::RELNULL => None,
-        t => Some(crate::shm::rel2abs(t)? as *mut ChannelNode),
-    };
-    let node_rel = crate::shm::abs2rel(node.0)?;
-    let arr_rel = crate::shm::abs2rel(arr.0)?;
-    let node_abs = node.0 as *mut ChannelNode;
-    std::mem::forget(node);
-    std::mem::forget(arr);
-    // SAFETY: SLOT-4
-    unsafe {
-        (*node_abs).next = shm_types_crate::RELNULL;
-        (*node_abs).arr = slot_owns(arr_rel);
-        match tail {
-            None => (*b).head = node_rel,
-            Some(tail) => (*tail).next = node_rel,
-        }
-        (*b).tail = slot_owns(node_rel);
-        (*b).count += 1;
-        channel_changed(b);
-    }
-    Ok(())
+fn channel_push(g: &SlotGuard, arr: AbsPtr) -> Result<(), MorlocError> {
+    g.channel()?.push(arr)
 }
 
 /// Take the next batch of a channel, waiting for the producer: `Some` array,
@@ -13492,43 +13400,23 @@ fn channel_pop(handle: i64) -> Result<Option<AbsPtr>, MorlocError> {
             )));
         };
         let word = {
-            let _g = SlotGuard::lock(slot)?;
+            let g = SlotGuard::lock(slot)?;
             if !slot_generation_is(slot, gen_claim) {
                 registered = false;
                 continue;
             }
-            let b = channel_block(slot)?;
-            channel_unwait(b, &mut registered);
-            unsafe {
-                if (*b).count > 0 {
-                    let node_abs = crate::shm::rel2abs((*b).head)?;
-                    let node = node_abs as *mut ChannelNode;
-                    let arr = crate::shm::rel2abs((*node).arr)?;
-                    (*b).head = (*node).next;
-                    if (*b).head == shm_types_crate::RELNULL {
-                        (*b).tail = shm_types_crate::RELNULL;
-                    }
-                    (*b).count -= 1;
-                    channel_changed(b);
-                    free_uncounted(node_abs);
-                    // SHM-8: the batch is this process's from here.
-                    crate::shm::take_on_reference();
-                    return Ok(Some(arr));
-                }
-                match (*b).status {
-                    CHANNEL_DONE => return Ok(None),
-                    CHANNEL_FAILED => {
-                        (*b).delivered = 1;
-                        return Err(MorlocError::Other(channel_fail_message(b)));
-                    }
-                    _ => {}
-                }
+            let c = g.channel()?;
+            c.unwait(&mut registered);
+            match c.take()? {
+                channel::Taken::Batch(arr) => return Ok(Some(arr)),
+                channel::Taken::End => return Ok(None),
+                channel::Taken::Empty => {}
             }
             if yields < CHANNEL_YIELDS {
                 None
             } else {
                 registered = true;
-                Some(channel_seen(b))
+                Some(c.seen())
             }
         };
         match word {
@@ -13544,28 +13432,9 @@ fn channel_pop(handle: i64) -> Result<Option<AbsPtr>, MorlocError> {
     }
 }
 
-fn channel_fail_message(b: *mut ChannelBlock) -> String {
-    unsafe {
-        if (*b).fail_msg == shm_types_crate::RELNULL {
-            return "the stream's producer failed".into();
-        }
-        match crate::shm::rel2abs((*b).fail_msg) {
-            Ok(p) => String::from_utf8_lossy(std::slice::from_raw_parts(p, (*b).fail_len as usize)).into_owned(),
-            Err(_) => "the stream's producer failed".into(),
-        }
-    }
-}
-
-/// The producer finished: every batch it wrote has been queued. Caller
-/// holds the slot lock.
-fn channel_finish(slot: &RegistrySlot) -> Result<(), MorlocError> {
-    let b = channel_block(slot)?;
-    unsafe {
-        if (*b).status == CHANNEL_RUNNING {
-            (*b).status = CHANNEL_DONE;
-            channel_changed(b);
-        }
-    }
+/// The producer finished: every batch it wrote has been queued.
+fn channel_finish(g: &SlotGuard) -> Result<(), MorlocError> {
+    g.channel()?.finish();
     Ok(())
 }
 
@@ -13576,41 +13445,15 @@ pub fn shared_channel_fail(handle: i64, msg: &str) -> Result<(), MorlocError> {
     let Some((slot, gen_claim)) = channel_slot(handle)? else {
         return Ok(());
     };
-    let _g = SlotGuard::lock(slot)?;
+    let g = SlotGuard::lock(slot)?;
     if !slot_generation_is(slot, gen_claim) {
         return Ok(());
     }
-    channel_fail_locked(slot, msg)
+    channel_fail_locked(&g, msg)
 }
 
-// SLOT-35: a channel that is not running takes no writes; a failed one
-// says why.
-fn channel_refusal(b: *mut ChannelBlock, finished: &str) -> Option<MorlocError> {
-    // SAFETY: SLOT-4
-    match unsafe { (*b).status } {
-        CHANNEL_RUNNING => None,
-        _ => Some(channel_failure(b).unwrap_or_else(|| MorlocError::Other(finished.into()))),
-    }
-}
-
-fn channel_failure(b: *mut ChannelBlock) -> Option<MorlocError> {
-    // SAFETY: SLOT-4
-    (unsafe { (*b).status } == CHANNEL_FAILED).then(|| MorlocError::Other(channel_fail_message(b)))
-}
-
-fn channel_fail_locked(slot: &RegistrySlot, msg: &str) -> Result<(), MorlocError> {
-    let b = channel_block(slot)?;
-    unsafe {
-        if (*b).status != CHANNEL_RUNNING {
-            return Ok(());
-        }
-        (*b).status = CHANNEL_FAILED;
-        if let Ok(rel) = shm_copy_bytes(msg.as_bytes()) {
-            (*b).fail_msg = slot_owns(rel);
-            (*b).fail_len = msg.len() as u64;
-        }
-        channel_changed(b);
-    }
+fn channel_fail_locked(g: &SlotGuard, msg: &str) -> Result<(), MorlocError> {
+    g.channel()?.fail(msg);
     Ok(())
 }
 
@@ -13621,11 +13464,11 @@ pub fn shared_channel_ended(handle: i64) -> Result<(), MorlocError> {
     let Some((slot, gen_claim)) = channel_slot(handle)? else {
         return Ok(());
     };
-    let _g = SlotGuard::lock(slot)?;
+    let g = SlotGuard::lock(slot)?;
     if !slot_generation_is(slot, gen_claim) {
         return Ok(());
     }
-    channel_finish(slot)
+    channel_finish(&g)
 }
 
 /// Settle a channel once its readers are done with it, releasing the slot.
@@ -13648,14 +13491,7 @@ pub fn shared_settle_channel(handle: i64) -> Result<(), MorlocError> {
             invalidate_process_local_slot(handle);
             return Err(died_inside());
         }
-        let b = channel_block(slot)?;
-        let failure = unsafe {
-            if (*b).status == CHANNEL_FAILED && (*b).delivered != 0 {
-                Some(channel_fail_message(b))
-            } else {
-                None
-            }
-        };
+        let failure = guard.channel()?.delivered_failure();
         release_slot_locked(&guard);
         failure
     };
@@ -13666,33 +13502,10 @@ pub fn shared_settle_channel(handle: i64) -> Result<(), MorlocError> {
     }
 }
 
-/// Free a channel's queued batches and its failure message. Caller holds
-/// the slot lock; the block itself is freed with the slot's other blocks.
+// SLOT-39
 fn channel_free_queue(g: &SlotGuard) {
-    let slot = g.slot();
-    let Ok(b) = channel_block(slot) else { return };
-    // SLOT-21: waiters look again and find the slot released.
-    channel_changed(b);
-    unsafe {
-        let mut node_rel = (*b).head;
-        while node_rel != shm_types_crate::RELNULL {
-            let Ok(node_abs) = crate::shm::rel2abs(node_rel) else { break };
-            let node = node_abs as *mut ChannelNode;
-            if let Ok(arr) = crate::shm::rel2abs((*node).arr) {
-                free_uncounted(arr);
-            }
-            node_rel = (*node).next;
-            free_uncounted(node_abs);
-        }
-        (*b).head = shm_types_crate::RELNULL;
-        (*b).tail = shm_types_crate::RELNULL;
-        (*b).count = 0;
-        if (*b).fail_msg != shm_types_crate::RELNULL {
-            if let Ok(p) = crate::shm::rel2abs((*b).fail_msg) {
-                free_uncounted(p);
-            }
-            (*b).fail_msg = shm_types_crate::RELNULL;
-        }
+    if let Ok(c) = g.channel() {
+        c.free_queue();
     }
 }
 
