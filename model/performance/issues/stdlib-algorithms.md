@@ -15,9 +15,3 @@
   `morloc_sortBy` (root-r/R/core.R:334-349) is O(n^2) comparator calls.
   Any rule that routes `sort` through `sortBy (<=)` (S2 ruling Q4) makes
   R's `sort` quadratic until it is a merge sort.
-
-- **Python and R `length` is a morloc fold.** [reproduced 2026-11-13]
-  root `length` (root/main.loc:315-316) has no native Python or R source,
-  so it folds element by element: about 1-2 us per element in R (counting
-  64 MiB of Reals: 16.9 s against 0.64 s with a native count), about
-  100 ns in Python. Fix: source `len` in root-py and `length` in root-r.
