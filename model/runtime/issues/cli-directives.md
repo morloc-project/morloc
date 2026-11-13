@@ -48,3 +48,16 @@
   RPC short-circuit" (stream.rs), SIGABRT, and writes no p.txt. The
   Python-fold variant fails the same way; `-p` to stdout passes. Repro:
   /work/plans/error-clusters/briefs/S5-steps0-2.md.
+- **A pure IFile whole-list handler is refused.** [reproduced, 2026-11-13]
+  Gap in STRM-4. `sliceFile :: IFile [I64] -> [I64]` as a `@render`
+  handler fails to compile with "Cannot force a non-effectful value (got
+  type Str)", pointing at the user's `@collect`: the IFile branch of
+  wrapWholeCollect (Desugar.hs ~4650) binds the handler with `<-`. A pure
+  `[a] -> b` handler is accepted. Workaround: a `do` body.
+- **A sink called after the run aborts its pool.** [reproduced,
+  2026-11-13] Spec gap: no item says what a late sink call does. A C++
+  sink stored and called from `std::atexit` aborts the pool with SIGABRT
+  and a backtrace on stderr ("slot index ... out of range; registry not
+  initialised or handle is corrupt"); the command still exits 0 with the
+  right output. A late call inside the run fails cleanly ("generation
+  mismatch ... handle was closed").

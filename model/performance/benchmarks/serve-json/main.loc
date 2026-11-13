@@ -1,0 +1,18 @@
+--' JSON results of growing size, served and printed
+module main (reals, count)
+
+import root
+import root-cpp
+
+source Cpp from "f.hpp" ("realsC", "countC")
+
+realsC :: I64 -> [F64]
+countC :: [F64] -> I64
+
+--' Make n reals
+reals :: I64 -> [F64]
+reals n = realsC n
+
+--' Make n reals and count them
+count :: I64 -> I64
+count n = countC (realsC n)

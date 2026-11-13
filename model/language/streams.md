@@ -37,7 +37,7 @@ record `R` opens as `IFile R`. The file's stored schema must match `a`
 
 ### STRM-4 A `@collect` command's output is every batch its sink receives, in order
 Intent: proposed
-Code: conforms 2026-10-21
+Code: deviates (../runtime/issues/cli-directives.md)
 
 The producer is handed a sink and calls it once per batch. An action applies
 to everything the command streams, whatever the shape of its body: several

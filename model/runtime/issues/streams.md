@@ -223,3 +223,10 @@ here touch locks and ownership: model first.
   2026-11-02] A source whose final footer says FAILED or PAUSED is merged
   into a file whose footer says CLOSED, so the failure is lost. Which status
   a merge of mixed statuses carries needs a ruling (with SLOT-31).
+- **A writer death between queue push and buffer install may double free.**
+  [speculative, 2026-11-13] `queue_buffer_then` pushes the sealed buffer,
+  then calls `install_buffer` (stream.rs:3530-3545); a death between the
+  two leaves the block both queued and in the slot, and
+  `free_slot_blocks` (stream.rs:1701) may free it again. Spec gap: no
+  item covers channel or write-buffer block ownership; the SAFETY
+  comments there cite SLOT-4, which covers dead lock holders.

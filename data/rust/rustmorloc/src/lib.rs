@@ -3749,6 +3749,40 @@ pub unsafe fn save<T: ToVoidstar>(value: &T, schema: &Schema, level: i64, path: 
 pub unsafe fn load<T: FromVoidstar>(schema: &Schema, path: &str) -> T {
     let path_c = cstr_arg(path, "@load");
     let mut err: *mut c_char = std::ptr::null_mut();
+    // SLOT-25: a stream file of this list type is read as its whole IFile
+    // slice; any other file, or one that does not open as an IFile, takes the
+    // general load.
+    if T::SEQ {
+        let h = with_schema_str(schema, |s| mlc_open_ifile(s, path_c.as_ptr(), &mut err));
+        if err.is_null() && h >= 0 {
+            struct Opened(i64);
+            impl Drop for Opened {
+                fn drop(&mut self) {
+                    if self.0 >= 0 {
+                        let mut e: *mut c_char = std::ptr::null_mut();
+                        unsafe {
+                            mlc_close(self.0, &mut e);
+                            if !e.is_null() {
+                                libc::free(e as *mut c_void);
+                            }
+                        }
+                    }
+                }
+            }
+            let mut opened = Opened(h);
+            let value = ifile_slice::<T>(schema, h as u64, None, None, "@load");
+            opened.0 = -1;
+            let mut close_err: *mut c_char = std::ptr::null_mut();
+            if mlc_close(h, &mut close_err) != 0 || !close_err.is_null() {
+                morloc_throw(format!("@load: {}", reason_or_abort(close_err, "@load")));
+            }
+            return value;
+        }
+        if !err.is_null() {
+            libc::free(err as *mut c_void);
+            err = std::ptr::null_mut();
+        }
+    }
     let voidstar = mlc_load(path_c.as_ptr(), cschema_of(schema), &mut err);
     read_voidstar(voidstar, err, schema, "@load")
 }
@@ -4224,7 +4258,7 @@ pub unsafe fn ifile_walk<T: FromVoidstar>(
         })
         .collect();
     if T::SEQ && path == ".[:]" && args.len() == 3 && args[2].map_or(true, |step| step == 1) {
-        return ifile_slice::<T>(schema, handle, args[0], args[1]);
+        return ifile_slice::<T>(schema, handle, args[0], args[1], "@ifile_walk");
     }
     let path_c = cstr_arg(path, "@ifile_walk");
     let args_ptr = if packed.is_empty() { std::ptr::null() } else { packed.as_ptr() };
@@ -4284,7 +4318,7 @@ unsafe extern "C" fn slice_decode<T: FromVoidstar>(c: *mut c_void, data: *const 
 
 /// `.[start:stop]` of a list-valued IFile, each sub-packet's part read
 /// where it lies onto the end of the list (SLOT-25).
-unsafe fn ifile_slice<T: FromVoidstar>(schema: &Schema, handle: u64, start: Option<i64>, stop: Option<i64>) -> T {
+unsafe fn ifile_slice<T: FromVoidstar>(schema: &Schema, handle: u64, start: Option<i64>, stop: Option<i64>, what: &str) -> T {
     let arg = |v: Option<i64>| IFileWalkArg { has: v.is_some() as u8, _pad: [0; 7], value: v.unwrap_or(0) };
     let bounds = [arg(start), arg(stop)];
     let mut d = Sliced::<T> { schema, value: None, unwinding: None };
@@ -4298,14 +4332,14 @@ unsafe fn ifile_slice<T: FromVoidstar>(schema: &Schema, handle: u64, start: Opti
         &mut err,
     );
     if rc < 0 {
-        morloc_throw(format!("@ifile_walk: {}", reason_or_abort(err, "@ifile_walk")));
+        morloc_throw(format!("{what}: {}", reason_or_abort(err, what)));
     }
     if let Some(p) = d.unwinding {
         std::panic::resume_unwind(p);
     }
     match d.value {
         Some(v) if rc == 0 => v,
-        _ => failed_without_reason("@ifile_walk"),
+        _ => failed_without_reason(what),
     }
 }
 

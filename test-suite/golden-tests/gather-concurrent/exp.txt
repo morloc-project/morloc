@@ -1,0 +1,8 @@
+cpp n=8000 distinct=8000 sum=31996000 whole=yes ordered=yes
+rust n=8000 distinct=8000 sum=31996000 whole=yes ordered=yes
+cpp 0 11 12 13 21 22 23 31 32 33 99
+cpp n=15011
+py 0 11 12 13 21 22 23 31 32 33 99
+py n=15011
+r 0 11 12 13 21 22 23 31 32 33 99
+r n=15011

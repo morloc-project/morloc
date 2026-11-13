@@ -1812,3 +1812,62 @@ fn a_closed_file_is_synced_unless_it_is_a_call_temp() {
     unsafe { crate::intrinsics::mlc_unlink_tmp(c.as_ptr(), &mut err) };
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The custodian runs in the nexus while @tmpfile registers in the pool, so
+/// a temp file is known by lying under the run's temp root, which the run
+/// removes: it is not synced whichever process made it (SLOT-15).
+#[test]
+fn a_file_under_the_run_temp_root_is_not_synced_whoever_made_it() {
+    let _shm = crate::own_test_registry();
+    let _run = crate::ScopedFallback::new("run_temp_sync");
+    let synced = |h: i64| crate::custody::SYNCED.lock().unwrap_or_else(|e| e.into_inner()).contains(&h);
+    let other = crate::intrinsics::temp_root().join("tmp-0000000000000001-host");
+    std::fs::create_dir_all(&other).unwrap();
+    let path = other.join("morloc-gather-made-elsewhere");
+    let h = shared_open_ostream_with_schema(path.to_str().unwrap(), "as").unwrap();
+    let v = strs_value(3, 10, 0);
+    shared_write_subpacket(h, crate::compression::CompressionLevel::NONE, v).unwrap();
+    let _ = shm::shfree(v);
+    shared_close_handle(h).unwrap();
+    assert!(!synced(h), "a temp file of the run was synced");
+    let _ = std::fs::remove_dir_all(&other);
+}
+
+/// A gather's temp file is removed by the @close of whichever pool reads it,
+/// not only the pool whose @tmpfile made it; a path outside the run's temp
+/// root is still refused.
+#[test]
+fn a_gather_temp_of_the_run_is_removed_by_any_pool() {
+    let _shm = crate::own_test_registry();
+    let _run = crate::ScopedFallback::new("run_temp_unlink");
+    let other = crate::intrinsics::temp_root().join("tmp-0000000000000002-host");
+    std::fs::create_dir_all(&other).unwrap();
+    let made = other.join("morloc-gather-made-elsewhere");
+    std::fs::write(&made, b"").unwrap();
+    let mut err: *mut std::os::raw::c_char = std::ptr::null_mut();
+    let c = std::ffi::CString::new(made.to_str().unwrap()).unwrap();
+    assert_eq!(unsafe { crate::intrinsics::mlc_unlink_tmp(c.as_ptr(), &mut err) }, 0, "refused a run temp");
+    assert!(!made.exists(), "the run temp was not removed");
+    let outside = std::env::temp_dir().join(format!("morloc-gather-outside-{}", std::process::id()));
+    std::fs::write(&outside, b"").unwrap();
+    let c = std::ffi::CString::new(outside.to_str().unwrap()).unwrap();
+    assert_ne!(unsafe { crate::intrinsics::mlc_unlink_tmp(c.as_ptr(), &mut err) }, 0, "removed a file outside the run");
+    assert!(outside.exists());
+    let up = crate::intrinsics::temp_root().join("tmp-0000000000000002-host");
+    let mut dotted = up.clone();
+    for _ in up.components() {
+        dotted.push("..");
+    }
+    let dotted = dotted.join(outside.strip_prefix("/").unwrap());
+    let c = std::ffi::CString::new(dotted.to_str().unwrap()).unwrap();
+    assert_ne!(unsafe { crate::intrinsics::mlc_unlink_tmp(c.as_ptr(), &mut err) }, 0, "removed a file through ..");
+    assert!(outside.exists());
+    let link = other.join("escape");
+    std::os::unix::fs::symlink(outside.parent().unwrap(), &link).unwrap();
+    let c = std::ffi::CString::new(link.join(outside.file_name().unwrap()).to_str().unwrap()).unwrap();
+    assert_ne!(unsafe { crate::intrinsics::mlc_unlink_tmp(c.as_ptr(), &mut err) }, 0, "removed a file through a link");
+    assert!(outside.exists());
+    unsafe { libc::free(err as *mut libc::c_void) };
+    let _ = std::fs::remove_file(&outside);
+    let _ = std::fs::remove_dir_all(&other);
+}

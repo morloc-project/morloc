@@ -144,3 +144,38 @@ A slice locates its sub-packets by two binary searches and checks only
 the records it reads, so neither the file's length nor the size of the
 sub-packet it reads from enters its cost, beyond decompressing a
 sub-packet that SLOT-34 has not kept.
+
+### ENC-11 A whole-list @collect costs little more than making its batches
+Intent: proposed
+Bench: gather
+Model: t(g) = c + b*g for g GiB gathered: b batches of k 256-count U64 histograms through `@collect` into a whole-list `@render` handler, against a control that makes and counts the same batches where they are made; `<lang>.extra` = b_gather - b_control, `<lang>.offcpu` = the same for wall minus CPU (negative when the gather runs threads), C++ and Python
+Measured: 2026-11-13-0233-c4022bfa7+dirty-after-w1-b2-w2, load 0.96-1.7. extra: cpp 1.66 s/GiB (gather 1.72, control 0.058), py 9.44 s/GiB (gather 10.6, control 1.17). @load decoded in place against into one block (same build, LD_PRELOAD control): 1.74 against 2.33 s/GiB. Before (2026-11-13-0159, which timed the to-path route): cpp 1.77, py 8.02.
+Goal: cpp.extra <= 0.3 s/GiB, py.extra <= 1.0 s/GiB
+Limit: cpp.extra <= 2.5 s/GiB, py.extra <= 10 s/GiB
+
+A handler that takes the whole list holds it in memory whatever the
+mechanism, so the gather needs no file: the batches are moved into one
+list where the handler runs. 
+
+### ENC-13 A strided or field-tail IFile slice costs near a unit slice of its output
+Intent: proposed
+Bench: ifile-slice
+Model: per pair, t and peak RSS of a strided `.[0:n:k]` (k = 2, 7), reversed `.[::-1]` or field-tail `.[0:n].1` slice against a unit slice `.[0:m]` with the same output count m, over [Real], (I64, Real, Real) and [Str], C++, Rust and Python, levels 0 and 3; `<lang>.<kind>.<form>.z<level>.ratio` = t_strided / t_unit, `.rssx` = peak RSS over the unit slice's
+Measured: 2026-11-13-0246-c4022bfa7+dirty-w6, load 2.2-4.0, ratio/rssx: cpp z0 reals k2 1.80/1.68, k7 1.55/1.32, rev 1.39/1.81, tups k2 1.34/1.42, field 1.63/1.67, strs k2 1.38/1.29; cpp z3 reals k2 1.61/1.64, field 1.57/1.92, strs k2 1.69/1.66; rs z0 reals k2 1.45/1.55, k7 1.36/1.11, rev 1.29/1.73, field 1.44/1.50; py z0 reals k2 0.97/0.88. before, installed build 2026-11-13 02:32, C++, load 2.1-2.5, best of 3, s and peak RSS MiB. [Real] 128 MB z0: k2 0.759/408 against unit 8M 0.099/84 (7.7x); k7 0.275/233 against unit 2.29M 0.062/41 (4.4x); rev 1.245/651 against unit 16M 0.156/145 (8.0x). z3: k2 0.926/481 against unit 8M 0.139/101 (6.7x); rev 1.399/727. (I64, Real, Real) 120 MB z0: k2 0.465/309 against unit 2.5M 0.135/100 (3.4x); `.1` 0.517/308 against [Real] unit 5M 0.078/62 (6.6x). [Str] 4M z0: k2 0.271/327 against unit 2M 0.185/141 (1.5x); z3 0.403/339 against 0.234/166 (1.7x). Earlier, 600 MiB, load 0.4-1.0: `.[0:n:2]` 3.44 s/1.84 GB, `.[0:n].1` 2.32 s/1.44 GB, unit 0.50 s/625 MB.
+Goal: cpp.reals.k2.z0.ratio <= 1.5, cpp.reals.rev.z0.ratio <= 1.5, cpp.tups.field.z0.ratio <= 1.5, rs.reals.k2.z0.ratio <= 1.5, rs.reals.rev.z0.ratio <= 1.5, rs.tups.field.z0.ratio <= 1.5
+
+A slice with a step other than 1, or with a field tail, takes one run per
+sub-packet it spans, found arithmetically (runtime/streams.md SLOT-38), and
+holds one sub-packet at a time. A fixed-width result is a strided copy into
+a block sized once. Against a unit slice of the same output it reads k
+times the records (k for a stride k, the record over the field for a
+tail), so at level 3 it decompresses k times as much: the goal covers the
+uncompressed forms whose touched bytes are near the output's. A [Str] result
+is sized and copied in two passes, so at level 3 it decompresses each
+interior sub-packet twice; a record holding a Str is still copied element by
+element and consolidated, near 2x its output in memory.
+
+Peak RSS counts the file's mapped pages a slice has touched, and a stride
+k touches k times the pages of a unit slice of the same output, though they
+are clean and reclaimable; so `rssx` is recorded but holds no Limit until
+the bench measures the anonymous memory a slice keeps.

@@ -34,10 +34,17 @@ def fmt_time(seconds):
 
 
 class Timing:
-    def __init__(self, walls, maxrss_kib, stdout):
+    def __init__(self, walls, maxrss_kib, stdout, cpus=None):
         self.walls = sorted(walls)
         self.maxrss_kib = maxrss_kib
         self.stdout = stdout
+        # CPU seconds (user + system) of the process and its waited-for
+        # descendants, per run; wall minus CPU is the time spent off-CPU.
+        self.cpus = sorted(cpus or [])
+
+    @property
+    def cpu(self):
+        return self.cpus[len(self.cpus) // 2] if self.cpus else None
 
     @property
     def best(self):
@@ -51,6 +58,11 @@ class Timing:
 def timed(cmd, cwd, env=None, stdin=None):
     """Run cmd once; return (wall seconds, max RSS KiB of the largest
     descendant, stdout bytes). Fails loudly on a nonzero exit."""
+    return timed_cpu(cmd, cwd, env=env, stdin=stdin)[:3]
+
+
+def timed_cpu(cmd, cwd, env=None, stdin=None):
+    """timed, plus the CPU seconds of cmd and its waited-for descendants."""
     full_env = dict(os.environ)
     if env:
         full_env.update(env)
@@ -77,7 +89,7 @@ def timed(cmd, cwd, env=None, stdin=None):
     if p.returncode != 0:
         sys.stderr.write(bufs["err"].decode(errors="replace"))
         raise RuntimeError(f"{cmd} exited {p.returncode}")
-    return t1 - t0, usage.ru_maxrss, bufs["out"]
+    return t1 - t0, usage.ru_maxrss, bufs["out"], usage.ru_utime + usage.ru_stime
 
 
 def fit_linear(xs, ys):
@@ -196,6 +208,7 @@ class Bench:
         self.fits = []
         self.started = time.strftime("%Y-%m-%d %H:%M")
         self.load = os.getloadavg()[0]
+        self.load_max = self.load
 
     def path(self, *parts):
         return os.path.join(self.dir, *parts)
@@ -208,18 +221,24 @@ class Bench:
 
     def time(self, cmd, reps=None, env=None, stdin=None, cwd=None):
         """Time cmd `reps` times (default: the bench's). Returns a Timing."""
-        walls = []
+        walls, cpus = [], []
         rss = 0
         out = b""
         for _ in range(reps or self.reps):
-            w, r, out = timed(cmd, cwd or self.dir, env=env, stdin=stdin)
+            w, r, out, c = timed_cpu(cmd, cwd or self.dir, env=env, stdin=stdin)
             walls.append(w)
+            cpus.append(c)
             rss = max(rss, r)
-        return Timing(walls, rss, out)
+        return Timing(walls, rss, out, cpus)
 
     def point(self, series, x, timing, **extra):
+        load = os.getloadavg()[0]
+        self.load_max = max(self.load_max, load)
         row = {"series": series, "x": x, "best_s": timing.best,
-               "median_s": timing.median, "maxrss_kib": timing.maxrss_kib}
+               "median_s": timing.median, "maxrss_kib": timing.maxrss_kib,
+               "load": f"{load:.2f}"}
+        if timing.cpu is not None:
+            row["cpu_s"] = f"{timing.cpu:.4f}"
         row.update(extra)
         self.points.append(row)
         print(f"  {series:<24} x={x:<12} best {fmt_time(timing.best):>10}"
@@ -237,13 +256,34 @@ class Bench:
         every x once, so a change in machine load during the sweep reaches
         all points rather than tilting the fit. Returns the best time per x."""
         walls = {x: [] for x in xs}
+        cpus = {x: [] for x in xs}
         rss = {x: 0 for x in xs}
         for _ in range(reps or self.reps):
             for x in xs:
-                w, r, _ = timed(cmd_of(x), cwd_of(x) if cwd_of else self.dir, env=env)
+                w, r, _, c = timed_cpu(cmd_of(x), cwd_of(x) if cwd_of else self.dir, env=env)
                 walls[x].append(w)
+                cpus[x].append(c)
                 rss[x] = max(rss[x], r)
-        return [self.point(series, x, Timing(walls[x], rss[x], b"")) for x in xs]
+        return [self.point(series, x, Timing(walls[x], rss[x], b"", cpus[x])) for x in xs]
+
+    def sweep_variants(self, series, variants, xs, cmd_of, reps=None, cwd_of=None):
+        """An in-run A/B: time cmd_of(x) under each variant's environment
+        (`variants` maps a name to an env dict), visiting every variant and
+        every x once per repetition, so load reaches all of them alike.
+        Records series `<series>.<variant>`; returns {variant: [best per x]}."""
+        walls = {(v, x): [] for v in variants for x in xs}
+        cpus = {k: [] for k in walls}
+        rss = {k: 0 for k in walls}
+        for _ in range(reps or self.reps):
+            for x in xs:
+                for v, env in variants.items():
+                    w, r, _, c = timed_cpu(cmd_of(x), cwd_of(x) if cwd_of else self.dir, env=env)
+                    walls[v, x].append(w)
+                    cpus[v, x].append(c)
+                    rss[v, x] = max(rss[v, x], r)
+        return {v: [self.point(f"{series}.{v}", x,
+                               Timing(walls[v, x], rss[v, x], b"", cpus[v, x]))
+                    for x in xs] for v in variants}
 
     def sweep_linear(self, item, series, xs, cmd_of, x_unit, b_unit="us",
                      c_unit="ms", reps=None, env=None, cwd_of=None):
@@ -258,6 +298,7 @@ class Bench:
     def save(self, run_dir):
         os.makedirs(run_dir, exist_ok=True)
         head = (f"# {self.name} {self.started} load={self.load:.2f} "
+                f"load_max={self.load_max:.2f} "
                 f"morloc={morloc_version()} commit={compiler_commit()} "
                 f"cpu={cpu_name()} cores={os.cpu_count()}\n")
         keys = []
@@ -288,7 +329,7 @@ def main():
     import importlib.util
     ap = argparse.ArgumentParser()
     ap.add_argument("name")
-    ap.add_argument("--reps", type=int, default=5)
+    ap.add_argument("--reps", type=int, default=7)
     ap.add_argument("--quick", action="store_true",
                     help="smaller sweeps; results are not saved")
     ap.add_argument("--run", help="results/<RUN> to write into (default: date-commit)")

@@ -682,7 +682,7 @@ pub(crate) unsafe fn get_morloc_data_packet_value_from(
         return get_morloc_data_packet_value_from(decompressed.as_ptr(), schema, errmsg, origin);
     }
 
-    let rs = CSchema::to_rust(schema);
+    let rs = std::cell::LazyCell::new(|| CSchema::to_rust(schema));
     let source = (*header).command.data.source;
     let format = (*header).command.data.format;
     let payload_start = 32 + (*header).offset as usize;

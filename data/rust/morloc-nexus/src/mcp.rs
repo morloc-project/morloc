@@ -653,8 +653,9 @@ impl DispatchCtx {
                     media_result(bytes, &mime, (*resp).result_text, command, &action)
                         .map_err(DispatchError::Call)
                 } else {
-                    let json = cstr_to_string((*resp).result_json).unwrap_or_else(|| "null".to_string());
-                    tool_result_object(&json).map_err(DispatchError::Call)
+                    result_text((*resp).result_json)
+                        .and_then(tool_result_object)
+                        .map_err(DispatchError::Call)
                 }
             } else {
                 let kind = (*resp).error_kind;
@@ -701,7 +702,7 @@ fn too_large(size: usize) -> String {
 const ENVELOPE: usize = 4096;
 
 /// The MCP `result` object for a JSON value: compact text, mirrored into
-/// `structuredContent` when it is an object.
+/// `structuredContent` when it is an object. Only an object is parsed.
 fn tool_result_object(result_json: &str) -> Result<Value, String> {
     let object = result_json.trim_start().starts_with('{');
     let size = json_escaped_len(result_json.as_bytes())
@@ -710,18 +711,174 @@ fn tool_result_object(result_json: &str) -> Result<Value, String> {
     if size > MAX_RESULT_LINE {
         return Err(too_large(size));
     }
-    let parsed: Option<Value> = serde_json::from_str(result_json).ok();
-    let text = parsed
-        .as_ref()
-        .map(|v| v.to_string())
-        .unwrap_or_else(|| result_json.to_string());
+    let parsed: Option<Value> = if object { serde_json::from_str(result_json).ok() } else { None };
+    let text = match &parsed {
+        Some(v) => v.to_string(),
+        None => compact_json(result_json)
+            .or_else(|| serde_json::from_str::<Value>(result_json).ok().map(|v| v.to_string()))
+            .unwrap_or_else(|| result_json.to_string()),
+    };
     let mut result = Map::new();
     result.insert("content".into(), json!([ { "type": "text", "text": text } ]));
-    if let Some(Value::Object(_)) = parsed {
-        result.insert("structuredContent".into(), parsed.unwrap());
+    if let Some(v @ Value::Object(_)) = parsed {
+        result.insert("structuredContent".into(), v);
     }
     result.insert("isError".into(), Value::Bool(false));
     Ok(Value::Object(result))
+}
+
+/// `json` as serde_json writes it after reading it: no whitespace outside
+/// strings, each string in serde_json's escapes, each exponent as `e`
+/// and a sign, and `-0` as `0`. None when a string holds an escape
+/// serde_json would refuse, or an object repeats a key (serde_json keeps
+/// only the last), so the caller takes serde_json's own reading.
+fn compact_json(json: &str) -> Option<String> {
+    let b = json.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(b.len());
+    let mut keys: Vec<Option<std::collections::HashSet<Vec<u8>>>> = Vec::new();
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b' ' | b'\t' | b'\n' | b'\r' => i += 1,
+            b'"' => {
+                let start = out.len();
+                i = compact_string(b, i + 1, &mut out)?;
+                let mut j = i;
+                while j < b.len() && matches!(b[j], b' ' | b'\t' | b'\n' | b'\r') {
+                    j += 1;
+                }
+                if b.get(j) == Some(&b':') {
+                    if let Some(Some(seen)) = keys.last_mut() {
+                        if !seen.insert(out[start..].to_vec()) {
+                            return None;
+                        }
+                    }
+                }
+            }
+            b'-' | b'0'..=b'9' => i = compact_number(b, i, &mut out),
+            c => {
+                match c {
+                    b'{' => keys.push(Some(std::collections::HashSet::new())),
+                    b'[' => keys.push(None),
+                    b'}' | b']' => {
+                        keys.pop();
+                    }
+                    _ => {}
+                }
+                out.push(c);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
+fn compact_number(b: &[u8], start: usize, out: &mut Vec<u8>) -> usize {
+    let mut i = start;
+    while i < b.len() && matches!(b[i], b'-' | b'+' | b'.' | b'e' | b'E' | b'0'..=b'9') {
+        i += 1;
+    }
+    let num = &b[start..i];
+    if num == b"-0" {
+        out.push(b'0');
+        return i;
+    }
+    match num.iter().position(|&c| c == b'e' || c == b'E') {
+        Some(e) => {
+            out.extend_from_slice(&num[..e]);
+            out.push(b'e');
+            if !matches!(num.get(e + 1), Some(b'+') | Some(b'-')) {
+                out.push(b'+');
+            }
+            out.extend_from_slice(&num[e + 1..]);
+        }
+        None => out.extend_from_slice(num),
+    }
+    i
+}
+
+fn compact_string(b: &[u8], mut i: usize, out: &mut Vec<u8>) -> Option<usize> {
+    out.push(b'"');
+    loop {
+        let run = i;
+        while i < b.len() && b[i] != b'"' && b[i] != b'\\' {
+            i += 1;
+        }
+        out.extend_from_slice(&b[run..i]);
+        match b.get(i)? {
+            b'"' => {
+                out.push(b'"');
+                return Some(i + 1);
+            }
+            _ => {
+                let (c, next) = unescape(b, i + 1)?;
+                push_escaped(c, out);
+                i = next;
+            }
+        }
+    }
+}
+
+fn unescape(b: &[u8], i: usize) -> Option<(char, usize)> {
+    let c = match b.get(i)? {
+        b'"' => '"',
+        b'\\' => '\\',
+        b'/' => '/',
+        b'b' => '\u{8}',
+        b'f' => '\u{c}',
+        b'n' => '\n',
+        b'r' => '\r',
+        b't' => '\t',
+        b'u' => {
+            let hi = hex4(b, i + 1)?;
+            return match hi {
+                0xD800..=0xDBFF => {
+                    if b.get(i + 5) != Some(&b'\\') || b.get(i + 6) != Some(&b'u') {
+                        return None;
+                    }
+                    let lo = hex4(b, i + 7)?;
+                    if !(0xDC00..=0xDFFF).contains(&lo) {
+                        return None;
+                    }
+                    Some((char::from_u32(0x10000 + ((hi - 0xD800) << 10) + (lo - 0xDC00))?, i + 11))
+                }
+                0xDC00..=0xDFFF => None,
+                _ => Some((char::from_u32(hi)?, i + 5)),
+            };
+        }
+        _ => return None,
+    };
+    Some((c, i + 1))
+}
+
+fn hex4(b: &[u8], i: usize) -> Option<u32> {
+    let s = std::str::from_utf8(b.get(i..i + 4)?).ok()?;
+    if !s.bytes().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    u32::from_str_radix(s, 16).ok()
+}
+
+fn push_escaped(c: char, out: &mut Vec<u8>) {
+    match c {
+        '"' => out.extend_from_slice(b"\\\""),
+        '\\' => out.extend_from_slice(b"\\\\"),
+        '\n' => out.extend_from_slice(b"\\n"),
+        '\r' => out.extend_from_slice(b"\\r"),
+        '\t' => out.extend_from_slice(b"\\t"),
+        '\u{8}' => out.extend_from_slice(b"\\b"),
+        '\u{c}' => out.extend_from_slice(b"\\f"),
+        c if (c as u32) < 0x20 => {
+            const HEX: &[u8; 16] = b"0123456789abcdef";
+            out.extend_from_slice(b"\\u00");
+            out.push(HEX[(c as usize) >> 4]);
+            out.push(HEX[(c as usize) & 0xf]);
+        }
+        c => {
+            let mut buf = [0u8; 4];
+            out.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
+        }
+    }
 }
 
 /// The MCP `result` object for raw output: raster images and
@@ -838,6 +995,16 @@ fn build_c_sockets(sockets: &[PoolSocket]) -> (Vec<MorlocSocket>, Vec<Vec<CStrin
     }
 
     (c_sockets, keepalive)
+}
+
+/// A daemon response's result text; `null` when it has none.
+unsafe fn result_text<'a>(p: *const c_char) -> Result<&'a str, String> {
+    if p.is_null() {
+        return Ok("null");
+    }
+    CStr::from_ptr(p)
+        .to_str()
+        .map_err(|e| format!("the daemon's result is not UTF-8 (byte {} is not)", e.valid_up_to()))
 }
 
 fn cstr_to_string(p: *const c_char) -> Option<String> {
@@ -1753,9 +1920,9 @@ impl Frontend {
                     let action = cstr_to_string((*resp).action).unwrap_or_else(|| "raw".into());
                     Ok(ForwardOk::Media(bytes, mime, (*resp).result_text, action))
                 } else {
-                    Ok(ForwardOk::Json(
-                        cstr_to_string((*resp).result_json).unwrap_or_else(|| "null".to_string()),
-                    ))
+                    result_text((*resp).result_json)
+                        .map(|t| ForwardOk::Json(t.to_string()))
+                        .map_err(|e| (INTERNAL, e))
                 }
             } else {
                 Err(((*resp).error_kind, cstr_to_string((*resp).error)
@@ -2807,6 +2974,68 @@ mod tests {
         let deep = format!("{}1{}", "[".repeat(400), "]".repeat(400));
         let r = tool_result_object(&deep).unwrap();
         assert_eq!(r["content"][0]["text"], deep);
+    }
+
+    fn text_by_tree(json: &str) -> String {
+        serde_json::from_str::<Value>(json).map(|v| v.to_string()).unwrap_or_else(|_| json.to_string())
+    }
+
+    // The text of a result that is not an object is what reading it into a
+    // tree and writing it back gives.
+    #[test]
+    fn compact_text_is_the_text_of_the_tree() {
+        let cases = [
+            "42", " -0 ", "[-0,-0.0,-0e1]", "1.0", "1E+5", "1e05", "1E-05", "-2.5e-3", "0e0", "-9223372036854775809", "18446744073709551617", "true", "null",
+            "\"\\/tmp:1:False\"", "\"a\\\"b\\\\c\\/d\\n\\r\\t\\b\\f\"",
+            "\"\\u0001\\u001F\\u007f\\u0041\\u00e9\\u2028\"", "\"\\ud83d\\ude00 \u{e9}\u{1F600}\"",
+            "[ 1 , [ ] , { } , { \"a\" : [ \"x\\/y\" , null ] } ]\n",
+            "[{\"name\":\"gene1\",\"start\":10,\"score\":0.37},{\"name\":\"g\\/2\",\"start\":20,\"score\":1e-300}]",
+            "\"\\ud800\"", "\"\\udc00x\"", "\"\\ud800\\u0041\"",
+        ];
+        for json in cases {
+            let want = text_by_tree(json);
+            let got = compact_json(json).unwrap_or_else(|| json.to_string());
+            assert_eq!(got, want, "for {json}");
+        }
+        let mut seed: u64 = 0x2545F4914F6CDD1D;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for _ in 0..2000 {
+            let len = (next() % 12) as usize;
+            let s: String = (0..len)
+                .map(|_| char::from_u32((next() % 0x300) as u32).unwrap_or('?'))
+                .collect();
+            let json = format!("[{}, {:?}, \"{}\"]", serde_json::to_string(&s).unwrap(), s, s.replace('\\', "\\/").replace('"', "\\u0022"));
+            if serde_json::from_str::<Value>(&json).is_ok() {
+                assert_eq!(compact_json(&json).unwrap(), text_by_tree(&json), "for {json}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_repeated_key_reads_as_its_tree_writes_it() {
+        for json in [
+            "[{\"a\":1,\"a\":2}]",
+            "[{\"a\":1,\"\\u0061\":2}]",
+            "[{\"a\":{\"b\":1,\"b\":[2]},\"c\":3}]",
+            "[{\"a\":1},{\"a\":2},[{\"a\":3,\"b\":{\"a\":4}}]]",
+        ] {
+            let r = tool_result_object(json).unwrap();
+            assert_eq!(r["content"][0]["text"], text_by_tree(json), "for {json}");
+        }
+        assert!(compact_json("[{\"a\":1},{\"a\":2}]").is_some(), "keys of sibling objects are not repeats");
+    }
+
+    #[test]
+    fn a_string_result_reads_as_its_tree_writes_it() {
+        let r = tool_result_object("\"\\/tmp:1:False\"").unwrap();
+        assert_eq!(r["content"][0]["text"], "\"/tmp:1:False\"");
+        let r = tool_result_object("[\"a\\/b\", 1.50]").unwrap();
+        assert_eq!(r["content"][0]["text"], "[\"a/b\",1.50]");
     }
 
     #[test]

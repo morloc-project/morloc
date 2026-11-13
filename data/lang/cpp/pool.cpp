@@ -686,7 +686,44 @@ T _mlc_unpack(Schema* schema, const std::vector<uint8_t>& packet) {
 // @load :: Str -> <IO, Err> a. Missing file / decode failure throws
 // MorlocException, which `@try` catches.
 template <typename T>
+T _mlc_ifile_slice(Schema* schema, int64_t handle, std::optional<int64_t> start, std::optional<int64_t> stop);
+
+template <typename T>
 T _mlc_load(Schema* schema, const std::string& path) {
+    // A stream file of this list type is read as its whole IFile slice,
+    // each sub-packet decoded where it lies (SLOT-25); any other file, or
+    // one that does not open as an IFile, takes the general load below.
+    if constexpr (is_std_vector<T>::value) {
+        char* s = schema_to_string(schema);
+        if (s == NULL) {
+            MLC_INTERNAL_ABORT("@load: schema_to_string returned NULL (invalid compile-time schema table entry)");
+        }
+        char* open_err = NULL;
+        int64_t h = mlc_open_ifile(s, path.c_str(), &open_err);
+        free(s);
+        if (open_err == NULL && h >= 0) {
+            struct Opened {
+                int64_t h;
+                ~Opened() {
+                    if (h < 0) return;
+                    char* e = NULL;
+                    mlc_close(h, &e);
+                    free(e);
+                }
+            } opened{h};
+            T result = _mlc_ifile_slice<T>(schema, h, std::nullopt, std::nullopt);
+            char* close_err = NULL;
+            int rc = mlc_close(h, &close_err);
+            opened.h = -1;
+            if (rc != 0 || close_err != NULL) {
+                std::string msg(close_err ? close_err : "closing the file failed");
+                free(close_err);
+                throw MorlocException(std::string("@load: ") + msg);
+            }
+            return result;
+        }
+        free(open_err);
+    }
     char* errmsg = NULL;
     void* voidstar = mlc_load(path.c_str(), schema, &errmsg);
     if (errmsg != NULL) {

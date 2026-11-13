@@ -107,3 +107,14 @@
   reserve without evicting), and make the slice's last end evict other
   reads' entries. Caching interiors needs cross-slot eviction and
   cold-inserted entries (clock bit 0) first.
+- **Strided slices of Str or Str-holding records keep extra costs.**
+  [measured in-process, 2026-11-13] SLOT-38 made strided and field-tail
+  slices one run per sub-packet with one sub-packet held; left: a [Str]
+  result is sized and copied in two passes, so at level 3 each interior
+  sub-packet is decompressed twice (`.[::7]` 0.70 -> 1.16 s in-process,
+  for ~8 MB peak instead of everything held; uncompressed, pass 2 faults
+  back in the pages release_passed dropped after pass 1; a budgeted
+  first-pass cache needs a ruling); a record holding a Str is still deep-copied per element
+  and consolidated (~2x its output in memory: a space-generic size walk is
+  needed, SizeWalk resolves only in SHM); at level 3 a stride k
+  decompresses k times a unit slice's data.

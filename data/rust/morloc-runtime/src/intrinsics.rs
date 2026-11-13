@@ -454,6 +454,22 @@ pub(crate) fn is_registered_temp(path: &str) -> bool {
     temp_registry().entries.iter().any(|e| e.path.as_os_str() == path)
 }
 
+/// SLOT-15: whether `path` lies under this run's temp root, which the run
+/// removes, whichever of its processes made the file.
+pub(crate) fn is_run_temp(path: &str) -> bool {
+    if run_dir().is_none() {
+        return false;
+    }
+    let p = std::path::Path::new(path);
+    if p.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+        return false;
+    }
+    let (Some(dir), Ok(root)) = (p.parent(), std::fs::canonicalize(temp_root())) else {
+        return false;
+    };
+    std::fs::canonicalize(dir).is_ok_and(|d| d.starts_with(root))
+}
+
 /// @close on a Str path: unlink a registered temp file and drop it from the
 /// call list. Errors if the path was not created by @tmpfile in this call --
 /// @close is not a general file-removal tool.
@@ -488,8 +504,12 @@ pub(crate) unsafe fn mlc_unlink_tmp(
         }
         None => false,
     };
+    let owned_here = reg.entries.iter().any(|e| e.path == pb);
     drop(reg);
-    if !registered {
+    let gather_of_run = !owned_here
+        && is_run_temp(path_str)
+        && pb.file_name().is_some_and(|n| n.to_string_lossy().starts_with("morloc-gather-"));
+    if !registered && !gather_of_run {
         set_errmsg(errmsg, &MorlocError::Other(format!(
             "@close: '{}' is not a registered temp file; @close only removes \
              files created by the whole-list with:/render: gather",

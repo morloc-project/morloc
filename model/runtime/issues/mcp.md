@@ -71,3 +71,6 @@ model/issues/LIST.md), checked against the code 2026-11-04 [read].
 - **A `__` collision in module or command names aborts the front end.**
   mcp.rs:1849-1860 exits 1 on purpose (fail closed). Needs a ruling: refuse
   at registration, or abort the whole front end as now.
+- **An HTTP call costs about 0.6 ms fixed.** [measured, 2026-11-13]
+  A scalar result takes 0.60 ms over HTTP and an 8 KB result 0.68 ms,
+  so nearly all of a small call is fixed cost. Not investigated.

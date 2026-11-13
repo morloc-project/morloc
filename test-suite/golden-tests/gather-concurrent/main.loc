@@ -1,0 +1,75 @@
+-- Whole-list gather (STRM-4) from sinks called concurrently.
+--
+-- Threads: a sourced C++ or Rust producer calls its sink from several
+-- threads it starts and joins. The handler checks the multiset (count,
+-- distinct, sum), that each four-element write arrived whole, and that one
+-- thread's writes keep their order (SLOT-11).
+--
+-- Forks: the producer writes, forks children that each call the sink and
+-- exit, waits for them, and writes again (C++ fork, Python os.fork, R
+-- mclapply). Every child write must arrive (SLOT-13), including a child's
+-- batch larger than the write buffer (the Makefile sets its size). A child
+-- that failed adds -1.
+
+module main (threadsCpp, threadsRust, forksCpp, forksPy, forksR)
+
+import root-cpp
+import root-py
+import root-r
+import root-rust
+
+source Cpp from "impl.hpp" ("produce_threads" as produceThreadsC, "produce_forks" as produceForksC, "tally" as tallyC, "sorted" as sortedC, "count" as countC)
+source Rust from "impl.rs" ("produce_threads" as produceThreadsRs, "tally" as tallyRs)
+source Py from "impl.py" ("produce_forks" as produceForksP, "sorted_ints" as sortedP, "count" as countP)
+source R from "impl.R" ("produce_forks" as produceForksR, "sorted_ints" as sortedR, "count" as countR)
+
+produceThreadsC :: I64 -> I64 -> ([I64] -> <IO> ()) -> <IO> ()
+produceThreadsRs :: I64 -> I64 -> ([I64] -> <IO> ()) -> <IO> ()
+produceForksC :: I64 -> I64 -> ([I64] -> <IO> ()) -> <IO> ()
+produceForksP :: I64 -> I64 -> ([I64] -> <IO> ()) -> <IO> ()
+produceForksR :: I64 -> I64 -> ([I64] -> <IO> ()) -> <IO> ()
+
+--' Count, distinct, sum, wholeness and order, in C++
+tallyC :: [I64] -> Str
+--' Count, distinct, sum, wholeness and order, in Rust
+tallyRs :: [I64] -> Str
+--' The elements sorted, in C++
+sortedC :: [I64] -> Str
+--' The elements sorted, in Python
+sortedP :: [I64] -> Str
+--' The elements sorted, in R
+sortedR :: [I64] -> Str
+--' The number of elements, in C++
+countC :: [I64] -> Str
+--' The number of elements, in Python
+countP :: [I64] -> Str
+--' The number of elements, in R
+countR :: [I64] -> Str
+
+--' Stream from C++ threads
+--' @render --tally=tallyC
+threadsCpp :: I64 -> I64 -> <IO> ()
+threadsCpp t b = @collect (produceThreadsC t b)
+
+--' Stream from Rust threads
+--' @render --tally=tallyRs
+threadsRust :: I64 -> I64 -> <IO> ()
+threadsRust t b = @collect (produceThreadsRs t b)
+
+--' Stream from C++ forked children
+--' @render --sorted=sortedC
+--' @render --count=countC
+forksCpp :: I64 -> I64 -> <IO> ()
+forksCpp n big = @collect (produceForksC n big)
+
+--' Stream from Python forked children
+--' @render --sorted=sortedP
+--' @render --count=countP
+forksPy :: I64 -> I64 -> <IO> ()
+forksPy n big = @collect (produceForksP n big)
+
+--' Stream from R forked children
+--' @render --sorted=sortedR
+--' @render --count=countR
+forksR :: I64 -> I64 -> <IO> ()
+forksR n big = @collect (produceForksR n big)

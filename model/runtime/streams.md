@@ -152,14 +152,15 @@ before it are still written, and the footer records the failure.
 
 ### SLOT-15 Close and flush return once their batches are in the file
 Status: implemented
-Checked by: a_flush_makes_its_elements_readable_from_the_open_file, a_closed_stream_refuses_writes_and_its_path_reopens_at_once, a_closed_file_is_synced_unless_it_is_a_call_temp, a_discarded_stream_keeps_what_was_queued_and_no_final_footer, tla:StreamQueue_reader_no_wait.bug, tla:StreamQueue_close_before_tail.bug
+Checked by: a_flush_makes_its_elements_readable_from_the_open_file, a_closed_stream_refuses_writes_and_its_path_reopens_at_once, a_closed_file_is_synced_unless_it_is_a_call_temp, a_file_under_the_run_temp_root_is_not_synced_whoever_made_it, a_discarded_stream_keeps_what_was_queued_and_no_final_footer, tla:StreamQueue_reader_no_wait.bug, tla:StreamQueue_close_before_tail.bug
 
 A close queues the unflushed elements and a close marker and waits for the
 custodian to write them and the footer; writes after it fail, and its path
 reopens at once. A flush waits likewise, so a reader of the open file sees
 what was flushed. A close also makes the file's data durable (fdatasync),
 except a file `@tmpfile` made in the writing process, which its call
-removes; an error closing the file (a filesystem that writes back at
+removes, or any file under the run's temp root, which the run removes
+(the custodian is often another process than the one that made it); an error closing the file (a filesystem that writes back at
 close) fails the stream. A discard writes what was queued, drops the unflushed elements,
 and leaves the temporary footer. Whether close and flush should
 instead return at once, with the wait moved to readers, waits on a
@@ -290,6 +291,25 @@ they are there. Of those it decompresses, it keeps in the cache (SLOT-23)
 only the first and the last, which a neighbouring slice may read again;
 the others are freed when the slice returns. A slice across many
 sub-packets therefore leaves at most two of them cached.
+
+### SLOT-38 A strided or field-tail slice holds one sub-packet at a time
+Status: implemented
+Checked by: a_strided_slice_is_the_slice_copied_element_by_element, a_strided_slice_releases_each_sub_packet_it_has_passed
+
+An IFile slice with a step other than 1, or with a field tail, takes one
+run from each sub-packet it spans: the run's first element and count
+follow arithmetically from the cumulative counts, one binary search per
+run. It copies a run before it reads the next sub-packet, and once the
+walk has passed a sub-packet, a decompressed copy that SLOT-34 does not
+keep is freed and the pages of an uncompressed interior one are dropped
+from the process's mapping. A fixed-width result (a fixed-width element,
+or a field tail to one) is copied into a block sized once, by a strided
+copy of each run. A Str result is sized by a first pass over the runs and
+copied by a second, which decompresses each interior compressed
+sub-packet twice; a second pass that finds other strings fails the slice.
+Any other result is deep-copied element by element and consolidated into
+one block. Every route gives the value the slice selects, and a fixed-width
+result its bytes.
 
 ### SLOT-35 A `@write` batch that fails leaves no trace, or fails its stream
 Status: implemented

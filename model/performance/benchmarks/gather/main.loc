@@ -1,0 +1,64 @@
+module main (gatherCpp, controlCpp, gatherPy, controlPy, gatherCross)
+
+import root
+import root-cpp
+import root-py
+
+source Cpp from "g.hpp" ("mk_hists" as mkHistsC, "summ" as summC, "count_hists" as countC)
+source Py from "g.py" ("mk_hists" as mkHistsP, "summ" as summP, "count_hists" as countP)
+
+mkHistsC :: I64 -> I64 -> [[U64]]
+summC :: [[U64]] -> Str
+countC :: [[U64]] -> I64
+mkHistsP :: I64 -> I64 -> [[U64]]
+summP :: [[U64]] -> Str
+countP :: [[U64]] -> I64
+
+produceC :: I64 -> I64 -> ([[U64]] -> <IO> ()) -> <IO> ()
+produceC k b sink = ? b <= 0 = do
+    ()
+  : do
+    _ <- sink (mkHistsC k b)
+    produceC k (b - 1) sink
+
+produceP :: I64 -> I64 -> ([[U64]] -> <IO> ()) -> <IO> ()
+produceP k b sink = ? b <= 0 = do
+    ()
+  : do
+    _ <- sink (mkHistsP k b)
+    produceP k (b - 1) sink
+
+loopC :: I64 -> I64 -> I64 -> <IO> I64
+loopC k b acc = ? b <= 0 = do
+    acc
+  : do
+    loopC k (b - 1) (acc + countC (mkHistsC k b))
+
+loopP :: I64 -> I64 -> I64 -> <IO> I64
+loopP k b acc = ? b <= 0 = do
+    acc
+  : do
+    loopP k (b - 1) (acc + countP (mkHistsP k b))
+
+--' C++ batches gathered whole into a C++ handler
+--' @render -s/--sum=summC
+gatherCpp :: I64 -> I64 -> <IO> ()
+gatherCpp k b = @collect (produceC k b)
+
+--' The C++ batches alone, each counted where it is made
+controlCpp :: I64 -> I64 -> <IO> I64
+controlCpp k b = loopC k b 0
+
+--' Python batches gathered whole into a Python handler
+--' @render -s/--sum=summP
+gatherPy :: I64 -> I64 -> <IO> ()
+gatherPy k b = @collect (produceP k b)
+
+--' The Python batches alone, each counted where it is made
+controlPy :: I64 -> I64 -> <IO> I64
+controlPy k b = loopP k b 0
+
+--' C++ batches gathered whole into a Python handler
+--' @render -s/--sum=summP
+gatherCross :: I64 -> I64 -> <IO> ()
+gatherCross k b = @collect (produceC k b)

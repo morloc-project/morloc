@@ -83,3 +83,19 @@ Details and evidence: /work/plans/runtime-audit-2026-10-10/C-processes.md.
   re-entrant reaches the same failure. Needs a ruling: per-pool affinity for stateful
   sources, a declared statefulness that keeps them on one worker, or host
   state ruled out.
+- **A cross-language round trip makes 7 syscalls where 4 would do.**
+  [measured with strace, 2026-11-13] Per cpp->py call: 2 poll, 3
+  recvfrom, 2 sendmsg; the extra poll is the reply wait
+  (ipc_ffi.rs:783-787) and the extra recvfrom is an EAGAIN in the callee.
+  py->cpp I64 is 23.0 us = 1.9 us Python marshalling + 21.2 us
+  foreign_call, against the 13.6 us floor (XL-1); copies and schemas are
+  not where the rest goes.
+- **Generated callers rebuild the socket path on every call.** [measured,
+  2026-11-13] Python calls os.path.join per call (0.28 us); C++
+  foreign_call_v builds a std::string per call.
+- **A Python worker grows and trims its heap twice per call near 64 KiB.**
+  [measured with strace, 2026-11-13] At 8000 Reals (64 KiB, inline) a
+  py->cpp loop makes 2050 brk calls per 1000 calls, all in the Python
+  worker: four ~64 KiB buffers are live at once, so glibc trims ~188 KiB
+  each time. About 20 us of the 52-62 us inline penalty at that size;
+  none at 16 KiB.

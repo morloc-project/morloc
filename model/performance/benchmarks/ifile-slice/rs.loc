@@ -7,15 +7,22 @@ module main
   , nextReals
   , nextStrs
   , pointsReals
+  , writeTups
+  , strideReals
+  , revReals
+  , strideStrs
+  , strideTups
+  , fieldTups
   )
 
 import root
 import root-rust
 
-source Rust from "gen.rs" ("gen_reals" as genReals, "gen_strs" as genStrs)
+source Rust from "gen.rs" ("gen_reals" as genReals, "gen_strs" as genStrs, "gen_tups" as genTups)
 
 genReals :: I64 -> [Real]
 genStrs :: I64 -> [Str]
+genTups :: I64 -> [(I64, Real, Real)]
 
 --' Write n Reals to a stream file at a compression level
 writeReals :: Int -> I64 -> Str -> <IO> I64
@@ -87,3 +94,41 @@ pointsReals :: Int -> Str -> <IO> Int
 pointsReals k path = do
   Ok f <- @open path :: <IO> (Try Str (IFile [Real]))
   pointLoop f k 0
+
+--' Write n tuples to a stream file at a compression level
+writeTups :: Int -> I64 -> Str -> <IO> I64
+writeTups z n path = do
+  Ok o <- @open path :: <IO> (Try Str (OStream (I64, Real, Real)))
+  @write z o (genTups n)
+  @close o
+  n
+
+--' Read every k-th of the first n Reals of a file
+strideReals :: Int -> Int -> Str -> <IO> Int
+strideReals n k path = do
+  Ok f <- @open path :: <IO> (Try Str (IFile [Real]))
+  length (.[0:n:k] f)
+
+--' Read every Real of a file in reverse
+revReals :: Str -> <IO> Int
+revReals path = do
+  Ok f <- @open path :: <IO> (Try Str (IFile [Real]))
+  length (.[::-1] f)
+
+--' Read every k-th of the first n Strs of a file
+strideStrs :: Int -> Int -> Str -> <IO> Int
+strideStrs n k path = do
+  Ok f <- @open path :: <IO> (Try Str (IFile [Str]))
+  length (.[0:n:k] f)
+
+--' Read every k-th of the first n tuples of a file
+strideTups :: Int -> Int -> Str -> <IO> Int
+strideTups n k path = do
+  Ok f <- @open path :: <IO> (Try Str (IFile [(I64, Real, Real)]))
+  length (.[0:n:k] f)
+
+--' Read the second field of the first n tuples of a file
+fieldTups :: Int -> Str -> <IO> Int
+fieldTups n path = do
+  Ok f <- @open path :: <IO> (Try Str (IFile [(I64, Real, Real)]))
+  length (.[0:n].1 f)

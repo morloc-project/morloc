@@ -3143,7 +3143,10 @@ fn start_fresh(
     header_bytes: Vec<u8>,
     opener: (u32, u64, u64),
 ) -> Result<i64, MorlocError> {
-    if unsafe { libc::ftruncate(fd, 0) } != 0 {
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstat(fd, &mut st) } != 0
+        || (st.st_size != 0 && unsafe { libc::ftruncate(fd, 0) } != 0)
+    {
         let e = std::io::Error::last_os_error();
         unlock_and_close(fd);
         return Err(MorlocError::Io(e));
@@ -3167,7 +3170,7 @@ fn start_custody(
     resume: Resume,
     opener: (u32, u64, u64),
 ) -> Result<i64, MorlocError> {
-    let durable = !crate::intrinsics::is_registered_temp(path);
+    let durable = !(crate::intrinsics::is_registered_temp(path) || crate::intrinsics::is_run_temp(path));
     let (slot_idx, slot, guard) = match allocate_slot_cas_for(opener.0, opener.1, opener.2) {
         Ok(s) => s,
         Err(e) => {
@@ -7692,26 +7695,6 @@ fn ifile_bracket_slice_against_slot(
     step: Option<i64>,
     tail_steps: &[WalkStep],
 ) -> Result<AbsPtr, MorlocError> {
-    struct SliceWork {
-        // The static projection inside each element. (0, elem_schema)
-        // when the tail is empty; (offset, target_schema) when a tail
-        // is present.
-        proj_offset: usize,
-        proj_schema: Schema,
-        // Source element width on disk -- always the full record's
-        // width, since the slice plan addresses element slots in the
-        // sub-packet array, not the projected field.
-        elem_width: usize,
-        // For each output position, which sub-packet and local index
-        // it sources from.
-        plan: Vec<(usize /*sub_k*/, u64 /*local_idx*/)>,
-        // Located sub-packet sources, keyed by sub_k. Held for the
-        // duration of the slice walk so a slice spanning many output
-        // elements within the same sub-packet locates once. Released
-        // (no-op for File, shfree for Shm) once the walk completes.
-        materialised: std::collections::BTreeMap<usize, SubpacketSrc>,
-    }
-
     if slot.kind.get() != MLC_KIND_IFILE {
         return Err(MorlocError::Other(format!(
             "bracket slice on non-IFile handle (kind = {})",
@@ -7741,120 +7724,201 @@ fn ifile_bracket_slice_against_slot(
         return slice_runs(local, &runs).and_then(|p| require_text(p, &schema));
     }
 
-    let mut work: SliceWork = {
+    let (proj_offset, proj_schema) = navigate_static_field_offset(&local.elem_schema, tail_steps)?;
+    let step = step.unwrap_or(1);
+    let runs = {
         let cum = local
             .subpacket_elem_cum
             .as_ref()
             .expect("ensure_elem_cum populates subpacket_elem_cum");
-        let plan: Vec<(usize, u64)> = slice
-            .indices()
-            .map(|idx_u| {
-                let sub_k = cum.partition_point(|&c| c <= idx_u) - 1;
-                (sub_k, idx_u - cum[sub_k])
-            })
-            .collect();
-        let (proj_offset, proj_schema) =
-            navigate_static_field_offset(&local.elem_schema, tail_steps)?;
-        SliceWork {
-            proj_offset,
-            proj_schema,
-            elem_width: local.elem_schema.width,
-            plan,
-            materialised: std::collections::BTreeMap::new(),
-        }
+        strided_runs(cum, &slice, step)
     };
-
-    let n_out = work.plan.len();
-
-    // Allocate the output Array structure (16 B) + the element-data buffer
-    // (n_out * elem_width bytes). The Array struct is a separate SHM block;
-    // its `data` relptr points to the buffer.
-    let arr_ptr = shm::shcalloc(1, std::mem::size_of::<shm_types_crate::Array>())?;
-    // Output element width is the PROJECTED schema's width (just the
-    // tail field's width when chain-fused; the full record width when
-    // the tail is empty). Source element width is the full record's
-    // width on disk -- we offset into each record by proj_offset to
-    // find the projected sub-field.
-    let out_elem_width = work.proj_schema.width;
+    let n_out = width::usize_from_u64(slice.len());
     if n_out == 0 {
-        // Empty slice: data relptr = RELNULL.
+        let arr_ptr = shm::shcalloc(1, std::mem::size_of::<shm_types_crate::Array>())?;
         let arr = unsafe { &mut *(arr_ptr as *mut shm_types_crate::Array) };
         arr.size = 0;
         arr.data = morloc_runtime_types::shm_types::RELNULL;
         return Ok(arr_ptr);
     }
-    // Fast path: when the projected element is a String, do ONE
-    // shmalloc for the whole output (n element headers + concatenated
-    // string bytes) and cursor-pack each element. Replaces N
-    // per-element shmemcpy calls with one shmalloc + N memcpys, for
-    // slice patterns like
-    // `.[i:j].field-of-Str` that the chain-fusion path produces. For
-    // anything else we keep the per-element deep_copy_with route
-    // below, which already handles the full schema zoo.
-    if work.proj_schema.serial_type == SerialType::String {
-        let r = slice_bulk_pack_str(
-            local, &mut work.plan, &mut work.materialised,
-            work.elem_width, work.proj_offset,
-        );
-        for (_, s) in std::mem::take(&mut work.materialised) {
-            s.release();
-        }
-        let _ = shm::shfree(arr_ptr);
-        return r.and_then(|p| require_text(p, &array_schema(&work.proj_schema)));
+    let cut = StridedCut { elem_width: local.elem_schema.width, proj_offset, step, n_out };
+    if proj_schema.is_fixed_width() {
+        return slice_strided_flat(local, &runs, &cut, proj_schema.width);
     }
-    // The generic route copies element by element and cannot know the
-    // result's size until it has, so it builds with a recorded block per
-    // variable-length part and consolidates into one block at the end --
-    // the shape a pool can release.
-    // Every block the walk takes until `consolidate` owns them; an error
-    // before then gives all of them back.
+    if proj_schema.serial_type == SerialType::String {
+        return slice_bulk_pack_str(local, &runs, &cut).and_then(|p| require_text(p, &array_schema(&proj_schema)));
+    }
+    slice_strided_deep(local, &runs, &cut, &proj_schema)
+}
+
+// SLOT-38
+fn strided_runs(cum: &[u64], slice: &slice::Slice, step: i64) -> Vec<(usize, usize, usize)> {
+    let mut runs = Vec::new();
+    let Some(mut at) = slice.indices().next() else { return runs };
+    let s = step.unsigned_abs();
+    let mut left = slice.len();
+    while left > 0 {
+        let k = cum.partition_point(|&c| c <= at) - 1;
+        let room = if step > 0 { (cum[k + 1] - 1 - at) / s } else { (at - cum[k]) / s } + 1;
+        let count = room.min(left);
+        runs.push((k, width::usize_from_u64(at - cum[k]), width::usize_from_u64(count)));
+        left -= count;
+        if left > 0 {
+            at = if step > 0 { at + count * s } else { at - count * s };
+        }
+    }
+    runs
+}
+
+// SLOT-38
+struct StridedCut {
+    elem_width: usize,
+    proj_offset: usize,
+    step: i64,
+    n_out: usize,
+}
+
+impl StridedCut {
+    fn locate(&self, src: &SubpacketSrc, first: usize, count: usize) -> Result<(*const u8, isize), MorlocError> {
+        let s = width::usize_from_u64(self.step.unsigned_abs());
+        let reach = (count - 1)
+            .checked_mul(s)
+            .ok_or_else(|| MorlocError::Other("IFile slice: a run's stride overflows".into()))?;
+        let low = if self.step > 0 {
+            first
+        } else {
+            first
+                .checked_sub(reach)
+                .ok_or_else(|| MorlocError::Other("IFile slice: a run starts before its sub-packet".into()))?
+        };
+        let records = run_records(src, self.elem_width, low, reach + 1)?;
+        // SAFETY: SLOT-38: run_records placed all reach + 1 records from low inside the payload.
+        let at = unsafe { records.add((first - low) * self.elem_width + self.proj_offset) };
+        let stride = if count > 1 { (s * self.elem_width) as isize } else { 0 };
+        Ok((at, if self.step > 0 { stride } else { -stride }))
+    }
+}
+
+// SLOT-38
+fn release_passed(local: &ProcessLocalSlot, src: SubpacketSrc, interior: bool) {
+    let mapped = match src {
+        SubpacketSrc::File { payload_base, payload_len, .. } => Some((payload_base as u64 - local.mmap_ptr as u64, payload_len)),
+        SubpacketSrc::Shm { .. } => None,
+    };
+    src.release();
+    if let Some((off, len)) = mapped.filter(|_| interior) {
+        drop_mapped_range(local, off, off + len);
+    }
+}
+
+// SLOT-38
+fn walk_runs(
+    local: &mut ProcessLocalSlot,
+    runs: &[(usize, usize, usize)],
+    cut: &StridedCut,
+    visit: &mut dyn FnMut(&SubpacketSrc, *const u8, isize, usize) -> Result<(), MorlocError>,
+) -> Result<(), MorlocError> {
+    let ends = slice_ends(runs.iter().map(|r| r.0));
+    for (i, &(sub_k, first, count)) in runs.iter().enumerate() {
+        let src = slice_source(local, sub_k, ends)?;
+        let visited = cut.locate(&src, first, count).and_then(|(at, stride)| visit(&src, at, stride, count));
+        release_passed(local, src, i > 0 && i + 1 < runs.len());
+        visited?;
+        slice_run_passed();
+    }
+    Ok(())
+}
+
+// SLOT-38
+unsafe fn copy_strided(src: *const u8, stride: isize, dst: *mut u8, w: usize, count: usize) {
+    unsafe fn fixed<const W: usize>(src: *const u8, stride: isize, dst: *mut u8, count: usize) {
+        for j in 0..count {
+            std::ptr::copy_nonoverlapping(src.offset(j as isize * stride), dst.add(j * W), W);
+        }
+    }
+    match w {
+        1 => fixed::<1>(src, stride, dst, count),
+        2 => fixed::<2>(src, stride, dst, count),
+        4 => fixed::<4>(src, stride, dst, count),
+        8 => fixed::<8>(src, stride, dst, count),
+        16 => fixed::<16>(src, stride, dst, count),
+        24 => fixed::<24>(src, stride, dst, count),
+        _ => {
+            for j in 0..count {
+                std::ptr::copy_nonoverlapping(src.offset(j as isize * stride), dst.add(j * w), w);
+            }
+        }
+    }
+}
+
+// SLOT-38
+fn slice_strided_flat(
+    local: &mut ProcessLocalSlot,
+    runs: &[(usize, usize, usize)],
+    cut: &StridedCut,
+    out_w: usize,
+) -> Result<AbsPtr, MorlocError> {
+    let size = cut
+        .n_out
+        .checked_mul(out_w)
+        .ok_or_else(|| MorlocError::Other("IFile slice: the result is too large".into()))?;
+    let (block, buf) = alloc_array_block(size)?;
+    let mut k = 0usize;
+    let built = walk_runs(local, runs, cut, &mut |_, at, stride, count| {
+        // SAFETY: SLOT-38: locate bounds the source records, and the run's count elements fit the result's remaining slots.
+        unsafe { copy_strided(at, stride, buf.add(k * out_w), out_w, count) };
+        k += count;
+        Ok(())
+    })
+    .and_then(|()| {
+        let out = unsafe { &mut *(block as *mut shm_types_crate::Array) };
+        out.size = k;
+        out.data = shm::abs2rel(buf as AbsPtr)?;
+        Ok(())
+    });
+    if let Err(e) = built {
+        let _ = shm::shfree(block);
+        return Err(e);
+    }
+    Ok(block)
+}
+
+// SLOT-38
+fn slice_strided_deep(
+    local: &mut ProcessLocalSlot,
+    runs: &[(usize, usize, usize)],
+    cut: &StridedCut,
+    proj_schema: &Schema,
+) -> Result<AbsPtr, MorlocError> {
+    let out_w = proj_schema.width;
+    let arr_ptr = shm::shcalloc(1, std::mem::size_of::<shm_types_crate::Array>())?;
     let mut parts: Vec<AbsPtr> = Vec::new();
     let walked = (|| -> Result<(), MorlocError> {
-        let buf_ptr: AbsPtr = shm::shcalloc(n_out, out_elem_width)?;
+        let buf_ptr: AbsPtr = shm::shcalloc(cut.n_out, out_w)?;
         parts.push(buf_ptr);
-        // For each output slot, ensure the source sub-packet is located,
-        // then deep_copy the projected sub-field into the output buffer
-        // slot. Sub-packets are kept by sub_k for the duration of the walk
-        // so a slice spanning many elements within one sub-packet pays
-        // only one location cost.
-        let ends = slice_ends(work.plan.iter().map(|p| p.0));
-        for (out_i, &(sub_k, local_idx)) in work.plan.iter().enumerate() {
-            if !work.materialised.contains_key(&sub_k) {
-                let src = slice_source(local, sub_k, ends)?;
-                work.materialised.insert(sub_k, src);
-            }
-            let src = work.materialised.get(&sub_k).unwrap();
-            let arr = unsafe { &*(src.arr_base() as *const shm_types_crate::Array) };
-            if local_idx >= arr.size as u64 {
-                return Err(MorlocError::Other(format!(
-                    "slice plan: local index {} out of bounds for sub-packet {} (size {})",
-                    local_idx, sub_k, arr.size,
-                )));
-            }
-            let dst = unsafe { (buf_ptr as *mut u8).add(out_i * out_elem_width) };
-            // The source's space resolves every relptr the copy follows:
-            // the mapped payload for an uncompressed sub-packet, SHM for a
-            // decompressed one. `proj_offset` hops over any record fields
-            // the chain fusion is skipping.
+        let mut k = 0usize;
+        walk_runs(local, runs, cut, &mut |src, at, stride, count| {
             let space = src.space();
-            let (_, records) = src.records(work.elem_width)?;
-            // SAFETY: local_idx is inside the records region just resolved.
-            unsafe {
-                let elem_src = (records as *const u8)
-                    .add(local_idx as usize * work.elem_width)
-                    .add(work.proj_offset);
-                voidstar::deep_copy_alloc(
-                    elem_src, dst, &work.proj_schema, &space,
-                    voidstar::CopyAlloc::Recording(&mut parts),
-                )?;
+            for j in 0..count {
+                // SAFETY: SLOT-38: locate bounds the source records; slot k of the bank is inside it.
+                unsafe {
+                    voidstar::deep_copy_alloc(
+                        at.offset(j as isize * stride),
+                        (buf_ptr as *mut u8).add(k * out_w),
+                        proj_schema,
+                        &space,
+                        voidstar::CopyAlloc::Recording(&mut parts),
+                    )?;
+                }
+                k += 1;
             }
-        }
+            Ok(())
+        })?;
         let arr = unsafe { &mut *(arr_ptr as *mut shm_types_crate::Array) };
-        arr.size = n_out;
+        arr.size = k;
         arr.data = shm::abs2rel(buf_ptr)?;
         Ok(())
     })();
-    work.materialised.clear();
     if let Err(e) = walked {
         for p in parts {
             let _ = shm::shfree(p);
@@ -7862,10 +7926,28 @@ fn ifile_bracket_slice_against_slot(
         let _ = shm::shfree(arr_ptr);
         return Err(e);
     }
-    let out_schema = array_schema(&work.proj_schema);
-    // SAFETY: `parts` lists every block the copies above took and the
-    // element bank they were written into; nothing else points into them.
+    let out_schema = array_schema(proj_schema);
+    // SAFETY: SLOT-38: `parts` lists every block the copies took and the bank they were written into.
     unsafe { voidstar::consolidate(arr_ptr, &out_schema, &parts) }.and_then(|p| require_text(p, &out_schema))
+}
+
+#[cfg(test)]
+thread_local! {
+    static SLICE_RUN_PROBE: std::cell::RefCell<Option<Box<dyn FnMut()>>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn set_slice_run_probe(f: Option<Box<dyn FnMut()>>) {
+    SLICE_RUN_PROBE.with(|p| *p.borrow_mut() = f);
+}
+
+fn slice_run_passed() {
+    #[cfg(test)]
+    SLICE_RUN_PROBE.with(|p| {
+        if let Some(f) = p.borrow_mut().as_mut() {
+            f()
+        }
+    });
 }
 
 fn unit_runs(cum: &[u64], lo: u64, hi: u64) -> Vec<(usize, usize, usize)> {
@@ -7926,16 +8008,9 @@ pub fn shared_ifile_slice_with(
             }
             let src = slice_source(local, sub_k, ends)?;
             let decoded = slice_piece(&src, &elem_schema, first, count, &mut *decode);
-            let mapped = match src {
-                SubpacketSrc::File { payload_base, payload_len, .. } => Some((payload_base as u64 - local.mmap_ptr as u64, payload_len)),
-                SubpacketSrc::Shm { .. } => None,
-            };
-            src.release();
+            release_passed(local, src, i > 0 && i + 1 < runs.len());
             if !decoded? {
                 return Ok(false);
-            }
-            if let Some((off, len)) = mapped.filter(|_| i > 0 && i + 1 < runs.len()) {
-                drop_mapped_range(local, off, off + len);
             }
         }
         Ok(true)
@@ -8176,144 +8251,79 @@ fn copy_runs(plans: &[RunPlan<'_>], elem_schema: &Schema) -> Result<AbsPtr, Morl
     Ok(block)
 }
 
-/// Bulk-pack a String-valued slice into one SHM block.
-///
-/// Layout in the output buffer:
-///   [Array{size,data} * n_out] [concatenated u8 bytes]
-///
-/// Each Array's `data` relptr addresses into the byte tail of the
-/// same buffer. One shmalloc for the whole slice, regardless of N --
-/// the value's own `Array` header included, so the caller's single
-/// `shfree` gives all of it back. Replaces the per-element shmemcpy in
-/// `deep_copy_with`'s String arm -- the dominant cost for record slices that the chain-fusion path projects down to a
-/// String field.
-///
-/// Caller is responsible for releasing `work.materialised`.
+// SLOT-38
 fn slice_bulk_pack_str(
     local: &mut ProcessLocalSlot,
-    plan: &mut Vec<(usize, u64)>,
-    materialised: &mut std::collections::BTreeMap<usize, SubpacketSrc>,
-    elem_width: usize,
-    proj_offset: usize,
+    runs: &[(usize, usize, usize)],
+    cut: &StridedCut,
 ) -> Result<AbsPtr, MorlocError> {
-    let n_out = plan.len();
     let hdr_size = std::mem::size_of::<shm_types_crate::Array>();
-
-    // Cache the resolved sub-packet context across consecutive elements
-    // sharing the same `sub_k`. For a contiguous slice this collapses
-    // 200 K resolver/array lookups to a single resolve at sub-packet
-    // boundaries. For a fragmented slice (rare, requires step > 1
-    // across sub-packet boundaries) the cache misses fall back to the
-    // recompute path.
-    struct SrcCtx {
-        sub_k: Option<usize>,
-        // The sub-packet's records, resolved once, and the space its
-        // per-element string relptrs resolve in.
-        arr_data: AbsPtr,
-        arr_size: u64,
-        space: SrcSpace,
-    }
-    let mut ctx = SrcCtx {
-        sub_k: None,
-        arr_data: std::ptr::null::<u8>() as AbsPtr,
-        arr_size: 0,
-        space: SrcSpace::Shm(voidstar::Arena),
-    };
-    // Pass 1: walk the plan, resolve every source Array<u8> (the Str
-    // wire form), record (src_data_ptr, len) for each element, and
-    // sum up the total tail size.
-    let mut srcs: Vec<(AbsPtr, usize)> = Vec::with_capacity(n_out);
-    let mut total_tail: usize = 0;
-    let ends = slice_ends(plan.iter().map(|p| p.0));
-    for &(sub_k, local_idx) in plan.iter() {
-        if ctx.sub_k != Some(sub_k) {
-            if !materialised.contains_key(&sub_k) {
-                let src = slice_source(local, sub_k, ends)?;
-                materialised.insert(sub_k, src);
-            }
-            let src = materialised.get(&sub_k).unwrap();
-            if let SubpacketSrc::File { payload_base, payload_len, .. } = *src {
-                // Tell the kernel to prefault this sub-packet's payload
-                // range. For a single-pass walk that touches the records
-                // section + the string tail, bulk readahead cuts the cost
-                // from N synchronous single-page faults to payload_len /
-                // readahead-window pages.
-                unsafe {
-                    libc::madvise(
-                        payload_base as *mut libc::c_void,
-                        payload_len as usize,
-                        libc::MADV_WILLNEED,
-                    );
-                }
-            }
-            let (n, arr_data) = src.records(elem_width)?;
-            ctx = SrcCtx {
-                sub_k: Some(sub_k),
-                arr_data,
-                arr_size: width::u64_from_usize(n),
-                space: src.space(),
-            };
-        }
-        if local_idx >= ctx.arr_size {
-            return Err(MorlocError::Other(format!(
-                "slice plan: local index {} out of bounds for sub-packet {} (size {})",
-                local_idx, sub_k, ctx.arr_size,
-            )));
-        }
-        // Land on slot 0 (or whatever proj_offset says) of the element.
-        let elem_src = unsafe {
-            (ctx.arr_data as *const u8)
-                .add(local_idx as usize * elem_width)
-                .add(proj_offset)
-        };
-        let str_arr = unsafe { &*(elem_src as *const shm_types_crate::Array) };
-        let str_len = str_arr.size;
-        let src_str_data: AbsPtr = if str_len == 0 {
-            std::ptr::null::<u8>() as AbsPtr
-        } else {
-            ctx.space.resolve(str_arr.data, str_len)?
-        };
-        srcs.push((src_str_data, str_len));
-        total_tail += str_len;
-    }
-
-    // One bare shmalloc for the whole slice -- Pass 2 writes every
-    // byte (headers in front, string tail behind), so a zero-fill
-    // would be 100 % wasted work.
-    // The value's own Array header sits in front of the element headers, so
-    // the whole slice -- header, elements and bytes -- is one block.
-    let buf_size = n_out * hdr_size + total_tail;
-    let block = shm::shmalloc(hdr_size + buf_size)?;
-    let buf_ptr = unsafe { (block as *mut u8).add(hdr_size) };
-    let hdr_start = buf_ptr;
-    let mut tail_cursor = unsafe { buf_ptr.add(n_out * hdr_size) };
-    // abs2rel adds a constant (volume index + base) to a pointer
-    // offset; the offset between two same-buffer pointers is just
-    // `ptr.offset_from`. Compute the cursor's relptr once via abs2rel
-    // and bump by string length per element so we skip 200 K
-    // abs2rel calls.
-    let mut tail_rel = shm::abs2rel(tail_cursor)?;
-    for (k, &(src_data, len)) in srcs.iter().enumerate() {
-        let hdr_slot = unsafe { (hdr_start as *mut shm_types_crate::Array).add(k) };
-        if len == 0 {
+    let mut tail = 0usize;
+    walk_runs(local, runs, cut, &mut |src, at, stride, count| {
+        if let SubpacketSrc::File { payload_base, payload_len, .. } = *src {
             unsafe {
-                (*hdr_slot).size = 0;
-                (*hdr_slot).data = morloc_runtime_types::shm_types::RELNULL;
+                libc::madvise(payload_base as *mut libc::c_void, payload_len as usize, libc::MADV_WILLNEED);
             }
-            continue;
         }
-        unsafe {
-            (*hdr_slot).size = len;
-            (*hdr_slot).data = tail_rel;
-            std::ptr::copy_nonoverlapping(src_data, tail_cursor, len);
-            tail_cursor = tail_cursor.add(len);
+        for j in 0..count {
+            // SAFETY: SLOT-38: locate bounds the source records.
+            let s = unsafe { &*(at.offset(j as isize * stride) as *const shm_types_crate::Array) };
+            tail = tail
+                .checked_add(s.size)
+                .ok_or_else(|| MorlocError::Other("IFile slice: the result is too large".into()))?;
         }
-        tail_rel += len as RelPtr;
+        Ok(())
+    })?;
+    let too_large = || MorlocError::Other("IFile slice: the result is too large".into());
+    let heads = cut.n_out.checked_mul(hdr_size).ok_or_else(too_large)?;
+    let buf_size = heads.checked_add(tail).ok_or_else(too_large)?;
+    let block = shm::shmalloc(hdr_size.checked_add(buf_size).ok_or_else(too_large)?)?;
+    let buf = unsafe { (block as *mut u8).add(hdr_size) };
+    let mut k = 0usize;
+    let mut cursor = heads;
+    let filled = shm::abs2rel(buf as AbsPtr).and_then(|buf_rel| {
+        walk_runs(local, runs, cut, &mut |src, at, stride, count| {
+            let space = src.space();
+            if k + count > cut.n_out {
+                return Err(MorlocError::Other("IFile slice: a run outgrew the result".into()));
+            }
+            for j in 0..count {
+                // SAFETY: SLOT-38: locate bounds the source records; header slot k is inside the result.
+                unsafe {
+                    let s = &*(at.offset(j as isize * stride) as *const shm_types_crate::Array);
+                    let slot = (buf as *mut shm_types_crate::Array).add(k);
+                    (*slot).size = s.size;
+                    (*slot).data = morloc_runtime_types::shm_types::RELNULL;
+                    if s.size > 0 {
+                        if s.size > buf_size - cursor {
+                            return Err(MorlocError::Other(
+                                "IFile slice: a sub-packet's strings changed between the passes over it".into(),
+                            ));
+                        }
+                        let from = space.resolve(s.data, s.size)?;
+                        std::ptr::copy_nonoverlapping(from as *const u8, buf.add(cursor), s.size);
+                        (*slot).data = buf_rel + cursor as RelPtr;
+                        cursor += s.size;
+                    }
+                }
+                k += 1;
+            }
+            Ok(())
+        })?;
+        if k != cut.n_out || cursor != buf_size {
+            return Err(MorlocError::Other(
+                "IFile slice: a sub-packet's strings changed between the passes over it".into(),
+            ));
+        }
+        let arr = unsafe { &mut *(block as *mut shm_types_crate::Array) };
+        arr.size = k;
+        arr.data = buf_rel;
+        Ok(())
+    });
+    if let Err(e) = filled {
+        let _ = shm::shfree(block);
+        return Err(e);
     }
-    let buf_relptr = shm::abs2rel(buf_ptr)?;
-    let arr = unsafe { &mut *(block as *mut shm_types_crate::Array) };
-    arr.size = n_out;
-    arr.data = buf_relptr;
     Ok(block)
 }
 
@@ -12292,6 +12302,269 @@ mod tests {
             shared_close_handle(f).unwrap();
             cached.sort();
             assert_eq!(cached, ends, "slice {start:?}:{stop:?}:{step:?} cached {cached:?}");
+        }
+    }
+
+    fn oracle_bulk_pack_str(
+        local: &mut ProcessLocalSlot,
+        plan: &[(usize, u64)],
+        materialised: &mut std::collections::BTreeMap<usize, SubpacketSrc>,
+        elem_width: usize,
+        proj_offset: usize,
+    ) -> Result<AbsPtr, MorlocError> {
+        let n_out = plan.len();
+        let hdr_size = std::mem::size_of::<shm_types_crate::Array>();
+        let mut srcs: Vec<(AbsPtr, usize)> = Vec::with_capacity(n_out);
+        let mut total_tail: usize = 0;
+        let ends = slice_ends(plan.iter().map(|p| p.0));
+        for &(sub_k, local_idx) in plan.iter() {
+            if !materialised.contains_key(&sub_k) {
+                let src = slice_source(local, sub_k, ends)?;
+                materialised.insert(sub_k, src);
+            }
+            let src = materialised.get(&sub_k).unwrap();
+            let (n, arr_data) = src.records(elem_width)?;
+            assert!((local_idx as usize) < n);
+            let elem_src = unsafe { (arr_data as *const u8).add(local_idx as usize * elem_width).add(proj_offset) };
+            let str_arr = unsafe { &*(elem_src as *const shm_types_crate::Array) };
+            let p = if str_arr.size == 0 { std::ptr::null_mut() } else { src.space().resolve(str_arr.data, str_arr.size)? };
+            srcs.push((p, str_arr.size));
+            total_tail += str_arr.size;
+        }
+        let block = shm::shmalloc(hdr_size + n_out * hdr_size + total_tail)?;
+        let buf_ptr = unsafe { (block as *mut u8).add(hdr_size) };
+        let mut tail_cursor = unsafe { buf_ptr.add(n_out * hdr_size) };
+        let mut tail_rel = shm::abs2rel(tail_cursor)?;
+        for (k, &(src_data, len)) in srcs.iter().enumerate() {
+            let hdr_slot = unsafe { (buf_ptr as *mut shm_types_crate::Array).add(k) };
+            unsafe {
+                (*hdr_slot).size = len;
+                (*hdr_slot).data = if len == 0 { morloc_runtime_types::shm_types::RELNULL } else { tail_rel };
+                if len > 0 {
+                    std::ptr::copy_nonoverlapping(src_data, tail_cursor, len);
+                    tail_cursor = tail_cursor.add(len);
+                }
+            }
+            tail_rel += len as RelPtr;
+        }
+        let arr = unsafe { &mut *(block as *mut shm_types_crate::Array) };
+        arr.size = n_out;
+        arr.data = shm::abs2rel(buf_ptr)?;
+        Ok(block)
+    }
+
+    /// The slice by one element plan entry, one deep copy and one
+    /// consolidate per element, holding every sub-packet it touches.
+    fn oracle_slice(h: i64, start: Option<i64>, stop: Option<i64>, step: Option<i64>, tail: &[WalkStep]) -> Result<AbsPtr, MorlocError> {
+        with_process_local_slot(h, |local, _| {
+            ensure_elem_cum(local)?;
+            let cum = local.subpacket_elem_cum.clone().unwrap();
+            let slice = slice::Slice::new(*cum.last().unwrap_or(&0u64), start, stop, step)?;
+            if let (Some((lo, hi)), true) = (slice.unit_range(), tail.is_empty()) {
+                let schema = array_schema(&local.elem_schema);
+                return slice_runs(local, &unit_runs(&cum, lo, hi)).and_then(|p| require_text(p, &schema));
+            }
+            let plan: Vec<(usize, u64)> = slice
+                .indices()
+                .map(|i| {
+                    let k = cum.partition_point(|&c| c <= i) - 1;
+                    (k, i - cum[k])
+                })
+                .collect();
+            let (proj_offset, proj_schema) = navigate_static_field_offset(&local.elem_schema, tail)?;
+            let elem_width = local.elem_schema.width;
+            let mut materialised = std::collections::BTreeMap::new();
+            let arr_ptr = shm::shcalloc(1, std::mem::size_of::<shm_types_crate::Array>())?;
+            let n_out = plan.len();
+            if n_out == 0 {
+                let arr = unsafe { &mut *(arr_ptr as *mut shm_types_crate::Array) };
+                arr.size = 0;
+                arr.data = morloc_runtime_types::shm_types::RELNULL;
+                return Ok(arr_ptr);
+            }
+            if proj_schema.serial_type == SerialType::String {
+                let r = oracle_bulk_pack_str(local, &plan, &mut materialised, elem_width, proj_offset);
+                materialised.clear();
+                shm::shfree(arr_ptr).unwrap();
+                return r.and_then(|p| require_text(p, &array_schema(&proj_schema)));
+            }
+            let out_w = proj_schema.width;
+            let buf_ptr = shm::shcalloc(n_out, out_w)?;
+            let mut parts = vec![buf_ptr];
+            let ends = slice_ends(plan.iter().map(|p| p.0));
+            for (out_i, &(sub_k, local_idx)) in plan.iter().enumerate() {
+                if !materialised.contains_key(&sub_k) {
+                    materialised.insert(sub_k, slice_source(local, sub_k, ends)?);
+                }
+                let src = materialised.get(&sub_k).unwrap();
+                let (n, records) = src.records(elem_width)?;
+                assert!((local_idx as usize) < n);
+                unsafe {
+                    let elem_src = (records as *const u8).add(local_idx as usize * elem_width).add(proj_offset);
+                    voidstar::deep_copy_alloc(
+                        elem_src, (buf_ptr as *mut u8).add(out_i * out_w), &proj_schema, &src.space(),
+                        voidstar::CopyAlloc::Recording(&mut parts),
+                    )?;
+                }
+            }
+            materialised.clear();
+            let arr = unsafe { &mut *(arr_ptr as *mut shm_types_crate::Array) };
+            arr.size = n_out;
+            arr.data = shm::abs2rel(buf_ptr)?;
+            let out_schema = array_schema(&proj_schema);
+            unsafe { voidstar::consolidate(arr_ptr, &out_schema, &parts) }.and_then(|p| require_text(p, &out_schema))
+        })
+    }
+
+    fn slice_json(block: AbsPtr, list: &Schema) -> serde_json::Value {
+        serde_json::from_str(&crate::json::voidstar_to_json_string(block, list).unwrap()).unwrap()
+    }
+
+    /// The records of a list block of fixed-width elements, as bytes.
+    fn slice_record_bytes(block: AbsPtr, width: usize) -> Vec<u8> {
+        let a = unsafe { &*(block as *const shm_types_crate::Array) };
+        if a.size == 0 {
+            return Vec::new();
+        }
+        unsafe { std::slice::from_raw_parts(shm::rel2abs(a.data).unwrap() as *const u8, a.size * width).to_vec() }
+    }
+
+    /// A strided or field-tail slice holds the same values as the slice by
+    /// one plan entry and one deep copy per element, for every slice form,
+    /// element type and tail, compressed or not; fixed-width results match
+    /// byte for byte.
+    #[test]
+    fn a_strided_slice_is_the_slice_copied_element_by_element() {
+        let _shm = crate::own_test_registry();
+        let dir = concat_test_dir("strided_slice_oracle");
+        let sizes = [5usize, 7, 0, 3, 6, 1, 9];
+        let n: usize = sizes.iter().sum();
+        let elem = |list: &str, i: usize| match list {
+            "af8" => format!("{}.5", i),
+            "ai4" => format!("{}", i as i64 - 9),
+            "as" => format!("\"{}\"", "s".repeat(i % 11)),
+            "at3i8f8f8" => format!("[{}, {}.25, {}.5]", i, i, i * 3),
+            "at2bf8" => format!("[{}, {}.75]", i % 2 == 0, i),
+            "at2sai8" => format!("[\"{}\", [{}]]", "q".repeat(i % 5), (0..i % 4).map(|j| j.to_string()).collect::<Vec<_>>().join(",")),
+            "aai8" => format!("[{}]", (0..i % 6).map(|j| (i * 10 + j).to_string()).collect::<Vec<_>>().join(",")),
+            _ => format!("{{\"n\": {}.25, \"s\": \"{}\"}}", i, "r".repeat(i * 3 % 13)),
+        };
+        let tails: &[(&str, &[&str])] = &[
+            ("af8", &[""]),
+            ("ai4", &[""]),
+            ("as", &[""]),
+            ("at3i8f8f8", &["", ".0", ".1", ".2"]),
+            ("at2bf8", &["", ".0", ".1"]),
+            ("at2sai8", &["", ".0", ".1"]),
+            ("aai8", &[""]),
+            ("am21nf81ss", &["", ".n", ".s"]),
+        ];
+        let bounds = [None, Some(0), Some(1), Some(4), Some(5), Some(12), Some(17), Some(35), Some(36), Some(80), Some(-1), Some(-3), Some(-14), Some(-100)];
+        let steps = [None, Some(1), Some(2), Some(3), Some(7), Some(13), Some(50), Some(-1), Some(-2), Some(-5), Some(-13), Some(-60)];
+        let mut forms = 0usize;
+        for &(list, tail_strs) in tails {
+            let schema = parse_schema(list).unwrap();
+            let mut at = 0;
+            let batches: Vec<String> = sizes
+                .iter()
+                .map(|&k| {
+                    let b = format!("[{}]", (at..at + k).map(|i| elem(list, i)).collect::<Vec<_>>().join(","));
+                    at += k;
+                    b
+                })
+                .collect();
+            for level in [0u8, 3] {
+                let p = dir.join(format!("{list}-{level}.idx")).to_str().unwrap().to_string();
+                write_level_stream(&p, list, level, &batches);
+                let f = open_ifile(&p).unwrap();
+                assert_eq!(handle_length(f).unwrap(), n as u64);
+                let before = live_blocks();
+                for tail in tail_strs.iter() {
+                    let steps_of = || if tail.is_empty() { Vec::new() } else { crate::stream_walk::parse_field_only_tail(tail).unwrap().unwrap() };
+                    let (_, proj) = navigate_static_field_offset(&schema.parameters[0], &steps_of()).unwrap();
+                    let out_list = array_schema(&proj);
+                    for &start in &bounds {
+                        for &stop in &bounds {
+                            for &step in &steps {
+                                let what = format!("{list}{tail} level {level} [{start:?}:{stop:?}:{step:?}]");
+                                let want = oracle_slice(f, start, stop, step, &steps_of()).expect(&what);
+                                let got = shared_ifile_bracket_slice_with_tail(f, start, stop, step, &steps_of()).expect(&what);
+                                assert_eq!(slice_json(got, &out_list), slice_json(want, &out_list), "{what}");
+                                if proj.is_fixed_width() {
+                                    assert_eq!(slice_record_bytes(got, proj.width), slice_record_bytes(want, proj.width), "{what}");
+                                }
+                                shm::shfree(got).unwrap();
+                                shm::shfree(want).unwrap();
+                                forms += 1;
+                            }
+                        }
+                    }
+                }
+                let cached = with_process_local_slot(f, |local, _| Ok(local.cache.entries.len())).unwrap();
+                assert_eq!(live_blocks(), before + cached, "{list} level {level}: a slice left blocks behind");
+                shared_close_handle(f).unwrap();
+            }
+        }
+        assert!(forms > 10000);
+        assert!(oracle_slice(1, None, None, Some(0), &[]).is_err());
+    }
+
+    /// A strided or field-tail slice holds, between the sub-packets it
+    /// reads, no more shared memory than its result and the sub-packets
+    /// SLOT-34 keeps: each one is released once the walk has passed it.
+    #[test]
+    fn a_strided_slice_releases_each_sub_packet_it_has_passed() {
+        let _shm = crate::own_test_registry();
+        let dir = concat_test_dir("strided_slice_memory");
+        let subs = 40usize;
+        let k = 4000usize;
+        let cases: &[(&str, &str, i64)] = &[
+            ("af8", "", 2),
+            ("af8", "", -1),
+            ("af8", "", 7),
+            ("at3i8f8f8", ".1", 1),
+            ("as", "", 2),
+            ("am21nf81ss", ".s", 3),
+            ("am21nf81ss", "", 7),
+        ];
+        for &(list, tail, step) in cases {
+            let elem = |i: usize| match list {
+                "af8" => format!("{}.5", i),
+                "at3i8f8f8" => format!("[{}, {}.25, 1.5]", i, i),
+                "as" => format!("\"{}\"", "s".repeat(10 + i % 20)),
+                _ => format!("{{\"n\": {}.25, \"s\": \"{}\"}}", i, "r".repeat(10 + i % 20)),
+            };
+            let batches: Vec<String> = (0..subs)
+                .map(|b| format!("[{}]", (b * k..(b + 1) * k).map(elem).collect::<Vec<_>>().join(",")))
+                .collect();
+            let p = dir.join(format!("{list}.idx")).to_str().unwrap().to_string();
+            write_level_stream(&p, list, 3, &batches);
+            let f = open_ifile(&p).unwrap();
+            let sub_bytes = with_process_local_slot(f, |local, _| {
+                let src = materialize_subpacket(local, 1)?;
+                Ok(unsafe { shm::shm_block_size(src.arr_base()) }.unwrap())
+            })
+            .unwrap();
+            let tail_steps = if tail.is_empty() { Vec::new() } else { crate::stream_walk::parse_field_only_tail(tail).unwrap().unwrap() };
+            let live = || {
+                let mut hist = [0usize; 40];
+                shm::live_block_stats(&mut hist).1
+            };
+            let base = live();
+            let peak = std::rc::Rc::new(std::cell::Cell::new(0usize));
+            let seen = peak.clone();
+            set_slice_run_probe(Some(Box::new(move || seen.set(seen.get().max(live())))));
+            let r = shared_ifile_bracket_slice_with_tail(f, None, None, Some(step), &tail_steps);
+            set_slice_run_probe(None);
+            let r = r.unwrap();
+            let out = unsafe { shm::shm_block_size(r) }.unwrap();
+            shm::shfree(r).unwrap();
+            shared_close_handle(f).unwrap();
+            let held = peak.get().saturating_sub(base);
+            let flat = !(list == "am21nf81ss" && tail.is_empty());
+            let bound = if flat { out } else { 4 * out } + 3 * sub_bytes + (64 << 10);
+            assert!(peak.get() > 0, "{list}{tail} step {step}: the probe never ran");
+            assert!(held <= bound, "{list}{tail} step {step}: held {held} bytes between sub-packets; result {out}, sub-packet {sub_bytes}");
         }
     }
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Line up benchmark runs against each other and against the spec.
 
-    python3 compare.py                      # the latest run against the one before
+    python3 compare.py                      # each bench's latest run against its one before
     python3 compare.py RUN [RUN ...]        # these runs, oldest first, newest last
     python3 compare.py --last 4             # the four latest runs
     python3 compare.py --bench xl-calls --item XL-1 RUN_A RUN_B
@@ -16,6 +16,13 @@ run against the one before it, the spec's goal and limit, and a status:
               or Goal says `>=`, or the parameter is a speedup.
     better    better than the previous run by more than the tolerance
     goal      meets the item's `Goal:`
+    miss      misses the item's `Goal:` (reported, never a failure)
+    NOISY     a run compared here had a load above half the core count
+              (performance/README.md: not citable); a change is then
+              never counted as REGRESS or better
+
+With no RUN arguments every bench is compared with its own past: its
+newest run against the newest earlier run holding the same bench.
 
 Exits 1 on any FAIL or REGRESS.
 """
@@ -75,6 +82,12 @@ def load_run(path):
     return out
 
 
+def run_load(head):
+    """The highest load a run header records (load_max, else load)."""
+    loads = [float(m) for m in re.findall(r"load(?:_max)?=([0-9.]+)", head)]
+    return max(loads) if loads else 0.0
+
+
 def resolve(run):
     path = run if os.path.isdir(run) else os.path.join(RESULTS, run)
     if not os.path.isdir(path):
@@ -117,11 +130,23 @@ def main():
                     help="only rows with a status")
     a = ap.parse_args()
 
-    names = a.runs or runs_available()[-(a.last or 2):]
+    if a.runs or a.last:
+        names = a.runs or runs_available()[-a.last:]
+    else:
+        # Each bench against its own past: keep the newest two runs that
+        # hold it, so every bench's newest run has a predecessor.
+        names, seen = [], {}
+        for r in reversed(runs_available()):
+            benches_in = load_run(resolve(r)).keys()
+            if any(seen.get(bn, 0) < 2 for bn in benches_in):
+                names.insert(0, r)
+                for bn in benches_in:
+                    seen[bn] = seen.get(bn, 0) + 1
     if not names:
         sys.exit("no runs in results/")
     paths = [resolve(r) for r in names]
     runs = [load_run(p) for p in paths]
+    noisy_above = (os.cpu_count() or 2) / 2
     conds, errors = spec_conditions()
     for e in errors:
         print(e)
@@ -152,24 +177,29 @@ def main():
             vals = [run.get(bench, ("", {}))[1].get((item, param)) for run in runs]
             unit = next((v[1] for v in vals if v), "")
             nums = [v[0] if v else None for v in vals]
+            loads = [run_load(run[bench][0]) if bench in run else 0.0 for run in runs]
             c = conds.get((item, param), {})
             goal, limit = c.get("goal"), c.get("limit")
             direction = direction_of(param, limit, goal)
-            new = nums[-1]
-            prev = next((x for x in reversed(nums[:-1]) if x is not None), None)
+            have = [i for i, x in enumerate(nums) if x is not None]
+            new = nums[have[-1]] if have else None
+            prev = nums[have[-2]] if len(have) > 1 else None
+            noisy = any(loads[i] > noisy_above for i in have[-2:])
             change, status = "", []
+            if noisy:
+                status.append("NOISY")
             if new is not None and prev not in (None, 0):
                 rel = (new - prev) / abs(prev)
                 change = f"{rel * 100:+.0f}%"
-                if direction:
+                if direction and not noisy:
                     worse = rel > a.tolerance if direction == "<=" else rel < -a.tolerance
                     better = rel < -a.tolerance if direction == "<=" else rel > a.tolerance
                     if worse:
                         status.append("REGRESS")
                     elif better:
                         status.append("better")
-            if new is not None and goal and holds(goal[0], new, goal[1]):
-                status.append("goal")
+            if new is not None and goal:
+                status.append("goal" if holds(goal[0], new, goal[1]) else "miss")
             if new is not None and limit and not holds(limit[0], new, limit[1]):
                 status.insert(0, "FAIL")
             fails += "FAIL" in status

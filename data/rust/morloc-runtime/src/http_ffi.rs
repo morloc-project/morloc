@@ -205,6 +205,29 @@ pub(crate) unsafe fn write_response_ex(
         std::ffi::CStr::from_ptr(extra_headers).to_str().unwrap_or("")
     };
 
+    let body: &[u8] = if body.is_null() || body_len == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(body as *const u8, body_len)
+    };
+    write_parts(fd, status, ct, &[body], extra)
+}
+
+/// One response whose body is `parts` in order, sent with one gathered
+/// write per syscall rather than joined first.
+pub(crate) unsafe fn write_response_parts(
+    fd: i32,
+    status: i32,
+    content_type: &str,
+    parts: &[&[u8]],
+    extra_headers: &std::ffi::CStr,
+) -> bool {
+    crate::daemon_ffi::note_reply_started();
+    write_parts(fd, status, content_type, parts, extra_headers.to_str().unwrap_or(""))
+}
+
+unsafe fn write_parts(fd: i32, status: i32, ct: &str, parts: &[&[u8]], extra: &str) -> bool {
+    let body_len: usize = parts.iter().map(|p| p.len()).sum();
     let header = format!(
         "HTTP/1.1 {} {}\r\n\
          Content-Type: {}\r\n\
@@ -216,20 +239,12 @@ pub(crate) unsafe fn write_response_ex(
          {}\r\n",
         status, http_status_text(status), ct, body_len, extra
     );
-
-    // send_all retries on EAGAIN (non-blocking client fd on macOS) and on a
-    // short header/body send, rather than truncating the response mid-message.
-    if !crate::ipc_ffi::send_all(fd, header.as_ptr(), header.len()) {
-        return false;
+    let mut iov: Vec<libc::iovec> = Vec::with_capacity(parts.len() + 1);
+    iov.push(libc::iovec { iov_base: header.as_ptr() as *mut libc::c_void, iov_len: header.len() });
+    if !crate::daemon_ffi::reply_without_body() {
+        iov.extend(parts.iter().map(|p| libc::iovec { iov_base: p.as_ptr() as *mut libc::c_void, iov_len: p.len() }));
     }
-
-    if !body.is_null() && body_len > 0 && !crate::daemon_ffi::reply_without_body() {
-        if !crate::ipc_ffi::send_all(fd, body as *const u8, body_len) {
-            return false;
-        }
-    }
-
-    true
+    crate::ipc_ffi::send_parts(fd, &mut iov).is_ok()
 }
 
 // -- http_to_daemon_request --
