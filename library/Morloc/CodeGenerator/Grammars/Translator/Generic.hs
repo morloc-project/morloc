@@ -16,7 +16,6 @@ by descriptor fields -- no hardcoded language-specific code.
 -}
 module Morloc.CodeGenerator.Grammars.Translator.Generic
   ( translate
-  , preprocess
   , CodegenManifest (..)
   , printProgram
   , manifoldName
@@ -80,9 +79,6 @@ import qualified System.Process as Proc
 -- | Simple template substitution: replace {{key}} with value
 substituteT :: Text -> [(Text, Text)] -> Text
 substituteT = foldl (\t (k, v) -> T.replace ("{{" <> k <> "}}") v t)
-
-preprocess :: SerialManifold -> MorlocMonad SerialManifold
-preprocess = return . invertSerialManifold
 
 translate :: Lang -> [Source] -> [SerialManifold] -> MorlocMonad Script
 translate lang srcs es = do

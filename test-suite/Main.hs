@@ -21,6 +21,7 @@ import LangSupportTests (langSupportTests)
 import MorlocDepsTests (morlocDepsTests)
 import PatternChainTests (patternChainTests)
 import ArgsBoundTests (argsBoundTests)
+import IndexAllocationTests (indexAllocationTests)
 import LangRegistryCostTests (langRegistryCostTests)
 import PropertyTests (propertyTests)
 import UsefulnessTests (usefulnessTests)
@@ -128,6 +129,7 @@ unitTests =
   , manifoldNameTests
   , patternChainTests
   , argsBoundTests
+  , indexAllocationTests
   , langRegistryCostTests
   , irrefutablePatternLexerTests
   , refutablePatternTests

@@ -1667,9 +1667,9 @@ expressPolyExpr
   pc
   (AnnoS (Idx midx _) (Idx cidx lang, args) (LetS v e1 e2)) = do
     let bodyArgs = case e2 of AnnoS _ (_, ba) _ -> ba
-        letId = case [j | Arg j v' <- bodyArgs, v' == v] of
-          [j] -> j
-          _ -> cidx
+    letId <- case [j | Arg j v' <- bodyArgs, v' == v] of
+      [j] -> return j
+      _ -> MM.getCounter
     let e1Type = case e1 of AnnoS (Idx _ t) _ _ -> mkIdx e1 t
     -- Express children under the LetS's OWN language (from Realize), not the
     -- caller's. expressContainer wraps in a cross-language manifold when the
@@ -1987,9 +1987,11 @@ dataHeadTVar (VarT v) = Just v
 dataHeadTVar (AppT (VarT v) _) = Just v
 dataHeadTVar _ = Nothing
 
--- | Bind a computed function value under @i@, then call it.
-bindThenCall :: Int -> Indexed Type -> PolyExpr -> [PolyExpr] -> PolyExpr
-bindThenCall i fnT fe es = PolyLet i fe . PolyReturn $ PolyApp (PolyLetVar fnT i) es
+-- | Bind a computed function value to a fresh variable, then call it.
+bindThenCall :: Indexed Type -> PolyExpr -> [PolyExpr] -> MorlocMonad PolyExpr
+bindThenCall fnT fe es = do
+  i <- MM.getCounter
+  return . PolyLet i fe . PolyReturn $ PolyApp (PolyLetVar fnT i) es
 
 expressPolyApp ::
   Lang ->
@@ -2003,10 +2005,10 @@ expressPolyApp _ (AnnoS g _ (ExeS (SrcCall (Idx si src)))) xs =
   return . PolyReturn $ PolyApp (PolyExe g (SrcCallP (Written si) src)) xs
 -- A function value computed by an application or an intrinsic (a
 -- constructor's field, a throw), applied: bind it, then call it.
-expressPolyApp lang f@(AnnoS g@(Idx i _) _ e) es
+expressPolyApp lang f@(AnnoS g _ e) es
   | isComputedHead e = do
       fe <- expressPolyExprWrap lang g f
-      return $ bindThenCall i g fe es
+      bindThenCall g fe es
   where
     isComputedHead (AppS _ _) = True
     isComputedHead PatS {} = True
@@ -2033,13 +2035,13 @@ expressPolyApp _ (AnnoS g (_, args) (LetBndS v)) xs = do
 -- function-typed wrapper node: the latter re-enters the eta-abstraction path
 -- ('expressPolyExpr' on a bare @FunT@ value), which calls back into
 -- 'expressPolyApp' and loops.
-expressPolyApp lang (AnnoS (Idx i t) (Idx cidx _, _) (EvalS x)) es = do
+expressPolyApp lang (AnnoS (Idx _ t) (Idx cidx _, _) (EvalS x)) es = do
   x' <- expressPolyExprWrap lang (Idx cidx t) x
-  return $ bindThenCall i (Idx cidx t) (PolyEval (Idx cidx t) x') es
-expressPolyApp lang (AnnoS (Idx i t) (Idx cidx _, _) (DoBlockS x)) es = do
+  bindThenCall (Idx cidx t) (PolyEval (Idx cidx t) x') es
+expressPolyApp lang (AnnoS (Idx _ t) (Idx cidx _, _) (DoBlockS x)) es = do
   let innerT = case t of EffectT _ inner -> inner; _ -> t
   x' <- expressPolyExprWrap lang (mkIdx x innerT) x
-  return $ bindThenCall i (Idx cidx t) (PolyDoBlock (Idx cidx t) x') es
+  bindThenCall (Idx cidx t) (PolyDoBlock (Idx cidx t) x') es
 -- A conditional that yields a function value, applied in head position (e.g. a
 -- let-bound @? c = f : g@ inlined at its single call site). Express each branch
 -- as a function value, bind the resulting conditional closure, and call it via
@@ -2055,7 +2057,7 @@ expressPolyApp lang (AnnoS (Idx i t) (Idx cidx clang, _) (IfS cond thenE elseE))
   cond' <- expressPolyExprWrap clang (mkIdx cond boolType) cond
   thenE' <- expressPolyExprWrap clang (mkIdx thenE t) thenE
   elseE' <- expressPolyExprWrap clang (mkIdx elseE t) elseE
-  return $ bindThenCall i (Idx cidx t) (PolyIf cond' thenE' elseE') es
+  bindThenCall (Idx cidx t) (PolyIf cond' thenE' elseE') es
 expressPolyApp lang (AnnoS (Idx i t) _ (CallS v)) xs = do
   (mid, crossLang) <- lookupRecursiveTarget lang v
   -- Serial manifolds force thunks before serializing, so strip EffectT from the

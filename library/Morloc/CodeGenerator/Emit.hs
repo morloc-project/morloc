@@ -73,9 +73,18 @@ emit ::
   MorlocMonad Script
 emit translateFn lang xs = do
   srcs' <- findSources xs
-  let xs' = map invertSerialManifold xs
+  xs' <- mapM invert xs
   checkDistinctParameters xs'
   translateFn lang srcs' xs'
+
+-- | Invert a manifold, numbering its fresh variables from the program's
+-- index sequence so they are distinct from every index it already holds.
+invert :: SerialManifold -> MorlocMonad SerialManifold
+invert sm = do
+  next <- MM.getCounter
+  let (sm', next') = invertSerialManifold next sm
+  MM.setCounter next'
+  return sm'
 
 -- | Each generated function's parameters are distinct variables: one
 -- variable bound twice is a function no language accepts.

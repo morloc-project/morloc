@@ -88,6 +88,7 @@ module Morloc.Monad
   , Index
   , IndexState (..)
   , runIndex
+  , runIndexFrom
   , newIndex
   , getIndex
   , setIndex
@@ -150,14 +151,11 @@ emptyState path v =
     , stateOutfile = path
     }
 
--- | Reuse the counter for the variable indices of code generation. Every
--- index handed out so far names an expression, some of them manifolds, so
--- the manifold allocator is seeded past them first.
+-- | Start code generation: the manifold allocator is seeded past every
+-- expression index handed out so far. Variable indices continue the same
+-- sequence, so an expression, a manifold and a variable never share an index.
 startCounter :: MorlocMonad ()
-startCounter = do
-  seedManifoldCounter
-  s <- get
-  put $! s {stateCounter = 0}
+startCounter = seedManifoldCounter
 
 -- | Move the manifold allocator past every expression index handed out
 -- so far, so a manifold created by code generation never shares an index
@@ -180,10 +178,12 @@ freshManifoldIndex parentIdx = do
   put $! s {stateManifoldCounter = i + 1, stateSourceMap = srcs}
   return $! i
 
+-- | A fresh index, above every expression, manifold and variable index
+-- handed out so far.
 getCounter :: MorlocMonad Int
 getCounter = do
   s <- get
-  let i = stateCounter s
+  let i = max (stateCounter s) (stateManifoldCounter s)
   put $! s {stateCounter = i + 1}
   return $! i
 
@@ -724,6 +724,10 @@ type Index a = StateT IndexState Identity a
 
 runIndex :: Int -> Index a -> a
 runIndex i x = evalState x (IndexState i Map.empty)
+
+-- | Run from index @i@, returning the next unused index.
+runIndexFrom :: Int -> Index a -> (a, Int)
+runIndexFrom i x = let (a, st) = runState x (IndexState i Map.empty) in (a, index st)
 
 newIndex :: Index Int
 newIndex = do

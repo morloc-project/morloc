@@ -93,7 +93,7 @@ import Morloc.CodeGenerator.Serial (containsFunF, serialAstToNativeType, serialA
 import Morloc.Data.Doc
 import Morloc.Data.Text (Text)
 import qualified Morloc.Data.Text as MT
-import Morloc.Monad (Identity, Index, newIndex, runIdentity, runIndex)
+import Morloc.Monad (Identity, Index, newIndex, runIdentity, runIndexFrom)
 import qualified Morloc.Monad as MM
 
 -- Stores pieces of code made while building a pool
@@ -750,9 +750,12 @@ argsBoundLoop a base body = case body of
   LoopBase x -> LoopBase (base a x)
   LoopContinue nes -> LoopContinue (map (fmap (argsBoundN a)) nes)
 
-invertSerialManifold :: SerialManifold -> SerialManifold
-invertSerialManifold sm0 =
-  wrapArgForms (serialManifoldArgsBound (runIndex (maxIndex sm0) (unD <$> foldSerialManifoldM fm sm0)))
+-- | The fresh variables it binds are numbered from @next@, which must be
+-- above every index in the manifold; it returns the next unused index.
+invertSerialManifold :: Int -> SerialManifold -> (SerialManifold, Int)
+invertSerialManifold next sm0 =
+  let (sm, next') = runIndexFrom next (unD <$> foldSerialManifoldM fm sm0)
+   in (wrapArgForms (serialManifoldArgsBound sm), next')
   where
     fm =
       FoldManifoldM
@@ -908,39 +911,6 @@ invertSerialManifold sm0 =
     invertNativeArgM :: NativeArg_ (D NativeManifold) (D NativeExpr) -> Index (D NativeArg)
     invertNativeArgM (NativeArgManifold_ (D nm deps)) = return $ D (NativeArgManifold nm) deps
     invertNativeArgM (NativeArgExpr_ (D ne deps)) = return $ D (NativeArgExpr ne) deps
-
-maxIndex :: SerialManifold -> Int
-maxIndex = (+ 1) . runIdentity . foldSerialManifoldM fm
-  where
-    fm =
-      FoldManifoldM
-        { opSerialManifoldM = findSerialManifoldIndices
-        , opNativeManifoldM = findNativeManifoldIndices
-        , opSerialExprM = findSerialIndices
-        , opNativeExprM = findNativeIndices
-        , opSerialArgM = return . foldlSA max 0
-        , opNativeArgM = return . foldlNA max 0
-        }
-
-    findSerialManifoldIndices :: (Monad m) => SerialManifold_ Int -> m Int
-    findSerialManifoldIndices (SerialManifold_ _ _ form _ bodyMax) = do
-      let formIndices = abilist const const form
-      return $ foldl max bodyMax formIndices
-
-    findNativeManifoldIndices :: (Monad m) => NativeManifold_ Int -> m Int
-    findNativeManifoldIndices (NativeManifold_ _ _ form bodyMax) = do
-      let formIndices = abilist const const form
-      return $ foldl max bodyMax formIndices
-
-    findSerialIndices :: (Monad m) => SerialExpr_ Int Int Int Int Int -> m Int
-    findSerialIndices (LetVarS_ _ i) = return i
-    findSerialIndices (BndVarS_ _ i) = return i
-    findSerialIndices e = return $ foldlSE max 0 e
-
-    findNativeIndices :: (Monad m) => NativeExpr_ Int Int Int Int Int -> m Int
-    findNativeIndices (LetVarN_ _ i _) = return i
-    findNativeIndices (BndVarN_ _ i _) = return i
-    findNativeIndices e = return $ foldlNE max 0 e
 
 {- | A record entry stores the common name, keys, and types of records that are
 not imported from source. These records are generated as structs (or
