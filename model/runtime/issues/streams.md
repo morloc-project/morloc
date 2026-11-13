@@ -223,3 +223,8 @@ here touch locks and ownership: model first.
   2026-11-02] A source whose final footer says FAILED or PAUSED is merged
   into a file whose footer says CLOSED, so the failure is lost. Which status
   a merge of mixed statuses carries needs a ruling (with SLOT-31).
+- **A stdin batch block may be held until teardown.** [read, not
+  reproduced, 2026-11-13] If the nexus fails to write its response
+  (morloc-nexus stdio_server.rs ~311, ~455-460) or the pool fails reading
+  the body (stream.rs ~2803), the batch block it was handed is not
+  released until the shared memory is torn down.
