@@ -127,3 +127,12 @@
   as its whole block, which suggests the plain writer is wrong there. Not
   reproduced: a CSV-read (Arrow) Table round-trips through `-f packet`;
   a voidstar Table returned by reference is the untested case.
+- **Decoders size their own writes instead of using the slot's width.**
+  [read, 2026-11-13] The JSON and msgpack decoders wrote one byte for a
+  unit, whose slot is 0 bytes (FMT-6), past the end of a record ending in
+  one (fixed). The class remains: each decoder passes its own size to its
+  writer rather than the schema width, and mpack.rs states in a SAFETY
+  comment that "each write respects the slot's width" with nothing
+  checking it. A writer bounded by the slot's width would make an overrun
+  fail. Arrow, table and CLI-shape decoders were covered only by a
+  suite-wide audit (no stray frees), not by reading.

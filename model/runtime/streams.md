@@ -29,7 +29,8 @@ Status: implemented
 Checked by: a_process_dying_inside_a_stream_does_not_hang_the_rest
 
 The slot lock detects a dead holder; the slot is then poisoned and every
-later operation on it fails.
+later operation on it fails. Reclaiming a poisoned slot frees none of its
+blocks (SLOT-39).
 
 ### SLOT-5 Closing a stream frees its path in every process
 Status: implemented
@@ -310,6 +311,19 @@ sub-packet twice; a second pass that finds other strings fails the slice.
 Any other result is deep-copied element by element and consolidated into
 one block. Every route gives the value the slice selects, and a fixed-width
 result its bytes.
+
+### SLOT-39 A poisoned slot's reclaim leaks its blocks
+Status: implemented
+Checked by: reclaiming_a_poisoned_slot_frees_none_of_its_blocks, a_writer_dying_between_queueing_and_replacing_its_buffer_releases_it_once, tla:WriteBufferHandoff, tla:WriteBufferHandoff_free_on_poison.bug, tla:WriteBufferHandoff_unlocked_reclaim.bug
+
+A slot's block fields (path, schema, sub-packet entries, write buffer,
+custody queue) change only under the slot's lock, and a guard of that slot
+is the only way to change them. A holder that dies inside an update leaves
+them possibly mid-swap: the next taker poisons the slot (SLOT-4), and its
+reclaim frees none of those blocks. A block already handed to the custody
+queue is released once, by the custodian; the slot's copy leaks. At most
+one write buffer and the path, schema and entries blocks leak per death,
+until the volume is torn down.
 
 ### SLOT-35 A `@write` batch that fails leaves no trace, or fails its stream
 Status: implemented

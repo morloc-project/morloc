@@ -293,3 +293,18 @@ its pages, until the namespace is discarded (SHM-8, DAEMON-1). Elsewhere
 (macOS, older kernels, the fallback directory) every request takes the
 general path. The test of falling back past a small tmpfs needs a
 private tmpfs and runs by hand.
+
+### SHM-19 A free of a block its caller does not hold ends every pool
+Status: implemented
+Checked by: a_free_of_a_block_already_free_ends_the_process
+
+A release that finds no block at its address, or a block that is already
+free or being released, means a holder released a reference it did not
+hold, which only a defect in the runtime or a binding can do. The process
+writes the address and the reason to stderr and exits with status 71
+without unwinding, as when shared memory runs out (SHM-17): in a pool
+every pool ends and every volume goes, a daemon recovers as from any pool
+death, and in the nexus the run fails and its volumes are swept by the
+next run (DAEMON-13). A second release that lands after the block was
+claimed again cannot be seen this way: it releases its new holder's
+reference.

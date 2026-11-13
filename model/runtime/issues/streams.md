@@ -223,26 +223,3 @@ here touch locks and ownership: model first.
   2026-11-02] A source whose final footer says FAILED or PAUSED is merged
   into a file whose footer says CLOSED, so the failure is lost. Which status
   a merge of mixed statuses carries needs a ruling (with SLOT-31).
-- **A writer death between queue push and buffer install may double free.**
-  [read, not reproduced, 2026-11-13] `queue_buffer_then` pushes the sealed
-  buffer, then calls `install_buffer` (stream.rs:3533-3548); a death between
-  the two leaves the block both queued and still named by the slot's
-  `write_buffer`. The custodian releases it after writing it (custody.rs:927,
-  freed or kept as the queue's spare) and `free_slot_blocks`
-  (stream.rs:1701-1712) frees `write_buffer` again, and frees the spares too.
-  The second free is not a crash and is not confined to the file:
-  - if the block is still free, the count check refuses it
-    ("Reference count already 0"), and `free_rel`/`free_uncounted` drop
-    that error, so nothing is reported;
-  - if the block was reallocated in between (to any value, in any process
-    of the run) or handed to another stream as a fresh buffer from the
-    spare, the second free drops the new owner's reference; that live block
-    is scrubbed and reused under it: silent corruption of an unrelated
-    value or stream.
-  The dead writer's own file is the visible part only. Fix direction:
-  install the fresh buffer before the push, so a death between them leaks
-  one buffer (reclaimed with the volume) instead of freeing one twice; a
-  leak is the benign failure here. Ownership change, so model first
-  (SLOT-4, SLOT-12, SLOT-32). Spec gap: no item covers channel or
-  write-buffer block ownership; the SAFETY comments there cite SLOT-4,
-  which covers dead lock holders.

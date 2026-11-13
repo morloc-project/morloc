@@ -1256,7 +1256,7 @@ fn an_in_place_batch_that_fails_is_absent_or_fails_its_stream() {
             let out = shared_open_ostream_with_schema(path, schema).unwrap();
             let slot = crate::stream::slot_ref(crate::stream::unpack_handle(out).1).unwrap();
             // SLOT-10: a slot's first stream allocates the queue it keeps.
-            let blocks = blocks + (crate::custody::queue_at(crate::stream::SlotField::get(&slot.custody)).unwrap().epoch() == 1) as usize;
+            let blocks = blocks + (crate::custody::queue_at(slot.custody.get()).unwrap().epoch() == 1) as usize;
             let first = matches!(failing, Some((_, 0)));
             if !first {
                 let before = value(3, 100);

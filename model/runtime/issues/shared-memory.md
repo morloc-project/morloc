@@ -150,3 +150,19 @@ Changes here touch locks and ownership: model first.
   owner's removals and other processes' releases leave it stale. Bounding
   inline by the block, safely, needs a bound that only the holder's
   reference keeps valid.
+
+- **A release that lands after its block was claimed again is invisible.**
+  [read, 2026-11-13] SHM-19 ends the process on a release that finds its
+  block free, but a stale release that arrives after the block was claimed
+  again drops the new holder's reference and nothing notices. The
+  generation (SHM-13) and the count are separate words, so no release can
+  check both atomically; eval_arena.rs `release_entry` checks the
+  generation and then releases, and the block can change hands between.
+  Option: count and generation in one 64-bit word, decremented together
+  (a block-header change: rides the cycle's ABI bump); u16 generations
+  wrap, so it is a detector, not a guarantee.
+- **`free_rel` drops a reference that does not resolve.** [read,
+  2026-11-13] stream.rs `free_rel` ignores a `rel2abs` failure. That is
+  right for a namespace a recovery discarded (SHM-10) and wrong for a
+  corrupt reference, which should end the process as SHM-19 does; the two
+  are not told apart.

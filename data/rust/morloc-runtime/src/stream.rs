@@ -676,11 +676,11 @@ pub struct RegistrySlot {
     /// SHM allocator at @open; freed at @close via shfree. Length is
     /// in `file_path_len`. NOT canonicalised; the planfile commits
     /// to explicit-only multi-writer sharing (no realpath dedup).
-    pub file_path:            std::sync::atomic::AtomicIsize,                          // off 48..56
+    pub file_path:            BlockField,                                              // off 48..56
     pub file_path_len:        std::sync::atomic::AtomicU32,                             // off 56..60
     _pad3:                    [u8; 4],                         // off 60..64
 
-    pub schema_str:           std::sync::atomic::AtomicIsize,                          // off 64..72
+    pub schema_str:           BlockField,                                              // off 64..72
     pub schema_str_len:       std::sync::atomic::AtomicU32,                             // off 72..76
     _pad4:                    [u8; 4],                         // off 76..80
 
@@ -700,7 +700,7 @@ pub struct RegistrySlot {
     /// (offset, elem_count) pairs, one per sub-packet. Length in
     /// `subpacket_entries_len`. Immutable after @open publication;
     /// freed at @close.
-    pub subpacket_entries:    std::sync::atomic::AtomicIsize,                          // off 104..112
+    pub subpacket_entries:    BlockField,                                              // off 104..112
     pub subpacket_entries_len:std::sync::atomic::AtomicU64,                             // off 112..120
 
     /// IStream initial cursor (right after stream header). Immutable
@@ -721,7 +721,7 @@ pub struct RegistrySlot {
     /// whole index and data section; with none, the index may end past
     /// the block. Cross-pool writers
     /// append to this same buffer under the slot lock.
-    pub write_buffer:           std::sync::atomic::AtomicIsize,                        // off 288..296
+    pub write_buffer:           BlockField,                                            // off 288..296
 
     /// Current index-section capacity in ELEMENTS. Starts at
     /// `WRITE_BUFFER_INDEX_INITIAL_CAP` (1024); doubles when filled
@@ -759,7 +759,7 @@ pub struct RegistrySlot {
     pub poisoned:             std::sync::atomic::AtomicU8,                              // off 346
     _wb_pad:                  [u8; 5],                         // off 347..352
     /// A written stream's queue to its custodian (`custody::CustodyQueue`).
-    pub custody:              std::sync::atomic::AtomicIsize,                          // off 352
+    pub custody:              BlockField,                                              // off 352
 
     /// Device and inode of an OStream's file, from its locked descriptor,
     /// so a reopen blocked by the lock can find the stream holding it.
@@ -781,6 +781,13 @@ pub struct RegistrySlot {
 const _: () = {
     assert!(std::mem::size_of::<RegistrySlot>() == STREAM_ENTRY_SIZE);
     assert!(std::mem::offset_of!(RegistrySlot, lock) == 384);
+    assert!(std::mem::size_of::<BlockField>() == std::mem::size_of::<std::sync::atomic::AtomicIsize>());
+    assert!(std::mem::align_of::<BlockField>() == std::mem::align_of::<std::sync::atomic::AtomicIsize>());
+    assert!(std::mem::offset_of!(RegistrySlot, file_path) == 48);
+    assert!(std::mem::offset_of!(RegistrySlot, schema_str) == 64);
+    assert!(std::mem::offset_of!(RegistrySlot, subpacket_entries) == 104);
+    assert!(std::mem::offset_of!(RegistrySlot, write_buffer) == 288);
+    assert!(std::mem::offset_of!(RegistrySlot, custody) == 352);
 };
 
 /// Resolve a slot index to a typed reference into the SHM-resident
@@ -843,48 +850,15 @@ pub(crate) const GENERATION_MASK: u64 = 0x0000_7FFF_FFFF_FFFF;
 // so operations on the stream fail from then on, and releasing the slot
 // leaks its SHM blocks rather than free pointers that may be mid-swap.
 
+mod slot_lock;
+pub use slot_lock::BlockField;
+pub(crate) use slot_lock::{Block, SlotGuard};
+
 fn died_inside() -> MorlocError {
     MorlocError::Other(
         "a process died while using this stream; it is incomplete and can \
          no longer be read or written".into(),
     )
-}
-
-/// Holds a slot's lock until dropped. A panic while it is held poisons the
-/// slot, as a death would: unwinding releases the lock mid-update.
-pub(crate) struct SlotGuard<'a> {
-    slot: &'a RegistrySlot,
-    _held: morloc_runtime_types::recoverable_lock::RecoverableGuard<'a>,
-}
-
-impl Drop for SlotGuard<'_> {
-    fn drop(&mut self) {
-        if std::thread::panicking() {
-            self.slot.poisoned.set(1);
-        }
-    }
-}
-
-impl<'a> SlotGuard<'a> {
-    /// Take the slot's lock to operate on its stream. Fails if a process
-    /// died inside the slot.
-    fn lock(slot: &'a RegistrySlot) -> Result<Self, MorlocError> {
-        let guard = Self::lock_any(slot)?;
-        if slot.poisoned.get() != 0 {
-            return Err(died_inside());
-        }
-        Ok(guard)
-    }
-
-    /// Take the slot's lock whatever its state, to end or reclaim it.
-    fn lock_any(slot: &'a RegistrySlot) -> Result<Self, MorlocError> {
-        refuse_inside_txn()?;
-        let acquired = slot.lock.lock()?;
-        if acquired.holder_died {
-            slot.poisoned.set(1);
-        }
-        Ok(SlotGuard { slot, _held: acquired.guard })
-    }
 }
 
 // ── Process-local mmap cache ─────────────────────────────────────────────
@@ -1536,7 +1510,8 @@ pub(crate) fn allocate_slot_cas_for(
 /// The slot's custody queue, ready for a new stream: the one its index
 /// already has, or a new one the slot keeps from now on.
 // SLOT-10
-fn ready_slot_queue(slot: &RegistrySlot) -> Result<&'static crate::custody::CustodyQueue, MorlocError> {
+fn ready_slot_queue(g: &SlotGuard) -> Result<&'static crate::custody::CustodyQueue, MorlocError> {
+    let slot = g.slot();
     let depth = crate::write_behind::depth().max(1);
     if let Ok(q) = slot_queue(slot) {
         // SLOT-18: a writer still leaving keeps the old queue and frees it.
@@ -1546,7 +1521,7 @@ fn ready_slot_queue(slot: &RegistrySlot) -> Result<&'static crate::custody::Cust
         }
     }
     let rel = crate::custody::new_queue()?;
-    slot.custody.set(slot_owns(rel));
+    g.set_block(Block::Custody, slot_owns(rel));
     slot_queue(slot)
 }
 
@@ -1646,8 +1621,9 @@ fn copy_slot_bytes(rel: RelPtr, len: usize) -> Result<Vec<u8>, MorlocError> {
     Ok(unsafe { std::slice::from_raw_parts(abs, len) }.to_vec())
 }
 
-fn release_slot_locked(slot: &RegistrySlot) {
+fn release_slot_locked(g: &SlotGuard) {
     use std::sync::atomic::Ordering;
+    let slot = g.slot();
 
     // Release the stdio claim if it names this slot. Must happen before
     // the slot's fields are zeroed so the claim kind is still readable. A
@@ -1669,13 +1645,13 @@ fn release_slot_locked(slot: &RegistrySlot) {
     // Free path / schema / subpacket_entries / write_buffer SHM blocks.
     // Best-effort: a leaked block here is bounded by the registry's
     // lifetime (cleaned at nexus shclose), and erroring would obscure
-    // the primary `state = FREE` transition. A poisoned slot's pointers
-    // may be mid-swap, so its blocks are leaked rather than freed.
+    // the primary `state = FREE` transition.
+    // SLOT-39: a poisoned slot's block fields may be mid-swap; its blocks leak.
     if slot.poisoned.get() == 0 {
-        free_slot_blocks(slot);
+        free_slot_blocks(g);
     }
 
-    clear_slot_fields(slot);
+    clear_slot_fields(g);
     #[cfg(test)]
     {
         let hook = *RELEASE_GAP_HOOK.lock().unwrap();
@@ -1698,11 +1674,12 @@ fn release_slot_locked(slot: &RegistrySlot) {
     }
 }
 
-fn free_slot_blocks(slot: &RegistrySlot) {
+fn free_slot_blocks(g: &SlotGuard) {
+    let slot = g.slot();
     free_rel(slot.file_path.get());
     free_rel(slot.schema_str.get());
     if slot.kind.get() == MLC_KIND_CHANNEL {
-        channel_free_queue(slot);
+        channel_free_queue(g);
     }
     free_rel(slot.subpacket_entries.get());
     free_rel(slot.write_buffer.get());
@@ -1728,7 +1705,7 @@ fn close_stream(slot_idx: usize, gen_claim: u64, status: u32, closing: crate::cu
         "stream slot index {} out of range", slot_idx,
     )))?;
     let waiting = {
-        let _guard = SlotGuard::lock_any(slot)?;
+        let guard = SlotGuard::lock_any(slot)?;
         if !slot_generation_is(slot, gen_claim) || slot.state.load(Ordering::Acquire) != SLOT_STATE_OPEN_SHARED {
             return Err(MorlocError::Other("the stream was closed".into()));
         }
@@ -1742,7 +1719,7 @@ fn close_stream(slot_idx: usize, gen_claim: u64, status: u32, closing: crate::cu
             let tail = if poisoned || status == crate::custody::STATUS_DISCARD {
                 Ok(())
             } else {
-                queue_buffer_then(slot, false, slot.compression_level.get())
+                queue_buffer_then(&guard, false, slot.compression_level.get())
             };
             let status = if poisoned || tail.is_err() {
                 morloc_runtime_types::packet::FOOTER_STATUS_FAILED as u32
@@ -1753,14 +1730,14 @@ fn close_stream(slot_idx: usize, gen_claim: u64, status: u32, closing: crate::cu
                 Ok(seq) => Some((q, seq, q.epoch(), tail, poisoned)),
                 // SLOT-10: a writer that is gone reads the slot no more.
                 Err(_) if q.is_stopped() => {
-                    release_slot_locked(slot);
+                    release_slot_locked(&guard);
                     None
                 }
                 Err(e) => return Err(e),
             }
         } else {
             // No writer took the stream, or it has stopped: nothing reads it.
-            release_slot_locked(slot);
+            release_slot_locked(&guard);
             None
         }
     };
@@ -1782,9 +1759,9 @@ fn close_stream(slot_idx: usize, gen_claim: u64, status: u32, closing: crate::cu
 pub(crate) fn release_closed_slot(slot_idx: usize, gen_claim: u64) {
     use std::sync::atomic::Ordering;
     let Some(slot) = slot_ref(slot_idx) else { return };
-    let Ok(_guard) = SlotGuard::lock_any(slot) else { return };
+    let Ok(guard) = SlotGuard::lock_any(slot) else { return };
     if slot_generation_is(slot, gen_claim) && slot.state.load(Ordering::Acquire) == SLOT_STATE_OPEN_SHARED {
-        release_slot_locked(slot);
+        release_slot_locked(&guard);
     }
 }
 
@@ -1831,26 +1808,27 @@ impl Default for SlotInit {
 }
 
 // SLOT-8: the fields are written, then the generation bump publishes them.
-fn publish_slot(slot: &RegistrySlot, i: &SlotInit) -> u64 {
+fn publish_slot(g: &SlotGuard, i: &SlotInit) -> u64 {
     use std::sync::atomic::Ordering;
+    let slot = g.slot();
     slot.kind.set(i.kind);
     slot.is_stdio.set(i.stdio_kind.is_some() as u8);
     slot.stdio_kind.set(i.stdio_kind.unwrap_or(0));
     slot.staged.set(i.staged as u8);
     slot.file_dev.set(i.file.0);
     slot.file_ino.set(i.file.1);
-    slot.file_path.set(i.path.0);
+    g.set_block(Block::FilePath, i.path.0);
     slot.file_path_len.set(i.path.1);
-    slot.schema_str.set(i.schema.0);
+    g.set_block(Block::SchemaStr, i.schema.0);
     slot.schema_str_len.set(i.schema.1);
-    slot.subpacket_entries.set(i.entries.0);
+    g.set_block(Block::SubpacketEntries, i.entries.0);
     slot.subpacket_entries_len.set(i.entries.1);
     slot.body_start.set(i.body_start);
     slot.cursor.set(i.cursor);
     slot.data_end.set(i.data_end);
     slot.element_count.set(i.element_count);
     slot.compression_level.set(0);
-    slot.write_buffer.set(i.buffer.0);
+    g.set_block(Block::WriteBuffer, i.buffer.0);
     slot.write_buffer_limit.set(i.buffer.1);
     slot.write_buffer_index_cap.set(0);
     slot.write_buffer_index_count.set(0);
@@ -1860,12 +1838,13 @@ fn publish_slot(slot: &RegistrySlot, i: &SlotInit) -> u64 {
     slot.generation.fetch_add(bump, Ordering::AcqRel).wrapping_add(bump) & GENERATION_MASK
 }
 
-fn clear_slot_fields(slot: &RegistrySlot) {
-    slot.file_path.set(shm_types_crate::RELNULL);
+fn clear_slot_fields(g: &SlotGuard) {
+    let slot = g.slot();
+    g.set_block(Block::FilePath, shm_types_crate::RELNULL);
     slot.file_path_len.set(0);
-    slot.schema_str.set(shm_types_crate::RELNULL);
+    g.set_block(Block::SchemaStr, shm_types_crate::RELNULL);
     slot.schema_str_len.set(0);
-    slot.subpacket_entries.set(shm_types_crate::RELNULL);
+    g.set_block(Block::SubpacketEntries, shm_types_crate::RELNULL);
     slot.subpacket_entries_len.set(0);
     slot.cursor.set(0);
     slot.element_count.set(0);
@@ -1877,7 +1856,7 @@ fn clear_slot_fields(slot: &RegistrySlot) {
     slot.is_stdio.set(0);
     slot.stdio_kind.set(0);
     slot.staged.set(0);
-    slot.write_buffer.set(shm_types_crate::RELNULL);
+    g.set_block(Block::WriteBuffer, shm_types_crate::RELNULL);
     slot.write_buffer_limit.set(0);
     slot.write_buffer_index_cap.set(0);
     slot.write_buffer_index_count.set(0);
@@ -2198,7 +2177,7 @@ pub fn shared_open_ifile(path: &str) -> Result<i64, MorlocError> {
     }
 
     // Allocate a slot.
-    let (slot_idx, slot, _guard) = match allocate_slot_cas() {
+    let (slot_idx, _, guard) = match allocate_slot_cas() {
         Ok(s) => s,
         Err(e) => {
             return Err(e);
@@ -2217,7 +2196,7 @@ pub fn shared_open_ifile(path: &str) -> Result<i64, MorlocError> {
         } else {
             shm_types_crate::RELNULL
         };
-        let new_gen = publish_slot(slot, &SlotInit {
+        let new_gen = publish_slot(&guard, &SlotInit {
             kind: MLC_KIND_IFILE,
             file: (file_dev, file_ino),
             path: (pending.own(path_rel), path.len() as u32),
@@ -2235,7 +2214,7 @@ pub fn shared_open_ifile(path: &str) -> Result<i64, MorlocError> {
             // Roll back the slot. release_slot_locked shfree's any
             // RelPtrs we've published; the lock guard releases on
             // drop.
-            release_slot_locked(slot);
+            release_slot_locked(&guard);
             return Err(e);
         }
     };
@@ -2295,7 +2274,7 @@ pub fn shared_open_istream(path: &str) -> Result<i64, MorlocError> {
         );
     }
 
-    let (slot_idx, slot, _guard) = match allocate_slot_cas() {
+    let (slot_idx, _, guard) = match allocate_slot_cas() {
         Ok(s) => s,
         Err(e) => {
             return Err(e);
@@ -2306,7 +2285,7 @@ pub fn shared_open_istream(path: &str) -> Result<i64, MorlocError> {
         let mut pending = Unpublished::default();
         let path_rel = pending.hold(shm_copy_bytes(path.as_bytes())?);
         let schema_rel = pending.hold(shm_copy_bytes(parsed.schema_str.as_bytes())?);
-        let new_gen = publish_slot(slot, &SlotInit {
+        let new_gen = publish_slot(&guard, &SlotInit {
             kind: MLC_KIND_ISTREAM,
             file: (file_dev, file_ino),
             path: (pending.own(path_rel), path.len() as u32),
@@ -2323,7 +2302,7 @@ pub fn shared_open_istream(path: &str) -> Result<i64, MorlocError> {
     let new_gen = match publish_result {
         Ok(g) => g,
         Err(e) => {
-            release_slot_locked(slot);
+            release_slot_locked(&guard);
             return Err(e);
         }
     };
@@ -2522,7 +2501,7 @@ pub(crate) fn open_stdio_in(kind: u8, stdio_kind: u8, schema_str: &str, mode: St
     if current_call_id() == CALL_ID_NO_SWEEP {
         set_current_call_id(generate_call_id());
     }
-    let (slot_idx, slot, _guard) = allocate_slot_cas()?;
+    let (slot_idx, slot, guard) = allocate_slot_cas()?;
 
     // OStream stdio slots buffer writes through the same pipeline as
     // file-backed OStreams; they need a real write_buffer. IStream
@@ -2552,10 +2531,10 @@ pub(crate) fn open_stdio_in(kind: u8, stdio_kind: u8, schema_str: &str, mode: St
         // reading from the beginning of the emitted output (the
         // `> file` case).
         if kind == MLC_KIND_OSTREAM {
-            ready_slot_queue(slot)?;
+            ready_slot_queue(&guard)?;
         }
         let idx_rel = shm_types_crate::RELNULL;
-        let new_gen = publish_slot(slot, &SlotInit {
+        let new_gen = publish_slot(&guard, &SlotInit {
             kind,
             stdio_kind: Some(stdio_kind),
             staged,
@@ -2572,7 +2551,7 @@ pub(crate) fn open_stdio_in(kind: u8, stdio_kind: u8, schema_str: &str, mode: St
 
     let new_gen = match publish_result {
         Ok(g) => g,
-        Err(e) => { release_slot_locked(slot); return Err(e); }
+        Err(e) => { release_slot_locked(&guard); return Err(e); }
     };
     let handle = pack_handle(new_gen, slot_idx);
 
@@ -2580,19 +2559,19 @@ pub(crate) fn open_stdio_in(kind: u8, stdio_kind: u8, schema_str: &str, mode: St
     if claim.compare_exchange(
         STDIO_UNCLAIMED, handle, Ordering::AcqRel, Ordering::Acquire,
     ).is_err() {
-        release_slot_locked(slot);
+        release_slot_locked(&guard);
         return Err(MorlocError::Other(format!(
             "@{} already open in this nexus; at most one open per \
              stdio kind is allowed", stdio_kind_name(stdio_kind),
         )));
     }
-    drop(_guard);
+    drop(guard);
     // SLOT-16
     if kind == MLC_KIND_OSTREAM {
         if let Err(e) = crate::custody::adopt(handle) {
-            if let Ok(_g) = SlotGuard::lock_any(slot) {
+            if let Ok(guard) = SlotGuard::lock_any(slot) {
                 if slot_generation_is(slot, new_gen) {
-                    release_slot_locked(slot);
+                    release_slot_locked(&guard);
                 }
             }
             return Err(e);
@@ -3185,8 +3164,8 @@ fn start_custody(
         let buf_bytes = read_write_buffer_bytes_env();
         let buf_abs = crate::shm::shmalloc(first_write_buffer(buf_bytes))?;
         let buf_rel = pending.hold(crate::shm::abs2rel(buf_abs)?);
-        crate::custody::take_custody(ready_slot_queue(slot)?);
-        let new_gen = publish_slot(slot, &SlotInit {
+        crate::custody::take_custody(ready_slot_queue(&guard)?);
+        let new_gen = publish_slot(&guard, &SlotInit {
             kind: MLC_KIND_OSTREAM,
             file: file_identity(fd),
             path: (pending.own(path_rel), path.len() as u32),
@@ -3202,7 +3181,7 @@ fn start_custody(
     let new_gen = match publish_result {
         Ok(g) => g,
         Err(e) => {
-            release_slot_locked(slot);
+            release_slot_locked(&guard);
             unlock_and_close(fd);
             return Err(e);
         }
@@ -3225,7 +3204,7 @@ fn start_custody(
         diag,
     });
     if let Err(e) = crate::custody::host_spawn(writer) {
-        release_slot_locked(slot);
+        release_slot_locked(&guard);
         drop(guard);
         unlock_and_close(fd);
         return Err(e);
@@ -3366,11 +3345,11 @@ fn close_open_stream(
     // see the end after it. The slot stays until the channel is settled.
     if kind == MLC_KIND_CHANNEL {
         let closed = with_process_local_slot(handle, |local, slot| {
-            let _guard = SlotGuard::lock(slot)?;
+            let guard = SlotGuard::lock(slot)?;
             if !slot_generation_is(slot, gen_claim) {
                 return Err(MorlocError::Other("the reader of this stream has stopped".into()));
             }
-            flush_channel_or_fail(slot, local)?;
+            flush_channel_or_fail(&guard, local)?;
             // SLOT-35: closing a failed channel reports its failure.
             if let Some(e) = channel_failure(channel_block(slot)?) {
                 return Err(e);
@@ -3390,15 +3369,15 @@ fn close_open_stream(
     }
 
     // IFile / IStream: no finalisation; just release.
-    let _guard = SlotGuard::lock(slot)?;
+    let guard = SlotGuard::lock(slot)?;
     let gen_now = slot.generation.load(Ordering::Acquire) & GENERATION_MASK;
     if gen_now != gen_claim {
         return Err(MorlocError::Other(
             "shared_close_handle: slot generation changed under us".into(),
         ));
     }
-    release_slot_locked(slot);
-    drop(_guard);
+    release_slot_locked(&guard);
+    drop(guard);
     invalidate_process_local_slot(handle);
     Ok(())
 }
@@ -3530,7 +3509,8 @@ fn slot_queue(slot: &RegistrySlot) -> Result<&'static crate::custody::CustodyQue
 
 /// Queue the buffered elements; `refill` installs a fresh buffer for later
 /// writes, which a closing stream does not need.
-fn queue_buffer_then(slot: &RegistrySlot, refill: bool, level: u8) -> Result<(), MorlocError> {
+fn queue_buffer_then(g: &SlotGuard, refill: bool, level: u8) -> Result<(), MorlocError> {
+    let slot = g.slot();
     if slot.write_buffer_index_count.get() == 0 {
         return Ok(());
     }
@@ -3543,7 +3523,12 @@ fn queue_buffer_then(slot: &RegistrySlot, refill: bool, level: u8) -> Result<(),
         free_rel(fresh);
         return Err(e);
     }
-    install_buffer(slot, fresh);
+    // SLOT-39
+    #[cfg(test)]
+    if EXIT_BEFORE_INSTALL.with(|f| f.get()) {
+        unsafe { libc::_exit(EXIT_BEFORE_INSTALL_STATUS) };
+    }
+    install_buffer(g, fresh);
     Ok(())
 }
 
@@ -3554,7 +3539,8 @@ fn would_block() -> MorlocError {
 
 // SLOT-37: `queue_buffer_then` with a fresh buffer, refused where it would
 // sleep; `would` is then the depth the push saw.
-fn queue_buffer_nowait(slot: &RegistrySlot, level: u8, would: &std::cell::Cell<Option<u32>>) -> Result<(), MorlocError> {
+fn queue_buffer_nowait(g: &SlotGuard, level: u8, would: &std::cell::Cell<Option<u32>>) -> Result<(), MorlocError> {
+    let slot = g.slot();
     let q = slot_queue(slot)?;
     if q.lacks_room() {
         would.set(Some(q.depth()));
@@ -3573,7 +3559,7 @@ fn queue_buffer_nowait(slot: &RegistrySlot, level: u8, would: &std::cell::Cell<O
             return Err(e);
         }
     }
-    install_buffer(slot, fresh);
+    install_buffer(g, fresh);
     Ok(())
 }
 
@@ -3618,8 +3604,9 @@ fn fresh_buffer(slot: &RegistrySlot, q: &crate::custody::CustodyQueue) -> Result
 }
 
 // SLOT-20: an empty buffer, keeping the index capacity.
-fn install_buffer(slot: &RegistrySlot, block: RelPtr) {
-    slot.write_buffer.set(block);
+fn install_buffer(g: &SlotGuard, block: RelPtr) {
+    let slot = g.slot();
+    g.set_block(Block::WriteBuffer, block);
     forget_write_room();
     slot.write_buffer_index_count.set(0);
     slot.write_buffer_data_used.set(0);
@@ -3708,7 +3695,11 @@ thread_local! {
     pub(crate) static FAIL_HAND_ON_AT: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
     pub(crate) static FAIL_COMMIT_PUSH_AT: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
     pub(crate) static FORCE_NO_ROOM: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+    pub(crate) static EXIT_BEFORE_INSTALL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
+
+#[cfg(test)]
+const EXIT_BEFORE_INSTALL_STATUS: i32 = 39;
 
 impl Batch {
     fn begin(slot: &RegistrySlot, level: u8) -> Result<Self, MorlocError> {
@@ -3779,7 +3770,8 @@ impl Batch {
     }
 
     // SLOT-35
-    fn seal(&mut self, slot: &RegistrySlot, local: &mut ProcessLocalSlot) -> Result<(), MorlocError> {
+    fn seal(&mut self, g: &SlotGuard, local: &mut ProcessLocalSlot) -> Result<(), MorlocError> {
+        let slot = g.slot();
         let count = slot.write_buffer_index_count.get();
         if count == 0 {
             return Ok(());
@@ -3796,19 +3788,19 @@ impl Batch {
         let ours = count.saturating_sub(self.start_count);
         // SLOT-36: a buffer holding none of the batch's elements is handed on.
         if self.pending.is_some() && ours > 0 {
-            return self.seal_pending(slot, ours);
+            return self.seal_pending(g, ours);
         }
         let level = self.level;
         if self.nowait {
             let would = std::cell::Cell::new(None);
-            let handed = self.hand_on(slot, ours, || queue_buffer_nowait(slot, level, &would));
+            let handed = self.hand_on(slot, ours, || queue_buffer_nowait(g, level, &would));
             if let Some(depth) = would.get() {
                 self.blocked = true;
                 self.wait_depth = Some(depth);
             }
             handed?;
         } else {
-            self.hand_on(slot, ours, || flush_write_buffer_at(slot, local, level))?;
+            self.hand_on(slot, ours, || flush_write_buffer_at(g, local, level))?;
         }
         self.start_count = 0;
         self.start_data_used = 0;
@@ -3838,7 +3830,8 @@ impl Batch {
     }
 
     // SLOT-36, SLOT-20
-    fn seal_pending(&mut self, slot: &RegistrySlot, ours: u64) -> Result<(), MorlocError> {
+    fn seal_pending(&mut self, g: &SlotGuard, ours: u64) -> Result<(), MorlocError> {
+        let slot = g.slot();
         let q = self.output_queue();
         // SLOT-37
         if !self.nowait {
@@ -3851,7 +3844,7 @@ impl Batch {
             p.first = Some(FirstSealed { start_count: self.start_count, start_data_used: self.start_data_used });
         }
         p.blocks.push(Private { item, ours });
-        install_buffer(slot, fresh);
+        install_buffer(g, fresh);
         self.start_count = 0;
         self.start_data_used = 0;
         Ok(())
@@ -3872,9 +3865,10 @@ impl Batch {
     }
 
     // SLOT-36
-    fn commit_pending(&mut self, slot: &RegistrySlot) -> Result<(), MorlocError> {
+    fn commit_pending(&mut self, g: &SlotGuard) -> Result<(), MorlocError> {
+        let slot = g.slot();
         let q = self.output_queue();
-        let cap = write_buffer_capacity(slot).inspect_err(|_| self.abort_pending(slot))?;
+        let cap = write_buffer_capacity(slot).inspect_err(|_| self.abort_pending(g))?;
         let p = self.pending.take().unwrap_or_default();
         for (k, b) in p.blocks.iter().enumerate() {
             let item = b.item;
@@ -3893,14 +3887,14 @@ impl Batch {
             if let Err(e) = pushed {
                 if k == 0 {
                     self.pending = Some(p);
-                    self.abort_pending(slot);
+                    self.abort_pending(g);
                     return Err(e);
                 }
                 for b in &p.blocks[k..] {
                     free_rel(b.item.block);
                 }
                 free_rel(slot.write_buffer.get());
-                slot.write_buffer.set(shm_types_crate::RELNULL);
+                g.set_block(Block::WriteBuffer, shm_types_crate::RELNULL);
                 forget_write_room();
                 slot.element_count.set(slot.element_count.get() + self.handed);
                 fail_stream(slot, &format!("a @write batch failed after part of it was queued: {e}"));
@@ -3912,7 +3906,8 @@ impl Batch {
     }
 
     // SLOT-36
-    fn abort_pending(&mut self, slot: &RegistrySlot) {
+    fn abort_pending(&mut self, g: &SlotGuard) {
+        let slot = g.slot();
         let p = self.pending.take().unwrap_or_default();
         let sealed = p.blocks.iter().find(|b| b.item.kind == crate::custody::ENTRY_BUFFER).map(|b| b.item);
         match (p.first, sealed) {
@@ -3921,7 +3916,7 @@ impl Batch {
                 for b in p.blocks.iter().filter(|b| b.item.block != item.block) {
                     free_rel(b.item.block);
                 }
-                slot.write_buffer.set(item.block);
+                g.set_block(Block::WriteBuffer, item.block);
                 slot.write_buffer_index_cap.set(item.index_cap);
                 slot.write_buffer_index_count.set(first.start_count);
                 slot.write_buffer_data_used.set(first.start_data_used);
@@ -3961,9 +3956,10 @@ fn fail_stream(slot: &RegistrySlot, msg: &str) {
 }
 
 // SLOT-35: a closing channel whose buffered batches cannot be handed on fails.
-fn flush_channel_or_fail(slot: &RegistrySlot, local: &mut ProcessLocalSlot) -> Result<(), MorlocError> {
+fn flush_channel_or_fail(g: &SlotGuard, local: &mut ProcessLocalSlot) -> Result<(), MorlocError> {
+    let slot = g.slot();
     let dropped = slot.write_buffer_index_count.get();
-    flush_write_buffer(slot, local).inspect_err(|e| {
+    flush_write_buffer(g, local).inspect_err(|e| {
         fail_stream(slot, &format!("the stream's buffered batches could not be handed on: {e}"));
         slot.element_count.set(slot.element_count.get().saturating_sub(dropped));
     })
@@ -3979,17 +3975,18 @@ fn level_mismatch(was: u8, level: u8) -> MorlocError {
 
 /// Hand the buffered elements on: an `OStream`'s to its custodian, a
 /// channel's compacted onto its queue. Caller MUST hold the slot lock.
-fn flush_write_buffer(slot: &RegistrySlot, local: &mut ProcessLocalSlot) -> Result<(), MorlocError> {
-    flush_write_buffer_at(slot, local, slot.compression_level.get())
+fn flush_write_buffer(g: &SlotGuard, local: &mut ProcessLocalSlot) -> Result<(), MorlocError> {
+    flush_write_buffer_at(g, local, g.slot().compression_level.get())
 }
 
 fn flush_write_buffer_at(
-    slot: &RegistrySlot,
+    g: &SlotGuard,
     local: &mut ProcessLocalSlot,
     level: u8,
 ) -> Result<(), MorlocError> {
+    let slot = g.slot();
     if slot.kind.get() != MLC_KIND_CHANNEL {
-        return queue_buffer_then(slot, true, level);
+        return queue_buffer_then(g, true, level);
     }
     let n = slot.write_buffer_index_count.get();
     if n == 0 {
@@ -4059,7 +4056,8 @@ fn forget_write_room() {
 // SLOT-20: grow the write buffer's block to hold `need` bytes, at least
 // doubling and never past the limit, carrying over what it holds; offsets
 // inside the buffer are relative to it. Caller holds the slot lock.
-fn ensure_write_room(slot: &RegistrySlot, need: usize) -> Result<(), MorlocError> {
+fn ensure_write_room(g: &SlotGuard, need: usize) -> Result<(), MorlocError> {
+    let slot = g.slot();
     let rel = slot.write_buffer.get();
     let (seen, size) = WRITE_ROOM.with(|r| r.get());
     if rel == seen && rel != shm_types_crate::RELNULL && need <= size {
@@ -4078,7 +4076,7 @@ fn ensure_write_room(slot: &RegistrySlot, need: usize) -> Result<(), MorlocError
     // and the fresh block holds `size > have` bytes.
     unsafe { std::ptr::copy_nonoverlapping(old, fresh, have) };
     let fresh_rel = slot_owns(crate::shm::abs2rel(fresh)?);
-    slot.write_buffer.set(fresh_rel);
+    g.set_block(Block::WriteBuffer, fresh_rel);
     WRITE_ROOM.with(|r| r.set((fresh_rel, size)));
     free_uncounted(old);
     Ok(())
@@ -4108,17 +4106,18 @@ fn full_index_cap(buf_size: usize, w: usize) -> u64 {
 /// element holds no pointer and its padding is zero, so its bytes are
 /// already its flattened form and no per-element walk is needed.
 fn append_flat_run(
-    slot: &RegistrySlot,
+    g: &SlotGuard,
     local: &mut ProcessLocalSlot,
     batch: &mut Batch,
     src: AbsPtr,
     n: usize,
     buf_size: usize,
 ) -> Result<(), MorlocError> {
+    let slot = g.slot();
     let w = local.elem_schema.width;
     let mut done = 0usize;
     while done < n {
-        let (at, k) = place_flat(slot, local, batch, n - done, buf_size)?;
+        let (at, k) = place_flat(g, local, batch, n - done, buf_size)?;
         let buf_abs = crate::shm::rel2abs(slot.write_buffer.get())?;
         // SAFETY: SLOT-20: the block holds `at + k * w` bytes and `src`
         // holds `n` elements.
@@ -4132,18 +4131,19 @@ fn append_flat_run(
 
 // SLOT-20
 fn place_flat(
-    slot: &RegistrySlot,
+    g: &SlotGuard,
     local: &mut ProcessLocalSlot,
     batch: &mut Batch,
     want: usize,
     buf_size: usize,
 ) -> Result<(usize, usize), MorlocError> {
+    let slot = g.slot();
     let w = local.elem_schema.width;
     let cap = full_index_cap(buf_size, w);
     debug_assert_eq!(slot.write_buffer_data_used.get(), 0, "fixed-width elements have no variable bytes");
     let mut count = slot.write_buffer_index_count.get();
     if count >= cap {
-        batch.seal(slot, local)?;
+        batch.seal(g, local)?;
         count = slot.write_buffer_index_count.get();
     }
     let k = (cap - count).min(want as u64) as usize;
@@ -4157,7 +4157,7 @@ fn place_flat(
     while index_cap < count + k as u64 {
         index_cap *= 2;
     }
-    ensure_write_room(slot, at + k * w)?;
+    ensure_write_room(g, at + k * w)?;
     slot.write_buffer_index_cap.set(index_cap.min(cap).max(count + k as u64));
     slot.write_buffer_index_count.set(count + k as u64);
     Ok((at, k))
@@ -4171,12 +4171,13 @@ enum Placement {
 
 // SLOT-20: place one element whose flat form is `flat_len` bytes.
 fn place_one(
-    slot: &RegistrySlot,
+    g: &SlotGuard,
     local: &mut ProcessLocalSlot,
     batch: &mut Batch,
     flat_len: usize,
     buf_size: usize,
 ) -> Result<Placement, MorlocError> {
+    let slot = g.slot();
     let w = local.elem_schema.width;
     batch.placing(1)?;
     let too_big = || MorlocError::Other("@write: an element's size overflows".into());
@@ -4192,7 +4193,7 @@ fn place_one(
     // SLOT-20: an element an empty buffer with a one-slot index cannot hold.
     let min_required = (16 + w).checked_add(variable_size).ok_or_else(too_big)?;
     if min_required > buf_size {
-        batch.seal(slot, local)?;
+        batch.seal(g, local)?;
         let len = 16usize.checked_add(flat_len).ok_or_else(too_big)?;
         return Ok(Placement::Oversize { len });
     }
@@ -4211,7 +4212,7 @@ fn place_one(
             .and_then(|r| r.checked_add(variable_size))
             .ok_or_else(too_big)?;
         if required <= buf_size {
-            ensure_write_room(slot, required)?;
+            ensure_write_room(g, required)?;
             if need_index_grow {
                 grow_index_capacity(slot, local, candidate_cap)?;
             }
@@ -4228,7 +4229,7 @@ fn place_one(
             slot.write_buffer_index_cap.set(fit.min(slot.write_buffer_index_cap.get()));
             continue;
         }
-        batch.seal(slot, local)?;
+        batch.seal(g, local)?;
     }
 
     let slot_at = 16 + (slot.write_buffer_index_count.get() as usize) * w;
@@ -4248,7 +4249,7 @@ unsafe fn oversize_header(base: *mut u8) {
 // SLOT-20: one element from `elem_src`, into the write buffer or a
 // sub-packet of its own.
 fn append_one_element(
-    slot: &RegistrySlot,
+    g: &SlotGuard,
     local: &mut ProcessLocalSlot,
     batch: &mut Batch,
     elem_src: AbsPtr,
@@ -4256,6 +4257,7 @@ fn append_one_element(
     elem: &Schema,
     res: &crate::recur::Resolver<'_>,
 ) -> Result<(), MorlocError> {
+    let slot = g.slot();
     let w = elem.width;
     let inline_int = elem.serial_type == SerialType::Int
         // SAFETY: SLOT-20: an Int's slot starts with its limb count.
@@ -4266,7 +4268,7 @@ fn append_one_element(
     } else {
         crate::ffi::calc_voidstar_size_portable_with(elem_src, elem, res)?
     };
-    let (slot_at, data_at, raw_variable_size, var) = match place_one(slot, local, batch, flat_len, buf_size)? {
+    let (slot_at, data_at, raw_variable_size, var) = match place_one(g, local, batch, flat_len, buf_size)? {
         Placement::Buffer { slot_at, data_at, raw, var } => (slot_at, data_at, raw, var),
         Placement::Oversize { len: oversize_len } => {
             let fill = |base: *mut u8| unsafe {
@@ -4362,7 +4364,7 @@ pub fn shared_write_subpacket(
             crate::shm::rel2abs(arr.data)?
         };
 
-        let _guard = lock_for_write(slot, gen_claim, "the stream was closed, or its reader stopped")?;
+        let guard = lock_for_write(slot, gen_claim, "the stream was closed, or its reader stopped")?;
 
         // SLOT-35
         let _paths = if crate::handle_scan::holds_stream_fields(&local.elem_schema) {
@@ -4374,7 +4376,7 @@ pub fn shared_write_subpacket(
         let level = written_level(slot.is_stdio.get() != 0, slot.stdio_kind.get(), level);
         let mut batch = Batch::begin(slot, level)?;
         forget_write_room();
-        match write_batch(slot, local, &mut batch, payload_voidstar, n_elements, elem_data_base) {
+        match write_batch(&guard, local, &mut batch, payload_voidstar, n_elements, elem_data_base) {
             Ok(()) => {
                 batch.pin(slot);
                 // SLOT-35: the batch's elements are counted once it is whole.
@@ -4397,16 +4399,17 @@ pub fn shared_write_subpacket(
 
 // SLOT-20, SLOT-35
 fn write_batch(
-    slot: &RegistrySlot,
+    g: &SlotGuard,
     local: &mut ProcessLocalSlot,
     batch: &mut Batch,
     payload_voidstar: AbsPtr,
     n_elements: u64,
     elem_data_base: AbsPtr,
 ) -> Result<(), MorlocError> {
+    let slot = g.slot();
     let w = local.elem_schema.width;
     if slot.staged.get() != 0 {
-        batch.seal(slot, local)?;
+        batch.seal(g, local)?;
         let schema = &local.value_schema;
         let res = crate::recur::Resolver::new(schema);
         let total = crate::ffi::calc_voidstar_size_portable_with(payload_voidstar, schema, &res)?;
@@ -4423,7 +4426,7 @@ fn write_batch(
     }
     let buf_size = write_buffer_capacity(slot)?;
     if flat_route(&local.elem_schema, buf_size, false, 0) {
-        return append_flat_run(slot, local, batch, elem_data_base, n_elements as usize, buf_size);
+        return append_flat_run(g, local, batch, elem_data_base, n_elements as usize, buf_size);
     }
     let elem = local.elem_schema.clone();
     let res = crate::recur::Resolver::new(&elem);
@@ -4439,13 +4442,13 @@ fn write_batch(
             }
             // SAFETY: SLOT-20: elements i..j lie within the batch.
             let run = unsafe { elem_data_base.add(i as usize * w) };
-            append_flat_run(slot, local, batch, run, (j - i) as usize, buf_size)?;
+            append_flat_run(g, local, batch, run, (j - i) as usize, buf_size)?;
             i = j;
             continue;
         }
         // SAFETY: SLOT-20: element `i` lies within the batch.
         let elem_src = unsafe { elem_data_base.add((i as usize) * w) };
-        append_one_element(slot, local, batch, elem_src, buf_size, &elem, &res)?;
+        append_one_element(g, local, batch, elem_src, buf_size, &elem, &res)?;
         i += 1;
     }
     Ok(())
@@ -4630,7 +4633,7 @@ fn with_txn<R>(reached: *const u8, f: impl FnOnce(&mut Txn) -> Result<R, MorlocE
         if r.is_err() {
             let mut t = cell.take().ok_or_else(no_txn)?;
             drop(cell);
-            t.batch.abort_pending(t.guard.slot);
+            t.batch.abort_pending(&t.guard);
             t.end();
         }
         r.map(Some)
@@ -4699,10 +4702,11 @@ fn place_room(t: &mut Txn, size: usize) -> Result<MlcRoom, MorlocError> {
         return Err(MorlocError::Other(format!("@write: a fixed-width element of {w} bytes was given size {size}")));
     }
     let int = t.local.elem_schema.serial_type == SerialType::Int && size == w;
-    let flat = flat_route(&t.local.elem_schema, t.buf_size, int, t.guard.slot.write_buffer_data_used.get());
-    let (slot, local, batch, buf_size) = (t.guard.slot, &mut t.local, &mut t.batch, t.buf_size);
+    let flat = flat_route(&t.local.elem_schema, t.buf_size, int, t.guard.slot().write_buffer_data_used.get());
+    let (g, local, batch, buf_size) = (&t.guard, &mut t.local, &mut t.batch, t.buf_size);
+    let slot = g.slot();
     let room = if flat {
-        let (at, _) = place_flat(slot, local, batch, 1, buf_size)?;
+        let (at, _) = place_flat(g, local, batch, 1, buf_size)?;
         let buf = crate::shm::rel2abs(slot.write_buffer.get())?;
         // SAFETY: SLOT-20: the block holds the slot at `at`.
         unsafe {
@@ -4711,7 +4715,7 @@ fn place_room(t: &mut Txn, size: usize) -> Result<MlcRoom, MorlocError> {
             MlcRoom { slot: buf.add(at), data: end, end, base: buf, origin: buf.add(at) }
         }
     } else {
-        match place_one(slot, local, batch, size, buf_size)? {
+        match place_one(g, local, batch, size, buf_size)? {
             Placement::Buffer { slot_at, data_at, var, .. } => {
                 let buf = crate::shm::rel2abs(slot.write_buffer.get())?;
                 // SAFETY: SLOT-20: the block holds the slot and `var` bytes at `data_at`.
@@ -4758,15 +4762,15 @@ pub fn write_place_run(k: usize, reached: *const u8) -> Result<Option<(*mut u8, 
         if k == 0 {
             return Ok((std::ptr::null_mut(), 0));
         }
-        if !flat_route(&t.local.elem_schema, t.buf_size, int, t.guard.slot.write_buffer_data_used.get()) {
+        if !flat_route(&t.local.elem_schema, t.buf_size, int, t.guard.slot().write_buffer_data_used.get()) {
             let room = place_room(t, w)?;
             // SAFETY: SLOT-20: the room holds the slot's `w` bytes.
             let end = unsafe { room.slot.add(w) };
             t.expect = Some((end, end));
             return Ok((room.slot, 1));
         }
-        let (at, n) = place_flat(t.guard.slot, &mut t.local, &mut t.batch, k, t.buf_size)?;
-        let buf = crate::shm::rel2abs(t.guard.slot.write_buffer.get())?;
+        let (at, n) = place_flat(&t.guard, &mut t.local, &mut t.batch, k, t.buf_size)?;
+        let buf = crate::shm::rel2abs(t.guard.slot().write_buffer.get())?;
         // SAFETY: SLOT-20: the block holds `n` slots at `at`.
         let slots = unsafe { buf.add(at) };
         // SAFETY: SLOT-20: as above.
@@ -4794,9 +4798,9 @@ pub fn write_commit(reached: *const u8) -> Result<(), MorlocError> {
     if let Err(what) = t.reached(reached) {
         overrun(Some(t), what);
     }
-    let committed = t.batch.commit_pending(t.guard.slot);
+    let committed = t.batch.commit_pending(&t.guard);
     if committed.is_ok() {
-        t.guard.slot.element_count.set(t.guard.slot.element_count.get() + t.batch.placed);
+        t.guard.slot().element_count.set(t.guard.slot().element_count.get() + t.batch.placed);
     }
     t.end();
     committed
@@ -4805,7 +4809,7 @@ pub fn write_commit(reached: *const u8) -> Result<(), MorlocError> {
 // SLOT-36, PANIC-1
 fn abort_leaked_txn() {
     if let Some(mut t) = take_txn() {
-        t.batch.abort_pending(t.guard.slot);
+        t.batch.abort_pending(&t.guard);
         t.end();
         panic!("a @write batch was still open when its call ended");
     }
@@ -4814,7 +4818,7 @@ fn abort_leaked_txn() {
 // SLOT-36
 pub fn write_abort() {
     if let Some(mut t) = take_txn() {
-        t.batch.abort_pending(t.guard.slot);
+        t.batch.abort_pending(&t.guard);
         t.end();
     }
 }
@@ -4830,8 +4834,8 @@ pub fn shared_flush_buffer(handle: i64) -> Result<(), MorlocError> {
                 handle_kind_name(slot.kind.get()),
             )));
         }
-        let _guard = lock_for_write(slot, gen_claim, "the stream was closed, or its reader stopped")?;
-        flush_write_buffer(slot, local)?;
+        let guard = lock_for_write(slot, gen_claim, "the stream was closed, or its reader stopped")?;
+        flush_write_buffer(&guard, local)?;
         if slot.kind.get() != MLC_KIND_OSTREAM {
             return Ok(None);
         }
@@ -8815,7 +8819,7 @@ pub fn shared_open_ifile_recovered(
         };
 
     // Allocate a slot and publish (mirrors shared_open_ifile).
-    let (_slot_idx, slot, _guard) = match allocate_slot_cas() {
+    let (_slot_idx, _, guard) = match allocate_slot_cas() {
         Ok(s) => s,
         Err(e) => {
             return Err(e);
@@ -8831,7 +8835,7 @@ pub fn shared_open_ifile_recovered(
         } else {
             shm_types_crate::RELNULL
         };
-        let new_gen = publish_slot(slot, &SlotInit {
+        let new_gen = publish_slot(&guard, &SlotInit {
             kind: MLC_KIND_IFILE,
             file: (file_dev, file_ino),
             path: (pending.own(path_rel), path.len() as u32),
@@ -8846,7 +8850,7 @@ pub fn shared_open_ifile_recovered(
     let new_gen = match publish_result {
         Ok(g) => g,
         Err(e) => {
-            release_slot_locked(slot);
+            release_slot_locked(&guard);
             return Err(e);
         }
     };
@@ -11103,7 +11107,7 @@ mod tests {
         let (_, slot, guard) = allocate_slot_cas().unwrap();
         slot.is_stdio.set(1);
         slot.stdio_kind.set(STDIO_KIND_STDIN);
-        release_slot_locked(slot);
+        release_slot_locked(&guard);
         drop(guard);
         assert_eq!(claim.load(Ordering::Acquire), h1, "another slot's release cleared the claim");
         close_handle(h1).unwrap();
@@ -13341,7 +13345,7 @@ pub fn shared_open_channel(schema_str: &str) -> Result<i64, MorlocError> {
     )))?;
     reject_non_list_stream_schema(&parsed_schema, "channel open", "<channel>")?;
 
-    let (slot_idx, slot, guard) = allocate_slot_cas()?;
+    let (slot_idx, _, guard) = allocate_slot_cas()?;
     let publish = (|| -> Result<u64, MorlocError> {
         let mut pending = Unpublished::default();
         let schema_rel = pending.hold(shm_copy_bytes(schema_str.as_bytes())?);
@@ -13357,7 +13361,7 @@ pub fn shared_open_channel(schema_str: &str) -> Result<i64, MorlocError> {
             (*b).fail_msg = shm_types_crate::RELNULL;
         }
         let block_rel = pending.hold(crate::shm::abs2rel(block_abs)?);
-        let new_gen = publish_slot(slot, &SlotInit {
+        let new_gen = publish_slot(&guard, &SlotInit {
             kind: MLC_KIND_CHANNEL,
             schema: (pending.own(schema_rel), schema_str.len() as u32),
             entries: (pending.own(block_rel), 0),
@@ -13369,7 +13373,7 @@ pub fn shared_open_channel(schema_str: &str) -> Result<i64, MorlocError> {
     let new_gen = match publish {
         Ok(g) => g,
         Err(e) => {
-            release_slot_locked(slot);
+            release_slot_locked(&guard);
             return Err(e);
         }
     };
@@ -13634,13 +13638,13 @@ pub fn shared_settle_channel(handle: i64) -> Result<(), MorlocError> {
         return Ok(());
     };
     let failure = {
-        let _g = SlotGuard::lock_any(slot)?;
+        let guard = SlotGuard::lock_any(slot)?;
         if !slot_generation_is(slot, gen_claim) {
             return Ok(());
         }
         if slot.poisoned.get() != 0 {
-            release_slot_locked(slot);
-            drop(_g);
+            release_slot_locked(&guard);
+            drop(guard);
             invalidate_process_local_slot(handle);
             return Err(died_inside());
         }
@@ -13652,7 +13656,7 @@ pub fn shared_settle_channel(handle: i64) -> Result<(), MorlocError> {
                 None
             }
         };
-        release_slot_locked(slot);
+        release_slot_locked(&guard);
         failure
     };
     invalidate_process_local_slot(handle);
@@ -13664,7 +13668,8 @@ pub fn shared_settle_channel(handle: i64) -> Result<(), MorlocError> {
 
 /// Free a channel's queued batches and its failure message. Caller holds
 /// the slot lock; the block itself is freed with the slot's other blocks.
-fn channel_free_queue(slot: &RegistrySlot) {
+fn channel_free_queue(g: &SlotGuard) {
+    let slot = g.slot();
     let Ok(b) = channel_block(slot) else { return };
     // SLOT-21: waiters look again and find the slot released.
     channel_changed(b);
@@ -14167,6 +14172,65 @@ mod write_behind_tests {
         assert_eq!(read_strs(&path), first);
     }
 
+    // SLOT-39
+    #[test]
+    fn reclaiming_a_poisoned_slot_frees_none_of_its_blocks() {
+        let _shm = crate::own_test_registry();
+        let dir = test_dir("poisoned_reclaim");
+        let path = dir.join("poisoned.idx");
+        let h = shared_open_ostream_with_schema(path.to_str().unwrap(), "as").unwrap();
+        write_one(h, &["held".to_string()], 0);
+        let slot = slot_ref(unpack_handle(h).1).unwrap();
+        let blocks: Vec<AbsPtr> = [slot.file_path.get(), slot.schema_str.get(), slot.write_buffer.get()]
+            .into_iter()
+            .map(|r| shm::rel2abs(r).unwrap())
+            .collect();
+        let counts = || blocks.iter().map(|&b| unsafe { shm::reference_count(b) }).collect::<Vec<_>>();
+        let before = counts();
+        assert_eq!(before, vec![Some(1); 3]);
+        {
+            let _g = SlotGuard::lock_any(slot).unwrap();
+            slot.poisoned.set(1);
+        }
+        let e = shared_close_handle(h).expect_err("a poisoned stream closed cleanly");
+        assert!(format!("{e:?}").contains("died"), "unexpected error: {e:?}");
+        assert_eq!(counts(), before, "reclaiming a poisoned slot freed one of its blocks");
+        blocks.into_iter().for_each(free_uncounted);
+    }
+
+    // SLOT-39
+    #[test]
+    fn a_writer_dying_between_queueing_and_replacing_its_buffer_releases_it_once() {
+        let _shm = crate::own_test_registry();
+        let dir = test_dir("died_mid_swap");
+        let path = dir.join("mid_swap.idx");
+        let h = shared_open_ostream_with_schema(path.to_str().unwrap(), "as").unwrap();
+        let first = vec!["kept".to_string(), "also kept".to_string()];
+        write_one(h, &first, 0);
+        let slot = slot_ref(unpack_handle(h).1).unwrap();
+        let block = shm::rel2abs(slot.write_buffer.get()).unwrap();
+        unsafe { shm::shincref(block) }.unwrap();
+        let pid = unsafe { libc::fork() };
+        if pid == 0 {
+            EXIT_BEFORE_INSTALL.with(|f| f.set(true));
+            let _ = shared_flush_buffer(h);
+            unsafe { libc::_exit(1) };
+        }
+        let st = reap(pid);
+        assert!(libc::WIFEXITED(st) && libc::WEXITSTATUS(st) == EXIT_BEFORE_INSTALL_STATUS, "the writer did not die between the push and the install: {st}");
+        assert_eq!(slot.write_buffer.get(), shm::abs2rel(block).unwrap(), "the slot no longer names the queued buffer");
+        let e = shared_close_handle(h).expect_err("a stream a writer died inside closed cleanly");
+        assert!(format!("{e:?}").contains("died"), "unexpected error: {e:?}");
+        let spares = slot_queue(slot).unwrap().spares_held();
+        assert_eq!(
+            unsafe { shm::reference_count(block) },
+            Some(1 + spares),
+            "the queued buffer was not released exactly once",
+        );
+        assert_eq!(read_strs(&path), first);
+        shm::shfree(block).unwrap();
+    }
+
     // SLOT-15: once close returns the file is finished, so its path reopens
     // at once; writes through the closed handle fail.
     #[test]
@@ -14489,9 +14553,10 @@ mod write_behind_tests {
             let h = shared_open_ostream_with_schema(path.to_str().unwrap(), "aj").unwrap();
             if full_block {
                 let slot = slot_ref(unpack_handle(h).1).unwrap();
+                let guard = SlotGuard::lock(slot).unwrap();
                 let old = crate::shm::rel2abs(slot.write_buffer.get()).unwrap();
                 let fresh = crate::shm::shmalloc(LIMIT).unwrap();
-                slot.write_buffer.set(slot_owns(crate::shm::abs2rel(fresh).unwrap()));
+                guard.set_block(Block::WriteBuffer, slot_owns(crate::shm::abs2rel(fresh).unwrap()));
                 free_uncounted(old);
             }
             for json in [&first, &then] {

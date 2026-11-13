@@ -1162,9 +1162,11 @@ pub(crate) unsafe fn incref_held(vols: &VolumeTable, ptr: AbsPtr) -> bool {
 // SHM-8: release a block no process counts. No eval arena tracks it, so
 // none is consulted.
 pub(crate) fn free_uncounted(abs: AbsPtr) {
-    take_on_reference();
     if ptr_is_in_any_volume(abs) {
-        let _ = shfree_unlocked(abs);
+        take_on_reference();
+        if shfree_unlocked(abs).is_err() {
+            hand_on_reference();
+        }
     }
 }
 
@@ -2011,13 +2013,13 @@ fn shfree_unlocked(ptr: AbsPtr) -> Result<(), MorlocError> {
     // SAFETY: ptr was returned by shmalloc, which places a BlockHeader
     // immediately before the data. Magic check validates correctness.
     if !heads_only_its_block(ptr) {
-        return Err(MorlocError::Shm("Corrupted memory - not a block in its large volume".into()));
+        refuse_free(ptr, "not a block in its large volume");
     }
     let blk = unsafe {
         &*(ptr.sub(std::mem::size_of::<BlockHeader>()) as *const BlockHeader)
     };
     if blk.magic() != BLK_MAGIC {
-        return Err(MorlocError::Shm("Corrupted memory".into()));
+        refuse_free(ptr, "no block header");
     }
     // Scrub before publishing, not after. A count of zero is precisely what
     // marks a block available, so a scrub that runs after the count drops
@@ -2035,13 +2037,11 @@ fn shfree_unlocked(ptr: AbsPtr) -> Result<(), MorlocError> {
     loop {
         let cur = blk.reference_count.load(Ordering::Acquire);
         if cur == 0 {
-            return Err(MorlocError::Shm("Reference count already 0".into()));
+            refuse_free(ptr, "the block is already free");
         }
         if cur == TEARING_DOWN {
             // Another party is mid-scrub and owns the transition to zero.
-            return Err(MorlocError::Shm(
-                "Reference count already 0 (block is being released or claimed)".into(),
-            ));
+            refuse_free(ptr, "the block is being released or claimed");
         }
         let next = if cur == 1 { TEARING_DOWN } else { cur - 1 };
         if blk
@@ -2066,6 +2066,11 @@ fn shfree_unlocked(ptr: AbsPtr) -> Result<(), MorlocError> {
         }
         return Ok(());
     }
+}
+
+// SHM-19
+fn refuse_free(ptr: AbsPtr, reason: &str) -> ! {
+    lose_shared_memory(&format!("refused to free {ptr:p}: {reason}"))
 }
 
 // SHM-6: a fill this large leaves the cache to the next owner either way.
@@ -3535,7 +3540,7 @@ pub(crate) mod tests {
         let inner_state = unsafe { block_state(inner) };
         let inner_count = unsafe { reference_count(inner) };
         let inner_incref = unsafe { shincref(inner) }.is_err();
-        let inner_free = shfree(inner).is_err();
+        let inner_heads = heads_only_its_block(inner);
         let rel = abs2rel(p).unwrap();
         let whole = rel2abs_extent(rel, LARGE_BOUND).is_ok();
         let past = rel2abs_extent(rel, LARGE_BOUND + 1).is_err();
@@ -3544,7 +3549,7 @@ pub(crate) mod tests {
         assert_eq!(inner_state, BlockState::NoBlock);
         assert_eq!(inner_count, None);
         assert!(inner_incref, "an interior address of a large block took a reference");
-        assert!(inner_free, "an interior address of a large block was released");
+        assert!(!inner_heads, "an interior address of a large block reads as a block");
         assert!(whole, "the block's own bytes could not be read");
         assert!(past, "a read past the block's committed bytes was allowed");
     }
@@ -4185,6 +4190,24 @@ mod out_of_shared_memory_tests {
     #[test]
     fn a_failed_release_never_ends_the_pool() {
         assert_eq!(status_of("child_releases_into_an_unmappable_volume"), Some(3));
+    }
+
+    #[test]
+    fn a_free_of_a_block_already_free_ends_the_process() {
+        assert_eq!(status_of("child_frees_a_block_twice"), Some(morloc_runtime_types::EXIT_SHARED_MEMORY_LOST));
+    }
+
+    #[test]
+    #[ignore]
+    fn child_frees_a_block_twice() {
+        if std::env::var_os(CHILD_ENV).is_none() {
+            return;
+        }
+        let _shm = crate::init_test_shm();
+        let p = shmalloc(64).unwrap();
+        shfree(p).unwrap();
+        let _ = shfree(p);
+        unsafe { libc::_exit(3) };
     }
 
     #[test]
