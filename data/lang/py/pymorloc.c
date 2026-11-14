@@ -4075,6 +4075,113 @@ error:
     return NULL;
 }
 
+// Whether any part of `schema` may read as a value that views the bytes it
+// was read from (a NumPy array or an Arrow table); a schema nested deeper
+// than `depth` counts.
+static bool schema_has_view(const Schema* schema, int depth){
+    if (depth <= 0 || schema->type == MORLOC_TABLE) {
+        return true;
+    }
+    if (schema->hint != NULL && strcmp(schema->hint, "numpy.ndarray") == 0) {
+        return true;
+    }
+    for (size_t i = 0; i < schema->size; i++) {
+        if (schema_has_view(schema->parameters[i], depth - 1)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// A whole-list @load decoded one sub-packet at a time where it lies
+// (SLOT-25), into one Python list.
+typedef struct {
+    const Schema* schema;
+    PyObject* acc;
+    Py_ssize_t at;
+} py_slice_t;
+
+static int32_t py_slice_begin(void* c, uint64_t n){
+    py_slice_t* d = (py_slice_t*)c;
+    if (n > (uint64_t)PY_SSIZE_T_MAX) {
+        PyErr_SetString(PyExc_MemoryError, "@load: the list is longer than a Python list can be");
+        return 1;
+    }
+    d->acc = PyList_New((Py_ssize_t)n);
+    return d->acc == NULL ? 1 : 0;
+}
+
+static int32_t py_slice_decode(void* c, const void* data, morloc_space_t space){
+    py_slice_t* d = (py_slice_t*)c;
+    PyObject* run = from_voidstar(d->schema, data, space);
+    if (run == NULL) {
+        return 1;
+    }
+    if (!PyList_Check(run) || d->acc == NULL
+        || d->at + PyList_GET_SIZE(run) > PyList_GET_SIZE(d->acc)) {
+        Py_DECREF(run);
+        PyErr_SetString(PyExc_RuntimeError, "@load: a part of the list does not fit the list's length");
+        return 1;
+    }
+    for (Py_ssize_t i = 0; i < PyList_GET_SIZE(run); i++) {
+        PyObject* x = PyList_GET_ITEM(run, i);
+        Py_INCREF(x);
+        PyList_SET_ITEM(d->acc, d->at++, x);
+    }
+    Py_DECREF(run);
+    return 0;
+}
+
+// The list stored in the stream file at `path`, read as its whole IFile
+// slice. Returns false, with no exception set, when the file does not open
+// as an IFile of `schema_str`; otherwise true, with `*out` the list or NULL
+// and an exception set.
+static bool py_load_in_place(const Schema* schema, const char* schema_str, const char* path, PyObject** out){
+    *out = NULL;
+    char* errmsg = NULL;
+    int64_t h;
+    Py_BEGIN_ALLOW_THREADS
+    h = mlc_open_ifile(schema_str, path, &errmsg);
+    Py_END_ALLOW_THREADS
+    if (errmsg != NULL || h < 0) {
+        free(errmsg);
+        if (h >= 0) {
+            char* close_err = NULL;
+            Py_BEGIN_ALLOW_THREADS
+            mlc_close(h, &close_err);
+            Py_END_ALLOW_THREADS
+            free(close_err);
+        }
+        return false;
+    }
+    py_slice_t ctx = {schema, NULL, 0};
+    mlc_ifile_walk_arg bounds[2];
+    memset(bounds, 0, sizeof(bounds));
+    int32_t rc = mlc_ifile_slice_with(h, bounds, py_slice_begin, py_slice_decode, &ctx, &errmsg);
+    char* close_err = NULL;
+    int close_rc;
+    Py_BEGIN_ALLOW_THREADS
+    close_rc = mlc_close(h, &close_err);
+    Py_END_ALLOW_THREADS
+    if (rc < 0 || (rc == 0 && (close_rc != 0 || close_err != NULL))) {
+        const char* why = rc < 0 ? errmsg : close_err;
+        PyErr_Format(PyMorlocException != NULL ? PyMorlocException : PyExc_RuntimeError,
+                     "@load: %s", why != NULL ? why : "reading the file failed");
+        Py_CLEAR(ctx.acc);
+    } else if (rc == 0 && ctx.acc != NULL && ctx.at != PyList_GET_SIZE(ctx.acc)) {
+        PyErr_SetString(PyExc_RuntimeError, "@load: the file held fewer elements than its index");
+        Py_CLEAR(ctx.acc);
+    } else if (rc == 0 && ctx.acc == NULL) {
+        ctx.acc = PyList_New(0);
+    } else if (rc != 0) {
+        Py_CLEAR(ctx.acc);
+    }
+    free(errmsg);
+    free(close_err);
+    *out = ctx.acc;
+    return true;
+}
+
 static PyObject* pybinding__mlc_load(PyObject* self, PyObject* args) { MAYFAIL
     const char* schema_str;
     const char* path;
@@ -4084,7 +4191,14 @@ static PyObject* pybinding__mlc_load(PyObject* self, PyObject* args) { MAYFAIL
 
     PARSE_ARGS_OR_ABORT(args, "ss", &schema_str, &path);
 
-    schema = PyTRY(parse_schema, schema_str);
+    schema = PyTRY(cached_schema, schema_str);
+
+    if (schema->type == MORLOC_ARRAY && schema->hint == NULL && !schema_has_view(schema, 64)) {
+        PyObject* loaded = NULL;
+        if (py_load_in_place(schema, schema_str, path, &loaded)) {
+            return loaded;
+        }
+    }
 
     voidstar = mlc_load(path, schema, &load_err);
 
@@ -4101,7 +4215,6 @@ static PyObject* pybinding__mlc_load(PyObject* self, PyObject* args) { MAYFAIL
                             load_err);
         }
         if (load_err != NULL) free(load_err);
-        free_schema(schema);
         return NULL;
     }
     if (load_err != NULL) { free(load_err); load_err = NULL; }
@@ -4116,7 +4229,6 @@ static PyObject* pybinding__mlc_load(PyObject* self, PyObject* args) { MAYFAIL
             shfree(voidstar, &shfree_errmsg);
             free(shfree_errmsg);
         }
-        free_schema(schema);
         if (obj == NULL) {
             return NULL;
         }
@@ -4129,7 +4241,6 @@ error:
         shfree(voidstar, &shfree_errmsg);
         free(shfree_errmsg);
     }
-    free_schema(schema);
     return NULL;
 }
 

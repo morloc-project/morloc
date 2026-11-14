@@ -6,6 +6,8 @@ Changed
    its program
  * Python and R calls passing values of tens of KiB are 13-24% faster
    (fork-pool workers keep heap headroom; `MORLOC_FORK_HEAP_PAD` sets it)
+ * a Python `@load` of a whole list decodes the file where it lies, about
+   14% faster
 
 Fixed
  * `.[i]` and `.[i].field` on an IFile compile inside a Rust pool
