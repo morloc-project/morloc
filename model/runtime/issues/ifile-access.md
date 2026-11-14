@@ -1,17 +1,5 @@
 # IFile access from morloc code
 
-- **`.[i] f` on an IFile does not compile in a Rust pool.** [reproduced,
-  2026-10-15, c4da6cf3] The index reaches `rustmorloc::ifile_walk` as a bare
-  `i64` (`&[(0 as i64)]`), but the shim takes `&[Option<i64>]`: rustc E0308
-  "expected `Option<i64>`, found `i64`". Slices wrap each bound in
-  `__to_index__` (Express.hs `expressBracketSlice`); `expressBracketIndex`
-  passes the index unwrapped, which the nexus walker accepts, so the golden
-  test `rust-ifile-walk` (evaluated on the nexus) does not see it. Repro: a
-  Rust-pool function `firstLen g = size (.bases (.[0] g))` with
-  `g :: IFile [FastaEntry]` (bio). [reproduced 2026-11-02] A second
-  site: `.[1].y f` on `IFile [Point]` (Express.hs `dispatchPatternStruct`)
-  also passes bare bounds.
-
 - **A projection after an IFile bracket decodes whole elements.** [reproduced,
   2026-10-15] `.[:].header g` lowers to a walk of `.[:]` (every element
   materialized) followed by a map of `.header`, and `.[i].header g` to a walk
@@ -84,14 +72,12 @@
   their sub-packets while one sub-packet is missing from the index loses
   that sub-packet's elements with no error, outside the debug-only open
   walk. Candidate: compare the file's data extent with the sum of the
-  indexed sub-packet lengths at open (no I/O beyond the footer).
-- **Three index tests fail under `cargo test --release`.** [reproduced,
-  2026-11-08, c3a7b3bb3] `an_ifile_refuses_permuted_counts`,
-  `..._skips_the_first_sub_packet` and `..._skips_the_last_sub_packet`
-  (stream.rs ~10210-10236) assert the debug-only walk of SLOT-30, so they
-  pass only in a debug build. They should set `MORLOC_VERIFY_INDEX`, or be
-  marked debug-only.
-
+  indexed sub-packet lengths at open (no I/O beyond the footer): the first
+  entry at the body start, the last sub-packet ending at the footer. Needs
+  a ruling: SLOT-30 (ruled 2026-11-02) allows gaps ("the last sub-packet
+  ends before the footer"), and every writer must then be shown to leave
+  none (custody writer, @concat, the nexus stdout relay
+  stdio_server.rs finish_logical_packet, append).
 - **A repeated slice decompresses its interior sub-packets again.**
   [read, 2026-11-08] By SLOT-34, a slice caches only its end sub-packets,
   so a loop of identical or overlapping slices over a compressed IFile

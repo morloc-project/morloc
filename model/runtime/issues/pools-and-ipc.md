@@ -86,7 +86,12 @@ Details and evidence: /work/plans/runtime-audit-2026-10-10/C-processes.md.
 - **A cross-language round trip makes 7 syscalls where 4 would do.**
   [measured with strace, 2026-11-13] Per cpp->py call: 2 poll, 3
   recvfrom, 2 sendmsg; the extra poll is the reply wait
-  (ipc_ffi.rs:783-787) and the extra recvfrom is an EAGAIN in the callee.
+  (ipc_ffi.rs:783-787) and the extra recvfrom is the MSG_PEEK on the held
+  connection in the callee (fork_pool.rs:509; pool_ffi.rs:425 reads
+  directly and treats a closed peer as Closed). Removing the peek and the
+  caller's reply poll gives 5, not 4: the callee's poll multiplexes the
+  listener, the held connection and the lifeline. Est. 0.5-1 us per call;
+  touches NET-5/NET-9, model first.
   py->cpp I64 is 23.0 us = 1.9 us Python marshalling + 21.2 us
   foreign_call, against the 13.6 us floor (XL-1); copies and schemas are
   not where the rest goes.
@@ -97,5 +102,9 @@ Details and evidence: /work/plans/runtime-audit-2026-10-10/C-processes.md.
   [measured with strace, 2026-11-13] At 8000 Reals (64 KiB, inline) a
   py->cpp loop makes 2050 brk calls per 1000 calls, all in the Python
   worker: four ~64 KiB buffers are live at once, so glibc trims ~188 KiB
-  each time. About 20 us of the 52-62 us inline penalty at that size;
-  none at 16 KiB.
+  each time. Cause [read 2026-11-13]: Python and R fork pools never call
+  tune_allocator (pool_ffi.rs:654, called only from pool_main), which C++
+  and Rust pools use. Measured with MALLOC_TOP_PAD_=1M
+  MALLOC_TRIM_THRESHOLD_=4M: py->cpp 64 KiB 163-174 -> 127-136 us (-36 us);
+  none at 16 KiB. Fix planned (/work/plans/output-path-stages.md stage 3,
+  4 MiB pad ruled 2026-11-14).

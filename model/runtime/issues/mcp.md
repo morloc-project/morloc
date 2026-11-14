@@ -71,6 +71,15 @@ model/issues/LIST.md), checked against the code 2026-11-04 [read].
 - **A `__` collision in module or command names aborts the front end.**
   mcp.rs:1849-1860 exits 1 on purpose (fail closed). Needs a ruling: refuse
   at registration, or abort the whole front end as now.
-- **An HTTP call costs about 0.6 ms fixed.** [measured, 2026-11-13]
-  A scalar result takes 0.60 ms over HTTP and an 8 KB result 0.68 ms,
-  so nearly all of a small call is fixed cost. Not investigated.
+- **Possible enhancement, not a defect: an HTTP call has a fixed cost
+  that connection reuse could cut.** [measured, 2026-11-13] A scalar
+  result took 0.60 ms over HTTP and an 8 KB result 0.68 ms (setup not
+  recorded); a raw-socket client calling the daemon directly measured
+  0.13-0.16 ms (TCP connect+accept+close alone 61 us), so the front end's
+  router_forward (router_ffi.rs:628-760: a new unix connection per
+  forward, JSON re-serialized, two writes) is the suspect. Candidates:
+  daemon keep-alive (pools-and-ipc.md), and a router connection per
+  child daemon. Both need rules first: an idle keep-alive connection must
+  not hold one of the DAEMON-16 call slots, and a retry on a stale pooled
+  connection must never run an effectful call twice. Deferred (user,
+  2026-11-14).

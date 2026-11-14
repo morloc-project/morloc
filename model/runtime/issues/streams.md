@@ -228,3 +228,13 @@ here touch locks and ownership: model first.
   (morloc-nexus stdio_server.rs ~311, ~455-460) or the pool fails reading
   the body (stream.rs ~2803), the batch block it was handed is not
   released until the shared memory is torn down.
+- **R stream decoders leak their block when decoding raises.** [read
+  2026-11-13] rmorloc.c morloc_mlc_next (~3090), mlc_ifile_walk (~3059),
+  mlc_next_frame (~3127) and mlc_stream_layout (~3157) call from_voidstar
+  without the shm_tracker that morloc_mlc_load uses (~2806-2810): an R
+  error while decoding (an R allocation failure, R_TRY_READ outside
+  runtime reads) leaks the SHM block and the parsed Schema;
+  mlc_next_frame also leaks the block when parse_schema fails after the
+  read. Violates SHM-4 (a reference is released once, by its holder): here
+  it is never released.
+
