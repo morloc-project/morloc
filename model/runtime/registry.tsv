@@ -20,6 +20,7 @@ data/lang/py/pymorloc.c::-::PyMorlocInternalError	startup
 data/lang/py/pymorloc.c::-::PyMorlocPipeClosed	startup		
 data/lang/py/pymorloc.c::-::mlc_failure_message_fn	startup		
 data/lang/py/pymorloc.c::-::recur_env_stack	thread		
+data/lang/py/pymorloc.c::-::schema_cache	lazy		
 data/lang/py/pymorloc.c::-::recur_env_depth	thread		
 data/lang/py/pymorloc.c::-::recur_env_cap	thread		
 data/lang/py/pymorloc.c::-::Methods	startup		

@@ -206,8 +206,11 @@ unsafe fn build_schema_metadata(schema: *const CSchema) -> (*mut u8, usize) {
     if schema.is_null() {
         return (ptr::null_mut(), 0);
     }
-    let rs = CSchema::to_rust(schema);
-    let schema_str = crate::schema::schema_to_string(&rs);
+    build_schema_metadata_rs(&CSchema::to_rust(schema))
+}
+
+unsafe fn build_schema_metadata_rs(rs: &crate::schema::Schema) -> (*mut u8, usize) {
+    let schema_str = crate::schema::schema_to_string(rs);
     let schema_bytes = schema_str.as_bytes();
     let schema_len = schema_bytes.len() + 1; // +1 for null terminator
     let meta_header_size = 8; // sizeof(morloc_metadata_header_t)
@@ -296,6 +299,37 @@ unsafe fn make_data_packet_with_schema(
     status: u8,
 ) -> *mut u8 {
     let (metadata, metadata_length) = build_schema_metadata(schema);
+    packet_with_metadata(data, data_length, metadata, metadata_length, src, fmt, cmpr, encr, status)
+}
+
+/// [`make_data_packet_with_schema`] for a schema already converted.
+unsafe fn make_data_packet_with_schema_rs(
+    data: *const u8,
+    data_length: usize,
+    meta: Option<&crate::schema::Schema>,
+    src: u8,
+    fmt: u8,
+    cmpr: u8,
+    encr: u8,
+    status: u8,
+) -> *mut u8 {
+    let (metadata, metadata_length) = meta.map_or((ptr::null_mut(), 0), |rs| build_schema_metadata_rs(rs));
+    packet_with_metadata(data, data_length, metadata, metadata_length, src, fmt, cmpr, encr, status)
+}
+
+/// Build the packet, then free the metadata buffer it was given.
+#[allow(clippy::too_many_arguments)]
+unsafe fn packet_with_metadata(
+    data: *const u8,
+    data_length: usize,
+    metadata: *mut u8,
+    metadata_length: usize,
+    src: u8,
+    fmt: u8,
+    cmpr: u8,
+    encr: u8,
+    status: u8,
+) -> *mut u8 {
     let result = make_data_packet_raw(
         data, data_length, metadata, metadata_length, src, fmt, cmpr, encr, status,
     );
@@ -331,9 +365,9 @@ unsafe fn reported_rptr_packet(relptr: RelPtr, schema: *const CSchema, format: u
 }
 
 /// 'make_rptr_data_packet' reporting through `errmsg`.
-pub(crate) unsafe fn rptr_packet_or_errmsg(relptr: RelPtr, schema: *const CSchema, format: u8, errmsg: *mut *mut c_char) -> *mut u8 {
+pub(crate) unsafe fn rptr_packet_or_errmsg(relptr: RelPtr, meta: Option<&crate::schema::Schema>, format: u8, errmsg: *mut *mut c_char) -> *mut u8 {
     clear_errmsg(errmsg);
-    match make_rptr_data_packet(relptr, schema, format) {
+    match make_rptr_data_packet_rs(relptr, meta, format) {
         Ok(packet) => packet,
         Err(e) => {
             set_errmsg(errmsg, &e);
@@ -345,16 +379,22 @@ pub(crate) unsafe fn rptr_packet_or_errmsg(relptr: RelPtr, schema: *const CSchem
 // SHM-13: the packet names the allocation the block at `relptr` holds now;
 // refused when no held block begins there.
 pub(crate) unsafe fn make_rptr_data_packet(relptr: RelPtr, schema: *const CSchema, format: u8) -> Result<*mut u8, MorlocError> {
+    let rs = (!schema.is_null()).then(|| CSchema::to_rust(schema));
+    make_rptr_data_packet_rs(relptr, rs.as_ref(), format)
+}
+
+// SHM-13: as make_rptr_data_packet.
+pub(crate) unsafe fn make_rptr_data_packet_rs(relptr: RelPtr, meta: Option<&crate::schema::Schema>, format: u8) -> Result<*mut u8, MorlocError> {
     let abs = shm::rel2abs(relptr)?;
     let shm::BlockState::Held(generation @ 1..) = shm::block_state(abs) else {
         return Err(MorlocError::Shm(
             "a reference packet was asked for an address no held shared-memory block begins at".into(),
         ));
     };
-    let packet = make_data_packet_with_schema(
+    let packet = make_data_packet_with_schema_rs(
         ptr::null(),
         std::mem::size_of::<RelPtr>(),
-        schema,
+        meta,
         PACKET_SOURCE_RPTR,
         format,
         PACKET_COMPRESSION_NONE,
@@ -1189,15 +1229,27 @@ pub(crate) unsafe fn make_data_packet_with(
     whole: bool,
     errmsg: *mut *mut c_char,
 ) -> *mut u8 {
+    make_data_packet_with_rs(voidstar, relptr, schema, &CSchema::to_rust(schema), whole, errmsg)
+}
+
+/// [`make_data_packet_with`] given `schema` already converted as `rs`.
+pub(crate) unsafe fn make_data_packet_with_rs(
+    voidstar: *mut c_void,
+    relptr: RelPtr,
+    schema: *const CSchema,
+    rs: &crate::schema::Schema,
+    whole: bool,
+    errmsg: *mut *mut c_char,
+) -> *mut u8 {
     clear_errmsg(errmsg);
-    let rs = CSchema::to_rust(schema);
+    let meta = (!schema.is_null()).then_some(rs);
 
     let threshold = crate::packet::inline_threshold();
     let t_sz = crate::log::trace_enabled().then(std::time::Instant::now);
     // Capped at threshold + 1: only whether the value fits inline matters.
     let flat_size = match crate::ffi::calc_voidstar_size_bounded(
         voidstar as *const u8,
-        &rs,
+        rs,
         threshold.saturating_add(1),
     ) {
         Ok(s) => s,
@@ -1214,14 +1266,14 @@ pub(crate) unsafe fn make_data_packet_with(
     );
 
     if flat_size <= threshold {
-        return make_inline_data_packet(voidstar, schema, errmsg);
+        return make_inline_data_packet_rs(voidstar, rs, meta, errmsg);
     }
 
     if crate::packet::shm_enabled() {
-        if whole && !crate::voidstar::within_its_block(voidstar as crate::shm::AbsPtr, &rs) {
-            return match crate::voidstar::deep_copy_to_block(voidstar as *const u8, &rs) {
+        if whole && !crate::voidstar::within_its_block(voidstar as crate::shm::AbsPtr, rs) {
+            return match crate::voidstar::deep_copy_to_block(voidstar as *const u8, rs) {
                 Ok(copy) => match crate::shm::abs2rel(copy)
-                    .and_then(|rel| make_rptr_data_packet(rel, schema, PACKET_FORMAT_VOIDSTAR))
+                    .and_then(|rel| make_rptr_data_packet_rs(rel, meta, PACKET_FORMAT_VOIDSTAR))
                 {
                     Ok(packet) => packet,
                     Err(e) => {
@@ -1233,9 +1285,9 @@ pub(crate) unsafe fn make_data_packet_with(
                 Err(e) => { set_errmsg(errmsg, &e); ptr::null_mut() }
             };
         }
-        rptr_packet_or_errmsg(relptr, schema, PACKET_FORMAT_VOIDSTAR, errmsg)
+        rptr_packet_or_errmsg(relptr, meta, PACKET_FORMAT_VOIDSTAR, errmsg)
     } else {
-        make_file_data_packet_voidstar(voidstar, schema, &rs, errmsg)
+        make_file_data_packet_voidstar(voidstar, schema, rs, errmsg)
     }
 }
 
@@ -1246,14 +1298,24 @@ pub(crate) unsafe fn make_inline_data_packet(
     schema: *const CSchema,
     errmsg: *mut *mut c_char,
 ) -> *mut u8 {
-    clear_errmsg(errmsg);
     let rs = CSchema::to_rust(schema);
-    match crate::voidstar::flatten_to_buffer(voidstar as AbsPtr, &rs) {
+    make_inline_data_packet_rs(voidstar, &rs, (!schema.is_null()).then_some(&rs), errmsg)
+}
+
+/// [`make_inline_data_packet`] for a schema already converted.
+pub(crate) unsafe fn make_inline_data_packet_rs(
+    voidstar: *mut c_void,
+    rs: &crate::schema::Schema,
+    meta: Option<&crate::schema::Schema>,
+    errmsg: *mut *mut c_char,
+) -> *mut u8 {
+    clear_errmsg(errmsg);
+    match crate::voidstar::flatten_to_buffer(voidstar as AbsPtr, rs) {
         Ok(blob) => {
-            let packet = make_data_packet_with_schema(
+            let packet = make_data_packet_with_schema_rs(
                 blob.as_ptr(),
                 blob.len(),
-                schema,
+                meta,
                 PACKET_SOURCE_MESG,
                 PACKET_FORMAT_VOIDSTAR,
                 PACKET_COMPRESSION_NONE,
@@ -2285,6 +2347,43 @@ unsafe fn print_binary(
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod schema_metadata_tests {
+    use super::*;
+
+    unsafe fn metadata_length(packet: *const u8) -> u32 {
+        (*(packet as *const PacketHeader)).offset
+    }
+
+    #[test]
+    fn a_packet_built_without_a_schema_carries_no_schema_metadata() {
+        let _shm = crate::own_test_registry();
+        let abs = crate::shm::shmalloc(8).expect("allocate");
+        let rel = crate::shm::abs2rel(abs).expect("relptr");
+        let mut errmsg: *mut c_char = ptr::null_mut();
+        unsafe {
+            let inline = make_inline_data_packet(abs as *mut c_void, ptr::null(), &mut errmsg);
+            assert!(!inline.is_null() && errmsg.is_null());
+            assert_eq!(metadata_length(inline), 0);
+            let auto = make_data_packet_with(abs as *mut c_void, rel, ptr::null(), false, &mut errmsg);
+            assert!(!auto.is_null() && errmsg.is_null());
+            assert_eq!(metadata_length(auto), 0);
+            let rptr = make_rptr_data_packet(rel, ptr::null(), PACKET_FORMAT_VOIDSTAR).expect("rptr");
+            assert_eq!(metadata_length(rptr), 0);
+
+            let schema = crate::schema::Schema::primitive(crate::schema::SerialType::Uint8);
+            let cs = CSchema::from_rust(&schema);
+            let with = make_inline_data_packet(abs as *mut c_void, cs, &mut errmsg);
+            assert!(metadata_length(with) > 0);
+            for p in [inline, auto, rptr, with] {
+                libc::free(p as *mut c_void);
+            }
+            CSchema::free(cs);
+        }
+        crate::shm::shfree(abs).expect("release");
+    }
+}
 
 #[cfg(test)]
 mod donation_tests {

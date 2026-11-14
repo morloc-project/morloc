@@ -25,3 +25,11 @@ timing (from the 2026-11-12 audit of the output-path work).
   the check added when the close-time sync was dropped for temporary
   streams has no test (needs a write-back failure, e.g. a full or
   failing filesystem).
+- **The registry scan misses a C static declared with an inline struct.**
+  [reproduced 2026-11-14] source_rules.rs `scan_c` reads one line at a
+  time and takes the last identifier before `=`, `;` or `[`; a declaration
+  `static struct {` ... `} name = ...;` yields no name, so
+  `every_process_wide_value_is_registered` passed with an unregistered
+  process-wide table in pymorloc.c (now declared through a typedef and
+  registered). Same for `static union {` and any declaration whose name
+  falls on a later line. Gap in the registry rule of model/runtime/state.md.

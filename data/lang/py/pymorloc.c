@@ -2799,6 +2799,91 @@ static relptr_t py_export_arrow_to_shm(PyObject* obj, const Schema* schema, char
 }
 
 
+// Parsed schemas by schema string (registry.tsv: schema_cache). Generated
+// pools pass a fixed set of schema strings, so the table stays small.
+typedef struct {
+    char** keys;
+    Schema** schemas;
+    size_t cap;
+    size_t count;
+} schema_cache_t;
+static schema_cache_t schema_cache = {NULL, NULL, 0, 0};
+
+static size_t schema_cache_hash(const char* s){
+    uint64_t h = 1469598103934665603ULL;
+    for (; *s; s++) { h ^= (unsigned char)*s; h *= 1099511628211ULL; }
+    return (size_t)h;
+}
+
+static bool schema_cache_insert(char* key, Schema* schema){
+    size_t i = schema_cache_hash(key) & (schema_cache.cap - 1);
+    while (schema_cache.keys[i] != NULL) {
+        i = (i + 1) & (schema_cache.cap - 1);
+    }
+    schema_cache.keys[i] = key;
+    schema_cache.schemas[i] = schema;
+    schema_cache.count++;
+    return true;
+}
+
+static bool schema_cache_grow(void){
+    size_t old_cap = schema_cache.cap;
+    char** old_keys = schema_cache.keys;
+    Schema** old_schemas = schema_cache.schemas;
+    size_t cap = old_cap ? old_cap * 2 : 64;
+    char** keys = (char**)calloc(cap, sizeof(char*));
+    Schema** schemas = (Schema**)calloc(cap, sizeof(Schema*));
+    if (keys == NULL || schemas == NULL) {
+        free(keys);
+        free(schemas);
+        return false;
+    }
+    schema_cache.keys = keys;
+    schema_cache.schemas = schemas;
+    schema_cache.cap = cap;
+    schema_cache.count = 0;
+    for (size_t i = 0; i < old_cap; i++) {
+        if (old_keys[i] != NULL) {
+            schema_cache_insert(old_keys[i], old_schemas[i]);
+        }
+    }
+    free(old_keys);
+    free(old_schemas);
+    return true;
+}
+
+// The parsed form of `schema_str`, from schema_cache.
+static Schema* cached_schema(const char* schema_str, char** errmsg){
+    *errmsg = NULL;
+    if (schema_cache.cap > 0) {
+        size_t i = schema_cache_hash(schema_str) & (schema_cache.cap - 1);
+        while (schema_cache.keys[i] != NULL) {
+            if (strcmp(schema_cache.keys[i], schema_str) == 0) {
+                return schema_cache.schemas[i];
+            }
+            i = (i + 1) & (schema_cache.cap - 1);
+        }
+    }
+    Schema* schema = parse_schema(schema_str, errmsg);
+    if (*errmsg != NULL) {
+        free_schema(schema);
+        return NULL;
+    }
+    if (schema == NULL) {
+        *errmsg = strdup("a schema string parsed to nothing");
+        return NULL;
+    }
+    char* key = strdup(schema_str);
+    if (key == NULL || ((schema_cache.count + 1) * 2 > schema_cache.cap && !schema_cache_grow())) {
+        free(key);
+        free_schema(schema);
+        *errmsg = strdup("out of memory caching a schema");
+        return NULL;
+    }
+    schema_cache_insert(key, schema);
+    return schema;
+}
+
 // Transforms a value into a message ready for the socket. With the
 // optional third argument true the packet is self-contained -- the value
 // travels inside it rather than as a reference to a shared-memory block
@@ -2817,7 +2902,7 @@ static PyObject* pybinding__put_value(PyObject* self, PyObject* args){ MAYFAIL
 
     PARSE_ARGS_OR_ABORT(args, "Os|p", &obj, &schema_str, &self_contained);
 
-    schema = PyTRY(parse_schema, schema_str);
+    schema = PyTRY(cached_schema, schema_str);
 
     // Arrow dispatch: schema marker `T` (MORLOC_TABLE) routes through the
     // Arrow C Data Interface. The legacy `<arrow>` hint has been retired;
@@ -2826,13 +2911,11 @@ static PyObject* pybinding__put_value(PyObject* self, PyObject* args){ MAYFAIL
         char* errmsg = NULL;
         relptr_t relptr = py_export_arrow_to_shm(obj, schema, &errmsg);
         if (errmsg) {
-            free_schema(schema);
             PyErr_SetString(PyExc_RuntimeError, errmsg);
             free(errmsg);
             return NULL;
         }
         if (PyErr_Occurred()) {
-            free_schema(schema);
             return NULL;
         }
 
@@ -2852,8 +2935,6 @@ static PyObject* pybinding__put_value(PyObject* self, PyObject* args){ MAYFAIL
         } else {
             packet = make_arrow_data_packet(relptr, schema);
         }
-        // The `error:` label frees the schema; freeing it here as well
-        // would free it twice.
         if (!packet) {
             PyINTERNAL_ABORT("Failed to create arrow data packet");
         }
@@ -2861,7 +2942,6 @@ static PyObject* pybinding__put_value(PyObject* self, PyObject* args){ MAYFAIL
         packet_size = PyTRY(morloc_packet_size, packet);
         PyObject* retval = PyBytes_FromStringAndSize((char*)packet, packet_size);
         free(packet);
-        free_schema(schema);
         return retval;
     }
 
@@ -2897,18 +2977,16 @@ static PyObject* pybinding__put_value(PyObject* self, PyObject* args){ MAYFAIL
     {
         PyObject* retval = PyBytes_FromStringAndSize((char*)packet, packet_size);
         free(packet);
-        free_schema(schema);
         return retval;
     }
 
 error:
     FREE(packet)
-    if (!tracked && voidstar && schema) {
+    if (!tracked && voidstar) {
         char* free_err = NULL;
         shfree((absptr_t)voidstar, &free_err);
         if (free_err) { free(free_err); }
     }
-    free_schema(schema);
     return NULL;
 }
 
@@ -2918,7 +2996,6 @@ static PyObject* pybinding__get_value(PyObject* self, PyObject* args){ MAYFAIL
     uint8_t* voidstar = NULL;
     Schema* schema = NULL;
     PyObject* obj = NULL;
-    bool tracked = false;
 
     const char* packet;
     size_t packet_size;
@@ -2933,14 +3010,12 @@ static PyObject* pybinding__get_value(PyObject* self, PyObject* args){ MAYFAIL
     uint8_t source = header->command.data.source;
     uint8_t format = header->command.data.format;
 
-    schema = PyTRY(parse_schema, schema_str)
+    schema = PyTRY(cached_schema, schema_str);
 
     // Arrow dispatch: a table-typed value is a block. It arrives by
     // reference (an Arrow packet) or in a form the runtime materializes
     // into a block of this pool's own (a cached result read back from a
-    // file, a captured value carried inline). Every error below leaves
-    // `schema` to the `error:` label; freeing it here as well would free
-    // it twice.
+    // file, a captured value carried inline).
     if (schema->type == MORLOC_TABLE) {
         bool materialized = (source != PACKET_SOURCE_RPTR);
         // PANIC-13: a value read from a file or carried inline is input;
@@ -3009,7 +3084,6 @@ static PyObject* pybinding__get_value(PyObject* self, PyObject* args){ MAYFAIL
         if (arrow_schema.release) arrow_schema.release(&arrow_schema);
         if (arrow_array.release) arrow_array.release(&arrow_array);
 
-        free_schema(schema);
         if (!obj) return NULL;
         return obj;
     }
@@ -3028,12 +3102,10 @@ static PyObject* pybinding__get_value(PyObject* self, PyObject* args){ MAYFAIL
         && header->command.data.encryption == PACKET_ENCRYPTION_NONE) {
         const uint8_t* payload = (const uint8_t*)packet + sizeof(morloc_packet_header_t) + header->offset;
         if (header->length < schema->width) {
-            free_schema(schema);
             PyRAISE("a %zu-byte inline payload cannot hold its %zu-byte value", (size_t)header->length, schema->width);
         }
         obj = from_voidstar(schema, (const void*)payload, morloc_payload_space(payload, (size_t)header->length));
         PyTRACE(obj == NULL)
-        free_schema(schema);
         return obj;
     }
 
@@ -3046,7 +3118,6 @@ static PyObject* pybinding__get_value(PyObject* self, PyObject* args){ MAYFAIL
         size_t payload_len = header->length;
         char path[PATH_MAX];
         if (payload_len >= sizeof(path)) {
-            free_schema(schema);
             PyErr_SetString(PyExc_RuntimeError, "stream ingest: path exceeds PATH_MAX");
             return NULL;
         }
@@ -3096,7 +3167,6 @@ static PyObject* pybinding__get_value(PyObject* self, PyObject* args){ MAYFAIL
                 Py_END_ALLOW_THREADS
                 if (cerr) free(cerr);
             }
-            free_schema(schema);
             return result;
 
         stream_error:
@@ -3112,7 +3182,6 @@ static PyObject* pybinding__get_value(PyObject* self, PyObject* args){ MAYFAIL
                 PyErr_SetString(PyExc_RuntimeError, stream_err);
                 free(stream_err);
             }
-            free_schema(schema);
             return NULL;
         }
         // Not a stream file -- fall through to legacy FILE+DATA handling.
@@ -3154,16 +3223,9 @@ static PyObject* pybinding__get_value(PyObject* self, PyObject* args){ MAYFAIL
     }
     PyTRACE(obj == NULL)
 
-    if (!tracked) {
-        free_schema(schema);
-    }
-
     return obj;
 
 error:
-    if (!tracked) {
-        free_schema(schema);
-    }
     return NULL;
 }
 
