@@ -1,6 +1,10 @@
 Unreleased
 ----------
 
+Changed
+ * a command starts only the language pools it calls, not every pool in
+   its program
+
 Fixed
  * `.[i]` and `.[i].field` on an IFile compile inside a Rust pool
 

@@ -1,0 +1,69 @@
+-- Which pools a command starts when its cross-language calls live only in
+-- hoisted recursive helpers (extractRecursiveHelpers). Each command lists
+-- the pools of the trees it reaches, transitively, and no others: a
+-- C++-only command in a program whose other helpers call Python must not
+-- start the Python pool. Reached trees include hoisted helpers, shared
+-- specializations of a named function, and recursive exports. The Makefile prints each command's pool languages
+-- from the manifest, then runs every command.
+module main (cppOnly, pyOnly, mixed, nested, viaC, viaP, countDownP, callsExport, bigC)
+
+import root
+import root-py
+import root-cpp
+
+source Py  from "helpers.py"  ("add1" as addP)
+source Cpp from "helpers.hpp" ("add1" as addC)
+
+addP :: Int -> Int
+addC :: Int -> Int
+
+cppOnly :: Int -> Int
+cppOnly n = go n where
+  go m ? m == 0 = 0
+       : addC 0 + go (m - 1)
+
+pyOnly :: Int -> Int
+pyOnly n = go n where
+  go m ? m == 0 = 0
+       : addP 0 + go (m - 1)
+
+mixed :: Int -> Int
+mixed n = go n where
+  go m ? m == 0 = 0
+       : addP 0 + addC 0 + go (m - 1)
+
+-- A C++ helper whose own helper calls Python.
+nested :: Int -> Int
+nested n = outer n where
+  outer m ? m == 0 = 0
+          : addC (inner m) + outer (m - 1)
+  inner k ? k == 0 = 0
+          : addP 0 + inner (k - 1)
+
+-- A named function shared by commands in two languages.
+bump :: Int -> Int
+bump x = addP (addP x)
+
+viaC :: Int -> Int
+viaC n = addC (bump n)
+
+viaP :: Int -> Int
+viaP n = addP (bump n)
+
+-- A C++ helper that calls a recursive Python export.
+countDownP :: Int -> Int
+countDownP n ? n == 0 = 0
+             : addP 0 + countDownP (n - 1)
+
+callsExport :: Int -> Int
+callsExport n = go n where
+  go m ? m == 0 = countDownP 3
+       : addC 0 + go (m - 1)
+
+-- A body past the sharing size becomes a shared specialization, called by
+-- a name only the recursion targets know (big@py).
+big :: Int -> Int
+big x = addP (addP (addP (addP (addP (addP (addP (addP (addP (addP (addP (addP (addP (addP (addP (addP (addP (addP (addP (addP (addP (addP (addP (addP (addP (addP (addP (addP (addP (addP (addP (addP (addP (addP (addP x))))))))))))))))))))))))))))))))))
+
+bigC :: Int -> Int
+bigC x = addC (big x)

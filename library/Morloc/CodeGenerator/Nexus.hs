@@ -51,6 +51,7 @@ import Morloc.CodeGenerator.Docstrings (underOptional)
 import qualified Morloc.CodeGenerator.Infer as Infer
 import Morloc.CodeGenerator.LogTemplate (RenderedRunLog (..), renderRunLogTemplate)
 import Morloc.CodeGenerator.Namespace
+import Morloc.CodeGenerator.Express (recursiveTargetOf)
 import qualified Morloc.CodeGenerator.EnvSpec as ES
 import qualified Morloc.CodeGenerator.IFile as IFile
 import qualified Morloc.CodeGenerator.NumericLiteral as NL
@@ -3318,16 +3319,38 @@ generate cs rASTs helperRASTs = do
   config <- MM.ask
   st <- CMS.get
 
-  -- 'findAllLangsSAnno' does not follow @CallS@ back-edges into hoisted
-  -- helper bodies, so it can't see cross-language calls that live only
-  -- inside them. Merge helper-reachable sockets into every command's
-  -- 'fdataSubSockets' as a safe upper bound; the runtime otherwise fails
-  -- to spin up pools referenced only by helpers.
-  helperSockets <- fmap concat (mapM findSockets helperRASTs)
+  -- 'findAllLangsSAnno' does not follow @CallS@ edges into other pool trees
+  -- (hoisted helpers, shared specializations, recursive exports), so each
+  -- command adds the sockets of every tree holding a manifold its calls
+  -- reach, transitively. A call resolves as pool codegen resolves it
+  -- ('recursiveTargetOf'); one that resolves to no tree counts every
+  -- tree's sockets.
+  let allTrees = map fst rASTs <> helperRASTs
+  nameMap <- MM.gets stateName
+  recTargets <- MM.gets stateRecursionTargets
+  -- the map lowerPools later records as 'stateManifoldLang'
+  let langMap = Map.fromList [(i, lang) | AnnoS (Idx i _) (Idx _ lang) _ <- allTrees]
+  treeInfo <- fmap Map.fromList . CM.forM allTrees $ \t@(AnnoS (Idx i _) _ _) ->
+    (,) i . (,) (calledNames t) <$> findSockets t
+  let treesOfNode = Map.fromListWith (<>)
+        [(n, [i]) | t@(AnnoS (Idx i _) _ _) <- allTrees, AnnoS (Idx n _) _ _ <- annoNodes t]
+      treesOfCall v = recursiveTargetOf nameMap langMap recTargets v >>= (`Map.lookup` treesOfNode)
+      everySocket = concatMap snd (Map.elems treeInfo)
+      reachTrees seen unresolved [] = (seen, unresolved)
+      reachTrees seen unresolved (v : vs) = case treesOfCall v of
+        Nothing -> reachTrees seen True vs
+        Just is -> case filter (`Set.notMember` seen) is of
+          [] -> reachTrees seen unresolved vs
+          new -> reachTrees (foldr Set.insert seen new) unresolved
+                   (concat [maybe [] fst (Map.lookup i treeInfo) | i <- new] <> vs)
+      callSocketsOf r = case reachTrees Set.empty False (calledNames r) of
+        (_, True) -> everySocket
+        (reached, False) -> concat [ss | i <- Set.toList reached, Just (_, ss) <- [Map.lookup i treeInfo]]
 
   xs <- mapM makeFData rASTs
   fdataRaw <- CM.mapM getFData xs
-      |>> map (\fd -> fd { fdataSubSockets = mergeSockets (fdataSubSockets fd) helperSockets })
+      |>> zipSame (map fst rASTs)
+      |>> map (\(r, fd) -> fd { fdataSubSockets = mergeSockets (fdataSubSockets fd) (callSocketsOf r) })
 
   -- Extract data for pure commands. The copies of shared specializations a
   -- pure command calls are not commands: each command carries the ones it
