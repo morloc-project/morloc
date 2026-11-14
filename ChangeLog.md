@@ -1,3 +1,9 @@
+Unreleased
+----------
+
+Fixed
+ * `.[i]` and `.[i].field` on an IFile compile inside a Rust pool
+
 0.112.0 [2026-11-01]
 --------------------
 

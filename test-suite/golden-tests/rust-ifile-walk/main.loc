@@ -13,6 +13,10 @@
 --   * .[i:j]  on [Int]  (bounded slice)
 --   * .[i:]   on [Int]  (open-ended slice -> absent upper bound = None arg)
 --   * .field  on a record (struct field select through the IFile)
+--   * the same accessors inside a Rust pool (the do-block calls a Rust
+--     function, so the walk is emitted as Rust code rather than run by
+--     the nexus): .[i] with a literal and a variable index, .[i].field
+--     on a list of records
 --
 -- Rust because it imports root-rust; the spec is backend-agnostic.
 
@@ -22,9 +26,16 @@ module main
   , testIntSlice
   , testIntTail
   , testRecordField
+  , testIndexInPool
+  , testVarIndexInPool
+  , testIndexFieldInPool
   )
 
 import root-rust
+
+source Rust from "impl.rs" ("plus", "str_len" as strLen)
+plus :: Int -> Int -> Int
+strLen :: Str -> Int
 
 record Point where
   x :: Int
@@ -68,3 +79,25 @@ testRecordField path = do
   @save 0 path (mkPoint 7 9)
   Ok f <- @open path :: <IO> (Try Str (IFile Point))
   .y f                                          -- expect 9
+
+-- .[i] inside a Rust pool.
+testIndexInPool :: Str -> <IO> Int
+testIndexInPool path = do
+  @save 0 path ["alpha", "beta", "gamma"]
+  Ok f <- @open path :: <IO> (Try Str (IFile [Str]))
+  strLen (.[1] f)                               -- expect 4
+
+-- .[i] with a variable index inside a Rust pool.
+testVarIndexInPool :: Str -> <IO> Int
+testVarIndexInPool path = do
+  @save 0 path [10, 20, 30, 40, 50]
+  Ok f <- @open path :: <IO> (Try Str (IFile [Int]))
+  let i = plus 1 2
+  plus 0 (.[i] f)                               -- expect 40
+
+-- .[i].field on a list of records inside a Rust pool.
+testIndexFieldInPool :: Str -> <IO> Int
+testIndexFieldInPool path = do
+  @save 0 path [mkPoint 1 2, mkPoint 3 4]
+  Ok f <- @open path :: <IO> (Try Str (IFile [Point]))
+  plus 0 (.[1].y f)                             -- expect 4

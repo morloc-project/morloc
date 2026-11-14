@@ -21,6 +21,7 @@ module Morloc.CodeGenerator.Express
   , addNativeRecEntries
   , etaReduceForwarders
   , polyFreeVars
+  , recursiveTargetOf
   ) where
 
 import Data.Foldable (toList)
@@ -821,15 +822,10 @@ expressBracketSlice
   -> (Type, PolyExpr)          -- receiver
   -> MorlocMonad PolyExpr
 expressBracketSlice callLang midx pev out s e p (rcvT, rcvE) = do
-  -- IFile receivers route to the unified runtime walker
-  -- (@mlc_ifile_walk). Each bound is still wrapped in __to_index__
-  -- because the desugar produces them with their natural types
-  -- and the wrapper marshals the optional encoding to the C ABI.
+  -- IFile receivers route to the runtime walker (IntrIFileWalk).
   isIFile <- typeHeadIs BT.ifileVar rcvT
   if isIFile
-    then do
-      bounds <- wrapBounds callLang midx pev [s, e, p]
-      emitIFileWalk callLang midx out bracketSliceSteps rcvE bounds
+    then emitIFileWalk callLang midx pev out bracketSliceSteps rcvE [s, e, p]
     else case patReceiver pev of
       Just ev
         | Just _ <- FI.evidenceMethod getterMethods ev ->
@@ -855,15 +851,12 @@ expressBracketIndex
   -> (Type, PolyExpr)          -- index
   -> (Type, PolyExpr)          -- receiver
   -> MorlocMonad PolyExpr
-expressBracketIndex callLang midx pev out i@(_, iE) (rcvT, rcvE) = do
-  -- IFile receivers route to the runtime intrinsic
-  -- @ifile_index, bypassing typeclass dispatch entirely. The
-  -- walker handles materialisation + bounds checks. Aliases are
-  -- resolved by walking the chain via @TE.reduceType@ until the
-  -- head TVar exposes itself.
+expressBracketIndex callLang midx pev out i (rcvT, rcvE) = do
+  -- IFile receivers route to the runtime walker (IntrIFileWalk), which
+  -- materializes the element and checks bounds.
   isIFile <- typeHeadIs BT.ifileVar rcvT
   if isIFile
-    then emitIFileWalk callLang midx out bracketIndexSteps rcvE [iE]
+    then emitIFileWalk callLang midx pev out bracketIndexSteps rcvE [i]
     else case patReceiver pev of
       Just ev
         | Just _ <- FI.evidenceMethod getterMethods ev ->
@@ -892,12 +885,15 @@ typeHeadIs target originalType = do
 emitIFileWalk
   :: Lang
   -> Int                       -- midx
+  -> PatEvidence               -- the bounds' IndexLike evidence
   -> Type                      -- result type (the value the walker materializes)
   -> [WalkStep]                -- the static walk chain
   -> PolyExpr                  -- the IFile-typed handle
-  -> [PolyExpr]                -- runtime args (bracket bounds, in DFS order)
+  -> [(Type, PolyExpr)]        -- bracket bounds, in DFS order, at their own types
   -> MorlocMonad PolyExpr
-emitIFileWalk callLang midx out steps rcvE runtimeArgs = do
+emitIFileWalk callLang midx pev out steps rcvE bounds = do
+  -- every walker takes its bounds as optional Int64s
+  runtimeArgs <- wrapBounds callLang midx pev bounds
   let pathText = walkStepsToPath steps
   let strType = VarT BT.str
   pathPoly <- dispatchPrimLit midx callLang strType BT.str
@@ -972,7 +968,7 @@ dispatchPatCall callLang midx g pev out app = case app of
     steps <- selectorToWalkSteps midx sel
     isIFile <- typeHeadIs BT.ifileVar rcvT
     if isIFile
-      then emitIFileWalk callLang midx out steps rcvE (map snd bounds)
+      then emitIFileWalk callLang midx pev out steps rcvE bounds
       else case patReceiver pev of
         Just ev | Just _ <- FI.evidenceMethod getterMethods ev ->
           emitPatternAccessibleCall callLang midx out ev pev steps rcvT bounds rcvE
@@ -2137,8 +2133,7 @@ tryFuseSliceSelectorChain midx callLang funcE listE outT =
               eP <- expressPolyArg callLang (mkIdx eE eT) eE
               pP <- expressPolyArg callLang (mkIdx pE pT) pE
               rcvP <- expressPolyArg callLang (mkIdx rcvExpr rcvT) rcvExpr
-              bounds <- wrapBounds callLang midx pev [(sT, sP), (eT, eP), (pT, pP)]
-              fmap Just $ emitIFileWalk callLang midx outT steps rcvP bounds
+              fmap Just $ emitIFileWalk callLang midx pev outT steps rcvP [(sT, sP), (eT, eP), (pT, pP)]
     _ -> return Nothing
   where
     isStaticFieldStep (WalkField _) = True
@@ -2257,6 +2252,18 @@ polyFreeVars = go
     go (PolyEnum {}) = Set.empty
     go (PolyNull _) = Set.empty
 
+-- | The manifold a call of @v@ (a 'CallS' name) invokes: a concrete manifold
+-- (one with a language) named @v@, else the recursion target @v@ names.
+recursiveTargetOf :: Map.Map Int EVar -> Map.Map Int Lang -> Map.Map EVar Int -> EVar -> Maybe Int
+recursiveTargetOf nameMap langMap recTargets v =
+  case Map.lookup v reverseMap of
+    Just idx -> Just idx
+    Nothing -> case Map.lookup v recTargets of
+      Just idx | Map.member idx langMap -> Just idx
+      _ -> Nothing
+  where
+    reverseMap = Map.fromList [(name, idx) | (idx, name) <- Map.toList nameMap, Map.member idx langMap]
+
 -- | Resolve a function name to its manifold ID and determine if the call is cross-language.
 -- Returns (manifold ID, Nothing) for same-pool calls, (manifold ID, Just targetLang) for foreign calls.
 -- Searches all manifolds in stateName, not just exports, to support non-exported recursive helpers.
@@ -2265,14 +2272,8 @@ lookupRecursiveTarget parentLang v = do
   nameMap <- MM.gets stateName
   langMap <- MM.gets stateManifoldLang
   reg <- MM.gets stateLangRegistry
-  -- Filter to concrete manifolds only (those in langMap) to avoid picking up
-  -- general/polymorphic indices that don't have serial manifold definitions
   recTargets <- MM.gets stateRecursionTargets
-  let reverseMap = Map.fromList [(name, idx) | (idx, name) <- Map.toList nameMap, Map.member idx langMap]
-      byToken = case Map.lookup v recTargets of
-        Just idx | Map.member idx langMap -> Just idx
-        _ -> Nothing
-  case maybe byToken Just (Map.lookup v reverseMap) of
+  case recursiveTargetOf nameMap langMap recTargets v of
     (Just mid) -> do
       -- A cross-language recursive call only when the target is NOT co-located
       -- with the caller; a co-located member (futhark in cpp) is an in-process call.
