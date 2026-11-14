@@ -39,7 +39,9 @@ None is scheduled.
   (removable part about 0.3 s/GiB), Python numpy +0.05 s (an in-place
   numpy must copy out anyway, so about 0), Python [Real] +1.7 s (PyFloat
   construction, not removable here). No real program reads streams from
-  Python or R. Fix: mlc_next_with for each, R under R_UnwindProtect.
+  Python or R. Fix: mlc_next_with for each; in R the decode callback must
+  catch R errors (R_tryCatchError) and re-raise after the call returns, since
+  R_UnwindProtect only runs cleanup while the longjmp crosses the runtime.
 - **A channel write lands its buffer again.** [measured] flush_write_buffer_at
   (stream.rs:3983-4020) copies the sealed buffer into a fresh landing,
   shifts its records and relocates it, all under the slot lock; elements
@@ -54,7 +56,12 @@ None is scheduled.
   decode each sub-packet in place (ENC-11: 1.74 against 2.33 s/GiB in one
   build); the gather still costs 1.66 s/GiB over making the batches in C++
   and 9.4 s/GiB in Python, the encode, custody, file and decode a native
-  gather would remove. Python and R @load still take the block path.
+  gather would remove. Python @load of a list now decodes in place too
+  (in-run A/B 6.81 -> 5.88 s/GiB, load 7), unless any part of the type
+  reads as a NumPy array or an Arrow table, which could view a piece that
+  does not outlive the call; R @load still takes the block path, and needs its decode
+  callbacks to catch R errors rather than longjmp through the runtime
+  (R_tryCatchError, the condition re-raised after the call returns).
 - **Python and R slices keep the copy path; Str strides cost a second
   pass.** Strided and field-tail slices run per sub-packet now (SLOT-38,
   ENC-13); leftovers in ifile-access.md. The unit-step C++ miss of the 1.5x
@@ -64,3 +71,18 @@ None is scheduled.
   rendered JSON from a Rust String into a malloc'd C string, about 2-3% of
   a large serve (SERVE-1) and under 1 us of a small one; the CLI does not
   use this path.
+- **Calling a C++ function value copies a list argument.** [measured
+  2026-11-14] A morloc function value in C++ is a `std::function` whose
+  parameters are by value, so every call of a sink or callback copies a
+  non-scalar argument (cpp-copy-count: 4 allocations per batch, one of them
+  this copy). Rendering every function type's non-scalar parameters as
+  `const T&` (patch: /work/plans/output-path-stages-notes/
+  cpp-const-ref-function-args.patch) gives 3 and passed 245 C++, closure and
+  callback goldens, but changes the C++ type user headers receive: a header
+  that pattern-matches `std::function` parameter types breaks (biolib
+  convert-cpp convert.hpp `cv_fn<SinkFn>`), and a header declaring a
+  by-value `std::function` parameter gets a converting wrapper that hides
+  `MorlocClosure` from `target<>()`, so the closure can no longer cross a
+  pool. A by-value callee that moves from its parameter then copies even
+  when the caller had an rvalue. Needs a ruling: is the C++ spelling of a
+  function type part of the interface users write against?

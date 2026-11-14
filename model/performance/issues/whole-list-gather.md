@@ -32,3 +32,12 @@ round trip and the decode is pending (plan step 0.5).
   the growing heap. Pausing GC around a native gather would save about
   1.5 s/GiB, but GC state is process-global (other threads, user cycles,
   a user's own gc.disable). Not planned (user, 2026-11-14).
+- **The gather's temp file is removed before the reply, on the critical
+  path.** [measured 2026-11-13: 126 ms for a 640 MiB file; read
+  2026-11-14] The desugared `@close path` and the end-of-dispatch sweep
+  (intrinsics.rs end_dispatch, run by pool_dispatch_packet before the
+  reply is sent) both remove it synchronously. Deferring the removal past
+  the reply helps a daemon only: a one-shot run removes its run directory
+  at exit, so the cost stays in its wall time. Unlinking the open file
+  early does not help (the space is freed at the last close).
+
