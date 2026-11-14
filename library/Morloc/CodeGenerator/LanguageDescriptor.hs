@@ -225,7 +225,7 @@ data LangDescriptor = LangDescriptor
   , -- Import
     ldImportTemplate :: !Text -- e.g. "{{namespace}} = importlib.import_module(\"{{module_path}}\")"
   , -- Socket path
-    ldSocketPathTemplate :: !Text -- e.g. "os.path.join(global_state[\"tmpdir\"], {{socket}})"
+    ldSocketPathTemplate :: !Text -- e.g. "_mlc_socket_paths[{{socket}}]"
   , -- Resource packing for remote calls
     ldResourcePackTemplate :: !Text -- e.g. "struct.pack('iiii', {{mem}}, {{time}}, {{cpus}}, {{gpus}})"
   , -- Return statement

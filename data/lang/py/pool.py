@@ -15,6 +15,18 @@ import importlib.util
 
 global_state = dict()
 
+
+class _SocketPaths(dict):
+    """Socket path by socket file name, joined once per name."""
+
+    def __missing__(self, name):
+        path = os.path.join(global_state["tmpdir"], name)
+        self[name] = path
+        return path
+
+
+_mlc_socket_paths = _SocketPaths()
+
 # The language preamble (runtime bootstrap: `import pymorloc as morloc`, path
 # setup) and the generated schema/closure tables run at module top, in the
 # coordinator parent -- they are thread-free and the parent depends on them.
@@ -274,7 +286,7 @@ def mlc_spawn(f, handle, schema):
     # producer's OStream argument, after its captured values.
     home, mid, packets = mlc_reify(f, MLC_HOME_LANG)
     packets = list(packets) + [morloc.put_value(handle, schema, True)]
-    sock = os.path.join(global_state["tmpdir"], "pipe-" + home)
+    sock = _mlc_socket_paths["pipe-" + home]
     morloc.mlc_spawn(sock, mid, packets, handle)
 
 
@@ -353,7 +365,7 @@ def mlc_reflect_from_tuple(tup, arg_codecs, res_codec):
     home_lang, mid, captured = tup
     # A [U8] decodes as a list (NATIVE-7); foreign_call takes packets as bytes.
     captured = [bytes(p) for p in captured]
-    sock = os.path.join(global_state["tmpdir"], "pipe-" + home_lang)
+    sock = _mlc_socket_paths["pipe-" + home_lang]
     def _call(*args):
         own = [mlc_encode(a, s) for a, s in zip(args, arg_codecs)]
         return _mlc_call_released(sock, mid, list(captured) + own, own, res_codec)
@@ -420,7 +432,7 @@ def _mlc_papply_remote(f, origin, xs):
         more = [mlc_encode(x, c, True) for x, c in zip(xs, arg_codecs)]
         return mlc_reflect_from_tuple(
             (home_lang, mid, list(packets) + more), arg_codecs[len(xs):], res_codec)
-    sock = os.path.join(global_state["tmpdir"], "pipe-" + home_lang)
+    sock = _mlc_socket_paths["pipe-" + home_lang]
     own = [mlc_encode(x, c) for x, c in zip(xs[:take], arg_codecs)]
     tup = _mlc_call_released(sock, smid, list(packets) + own, own, None)
     g = mlc_reflect_from_tuple(tup, arg_codecs[take:], res_codec)

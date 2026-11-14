@@ -90,7 +90,7 @@ ldDoBlockExpr: "(lambda: {{expr}})"
 ldDoBlockBlock: ""
 ldPartialTemplate: "functools.partial({{fn_with_context}})"
 ldImportTemplate: "{{namespace}} = _mlc_import_source(\"{{module_path}}\")"
-ldSocketPathTemplate: "os.path.join(global_state[\"tmpdir\"], {{socket}})"
+ldSocketPathTemplate: "_mlc_socket_paths[{{socket}}]"
 ldResourcePackTemplate: "struct.pack('iiii', {{mem}}, {{time}}, {{cpus}}, {{gpus}})"
 ldReturnTemplate: "return({{expr}})"
 ldReservedPrefixes: ["__mm_", "__morloc"]
