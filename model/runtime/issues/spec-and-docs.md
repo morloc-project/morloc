@@ -35,8 +35,10 @@ code. Found by the 2026-10-21 audit [read unless marked].
   FORK-11 covers only std stream/env locks.
 - **Runtime variables with no ruling on whether users set them.** [read]
   MORLOC_CHANNEL_DEPTH (default 4), MORLOC_ARROW_NO_BORROW (disables table
-  pass-through), MORLOC_MALLOC_TUNING (`off` skips glibc tuning) and
-  MORLOC_R_GC_BUDGET (bytes, default 32 MiB, 0 off) are read by the runtime
+  pass-through), MORLOC_MALLOC_TUNING (`off` skips glibc tuning),
+  MORLOC_R_GC_BUDGET (bytes, default 32 MiB, 0 off) and MORLOC_FORK_HEAP_PAD
+  (bytes of glibc top pad and trim threshold in each Python or R fork-pool
+  worker, default 16 MiB, `off` for none; a tunable by ruling 2026-11-14) are read by the runtime
   and absent from environmental-variables.asc.
 - **arch-build-artifacts.asc:35-37** says a failed build leaves the
   previous build in place; false for ART-3's kill window and for a refused

@@ -4,6 +4,8 @@ Unreleased
 Changed
  * a command starts only the language pools it calls, not every pool in
    its program
+ * Python and R calls passing values of tens of KiB are 13-24% faster
+   (fork-pool workers keep heap headroom; `MORLOC_FORK_HEAP_PAD` sets it)
 
 Fixed
  * `.[i]` and `.[i].field` on an IFile compile inside a Rust pool

@@ -216,6 +216,9 @@ pub unsafe fn run(
 ) -> i32 {
     let lang = if cfg.lang.is_null() { "pool".to_string() } else { CStr::from_ptr(cfg.lang).to_string_lossy().into_owned() };
     libc::signal(libc::SIGPIPE, libc::SIG_IGN);
+    if let Some(heap) = crate::pool_ffi::fork_pool_heap() {
+        crate::pool_ffi::tune_allocator(heap);
+    }
     let lifeline = crate::lifeline::adopt();
     // Workers are forked after this and inherit it.
     crate::ipc_ffi::mlc_set_self_socket(socket_path);

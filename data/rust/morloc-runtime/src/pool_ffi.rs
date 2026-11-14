@@ -651,29 +651,54 @@ unsafe fn serve(config: &PoolConfig, socket_path: *const c_char, tmpdir: *const 
 /// allocation, so a value set there is already in force and this leaves it
 /// alone.
 #[cfg(target_env = "gnu")]
-unsafe fn tune_allocator() {
+pub(crate) unsafe fn tune_allocator(heap: AllocatorTuning) {
     if std::env::var_os("MORLOC_MALLOC_TUNING").as_deref() == Some(std::ffi::OsStr::new("off")) {
         return;
     }
-    // Comfortably above a default 16 MiB sub-packet, so a batch and the values
-    // built from it stay on the heap and are reused rather than remapped.
-    const MMAP_THRESHOLD: libc::c_int = 32 * 1024 * 1024;
-    const TRIM_THRESHOLD: libc::c_int = 64 * 1024 * 1024;
-    const TOP_PAD: libc::c_int = 64 * 1024 * 1024;
-    if std::env::var_os("MALLOC_MMAP_THRESHOLD_").is_none() {
-        libc::mallopt(libc::M_MMAP_THRESHOLD, MMAP_THRESHOLD);
-    }
-    if std::env::var_os("MALLOC_TRIM_THRESHOLD_").is_none() {
-        libc::mallopt(libc::M_TRIM_THRESHOLD, TRIM_THRESHOLD);
-    }
-    if std::env::var_os("MALLOC_TOP_PAD_").is_none() {
-        libc::mallopt(libc::M_TOP_PAD, TOP_PAD);
-    }
+    let set = |env: &str, param: libc::c_int, value: Option<libc::c_int>| {
+        if let Some(v) = value {
+            if std::env::var_os(env).is_none() {
+                libc::mallopt(param, v);
+            }
+        }
+    };
+    set("MALLOC_MMAP_THRESHOLD_", libc::M_MMAP_THRESHOLD, heap.mmap_threshold);
+    set("MALLOC_TRIM_THRESHOLD_", libc::M_TRIM_THRESHOLD, Some(heap.trim_threshold));
+    set("MALLOC_TOP_PAD_", libc::M_TOP_PAD, Some(heap.top_pad));
 }
 
 /// Only glibc exposes these knobs; every other allocator keeps its own policy.
 #[cfg(not(target_env = "gnu"))]
-unsafe fn tune_allocator() {}
+pub(crate) unsafe fn tune_allocator(_heap: AllocatorTuning) {}
+
+#[derive(Clone, Copy)]
+pub(crate) struct AllocatorTuning {
+    pub mmap_threshold: Option<libc::c_int>,
+    pub trim_threshold: libc::c_int,
+    pub top_pad: libc::c_int,
+}
+
+const STREAMING_POOL_HEAP: AllocatorTuning = AllocatorTuning {
+    mmap_threshold: Some(32 * 1024 * 1024),
+    trim_threshold: 64 * 1024 * 1024,
+    top_pad: 64 * 1024 * 1024,
+};
+
+pub(crate) fn fork_pool_heap() -> Option<AllocatorTuning> {
+    const DEFAULT: libc::c_int = 16 * 1024 * 1024;
+    let pad = match std::env::var("MORLOC_FORK_HEAP_PAD") {
+        Ok(v) if v.trim() == "off" => return None,
+        Ok(v) => match v.trim().parse::<libc::c_int>() {
+            Ok(n) if n >= 0 => n,
+            _ => {
+                eprintln!("morloc: ignoring MORLOC_FORK_HEAP_PAD={v:?}: not a byte count or `off`");
+                DEFAULT
+            }
+        },
+        Err(_) => DEFAULT,
+    };
+    Some(AllocatorTuning { mmap_threshold: None, trim_threshold: pad, top_pad: pad })
+}
 
 pub(crate) unsafe fn pool_main(
     argc: i32,
@@ -681,7 +706,7 @@ pub(crate) unsafe fn pool_main(
     config: *mut PoolConfig,
 ) -> i32 {
     crate::panic_ffi::install(None);
-    tune_allocator();
+    tune_allocator(STREAMING_POOL_HEAP);
     if argc != 4 {
         let prog = if argc > 0 { CStr::from_ptr(*argv).to_string_lossy() } else { "pool".into() };
         eprintln!("Usage: {} <socket_path> <tmpdir> <shm_basename>", prog);
