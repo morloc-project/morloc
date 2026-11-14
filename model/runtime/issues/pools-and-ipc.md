@@ -108,3 +108,17 @@ Details and evidence: /work/plans/runtime-audit-2026-10-10/C-processes.md.
   MALLOC_TRIM_THRESHOLD_=4M: py->cpp 64 KiB 163-174 -> 127-136 us (-36 us);
   none at 16 KiB. Fix planned (/work/plans/output-path-stages.md stage 3,
   4 MiB pad ruled 2026-11-14).
+- **Every R pool leaves an `Rtmp*` directory in /tmp.** [reproduced
+  2026-11-14] One run of any program with an R pool adds one empty
+  `/tmp/RtmpXXXXXX` (R's per-session temp dir): the pool ends without R's
+  own exit cleanup removing it. A day of test runs left 8763 of them. Gap in
+  model/runtime/lifecycle.md: no item says what a pool leaves behind when
+  it ends. Fix direction: point R's TMPDIR at the run's temp root, which
+  the run removes, or remove `tempdir()` in the pool's exit path.
+- **Every run's startup scans all of /tmp.** [measured 2026-11-14]
+  process.rs `cleanup_stale_shm` reads every /tmp entry to find stale
+  `morloc.XXXXXX` run dirs. With about 9800 entries (mostly the leaked
+  `Rtmp*` dirs above), the fixed cost of every program rose by 6.6 ms
+  (C++-only 15.7 -> 22.3 ms; crossing bench `.c` terms, results
+  2026-11-14-0438 vs -0802). Fix direction: keep run dirs under one
+  morloc-owned parent so the scan reads only them.
