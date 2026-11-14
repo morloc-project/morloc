@@ -126,6 +126,10 @@ morloc_mlc_cell_put                  <- function(...){ .Call("morloc_mlc_cell_pu
 morloc_mlc_cell_count                <- function(...){ .Call("morloc_mlc_cell_count",                ...) }
 morloc_mlc_cell_slot                 <- function(...){ .Call("morloc_mlc_cell_slot",                 ...) }
 morloc_mlc_cell_free                 <- function(...){ .Call("morloc_mlc_cell_free",                 ...) }
+morloc_mlc_side_route                <- function(...){ .Call("morloc_mlc_side_route",                ...) }
+morloc_mlc_side_put                  <- function(...){ .Call("morloc_mlc_side_put",                  ...) }
+morloc_mlc_side_take                 <- function(...){ .Call("morloc_mlc_side_take",                 ...) }
+morloc_mlc_side_next                 <- function(...){ .Call("morloc_mlc_side_next",                 ...) }
 morloc_mlc_fschema                   <- function(...){ .Call("morloc_mlc_fschema",                   ...) }
 morloc_mlc_ifile_walk                <- function(...){ .Call("morloc_mlc_ifile_walk",                ...) }
 morloc_mlc_ifile_length              <- function(...){ .Call("morloc_mlc_ifile_length",              ...) }
@@ -167,6 +171,31 @@ morloc_mlc_replay <- function(schema, handle, fn) {
     if (is.null(frame)) break
     fn(frame)
   }
+  NULL
+}
+
+# @gather through a temp-file stream: the handle is the stream, and the
+# result is what @load gives (NATIVE-9).
+mlc_gather <- function(schema, f) {
+  path <- morloc_mlc_tmpfile()
+  o <- morloc_mlc_open_ostream(schema, path)
+  f(o)
+  morloc_mlc_close(o)
+  xs <- morloc_mlc_load(schema, path)
+  morloc_mlc_unlink_tmp(path)
+  xs
+}
+
+# SIDE-4, SIDE-10
+mlc_cell_sink <- function(schema, h, batch, k) {
+  if (morloc_mlc_side_route(h)) k(batch) else morloc_mlc_side_put(h, schema, batch)
+  NULL
+}
+
+# SIDE-7
+mlc_cell_side <- function(schema, h, k) {
+  r <- morloc_mlc_side_take(h, schema)
+  while (length(b <- morloc_mlc_side_next(r)) == 1L) k(b[[1L]])
   NULL
 }
 

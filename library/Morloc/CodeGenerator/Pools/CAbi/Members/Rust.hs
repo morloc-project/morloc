@@ -2491,6 +2491,7 @@ rustLowerConfig mask makers consumed =
     , lcTakeSetter = rustTakeSetter
     , lcKeepContextArg = \_ _ _ _ v -> return v
     , lcKeepCallArg = \_ _ _ v -> return v
+    , lcKeepClosureArg = \_ _ -> return Nothing
     , lcKeepSlot = \_ _ v -> return v
     , lcKeepElem = \_ v -> return v
     , lcStoreField = \_ v -> return v

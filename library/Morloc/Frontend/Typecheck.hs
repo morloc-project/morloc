@@ -1882,6 +1882,39 @@ synthE _ g (IntrinsicS IntrSpawn [handleE, fnE]) = do
   return (g3, EffectU ioEffectSet BT.unitU, IntrinsicS IntrSpawn [handleE', fnE'])
 synthE i _ (IntrinsicS IntrSpawn args) =
   MM.throwCompilerBugAt i $ "IntrSpawn expects 2 args (stream, producer), got " <> pretty (length args)
+-- @gather :: (Cell [a] -> <IO> ()) -> <IO> [a]
+synthE _ g (IntrinsicS IntrGather [fnE]) = do
+  let (g1, a) = newvar "gather_a_" g
+      listT = BT.listU a
+  (g2, _, fnE') <- checkG g1 fnE (FunU [AppU (VarU BT.cellVar) [listT]] (EffectU ioEffectSet BT.unitU))
+  return (g2, EffectU ioEffectSet (apply g2 listT), IntrinsicS IntrGather [fnE'])
+synthE i _ (IntrinsicS IntrGather args) =
+  MM.throwCompilerBugAt i $ "IntrGather expects 1 arg (function), got " <> pretty (length args)
+-- @gatherput :: Cell [a] -> [a] -> <IO> ()
+synthE _ g (IntrinsicS IntrGatherPut [handleE, listE]) = do
+  let (g1, a) = newvar "gatherput_a_" g
+  (g2, _, handleE') <- checkG g1 handleE (AppU (VarU BT.cellVar) [BT.listU a])
+  (g3, _, listE') <- checkG g2 listE (BT.listU (apply g2 a))
+  return (g3, EffectU ioEffectSet BT.unitU, IntrinsicS IntrGatherPut [handleE', listE'])
+synthE i _ (IntrinsicS IntrGatherPut args) =
+  MM.throwCompilerBugAt i $ "IntrGatherPut expects 2 args (handle, list), got " <> pretty (length args)
+-- @cellsink :: Cell b -> [a] -> ([a] -> <IO> ()) -> <IO> ()
+synthE _ g (IntrinsicS IntrCellSink [handleE, listE, fnE]) = do
+  let (g1, a) = newvar "cellsink_a_" g
+  (g2, _, handleE') <- checkCellHandle g1 handleE
+  (g3, _, listE') <- checkG g2 listE (BT.listU a)
+  (g4, _, fnE') <- checkG g3 fnE (FunU [BT.listU (apply g3 a)] (EffectU ioEffectSet BT.unitU))
+  return (g4, EffectU ioEffectSet BT.unitU, IntrinsicS IntrCellSink [handleE', listE', fnE'])
+synthE i _ (IntrinsicS IntrCellSink args) =
+  MM.throwCompilerBugAt i $ "IntrCellSink expects 3 args (handle, list, function), got " <> pretty (length args)
+-- @cellside :: Cell b -> ([a] -> <IO> ()) -> <IO> ()
+synthE _ g (IntrinsicS IntrCellSide [handleE, fnE]) = do
+  let (g1, a) = newvar "cellside_a_" g
+  (g2, _, handleE') <- checkCellHandle g1 handleE
+  (g3, _, fnE') <- checkG g2 fnE (FunU [BT.listU a] (EffectU ioEffectSet BT.unitU))
+  return (g3, EffectU ioEffectSet BT.unitU, IntrinsicS IntrCellSide [handleE', fnE'])
+synthE i _ (IntrinsicS IntrCellSide args) =
+  MM.throwCompilerBugAt i $ "IntrCellSide expects 2 args (handle, function), got " <> pretty (length args)
 -- @settle :: IStream a -> <IO> ().
 synthE _ g (IntrinsicS IntrSettle [handleE]) = do
   let (g1, a) = newvar "settle_a_" g
@@ -2056,6 +2089,12 @@ intrinsicType IntrReplay = Nothing
 intrinsicType IntrChannel = Nothing
 intrinsicType IntrSpawn = Nothing
 intrinsicType IntrSettle = Nothing
+intrinsicType IntrGather = Nothing
+intrinsicType IntrGatherPut = Nothing
+intrinsicType IntrGatherNative = Nothing
+intrinsicType IntrGatherPutNative = Nothing
+intrinsicType IntrCellSink = Nothing
+intrinsicType IntrCellSide = Nothing
 intrinsicType IntrAppend = Nothing
 intrinsicType IntrConcat = Just (EffectU ioEffectSet (BT.tryU BT.strU BT.unitU))
 intrinsicType IntrFlush = Just (EffectU ioEffectSet (BT.tryU BT.strU BT.unitU))

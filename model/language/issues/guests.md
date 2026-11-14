@@ -13,5 +13,3 @@ Guest-language signatures (GUEST) against the code. Reproduced on 0.109.0
 - **A GUEST-3 rejection names no term or location.** [reproduced,
   2026-10-21] "Futhark: unsupported type Int (only fixed-width numeric
   scalars, ...)". Repro: /work/plans/model-audit-2026-10-21/repro/F/fut/g1.loc.
-- **Manual.** lang-futhark.asc covers only `backend`/`device`; it states
-  none of GUEST-1..4.

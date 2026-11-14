@@ -158,7 +158,7 @@ typedef enum {
     MORLOC_TUPLE    = 15,
     MORLOC_MAP      = 16,
     MORLOC_OPTIONAL = 17,
-    MORLOC_INT      = 18, // variable-width integer (Array of uint64_t limbs, two's complement)
+    MORLOC_INT      = 18, // variable-width integer
     MORLOC_TABLE    = 19, // Arrow IPC primitive. Schema columns (if any) are
                           // open constraints on the buffer's actual schema; the
                           // binary layout is fully described by the Arrow
@@ -1968,6 +1968,37 @@ void* mlc_cell_slot(int64_t handle, int64_t index, const Schema* schema,
 // still live when its dispatch ends is swept, so a handler that raises
 // before its merge cannot leak one.
 int32_t mlc_cell_free(int64_t handle, ERRMSG);
+
+// The fork side (model/runtime/side.md): an in-pool accumulator's record,
+// through which a forked child's batches reach it. A fold cell has one,
+// keyed by its handle. Each returns -1 (or NULL) on error.
+
+// A new gather entry holding `native`, the container mlc_side_put_native
+// appends to.
+int64_t mlc_side_new(void* native, ERRMSG);
+
+// 1 when a put is native here, 0 when it goes to the side file.
+int32_t mlc_side_route(int64_t id, ERRMSG);
+
+// 1 after `append(native, item)` (SIDE-5), 0 when the batch goes to the
+// side file instead.
+int32_t mlc_side_put_native(int64_t id, void (*append)(void* container, void* item),
+                            void* item, ERRMSG);
+
+// Write a batch to the side file. Returns 0 on success. A NULL schema (a
+// batch with no wire form) poisons the file, so the take fails, and fails.
+int32_t mlc_side_put(int64_t id, const Schema* schema, const void* value, ERRMSG);
+
+// End the entry in its owner; a reader over the side batches, in order.
+void* mlc_side_take(int64_t id, ERRMSG);
+
+// The next side batch as a fresh SHM value, or NULL with *eof set.
+void* mlc_side_next(void* reader, const Schema* schema, int32_t* eof, ERRMSG);
+
+void mlc_side_reader_free(void* reader);
+
+// End an entry without reading it.
+void mlc_side_drop(int64_t id);
 
 // ========================================================================
 // Section 25: Function declarations -- Slurm

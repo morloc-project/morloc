@@ -22,7 +22,6 @@
 //! [strtab_offset)  string table: format strings, names and per-node Arrow
 //!                  metadata blobs, NUL-terminated; strtab[0] is NUL so an
 //!                  offset of 0 means "absent"
-//! [metadata_offset) msgpack map of morloc.* keys, or absent
 //! [data_start)     buffer bytes, each 64-byte aligned from the block start
 //! ```
 //!

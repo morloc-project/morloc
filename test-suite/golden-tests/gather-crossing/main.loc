@@ -1,0 +1,56 @@
+-- A sink handed to producers in two languages carries its gather's handle
+-- into the other pool. A native gather's handle names a record in one
+-- pool's runtime (SIDE-4), so this gather takes the temp-file route, whose
+-- handle is a stream both pools write to.
+--
+-- cmd2 uses the same sink function from a second command. cmd3 hands the
+-- sink to a recursive function, whose body is not in the gather's own
+-- tree, so the gather cannot see every use of its handle and takes the
+-- temp-file route: its last batch is 1000 plus the gather files it sees.
+
+module main (cmd, cmd2, cmd3)
+
+import root-cpp
+import root-py
+
+source Cpp from "impl.hpp"
+  ("produce" as produceC, "show_ints" as showC, "dec" as decC, "is_zero" as isZeroC, "produce_route" as routeC)
+source Py from "impl.py" ("produce" as produceP)
+
+produceC :: ([I64] -> <IO> ()) -> <IO> ()
+produceP :: ([I64] -> <IO> ()) -> <IO> ()
+routeC :: ([I64] -> <IO> ()) -> <IO> ()
+decC :: I64 -> I64
+isZeroC :: I64 -> Bool
+
+--' The elements, shown by C++
+showC :: [I64] -> Str
+
+both :: ([I64] -> <IO> ()) -> <IO> ()
+both sink = do
+  produceP sink
+  produceC sink
+
+--' Gather from two languages
+--' @render --show=showC
+cmd :: <IO> ()
+cmd = @collect both
+
+--' Gather from two languages, a second time
+--' @render --show=showC
+cmd2 :: <IO> ()
+cmd2 = @collect both
+
+--' Batches from n levels of recursion
+many :: I64 -> ([I64] -> <IO> ()) -> <IO> ()
+many n sink
+  ? isZeroC n = routeC sink
+  : do
+      produceP sink
+      many (decC n) sink
+      produceC sink
+
+--' Gather through a recursive producer
+--' @render --show=showC
+cmd3 :: I64 -> <IO> ()
+cmd3 n = @collect (many n)

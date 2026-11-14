@@ -968,19 +968,20 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
         "a command with `@parse` arguments must dispatch to a foreign pool;"
           <+> "here the command and its parsers are all morloc code. Call a"
           <+> "foreign function in the command or in its parsers."
-    toNexusExpr (AnnoS (Idx iTmp _) _ (IntrinsicS IntrTmpfile _)) =
-      MM.throwSourcedError iTmp $
-        "the whole-list `@with`/`@render` handler currently requires a command"
-          <+> "that dispatches to a foreign pool; a pure (all-morloc) whole-form"
-          <+> "command is not yet supported. Add the `@stream` modifier for"
-          <+> "per-batch streaming, or involve a foreign function in the"
-          <+> "command body."
+    toNexusExpr (AnnoS (Idx iTmp _) _ (IntrinsicS intr _))
+      | intr `elem` [IntrTmpfile, IntrGather, IntrGatherPut, IntrGatherNative, IntrGatherPutNative] =
+          MM.throwSourcedError iTmp $
+            "the whole-list `@with`/`@render` handler currently requires a command"
+              <+> "that dispatches to a foreign pool; a pure (all-morloc) whole-form"
+              <+> "command is not yet supported. Add the `@stream` modifier for"
+              <+> "per-batch streaming, or involve a foreign function in the"
+              <+> "command body."
     -- The fold accumulator lives in the runtime and its step and combine
     -- run in a pool. The nexus interpreter cannot call a morloc function
     -- by name, so a pure (all-morloc) folding command is rejected here
     -- rather than falling off the evaluator.
     toNexusExpr (AnnoS (Idx iCell _) _ (IntrinsicS intr _))
-      | intr `elem` [IntrCellNew, IntrCellGet, IntrCellPut, IntrCellReduce] =
+      | intr `elem` [IntrCellNew, IntrCellGet, IntrCellPut, IntrCellReduce, IntrCellSink, IntrCellSide] =
           MM.throwSourcedError iCell $
             "a folding `@render`/`@with` handler currently requires a command"
               <+> "that dispatches to a foreign pool; a pure (all-morloc) fold"

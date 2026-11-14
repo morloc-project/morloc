@@ -1089,6 +1089,18 @@ realizeWithRegistry registry tables pins seedLangs s00 = do
     scoreExpr rstat (LabelS k x, i) = do
       x' <- scoreAnnoS rstat x
       return (LabelS k x', Idx i (scoresOf x'))
+    -- A gather follows its consumer: reaching its producer counts below
+    -- every crossing, so a consumer in another language takes the stream
+    -- through a file rather than as one value.
+    scoreExpr rstat (IntrinsicS IntrGather [f], i) = do
+      f' <- scoreAnnoS rstat f
+      scopes <- MM.gets stateConcreteTypedefs
+      let k = kid f'
+          langs = unique (rLangs rstat <> map fst (kidTable k) <> map (LR.poolOf registry) (Map.keys scopes))
+          best
+            | null (kidTable k) = [(l, mempty) | l <- rLangs rstat]
+            | otherwise = [(l, soften (reachKid l k)) | l <- langs]
+      return (IntrinsicS IntrGather [f'], Idx i best)
     scoreExpr rstat (IntrinsicS intr xs, i) = do
       xs' <- mapM (scoreAnnoS rstat) xs
       let Idx _ langScores = zipLang i rstat
@@ -1108,6 +1120,9 @@ realizeWithRegistry registry tables pins seedLangs s00 = do
       | otherwise = [(l1, s1 <> mconcat (map (reachKid l1) placed)) | (l1, s1) <- scores]
       where
         placed = filter (not . null . kidTable) kids
+
+    soften :: Score -> Score
+    soften (Score u c w p z) = Score u [] (w + sum c) p z
 
     -- A function or suspension passed to a sourced function, or to a shared
     -- specialization whose body is placed on its own, may be called many

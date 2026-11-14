@@ -3,14 +3,29 @@
 - **Cross-language @fold crosses pools with its cell.** Violates STRM-4.
   Cells live in one pool process (morloc-runtime/src/cell.rs) but
   realization can split `@cellnew` and `@cellreduce` across pools (S5 in
-  /work/plans/error-clusters). [2026-11-02] Python `produce`, C++ fold
-  (`-s`) now prints `c=15`, but only because the handle goes cpp -> py ->
-  cpp and returns to the process holding the cell.
-  The other direction aborts too [reproduced, 2026-10-29]: a C++
-  `produceParallel` calling its sink from four threads, with the `@fold`,
-  `@init` and `@combine` functions in Python (or R), kills the C++ pool with
-  "mlc_cell_get: no such fold accumulator; the handle is stale or was
-  already released", whatever the accumulator type (an `Int` is enough).
+  /work/plans/error-clusters). A Python producer with a C++ fold works:
+  its `@cellsink` is placed in C++, so the handle goes cpp -> py -> cpp
+  (golden gather-relay foldPyCpp). The other direction fails
+  [reproduced 2026-11-14]: a C++ producer calling its sink from four
+  threads, with `@fold`, `@init` and `@combine` in Python: every
+  callback's `@cellget` fails with "mlc_cell_get: no such fold
+  accumulator" and the run fails. Cause not narrowed; the likely one is
+  that the callbacks run in another Python process than the one that made
+  the cell (SIDE-11 makes such a miss certain rather than a wrong cell).
+- **A fold batch with no wire form cannot come from a forked child.**
+  [reproduced, stage 6 prototype] SIDE-10: a batch type with a packer
+  (`[Map Str I64]` in C++ or Python) sent from a forked child poisons the
+  side file and the fold fails ("no wire form"); the parent's own batches
+  fold natively. The child could pack the batch first (golden
+  gather-native mapsFold*).
+- **A side-file writer's forked grandchild holds its lock.** [read]
+  Violates SIDE-10's intent that take waits only for writes in flight. A
+  forked child that forks again while it holds the flock on its side-file
+  descriptor (a fork inside a sink call, from another thread of the child)
+  hands the descriptor, and so the lock, to the grandchild; the owner's
+  take blocks until the grandchild exits or closes it. O_CLOEXEC does not
+  help across fork. Open question: refuse a fork while the lock is held
+  (an atfork check), or time-bound the take's lock wait.
 - **@render return type unchecked.** [reproduced] Violates CLI-8. A
   handler returning `Int` builds and fails after the command ran ("-f raw
   requires Str, [Str], Vector U8, or [Vector U8]"). `@mime` has the check
@@ -61,3 +76,22 @@
   initialised or handle is corrupt"); the command still exits 0 with the
   right output. A late call inside the run fails cleanly ("generation
   mismatch ... handle was closed").
+- **A replay of a packed element type does not build.** [reproduced,
+  2026-11-14] Gap in STRM-4. A streaming command whose batch type is
+  `[T]`, `T` a native type with a packer and no serializer of its own
+  (golden gather-fold-packed `Tally`), gets a replay entry for its
+  `@render` actions (Desugar synthStreamingReplay); its C++ `_mlc_replay<T>`
+  instantiates `from_voidstar` on `T` ("no matching function for call to
+  'Tally::Tally()'") and its Rust `replay` needs `T: FromVoidstar`, so the
+  pool does not compile. The replay reads frames as the native type
+  instead of the wire type and packing each element. Workaround: give the
+  producer through a lambda, which leaves the command without a replay
+  entry.
+- **A file-route gather leaves its stream open when the producer
+  raises.** [read, 2026-11-14] Gap in STRM-4 / SIDE: `_mlc_gather_file`
+  (pool.cpp), `gather_file` (rustmorloc), `mlc_gather` (pool.py, pool.R)
+  open an OStream on a temp file, call the producer, then close, load and
+  unlink; an exception or R error from the producer skips the close and
+  the unlink, so the stream's slot and its temp file stay until the
+  dispatch's sweep (if any reaches them). The native route drops its entry
+  on the same path.

@@ -4,7 +4,7 @@ all:
 	rm -f *.err obs.txt *.dat *.json
 	morloc make -o nexus main.loc 2> build.err
 	python3 gen.py
-	test $$(grep -c 'morloc.mlc_write(' nexus-build/pools/py/pool.py) -eq $$(( 2 * $$(wc -l < types.txt) + 5 )) && echo py-writes >> obs.txt || echo UNEXPECTED_PY_WRITES >> obs.txt
+	test $$(sed -n '/AUTO include manifolds start/,/AUTO include manifolds end/p' nexus-build/pools/py/pool.py | grep -c 'morloc.mlc_write(') -eq $$(( 2 * $$(wc -l < types.txt) + 5 )) && echo py-writes >> obs.txt || echo UNEXPECTED_PY_WRITES >> obs.txt
 	test $$(grep -c '^ *_mlc_write(mlc_schema' nexus-build/pools/cpp/pool.cpp) -eq $$(( 2 * $$(wc -l < types.txt) )) && echo cpp-writes >> obs.txt || echo UNEXPECTED_CPP_WRITES >> obs.txt
 	test $$(grep -c 'rustmorloc::write(' nexus-build/pools/rust/src/main.rs) -eq $$(( 2 * $$(wc -l < types.txt) + 2 )) && echo rust-writes >> obs.txt || echo UNEXPECTED_RUST_WRITES >> obs.txt
 	test $$(grep -F -c 'morloc$$morloc_mlc_write(' nexus-build/pools/r/pool.R) -eq $$(( 2 * $$(wc -l < types-r.txt) + $$(wc -l < types-rl.txt) )) && echo r-writes >> obs.txt || echo UNEXPECTED_R_WRITES >> obs.txt

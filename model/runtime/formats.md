@@ -18,7 +18,8 @@ Integers are little-endian.
 Status: draft
 Call: entrypoint at 13, mid u32 at 16, payload = argument data packets
 concatenated. Data: source 13, format 14, compression 15, encryption 16,
-status 17.
+status 17, generation u16 at 18 (little-endian; the SHM-13 generation of a
+reference's block, 0 for inline data).
 
 ### FMT-3 Metadata blocks are `mmh`, kind u8, size u32, body
 Status: draft
@@ -37,9 +38,11 @@ relative to the buffer start.
 ### FMT-5 Volume and block headers
 Status: draft
 Volume: magic 0xFECA0DF0 (stored last), name[128], index i32, size u64,
-reserved u64, lock, cursor; padded to 16. Block: magic 0x0CB10DF0 (merged:
-0x0CB1DEAD), refcount u32 (0 free, all ones tearing down), size u64; data
-16-aligned, sizes multiples of 16.
+poison u64 (SHM-6), lock, cursor, next_index u32 and grow_lock (SHM-12),
+kind u32 and committed u64 (SHM-18); padded to 16. Block: magic 0x0CB10DF0,
+refcount u32 (0 free, all ones tearing down), size in bits 0-47 and
+generation in bits 48-63 of a u64 (SHM-13); a merged header is all zero;
+data 16-aligned, sizes multiples of 16.
 
 ### FMT-6 Voidstar slot layout per schema code
 Status: draft

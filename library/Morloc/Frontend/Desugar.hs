@@ -4085,7 +4085,7 @@ synthCollectReplay sp parentName pt batchT elemT sigMap spec
   | wsStream spec || isJust (wsFold spec) =
       synthStreamingReplay sp parentName pt batchT elemT sigMap spec
   | otherwise =
-      let useIFile = maybe False firstParamIsIFile (Map.lookup (wsTerm spec) sigMap)
+      let useIFile = maybe False (payloadParamIsIFile (wsArgs spec)) (Map.lookup (wsTerm spec) sigMap)
           inputT = if useIFile then AppU (VarU BT.ifileVar) [batchT] else batchT
       in synthValueReplay sp parentName pt inputT spec
 
@@ -4201,14 +4201,18 @@ validateWithSpec sp parentName arity isCollect
       <> "`@stream` emits one result per batch; `@fold` emits one result for "
       <> "the whole stream. Pick one."
 
--- | True iff the declared whole-form handler takes an @IFile [a]@ receiver
--- (its first parameter's head is @IFile@). Selects random-access presentation
--- over a materialized @[a]@ list. Peels leading @ForallU@ quantifiers.
-firstParamIsIFile :: TypeU -> Bool
-firstParamIsIFile = go
+-- | True iff the declared whole-form handler takes the payload as an
+-- @IFile [a]@: the parameter at the payload's position ('orderPayloadArg')
+-- has head @IFile@. Selects random-access presentation over a materialized
+-- @[a]@ list. Peels leading @ForallU@ quantifiers.
+payloadParamIsIFile :: [ArgSource] -> TypeU -> Bool
+payloadParamIsIFile srcs = go
   where
+    payloadAt = length (takeWhile (/= ArgValue) (orderPayloadArg srcs))
     go (ForallU _ t) = go t
-    go (FunU (arg : _) _) = isIFileHead arg
+    go (FunU ts _) = case drop payloadAt ts of
+      (arg : _) -> isIFileHead arg
+      [] -> False
     go _ = False
     isIFileHead (AppU (VarU v) _) = v == BT.ifileVar
     isIFileHead _ = False
@@ -4355,7 +4359,7 @@ synthStreamingBinding sp parentName assI sigMap
       -- the nexus formats per `-f`; `render` returns the handler's final bytes,
       -- emitted verbatim. Synthesis is identical -- only the manifest `render`
       -- flag differs.
-      let useIFile = maybe False firstParamIsIFile (Map.lookup tTerm sigMap)
+      let useIFile = maybe False (payloadParamIsIFile argSrcs) (Map.lookup tTerm sigMap)
       in withParentBody $ \ps -> composeWholeIntoCollect useIFile sigMap ps argSrcs tTerm
   where
     -- Every local binder already has a unique name ('Rename.renameLocals'), so
@@ -4504,31 +4508,23 @@ composeFoldIntoCollect params argSrcs fs handler =
 -- | Build the fold do-block for one @collect arg@:
 --
 -- > do  h <- @cellnew init
--- >     _ <- arg (\c -> do  acc <- @cellget h
--- >                         @cellput h (step acc c))
+-- >     _ <- arg (\c -> do { _ <- @cellsink h c k; () })
+-- >     _ <- @cellside h k
 -- >     b <- @cellreduce combine h
 -- >     handler b
 --
--- The sink still returns @()@, so the running accumulator lives behind the
--- cell rather than flowing back out of the sink. @step@ and @combine@ are
--- applied as ordinary morloc code, so the realizer places them like any
--- other call and marshals across a language boundary if it has to.
---
--- The accumulator is per calling thread (see the runtime's cell module), so
--- a producer that drives its sink from several threads loses no updates;
--- @combine@ merges them. Every accumulator starts from @init@, so @init@
--- must be an identity for @combine@ or the answer depends on how many
--- threads the producer used -- the usual contract of a parallel fold, and
--- not something that can be checked here.
+-- where @k = \c -> do { acc <- @cellget h; @cellput h (step acc c) }@,
+-- written out at both uses (SIDE-4, SIDE-7). @init@ and @combine@ obey STRM-5.
 wrapFoldCollect :: [EVar] -> [ArgSource] -> FoldSpec -> EVar -> ExprI -> ExprI -> D ExprI
 wrapFoldCollect params argSrcs (FoldSpec step ini comb) handler ref collectArg = do
   idx <- freshIdPos (Pos 0 0 "")
   let nm base = EV (base <> T.pack (show idx))
       hV   = nm "_fold_h_"
-      accV = nm "_fold_acc_"
       bV   = nm "_fold_b_"
       cV   = nm "_fold_c_"
       gV   = nm "_fold_g_"
+      sV   = EV (BT.doDiscardPrefix <> "fold_s_" <> T.pack (show idx))
+      hRef = freshExprFrom ref (VarE defaultValue hV)
   handlerRef <- freshExprFrom ref (VarE defaultValue handler)
   -- h <- @cellnew init
   newBind <- do
@@ -4536,37 +4532,56 @@ wrapFoldCollect params argSrcs (FoldSpec step ini comb) handler ref collectArg =
     n <- freshExprFrom ref (IntrinsicE IntrCellNew [iniRef])
     freshExprFrom ref (EvalE n)
   -- \c -> do { acc <- @cellget h; @cellput h (step acc c) }
+  let foldStep = do
+        k <- freshIdPos (Pos 0 0 "")
+        let accV = EV ("_fold_acc_" <> T.pack (show k))
+            c2V = EV ("_fold_c2_" <> T.pack (show k))
+            dV = EV (BT.doDiscardPrefix <> "fold_p_" <> T.pack (show k))
+        getE <- hRef >>= \h -> freshExprFrom ref (IntrinsicE IntrCellGet [h])
+        getBind <- freshExprFrom ref (EvalE getE)
+        stepRef <- freshExprFrom ref (VarE defaultValue step)
+        accRef <- freshExprFrom ref (VarE defaultValue accV)
+        cRef <- freshExprFrom ref (VarE defaultValue c2V)
+        stepApp <- freshExprFrom ref (AppE stepRef [accRef, cRef])
+        putE <- hRef >>= \h -> freshExprFrom ref (IntrinsicE IntrCellPut [h, stepApp])
+        forcePut <- freshExprFrom ref (EvalE putE)
+        unitE <- freshExprFrom ref UniE
+        putBody <- freshExprFrom ref (LetE [(dV, forcePut)] unitE)
+        inner <- freshExprFrom ref (LetE [(accV, getBind)] putBody)
+        blk <- freshExprFrom ref (DoBlockE inner)
+        freshExprFrom ref (LamE [c2V] blk)
+  -- \c -> @cellsink h c k
   sink <- do
-    hGet <- freshExprFrom ref (VarE defaultValue hV)
-    getE <- freshExprFrom ref (IntrinsicE IntrCellGet [hGet])
-    getBind <- freshExprFrom ref (EvalE getE)
-    stepRef <- freshExprFrom ref (VarE defaultValue step)
-    accRef <- freshExprFrom ref (VarE defaultValue accV)
+    h <- hRef
     cRef <- freshExprFrom ref (VarE defaultValue cV)
-    stepApp <- freshExprFrom ref (AppE stepRef [accRef, cRef])
-    hPut <- freshExprFrom ref (VarE defaultValue hV)
-    putE <- freshExprFrom ref (IntrinsicE IntrCellPut [hPut, stepApp])
-    forcePut <- freshExprFrom ref (EvalE putE)
+    k <- foldStep
+    e <- freshExprFrom ref (IntrinsicE IntrCellSink [h, cRef, k])
+    forceSink <- freshExprFrom ref (EvalE e)
     unitE <- freshExprFrom ref UniE
-    let dV = EV (BT.doDiscardPrefix <> "fold_p_" <> T.pack (show idx))
-    putBody <- freshExprFrom ref (LetE [(dV, forcePut)] unitE)
-    inner <- freshExprFrom ref (LetE [(accV, getBind)] putBody)
-    blk <- freshExprFrom ref (DoBlockE inner)
+    body <- freshExprFrom ref (LetE [(EV (BT.doDiscardPrefix <> "fold_k_" <> T.pack (show idx)), forceSink)] unitE)
+    blk <- freshExprFrom ref (DoBlockE body)
     freshExprFrom ref (LamE [cV] blk)
   -- _ <- arg (\c -> ...)
   prodBare <- do
     app <- freshExprFrom ref (AppE collectArg [sink])
     freshExprFrom ref (EvalE app)
+  -- _ <- @cellside h k
+  sideBare <- do
+    h <- hRef
+    k <- foldStep
+    e <- freshExprFrom ref (IntrinsicE IntrCellSide [h, k])
+    freshExprFrom ref (EvalE e)
   -- b <- @cellreduce combine h   (the cell is released here)
   reduceBind <- do
     combRef <- freshExprFrom ref (VarE defaultValue comb)
-    hRef <- freshExprFrom ref (VarE defaultValue hV)
-    r <- freshExprFrom ref (IntrinsicE IntrCellReduce [combRef, hRef])
+    h <- hRef
+    r <- freshExprFrom ref (IntrinsicE IntrCellReduce [combRef, h])
     freshExprFrom ref (EvalE r)
   appArgs <- buildStreamArgs ref params Nothing bV argSrcs
   handlerApp <- freshExprFrom ref (AppE handlerRef appArgs)
   t1 <- freshExprFrom ref (LetE [(bV, reduceBind)] handlerApp)
-  t2 <- freshExprFrom ref (LetE [(gV, prodBare)] t1)
+  t1' <- freshExprFrom ref (LetE [(sV, sideBare)] t1)
+  t2 <- freshExprFrom ref (LetE [(gV, prodBare)] t1')
   t3 <- freshExprFrom ref (LetE [(hV, newBind)] t2)
   freshExprFrom ref (DoBlockE t3)
 
@@ -4579,37 +4594,67 @@ composeWholeIntoCollect ::
 composeWholeIntoCollect useIFile sigs params argSrcs handler =
   rewriteCollectWith $ \self arg' -> wrapWholeCollect useIFile sigs params argSrcs self handler arg'
 
--- | Build the whole-list gather-and-apply do-block for one @collect arg@:
+-- | Build the whole-list gather-and-apply do-block for one @collect arg@.
+-- For a @[a] -> b@ handler:
+--
+-- > do  xs <- @gather (\g -> do { _ <- arg (\v -> @gatherput g v); () })
+-- >     handler xs
+--
+-- For an @IFile [a] -> b@ handler the stream goes through a temp file:
 --
 -- > do  path <- @tmpfile          -- registered for removal at end of call
 -- >     o    <- @open path         -- OStream a
 -- >     _    <- arg (@write 0 o)   -- gather the producer's stream to the file
--- >     _    <- @close o           -- final footer -> IFile/@load-readable
--- >     <present>
---
--- with @<present>@ applying @handler@ once to the complete data:
---
--- >     f  <- @open path           -- IFile [a]           (useIFile)
--- >     r  <- handler f
--- >     _  <- @close f
--- >     _  <- @close path          -- unlink the temp file
+-- >     _    <- @close o           -- final footer -> IFile-readable
+-- >     f    <- @open path         -- IFile [a]
+-- >     r    <- handler f
+-- >     _    <- @close f
+-- >     _    <- @close path        -- unlink the temp file
 -- >     r
---
--- or, for a @[a] -> b@ handler:
---
--- >     xs <- @load path           -- materialize the whole list
--- >     _  <- @close path          -- unlink the temp file
--- >     handler xs
 wrapWholeCollect ::
   Bool -> Map.Map EVar TypeU -> [EVar] -> [ArgSource] -> ExprI -> EVar -> ExprI -> D ExprI
-wrapWholeCollect useIFile sigs params argSrcs ref handler collectArg = do
+wrapWholeCollect False sigs params argSrcs ref handler collectArg = do
+  idx <- freshIdPos (Pos 0 0 "")
+  let nm base = EV (base <> T.pack (show idx))
+      gV  = nm "_whole_g_"
+      vV  = nm "_whole_v_"
+      xsV = nm "_whole_xs_"
+      g1  = EV (BT.doDiscardPrefix <> "whole_p_" <> T.pack (show idx))
+      g2  = EV (BT.doDiscardPrefix <> "whole_w_" <> T.pack (show idx))
+  handlerRef <- freshExprFrom ref (VarE defaultValue handler)
+  -- \v -> do { _ <- @gatherput g v; () }
+  sinkE <- do
+    gRef <- freshExprFrom ref (VarE defaultValue gV)
+    vRef <- freshExprFrom ref (VarE defaultValue vV)
+    putE <- freshExprFrom ref (IntrinsicE IntrGatherPut [gRef, vRef])
+    forcePut <- freshExprFrom ref (EvalE putE)
+    unitE <- freshExprFrom ref UniE
+    body <- freshExprFrom ref (LetE [(g2, forcePut)] unitE)
+    blk <- freshExprFrom ref (DoBlockE body)
+    freshExprFrom ref (LamE [vV] blk)
+  -- \g -> do { _ <- arg sink; () }
+  fnE <- do
+    app <- freshExprFrom ref (AppE collectArg [sinkE])
+    forceApp <- freshExprFrom ref (EvalE app)
+    unitE <- freshExprFrom ref UniE
+    body <- freshExprFrom ref (LetE [(g1, forceApp)] unitE)
+    blk <- freshExprFrom ref (DoBlockE body)
+    freshExprFrom ref (LamE [gV] blk)
+  gatherBind <- do
+    gE <- freshExprFrom ref (IntrinsicE IntrGather [fnE])
+    freshExprFrom ref (EvalE gE)
+  appArgs <- buildStreamArgs ref params Nothing xsV argSrcs
+  handlerApp <- freshExprFrom ref (AppE handlerRef appArgs)
+  pinned <- pinGathered False sigs ref handler collectArg xsV id handlerApp
+  t1 <- freshExprFrom ref (LetE [(xsV, gatherBind)] pinned)
+  freshExprFrom ref (DoBlockE t1)
+wrapWholeCollect True sigs params argSrcs ref handler collectArg = do
   idx <- freshIdPos (Pos 0 0 "")
   let nm base = EV (base <> T.pack (show idx))
       pathV = nm "_whole_path_"
       oV    = nm "_whole_o_"
       fV    = nm "_whole_f_"
       rV    = nm "_whole_r_"
-      xsV   = nm "_whole_xs_"
       g1    = nm "_whole_g1_"
       g2    = nm "_whole_g2_"
       g3    = nm "_whole_g3_"
@@ -4641,72 +4686,59 @@ wrapWholeCollect useIFile sigs params argSrcs ref handler collectArg = do
         p <- freshExprFrom ref (VarE defaultValue pathV)
         u <- freshExprFrom ref (IntrinsicE IntrClose [p])
         freshExprFrom ref (EvalE u)
-  tailE <-
-    if useIFile
-      then do
-        openFBind <- do
-          p <- freshExprFrom ref (VarE defaultValue pathV)
-          o <- freshExprFrom ref (IntrinsicE IntrOpen [p])
-          freshExprFrom ref (EvalE o)
-        handlerBind <- do
-          appArgs <- buildStreamArgs ref params Nothing fV argSrcs
-          app <- freshExprFrom ref (AppE handlerRef appArgs)
-          freshExprFrom ref (EvalE app)
-        closeFBare <- do
-          fref <- freshExprFrom ref (VarE defaultValue fV)
-          c <- freshExprFrom ref (IntrinsicE IntrClose [fref])
-          freshExprFrom ref (EvalE c)
-        unlink <- unlinkBare
-        rRef <- freshExprFrom ref (VarE defaultValue rV)
-        t1 <- freshExprFrom ref (LetE [(g4, unlink)] rRef)
-        t2 <- freshExprFrom ref (LetE [(g3, closeFBare)] t1)
-        t3 <- freshExprFrom ref (LetE [(rV, handlerBind)] t2)
-        t3' <- pinGathered fV (\a -> AppU (VarU BT.ifileVar) [a]) t3
-        bindOkFrom ref fV openFBind t3'
-      else do
-        loadBind <- do
-          p <- freshExprFrom ref (VarE defaultValue pathV)
-          l <- freshExprFrom ref (IntrinsicE IntrLoad [p])
-          freshExprFrom ref (EvalE l)
-        unlink <- unlinkBare
-        appArgs <- buildStreamArgs ref params Nothing xsV argSrcs
-        handlerApp <- freshExprFrom ref (AppE handlerRef appArgs)
-        t1 <- freshExprFrom ref (LetE [(g3, unlink)] handlerApp)
-        t1' <- pinGathered xsV id t1
-        bindOkFrom ref xsV loadBind t1'
+  openFBind <- do
+    p <- freshExprFrom ref (VarE defaultValue pathV)
+    o <- freshExprFrom ref (IntrinsicE IntrOpen [p])
+    freshExprFrom ref (EvalE o)
+  handlerBind <- do
+    appArgs <- buildStreamArgs ref params Nothing fV argSrcs
+    app <- freshExprFrom ref (AppE handlerRef appArgs)
+    freshExprFrom ref (EvalE app)
+  closeFBare <- do
+    fref <- freshExprFrom ref (VarE defaultValue fV)
+    c <- freshExprFrom ref (IntrinsicE IntrClose [fref])
+    freshExprFrom ref (EvalE c)
+  unlink <- unlinkBare
+  rRef <- freshExprFrom ref (VarE defaultValue rV)
+  t1 <- freshExprFrom ref (LetE [(g4, unlink)] rRef)
+  t2 <- freshExprFrom ref (LetE [(g3, closeFBare)] t1)
+  t3 <- freshExprFrom ref (LetE [(rV, handlerBind)] t2)
+  t3' <- pinGathered True sigs ref handler collectArg fV (\a -> AppU (VarU BT.ifileVar) [a]) t3
+  tailE <- bindOkFrom ref fV openFBind t3'
   b1 <- freshExprFrom ref (LetE [(g2, closeOBare)] tailE)
   b2 <- freshExprFrom ref (LetE [(g1, gatherBare)] b1)
   b3 <- bindOkFrom ref oV openOBind b2
   b4 <- bindOkFrom ref pathV tmpBind b3
   freshExprFrom ref (DoBlockE b4)
-  where
-    -- Tie the gathered value to what the producer streams.
-    --
-    -- The stream leaves through a file and comes back through @load or
-    -- @open, and both are polymorphic: their element type is inferred from
-    -- whatever reads them, which is the handler. Nothing else relates the
-    -- two ends, so a handler whose receiver disagrees with the stream is
-    -- accepted and then reads the file's bytes as a type they do not hold.
-    -- The producer's declared signature is what closes the loop, and
-    -- `wrap` says how the handler sees the stream: as the list itself, or
-    -- behind an @IFile@.
-    --
-    -- A producer with no reachable signature, or one whose batch type is
-    -- generic, cannot be pinned: there is nothing to check against, and a
-    -- rigid annotation would over-constrain a legitimately generic handler.
-    -- That leaves the handler unchecked, so it is said out loud rather than
-    -- passed over.
-    pinGathered :: EVar -> (TypeU -> TypeU) -> ExprI -> D ExprI
-    pinGathered v wrap body =
-      case streamTypeOfProducer sigs collectArg of
-        Just t | isConcreteType t -> do
-          vRef <- freshExprFrom ref (VarE defaultValue v)
-          annV <- freshExprFrom ref (AnnE vRef (wrap t))
-          freshExprFrom ref (LetE [(v, annV)] body)
-        mt -> do
-          dwarn [unpinnedMsg mt]
-          return body
 
+-- | Tie the gathered value to what the producer streams.
+--
+-- The stream leaves through a file and comes back through @load or
+-- @open, and both are polymorphic: their element type is inferred from
+-- whatever reads them, which is the handler. Nothing else relates the
+-- two ends, so a handler whose receiver disagrees with the stream is
+-- accepted and then reads the file's bytes as a type they do not hold.
+-- The producer's declared signature is what closes the loop, and
+-- `wrap` says how the handler sees the stream: as the list itself, or
+-- behind an @IFile@.
+--
+-- A producer with no reachable signature, or one whose batch type is
+-- generic, cannot be pinned: there is nothing to check against, and a
+-- rigid annotation would over-constrain a legitimately generic handler.
+-- That leaves the handler unchecked, so it is said out loud rather than
+-- passed over. A gather's handle already ties the two ends, so there the
+-- annotation only fixes the element type and nothing is said.
+pinGathered :: Bool -> Map.Map EVar TypeU -> ExprI -> EVar -> ExprI -> EVar -> (TypeU -> TypeU) -> ExprI -> D ExprI
+pinGathered warn sigs ref handler collectArg v wrap body =
+  case streamTypeOfProducer sigs collectArg of
+    Just t | isConcreteType t -> do
+      vRef <- freshExprFrom ref (VarE defaultValue v)
+      annV <- freshExprFrom ref (AnnE vRef (wrap t))
+      freshExprFrom ref (LetE [(v, annV)] body)
+    mt -> do
+      when warn $ dwarn [unpinnedMsg mt]
+      return body
+  where
     unpinnedMsg mt =
       "the whole-list handler `" <> unEVar handler <> "` is not checked "
         <> "against what this `@collect` streams, because " <> reason

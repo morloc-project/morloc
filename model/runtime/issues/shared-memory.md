@@ -2,11 +2,6 @@
 
 Changes here touch locks and ownership: model first.
 
-- Spec text behind the code: topology.md says only the nexus unlinks
-  (code: the fork generation that made the primary volume, shm.rs:611-620
-  `OWNER_GENERATION`, `owns_program`);
-  topology.md's temp-file route does not apply to tables, which always use
-  shared memory.
 - **C++ trackers on helper threads never flush.** [read] Per-thread
   trackers in the C++ pool (data/lang/cpp/pool.cpp, `thread_local`
   ShmTracker) are flushed at dispatch end or thread exit; a persistent

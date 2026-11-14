@@ -222,7 +222,7 @@ buildProgram (manifest, wrappers, pools) = do
 
 -- | Provision a program's declared package dependencies before its pools are
 -- compiled, by invoking the environment's build hook: an external program named
--- by @MORLOC_BUILD_HOOK@ (the in-environment dependency agent, e.g. @mim-env@),
+-- by @MORLOC_BUILD_HOOK@,
 -- run as @<hook> sync --name <key> --spec envspec.json --root <projectRoot>@.
 -- @projectRoot@ is the absolute directory the hook resolves local (filesystem
 -- path) dependencies against; the caller resolves it before the build changes
@@ -331,10 +331,6 @@ syncEnvDeps projectRoot = do
       (_, _, _, ph) <- createProcess spec
       waitForProcess ph
 
--- | Atomically replace @dest@ with @staging@ (same parent, so the rename is
--- atomic). An existing @dest@ is removed only when it is a real directory
--- (not a symlink) carrying the 'buildMarker', so a stray or user-owned
--- directory is never destroyed.
 swapIn :: FilePath -> FilePath -> IO ()
 swapIn staging dest = do
   destExists <- SD.doesDirectoryExist dest

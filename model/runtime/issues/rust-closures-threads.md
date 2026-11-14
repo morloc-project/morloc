@@ -93,3 +93,11 @@ thread that outlives the call (a rayon or other persistent pool) skips
 `release_packet` while unwinding, so the blocks it tracked and the frames
 it pushed stay on that thread until it exits. Each caught failure there
 leaks its argument blocks for the life of the process. Not reproduced.
+- **A runtime panic inside a user generic is classified as the user's in
+  release builds.** [reproduced 2026-11-14, also on clean dev 276634e00]
+  `cargo test --release -p rustmorloc -- panic_classifier` fails
+  `a_std_panic_raised_by_runtime_code_inside_a_user_generic_is_the_runtimes`
+  (child exits 10, user, instead of 11, runtime); debug passes. The
+  classifier reads frame files, which inlining changes. Generated pools
+  are optimized, so a runtime defect there may be reported as a call
+  failure instead of status 70 (PANIC standard).

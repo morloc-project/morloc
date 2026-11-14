@@ -3515,6 +3515,91 @@ SEXP morloc_mlc_cell_free(SEXP handle_r) { MAYFAIL
     return R_NilValue;
 }
 
+// -- Fold side files (model/runtime/side.md) -----------------------------
+
+// TRUE when a fold batch is folded here, FALSE when it goes to the side file.
+SEXP morloc_mlc_side_route(SEXP id_r) { MAYFAIL
+    int64_t id = i64_from_sexp(id_r);
+    int32_t r = R_TRY(mlc_side_route, id);
+    return ScalarLogical(r == 1);
+}
+
+// A NULL schema (no wire form) fails the fold (SIDE-10).
+SEXP morloc_mlc_side_put(SEXP id_r, SEXP schema_str_r, SEXP value_r) { MAYFAIL
+    int64_t id = i64_from_sexp(id_r);
+    if (TYPEOF(schema_str_r) != STRSXP || LENGTH(schema_str_r) != 1) {
+        R_TRY(mlc_side_put, id, NULL, NULL);
+        return R_NilValue;
+    }
+    const char* schema_str = CHAR(STRING_ELT(schema_str_r, 0));
+    Schema* schema = R_TRY(parse_schema, schema_str);
+    void* voidstar = to_voidstar(value_r, schema, NULL);
+    R_TRY_WITH(
+        { char* err = NULL; shfree(voidstar, &err); free(err); free_schema(schema); },
+        mlc_side_put, id, schema, voidstar);
+    {
+        char* shfree_errmsg = NULL;
+        shfree(voidstar, &shfree_errmsg);
+        free(shfree_errmsg);
+    }
+    free_schema(schema);
+    return R_NilValue;
+}
+
+typedef struct {
+    void* reader;
+    Schema* schema;
+} side_reader_r;
+
+static void side_reader_r_free(SEXP p) {
+    side_reader_r* r = (side_reader_r*)R_ExternalPtrAddr(p);
+    if (r == NULL) return;
+    mlc_side_reader_free(r->reader);
+    if (r->schema) free_schema(r->schema);
+    free(r);
+    R_ClearExternalPtr(p);
+}
+
+// The reader over a side file's batches. With a NULL schema, a batch in
+// the file fails the take.
+SEXP morloc_mlc_side_take(SEXP id_r, SEXP schema_str_r) { MAYFAIL
+    int64_t id = i64_from_sexp(id_r);
+    Schema* schema = NULL;
+    if (TYPEOF(schema_str_r) == STRSXP && LENGTH(schema_str_r) == 1) {
+        schema = R_TRY(parse_schema, CHAR(STRING_ELT(schema_str_r, 0)));
+    }
+    side_reader_r* r = (side_reader_r*)calloc(1, sizeof(side_reader_r));
+    if (r == NULL) {
+        free_schema(schema);
+        MORLOC_ERROR("out of memory");
+    }
+    r->schema = schema;
+    SEXP p = PROTECT(R_MakeExternalPtr(r, R_NilValue, R_NilValue));
+    R_RegisterCFinalizerEx(p, side_reader_r_free, TRUE);
+    r->reader = R_TRY_WITH(UNPROTECT(1), mlc_side_take, id);
+    UNPROTECT(1);
+    return p;
+}
+
+// The next side batch in a list of one, or an empty list at the end.
+SEXP morloc_mlc_side_next(SEXP p) { MAYFAIL
+    side_reader_r* r = (side_reader_r*)R_ExternalPtrAddr(p);
+    if (r == NULL) return allocVector(VECSXP, 0);
+    int32_t eof = 0;
+    void* voidstar = R_TRY_WITH(side_reader_r_free(p), mlc_side_next, r->reader, r->schema, &eof);
+    if (eof) {
+        side_reader_r_free(p);
+        return allocVector(VECSXP, 0);
+    }
+    SEXP out = PROTECT(allocVector(VECSXP, 1));
+    SET_VECTOR_ELT(out, 0, from_voidstar(voidstar, r->schema, morloc_shm_space()));
+    char* shfree_errmsg = NULL;
+    shfree(voidstar, &shfree_errmsg);
+    free(shfree_errmsg);
+    UNPROTECT(1);
+    return out;
+}
+
 SEXP morloc_mlc_append(SEXP schema_str_r, SEXP path_r) { MAYFAIL
     if (TYPEOF(schema_str_r) != STRSXP || LENGTH(schema_str_r) != 1) {
         MORLOC_INTERNAL_ABORT("mlc_append: schema must be a single string");
@@ -4833,6 +4918,10 @@ static void _r_init_impl(DllInfo *info) {
         {"morloc_mlc_cell_count", (DL_FUNC) &morloc_mlc_cell_count, 1},
         {"morloc_mlc_cell_slot", (DL_FUNC) &morloc_mlc_cell_slot, 3},
         {"morloc_mlc_cell_free", (DL_FUNC) &morloc_mlc_cell_free, 1},
+        {"morloc_mlc_side_route", (DL_FUNC) &morloc_mlc_side_route, 1},
+        {"morloc_mlc_side_put", (DL_FUNC) &morloc_mlc_side_put, 3},
+        {"morloc_mlc_side_take", (DL_FUNC) &morloc_mlc_side_take, 2},
+        {"morloc_mlc_side_next", (DL_FUNC) &morloc_mlc_side_next, 1},
         {"r_morloc_log_next_id", (DL_FUNC) &morloc_log_next_id_r, 0},
         {"r_morloc_log_emit", (DL_FUNC) &morloc_log_emit_r, 4},
         {"r_morloc_bench_record", (DL_FUNC) &morloc_bench_record_r, 2},

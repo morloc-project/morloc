@@ -1012,8 +1012,6 @@ fn daemon_exit_code() -> i32 {
 }
 
 /// Run the multi-program router daemon.
-/// Scans the exe directory (one exe/<name>/manifest.json per installed
-/// program) and serves them all via HTTP/TCP/Unix.
 fn run_router(config: &dispatch::NexusConfig) {
     use std::ffi::{c_char, c_void, CString};
     use std::ptr;

@@ -1,0 +1,204 @@
+-- Whole-list gather (STRM-4) held natively in its pool (SIDE-4..7), and
+-- fold batches sent from forked children (SIDE-4, SIDE-7).
+--
+-- route: a C++ or Rust producer and handler in one pool. After its batches
+-- the producer puts the number of morloc-gather-* files under the run's
+-- temp dir plus 1000, so 1000 says the gather made no file.
+--
+-- forks: the C++ producer puts 0, then forks three children one at a time,
+-- each putting three batches before the parent reaps it and puts 50 + c,
+-- then puts 99. The result keeps that order (SIDE-6).
+--
+-- fold: a folding handler counts the elements of batches put by the
+-- parent and by forked children (C++ fork, Python os.fork, R mclapply),
+-- and by a Rust producer that does not fork.
+--
+-- py: a Python gather holds its batches in the pool (route, as above) and
+-- gives each the form @load would: ints put for [Real], bools for [I64],
+-- lists for tuples and a dict with its keys out of order come back as
+-- floats, ints, tuples and a dict in field order. forksPy keeps order as
+-- forksCpp does. strsPy puts non-ASCII strings natively, then the same
+-- strings from a forked child, which come back decoded from the side file.
+--
+-- maps: a C++ batch type with a packer (Map) has no wire form of its own,
+-- so its gather goes through a temp file. A forked child cannot send such a
+-- batch to a fold, and the fold fails rather than lose it.
+
+module main (routeCpp, routeRust, forksCpp, foldCpp, foldPy, foldR, foldRust, mapsCpp, mapsFoldCpp, mapsFoldPy
+  , routePy, realsPy, intsPy, pairsPy, hitsPy, forksPy, strsPy)
+
+import root-cpp
+import root-py
+import root-r
+import root-rust
+import map-cpp (Map)
+import map-py
+
+--' A named score
+record Hit where
+  --' Name of the hit
+  name :: Str
+  --' Its score
+  score :: I64
+record Py => Hit = "dict"
+
+source Cpp from "impl.hpp"
+  ( "produce_route" as produceRouteC, "produce_forks" as produceForksC
+  , "show_ints" as showIntsC, "add_batch" as addBatchC, "merge" as mergeC, "show_n" as showNC
+  , "produce_maps" as produceMapsC, "produce_map_forks" as produceMapForksC
+  , "show_maps" as showMapsC, "add_maps" as addMapsC )
+source Rust from "impl.rs"
+  ( "produce_route" as produceRouteRs, "show_ints" as showIntsRs
+  , "add_batch" as addBatchRs, "merge" as mergeRs, "show_n" as showNRs )
+source Py from "impl.py"
+  ( "produce_forks" as produceForksP, "add_batch" as addBatchP, "merge" as mergeP, "show_n" as showNP
+  , "produce_map_forks" as produceMapForksP, "add_maps" as addMapsP
+  , "produce_route" as produceRouteP, "produce_reals" as produceRealsP, "produce_ints" as produceIntsP
+  , "produce_pairs" as producePairsP, "produce_hits" as produceHitsP, "produce_order" as produceOrderP
+  , "show_forms" as showRealsP, "show_forms" as showIntsP, "show_forms" as showPairsP, "show_forms" as showHitsP
+  , "produce_strs" as produceStrsP, "show_ascii" as showStrsP )
+source R from "impl.R"
+  ("produce_forks" as produceForksR, "add_batch" as addBatchR, "merge" as mergeR, "show_n" as showNR)
+
+produceRouteC :: ([I64] -> <IO> ()) -> <IO> ()
+produceRouteRs :: ([I64] -> <IO> ()) -> <IO> ()
+produceForksC :: ([I64] -> <IO> ()) -> <IO> ()
+produceForksP :: ([I64] -> <IO> ()) -> <IO> ()
+produceForksR :: ([I64] -> <IO> ()) -> <IO> ()
+produceMapsC :: ([Map Str I64] -> <IO> ()) -> <IO> ()
+produceMapForksC :: ([Map Str I64] -> <IO> ()) -> <IO> ()
+
+--' The maps' sizes, shown by C++
+showMapsC :: [Map Str I64] -> Str
+addMapsC :: Int -> [Map Str I64] -> Int
+produceMapForksP :: ([Map Str I64] -> <IO> ()) -> <IO> ()
+produceRouteP :: ([I64] -> <IO> ()) -> <IO> ()
+produceRealsP :: ([Real] -> <IO> ()) -> <IO> ()
+produceIntsP :: ([I64] -> <IO> ()) -> <IO> ()
+producePairsP :: ([(I64, Str)] -> <IO> ()) -> <IO> ()
+produceHitsP :: ([Hit] -> <IO> ()) -> <IO> ()
+produceOrderP :: ([I64] -> <IO> ()) -> <IO> ()
+produceStrsP :: ([Str] -> <IO> ()) -> <IO> ()
+
+--' The strings, escaped, and their Python types
+showStrsP :: [Str] -> Str
+
+--' The elements and their Python types
+showRealsP :: [Real] -> Str
+--' The elements and their Python types
+showIntsP :: [I64] -> Str
+--' The elements and their Python types
+showPairsP :: [(I64, Str)] -> Str
+--' The elements and their Python types
+showHitsP :: [Hit] -> Str
+addMapsP :: Int -> [Map Str I64] -> Int
+
+--' The elements, shown by C++
+showIntsC :: [I64] -> Str
+--' The elements, shown by Rust
+showIntsRs :: [I64] -> Str
+
+addBatchC :: Int -> [I64] -> Int
+mergeC :: Int -> Int -> Int
+--' The count, shown by C++
+showNC :: Int -> Str
+addBatchP :: Int -> [I64] -> Int
+mergeP :: Int -> Int -> Int
+--' The count, shown by Python
+showNP :: Int -> Str
+addBatchR :: Int -> [I64] -> Int
+mergeR :: Int -> Int -> Int
+--' The count, shown by R
+showNR :: Int -> Str
+addBatchRs :: Int -> [I64] -> Int
+mergeRs :: Int -> Int -> Int
+--' The count, shown by Rust
+showNRs :: Int -> Str
+
+zero :: Int
+zero = 0
+
+--' Gather in C++
+--' @render --show=showIntsC
+routeCpp :: <IO> ()
+routeCpp = @collect produceRouteC
+
+--' Gather in Rust
+--' @render --show=showIntsRs
+routeRust :: <IO> ()
+routeRust = @collect produceRouteRs
+
+--' Gather from C++ forked children
+--' @render --show=showIntsC
+forksCpp :: <IO> ()
+forksCpp = @collect produceForksC
+
+--' Fold over C++ forked children
+--' @render --n=showNC @fold=addBatchC @init=zero @combine=mergeC
+foldCpp :: <IO> ()
+foldCpp = @collect produceForksC
+
+--' Fold over Python forked children
+--' @render --n=showNP @fold=addBatchP @init=zero @combine=mergeP
+foldPy :: <IO> ()
+foldPy = @collect produceForksP
+
+--' Fold over R forked children
+--' @render --n=showNR @fold=addBatchR @init=zero @combine=mergeR
+foldR :: <IO> ()
+foldR = @collect produceForksR
+
+--' Fold in Rust
+--' @render --n=showNRs @fold=addBatchRs @init=zero @combine=mergeRs
+foldRust :: <IO> ()
+foldRust = @collect produceRouteRs
+
+--' Gather maps in C++
+--' @render --show=showMapsC
+mapsCpp :: <IO> ()
+mapsCpp = @collect produceMapsC
+
+--' Fold maps over C++ forked children
+--' @render --n=showNC @fold=addMapsC @init=zero @combine=mergeC
+mapsFoldCpp :: <IO> ()
+mapsFoldCpp = @collect produceMapForksC
+
+--' Fold maps over Python forked children
+--' @render --n=showNP @fold=addMapsP @init=zero @combine=mergeP
+mapsFoldPy :: <IO> ()
+mapsFoldPy = @collect produceMapForksP
+
+--' Gather in Python
+--' @render --show=showIntsP
+routePy :: <IO> ()
+routePy = @collect produceRouteP
+
+--' Ints put for reals
+--' @render --show=showRealsP
+realsPy :: <IO> ()
+realsPy = @collect produceRealsP
+
+--' Bools put for ints
+--' @render --show=showIntsP
+intsPy :: <IO> ()
+intsPy = @collect produceIntsP
+
+--' Lists put for tuples
+--' @render --show=showPairsP
+pairsPy :: <IO> ()
+pairsPy = @collect producePairsP
+
+--' Dicts with keys out of order
+--' @render --show=showHitsP
+hitsPy :: <IO> ()
+hitsPy = @collect produceHitsP
+
+--' Gather from Python forked children
+--' @render --show=showIntsP
+forksPy :: <IO> ()
+forksPy = @collect produceOrderP
+
+--' Non-ASCII strings, native and from a forked child
+--' @render --show=showStrsP
+strsPy :: <IO> ()
+strsPy = @collect produceStrsP

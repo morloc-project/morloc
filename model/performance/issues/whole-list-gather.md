@@ -22,6 +22,14 @@ creation 2.85, cyclic GC 1.5). The write series is I/O-bound and noisy
 (medians equal across runs, CPU unchanged). What remains is the encode,
 file and decode a native in-memory gather would remove.
 
+- **Any fork switches a live native gather to its side file, silently.**
+  [read, stage 6] SIDE-9: every fork that runs the atfork handlers while a
+  gather entry is NATIVE switches it, including a fork unrelated to the
+  gather (another call in a daemon, a library that forks a helper). From
+  then on every put of that gather is encoded to the side file and decoded
+  at take, the file route's cost, with nothing in the output saying so.
+  Open question: report the switch under `--debug`, or switch only entries
+  whose sink the forking thread can reach.
 - **An action written to a path runs two more nexus processes.**
   [measured 2026-11-13, bench gather, load 1.0; remeasured 2026-11-14]
   An action given a path runs through orchestrate.rs `run`, which spawns a
@@ -51,3 +59,7 @@ file and decode a native in-memory gather would remove.
   at exit, so the cost stays in its wall time. Unlinking the open file
   early does not help (the space is freed at the last close).
 
+- **Possible enhancement, not a defect: a fold put looks up its entry in
+  the fork-side registry under its lock.** [read 2026-11-14] An
+  always-native owner fold route could skip the lookup; measured cost ~50
+  ns per batch, against the cell path's two deep copies.

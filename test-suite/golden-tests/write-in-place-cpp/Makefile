@@ -4,7 +4,7 @@ all:
 	rm -f *.err obs.txt *.dat *.json
 	morloc make -o nexus main.loc 2> build.err
 	python3 gen.py
-	test $$(grep -c 'morloc.mlc_write(' nexus-build/pools/py/pool.py) -eq $$(wc -l < types.txt) && echo py-writes >> obs.txt || echo UNEXPECTED_PY_WRITES >> obs.txt
+	test $$(sed -n '/AUTO include manifolds start/,/AUTO include manifolds end/p' nexus-build/pools/py/pool.py | grep -c 'morloc.mlc_write(') -eq $$(wc -l < types.txt) && echo py-writes >> obs.txt || echo UNEXPECTED_PY_WRITES >> obs.txt
 	for t in $$(cat types.txt); do for z in 0 3; do \
 	  ./nexus wc$$t $$z c.dat $$t.json 2>> obs.err || echo "FAIL wc$$t" >> obs.txt; \
 	  ./nexus wp$$t $$z p.dat $$t.json 2>> obs.err || echo "FAIL wp$$t" >> obs.txt; \

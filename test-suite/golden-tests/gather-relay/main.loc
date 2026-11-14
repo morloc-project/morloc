@@ -1,0 +1,43 @@
+-- A fold or gather handle that leaves the pool its record lives in.
+--
+-- foldPyCpp: a Python producer and a C++ fold. The fold's cell and its
+-- side record live in the C++ pool; its handle goes to the Python sink and
+-- back with each batch, so every batch folds in the C++ pool (SIDE-4).
+--
+-- relay: a Rust producer calls a sink that applies a Python function before
+-- each put, so the gather's handle passes through the Rust pool on its way
+-- to the put; the gather is a stream every pool writes to.
+
+module main (foldPyCpp, relay)
+
+import root-cpp
+import root-py
+import root-rust
+
+source Py from "impl.py" ("produce" as produceP, "inc" as incP)
+source Rust from "impl.rs" ("produce" as produceRs)
+source Cpp from "impl.hpp"
+  ("add_batch" as addC, "merge" as mergeC, "show_n" as showNC, "show_ints" as showC)
+
+produceP :: ([I64] -> <IO> ()) -> <IO> ()
+produceRs :: ([I64] -> <IO> ()) -> <IO> ()
+incP :: [I64] -> [I64]
+addC :: Int -> [I64] -> Int
+mergeC :: Int -> Int -> Int
+--' The count, shown by C++
+showNC :: Int -> Str
+--' The elements, shown by C++
+showC :: [I64] -> Str
+
+zero :: Int
+zero = 0
+
+--' Fold Python batches in C++
+--' @render --n=showNC @fold=addC @init=zero @combine=mergeC
+foldPyCpp :: <IO> ()
+foldPyCpp = @collect produceP
+
+--' Gather Rust batches handed on by Python
+--' @render --show=showC
+relay :: <IO> ()
+relay = @collect (\sink -> produceRs (\xs -> sink (incP xs)))

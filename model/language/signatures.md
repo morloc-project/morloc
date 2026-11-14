@@ -33,8 +33,7 @@ Intent: open
 Code: unaudited
 
 A term without a signature gets the type inference gives it. Inference
-fails today for a point-free use of class methods and for a term that
-matches on constructors. Is that (a) the rule, with a rejection that asks
+fails today for a term that matches on constructors. Is that (a) the rule, with a rejection that asks
 for a signature, or (b) a gap, so that any term whose type is determined by
 its uses needs none?
 

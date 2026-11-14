@@ -2,7 +2,9 @@
 #include "morloc.h"
 #include "Python.h"
 #include <errno.h>
+#include <float.h>
 #include <limits.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/stat.h>
@@ -5193,6 +5195,315 @@ error:
     return NULL;
 }
 
+// -- Native gathers (model/runtime/side.md) ------------------------------
+// A gather keeps the batches put into it in one Python list. Each batch is
+// first given the form @load would give it (NATIVE-9): a batch already in
+// that form is kept as it is, and any other is packed and decoded.
+
+#define PY_GATHER_DEPTH 64
+
+static int py_int_in(PyObject* x, long long lo, unsigned long long hi) {
+#if PY_VERSION_HEX >= 0x030C0000
+    if (PyUnstable_Long_IsCompact((PyLongObject*)x)) {
+        Py_ssize_t c = PyUnstable_Long_CompactValue((PyLongObject*)x);
+        return c >= lo && (c < 0 || (unsigned long long)c <= hi);
+    }
+#endif
+    int overflow = 0;
+    long long v = PyLong_AsLongLongAndOverflow(x, &overflow);
+    if (overflow > 0) {
+        if (hi < ULLONG_MAX) return 0;
+        unsigned long long u = PyLong_AsUnsignedLongLong(x);
+        if (u == (unsigned long long)-1 && PyErr_Occurred()) { PyErr_Clear(); return 0; }
+        return 1;
+    }
+    if (overflow < 0) return 0;
+    if (v == -1 && PyErr_Occurred()) { PyErr_Clear(); return 0; }
+    if (v < lo) return 0;
+    return v < 0 || (unsigned long long)v <= hi;
+}
+
+// 1 when `x` is exactly what decoding a value of `schema` gives, 0 when it
+// is not (it may still encode).
+static int py_exact(const Schema* schema, PyObject* x, int depth) {
+    if (depth > PY_GATHER_DEPTH) return 0;
+    if (schema->hint != NULL
+        && !(schema->type == MORLOC_ARRAY && strcmp(schema->hint, "list") == 0)
+        && !(schema->type == MORLOC_MAP && strcmp(schema->hint, "dict") == 0)) return 0;
+    switch (schema->type) {
+        case MORLOC_NIL: return x == Py_None;
+        case MORLOC_BOOL: return PyBool_Check(x);
+        case MORLOC_SINT8: return PyLong_CheckExact(x) && py_int_in(x, INT8_MIN, INT8_MAX);
+        case MORLOC_SINT16: return PyLong_CheckExact(x) && py_int_in(x, INT16_MIN, INT16_MAX);
+        case MORLOC_SINT32: return PyLong_CheckExact(x) && py_int_in(x, INT32_MIN, INT32_MAX);
+        case MORLOC_SINT64: return PyLong_CheckExact(x) && py_int_in(x, INT64_MIN, INT64_MAX);
+        case MORLOC_UINT8: return PyLong_CheckExact(x) && py_int_in(x, 0, UINT8_MAX);
+        case MORLOC_UINT16: return PyLong_CheckExact(x) && py_int_in(x, 0, UINT16_MAX);
+        case MORLOC_UINT32: return PyLong_CheckExact(x) && py_int_in(x, 0, UINT32_MAX);
+        case MORLOC_UINT64: return PyLong_CheckExact(x) && py_int_in(x, 0, UINT64_MAX);
+        case MORLOC_INT: return PyLong_CheckExact(x);
+        case MORLOC_FLOAT64: return PyFloat_CheckExact(x);
+        case MORLOC_FLOAT32: {
+            if (!PyFloat_CheckExact(x)) return 0;
+            double d = PyFloat_AS_DOUBLE(x);
+            return d != d || isinf(d) || (fabs(d) <= FLT_MAX && (double)(float)d == d);
+        }
+        case MORLOC_STRING: {
+            if (!PyUnicode_CheckExact(x)) return 0;
+            int kind = PyUnicode_KIND(x);
+            if (kind == PyUnicode_1BYTE_KIND) return 1;
+            const void* data = PyUnicode_DATA(x);
+            Py_ssize_t n = PyUnicode_GET_LENGTH(x);
+            for (Py_ssize_t i = 0; i < n; i++) {
+                Py_UCS4 c = PyUnicode_READ(kind, data, i);
+                if (c >= 0xD800 && c <= 0xDFFF) return 0;
+            }
+            return 1;
+        }
+        case MORLOC_ARRAY: {
+            if (!PyList_CheckExact(x)) return 0;
+            const Schema* e = schema->parameters[0];
+            Py_ssize_t n = PyList_GET_SIZE(x);
+            for (Py_ssize_t i = 0; i < n; i++) {
+                if (!py_exact(e, PyList_GET_ITEM(x, i), depth + 1)) return 0;
+            }
+            return 1;
+        }
+        case MORLOC_TUPLE: {
+            if (!PyTuple_CheckExact(x) || (size_t)PyTuple_GET_SIZE(x) != schema->size) return 0;
+            for (size_t i = 0; i < schema->size; i++) {
+                if (!py_exact(schema->parameters[i], PyTuple_GET_ITEM(x, (Py_ssize_t)i), depth + 1)) return 0;
+            }
+            return 1;
+        }
+        case MORLOC_MAP: {
+            if (!PyDict_CheckExact(x) || (size_t)PyDict_GET_SIZE(x) != schema->size) return 0;
+            Py_ssize_t pos = 0;
+            PyObject* k;
+            PyObject* v;
+            for (size_t i = 0; i < schema->size; i++) {
+                if (!PyDict_Next(x, &pos, &k, &v)) return 0;
+                if (!PyUnicode_CheckExact(k) || PyUnicode_CompareWithASCIIString(k, schema->keys[i]) != 0) return 0;
+                if (!py_exact(schema->parameters[i], v, depth + 1)) return 0;
+            }
+            return 1;
+        }
+        case MORLOC_OPTIONAL:
+            return x == Py_None || py_exact(schema->parameters[0], x, depth + 1);
+        default:
+            return 0;
+    }
+}
+
+// mlc_gather_new(acc) -> handle. `acc` is the list batches are added to
+// (SIDE-5).
+static PyObject* pybinding__mlc_gather_new(PyObject* self, PyObject* args) { MAYFAIL
+    PyObject* acc;
+    PARSE_ARGS_OR_ABORT(args, "O!", &PyList_Type, &acc);
+    int64_t h = PyTRY(mlc_side_new, (void*)acc);
+    return PyLong_FromLongLong((long long)h);
+error:
+    return NULL;
+}
+
+typedef struct {
+    PyObject* batch;
+    int failed;
+} py_gather_item_t;
+
+// SIDE-5
+static void py_gather_append(void* container, void* item) {
+    py_gather_item_t* it = (py_gather_item_t*)item;
+    PyObject* acc = (PyObject*)container;
+    Py_ssize_t n = PyList_GET_SIZE(acc);
+    if (PyList_SetSlice(acc, n, n, it->batch) != 0) it->failed = 1;
+}
+
+// The batch in the form @load would give it: itself when it is already in
+// that form, else packed and decoded.
+static PyObject* py_gather_form(const Schema* schema, PyObject* batch) {
+    if (py_exact(schema, batch, 0)) {
+        Py_INCREF(batch);
+        return batch;
+    }
+    void* voidstar = to_voidstar(schema, batch);
+    if (voidstar == NULL) return NULL;
+    PyObject* obj = from_voidstar_owned(schema, voidstar);
+    char* shfree_errmsg = NULL;
+    shfree(voidstar, &shfree_errmsg);
+    free(shfree_errmsg);
+    return obj;
+}
+
+// mlc_gather_put(handle, schema, batch) -> None. SIDE-4: a gather id puts
+// to its record, a stream handle to its stream.
+static PyObject* pybinding__mlc_gather_put(PyObject* self, PyObject* args) { MAYFAIL
+    long long h_ll;
+    const char* schema_str;
+    PyObject* batch;
+    PyObject* formed = NULL;
+    void* voidstar = NULL;
+    PARSE_ARGS_OR_ABORT(args, "LsO", &h_ll, &schema_str, &batch);
+    if (h_ll >= 0) {
+        PyObject* wargs = Py_BuildValue("(sLOL)", schema_str, 0LL, batch, h_ll);
+        if (wargs == NULL) goto error;
+        PyObject* written = pybinding__mlc_write(self, wargs);
+        Py_DECREF(wargs);
+        return written;
+    }
+    Schema* schema = PyTRY(cached_schema, schema_str);
+    int32_t r = PyTRY(mlc_side_route, (int64_t)h_ll);
+    if (r == 1) {
+        formed = py_gather_form(schema, batch);
+        if (formed == NULL) goto error;
+        py_gather_item_t item = {formed, 0};
+        r = PyTRY(mlc_side_put_native, (int64_t)h_ll, py_gather_append, (void*)&item);
+        if (item.failed) goto error;
+    }
+    if (r == 0) {
+        voidstar = to_voidstar(schema, batch);
+        PyTRACE(voidstar == NULL)
+        PyTRY(mlc_side_put, (int64_t)h_ll, schema, voidstar);
+        char* shfree_errmsg = NULL;
+        shfree(voidstar, &shfree_errmsg);
+        free(shfree_errmsg);
+        voidstar = NULL;
+    }
+    Py_XDECREF(formed);
+    Py_RETURN_NONE;
+error:
+    if (voidstar) {
+        char* shfree_errmsg = NULL;
+        shfree(voidstar, &shfree_errmsg);
+        free(shfree_errmsg);
+    }
+    Py_XDECREF(formed);
+    return NULL;
+}
+
+// mlc_gather_take(handle, schema, acc) -> acc, with every batch forked
+// children sent added after the native ones, in order.
+static PyObject* pybinding__mlc_gather_take(PyObject* self, PyObject* args) { MAYFAIL
+    long long h_ll;
+    const char* schema_str;
+    PyObject* acc;
+    void* reader = NULL;
+    PARSE_ARGS_OR_ABORT(args, "LsO!", &h_ll, &schema_str, &PyList_Type, &acc);
+    Schema* schema = PyTRY(cached_schema, schema_str);
+    reader = PyTRY(mlc_side_take, (int64_t)h_ll);
+    while (1) {
+        int32_t eof = 0;
+        void* voidstar = PyTRY(mlc_side_next, reader, schema, &eof);
+        if (eof) break;
+        PyObject* batch = from_voidstar_owned(schema, voidstar);
+        char* shfree_errmsg = NULL;
+        shfree(voidstar, &shfree_errmsg);
+        free(shfree_errmsg);
+        if (batch == NULL) goto error;
+        Py_ssize_t n = PyList_GET_SIZE(acc);
+        int rc = PyList_SetSlice(acc, n, n, batch);
+        Py_DECREF(batch);
+        if (rc != 0) goto error;
+    }
+    mlc_side_reader_free(reader);
+    Py_INCREF(acc);
+    return acc;
+error:
+    if (reader) mlc_side_reader_free(reader);
+    return NULL;
+}
+
+// mlc_side_drop(handle) -> None: end a gather without reading it.
+static PyObject* pybinding__mlc_side_drop(PyObject* self, PyObject* args) {
+    long long h_ll;
+    if (!PyArg_ParseTuple(args, "L", &h_ll)) return NULL;
+    mlc_side_drop((int64_t)h_ll);
+    Py_RETURN_NONE;
+}
+
+// -- Fold side files (model/runtime/side.md) -----------------------------
+
+// mlc_side_route(id) -> True when a batch is folded here, False when it goes
+// to the side file.
+static PyObject* pybinding__mlc_side_route(PyObject* self, PyObject* args) { MAYFAIL
+    long long id_ll;
+    PARSE_ARGS_OR_ABORT(args, "L", &id_ll);
+    int32_t r = PyTRY(mlc_side_route, (int64_t)id_ll);
+    return PyBool_FromLong(r == 1);
+error:
+    return NULL;
+}
+
+// mlc_side_put(id, schema, batch) -> None. A schema of None (no wire form)
+// fails the fold (SIDE-10).
+static PyObject* pybinding__mlc_side_put(PyObject* self, PyObject* args) { MAYFAIL
+    long long id_ll;
+    PyObject* schema_obj;
+    PyObject* value_obj;
+    Schema* schema = NULL;
+    void* voidstar = NULL;
+    PARSE_ARGS_OR_ABORT(args, "LOO", &id_ll, &schema_obj, &value_obj);
+    if (schema_obj != Py_None) {
+        const char* schema_str = PyUnicode_AsUTF8(schema_obj);
+        if (schema_str == NULL) goto error;
+        schema = PyTRY(cached_schema, schema_str);
+        voidstar = to_voidstar(schema, value_obj);
+        PyTRACE(voidstar == NULL)
+    }
+    PyTRY(mlc_side_put, (int64_t)id_ll, schema, voidstar);
+    if (voidstar) {
+        char* shfree_errmsg = NULL;
+        shfree(voidstar, &shfree_errmsg);
+        free(shfree_errmsg);
+    }
+    Py_RETURN_NONE;
+error:
+    if (voidstar) {
+        char* shfree_errmsg = NULL;
+        shfree(voidstar, &shfree_errmsg);
+        free(shfree_errmsg);
+    }
+    return NULL;
+}
+
+// mlc_side_take(id, schema, k) -> None: k applied to each side batch, in
+// order. With a schema of None, a batch in the file fails the take.
+static PyObject* pybinding__mlc_side_take(PyObject* self, PyObject* args) { MAYFAIL
+    long long id_ll;
+    PyObject* schema_obj;
+    PyObject* k;
+    Schema* schema = NULL;
+    void* reader = NULL;
+    PARSE_ARGS_OR_ABORT(args, "LOO", &id_ll, &schema_obj, &k);
+    if (schema_obj != Py_None) {
+        const char* schema_str = PyUnicode_AsUTF8(schema_obj);
+        if (schema_str == NULL) goto error;
+        schema = PyTRY(cached_schema, schema_str);
+    }
+    reader = PyTRY(mlc_side_take, (int64_t)id_ll);
+    while (1) {
+        int32_t eof = 0;
+        void* voidstar = PyTRY(mlc_side_next, reader, schema, &eof);
+        if (eof) break;
+        PyObject* v = from_voidstar_owned(schema, voidstar);
+        {
+            char* shfree_errmsg = NULL;
+            shfree(voidstar, &shfree_errmsg);
+            free(shfree_errmsg);
+        }
+        if (v == NULL) { goto error; }
+        PyObject* r = PyObject_CallFunctionObjArgs(k, v, NULL);
+        Py_DECREF(v);
+        if (r == NULL) { goto error; }
+        Py_DECREF(r);
+    }
+    mlc_side_reader_free(reader);
+    Py_RETURN_NONE;
+error:
+    if (reader) mlc_side_reader_free(reader);
+    return NULL;
+}
+
 // mlc_reduce_list(combine, xs) -> value. A non-empty list folded with
 // `combine`.
 static PyObject* pybinding__mlc_reduce_list(PyObject* self, PyObject* args) {
@@ -5295,6 +5606,13 @@ static PyMethodDef Methods[] = {
     {"mlc_cell_slots", pybinding__mlc_cell_slots, METH_VARARGS, "Every fold accumulator, and the cell released"},
     {"mlc_reduce_list", pybinding__mlc_reduce_list, METH_VARARGS, "Fold a non-empty list with a function"},
     {"mlc_replay", pybinding__mlc_replay, METH_VARARGS, "Call a function on every element of an IStream"},
+    {"mlc_side_route", pybinding__mlc_side_route, METH_VARARGS, "Whether a fold batch is folded here"},
+    {"mlc_gather_new", pybinding__mlc_gather_new, METH_VARARGS, "Start a native gather"},
+    {"mlc_gather_put", pybinding__mlc_gather_put, METH_VARARGS, "Add a batch to a native gather"},
+    {"mlc_gather_take", pybinding__mlc_gather_take, METH_VARARGS, "End a native gather"},
+    {"mlc_side_drop", pybinding__mlc_side_drop, METH_VARARGS, "End a gather without reading it"},
+    {"mlc_side_put", pybinding__mlc_side_put, METH_VARARGS, "Send a fold batch to the side file"},
+    {"mlc_side_take", pybinding__mlc_side_take, METH_VARARGS, "Apply a function to each of the side file's batches"},
     {"mlc_throw", pybinding__mlc_throw, METH_VARARGS, "Raise a MorlocException with the given message"},
     {"mlc_try", pybinding__mlc_try, METH_VARARGS, "Evaluate body; wrap the value with ok, or a caught message with err"},
     {"set_failure_message", pybinding__set_failure_message, METH_VARARGS, "Register the function that renders a failure as text"},

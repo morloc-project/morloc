@@ -172,6 +172,8 @@ pub struct ShmHeader {
     /// SHM-18: in a large volume, the bytes of its block's data from the
     /// start that are committed.
     pub committed: std::sync::atomic::AtomicUsize,
+    /// SIDE-11: in the primary volume, the next process ordinal to draw.
+    pub next_ordinal: std::sync::atomic::AtomicU64,
 }
 
 /// SHM-18

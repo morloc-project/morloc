@@ -371,9 +371,21 @@ rewrite lang m (PolyRecord o v@(Idx _ name) ps rs) = do
     else return (PolyRecord o v ps rs')
 rewrite lang m (PolyIntrinsic t@(Idx _ resT) intr xs) = do
   xs' <- mapM (rewrite lang m) xs
+  scope <- MM.getGeneralScope
+  let param h = case expandT scope <$> polyOuterType h of
+        Just (AppT _ [a]) -> Just a
+        _ -> Nothing
+      unitOf (EffectT e _) = EffectT e (VarT BT.unit)
+      unitOf _ = VarT BT.unit
+      gatherArg = case expandT scope resT of
+        EffectT _ l@(AppT _ [_]) -> Just (AppT (VarT BT.cellVar) [TyA l])
+        _ -> Nothing
   PolyIntrinsic t intr <$> case (intr, xs') of
-    (IntrReplay, [h, f]) -> (\f' -> [h, f']) <$> intrinsicCallback lang m intr resT h f
-    (IntrSpawn, [h, f]) -> (\f' -> [h, f']) <$> intrinsicCallback lang m intr resT h f
+    (IntrReplay, [h, f]) -> (\f' -> [h, f']) <$> intrinsicCallback lang m intr ((\a -> AppT (VarT BT.list) [a]) <$> param h) resT f
+    (IntrSpawn, [h, f]) -> (\f' -> [h, f']) <$> intrinsicCallback lang m intr ((\a -> AppT (VarT BT.ostreamVar) [a]) <$> param h) resT f
+    (IntrGather, [f]) -> (: []) <$> intrinsicCallback lang m intr gatherArg (unitOf resT) f
+    (IntrCellSink, [h, c, f]) -> (\f' -> [h, c, f']) <$> intrinsicCallback lang m intr (expandT scope <$> polyOuterType c) resT f
+    (IntrCellSide, [h, f]) -> (\f' -> [h, f']) <$> intrinsicCallback lang m intr Nothing resT f
     _ -> return xs'
 rewrite lang m (PolyVariant t n i xs) = PolyVariant t n i <$> mapM (rewrite lang m) xs
 rewrite _ _ leaf = return leaf
@@ -1121,18 +1133,16 @@ rebuildIn dir lang g hv@(HostView scope _ _ _ _) d t0 e = do
         (ManifoldPart [Arg v None] ([Arg i (Just (slotT da a)) | (i, da, a) <- zip3Same ids das as] <> [Arg i (Just a) | (i, a) <- zipSame restIds rest]))
         Transparent (PolyReturn body)
 
--- | The function @replay and @spawn call as @f(x)@ in their pool helper,
--- exactly as a host calls a callback: @replay :: IStream a -> ([a] -> \<IO\>
--- ()) -> \<IO\> ()@ and @spawn :: IStream a -> (OStream a -> \<IO\> ()) ->
--- \<IO\> ()@, whose result type is the function's.
-intrinsicCallback :: Lang -> Int -> Intrinsic -> Type -> PolyExpr -> PolyExpr -> MorlocMonad PolyExpr
-intrinsicCallback lang m intr resT h f = do
+-- | The function an intrinsic's pool helper calls as @f(x)@, exactly as a
+-- host calls a callback: @replay's @([a] -> \<IO\> ())@, @spawn's
+-- @(OStream a -> \<IO\> ())@, @gather's @(Cell [a] -> \<IO\> ())@ and the
+-- fold step of @cellsink and @cellside, given the type of its argument where
+-- it is known and the type of its result.
+intrinsicCallback :: Lang -> Int -> Intrinsic -> Maybe Type -> Type -> PolyExpr -> MorlocMonad PolyExpr
+intrinsicCallback lang m intr margT resT f = do
   scope <- MM.getGeneralScope
-  let argT a = case intr of
-        IntrReplay -> AppT (VarT BT.list) [a]
-        _ -> AppT (VarT BT.ostreamVar) [a]
-  case expandT scope <$> polyOuterType h of
-    Just (AppT _ [a]) -> adapt Outbound lang m (HostView scope Set.empty Set.empty Set.empty Nothing) Nothing (FunT [argT a] resT) f
+  case margT of
+    Just argT -> adapt Outbound lang m (HostView scope Set.empty Set.empty Set.empty Nothing) Nothing (FunT [argT] resT) f
     _ -> case f of
       PolyManifold l m' form k body | isLambdaForm form ->
         return (PolyManifold l m' form k (forceReturnPosition m' body))

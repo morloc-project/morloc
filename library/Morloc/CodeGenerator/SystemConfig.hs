@@ -182,14 +182,6 @@ configureAllSteps verbose force slurmSupport sanitize config = do
     then provisionRustRuntime verbose config homeDir soPath nexusBinPath
     else sayInfo verbose "Runtime (libmorloc + morloc-nexus) already built; skipping"
 
-  -- When force is set, clean stale init-owned artifacts. This runs only once
-  -- the runtime has built, so a failed build leaves the installed one usable;
-  -- the runtime and morloc.h are already in place and are kept. Package-installed
-  -- subtrees (see Module.exposeDirsFor) live in include/<modName>/,
-  -- lib/python/<modName>/ and lib/R/<modName>/; those must not be wiped
-  -- here or every `morloc init -f` would force a reinstall of every module
-  -- that uses the `expose:` field. opt/ has no expose target, so it can
-  -- still be fully wiped.
   when (force == ForceOverwrite) $ do
     sayInfo verbose "Force rebuild: cleaning init-owned artifacts"
     forM_ (filter (/= takeFileName soPath) initOwnedLibPaths) $ \p -> removePathIfExists (libDir </> p)

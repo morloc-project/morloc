@@ -11,12 +11,6 @@
   timeout) leaves it, and later builds have other pids, so none removes it.
   The golden tree holds 8, dated 2026-09-02 to 2026-10-17, two of them
   from a suite run stopped on 2026-10-17.
-- Stale text: `morloc-nexus --help` says launchers pass the wrapper (they
-  pass the manifest); ProgramBuilder/Install.hs names
-  `exe/<name>/manifest.json` (real: `exe/<name>/<name>-build/manifest.json`);
-  morloc-runtime-types/src/schema.rs:39 and data/morloc/morloc.h:161 call
-  Int an array of limbs (one limb is inline); stream.rs:152 says the salt is
-  per process (per registry).
 - [read] morloc-runtime/src/ipc.rs is dead code: `send_and_receive` (:25)
   and `read_packet` are public and uncalled (callers use ipc_ffi.rs), and
   `read_packet` underflows `offset - 32` (:80). Delete the module.
@@ -177,10 +171,3 @@
 - **Dead C++ search paths.** [read 2026-11-04, from mim's list]
   CodeGenerator/Pools/CAbi/Members/Cpp.hs:2876 and :2890-2891 search
   `STATE/src/<base>/...`, which nothing writes.
-- **Stale comments on locations.** [read 2026-11-04, from mim's list]
-  Namespace/State.hs:878-890 and SystemConfig.hs:186-191 place expose
-  targets and include/lib under `$MORLOC_HOME` (now the state root's
-  modules dir, `exposeDirsFor`, Module.hs:289); morloc-nexus cli.rs:331
-  says exe defaults to `$MORLOC_HOME/exe` (it is under STATE,
-  Config.hs:96); Build.hs:225 names the build hook `mim-env`. The router
-  scan path and transport comments in nexus cli.rs/main.rs are unchecked.

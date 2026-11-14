@@ -36,7 +36,7 @@ serial_types! {
     Tuple = 15,
     Map = 16,
     Optional = 17,
-    Int = 18,       // variable-width integer (Array of uint64_t limbs, two's complement)
+    Int = 18,       // variable-width integer
     Table = 19,     // Arrow IPC primitive. Schema entries (if any) are open
                     // constraints on the buffer's actual schema; the binary
                     // layout is fully described by the Arrow buffer itself.

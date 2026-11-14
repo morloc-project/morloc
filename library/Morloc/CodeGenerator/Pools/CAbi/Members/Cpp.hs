@@ -1177,6 +1177,7 @@ cppLowerConfig (ClosureGen reifyThunks stageTable papplyHeads) =
                 _ -> v
         return $ defaultValue {poolExpr = t <> encloseSep "{" "}" "," (map wrapField rs)}
     , lcKeepCallArg = cppKeepCallArg
+    , lcKeepClosureArg = cppKeptLet
     , lcKeepContextArg = cppKeepContextArg
     , lcKeepSlot = cppKeepSlot
     , lcKeepElem = cppKeepElem

@@ -43,6 +43,15 @@ The producer is handed a sink and calls it once per batch. An action applies
 to everything the command streams, whatever the shape of its body: several
 `@collect`s, or one in a branch, give the action the whole output in order.
 
+### STRM-6 A batch handed to a sink is not changed afterwards
+Intent: proposed
+Code: unaudited
+
+A producer that hands a batch to its sink does not change that batch, or
+any value inside it, afterwards. A whole-list gather may keep the batch
+itself rather than a copy, so a producer that refills one buffer and hands
+it on each time would gather that buffer's last contents many times over.
+
 ### STRM-5 What `@fold` promises when `@init` and `@combine` break their laws
 Intent: open
 Code: unaudited

@@ -422,23 +422,13 @@ pub fn begin_dispatch() -> (u64, u64) {
 /// register it for removal at end-of-call, and return its path.
 pub(crate) unsafe fn mlc_tmpfile(errmsg: *mut *mut c_char) -> *mut c_char {
     clear_errmsg(errmsg);
-    let dir = process_temp_dir();
-    let _ = std::fs::create_dir_all(&dir);
-    let template = format!("{}/morloc-gather-XXXXXX\0", dir.display());
-    let mut buf: Vec<u8> = template.into_bytes();
-    let fd = morloc_runtime_types::fd::mkstemp(buf.as_mut_ptr() as *mut c_char);
-    if fd < 0 {
-        set_errmsg(errmsg, &MorlocError::Io(std::io::Error::last_os_error()));
-        return ptr::null_mut();
-    }
-    libc::close(fd);
-    buf.pop(); // drop the NUL mkstemp left in place
-    let path = String::from_utf8_lossy(&buf).into_owned();
-    temp_registry().entries.push(TempEntry {
-        owner: current_temp_owner(),
-        born: next_dispatch_id(),
-        path: std::path::PathBuf::from(&path),
-    });
+    let path = match make_temp(current_temp_owner(), next_dispatch_id()) {
+        Ok(p) => p,
+        Err(e) => {
+            set_errmsg(errmsg, &e);
+            return ptr::null_mut();
+        }
+    };
     match CString::new(path) {
         Ok(cs) => crate::error::malloc_cstr(&cs),
         Err(_) => {
@@ -446,6 +436,35 @@ pub(crate) unsafe fn mlc_tmpfile(errmsg: *mut *mut c_char) -> *mut c_char {
             ptr::null_mut()
         }
     }
+}
+
+/// A fresh empty file in the morloc tmpdir, registered for removal with the
+/// call `owner` (born at dispatch id `born`) as @tmpfile registers its own.
+pub(crate) fn make_temp(owner: u64, born: u64) -> Result<String, MorlocError> {
+    let dir = process_temp_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    let template = format!("{}/morloc-gather-XXXXXX\0", dir.display());
+    let mut buf: Vec<u8> = template.into_bytes();
+    let fd = unsafe { morloc_runtime_types::fd::mkstemp(buf.as_mut_ptr() as *mut c_char) };
+    if fd < 0 {
+        return Err(MorlocError::Io(std::io::Error::last_os_error()));
+    }
+    unsafe { libc::close(fd) };
+    buf.pop(); // drop the NUL mkstemp left in place
+    let path = String::from_utf8_lossy(&buf).into_owned();
+    temp_registry().entries.push(TempEntry {
+        owner,
+        born,
+        path: std::path::PathBuf::from(&path),
+    });
+    Ok(path)
+}
+
+/// Remove a file `make_temp` made, dropping its registration.
+pub(crate) fn unlink_temp(path: &str) {
+    let pb = std::path::PathBuf::from(path);
+    temp_registry().entries.retain(|e| e.path != pb);
+    let _ = std::fs::remove_file(&pb);
 }
 
 /// SLOT-15: whether `path` is a file @tmpfile made in this process and not

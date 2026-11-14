@@ -85,6 +85,13 @@ records and user-mapped types copy deeply.
   loopCarried). Binding it by const reference was tried and dropped: it
   blocks the move of the slot into the loop's result. EVAL-7 (ruled
   2026-10-18) forbids a source taking `T&`, which was the other obstacle.
+- **A gather sink copies its batch into the suspension it returns.**
+  [reproduced, stage 6 prototype] A C++ closure takes its parameters by
+  reference (OWN-7), so the sink of a whole-list gather copies the batch
+  into the suspension it builds, and the suspension, which may run again
+  (OWN-3), copies it once more into the gather's list (golden
+  cpp-copy-count). Taking a kept parameter by value in a closure, or a
+  capture held in shared storage, would remove one or both.
 - **Some captures copy a dead owned value.** [reproduced] A C++ closure that
   may cross a pool (a `MorlocClosure`, pap or staged form) copies its
   captures, since its reify thunk or stage call names them again, and a
@@ -121,11 +128,6 @@ records and user-mapped types copy deeply.
   tuple; a variant arm needing wire conversion clones each field, though on
   the deserialize side the raw value is dead. C++: `IMapList` binds
   `auto x = coll[i]` and `IIfNotNull` copies the optional's value.
-- **A comment states a convention OWN-7 broke.** [read] `borrowableRoot`
-  (library/Morloc/CodeGenerator/Grammars/Translator/Imperative.hs) says
-  every native manifold parameter is passed by const reference, as the
-  reason a projection take may not move out of a bound variable. A Rust
-  parameter taken by value is owned. No wrong take was found.
 - **A C++ optional mapped through a function is copied twice.** [read]
   `MapOptionalN` and the optional-map intrinsic render `auto src = ...;
   T u = src.value();` (Pools/CAbi/Members/CppPrinter.hs `IIfNotNull`, ~260-280), copying the optional and

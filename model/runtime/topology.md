@@ -64,7 +64,7 @@ nexus (one per program run, or one long-running daemon / MCP server)
   Small values (at most the inline threshold, 64 KiB by default) travel
   inline; large ones as a relative pointer into shared
   memory, or, when shared memory is disabled, as the path of a temporary
-  file.
+  file (tables always use shared memory).
 - A command that calls no foreign function is pure: the nexus evaluates it
   itself and starts no pool.
 - A one-shot CLI run starts only the pools its command can reach; the

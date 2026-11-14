@@ -616,6 +616,7 @@ genericLowerConfig desc srcNamer debugInfo traceInfo debugMode = cfg
         , lcTakeSetter = \_ _ _ _ -> return Nothing
         , lcKeepContextArg = \_ _ _ _ v -> return v
         , lcKeepCallArg = \_ _ _ v -> return v
+        , lcKeepClosureArg = \_ _ -> return Nothing
         , lcKeepSlot = \_ _ v -> return v
         , lcKeepElem = \_ v -> return v
         , lcStoreField = \_ v -> return v
@@ -1410,6 +1411,14 @@ genericPrintExpr desc = go
     go (IIntrinsicReduceList combine xs) =
       let prefix = ldIntrinsicPrefix desc
        in pretty prefix <> "mlc_reduce_list(" <> go combine <> ", " <> go xs <> ")"
+    go (IIntrinsicGather native sid _ fn) =
+      pool desc (if native then "mlc_gather_native" else "mlc_gather") <> "(" <> schemaRef sid <> ", " <> go fn <> ")"
+    go (IIntrinsicGatherPut sid handle value) =
+      pretty (ldIntrinsicPrefix desc) <> "mlc_gather_put(" <> go handle <> ", " <> schemaRef sid <> ", " <> go value <> ")"
+    go (IIntrinsicCellSink msid handle value fn) =
+      pool desc "mlc_cell_sink" <> "(" <> schemaOrNull msid <> ", " <> go handle <> ", " <> go value <> ", " <> go fn <> ")"
+    go (IIntrinsicCellSide msid _ handle fn) =
+      pool desc "mlc_cell_side" <> "(" <> schemaOrNull msid <> ", " <> go handle <> ", " <> go fn <> ")"
     go (IIntrinsicReplay sid _ handle fn) =
       let prefix = ldIntrinsicPrefix desc
        in pretty prefix <> "mlc_replay("
@@ -1447,6 +1456,8 @@ genericPrintExpr desc = go
             <> argList <> ")"
 
     schemaRef = genericSchemaRef desc
+    -- A batch with no wire form has no schema (SIDE-10).
+    schemaOrNull = maybe (pretty (ldNullLiteral desc)) schemaRef
 
     -- Backstop for a NUL reaching a pool that cannot represent one.
     --

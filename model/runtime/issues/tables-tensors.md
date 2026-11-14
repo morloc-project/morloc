@@ -22,8 +22,6 @@
   What a column may hold is decided in four places that disagree
   (`isArrowColumn`, Nexus.hs `tableFormProblem`, arrow_shm.rs `declared_*`,
   delimited.rs `ColType`); briefs/B12-B13.md.
-- [read] Arrow block doc (arrow_shm.rs) describes a metadata section never
-  written.
 - [speculative] pymorloc.c:2591-2593 leaks a moved schema on failure.
 
 CSV input to a `Table` argument (reader: arrow_ipc_reader.rs

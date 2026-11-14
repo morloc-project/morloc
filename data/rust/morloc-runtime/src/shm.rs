@@ -670,6 +670,8 @@ unsafe fn init_volume(
         if volume_index == PRIMARY_VOLUME { PRIMARY_VOLUME as u32 + 1 } else { 0 },
         Ordering::Relaxed,
     );
+    // SIDE-11
+    (*shm).next_ordinal.store(1, Ordering::Relaxed);
     let first_block = (shm as *mut u8).add(std::mem::size_of::<ShmHeader>()) as *mut BlockHeader;
     (*first_block).reference_count.store(0, Ordering::Relaxed);
     (*first_block).set_size(first_size);
@@ -2119,6 +2121,14 @@ fn published_header(idx: usize) -> Option<*mut ShmHeader> {
     Some(unsafe { base.sub(std::mem::size_of::<ShmHeader>()) } as *mut ShmHeader)
 }
 
+// SIDE-11
+pub(crate) fn draw_ordinal() -> Result<u64, MorlocError> {
+    let h = published_header(PRIMARY_VOLUME)
+        .ok_or_else(|| MorlocError::Shm("no shared memory to number this process in".into()))?;
+    // SAFETY: SHM-10: a published header stays mapped.
+    Ok(unsafe { (*h).next_ordinal.fetch_add(1, Ordering::Relaxed) })
+}
+
 // SHM-11: try the published volumes, the hinted one first, holding no
 // process lock while each volume's own lock is awaited.
 fn find_in_published(size: usize) -> Result<Option<*mut BlockHeader>, MorlocError> {
@@ -2390,6 +2400,7 @@ unsafe fn init_large_volume(shm: *mut ShmHeader, volume_index: usize, label: &st
     (*shm).cursor = VOLNULL;
     (*shm).next_index.store(0, Ordering::Relaxed);
     (*shm).kind.store(VOLUME_LARGE, Ordering::Relaxed);
+    (*shm).next_ordinal.store(0, Ordering::Relaxed);
     (*shm).committed.store(0, Ordering::Relaxed);
     let blk = large_block(shm);
     (*blk).reference_count.store(0, Ordering::Relaxed);

@@ -82,5 +82,7 @@ OK
 OK
 --- latePy --show ---
 OK
+--- tenArgCpp 5 --plus ---
+[5,10]
 OK
 0

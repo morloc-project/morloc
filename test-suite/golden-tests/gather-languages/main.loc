@@ -5,10 +5,6 @@
 -- 0 is empty), so a handler that saw dropped, merged or reordered batches
 -- prints different rows. Element types: [U64] rows, Str (with an empty
 -- string and spaces) and a record.
---
--- A pair whose gather and handler land in different pools fails with
--- "@close: ... is not a registered temp file": see the cross-language
--- gather entry in model/runtime/issues/cli-directives.md.
 
 module main
   ( rowsCpp, rowsPy, rowsR, rowsRust

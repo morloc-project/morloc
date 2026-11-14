@@ -674,6 +674,23 @@ data Intrinsic
                     -- runs when a packer builds the accumulator's native form.
   | IntrReduceList  -- ^ internal @reducelist :: (b -> b -> b) -> [b] -> b,
                     -- over a non-empty list.
+  | IntrGather      -- ^ internal @gather :: (Cell [a] -> <IO> ()) -> <IO> [a]:
+                    -- run the function on a fresh gather handle and return
+                    -- every batch put into it, in order (SIDE-6). Synthesized
+                    -- by the whole-list `@with`/`@render` handler form.
+  | IntrGatherPut   -- ^ internal @gatherput :: Cell [a] -> [a] -> <IO> (): add
+                    -- a batch to a gather (SIDE-4).
+  | IntrGatherNative -- ^ internal: @gather keeping its batches in the pool's
+                    -- own list, chosen by Serialize where the batch has a
+                    -- wire form and the language holds batches natively.
+  | IntrGatherPutNative -- ^ internal: the @gatherput of a native gather.
+  | IntrCellSink    -- ^ internal @cellsink :: Cell b -> [a] -> ([a] -> <IO> ())
+                    -- -> <IO> (): fold a batch with the function in the cell's
+                    -- own process, or send it to the cell's side file from a
+                    -- forked child (SIDE-4).
+  | IntrCellSide    -- ^ internal @cellside :: Cell b -> ([a] -> <IO> ()) ->
+                    -- <IO> (): fold every batch forked children sent the cell
+                    -- (SIDE-7).
   | IntrIFileWalk   -- ^ Unified IFile pattern walker. Synthesized by Express.hs
                     -- and Nexus.hs from any pattern application with an IFile
                     -- receiver (`.[i] f`, `.[s:e:p] f`, `.foo.bar f`, mixed
@@ -770,6 +787,12 @@ intrinsicSig IntrReplay = IntrSig "replay" (Just 2) True False
 intrinsicSig IntrChannel = IntrSig "channel" (Just 0) True False
 intrinsicSig IntrSpawn = IntrSig "spawn" (Just 2) True False
 intrinsicSig IntrSettle = IntrSig "settle" (Just 1) True False
+intrinsicSig IntrGather = IntrSig "gather" (Just 1) True False
+intrinsicSig IntrGatherPut = IntrSig "gatherput" (Just 2) True False
+intrinsicSig IntrGatherNative = IntrSig "gathernative" (Just 1) True False
+intrinsicSig IntrGatherPutNative = IntrSig "gatherputnative" (Just 2) True False
+intrinsicSig IntrCellSink = IntrSig "cellsink" (Just 3) True False
+intrinsicSig IntrCellSide = IntrSig "cellside" (Just 2) True False
 intrinsicSig IntrIFileWalk = IntrSig "ifile_walk" Nothing True False
 intrinsicSig IntrConform = IntrSig "conform" (Just 1) False False
 intrinsicSig IntrCellSlots = IntrSig "cellslots" (Just 1) True False

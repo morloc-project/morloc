@@ -161,6 +161,14 @@ extern "C" {
     fn mlc_cell_count(handle: i64, errmsg: *mut *mut c_char) -> i64;
     fn mlc_cell_slot(handle: i64, index: i64, schema: *const CSchema, errmsg: *mut *mut c_char) -> *mut c_void;
     fn mlc_cell_free(handle: i64, errmsg: *mut *mut c_char) -> i32;
+    fn mlc_side_new(native: *mut c_void, errmsg: *mut *mut c_char) -> i64;
+    fn mlc_side_route(id: i64, errmsg: *mut *mut c_char) -> i32;
+    fn mlc_side_put_native(id: i64, append: unsafe extern "C" fn(*mut c_void, *mut c_void), item: *mut c_void, errmsg: *mut *mut c_char) -> i32;
+    fn mlc_side_put(id: i64, schema: *const CSchema, value: *const c_void, errmsg: *mut *mut c_char) -> i32;
+    fn mlc_side_take(id: i64, errmsg: *mut *mut c_char) -> *mut c_void;
+    fn mlc_side_next(reader: *mut c_void, schema: *const CSchema, eof: *mut i32, errmsg: *mut *mut c_char) -> *mut c_void;
+    fn mlc_side_reader_free(reader: *mut c_void);
+    fn mlc_side_drop(id: i64);
     fn mlc_open_ostream(schema_str: *const c_char, path: *const c_char, errmsg: *mut *mut c_char) -> i64;
     fn mlc_open_istream(schema_str: *const c_char, path: *const c_char, errmsg: *mut *mut c_char) -> i64;
     fn mlc_open_stdin(schema_str: *const c_char, errmsg: *mut *mut c_char) -> i64;
@@ -4165,6 +4173,172 @@ pub fn reduce_list<T, F: Invoke2<T, T, T>>(combine: F, xs: Vec<T>) -> T {
         acc = combine.invoke(&acc, &x);
     }
     acc
+}
+
+// -- Gathers and fold side files (model/runtime/side.md) ----------------
+
+pub trait Batch: Sized + 'static {
+    fn join(batches: Vec<Self>) -> Self;
+}
+
+impl<E: 'static> Batch for Vec<E> {
+    fn join(mut batches: Vec<Self>) -> Self {
+        if batches.len() == 1 {
+            return batches.pop().unwrap_or_default();
+        }
+        let n = batches.iter().map(|b| b.len()).sum();
+        let mut out = Vec::with_capacity(n);
+        for b in batches {
+            out.extend(b);
+        }
+        out
+    }
+}
+
+#[repr(C)]
+struct GatherList<L> {
+    tag: std::any::TypeId,
+    batches: Vec<L>,
+}
+
+unsafe extern "C" fn gather_append<L: Batch>(container: *mut c_void, item: *mut c_void) {
+    if *(container as *const std::any::TypeId) != std::any::TypeId::of::<L>() {
+        morloc_infra_abort("@gather: a batch was put with another type than its gather's");
+    }
+    let list = &mut *(container as *mut GatherList<L>);
+    list.batches.push(std::ptr::read(item as *mut L));
+}
+
+struct SideReader(*mut c_void);
+impl Drop for SideReader {
+    fn drop(&mut self) {
+        unsafe { mlc_side_reader_free(self.0) };
+    }
+}
+
+unsafe fn side_take(h: u64) -> SideReader {
+    let mut err: *mut c_char = std::ptr::null_mut();
+    let r = mlc_side_take(h as i64, &mut err);
+    check_err(err);
+    if r.is_null() {
+        failed_without_reason("@gather");
+    }
+    SideReader(r)
+}
+
+unsafe fn side_each<L: FromVoidstar>(schema: &Schema, reader: &SideReader, mut each: impl FnMut(L)) {
+    loop {
+        let mut err: *mut c_char = std::ptr::null_mut();
+        let mut eof: i32 = 0;
+        let vs = mlc_side_next(reader.0, cschema_of(schema), &mut eof, &mut err);
+        if eof != 0 && err.is_null() {
+            break;
+        }
+        each(read_voidstar(vs, err, schema, "@gather"));
+    }
+}
+
+unsafe fn side_route(h: u64) -> bool {
+    let mut err: *mut c_char = std::ptr::null_mut();
+    let r = mlc_side_route(h as i64, &mut err);
+    check_err(err);
+    r == 1
+}
+
+unsafe fn side_put<T: ToVoidstar>(schema: &Schema, h: u64, batch: &T) {
+    let rc = with_voidstar(batch, schema, |vs, cs, err| mlc_side_put(h as i64, cs, vs, err));
+    if rc != 0 {
+        failed_without_reason("@gather");
+    }
+}
+
+/// SIDE-6
+pub unsafe fn gather_native<L: Batch + FromVoidstar, F: Invoke1<u64, ()>>(schema: &Schema, f: F) -> L {
+    let mut list = GatherList::<L> { tag: std::any::TypeId::of::<L>(), batches: Vec::new() };
+    let mut err: *mut c_char = std::ptr::null_mut();
+    let h = mlc_side_new(&mut list as *mut GatherList<L> as *mut c_void, &mut err);
+    check_err(err);
+    let h = h as u64;
+    struct Abandon(Option<i64>);
+    impl Drop for Abandon {
+        fn drop(&mut self) {
+            if let Some(h) = self.0 {
+                unsafe { mlc_side_drop(h) };
+            }
+        }
+    }
+    let mut abandon = Abandon(Some(h as i64));
+    f.invoke(&h);
+    abandon.0 = None;
+    let reader = side_take(h);
+    side_each::<L>(schema, &reader, |b| list.batches.push(b));
+    L::join(std::mem::take(&mut list.batches))
+}
+
+/// SIDE-4: a gather id puts to its record, a stream handle to its stream.
+pub unsafe fn gather_put<L: Batch + ToVoidstar>(schema: &Schema, h: u64, batch: L) {
+    if (h as i64) >= 0 {
+        write(schema, 0, &batch, h);
+        return;
+    }
+    let mut slot = std::mem::ManuallyDrop::new(batch);
+    let mut err: *mut c_char = std::ptr::null_mut();
+    let r = mlc_side_put_native(h as i64, gather_append::<L>, &mut *slot as *mut L as *mut c_void, &mut err);
+    if r == 1 {
+        return;
+    }
+    let batch = std::mem::ManuallyDrop::into_inner(slot);
+    check_err(err);
+    if r != 0 {
+        failed_without_reason("@gather");
+    }
+    side_put(schema, h, &batch);
+}
+
+/// The handle is the stream.
+pub unsafe fn gather_file<L: FromVoidstar, F: Invoke1<u64, ()>>(schema: &Schema, f: F) -> L {
+    let path = tmpfile();
+    let o = open_ostream(schema, &path);
+    f.invoke(&o);
+    close(o);
+    let xs = load::<L>(schema, &path);
+    unlink_tmp(&path);
+    xs
+}
+
+/// SIDE-4, SIDE-10
+pub unsafe fn cell_sink<L: ToVoidstar, F: Invoke1<L, ()>>(schema: &Schema, h: u64, batch: &L, k: F) {
+    if side_route(h) {
+        k.invoke(batch);
+        return;
+    }
+    side_put(schema, h, batch);
+}
+
+/// SIDE-4, SIDE-10: a batch with no wire form poisons the side file.
+pub unsafe fn cell_sink_schemaless<L, F: Invoke1<L, ()>>(h: u64, batch: &L, k: F) {
+    if side_route(h) {
+        k.invoke(batch);
+        return;
+    }
+    let mut err: *mut c_char = std::ptr::null_mut();
+    mlc_side_put(h as i64, std::ptr::null(), std::ptr::null(), &mut err);
+    check_err(err);
+}
+
+/// SIDE-7
+pub unsafe fn cell_side<L: FromVoidstar, F: Invoke1<L, ()>>(schema: &Schema, h: u64, k: F) {
+    let reader = side_take(h);
+    side_each::<L>(schema, &reader, |b| k.invoke(&b));
+}
+
+/// SIDE-7, SIDE-10: a schemaless side file holds only poison records.
+pub unsafe fn cell_side_schemaless(h: u64) {
+    let reader = side_take(h);
+    let mut err: *mut c_char = std::ptr::null_mut();
+    let mut eof: i32 = 0;
+    mlc_side_next(reader.0, std::ptr::null(), &mut eof, &mut err);
+    check_err(err);
 }
 
 /// @open (OStream): open a file for writing with the element schema.

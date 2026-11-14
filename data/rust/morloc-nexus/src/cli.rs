@@ -2,11 +2,6 @@
 //!
 //! The nexus has three explicit roles -- `run`, `daemon`, `router` --
 //! each a clap subcommand on the top-level `morloc-nexus` binary.
-//! Compiled wrapper scripts always hardcode `morloc-nexus run "$0"
-//! "$@"`, so a user's `./my-prog -h` resolves to `morloc-nexus run
-//! ./my-prog -h` and its clap-generated help shows only the run-side
-//! options. Daemon and router options are only reachable through
-//! explicit `morloc-nexus daemon` / `morloc-nexus router` invocations.
 //!
 //! ## Two-pass parse
 //!
@@ -40,7 +35,7 @@ use crate::dispatch::{NexusConfig, OutputFormat};
     about = "Morloc nexus: CLI dispatcher for compiled morloc programs.",
     long_about = "Morloc nexus binary.\n\n\
                   Programs compiled with `morloc make` ship a small shell wrapper that \
-                  re-execs into `morloc-nexus run <wrapper>`; users normally interact with \
+                  re-execs into `morloc-nexus run <manifest>`; users normally interact with \
                   the wrapper rather than this binary directly. Use `daemon` to serve a \
                   compiled program as a long-lived process and `router` to multiplex many \
                   installed programs from one process."
@@ -322,13 +317,10 @@ pub struct McpArgs {
     pub allow_no_auth: bool,
 }
 
-/// Multi-program router across installed programs. Doesn't take a
-/// single program target -- it serves every `exe/<name>/manifest.json`
-/// it finds under the exe directory.
+/// Multi-program router across installed programs.
 #[derive(Args, Debug)]
 pub struct RouterArgs {
-    /// Path to the exe directory (one `<name>/manifest.json` per installed
-    /// program). Defaults to `$MORLOC_HOME/exe`.
+    /// Path to the exe directory.
     #[arg(long, value_name = "PATH")]
     pub fdb: Option<String>,
 

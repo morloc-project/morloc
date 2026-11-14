@@ -281,6 +281,18 @@ data IExpr
       --   handle. The combine is an ordinary native callable in the pool
       --   the reduce was realized in; the per-language helper applies it
       --   over the accumulators and releases the cell.
+  | IIntrinsicGather Bool Int (Maybe IType) IExpr
+      -- ^ @gather: whether the batches are held natively (else gathered
+      --   through a temp-file stream), schemaId of the `[a]` result, its
+      --   type, the function run on the handle.
+  | IIntrinsicGatherPut Int IExpr IExpr
+      -- ^ native @gatherput: schemaId of the batch, handle, batch.
+  | IIntrinsicCellSink (Maybe Int) IExpr IExpr IExpr
+      -- ^ @cellsink: schemaId of the batch (Nothing: it has no wire form),
+      --   handle, batch, fold step.
+  | IIntrinsicCellSide (Maybe Int) (Maybe IType) IExpr IExpr
+      -- ^ @cellside: schemaId of a batch (Nothing: no wire form), the
+      --   batch's type, handle, fold step.
   | IIntrinsicTmpfile
       -- ^ @tmpfile :: <IO> Str: nullary. Create a fresh empty file in the
       --   morloc tmpdir, register it for removal at end-of-call, and return
@@ -673,6 +685,9 @@ data LowerConfig m = LowerConfig
   , lcKeepCallArg :: Int -> Int -> NativeExpr -> MDoc -> m MDoc
   -- ^ Adapt argument @j@ of a call of native manifold @m@, given its
   -- original (OWN-7).
+  , lcKeepClosureArg :: NativeExpr -> MDoc -> m (Maybe MDoc)
+  -- ^ An argument of a function value's call, moved at its last read of an
+  -- owned value (OWN-2); Nothing where it is not.
   , lcKeepSlot :: [Int] -> NativeExpr -> MDoc -> m MDoc
   -- ^ Adapt the value a native loop ends with, given the loop's carried
   -- locals and the value's original (OWN-2).
@@ -1234,14 +1249,6 @@ isBorrowableProjection _ = False
 
 -- | A projection root that a reference may point into: a variable, or another
 -- projection of one.
---
--- INVARIANT, load-bearing rather than incidental: a member may bind an alias
--- to such a root but must never take the root's storage. Every native
--- manifold parameter is passed by const reference and a loop-carried local is
--- a manifold parameter too, so a frame that moved out of a @BndVarN@ would
--- empty its caller's value, or the next iteration's. The frame-local
--- 'LetVarN' is the only root a member may consider consuming, and even then
--- only under 'consumableLetRoot'.
 borrowableRoot :: NativeExpr -> Bool
 borrowableRoot (LetVarN _ _ _) = True
 borrowableRoot (BndVarN _ _ _) = True
@@ -2646,9 +2653,16 @@ lowerNativeExprRaw cfg _ (PatN_ t xs) = do
 -- languages; the Rust member borrows every native arg so a value can fan out to
 -- several manifold calls as shared borrows instead of a move-after-move).
 lowerNativeExprRaw cfg _ (AppExeN_ _ (LocalCallP idx) xs0) = do
-  xs <- bindCallArgs cfg (constArgs cfg Nothing xs0)
+  xs <- bindCallArgs cfg =<< mapM keepOrConst xs0
   owns <- argOwnerships cfg xs
   return $ mergePoolDocs (\es -> lcApplyClosure cfg ((nvar cfg) idx) (zipWith3Same (\own t e -> lcSourcedArg cfg ClosureArg own t e) owns (map laType xs) es)) (map laDocs xs)
+  where
+    keepOrConst la@(LowArg (NativeArgExpr e) _ d) = do
+      kept <- lcKeepClosureArg cfg e (poolExpr d)
+      return $ case kept of
+        Just v -> la {laDocs = d {poolExpr = v}}
+        Nothing -> constArg cfg Nothing la
+    keepOrConst la = return (constArg cfg Nothing la)
 -- A partial application of a closure: the pool's runtime runs its stage
 -- entry, if it has one, and returns the closure of the remaining arguments.
 lowerNativeExprRaw cfg _ (AppExeN_ t (PapplyP idx) xs0) = do
@@ -3145,6 +3159,36 @@ lowerNativeExprRaw cfg origExpr (IntrinsicN_ _ IntrCellSlots (Just schema) [Low 
 lowerNativeExprRaw cfg _ (IntrinsicN_ _ IntrReduceList _ [Low _ combineDocs, Low _ listDocs]) = do
   let raw d = IRawExpr (render (poolExpr d))
   return $ mergePoolDocs (const $ lcPrintExpr cfg (IIntrinsicReduceList (raw combineDocs) (raw listDocs))) [combineDocs, listDocs]
+lowerNativeExprRaw cfg origExpr (IntrinsicN_ _ intr (Just schema) [Low _ fnDocs])
+  | intr `elem` [IntrGather, IntrGatherNative] = do
+      sid <- lcRegisterSchema cfg schema
+      listType <- lcTypeOf cfg (typeFof origExpr)
+      let call = IIntrinsicGather (intr == IntrGatherNative) sid listType (IRawExpr (render (poolExpr fnDocs)))
+      return $ fnDocs {poolExpr = lcPrintExpr cfg call}
+lowerNativeExprRaw cfg _ (IntrinsicN_ _ intr (Just schema) [Low _ handleDocs, Low valueE valueDocs])
+  | intr `elem` [IntrGatherPut, IntrGatherPutNative] = do
+      sid <- lcRegisterSchema cfg schema
+      let native = intr == IntrGatherPutNative
+      valueDocs' <- if native then adaptOwnedElem cfg valueE valueDocs else adaptReadElem cfg valueE valueDocs
+      let raw d = IRawExpr (render (poolExpr d))
+          putExpr
+            | native = IIntrinsicGatherPut sid (raw handleDocs) (raw valueDocs')
+            | otherwise = IIntrinsicWrite sid (IIntLit Nothing 0) (raw valueDocs') (raw handleDocs)
+      return $ mergePoolDocs (const $ lcPrintExpr cfg putExpr) [handleDocs, valueDocs']
+lowerNativeExprRaw cfg _ (IntrinsicN_ _ IntrCellSink mschema [Low _ handleDocs, Low batchE batchDocs, Low _ fnDocs]) = do
+  msid <- traverse (lcRegisterSchema cfg) mschema
+  batchDocs' <- adaptReadElem cfg batchE batchDocs
+  let raw d = IRawExpr (render (poolExpr d))
+      sinkExpr = IIntrinsicCellSink msid (raw handleDocs) (raw batchDocs') (raw fnDocs)
+  return $ mergePoolDocs (const $ lcPrintExpr cfg sinkExpr) [handleDocs, batchDocs', fnDocs]
+lowerNativeExprRaw cfg _ (IntrinsicN_ _ IntrCellSide mschema [Low _ handleDocs, Low fnE fnDocs]) = do
+  msid <- traverse (lcRegisterSchema cfg) mschema
+  batchType <- case typeFof fnE of
+    FunF [b] _ -> lcTypeOf cfg b
+    _ -> return Nothing
+  let raw d = IRawExpr (render (poolExpr d))
+      sideExpr = IIntrinsicCellSide msid batchType (raw handleDocs) (raw fnDocs)
+  return $ mergePoolDocs (const $ lcPrintExpr cfg sideExpr) [handleDocs, fnDocs]
 lowerNativeExprRaw cfg _ (IntrinsicN_ _ IntrReplay (Just schema)
                                   [Low handleE handleDocs, Low _ fnDocs]) = do
   sid <- lcRegisterSchema cfg schema
@@ -3265,6 +3309,7 @@ lowerNativeExprRaw cfg _ (WireToNativeN_ _ s intr schema argLows) = do
     (IntrUnpack, [x]) -> return $ IIntrinsicUnpack sid rawType (arg x)
     (IntrCellGet, [h]) -> return $ IIntrinsicCellGet sid rawType (arg h)
     (IntrCellSlots, [h]) -> return $ IIntrinsicCellSlots sid rawType (arg h)
+    (IntrGather, [f]) -> return $ IIntrinsicGather False sid rawType (arg f)
     _ -> error ("morloc bug: WireToNativeN over " <> show intr)
   idx <- lcNewIndex cfg
   let v = (helperVar cfg) idx

@@ -65,16 +65,9 @@ use crate::voidstar;
 
 /// Slot index occupies the low 12 bits, a process tag the next 24, and
 /// the generation the rest below the sign bit, so every valid handle is
-/// positive and -1 is an unambiguous error sentinel.
-///
-/// The process tag is what makes a handle safe to reject rather than
-/// misread. This registry is process-local, unlike the stream registry
-/// which lives in a shared segment, so a handle that reaches another
-/// worker process would otherwise resolve against whatever cell happens
-/// to occupy that slot there -- and the first cell of two processes lands
-/// at the same slot and generation, which is the case most likely to
-/// arise. The tag is drawn per process rather than taken from the pid,
-/// which is reused and bounded by `pid_max`.
+/// positive and -1 is an unambiguous error sentinel. SIDE-11: the tag is
+/// the process's ordinal, so a handle from another process never resolves
+/// here.
 const SLOT_BITS: u32 = 12;
 const PROC_BITS: u32 = 24;
 const SLOT_MASK: i64 = (1 << SLOT_BITS) - 1;
@@ -91,44 +84,28 @@ const MAX_CELLS: usize = 1 << SLOT_BITS;
 /// remove. Refusing is better than quietly becoming worse than the gather.
 const MAX_SLOTS: usize = 4096;
 
-fn proc_tag() -> i64 {
-    let pid = std::process::id() as u64;
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.subsec_nanos() as u64 ^ d.as_secs())
-        .unwrap_or(0);
-    // Any spread over the tag's range will do; this only has to make a
-    // collision between two live pool processes unlikely.
-    let mixed = pid
-        .wrapping_mul(0x9E37_79B9_7F4A_7C15)
-        .rotate_left(31)
-        ^ now.wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    ((mixed ^ (mixed >> 29)) as i64) & PROC_MASK
-}
-
 static TAG: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(-1);
 
-fn tag() -> i64 {
+// SIDE-11
+fn tag() -> Result<i64, MorlocError> {
     use std::sync::atomic::Ordering;
     let t = TAG.load(Ordering::Acquire);
     if t >= 0 {
-        return t;
+        return Ok(t);
     }
-    match TAG.compare_exchange(-1, proc_tag(), Ordering::AcqRel, Ordering::Acquire) {
-        Ok(_) => TAG.load(Ordering::Acquire),
+    let drawn = shm::draw_ordinal()?;
+    let drawn = i64::try_from(drawn).ok().filter(|&o| o > 0 && o <= PROC_MASK).ok_or_else(|| {
+        MorlocError::Other("mlc_cell_new: this program has numbered more processes than a fold handle holds".into())
+    })?;
+    Ok(match TAG.compare_exchange(-1, drawn, Ordering::AcqRel, Ordering::Acquire) {
+        Ok(_) => drawn,
         Err(won) => won,
-    }
+    })
 }
 
-// FORK-13: a child's tag never equals the tag of the parent it was forked from.
+// FORK-13, SIDE-11
 pub(crate) fn after_fork_in_child() {
-    use std::sync::atomic::Ordering;
-    let parent = TAG.load(Ordering::Relaxed);
-    let mut t = proc_tag();
-    if t == parent {
-        t = (t + 1) & PROC_MASK;
-    }
-    TAG.store(t, Ordering::Release);
+    TAG.store(-1, std::sync::atomic::Ordering::Release);
 }
 
 struct CellEntry {
@@ -147,6 +124,8 @@ struct CellEntry {
     /// SHM value stores anyway.
     init: RelPtr,
     slots: Vec<(ThreadId, RelPtr)>,
+    // SIDE-5
+    sealed: bool,
 }
 
 struct CellRegistry {
@@ -156,15 +135,12 @@ struct CellRegistry {
 static CELL_REGISTRY: crate::fork_policy::Reset<CellRegistry> =
     crate::fork_policy::Reset::new(|| CellRegistry { cells: Vec::new() });
 
-fn pack_handle(slot: usize, generation: i64) -> i64 {
-    ((generation << (SLOT_BITS + PROC_BITS))
-        | (tag() << SLOT_BITS)
-        | (slot as i64))
-        & i64::MAX
+fn pack_handle(slot: usize, generation: i64, tag: i64) -> i64 {
+    ((generation << (SLOT_BITS + PROC_BITS)) | (tag << SLOT_BITS) | (slot as i64)) & i64::MAX
 }
 
 fn unpack_handle(h: i64) -> Option<(usize, i64)> {
-    if h < 0 || (h >> SLOT_BITS) & PROC_MASK != tag() {
+    if h < 0 || (h >> SLOT_BITS) & PROC_MASK != TAG.load(std::sync::atomic::Ordering::Acquire) {
         return None;
     }
     Some(((h & SLOT_MASK) as usize, h >> (SLOT_BITS + PROC_BITS)))
@@ -230,10 +206,18 @@ fn release_entry(c: &mut CellEntry) {
 /// # Safety
 /// `init` must point at a value laid out as `rs` describes.
 pub unsafe fn cell_new(rs: &Schema, init: *const u8) -> Result<i64, MorlocError> {
+    let h = cell_new_slot(rs, init)?;
+    // SIDE-4
+    crate::fork_side::new_for_cell(h);
+    Ok(h)
+}
+
+unsafe fn cell_new_slot(rs: &Schema, init: *const u8) -> Result<i64, MorlocError> {
     if init.is_null() {
         // PANIC-14
         morloc_runtime_types::panic::fatal("mlc_cell_new: null init");
     }
+    let t = tag()?;
     let seed = cell_owns(voidstar::deep_copy_to_block(init, rs)?)?;
     let mut reg = registry();
     let owner = current_temp_owner();
@@ -246,8 +230,9 @@ pub unsafe fn cell_new(rs: &Schema, init: *const u8) -> Result<i64, MorlocError>
             born: crate::intrinsics::next_dispatch_id(),
             init: seed,
             slots: Vec::new(),
+            sealed: false,
         };
-        return Ok(pack_handle(i, gen));
+        return Ok(pack_handle(i, gen, t));
     }
     if reg.cells.len() >= MAX_CELLS {
         free_block(seed);
@@ -262,8 +247,9 @@ pub unsafe fn cell_new(rs: &Schema, init: *const u8) -> Result<i64, MorlocError>
         born: crate::intrinsics::next_dispatch_id(),
         init: seed,
         slots: Vec::new(),
+        sealed: false,
     });
-    Ok(pack_handle(reg.cells.len() - 1, 0))
+    Ok(pack_handle(reg.cells.len() - 1, 0, t))
 }
 
 /// This thread's accumulator, as a fresh block the caller owns and frees.
@@ -327,6 +313,11 @@ pub unsafe fn cell_put(handle: i64, rs: &Schema, value: *const u8) -> Result<(),
         }
     };
     let c = &mut reg.cells[i];
+    // SIDE-5
+    if c.sealed {
+        free_block(fresh);
+        return Err(MorlocError::Other("@fold: a batch was folded after the fold was reduced".into()));
+    }
     match c.slots.iter_mut().find(|(t, _)| *t == me) {
         Some(entry) => {
             free_block(entry.1);
@@ -354,8 +345,10 @@ pub unsafe fn cell_put(handle: i64, rs: &Schema, value: *const u8) -> Result<(),
 /// thread touched answers with its seed, which is what an empty stream
 /// folds to.
 pub fn cell_count(handle: i64) -> Result<i64, MorlocError> {
-    let reg = registry();
+    let mut reg = registry();
     let i = resolve(&reg, handle, "mlc_cell_count")?;
+    // SIDE-5
+    reg.cells[i].sealed = true;
     Ok(std::cmp::max(1, reg.cells[i].slots.len() as i64))
 }
 
@@ -381,6 +374,8 @@ pub fn cell_free(handle: i64) -> Result<(), MorlocError> {
     let mut reg = registry();
     let i = resolve(&reg, handle, "mlc_cell_free")?;
     release_entry(&mut reg.cells[i]);
+    drop(reg);
+    crate::fork_side::drop_entry(handle);
     Ok(())
 }
 
@@ -467,13 +462,22 @@ unsafe fn require_schema(schema: *const CSchema, fn_name: &str) -> Result<Schema
 /// zero, which is the same count this registry would otherwise keep a
 /// second copy of.
 pub fn sweep_dispatch(call_id: u64, oldest: Option<u64>) {
-    for c in registry().cells.iter_mut() {
+    let t = TAG.load(std::sync::atomic::Ordering::Acquire);
+    if t < 0 {
+        return;
+    }
+    let mut released = Vec::new();
+    for (i, c) in registry().cells.iter_mut().enumerate() {
         if c.live
             && (c.owner == call_id
                 || (c.owner == TEMP_OWNER_NONE && crate::intrinsics::unowned_collectable(c.born, oldest)))
         {
+            released.push(pack_handle(i, c.generation, t));
             release_entry(c);
         }
+    }
+    for h in released {
+        crate::fork_side::drop_entry(h);
     }
 }
 
@@ -703,6 +707,32 @@ mod tests {
             assert!(cell_count(h).is_ok());
             cell_free(h).unwrap();
             assert!(ok, "a forked child resolved a fold accumulator its parent owns");
+        }
+    }
+
+    #[test]
+    fn a_put_once_the_reduce_has_counted_fails() {
+        let _shm = crate::own_test_registry();
+        let schema = parse_schema("as").unwrap();
+        unsafe {
+            let seed = mk("[]", &schema);
+            let h = cell_new(&schema, seed).unwrap();
+            shm::shfree(seed).unwrap();
+            let v = mk("[\"x\"]", &schema);
+            cell_put(h, &schema, v).unwrap();
+            let n = cell_count(h).unwrap();
+            let vs = v as usize;
+            let late_thread = std::thread::spawn(move || {
+                let schema = parse_schema("as").unwrap();
+                cell_put(h, &schema, vs as AbsPtr).is_err()
+            })
+            .join()
+            .unwrap();
+            let late_here = cell_put(h, &schema, v).is_err();
+            shm::shfree(v).unwrap();
+            assert_eq!(n, 1);
+            assert!(late_thread && late_here, "a put after the reduce counted its slots returned success");
+            cell_free(h).unwrap();
         }
     }
 

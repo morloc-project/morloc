@@ -1,0 +1,15 @@
+# gather 2026-11-14 19:51 load=4.54 load_max=4.54 morloc=0.112.0 commit=bc4d564 cpu=AMD Ryzen 5 7535U with Radeon Graphics cores=12
+item	param	value	unit	note
+ENC-11	cpp.gather.b	0.871825	s/GiB	r2=0.9998
+ENC-11	cpp.control.b	0.0722217	s/GiB	r2=0.9985
+ENC-11	cpp.extra	0.799603	s/GiB	gather slope over the control's
+ENC-11	cpp.write.b	0.801095	s/GiB	write slope over the control's, r2=0.9818
+ENC-11	cpp.load.b	0.896328	s/GiB	whole load slope, r2=0.9998
+ENC-11	py.gather.b	5.80218	s/GiB	r2=0.9995
+ENC-11	py.control.b	1.47724	s/GiB	r2=0.9807
+ENC-11	py.extra	4.32494	s/GiB	gather slope over the control's
+ENC-11	py.write.b	3.2462	s/GiB	write slope over the control's, r2=0.9679
+ENC-11	py.load.b	6.10395	s/GiB	whole load slope, r2=0.9991
+ENC-11	cpp.load.inplace.b	0.892591	s/GiB	gather slope, @load decoded in place
+ENC-11	cpp.load.block.b	0.898109	s/GiB	gather slope, @load into one block (control)
+ENC-11	cpp.topath.b	2.05268	s/GiB	gather slope, action written to a path, r2=0.9997

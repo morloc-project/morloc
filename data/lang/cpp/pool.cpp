@@ -35,6 +35,7 @@
 
 #include <limits>
 #include <utility>
+#include <typeinfo>
 #include <chrono>
 
 char* g_tmpdir;
@@ -1334,6 +1335,16 @@ typename L::value_type _mlc_reduce_list(F combine, L xs) {
     return acc;
 }
 
+template <typename T>
+T _mlc_from_voidstar_freed(Schema* schema, void* voidstar) {
+    struct Freed {
+        void* p;
+        ~Freed() { shfree_cpp(p); }
+    } freed{voidstar};
+    T* dummy = nullptr;
+    return from_voidstar(schema, voidstar, dummy);
+}
+
 // @replay: call `fn` on every frame (sub-packet) of the stream, in order,
 // each as the list it holds. An empty frame is an empty list; only the end
 // of the stream stops the loop.
@@ -1345,11 +1356,170 @@ mlc::Unit _mlc_replay(Schema* schema, int64_t handle, F fn) {
         void* voidstar = mlc_next_frame(handle, &eof, &errmsg);
         if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
         if (eof) break;
-        std::vector<E>* dummy = nullptr;
-        std::vector<E> frame = from_voidstar(schema, voidstar, dummy);
-        shfree_cpp(voidstar);
+        std::vector<E> frame = _mlc_from_voidstar_freed<std::vector<E>>(schema, voidstar);
         fn(frame);
     }
+    return mlc::Unit{};
+}
+
+// -- Gathers and fold side files (model/runtime/side.md) ----------------
+
+struct MlcGatherBase {
+    const std::type_info* type;
+};
+
+template <typename L>
+struct MlcGatherList : MlcGatherBase {
+    std::vector<L> batches;
+    MlcGatherList() : MlcGatherBase{&typeid(L)} {}
+};
+
+template <typename L>
+void _mlc_gather_append(void* container, void* item) noexcept {
+    auto* base = static_cast<MlcGatherBase*>(container);
+    if (*base->type != typeid(L)) {
+        MLC_INTERNAL_ABORT("@gather: a batch was put with another type than its gather's");
+    }
+    try {
+        static_cast<MlcGatherList<L>*>(base)->batches.push_back(std::move(*static_cast<L*>(item)));
+    } catch (...) {
+        MLC_INTERNAL_ABORT("@gather: holding a batch failed");
+    }
+}
+
+struct MlcSideReader {
+    void* reader;
+    ~MlcSideReader() { mlc_side_reader_free(reader); }
+};
+
+template <typename L, typename F>
+void _mlc_side_each(Schema* schema, void* reader, F each) {
+    MlcSideReader guard{reader};
+    while (true) {
+        char* errmsg = NULL;
+        int32_t eof = 0;
+        void* voidstar = mlc_side_next(reader, schema, &eof, &errmsg);
+        if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
+        if (eof) break;
+        L batch = _mlc_from_voidstar_freed<L>(schema, voidstar);
+        each(batch);
+    }
+}
+
+// SIDE-6
+template <typename L, typename F>
+L _mlc_gather_native(Schema* schema, F f) {
+    MlcGatherList<L> list;
+    char* errmsg = NULL;
+    int64_t h = mlc_side_new(static_cast<MlcGatherBase*>(&list), &errmsg);
+    if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
+    try {
+        f((uint64_t)h);
+    } catch (...) {
+        mlc_side_drop(h);
+        throw;
+    }
+    void* reader = mlc_side_take(h, &errmsg);
+    if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
+    _mlc_side_each<L>(schema, reader, [&](L& b) { list.batches.push_back(std::move(b)); });
+    if (list.batches.size() == 1) {
+        return std::move(list.batches[0]);
+    }
+    size_t n = 0;
+    for (const auto& b : list.batches) n += b.size();
+    L xs;
+    xs.reserve(n);
+    for (auto& b : list.batches) {
+        xs.insert(xs.end(), std::make_move_iterator(b.begin()), std::make_move_iterator(b.end()));
+    }
+    return xs;
+}
+
+// SIDE-4: a gather id puts to its record, a stream handle to its stream.
+template <typename L>
+mlc::Unit _mlc_gather_put(Schema* schema, uint64_t h, L batch) {
+    if ((int64_t)h >= 0) {
+        _mlc_write(schema, 0, batch, (int64_t)h);
+        return mlc::Unit{};
+    }
+    char* errmsg = NULL;
+    int32_t r = mlc_side_put_native((int64_t)h, &_mlc_gather_append<L>, &batch, &errmsg);
+    if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
+    if (r == 0) {
+        void* voidstar = to_voidstar(schema, batch);
+        mlc_side_put((int64_t)h, schema, voidstar, &errmsg);
+        shfree_cpp(voidstar);
+        if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
+    }
+    return mlc::Unit{};
+}
+
+// The handle is the stream.
+template <typename L, typename F>
+L _mlc_gather_file(Schema* schema, F f) {
+    std::string path = _mlc_tmpfile();
+    int64_t o = _mlc_open_ostream(schema, path);
+    f((uint64_t)o);
+    _mlc_close(o);
+    L xs = _mlc_load<L>(schema, path);
+    _mlc_unlink_tmp(path);
+    return xs;
+}
+
+inline bool _mlc_side_route(uint64_t h) {
+    char* errmsg = NULL;
+    int32_t r = mlc_side_route((int64_t)h, &errmsg);
+    if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
+    return r == 1;
+}
+
+// SIDE-4, SIDE-10
+template <typename L, typename F>
+mlc::Unit _mlc_cell_sink(Schema* schema, uint64_t h, const L& batch, F k) {
+    if (_mlc_side_route(h)) {
+        k(batch);
+        return mlc::Unit{};
+    }
+    void* voidstar = to_voidstar(schema, batch);
+    char* errmsg = NULL;
+    mlc_side_put((int64_t)h, schema, voidstar, &errmsg);
+    shfree_cpp(voidstar);
+    if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
+    return mlc::Unit{};
+}
+
+// SIDE-4, SIDE-10: a batch with no wire form poisons the side file.
+template <typename L, typename F>
+mlc::Unit _mlc_cell_sink_schemaless(uint64_t h, const L& batch, F k) {
+    if (_mlc_side_route(h)) {
+        k(batch);
+        return mlc::Unit{};
+    }
+    char* errmsg = NULL;
+    mlc_side_put((int64_t)h, NULL, NULL, &errmsg);
+    if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
+    return mlc::Unit{};
+}
+
+// SIDE-7
+template <typename L, typename F>
+mlc::Unit _mlc_cell_side(Schema* schema, uint64_t h, F k) {
+    char* errmsg = NULL;
+    void* reader = mlc_side_take((int64_t)h, &errmsg);
+    if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
+    _mlc_side_each<L>(schema, reader, [&](L& b) { k(b); });
+    return mlc::Unit{};
+}
+
+// SIDE-7, SIDE-10: a schemaless side file holds only poison records.
+inline mlc::Unit _mlc_cell_side_schemaless(uint64_t h) {
+    char* errmsg = NULL;
+    void* reader = mlc_side_take((int64_t)h, &errmsg);
+    if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
+    MlcSideReader guard{reader};
+    int32_t eof = 0;
+    mlc_side_next(reader, NULL, &eof, &errmsg);
+    if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
     return mlc::Unit{};
 }
 

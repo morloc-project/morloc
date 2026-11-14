@@ -140,6 +140,22 @@ printExpr (IIntrinsicSpawn sid h f) =
   [idoc|_mlc_spawn(#{printExpr f}, #{printExpr h}, mlc_schema_table[#{pretty sid}])|]
 printExpr (IIntrinsicSettle h) =
   [idoc|_mlc_settle(#{printExpr h})|]
+printExpr (IIntrinsicGather native sid (Just t) f) =
+  [idoc|#{gatherFn native}<#{renderIType t}>(mlc_schema_table[#{pretty sid}], #{printExpr f})|]
+printExpr (IIntrinsicGather native sid Nothing f) =
+  [idoc|#{gatherFn native}(mlc_schema_table[#{pretty sid}], #{printExpr f})|]
+printExpr (IIntrinsicGatherPut sid h v) =
+  [idoc|_mlc_gather_put(mlc_schema_table[#{pretty sid}], #{printExpr h}, #{printExpr v})|]
+printExpr (IIntrinsicCellSink (Just sid) h v f) =
+  [idoc|_mlc_cell_sink(mlc_schema_table[#{pretty sid}], #{printExpr h}, #{printExpr v}, #{printExpr f})|]
+printExpr (IIntrinsicCellSink Nothing h v f) =
+  [idoc|_mlc_cell_sink_schemaless(#{printExpr h}, #{printExpr v}, #{printExpr f})|]
+printExpr (IIntrinsicCellSide (Just sid) (Just t) h f) =
+  [idoc|_mlc_cell_side<#{renderIType t}>(mlc_schema_table[#{pretty sid}], #{printExpr h}, #{printExpr f})|]
+printExpr (IIntrinsicCellSide (Just sid) Nothing h f) =
+  [idoc|_mlc_cell_side(mlc_schema_table[#{pretty sid}], #{printExpr h}, #{printExpr f})|]
+printExpr (IIntrinsicCellSide Nothing _ h _) =
+  [idoc|_mlc_cell_side_schemaless(#{printExpr h})|]
 printExpr (IIntrinsicReplay sid (Just t) h f) =
   [idoc|_mlc_replay<#{renderIType t}>(mlc_schema_table[#{pretty sid}], #{printExpr h}, #{printExpr f})|]
 printExpr (IIntrinsicReplay sid Nothing h f) =
@@ -665,3 +681,8 @@ printDeserializer params rtype fields =
     sizeField :: Int -> MDoc -> MDoc
     sizeField idx key =
       [idoc|w.child(schema->parameters[#{pretty idx}], obj.#{key}, true);|]
+
+gatherFn :: Bool -> MDoc
+gatherFn True = "_mlc_gather_native"
+gatherFn False = "_mlc_gather_file"
+

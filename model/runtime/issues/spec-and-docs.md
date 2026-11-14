@@ -3,17 +3,6 @@
 Runtime items whose text, cited tests or manual pages no longer match the
 code. Found by the 2026-10-21 audit [read unless marked].
 
-- **FMT-5 contradicts SHM-6, SHM-12 and SHM-13.** FMT-5 lists the volume
-  header as `... reserved u64, lock, cursor` and the block header as
-  `magic (merged: 0x0CB1DEAD), refcount, size u64`. The code
-  (shm_types.rs ShmHeader/BlockHeader) has a `poison` word where
-  "reserved" is, `next_index` and `grow_lock` after `cursor`, a zeroed
-  absorbed header (no DEAD magic), and a 16-bit generation in the top bits
-  of the size word. (The manual's arch-build-shm.asc now describes the
-  code.)
-- **FMT-2 omits the reference generation.** Data packets carry the SHM-13
-  generation at command bytes 18-19 (little-endian, never 0, refused if 0;
-  morloc-runtime-types packet.rs CommandData.generation). FMT-2 lists data bytes 13-17 only.
 - **SHM-6 does not say who zeroes a new block under poison.** Under
   MORLOC_SHM_POISON=1 a released block holds 0xDB; shcalloc relies on a new
   block reading zero (shm.rs:1288), which holds because shmalloc_unlocked
@@ -40,10 +29,6 @@ code. Found by the 2026-10-21 audit [read unless marked].
   (bytes of glibc top pad and trim threshold in each Python or R fork-pool
   worker, default 16 MiB, `off` for none; a tunable by ruling 2026-11-14) are read by the runtime
   and absent from environmental-variables.asc.
-- **arch-build-artifacts.asc:35-37** says a failed build leaves the
-  previous build in place; false for ART-3's kill window and for a refused
-  rebuild (build-and-text.md). ProgramBuilder/Build.hs:334's "Atomically replace" comment
-  is false for the same reason.
 - **More cited tests that miss their rule.** [read, 2026-10-21] NET-3:
   `the_header_names_every_kind_as_the_runtime_does` and
   `a_reply_is_refused_before_it_is_built_only_when_its_payload_is_past_the_frame`
@@ -58,7 +43,3 @@ code. Found by the 2026-10-21 audit [read unless marked].
   models; items also cite RunSweep, DaemonShutdown, CrossingConn,
   ForkPool, PanicExit, SlotSeqlock, LocalSweep, QueueHandoff,
   SlotRelease, ChannelWait, QueueWake, AheadJob.
-- **The manual says `registry` is read from `~/.morloc/config.yaml`.**
-  [read 2026-11-04, from mim's list] docs ecosystem.asc:54. The path and
-  file name are wrong, and no default config file is read at all (see
-  environment-deps.md).

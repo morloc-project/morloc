@@ -234,6 +234,8 @@ here touch locks and ownership: model first.
   mlc_next_frame also leaks the block when parse_schema fails after the
   read. Violates SHM-4 (a reference is released once, by its holder): here
   it is never released.
+  morloc_mlc_side_next (rmorloc.c ~3595, the fold side replay) has the
+  same shape: an R error in from_voidstar longjmps past its shfree.
 - **R `@next` and `@streamLayout` leak their parsed schema when the runtime
   call fails.** [read, 2026-11-14] rmorloc.c morloc_mlc_next (3099-3100)
   and morloc_mlc_stream_layout (3151-3152) parse the schema, then call

@@ -219,6 +219,7 @@ struct ForkHeld {
     _run_tee: HeldGuard<'static, Option<std::sync::Arc<std::fs::File>>>,
     _command: HeldGuard<'static, Option<String>>,
     _error: HeldGuard<'static, Option<String>>,
+    _sides: HeldGuard<'static, Option<crate::fork_side::Sides>>,
 }
 
 struct ForkHeldSlot(std::cell::UnsafeCell<Option<ForkHeld>>);
@@ -265,6 +266,8 @@ fn prepare_fork_body() {
             libc::abort();
         }
     }
+    // SIDE-2: before any held lock, so the side opens may wait on the nexus.
+    crate::fork_side::prepare();
     // FORK-15: staged now; the fork holds the locks guarding its paths below,
     // and no file is written while they are held.
     let staged = if crate::arrow_shm::any_views() {
@@ -293,6 +296,7 @@ fn prepare_fork_body() {
         _run_tee: crate::run::RUN_TEE_HANDLE.lock(),
         _command: crate::run::RUN_COMMAND.lock(),
         _error: crate::run::RUN_ERROR.lock(),
+        _sides: crate::fork_side::REGISTRY.lock(),
     };
     let mut held = held;
     // FORK-15: the child's views read blocks its lease holds references on.
@@ -320,6 +324,7 @@ extern "C" fn after_fork_in_parent() {
 fn after_fork_in_parent_body() {
     // NET-7: before the held locks are released.
     FORK_SEQ.fetch_add(1, Ordering::SeqCst);
+    crate::fork_side::after_fork_in_parent();
     crate::lease::note_forked();
     if let Some(mut held) = take_fork_held() {
         let (lease, rels) = (held.lease.take(), std::mem::take(&mut held.lease_rels));
@@ -345,6 +350,7 @@ fn after_fork_in_child_body() {
     // the child has.
     INHERITED_DISPATCHES.store(crate::intrinsics::dispatches_in_flight(), Ordering::Relaxed);
     crate::cell::after_fork_in_child();
+    crate::fork_side::after_fork_in_child();
     crate::shm::forget_held_references();
     if let Some(mut held) = take_fork_held() {
         crate::stream::after_fork_in_child(&mut held.locked_fds);

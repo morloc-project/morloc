@@ -280,6 +280,44 @@ def mlc_reify(f, home_lang):
     return (home_lang, mid, packets)
 
 
+def mlc_gather(schema, f):
+    # @gather through a temp-file stream: the handle is the stream, and the
+    # result is what @load gives (NATIVE-9).
+    path = morloc.mlc_tmpfile()
+    o = morloc.mlc_open_ostream(schema, path)
+    f(o)
+    morloc.mlc_close(o)
+    xs = morloc.mlc_load(schema, path)
+    morloc.mlc_unlink_tmp(path)
+    return xs
+
+
+def mlc_gather_native(schema, f):
+    # A gather held in this pool's own list, each batch in the form @load
+    # would give it (NATIVE-9).
+    acc = []
+    h = morloc.mlc_gather_new(acc)
+    try:
+        f(h)
+    except BaseException:
+        morloc.mlc_side_drop(h)
+        raise
+    return morloc.mlc_gather_take(h, schema, acc)
+
+
+def mlc_cell_sink(schema, h, batch, k):
+    # SIDE-4, SIDE-10
+    if morloc.mlc_side_route(h):
+        k(batch)
+    else:
+        morloc.mlc_side_put(h, schema, batch)
+
+
+def mlc_cell_side(schema, h, k):
+    # SIDE-7
+    morloc.mlc_side_take(h, schema, k)
+
+
 def mlc_spawn(f, handle, schema):
     # Start the producer `f` on the channel as a separate dispatch in its
     # home pool, without waiting for it. The channel travels as the

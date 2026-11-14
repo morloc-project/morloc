@@ -1,0 +1,65 @@
+-- A fold whose batch type is an opaque native type with a packer (SIDE-10):
+-- the parent's batches fold natively, and the batch a forked child sends
+-- has no wire form, so the fold fails rather than lose it. The fold over
+-- the same type with no fork answers. Each producer is given through a
+-- lambda, so the command has no replay entry (a replay of a packed element
+-- type does not build; model/runtime/issues/cli-directives.md).
+
+module main (foldCpp, forkCpp, foldRust, forkRust)
+
+import root-cpp
+import root-rust
+
+newtype Tally = Int
+type Cpp => Tally = "Tally"
+type Rust => Tally = "Tally"
+
+instance Packable Int Tally where
+  source Cpp from "impl.hpp" ("pack_tally" as pack, "unpack_tally" as unpack)
+
+instance Packable Int Tally where
+  source Rust from "impl.rs" ("pack_tally" as pack, "unpack_tally" as unpack)
+
+source Cpp from "impl.hpp"
+  ( "produce" as produceC, "produce_forks" as produceForksC
+  , "add_tallies" as addC, "merge" as mergeC, "show_n" as showNC )
+source Rust from "impl.rs"
+  ( "produce" as produceRs, "produce_forks" as produceForksRs
+  , "add_tallies" as addRs, "merge" as mergeRs, "show_n" as showNRs )
+
+produceC :: ([Tally] -> <IO> ()) -> <IO> ()
+produceForksC :: ([Tally] -> <IO> ()) -> <IO> ()
+addC :: Int -> [Tally] -> Int
+mergeC :: Int -> Int -> Int
+--' The sum, shown by C++
+showNC :: Int -> Str
+
+produceRs :: ([Tally] -> <IO> ()) -> <IO> ()
+produceForksRs :: ([Tally] -> <IO> ()) -> <IO> ()
+addRs :: Int -> [Tally] -> Int
+mergeRs :: Int -> Int -> Int
+--' The sum, shown by Rust
+showNRs :: Int -> Str
+
+zero :: Int
+zero = 0
+
+--' Fold tallies in C++
+--' @render --n=showNC @fold=addC @init=zero @combine=mergeC
+foldCpp :: <IO> ()
+foldCpp = @collect (\s -> produceC s)
+
+--' Fold tallies over a C++ forked child
+--' @render --n=showNC @fold=addC @init=zero @combine=mergeC
+forkCpp :: <IO> ()
+forkCpp = @collect (\s -> produceForksC s)
+
+--' Fold tallies in Rust
+--' @render --n=showNRs @fold=addRs @init=zero @combine=mergeRs
+foldRust :: <IO> ()
+foldRust = @collect (\s -> produceRs s)
+
+--' Fold tallies over a Rust forked child
+--' @render --n=showNRs @fold=addRs @init=zero @combine=mergeRs
+forkRust :: <IO> ()
+forkRust = @collect (\s -> produceForksRs s)

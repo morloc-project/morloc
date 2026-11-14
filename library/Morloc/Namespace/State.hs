@@ -875,19 +875,13 @@ data PackageMeta
   -- after morloc deps are installed. Non-zero exit fails the install.
   , packageSetup :: !(Maybe FilePath)
   -- | Per-language lists of paths (relative to module root, glob patterns
-  -- allowed) to copy on install into per-language well-known dirs under
-  -- $MORLOC_HOME so downstream foreign code can reference them by a
-  -- stable, module-namespaced path.
+  -- allowed) to copy on install.
   , packageExpose :: !ExposeSet
   }
   deriving (Show, Ord, Eq)
 
 -- | Per-language exposure lists. Each list holds paths or glob patterns
--- relative to the module root. The install pipeline copies the matched
--- files (preserving subtree under the module root) into
--- $MORLOC_HOME/include/<module>/        (cpp)
--- $MORLOC_HOME/lib/python/<py_module>/  (py, hyphens in module name -> _)
--- $MORLOC_HOME/lib/R/<module>/          (r)
+-- relative to the module root.
 data ExposeSet
   = ExposeSet
   { exposeCpp :: ![Text]

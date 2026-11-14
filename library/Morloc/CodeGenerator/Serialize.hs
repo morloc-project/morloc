@@ -18,7 +18,7 @@ module Morloc.CodeGenerator.Serialize
   ) where
 
 import Data.Foldable (toList)
-import Morloc.Data.Zip (zip3Same, zipExact, zipSame, zipWithSameM)
+import Morloc.Data.Zip (zip3Same, zipExact, zipPrefix, zipSame, zipWithSameM)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Morloc.BaseTypes as BT
@@ -616,6 +616,54 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
     -- (NEWT-7), so natively it is its argument.
     nativeExpr m (MonoCoerce (CoerceNewtype _ _) _ e) = nativeExpr m e
     nativeExpr m (MonoCoerce c t e) = CoerceN c <$> inferType t <*> nativeExpr m e
+    -- SIDE-4: otherwise the gather goes through a temp-file stream.
+    nativeExpr m (MonoIntrinsic t IntrGather [f]) = do
+      tf <- inferType t
+      f' <- nativeExpr m f
+      ast <- Serial.makeSerialAST m lang tf
+      sch <- Serial.schemaOfHeld m lang ast
+      let staysHere = maybe False (not . handleCrosses) (gatherHandles f)
+      return $ case () of
+        _ | Serial.isSerializable ast && holdsNatively sch && staysHere -> IntrinsicN tf IntrGatherNative (Just sch) [f']
+          | Serial.isSerializable ast -> IntrinsicN tf IntrGather (Just sch) [f']
+          | otherwise -> WireToNativeN tf ast IntrGather sch [f']
+    nativeExpr m (MonoIntrinsic t@(Idx tidx _) IntrGatherPut [h, v]) = do
+      tf <- inferType t
+      h' <- nativeExpr m h
+      v' <- nativeExpr m v
+      let vtf = typeFof v'
+      Serial.checkWriteDataType tidx IntrGatherPut (Serial.containsFunF vtf) (pretty (renderTypeFName vtf))
+      ast <- Serial.makeSerialAST m lang vtf
+      sch <- Serial.schemaOfHeld m lang ast
+      if Serial.isSerializable ast && holdsNatively sch
+        then return $ IntrinsicN tf IntrGatherPutNative (Just sch) [h', v']
+        else do
+          wire <- packDataArg m v'
+          case wire of
+            [w] -> do
+              wast <- Serial.makeSerialAST m lang (typeFof w)
+              wsch <- Serial.schemaOfHeld m lang wast
+              return $ IntrinsicN tf IntrGatherPut (Just wsch) [h', w]
+            _ -> MM.throwCompilerBugAt tidx "@gatherput: the batch did not pack to one value"
+    -- SIDE-10: a batch with no wire form here carries no schema.
+    nativeExpr m (MonoIntrinsic t@(Idx tidx _) IntrCellSink [h, c, k]) = do
+      tf <- inferType t
+      es <- mapM (nativeExpr m) [h, c, k]
+      case es of
+        [_, c', _] -> do
+          let ctf = typeFof c'
+          Serial.checkWriteDataType tidx IntrCellSink (Serial.containsFunF ctf) (pretty (renderTypeFName ctf))
+          msch <- batchSchema m ctf
+          return $ IntrinsicN tf IntrCellSink msch es
+        _ -> MM.throwCompilerBugAt tidx "@cellsink expects 3 args"
+    nativeExpr m (MonoIntrinsic t@(Idx tidx _) IntrCellSide [h, k]) = do
+      tf <- inferType t
+      es <- mapM (nativeExpr m) [h, k]
+      case es of
+        [_, k'] | FunF [ltf] _ <- typeFof k' -> do
+          msch <- batchSchema m ltf
+          return $ IntrinsicN tf IntrCellSide msch es
+        _ -> MM.throwCompilerBugAt tidx "@cellside expects a handle and a function of one batch"
     -- Runtime intrinsics (save/load, streams, @try, ...). The C functions
     -- are eager; an intrinsic declared with a suspension result reaches
     -- here as the body of the closure manifold that suspends it
@@ -824,6 +872,48 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
             | otherwise = WireToNativeN listTf listAst IntrCellSlots sch [handle]
       return . Just $ IntrinsicN accTf IntrReduceList Nothing [combine, slots]
     cellReduceSlots _ _ _ _ = return Nothing
+
+    -- The handle a @gather hands its function, and every name it is bound
+    -- to below; Nothing where the function is not a manifold.
+    gatherHandles :: MonoExpr -> Maybe (Set.Set Int)
+    gatherHandles (MonoManifold _ form _ body) =
+      Just (aliases body (Set.fromList [i | Arg i _ <- manifoldBound form]))
+    gatherHandles _ = Nothing
+
+    -- A gather keeps its batches natively only if every use of its handle
+    -- is seen here and stays in this pool: a handle, or a value holding it,
+    -- given to another pool or to a function whose body is not in this tree
+    -- (a recursive call, a function value, a spawned call) must be a real
+    -- stream, so that its writer can reach it.
+    handleCrosses :: Set.Set Int -> Bool
+    handleCrosses hs = any crossing (subExprs e0)
+      where
+        cs = carriers e0 hs
+        holds' e = any (`Set.member` cs) (varsIn e)
+        crossing (MonoApp f es) | opaque f = any holds' es
+        crossing (MonoPoolCall _ _ _ _ ctx) = any (`Set.member` cs) [i | Arg i _ <- ctx]
+        crossing (MonoIntrinsic _ IntrSpawn es) = any holds' es
+        crossing _ = False
+        opaque MonoManifold {} = False
+        opaque (MonoExe _ SrcCallP {}) = False
+        opaque (MonoExe _ (LocalCallP w)) = not (Map.member w (letManifolds e0))
+        opaque _ = True
+
+    -- C++ and Rust hold a gather's batches by their static types; Python
+    -- in a plain list, each batch given @load's form as it is put (NATIVE-9),
+    -- so not a list whose own form is hinted (a numpy array).
+    holdsNatively :: Text -> Bool
+    holdsNatively sch = case langName lang of
+      "py" -> any (`T.isPrefixOf` sch) ["a", "<list>a"]
+      l -> l `elem` ["cpp", "rust"]
+
+    -- The schema of a batch with a wire form; Nothing for one without.
+    batchSchema :: Int -> TypeF -> MorlocMonad (Maybe Text)
+    batchSchema m btf = do
+      ast <- Serial.makeSerialAST m lang btf
+      if Serial.isSerializable ast
+        then Just <$> Serial.schemaOfHeld m lang ast
+        else return Nothing
 
     -- Compute the msgpack schema string for runtime intrinsics
     intrinsicSchema :: Int -> Intrinsic -> TypeF -> [NativeExpr] -> MorlocMonad (Maybe Text)
@@ -1665,3 +1755,82 @@ refuseHostVar m i = do
   CM.when (Set.member i hostArgs) $
     MM.throwCompilerBugAt m
       "a function made by host code would be serialized here; placement keeps such a function in its pool (HOST-9)"
+
+-- | The variable an expression names, if it is one.
+monoVarIndex :: MonoExpr -> Maybe Int
+monoVarIndex (MonoBndVar _ i) = Just i
+monoVarIndex (MonoLetVar _ i) = Just i
+monoVarIndex _ = Nothing
+
+-- | Every variable named anywhere in an expression, captures included.
+varsIn :: MonoExpr -> [Int]
+varsIn e = concatMap here (subExprs e)
+  where
+    here (MonoBndVar _ i) = [i]
+    here (MonoLetVar _ i) = [i]
+    here (MonoManifold _ form _ _) = [i | Arg i _ <- manifoldContext form]
+    here (MonoPoolCall _ _ _ _ ctx) = [i | Arg i _ <- ctx]
+    here (MonoCacheBody _ _ args _) = [i | Arg i _ <- args]
+    here (MonoDebugWrap _ args _) = [i | Arg i _ <- args]
+    here (MonoExe _ (LocalCallP i)) = [i]
+    here (MonoExe _ (PapplyP i)) = [i]
+    here _ = []
+
+-- | The names a set of variables is also bound to: a let of one of them, or
+-- a manifold applied to one of them, directly or through a let-bound name.
+aliases :: MonoExpr -> Set.Set Int -> Set.Set Int
+aliases body s0 = go s0
+  where
+    lets = letManifolds body
+    step s = Set.union s . Set.fromList $ concatMap (more s) (subExprs body)
+    more s (MonoLet j rhs _) | Just i <- monoVarIndex rhs, Set.member i s = [j]
+    more s (MonoApp (MonoManifold _ form _ _) args) = bound s form args
+    more s (MonoApp (MonoExe _ (LocalCallP w)) args) | Just form <- Map.lookup w lets = bound s form args
+    more _ _ = []
+    bound s form args =
+      [j | (Arg j _, a) <- zipPrefix (manifoldBound form) args, Just i <- [monoVarIndex a], Set.member i s]
+    go s = let s' = step s in if Set.size s' == Set.size s then s else go s'
+
+-- | The let-bound manifolds of an expression, by the name they are bound to.
+letManifolds :: MonoExpr -> Map.Map Int (ManifoldForm None (Maybe Type))
+letManifolds body = Map.fromList [(j, form) | MonoLet j (MonoManifold _ form _ _) _ <- subExprs body]
+
+-- | The names bound to a value that holds one of a set of variables: a let
+-- whose right side names one, or a parameter of a manifold applied to one,
+-- directly or through a let-bound name.
+carriers :: MonoExpr -> Set.Set Int -> Set.Set Int
+carriers body = go
+  where
+    lets = letManifolds body
+    step s = Set.union s . Set.fromList $ concatMap (more s) (subExprs body)
+    touches s e = any (`Set.member` s) (varsIn e)
+    more s (MonoLet j rhs _) | touches s rhs = [j]
+    more s (MonoApp (MonoManifold _ form _ _) args) = bound s form args
+    more s (MonoApp (MonoExe _ (LocalCallP w)) args) | Just form <- Map.lookup w lets = bound s form args
+    more _ _ = []
+    bound s form args = [j | (Arg j _, a) <- zipPrefix (manifoldBound form) args, touches s a]
+    go s = let s' = step s in if Set.size s' == Set.size s then s else go s'
+
+-- | An expression and every expression below it.
+subExprs :: MonoExpr -> [MonoExpr]
+subExprs e = e : concatMap subExprs (kids e)
+  where
+    kids (MonoManifold _ _ _ x) = [x]
+    kids (MonoLet _ a b) = [a, b]
+    kids (MonoReturn x) = [x]
+    kids (MonoApp f xs) = f : xs
+    kids (MonoCacheBody _ _ _ x) = [x]
+    kids (MonoDebugWrap _ _ x) = [x]
+    kids (MonoPat _ app) = toList app
+    kids (MonoRecord _ _ _ rs) = map (snd . snd) rs
+    kids (MonoList _ _ xs) = xs
+    kids (MonoTuple _ xs) = map snd xs
+    kids (MonoVariant _ _ _ xs) = xs
+    kids (MonoDoBlock _ x) = [x]
+    kids (MonoEval _ x) = [x]
+    kids (MonoCoerce _ _ x) = [x]
+    kids (MonoIf a b c) = [a, b, c]
+    kids (MonoLoop _ _ x) = [x]
+    kids (MonoLoopContinue xs) = xs
+    kids (MonoIntrinsic _ _ xs) = xs
+    kids _ = []

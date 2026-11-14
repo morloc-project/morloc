@@ -25,9 +25,8 @@ Waiting on a ruling:
   agrees; typecheck.md).
 - INTR-6 open: features-intrinsics.asc presents `@lang`, whose value depends
   on the realization, against REAL-1, under which merged implementations may substitute for each other.
-- SUM-4 vs ALIAS-7: features-sum-types.asc:396-425 says records or aliases
-  alone never close a cycle; a guarded self-recursive alias or record builds
-  (records.md).
+- SUM-4: features-sum-types.asc says records alone never close a cycle; a
+  guarded self-recursive record builds (records.md).
 - BASE-5 (ruled 2026-11-08: `size` counts characters): features-strings.asc:193
   still says "Five bytes". No longer waits on a ruling; the wording waits on
   the C++/Rust `size` fix (values.md).
@@ -41,17 +40,7 @@ Waiting on a ruling:
 
 Deferred, needs a new example:
 
-- cli-intro.asc:343-350: the standalone `@epilogue` illustration uses
-  `total :: Str -> Str -> Int` and `sift total needle ./notes/today.md`,
-  which contradicts sift's real `total`.
 - features-integers.asc factR transcript waits on the R overflow message
   naming the wrong R type (values.md).
-- features-modules.asc gives Python startup as 132 ms (recorded xl-calls
-  data suggests about 58 ms); re-measure before changing.
 - features-intrinsics.asc does not document `@streamLayout`, which is
   user-reachable (Namespace/Expr.hs:558, :749); decide whether it is public.
-- deploy-eval.asc:121-122 says that on the default loopback bind eval needs
-  no token. [read, 2026-11-14] The code locks eval whenever no token is set
-  and no waiver is given, whatever the bind (morloc-nexus/src/mcp.rs:2043-2045
-  `eval_needs_token`; daemon `eval_refusal`, daemon_ffi.rs:1453). IFACE-13
-  sides with the code (interfaces.md, eval entry); the manual needs fixing.

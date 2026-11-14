@@ -191,6 +191,18 @@ printExpr (IIntrinsicSpawn sid h f) =
   "::rustmorloc::spawn(&" <> printExpr f <> ", " <> printExpr h <> ", " <> schemaRef sid <> ")"
 printExpr (IIntrinsicSettle h) =
   "::rustmorloc::settle(" <> printExpr h <> ")"
+printExpr (IIntrinsicGather native sid mt f) =
+  "::rustmorloc::" <> rustGatherFn native <> reduceTurbofish mt <> "(" <> schemaRef sid <> ", " <> printExpr f <> ")"
+printExpr (IIntrinsicGatherPut sid h v) =
+  "::rustmorloc::gather_put(" <> schemaRef sid <> ", " <> printExpr h <> ", " <> printExpr v <> ")"
+printExpr (IIntrinsicCellSink (Just sid) h v f) =
+  "::rustmorloc::cell_sink(" <> schemaRef sid <> ", " <> printExpr h <> ", " <> refExpr v <> ", " <> printExpr f <> ")"
+printExpr (IIntrinsicCellSink Nothing h v f) =
+  "::rustmorloc::cell_sink_schemaless(" <> printExpr h <> ", " <> refExpr v <> ", " <> printExpr f <> ")"
+printExpr (IIntrinsicCellSide (Just sid) mt h f) =
+  "::rustmorloc::cell_side" <> reduceTurbofish mt <> "(" <> schemaRef sid <> ", " <> printExpr h <> ", " <> printExpr f <> ")"
+printExpr (IIntrinsicCellSide Nothing _ h _) =
+  "::rustmorloc::cell_side_schemaless(" <> printExpr h <> ")"
 printExpr (IIntrinsicReplay sid mt h f) =
   -- The element type is given, the function's closure type is left to
   -- inference.
@@ -227,6 +239,10 @@ schemaRef sid = "crate::__morloc_schema(" <> pretty sid <> ")"
 -- path shims expect.
 refExpr :: IExpr -> MDoc
 refExpr e = "&" <> parens (printExpr e)
+
+rustGatherFn :: Bool -> MDoc
+rustGatherFn True = "gather_native"
+rustGatherFn False = "gather_file"
 
 -- | Optional turbofish for a typed-result intrinsic: `::<T>` when the result
 -- type is known (always, for Rust), empty otherwise. Lets a generic shim

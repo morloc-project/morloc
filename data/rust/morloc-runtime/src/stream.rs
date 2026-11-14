@@ -149,10 +149,6 @@ struct RegistryHeader {
     /// it as part of the happens-before established by the magic.
     slot_count:   u64,
 
-    /// Per-process random salt mixed into the generation increment on
-    /// every slot close. Drawn from /dev/urandom by the bootstrap
-    /// winner; nonzero so the increment is never trivially zero. All
-    /// processes attaching to the registry observe the same salt.
     gen_salt:     u64,
 
     /// Singleton claim slots for the three stdio kinds. Sentinel

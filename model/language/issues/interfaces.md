@@ -125,12 +125,6 @@ re-checked.
   IFACE-11.
 ## Eval (IFACE-13)
 
-- **The manual says loopback eval needs no token; the code locks it.**
-  [read] docs src/content/deploy-eval.asc ("On the default loopback bind,
-  eval needs no token") against the front end's `eval_needs_token`
-  (morloc-nexus/src/mcp.rs, no bind check) and the daemon's
-  `eval_refusal`: eval with no token set is refused unless waived, whatever
-  the bind. One side is wrong; the code follows the front end.
 - **Eval request bodies are read differently.** [read] The front end's
   `/eval` (morloc-nexus/src/mcp.rs:2514-2521 `frontend_eval_api`) accepts
   `expr`, `expression` or a bare string; the daemon's

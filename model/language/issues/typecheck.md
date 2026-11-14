@@ -113,11 +113,6 @@ literal and record gaps. Reproduced on 0.109.0 unless marked.
   POLY-4, which rules `where` signatures: `let g :: a -> a` fails
   "unexpected '::'".
   Repro: /work/plans/model-audit-2026-10-21/repro/D/poly4d.
-- **SIG-4's premise is stale.** [reproduced, 2026-10-21] It says
-  inference fails for a point-free use of class methods; `g = (+)` and
-  `concatTo = fold (<>)` build and run unsigned. Only constructor matching
-  still fails, with "'Ci' is not a constructor of *s`1591@1_x1" rather than
-  a request for a signature (SIG-4 (a)). Repro: /work/plans/model-audit-2026-10-21/repro/D/sig4, sig4b.
 - **EVAL-5's candidates miss what the code does.** [reproduced,
   2026-10-21] An unused `let` is computed (`let y = boom x in x` fails),
   an unused `where` is not, and a used `let` is placed at its use, so an
