@@ -1,0 +1,130 @@
+# ifile-slice 2026-11-14 08:13 load=1.32 load_max=2.99 morloc=0.112.0 commit=66cc0b398+dirty cpu=AMD Ryzen 5 7535U with Radeon Graphics cores=12
+item	param	value	unit	note
+ENC-9	cpp.Reals.z0.slice.c	23.359	ms	r2=0.9993
+ENC-9	cpp.Reals.z0.slice.b	5.11381	ns	r2=0.9993 per element
+ENC-9	cpp.Reals.z0.next.c	26.3649	ms	r2=0.9519
+ENC-9	cpp.Reals.z0.next.b	1.62267	ns	r2=0.9519 per element
+ENC-9	cpp.Reals.z0.ratio	3.15149	x	slice slope over @next slope
+ENC-9	cpp.Strs.z0.slice.c	31.5218	ms	r2=0.9936
+ENC-9	cpp.Strs.z0.slice.b	59.4305	ns	r2=0.9936 per element
+ENC-9	cpp.Strs.z0.next.c	27.2194	ms	r2=0.9949
+ENC-9	cpp.Strs.z0.next.b	33.7628	ns	r2=0.9949 per element
+ENC-9	cpp.Strs.z0.ratio	1.76024	x	slice slope over @next slope
+ENC-10	cpp.points.z0.n1000000	0.318088	us	per one-element slice
+ENC-10	cpp.points.z0.n4000000	0.334878	us	per one-element slice
+ENC-10	cpp.points.z0.n16000000	0.336875	us	per one-element slice
+ENC-10	cpp.points.z0.growth	1.05906	x	per-slice cost at n=16000000 over n=1000000
+ENC-9	cpp.Reals.z3.slice.c	29.9811	ms	r2=0.9911
+ENC-9	cpp.Reals.z3.slice.b	9.32264	ns	r2=0.9911 per element
+ENC-9	cpp.Reals.z3.next.c	30.5164	ms	r2=0.9320
+ENC-9	cpp.Reals.z3.next.b	4.28065	ns	r2=0.9320 per element
+ENC-9	cpp.Reals.z3.ratio	2.17786	x	slice slope over @next slope
+ENC-9	cpp.Strs.z3.slice.c	37.2673	ms	r2=0.9923
+ENC-9	cpp.Strs.z3.slice.b	85.475	ns	r2=0.9923 per element
+ENC-9	cpp.Strs.z3.next.c	30.046	ms	r2=0.9904
+ENC-9	cpp.Strs.z3.next.b	47.2553	ns	r2=0.9904 per element
+ENC-9	cpp.Strs.z3.ratio	1.80879	x	slice slope over @next slope
+ENC-10	cpp.points.z3.n1000000	1.32304	us	per one-element slice
+ENC-10	cpp.points.z3.n4000000	1.36789	us	per one-element slice
+ENC-10	cpp.points.z3.n16000000	1.309	us	per one-element slice
+ENC-10	cpp.points.z3.growth	0.989389	x	per-slice cost at n=16000000 over n=1000000
+ENC-9	rs.Reals.z0.slice.c	25.7806	ms	r2=0.9947
+ENC-9	rs.Reals.z0.slice.b	5.8659	ns	r2=0.9947 per element
+ENC-9	rs.Reals.z0.next.c	24.3454	ms	r2=0.9806
+ENC-9	rs.Reals.z0.next.b	1.62025	ns	r2=0.9806 per element
+ENC-9	rs.Reals.z0.ratio	3.62037	x	slice slope over @next slope
+ENC-9	rs.Strs.z0.slice.c	31.3101	ms	r2=0.9947
+ENC-9	rs.Strs.z0.slice.b	69.518	ns	r2=0.9947 per element
+ENC-9	rs.Strs.z0.next.c	28.765	ms	r2=0.9961
+ENC-9	rs.Strs.z0.next.b	48.957	ns	r2=0.9961 per element
+ENC-9	rs.Strs.z0.ratio	1.41998	x	slice slope over @next slope
+ENC-10	rs.points.z0.n1000000	0.418849	us	per one-element slice
+ENC-10	rs.points.z0.n4000000	0.397072	us	per one-element slice
+ENC-10	rs.points.z0.n16000000	0.322788	us	per one-element slice
+ENC-10	rs.points.z0.growth	0.770656	x	per-slice cost at n=16000000 over n=1000000
+ENC-9	rs.Reals.z3.slice.c	31.5813	ms	r2=0.9885
+ENC-9	rs.Reals.z3.slice.b	10.6078	ns	r2=0.9885 per element
+ENC-9	rs.Reals.z3.next.c	30.581	ms	r2=0.9440
+ENC-9	rs.Reals.z3.next.b	4.41944	ns	r2=0.9440 per element
+ENC-9	rs.Reals.z3.ratio	2.40027	x	slice slope over @next slope
+ENC-9	rs.Strs.z3.slice.c	36.2417	ms	r2=0.9933
+ENC-9	rs.Strs.z3.slice.b	96.2725	ns	r2=0.9933 per element
+ENC-9	rs.Strs.z3.next.c	30.7046	ms	r2=0.9933
+ENC-9	rs.Strs.z3.next.b	63.6021	ns	r2=0.9933 per element
+ENC-9	rs.Strs.z3.ratio	1.51367	x	slice slope over @next slope
+ENC-10	rs.points.z3.n1000000	1.5219	us	per one-element slice
+ENC-10	rs.points.z3.n4000000	1.42612	us	per one-element slice
+ENC-10	rs.points.z3.n16000000	1.53826	us	per one-element slice
+ENC-10	rs.points.z3.growth	1.01075	x	per-slice cost at n=16000000 over n=1000000
+ENC-13	cpp.reals.k2.z0.ratio	2.037	x	strided over unit, same output count
+ENC-13	cpp.reals.k2.z0.rssx	1.68673	x	peak RSS over the unit slice's; output about 61 MiB
+ENC-13	cpp.reals.k7.z0.ratio	1.89017	x	strided over unit, same output count
+ENC-13	cpp.reals.k7.z0.rssx	1.31653	x	peak RSS over the unit slice's; output about 17 MiB
+ENC-13	cpp.reals.rev.z0.ratio	1.64669	x	strided over unit, same output count
+ENC-13	cpp.reals.rev.z0.rssx	1.80562	x	peak RSS over the unit slice's; output about 122 MiB
+ENC-13	cpp.tups.k2.z0.ratio	1.40874	x	strided over unit, same output count
+ENC-13	cpp.tups.k2.z0.rssx	1.41692	x	peak RSS over the unit slice's; output about 57 MiB
+ENC-13	cpp.tups.field.z0.ratio	1.98141	x	strided over unit, same output count
+ENC-13	cpp.tups.field.z0.rssx	1.67554	x	peak RSS over the unit slice's; output about 38 MiB
+ENC-13	cpp.strs.k2.z0.ratio	1.36765	x	strided over unit, same output count
+ENC-13	cpp.strs.k2.z0.rssx	1.29698	x	peak RSS over the unit slice's; output about 69 MiB
+ENC-13	cpp.reals.k2.z3.ratio	1.81322	x	strided over unit, same output count
+ENC-13	cpp.reals.k2.z3.rssx	1.64752	x	peak RSS over the unit slice's; output about 61 MiB
+ENC-13	cpp.reals.k7.z3.ratio	1.97396	x	strided over unit, same output count
+ENC-13	cpp.reals.k7.z3.rssx	1.47423	x	peak RSS over the unit slice's; output about 17 MiB
+ENC-13	cpp.reals.rev.z3.ratio	1.29393	x	strided over unit, same output count
+ENC-13	cpp.reals.rev.z3.rssx	1.6441	x	peak RSS over the unit slice's; output about 122 MiB
+ENC-13	cpp.tups.k2.z3.ratio	1.38042	x	strided over unit, same output count
+ENC-13	cpp.tups.k2.z3.rssx	1.42918	x	peak RSS over the unit slice's; output about 57 MiB
+ENC-13	cpp.tups.field.z3.ratio	1.73965	x	strided over unit, same output count
+ENC-13	cpp.tups.field.z3.rssx	1.91623	x	peak RSS over the unit slice's; output about 38 MiB
+ENC-13	cpp.strs.k2.z3.ratio	1.78896	x	strided over unit, same output count
+ENC-13	cpp.strs.k2.z3.rssx	1.65484	x	peak RSS over the unit slice's; output about 69 MiB
+ENC-13	rs.reals.k2.z0.ratio	1.74719	x	strided over unit, same output count
+ENC-13	rs.reals.k2.z0.rssx	1.55485	x	peak RSS over the unit slice's; output about 61 MiB
+ENC-13	rs.reals.k7.z0.ratio	1.5886	x	strided over unit, same output count
+ENC-13	rs.reals.k7.z0.rssx	1.1058	x	peak RSS over the unit slice's; output about 17 MiB
+ENC-13	rs.reals.rev.z0.ratio	1.37144	x	strided over unit, same output count
+ENC-13	rs.reals.rev.z0.rssx	1.72057	x	peak RSS over the unit slice's; output about 122 MiB
+ENC-13	rs.tups.k2.z0.ratio	1.48429	x	strided over unit, same output count
+ENC-13	rs.tups.k2.z0.rssx	1.42765	x	peak RSS over the unit slice's; output about 57 MiB
+ENC-13	rs.tups.field.z0.ratio	1.64731	x	strided over unit, same output count
+ENC-13	rs.tups.field.z0.rssx	1.49821	x	peak RSS over the unit slice's; output about 38 MiB
+ENC-13	rs.strs.k2.z0.ratio	1.36985	x	strided over unit, same output count
+ENC-13	rs.strs.k2.z0.rssx	1.34287	x	peak RSS over the unit slice's; output about 69 MiB
+ENC-13	rs.reals.k2.z3.ratio	1.83297	x	strided over unit, same output count
+ENC-13	rs.reals.k2.z3.rssx	1.53688	x	peak RSS over the unit slice's; output about 61 MiB
+ENC-13	rs.reals.k7.z3.ratio	1.89024	x	strided over unit, same output count
+ENC-13	rs.reals.k7.z3.rssx	1.29834	x	peak RSS over the unit slice's; output about 17 MiB
+ENC-13	rs.reals.rev.z3.ratio	1.09454	x	strided over unit, same output count
+ENC-13	rs.reals.rev.z3.rssx	1.57635	x	peak RSS over the unit slice's; output about 122 MiB
+ENC-13	rs.tups.k2.z3.ratio	1.47851	x	strided over unit, same output count
+ENC-13	rs.tups.k2.z3.rssx	1.43815	x	peak RSS over the unit slice's; output about 57 MiB
+ENC-13	rs.tups.field.z3.ratio	1.63102	x	strided over unit, same output count
+ENC-13	rs.tups.field.z3.rssx	1.75897	x	peak RSS over the unit slice's; output about 38 MiB
+ENC-13	rs.strs.k2.z3.ratio	1.68995	x	strided over unit, same output count
+ENC-13	rs.strs.k2.z3.rssx	1.69077	x	peak RSS over the unit slice's; output about 69 MiB
+ENC-13	py.reals.k2.z0.ratio	1.02145	x	strided over unit, same output count
+ENC-13	py.reals.k2.z0.rssx	0.884595	x	peak RSS over the unit slice's; output about 61 MiB
+ENC-13	py.reals.k7.z0.ratio	1.06234	x	strided over unit, same output count
+ENC-13	py.reals.k7.z0.rssx	0.943943	x	peak RSS over the unit slice's; output about 17 MiB
+ENC-13	py.reals.rev.z0.ratio	0.97078	x	strided over unit, same output count
+ENC-13	py.reals.rev.z0.rssx	0.87142	x	peak RSS over the unit slice's; output about 122 MiB
+ENC-13	py.tups.k2.z0.ratio	1.01948	x	strided over unit, same output count
+ENC-13	py.tups.k2.z0.rssx	0.926759	x	peak RSS over the unit slice's; output about 57 MiB
+ENC-13	py.tups.field.z0.ratio	1.00268	x	strided over unit, same output count
+ENC-13	py.tups.field.z0.rssx	0.929269	x	peak RSS over the unit slice's; output about 38 MiB
+ENC-13	py.strs.k2.z0.ratio	0.945719	x	strided over unit, same output count
+ENC-13	py.strs.k2.z0.rssx	0.80914	x	peak RSS over the unit slice's; output about 69 MiB
+ENC-13	py.reals.k2.z3.ratio	0.972941	x	strided over unit, same output count
+ENC-13	py.reals.k2.z3.rssx	0.822234	x	peak RSS over the unit slice's; output about 61 MiB
+ENC-13	py.reals.k7.z3.ratio	1.28211	x	strided over unit, same output count
+ENC-13	py.reals.k7.z3.rssx	1.05736	x	peak RSS over the unit slice's; output about 17 MiB
+ENC-13	py.reals.rev.z3.ratio	0.873887	x	strided over unit, same output count
+ENC-13	py.reals.rev.z3.rssx	0.816	x	peak RSS over the unit slice's; output about 122 MiB
+ENC-13	py.tups.k2.z3.ratio	0.987444	x	strided over unit, same output count
+ENC-13	py.tups.k2.z3.rssx	0.934989	x	peak RSS over the unit slice's; output about 57 MiB
+ENC-13	py.tups.field.z3.ratio	0.995184	x	strided over unit, same output count
+ENC-13	py.tups.field.z3.rssx	1.00242	x	peak RSS over the unit slice's; output about 38 MiB
+ENC-13	py.strs.k2.z3.ratio	1.19838	x	strided over unit, same output count
+ENC-13	py.strs.k2.z3.rssx	0.992154	x	peak RSS over the unit slice's; output about 69 MiB

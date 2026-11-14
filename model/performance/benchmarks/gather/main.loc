@@ -71,30 +71,51 @@ wr o xs = do
   u
 
 --' C++ batches written to a stream file
---' @arg path
---' @check.path w
-writeCpp :: I64 -> I64 -> Str -> <IO> ()
+writeCpp ::
+  --' Histograms per batch
+  I64 ->
+  --' Batches
+  I64 ->
+  --' Stream file to write
+  --' @check.path w
+  Str ->
+  <IO> ()
 writeCpp k b path = do
   Ok o <- @open path :: <IO> (Try Str (OStream [U64]))
   produceC k b (wr o)
   @close o
 
 --' A stream file loaded whole into a C++ handler
---' @check.path r
-loadCpp :: Str -> <IO> Str
+loadCpp ::
+  --' Stream file to load
+  --' @check.path r
+  Str ->
+  <IO> Str
 loadCpp path = do
   Ok xs <- @load path
   summC xs
 
 --' Python batches written to a stream file
-writePy :: I64 -> I64 -> Str -> <IO> ()
+writePy ::
+  --' Histograms per batch
+  I64 ->
+  --' Batches
+  I64 ->
+  --' Stream file to write
+  --' @check.path w
+  Str ->
+  <IO> ()
 writePy k b path = do
   Ok o <- @open path :: <IO> (Try Str (OStream [U64]))
   produceP k b (wr o)
   @close o
 
 --' A stream file loaded whole into a Python handler
-loadPy :: Str -> <IO> Str
+loadPy ::
+  --' Stream file to load
+  --' @check.path r
+  Str ->
+  <IO> Str
 loadPy path = do
   Ok xs <- @load path
   summP xs

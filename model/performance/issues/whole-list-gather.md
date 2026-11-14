@@ -12,6 +12,16 @@ The rewrite runs before placement, so it cannot know whether the producer
 and the handler share a pool. How the time divides between the temp-file
 round trip and the decode is pending (plan step 0.5).
 
+Measured 2026-11-14 (bench gather, results ...-0438 baseline vs ...-0802,
+load 0.6-2): gather extra over the producer alone, C++ 1.85 -> 1.60 s/GiB,
+Python 9.97 -> 8.18 s/GiB, after commands started only the pools they reach,
+fork-pool heap headroom and the Python in-place load (Python whole load
+7.17 -> 5.51 s/GiB). The split is now about: C++ write 0.9, load 0.76 (half
+of it faulting in fresh vectors); Python write 2.3-3.9, load 5.5 (object
+creation 2.85, cyclic GC 1.5). The write series is I/O-bound and noisy
+(medians equal across runs, CPU unchanged). What remains is the encode,
+file and decode a native in-memory gather would remove.
+
 - **An action written to a path runs two more nexus processes.**
   [measured 2026-11-13, bench gather, load 1.0; remeasured 2026-11-14]
   An action given a path runs through orchestrate.rs `run`, which spawns a
