@@ -42,7 +42,7 @@ anonymous records, which pure nexus code, getters and views use.
 ### REC-5 Field access and update are getter and setter patterns
 Intent: proposed
 Tests: spec-rec-5-1, spec-rec-5-2, spec-rec-5-3, spec-rec-5-4, spec-rec-5-5, spec-rec-5-6, spec-rec-5-7, spec-rec-5-8
-Code: conforms 2026-11-01
+Code: deviates (issues/typecheck.md)
 
 `.f r` is the value of field `f` of `r`. `.(.f = e) r` is a new record equal
 to `r` except that `f` is `e`; `r` itself is unchanged. Naming a field the

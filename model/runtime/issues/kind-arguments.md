@@ -17,9 +17,12 @@ how kind arguments reach a native form.
   forms. They agree on the forms tested (row term, anonymous record, a
   form that drops the row); one slot-aware helper for all three is the
   general fix.
-- [read] Serial.hs `generalTypeToSerialAST'` (data arms, ~:2050): `zip
-  params ts` pairs only the `Left` parameters of a `data` declaration with
-  all its arguments, so a `data` with a specialized parameter misaligns
-  them; and the arms are erased before instantiation, so `data Box (n ::
-  Nat) = Box (Vector n Int)` may lose its dimension on the nexus path
-  (DIM-8), where the alias path substitutes first. Unreproduced.
+- [read] Serial.hs `appliedTypeToSerialAST` (data arms, :2007-2010):
+  `zipSame params ts` pairs only the `Left` parameters of a `data`
+  declaration (`dataDeclOfName`, Type.hs:348) with all its arguments, so a
+  `data` with a specialized parameter stops with the internal error
+  "morloc bug: paired lists differ in length" (Data/Zip.hs:43); whether a
+  general `data` declaration can carry one is not known. The arms are
+  erased before instantiation, so `data Box (n :: Nat) = Box (Vector n
+  Int)` may lose its dimension on the nexus path (DIM-8), where the alias
+  path substitutes first. Unreproduced.

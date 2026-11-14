@@ -10,10 +10,8 @@ morloc-runtime-types/src/packet.rs, FFI = morloc-runtime/src/packet_ffi.rs.
   `morloc_packet_size`) check every length against the packet's own header,
   not against the bytes the caller holds. Taking `(ptr, len)` is an ABI
   change (/work/plans/brittleness-2026-10-23/1-abi-bundle-proposal.md).
-- [read] RT:843-844 (`make_footer_packet`): a footer sets `offset = length = body length`, so the
+- [read] RT:841-842 (`make_footer_packet`): a footer sets `offset = length = body length`, so the
   generic size counts the body twice. Decide what the fields mean.
-- [read] `get_morloc_data_packet_value` rejects inline JSON that
-  `packet.rs::get_data_value` accepts.
 - [read] FMT-1: the `version` field is never read, and the header is written
   in host byte order though FMT-1 says little-endian.
 - [read, 2026-11-01] stream_format.rs `parse_stream_file` discards
@@ -29,13 +27,14 @@ morloc-runtime-types/src/packet.rs, FFI = morloc-runtime/src/packet_ffi.rs.
   one SHM block and there is no SHM realloc, so reading first means a
   copy of every large legitimate packet; needs a choice (bounded direct
   allocation, then staging past a size?).
-- [read 2026-11-02] daemon_ffi.rs `reply_reference` reads the data source
-  byte without checking the packet type or magic.
+- [read 2026-11-02] daemon_ffi.rs `reply_reference` reads the reply
+  through packet_ffi.rs `rptr_payload_of` (:937-949), which checks the
+  packet type and length but not the magic.
 - [read 2026-11-04] Metadata lengths still cast with `as u32`:
   packet_ffi.rs `new_metadata_size as u32` and `extended_offset as u32`
   (original metadata plus a frame index, as compression.rs's now-checked
-  one), compression.rs:965, cache.rs:1069, intrinsics.rs:191,
-  stream_format.rs:895. `meta_len_u32` is crate-private to
+  one), morloc-runtime-types compression.rs:965, cache.rs:1069,
+  intrinsics.rs:171, stream_format.rs:894. `meta_len_u32` is crate-private to
   morloc-runtime-types.
 - [read 2026-11-04] ipc.rs `read_packet` skips `offset - 32` bytes of
   metadata (offset is the metadata length: offset 0 underflows, offset 64

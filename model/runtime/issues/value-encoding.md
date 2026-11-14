@@ -10,11 +10,11 @@
   (REC-2 covers literals only): R writes a missing `?T` field as null, so
   that `x$f <- NULL` keeps working; Python raises a KeyError for any
   missing key. Which a foreign record value may do needs a ruling; deferred to the record work (user, 2026-11-12).
-- [read] morloc-runtime/src/mpack.rs:413-414: Int limbs copied to an
+- [read] morloc-runtime/src/mpack.rs:404-405: Int limbs copied to an
   unaligned cursor.
-- [read] mpack.rs:398-416: an 8-byte `bin` Int stores size 1 and a relptr,
+- [read] mpack.rs:397-405: an 8-byte `bin` Int stores size 1 and a relptr,
   which readers take as the inline value.
-- [read] voidstar.rs `headers` (~486): a shared-memory rebase sets an empty
+- [read] voidstar.rs `headers` (:479): a shared-memory rebase sets an empty
   array's data to the window's low end instead of keeping null; empty
   arrays have no canonical form.
 - **Python and R quiet signalling NaNs in `F32` scalars.** [read] Breaks
@@ -51,8 +51,8 @@
   54585374). `summarize :: Table n {state = Str, pop = Int} -> Int;
   summarize t = fold (+) 0 (getCol "pop" t)` with root-py, table-py and
   vector-py fails for every input, JSON included: "Expected int for
-  MORLOC_INT, but got numpy.int64" (pymorloc.c:890 py_size_step, the
-  `PyLong_Check` in the MORLOC_INT arm, unchanged since 139b83e1). Cause
+  MORLOC_INT, but got numpy.int64" (pymorloc.c:961 py_size_step and
+  :1408 in the writer, the `PyLong_Check` in the MORLOC_INT arm). Cause
   unknown: what changed is that the fold now yields a numpy scalar.
 - **Multi-limb `Int` overflow messages omit the value.** [reproduced,
   2026-10-21] Violates WIRE-3. Python `x * 2**70` into Rust `Int`:
@@ -61,8 +61,8 @@
   in 32-bit type". Single-limb messages name the value. Repro:
   /work/plans/model-audit-2026-10-21/repro/F/wire/w3.loc.
 - **Python reads a `Bool` byte through `*(bool*)`.** [read, 2026-10-21]
-  Violates WIRE-8. data/lang/py/pymorloc.c:1806 `PyBool_FromLong(*(bool*)
-  data)` is undefined on a byte other than 0 or 1; R (rmorloc.c:1618), C++
+  Violates WIRE-8. data/lang/py/pymorloc.c:1910 `PyBool_FromLong(*(bool*)
+  data)` is undefined on a byte other than 0 or 1; R (rmorloc.c:2148), C++
   and Rust compare a `uint8_t`.
 - **Packet landing is checked by convention, not by type.** [read,
   2026-10-21] `@load` and pool sidecar loads go through
@@ -72,8 +72,7 @@
   `voidstar::land_compressed_frames` and `read_binary_with_hint`
   still accept any schema, so a new caller can skip the check. A
   `CheckedSchema` value only the check can make would close that.
-  `packet::get_data_value` (pool IPC) and cache.rs's reads of cached
-  packets land without comparing schemas; a cache file is not trusted
+  cache.rs's reads of cached packets land without comparing schemas; a cache file is not trusted
   input. A packet with no schema entry is refused.
   `load_packet_file` opens a small file up to four times (header peek,
   each fast path, the read) and reads the header three times; one read of

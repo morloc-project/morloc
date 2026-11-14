@@ -32,12 +32,6 @@ literal and record gaps. Reproduced on 0.109.0 unless marked.
   `Frame {x = Int}`: "Cannot compare Rec expressions"). The tick form
   `['x]` works. Open: should `["x"]` at kind List be read as `['x]` or be
   rejected at the signature?
-- **Missing column found at code generation.** [reproduced] Violates TAB-3.
-  `oops = getCol "poop" census` (census a `Table 2 {state = Str, pop =
-  Int}`): typecheck gives `Vector 2 {state=Str, pop=Int}."poop"`; make fails
-  "The type of this term is not determined: nothing in the program fixes
-  'a'" at the export list, not naming the column. table/main.loc's comment
-  on getCol claims a compile-time error.
 - **Sort key checked at run time.** [reproduced] Violates TAB-3. `byPop =
   sortRows [("poop", False)] census` builds; `./sort byPop` fails "Invalid
   sort key column: No match for FieldRef.Name(poop)" and prints the whole
@@ -48,8 +42,7 @@ literal and record gaps. Reproduced on 0.109.0 unless marked.
   (`f :: (Member "q" (Keys r)) => Frame r -> Int` at `Frame {x = Int}`),
   `Disjoint: shared element(s) 'x'`. An overlap through `+` is located.
 - **Rejections located at the export list.** [reproduced] Violates DIAG-2
-  (location of the construct): every make-time failure above, and a list
-  or record table column (`t :: Table 2 {xs =
+  (location of the construct): a list or record table column (`t :: Table 2 {xs =
   [Int]}`, accepted by typecheck, refused by make), point at
   `main.loc:1:14`. See model/compiler/issues/typecheck-output.md.
 - **Exported method error.** [reproduced] Violates MOD-2 and MOD-10 in
@@ -64,14 +57,6 @@ literal and record gaps. Reproduced on 0.109.0 unless marked.
   fails "No instance found for Packable::pack / Are you missing a top-level
   type signature?" although one is present; `:: Vector 6 Real` on the list
   passes. Gap: SIG-4 open; the hint is wrong either way.
-- **Literal in a point-free section ignores a `Real` context.**
-  [reproduced] Violates LIT-2. `divTwo :: [Real] -> [Real]; divTwo = map
-  (2 /)` fails "expected: [Real] -> [Real], inferred: a Int -> a Int";
-  `divTwo xs = map (\x -> 2 / x) xs`, `half x = x / 2`, `w :: Real; w = 1`
-  and `[1, 0xff, 2.5] :: [Real]` all work.
-- Manual stale: the Packable mismatch error no longer prints compiler
-  internals, but types-custom-types.asc quotes the old message. [not
-  re-verified 2026-10-31]
 - **`@collect (psmap f (@next s))` leaves the element type unsolved.**
   [reproduced, 0.109.0] With `f :: Str -> Real`, `s :: IStream Str` and
   `import parallel-cpp`, `morloc make` fails "cannot serialize unknown type
@@ -120,18 +105,10 @@ literal and record gaps. Reproduced on 0.109.0 unless marked.
   name, worded backwards) carry no location (DIAG-2; /work/plans/model-audit-2026-10-21/repro/A/op/o8.loc,
   /work/plans/model-audit-2026-10-21/repro/A/mod/m2).
 - **Internal names in record and constructor errors.** [reproduced,
-  2026-10-21] `g p = .c p` on `record P {a, b}` fails "expected: a []
-  [(c, b)] ... Error in NamU with conflicting open keysets ... hint: 'P' is
-  a newtype"; it should name the missing field. `f x = match x | Foo = 1 |
+  2026-10-21] `f x = match x | Foo = 1 |
   (Bar n) = n` with no signature fails "'Foo' is not a constructor of
   *x`1560@1_x1" (SUM-6 (b) promises a request for a signature). Repro:
   /work/plans/model-audit-2026-10-21/repro/C/rec/getbad.loc, /work/plans/model-audit-2026-10-21/repro/C/sum/sum6.loc.
-- **A class obligation through a type alias is not covered.**
-  [reproduced, 2026-10-30, not bisected] With `type Model k v = [(k, v)]`,
-  `modelStep :: Ord k => ... ; ... without k xs <> [(k, v)] ...` fails
-  "This definition needs Semigroup (Model k Int) but its signature does
-  not declare it", though `[a]` has a Semigroup instance. Repro:
-  /work/tests/sumtypes/07-persistent-redblack/core/rbtree/main.loc:265.
 - **`let` signatures do not parse.** [reproduced, 2026-10-21] Gap in
   POLY-4, which rules `where` signatures: `let g :: a -> a` fails
   "unexpected '::'".
@@ -155,14 +132,6 @@ literal and record gaps. Reproduced on 0.109.0 unless marked.
   containers, so plain lists have no `++`. Gap in collections.md: no item
   says how lists are appended.
 
-- **An application through a type variable that stands for a function is
-  rejected.** [reproduced, 2026-10-27] Awaits APP-4 (open): under its
-  candidate (a), with APP-1 (`a -> b -> c` and `a -> (b -> c)` are one
-  type), it is well typed. `first2 :: [Int -> Int -> c] -> Int -> c` and
-  `d3 :: Int -> Int -> Int -> Int`: `first2 [d3] x 7` is refused with
-  "Invalid function application of type: [Int -> Int -> a] -> Int -> a",
-  while `apply1 (first2 [d3] x) 7` builds and runs. With `c = Int -> Int`
-  the three-argument application is well typed.
 - **Silent drops left in existential merging.** [read, 2026-11-01] Gaps
   under REC-5, COLL-7 and PAT-1, found reviewing 2617a9e4d; none reproduced
   as a wrong result. In Typecheck/Internal.hs:
@@ -181,21 +150,13 @@ literal and record gaps. Reproduced on 0.109.0 unless marked.
     is already solved;
   - the comment on `accumulatedRecords`' short circuit says merges write
     keys into the ExistG entry; no code does.
-- **A form's `$N` past the type-kinded arguments crashes codegen.**
-  [reproduced 2026-11-04] Violates DIAG-1. A list counted against the
-  form's own kind annotations can name more `$N` than the general
-  declaration's type arguments (an unannotated Nat parameter): Macro.hs
-  `expandMacro` calls `error`. Also a list that leaves out a phantom
-  parameter (`newtype Q a b = [b]`, `"std::vector<$1>" b`) fails "Could
-  not reduce type in broadest scope" with no form named.
+- **A native form that leaves out a phantom parameter names no form.**
+  [reproduced 2026-11-04] Violates DIAG-1. `newtype Q a b = [b]` with
+  `"std::vector<$1>" b` fails "Could not reduce type in broadest scope"
+  (CodeGenerator/Infer.hs:544) with no form named.
 - **`{x=?Int}` does not parse.** [reproduced 2026-11-02] `=?` lexes as one
   operator ("expected one of: '=', '::'"), and the typecheck printer writes
   `{x=?Int}`, which cannot be read back.
-- **A do-block's literal final ignores the expected payload type.**
-  [reproduced 2026-11-02] `f :: <IO> Real; f = do 2` fails "inferred <>
-  Int"; `do 1 + 2` too, while `do [1,2]` passes: a bare literal is
-  synthesized at once and there is no single-layer check rule for a do
-  block (briefs/B16-B17.md).
 - **A do-block final of unsolved type is not run.** [reproduced
   2026-11-02] `f = (\h -> do h 2) pyLog` against `<IO> ()` fails "inferred
   <> (<IO> Unit)": the block is built as a nested suspension. Same class as

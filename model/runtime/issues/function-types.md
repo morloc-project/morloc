@@ -4,7 +4,7 @@ How a function type's arrows group. APP-1 rules that `a -> (b -> c)` and
 `a -> b -> c` are one type; HOST makes grouping a property of a source.
 
 - [read] A docstring on a parenthesized result group is shown as the
-  return's (Docstrings.hs ~:207 pads or drops argument docs against the
+  return's (CodeGenerator/Docstrings.hs:200-201 pads or drops argument docs against the
   flat type). Needs a ruling on what such a docstring documents.
 - [read] Host call grouping is carried by nesting: when a source's type
   variable is instantiated to a function (`feed_split :: ((Int -> b) -> c)

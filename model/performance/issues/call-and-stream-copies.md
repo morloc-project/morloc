@@ -5,20 +5,13 @@ measurements on 2026-11-13 (load 0.6-2.1 unless noted; scratch programs
 under the session scratchpad agent-call/, agent-stream/, agent-chan/).
 None is scheduled.
 
-- **Every packet rebuilds its schema.** [read; measured] Building an
-  inline packet (packet_ffi.rs make_data_packet_with :1185 and its
-  siblings) runs CSchema::to_rust three times and schema_to_string once;
-  get_morloc_data_packet_value_from (:685) converts before it checks the
-  source, so a by-reference value pays for a schema it never uses.
-  Python and R parse the schema string on every put_value and get_value
-  (pymorloc.c:2820/2936, rmorloc.c:2470/2677); C++ parses once and its
-  inline read needs no conversion, but its put still converts three
-  times. Measured with an 8-field record: cpp->py 25.0 us for I64, 32.2
-  with a record argument, 38.2 with a record in and out; schema work is
-  about 3 us of each record crossing, 0.3 us on I64. Parse time jumps
-  between 7 and 8 fields (1.1 to 1.9 us, cause unknown). Fix: cache the
-  Rust Schema and the metadata block on the CSchema, filled eagerly
-  (ABI), and give Python/R schema handles.
+- **Every packet converts its schema.** [read] Building a packet
+  (packet_ffi.rs make_data_packet_with :1225) still runs CSchema::to_rust
+  once and schema_to_string once (build_schema_metadata_rs :213). R
+  parses the schema string on every put_value and get_value
+  (rmorloc.c:2470/2677). Parse time jumps between 7 and 8 fields (1.1 to
+  1.9 us, cause unknown). Fix: cache the Rust Schema and the metadata
+  block on the CSchema, filled eagerly (ABI), and give R schema handles.
 - **Mid-size inline values cost more than sending them by reference.**
   [measured] Per call, inline minus MORLOC_INLINE_SIZE=0: 1 KiB -1.1 to
   +0.9 us, 4 KiB +3 to +5, 16 KiB +7, 64 KiB +52 to +62 (about 20 us of
@@ -43,9 +36,9 @@ None is scheduled.
   catch R errors (R_tryCatchError) and re-raise after the call returns, since
   R_UnwindProtect only runs cleanup while the longjmp crosses the runtime.
 - **A channel write lands its buffer again.** [measured] flush_write_buffer_at
-  (stream.rs:3983-4020) copies the sealed buffer into a fresh landing,
+  (stream.rs:3987-4025) copies the sealed buffer into a fresh landing,
   shifts its records and relocates it, all under the slot lock; elements
-  larger than the buffer already skip it (stream.rs:4266-4285). A/B
+  larger than the buffer already skip it (stream.rs:4278-4299). A/B
   against the oversize path: 30-45 ms/GiB, 15-20% of a channel that only
   copies, 3% or less of a parsing pipeline. Channels come only from
   `@parse` over an IStream; their users are C++ readers in /work/tests.
@@ -54,8 +47,8 @@ None is scheduled.
 - **The whole-list gather still goes through a temp file.**
   (whole-list-gather.md) [measured] C++ and Rust @load of a stream file now
   decode each sub-packet in place (ENC-11: 1.74 against 2.33 s/GiB in one
-  build); the gather still costs 1.66 s/GiB over making the batches in C++
-  and 9.4 s/GiB in Python, the encode, custody, file and decode a native
+  build); the gather still costs 1.60 s/GiB over making the batches in C++
+  and 8.18 s/GiB in Python (2026-11-14), the encode, custody, file and decode a native
   gather would remove. Python @load of a list now decodes in place too
   (in-run A/B 6.81 -> 5.88 s/GiB, load 7), unless any part of the type
   reads as a NumPy array or an Arrow table, which could view a piece that

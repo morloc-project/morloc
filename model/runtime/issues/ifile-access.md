@@ -17,10 +17,10 @@
   `.[i]` result.
 - **`@open` of a missing file does not name it.** [reproduced, 2026-10-15]
   `@open p :: <IO> (Try Str (IStream a))` on a path that does not exist
-  returns `Err "IO error: No such file or directory (os error 2)"`; the
-  message carries neither the path nor the operation, so a program that
-  throws it reports an unplaceable error. Gap in model/runtime/streams.md:
-  no item says what an `@open` error states.
+  returns `Err "cannot open '<p>': No such file or directory (os error
+  2)"` (stream_format.rs:249); the message names the path but not the
+  operation (`@open` as an IStream or IFile). Gap in
+  model/runtime/streams.md: no item says what an `@open` error states.
 - **`@stdin` checks the element schema at the first `@next`.**
   [reproduced, 2026-10-21] Gap in STRM-1, which says a mismatch is an
   `Err` at open; for a pipe the schema arrives with the bytes. STRM-1 needs
@@ -51,18 +51,16 @@
   than the stream path.** [reproduced, 2026-11-08] There is no spec item
   yet; it is proposed as SLICE-1/2 in /work/plans/output-path-perf.
   mosm `cut 0:100000` on an IFile: 2.5 s and a 1.67 GB peak for 240 MB of
-  output; the same slice through stdin takes 0.9 s.
-  - `slice_runs` (stream.rs ~6975) locates every touched sub-packet before
-    it copies any. `copy_runs` then builds one result block, and the
-    binding decodes it whole.
-  - The generic route (a step other than 1, or a field tail) holds every
-    touched sub-packet for the whole walk, then `consolidate`s the parts,
-    a second copy.
+  output; the same slice through stdin takes 0.9 s. C++ and Rust unit-step
+  slices decode in place per sub-packet (SLOT-25); what remains:
+  - A Python or R slice: `slice_runs` (stream.rs:8108) locates every
+    touched sub-packet before it copies any, `copy_runs` (:8216) builds
+    one result block, and the binding decodes it whole.
   - SHM growth doubles (SHM-12), and volumes stay pre-faulted.
   - Peak per holder: to be measured (plan step 0); mosm bench/slice.sh.
 - **`_mlc_ifile_walk` may leak its block when decoding throws.**
   [speculative, 2026-11-08] `_mlc_ifile_walk` and `_mlc_stream_layout`
-  (data/lang/cpp/cppmorloc.hpp) call `shfree_cpp` only after
+  (data/lang/cpp/pool.cpp:895-927, :960-969) call `shfree_cpp` only after
   `from_voidstar` returns, so an exception skips the free. It is unknown
   whether the eval arena reclaims the block.
 

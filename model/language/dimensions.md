@@ -59,7 +59,7 @@ runtime check at that point.
 ### DIM-6 An open Nat equation is accepted when it has a solution
 Intent: ruled 2026-10-09
 Tests: spec-dim-6-1, spec-dim-6-2, spec-dim-6-3, spec-dim-6-4, spec-dim-6-5, spec-dim-6-6
-Code: conforms 2026-10-09
+Code: deviates (issues/kinds-dimensions.md)
 
 A Nat equation still open when inference ends, such as `n + m = 4` with
 `n` and `m` otherwise free, is accepted when it has a solution in the

@@ -24,15 +24,4 @@ from the shapes below]
 - The `effectfulLoop`/`returnEager` gate in addLoopWraps: [read, one probe,
   2026-11-02] it does fire for a nullary recursive `<IO>` value (the
   CallS-as-value fallback in Express.hs keeps EffectT); delete it only
-  after a nullary test passes, which two bugs below block
-  (briefs/B7-G4.md).
-- [reproduced 2026-11-02] A Python loop whose continue changes no carried
-  variable (`retry k = do {x <- tick k; ? x > 5000 = tick x : retry k}`)
-  is written with an empty `else:`; the pool fails to load
-  (IndentationError). `genericMakeLoop` drops unchanged slots and
-  `renderIf` writes an empty block.
-- [reproduced 2026-11-02, after hand-fixing the empty `else:`] A nullary
-  recursive `<IO>` value returned by an export fails "cannot reify a
-  callable that morloc did not create (None)": its serial entry wraps the
-  int result in `mlc_reify` with a closure schema. The non-recursive
-  equivalent works. Cause not traced.
+  after a nullary recursive `<IO>` test is in the suite.

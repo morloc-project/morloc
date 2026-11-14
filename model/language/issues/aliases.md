@@ -21,7 +21,7 @@
   ALIAS-13 first narrows the choice.
 - **A record literal's fields are checked at the record's full
   unfolding.** [read] Violates ALIAS-10. `checkE (NamS rs)`
-  (Frontend/Typecheck.hs, "C3: Record literal") checks each field against
+  (Frontend/Typecheck.hs:2621) checks each field against
   `TE.evaluateType` of the whole record type and returns that unfolding, so
   `?(Inner Str)` in a field is spelled as the expanded record. The TupS case
   beside it reduces one step and returns the written type. Reachable
@@ -39,6 +39,6 @@
   beside reduceAliasHead / subtypeEvaluated / reduceType arms with
   different stop sets and termination guards. filterByAliasChain is made
   finite by fuel rather than by lazy unfolding. No failing program known.
-- [speculative] Desugar.hs expandParseEntries (~4783): a `@parse` command
+- [speculative] Desugar.hs expandParseEntries (~4869): a `@parse` command
   whose return type is a function alias flattening to more parameters than
   there are argument docs may fail with an internal error. Not run.

@@ -38,21 +38,14 @@ preference, then size).
   implementation that is functional data (`handleOne`) and the language of
   a named lambda (`pinNamedLambda`), each by its own rule. One predicate
   both consult would keep them from drifting apart.
-- **A function argument that LambdaEval inlines is placed for where it is
-  built, not where it runs.** [read, 2026-10-25] A lambda argument is collapsed in its parent's
-  language, but `applyLambdas` (after collapse) substitutes an argument used
-  at most once at its reference, where the scorer priced it; a closure that
-  survives (used twice, forwarded to a recursion, put in a container) is
-  priced by the scorer as living where its body is cheapest, though it
-  lives where it is built. Reducing calls of single-lambda terms before
-  scoring (normalizePop1) cut the differences from 31 to 14 but broke
-  collapse's invariant that a lambda takes its builder's language
-  (closure-conformance `mkE "abcde"`). Candidate fix: collapse an inlined
-  argument at its reference site, and score a surviving closure's
-  references per build language, memoized on the bound tables.
-  Placement after normalization (Realize.hs `placeNormalized`) places the
-  inlined argument where it runs; the choice of implementation is still
-  made at the build site.
+- **A function argument that LambdaEval inlines has its implementation
+  chosen where it is built, not where it runs.** [read, 2026-10-25]
+  Placement after normalization (Realize.hs `placeNormalized`) places an
+  argument `applyLambdas` inlines where it runs, but the choice of
+  implementation is still made at the build site. Reducing calls of
+  single-lambda terms before scoring (normalizePop1) broke collapse's
+  invariant that a lambda takes its builder's language
+  (closure-conformance `mkE "abcde"`).
 - **A crossing recursion given both a function made by host code and a
   value its pool cannot hold is refused.** [reproduced, 2026-10-26] Such a
   recursion keeps its serial entry (Express.hs `allHeld`: callers of a
@@ -117,15 +110,9 @@ preference, then size).
   `Instances.nativeServes` lists root and vector modules of the four stdlib
   languages; a plugin's `root-foo` is a method use: correct output, but a pool
   where the ruling wants none, with nothing failing when a language is missed.
-- **An unapplied pattern passed as a function adds a wrapper call per element.**
-  [reproduced, 2026-11-06] pattern-getters: since a pattern is eta-expanded in
-  Treeify, generated Python is `morloc_map(lambda n: m(n), xs)` where it was
-  `morloc_map(m, xs)`. Same results, one more Python call per element. COST-1
-  does not see it; the printer could drop a lambda that only forwards.
 - **An argument computable in the caller is computed by a callback.**
-  [reproduced, 2026-10-23] A cut is a subtree (Express.hs, the cross-pool
-  AppS clause ~1674-1688, and the PatS clause ~1616, eta ~1714, expressContainer
-  ~2347): in `inc (dbl (inc x))` with `inc` in Python and `dbl` in C++, C++
+  [reproduced, 2026-10-23] A cut is a subtree (Express.hs `expressPolyExpr`: the
+  cross-pool AppS, PatS and eta clauses; `expressContainer`, Express.hs:2178): in `inc (dbl (inc x))` with `inc` in Python and `dbl` in C++, C++
   calls back into Python for the inner `inc x`, two round trips where one
   would do; `inc (add (inc x) (inc y))` takes three. A `where` value used
   only inside the foreign argument is placed there too. EVAL-1/2 permit

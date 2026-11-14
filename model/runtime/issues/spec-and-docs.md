@@ -16,14 +16,14 @@ code. Found by the 2026-10-21 audit [read unless marked].
   morloc-runtime-types packet.rs CommandData.generation). FMT-2 lists data bytes 13-17 only.
 - **SHM-6 does not say who zeroes a new block under poison.** Under
   MORLOC_SHM_POISON=1 a released block holds 0xDB; shcalloc relies on a new
-  block reading zero (shm.rs:1203), which holds because shmalloc_unlocked
-  zeroes when poisoning (shm.rs:1837). The rule states only the release
+  block reading zero (shm.rs:1288), which holds because shmalloc_unlocked
+  zeroes when poisoning (shm.rs:2002-2003). The rule states only the release
   side. Its test zeroes the freed block itself before checking that a new
   block reads zero, so that half proves nothing.
 - **Cited tests that do not test their rule.** SHM-1 cites
   `threads_allocating_together_never_share_a_block`, which never reads a
   count; `a_donated_reference_survives_the_sender_release`
-  (packet_ffi.rs:2310) asserts a count of 1 after shmalloc. STATE-3 cites
+  (packet_ffi.rs:2396) asserts a count of 1 after shmalloc. STATE-3 cites
   golden placement-representability, whose `rustCaptured` calls the
   capturing closure once on one thread. FORK-7 cites
   `a_fork_from_a_thread_holding_a_reset_lock_aborts`, a FORK-8 test
@@ -42,7 +42,7 @@ code. Found by the 2026-10-21 audit [read unless marked].
   and absent from environmental-variables.asc.
 - **arch-build-artifacts.asc:35-37** says a failed build leaves the
   previous build in place; false for ART-3's kill window and for a refused
-  rebuild (build-and-text.md). ProgramBuilder/Build.hs:333's "Atomically replace" comment
+  rebuild (build-and-text.md). ProgramBuilder/Build.hs:334's "Atomically replace" comment
   is false for the same reason.
 - **More cited tests that miss their rule.** [read, 2026-10-21] NET-3:
   `the_header_names_every_kind_as_the_runtime_does` and

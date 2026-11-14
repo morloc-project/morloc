@@ -5,7 +5,7 @@
   2026-10-10 failed
   `process::tests::the_sweeper_waits_for_a_group_to_end_then_sweeps_its_dead_run`
   at the `.unwrap()` on `Spawn::run` in its helper `start_group`
-  (morloc-nexus/src/process.rs:2132); five isolated reruns and one workspace rerun passed. The
+  (morloc-nexus/src/process.rs:2138); five isolated reruns and one workspace rerun passed. The
   error value was not captured; cause unknown.
 - **Reader slot test fails under the gate.** [reproduced once] Against
   SLOT-9. The full gate on 2026-10-11 failed
@@ -66,17 +66,6 @@
   Unconfirmed guess: a channel test holding the exclusive guard waits
   forever. gdb cannot attach in the container (no CAP_SYS_PTRACE); run the
   test binary as gdb's inferior and interrupt it to see every stack.
-- **Stream depth-share test may see other tests' writers.** [speculative,
-  from review] `streams_share_the_queue_bytes_and_keep_no_more_spares_than_their_depth`
-  (morloc-runtime/src/stream.rs) expects exact depths computed from the
-  process-wide list of hosted writers. A writer another test left open is
-  counted until it ends; the test waits up to 10 s for the depth to rise,
-  which covers writers that end, not one left open for the whole run.
-  Passed in every run so far (5 full lib runs, 2026-10-15).
-  Since d9b97d00 taking an exclusive guard reports and stops writers that
-  earlier tests left, and releasing one fails a test that leaves its own,
-  so a leaked writer no longer reaches this test; delete this entry if no
-  failure is seen.
 - **Bare-forked test children hold other tests' descriptors.** [read,
   one failure reproduced 2026-10-15] Spec gap: FORK-3 covers exec, not a
   fork without one. Tests fork without exec (`exits_cleanly_in_a_forked_child`,

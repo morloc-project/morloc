@@ -34,7 +34,7 @@ needs those values runs the work in another language.
 
 ### NUM-4 A value that does not fit is an error at the boundary
 Intent: proposed
-Code: conforms 2026-10-21
+Code: deviates (issues/values.md)
 
 When an integer crosses into a language whose type cannot hold it, the call
 fails. It is never truncated or wrapped.

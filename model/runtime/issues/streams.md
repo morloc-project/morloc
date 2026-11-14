@@ -28,15 +28,6 @@ here touch locks and ownership: model first.
   path finishes it (as the kernel dropping the flock allowed before).
   Should the custodian also finish it on its own when the opener is gone,
   at the cost of other live writers of the handle?
-- [measured] Possible speedup (SLOT-11): appending an element with
-  nested pointers (`[[Str]]`, optionals of arrays) walks the flattened
-  element to move its relative pointers to its place in the buffer
-  (stream.rs `append_one_element`). A `[[Str]]` element costs 305 ns, of
-  which flattening is 100 ns (stream_bench_string_elements with
-  BENCH_DEEP=1, 2026-10-12); a `Str` element, which skips the walk
-  (`shallow_array_slots`), 135 ns with 41 ns flattening. Flattening at the
-  buffer offset would drop the walk, about 80 ns per nested element, but
-  the flattener re-reads pointers it wrote, so every pointer write changes.
 - Open question (SLOT-16): a stdout write returns once its batches are
   queued, so raw text a pool prints to its inherited stdout while it streams
   to `@stdout` can land inside a frame; before, a single-threaded pool's
@@ -63,7 +54,7 @@ here touch locks and ownership: model first.
   call.** [read] Gap in SLOT-15 ("its path reopens at once" covers only a
   user close). A nexus-evaluated daemon request that leaves an OStream open
   has it closed by the call sweep after the reply is sent
-  (daemon_ffi.rs `sweep_call`), which does not wait for the writer
+  (stream.rs `sweep_call`), which does not wait for the writer
   (SLOT-19). A next request that opens the same path before the custodian
   has finished it fails: the custodian takes the file lock non-blocking
   (stream.rs `lock_stream_file`). Open: should an open of a path whose
@@ -81,11 +72,14 @@ here touch locks and ownership: model first.
   file, ~18 us more per `@next`, which reading ahead does not remove.
 - **`@next` errors carry their prefix twice.** [reproduced, 0.109.0]
   `./rs producer | ./rs checkSum` (rust-stdio golden) prints "@next:
-  @next: stdin ended after 23 byte(s) ...".
+  @next: stdin ended after 23 byte(s) ...". [read] rustmorloc lib.rs:3864
+  wraps in `format!("@next: {}", ...)` an error that stream.rs:2820-2821
+  already formats as "@next: {}". The C++, Python and R wrappers are
+  unchecked.
 - **The daemon's remote path sets no call id and runs no sweep.** [read]
-  Against SLOT-19. data/rust/morloc-runtime/src/daemon_ffi.rs:2434-2435 and
-  2527-2528 set and sweep a call id on the pure path only; the remote
-  branch (2529 on) does neither, and stream.rs:2530-2534 claims "the nexus
+  Against SLOT-19. data/rust/morloc-runtime/src/daemon_ffi.rs:2545-2546 and
+  2638-2639 set and sweep a call id on the pure path only; the remote
+  branch (2640 on) does neither, and stream.rs:2500-2502 claims "the nexus
   dispatch always pre-sets a call_id", which holds only there.
 - **A reader cannot tell a finished stream file from an unfinished one.**
   [reproduced 0.109.0, and read] Spec: SLOT-28 to SLOT-31 (streams.md,
@@ -98,11 +92,12 @@ here touch locks and ownership: model first.
   - No footer: `saveSource 0 p` of batches [1,2,3], [4,5], [6] writes 689
     bytes; with 300 bytes cut off, `@next` returns `Ok [[1,2,3]]`, `Ok
     [[4,5]]`, `Ok []`; with 500 cut, `Ok []` at once. Only a cut inside a
-    sub-packet header errors. Cause: stream_format.rs:112 forward-scans
+    sub-packet header errors. Cause: stream_format.rs:127-130 forward-scans
     when no footer parses.
-  - Final footer, FAILED: the status is parsed (stream_format.rs ~563) and
+  - Final footer, FAILED: the status is parsed (stream_format.rs:567-581) and
     never consulted, so a file whose writer died inside the slot lock reads
-    as a clean one. IFile opens it too (SLOT-30).
+    as a clean one. IFile opens it too (stream.rs:2170 checks only
+    `final_footer`; SLOT-30).
   - Temporary footer: written both while a stream is being written, when a
     reader may legitimately read it as it grows, and by a stream that will
     never change again (discarded without `@close` with its unflushed
@@ -187,25 +182,27 @@ here touch locks and ownership: model first.
   stack) would make each O(1).
 - **SLOT-28's table misstates where a PAUSED footer comes from.** [read,
   2026-10-21] The code writes a PAUSED footer (unflushed elements first)
-  from the daemon call sweep (stream.rs:5604-5630), a reopen after the
-  opener died (:3130), a stdio claim whose owner died (:2418),
-  `pool_reclaim_stdio_after_dispatch` (:5647), and stdout/stderr at the end
-  of a successful run (morloc-nexus main.rs:73-82). The table's one source,
+  from the daemon call sweep (stream.rs:6481, `sweep_matching`), a reopen
+  after the opener died (:3098, `finish_dead_openers_of`), a stdio claim
+  whose owner died (:2386, `try_reclaim_stale_stdio_claim`),
+  `pool_reclaim_stdio_after_dispatch` (:6517), and stdout/stderr at the end
+  of a successful run (morloc-nexus main.rs:76-83, `custody_finish`). The
+  table's one source,
   "a remote child returns the stream without @close", has no code path. So
   a stream left open by a daemon call ends PAUSED with its elements
   written, while at the end of a CLI run it is discarded (SLOT-13); SLOT-13
   and SLOT-19 give two endings without saying so.
 - **Idle slots per handle are capped at 16.** [read, 2026-10-21] Violates
-  SLOT-23 (one per processor): stream.rs:1098 `idle_slots_kept` clamps to
+  SLOT-23 (one per processor): stream.rs:1091 `idle_slots_kept` clamps to
   16. Speed only.
 - **SLOT-29 is silent on a present but corrupt footer.** [read,
-  2026-10-21] stream_format.rs `parse_stream_file` treats `Ok(None) |
-  Err(_)` alike, so a damaged footer, or a final footer whose sub-packet
-  index fails `check_subpacket_index`, silently falls back to a forward
-  scan; `@open` as an IFile then refuses it as unindexed, without the
-  reason. Belongs with the
-  SLOT-31 ruling. `MORLOC_WRITE_BEHIND_DEPTH=0` is clamped to 1 silently
-  (custody.rs:191).
+  2026-10-21] stream_format.rs `parse_stream_file` records a damaged
+  footer, or a final footer whose sub-packet index fails
+  `check_subpacket_index`, as `footer_damaged` and falls back to a forward
+  scan (:116-130); `@open` as an IFile then refuses it as "not cleanly
+  closed (no final footer)" (stream.rs:2170-2175), without the reason.
+  Belongs with the SLOT-31 ruling. `MORLOC_WRITE_BEHIND_DEPTH=0` is
+  clamped to 1 silently (custody.rs:193).
 - **The index walk reads every sub-packet.** [read, 2026-11-01] `@concat`,
   `@append`, and `@open` as an IFile in a debug build or with
   `MORLOC_VERIFY_INDEX=1` (SLOT-30), check a final footer's index against
@@ -229,12 +226,20 @@ here touch locks and ownership: model first.
   the body (stream.rs ~2803), the batch block it was handed is not
   released until the shared memory is torn down.
 - **R stream decoders leak their block when decoding raises.** [read
-  2026-11-13] rmorloc.c morloc_mlc_next (~3090), mlc_ifile_walk (~3059),
-  mlc_next_frame (~3127) and mlc_stream_layout (~3157) call from_voidstar
-  without the shm_tracker that morloc_mlc_load uses (~2806-2810): an R
+  2026-11-13] rmorloc.c morloc_mlc_next (3090), mlc_ifile_walk (3019),
+  mlc_next_frame (3117) and mlc_stream_layout (3142) call from_voidstar
+  without the shm_tracker that morloc_mlc_load uses (2809): an R
   error while decoding (an R allocation failure, R_TRY_READ outside
   runtime reads) leaks the SHM block and the parsed Schema;
   mlc_next_frame also leaks the block when parse_schema fails after the
   read. Violates SHM-4 (a reference is released once, by its holder): here
   it is never released.
+- **R `@next` and `@streamLayout` leak their parsed schema when the runtime
+  call fails.** [read, 2026-11-14] rmorloc.c morloc_mlc_next (3099-3100)
+  and morloc_mlc_stream_layout (3151-3152) parse the schema, then call
+  `R_TRY(mlc_next, ...)` / `R_TRY(mlc_stream_layout, ...)`; `R_TRY`
+  (rmorloc.c:113-117) raises the R error without freeing, so every failed
+  `@next` (end of a bad stdin, a closed handle) leaks one malloc'd Schema.
+  Parsing after the call, or `R_TRY_WITH(free_schema(schema), ...)`, frees
+  it.
 

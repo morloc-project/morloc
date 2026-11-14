@@ -17,7 +17,7 @@ fails loudly naming itself.
   against compiler/README.md ("stops with an internal error naming the
   item"). `grep 'TC-\|EBND-' library/` finds nothing; EBND-1/2 throw
   unnamed compiler bugs; only EMIT-3's missing return names its item, via
-  Haskell `error` (Imperative.hs:3112). EBND-3 states no checker and none
+  Haskell `error` (Imperative.hs:3349). EBND-3 states no checker and none
   exists (candidate: count `PolyEval` per path after insertion and after
   `lowerSuspensions`). Either the README rule becomes "items that have a
   checker", or each item gets one.

@@ -4,7 +4,8 @@ Each pool puts the runtime binder (rustmorloc, cppmorloc and the libmorloc
 C API, rmorloc, pymorloc) and its own generated names in the scope where
 user sources live, so a user file can collide with them. Spec gap:
 model/language/sources.md says nothing about which names a sourced file
-may use.
+may use. Python is the exception: each sourced file is its own module and
+calls are qualified (`__morloc_src_<name>.f`).
 
 - [read] Rust: sourced files are `include!`d at the crate root, where
   generated code still names the standard prelude (`Vec`, `Option`,
@@ -52,8 +53,6 @@ may use.
   except the twelve pool.R compiles at load (about 20 ms per pool start).
   Shipping the runtime as an installed R package would have R byte-compile
   its namespace once, at install.
-- Python files are isolated: each sourced file is its own module and calls
-  are qualified (`__morloc_src_<name>.f`).
 - [read, 2026-10-23] C++ declares no reserved prefixes or names in its
   lang.yaml, so SRC-6's build-time check covers nothing for C++: manifolds
   are `m<N>`/`m<N>_remote` (not the `__mm_` prefix), and the pool's macros
@@ -73,19 +72,16 @@ may use.
   `static const int BUFFER_SIZE = 8;`; a user template `to_voidstar` is
   called by the pool (better overload match) and aborts it (Bn-5); a
   crate-root `pub use Strand::*` with a `None` variant breaks every Rust
-  pool (Bn-6); generated C++/Rust locals (`__e`, `__o`, `arm`, `mlc_w`) are
-  outside every reserved prefix. Cpp.hs reads a manifold's id back from its
+  pool (Bn-6); generated C++ locals (`__o`, `mlc_w`) are outside every
+  reserved prefix. Cpp.hs reads a manifold's id back from its
   name (`MT.drop 1`, `manifoldIdOf`), so renaming manifolds needs the id
   passed through first. The C++ prefix needs a ruling (briefs/B14-B15.md).
-- [read 2026-11-02] Generated binders outside every reserved prefix, beyond
-  the four namers (`n<N>`, `s<N>`, `helper<N>`, `argNamer`): loop iterators
-  `i<N>` (Imperative.hs, all languages); R `mlc_clo` (lang.yaml
-  `ldPartialTemplate`); Rust `mlc_v<n>`, `mlc_c<n>_<k>`, `mlc_s<n>`,
-  `mlc_<n>_<j>`, `mlc_t<n>`, `__a<i>`, `__tup<u>`, `__arm<u>`, `__mlc_ca_*`
-  (`__mlc_` is not a Rust reserved prefix), `__n/__k/__s`, `_mlc_call`; C++
-  `e`, `mlc_r`, `__a<i>`. Users already source `mlc_*` names (goldens
-  string-encoding, native-morloc-3). The fix is one per-language local
-  namer through LowerConfig and a test that extracts every binder from
-  generated pool text and checks it is reserved; a namer-output test alone
-  misses these. Qualifying sourced calls instead fails in R (root-r sources
+- [read 2026-11-02] Generated binders outside every reserved prefix: R
+  `mlc_clo` (data/lang/r/lang.yaml:98 `ldPartialTemplate`); Rust
+  `mlc_<n>_<j>` (Rust.hs:594) and `__a<i>` (Rust.hs:1127, :1319); C++
+  `e` (Cpp.hs:1466), `mlc_r` (:2436) and `__a<i>` (:2034). Users already
+  source `mlc_*` names (goldens string-encoding, native-morloc-3). The fix
+  is the per-language local prefix (LowerConfig `lcLocalPrefix`) for these
+  too, and a test that extracts every binder from generated pool text and
+  checks it is reserved; a namer-output test alone misses these. Qualifying sourced calls instead fails in R (root-r sources
   base `c`, not in the global environment) and for Rust prelude names.

@@ -39,7 +39,7 @@ a signature, never a language-native name.
 
 ### INTR-5 `@version`, `@compiled` and `@datafile` are fixed when the program is built
 Intent: proposed
-Code: conforms 2026-10-21
+Code: deviates (issues/values.md)
 
 `@datafile p` is the installed location of data file `p`, or `p` unchanged
 when the program is not installed.

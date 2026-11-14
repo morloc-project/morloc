@@ -6,13 +6,13 @@
 - [reproduced] Undeclared JSON column typed from its first value:
   `[{"u":1},{"u":2.5}]` -> "Expected integer" (arrow_ffi.rs
   `discover_json_columns` keeps the first sample).
-- [reproduced] `?(?Int)` column compiles, fails at run time (Serial.hs:748
-  vs arrow_shm.rs:212-221).
+- [reproduced] `?(?Int)` column compiles, fails at run time (Serial.hs:830-831
+  `isArrowColumn` vs arrow_shm.rs:217-226 `declared_inner`).
 - **Tensor dims unchecked.** [reproduced] Violates DIM-3. Only the flat
   length is checked against a static product. `Matrix 2 2` accepts dims
-  (1,4); C++ wraps negative dims (lib/stdlib tensor-cpp/tensor.hpp:328,
-  :366); Python reshape infers -1 (tensor-py/tensor.py:66-68); R `array()`
-  recycles or truncates (tensor-r/R/tensor.R:38-41).
+  (1,4); C++ wraps negative dims (lib/stdlib tensor-cpp/tensor.hpp:333,
+  :371); Python reshape infers -1 (tensor-py/tensor.py:70-72); R `array()`
+  recycles or truncates (tensor-r/R/tensor.R:36-39).
 - Contradicts TAB-1: only the row count is erased; columns travel and are
   checked. TAB-5/TAB-6 open: `morloc typecheck` accepts a list column that
   `make` rejects; row counts are never checked.

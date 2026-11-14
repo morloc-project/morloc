@@ -10,15 +10,15 @@ Waiting on a ruling:
 - features-patterns.asc:22-27 teaches "anonymous record types"
   (`pts :: [{x = Int, y = Int}]`); whether they stay depends on the
   decision in records.md.
-- features-records.asc:33-34, 161 write `record Py => Person = "dict"` and
+- features-records.asc:43-44, 172-173 write `record Py => Person = "dict"` and
   `record R => Person = "list"` in every example; NATIVE-5 is open, and a
   record literal currently needs them (records.md).
 - SRC-4 open: features-source.asc says backtick names are emitted verbatim,
   any two-argument infix operator, against SRC-1's name check.
 - CLI-4 open: cli-reference.asc:56 documents `@default <json>`;
   cli-parameterization.asc:278 writes `@default dot` for a `data` argument.
-- ANN-6 open: runs-logging.asc:82 says `{lang}` is "the pool language"; its
-  example shows `cpp` for a Python function, explained by caller-side timing.
+- ANN-6 open: runs-logging.asc:89 says `{lang}` is "the pool language"; its
+  example (:398) shows `cpp` for a Python function, explained by caller-side timing.
 - EVAL-5, EVAL-6 open: features-where.asc:132-135 says a value used in a
   lambda is computed "when the lambda is built", and an unused `let` "still
   runs where it is written" while an unused `where` never does (the code
@@ -28,8 +28,9 @@ Waiting on a ruling:
 - SUM-4 vs ALIAS-7: features-sum-types.asc:396-425 says records or aliases
   alone never close a cycle; a guarded self-recursive alias or record builds
   (records.md).
-- BASE-5 open: features-strings.asc NUL section says `size` counts bytes; in
-  Python and R it counts code points (values.md).
+- BASE-5 (ruled 2026-11-08: `size` counts characters): features-strings.asc:193
+  still says "Five bytes". No longer waits on a ruling; the wording waits on
+  the C++/Rust `size` fix (values.md).
 - NUM-9 open: features-floats.asc type table calls `Real` language-dependent;
   every language uses a double.
 - DOC-1/DOC-3: cli-docstrings.asc's attachment table has no `newtype` row; a
@@ -48,4 +49,9 @@ Deferred, needs a new example:
 - features-modules.asc gives Python startup as 132 ms (recorded xl-calls
   data suggests about 58 ms); re-measure before changing.
 - features-intrinsics.asc does not document `@streamLayout`, which is
-  user-reachable (Namespace/Expr.hs:736); decide whether it is public.
+  user-reachable (Namespace/Expr.hs:558, :749); decide whether it is public.
+- deploy-eval.asc:121-122 says that on the default loopback bind eval needs
+  no token. [read, 2026-11-14] The code locks eval whenever no token is set
+  and no waiver is given, whatever the bind (morloc-nexus/src/mcp.rs:2043-2045
+  `eval_needs_token`; daemon `eval_refusal`, daemon_ffi.rs:1453). IFACE-13
+  sides with the code (interfaces.md, eval entry); the manual needs fixing.

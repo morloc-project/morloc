@@ -13,12 +13,13 @@ erased; no item says how the lowered IR marks a ground row's kind.
 - [read] Walks that still read a ground row as a record (harmless today,
   since a row holds only primitive, Str and optional columns): EffectBoundary
   `hostRecords` collects `@REC`; the Nexus glossary emits an `@REC` entry
-  its filter then drops; C++ `collectCppTypes` writes no static_assert for
-  any typed table; Grammars/Common.hs `collectRecords` walks a row's
+  its filter then drops (Nexus.hs:2052); Grammars/Common.hs `collectRecords` walks a row's
   fields (it collects only generated `"struct"` records); Serial.hs
   `runtimeTs` and its tuple-arity check count a ground row as a runtime
-  type. The collectors that emit code decide through
-  CodeGenerator/ValueArgs.hs; these do not.
+  type. The collectors that emit code read the `RowK` tag Infer.hs:801
+  `retagArg` sets from CodeGenerator/ValueArgs.hs; these walk the `Type`
+  form, where `argOf` (Namespace/Type.hs:1089) still makes a ground row a
+  record.
 - [read] Cpp.hs showDefType counts a ground row as a `$N` type argument:
   it renders a `Type` whose head is the concrete name, so it cannot read
   the declared kinds as the other `$N` sites do. Left for the native-form

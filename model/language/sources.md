@@ -85,7 +85,7 @@ the build.
 
 ### SRC-8 A program refuses to run a sourced file that changed after its build
 Intent: ruled 2026-11-01
-Code: conforms 2026-11-01
+Code: deviates (../runtime/issues/build-and-text.md)
 Tests: spec-src-8-1, spec-src-8-2, spec-src-8-3
 
 A pool of a language that loads its sources when it starts (Python, R)

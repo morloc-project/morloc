@@ -108,8 +108,7 @@ comparable with `dd` until both sync or neither does. [inferred]
 
 For pairs the write path walks each value about six times: C++ size and
 write walks, Rust size walk, flatten, shift (`append_one_element`), and the
-custodian's compaction shift. (A stdout stream adds one more copy in
-`send_stdio`, custody.rs:796-799.)
+custodian's compaction shift.
 
 ## Solutions
 
@@ -118,14 +117,10 @@ No type or API change, each measurable alone:
 - **S0. Measure first.** Run once with `WORKDIR` on tmpfs and once with
   `dd conv=fdatasync` (or time `@close` separately); print `ru_minflt`
   (measure.py already calls `getrusage`); report the median of 5 runs.
-- **W3. Encode in place.** Done for writes to an output stream (SLOT-36,
-  SLOT-37) from C++, Rust, Python lists, and R lists and character
-  vectors: copies 1 and 2 and the runtime's append walk are gone there.
-  Measured on the 600 MiB bench at level 0: C++ pairs 1.60 -> 1.22 s, Rust
-  pairs 1.96 -> 1.61 s, Python bytes 2.89 -> 2.79 s; R strings (560 MB)
-  2974 -> 2388 ms. numpy, bytes, R atomic vectors, and every staged,
-  channel and table write take the copy path described above (numpy in
-  place was measured slower and dropped).
+- **Writes left on the copy path.** Output-stream writes are encoded in
+  place (SLOT-36, SLOT-37) except numpy, bytes, R atomic vectors, and
+  every staged, channel and table write, which take the copy path above
+  (numpy in place was measured slower).
 - **R2.** Decompress into a reused, bounded private buffer and decode in
   payload space (with R1's callback), skipping the shared-memory block
   and its scrub. A thread-local buffer needs a STATE-1 registry row.
@@ -180,7 +175,7 @@ Not acceptable: a non-owning `std::span` justified by "the parameter is
 `const&` and never escapes". The compiler cannot see what sourced C++ does
 with a reference; it would be an unchecked lifetime claim.
 
-Order: S0, W3 (model first), R2; then A for C++ records and B for Rust.
+Order: S0, R2; then A for C++ records and B for Rust.
 Whether writes approach `dd` depends on the sync share, unmeasured.
 
 ## An in-place batch smaller than the buffer holds a sealed buffer [measured]
@@ -206,10 +201,9 @@ change).
 - Count passes rather than time them where possible: minor-fault counts
   and a copy counter like the existing `cpp-copy-count` golden; each fix
   measured alone with a runtime-bench `BENCH_LABEL`.
-- Goldens for R1: a decode exception leaves the claim released; a file
-  truncated during a read fails no worse than today (today's landing
-  memcpy has the same SIGBUS exposure); several readers of one stream
-  still see every sub-packet once.
+- Goldens for R1: a file truncated during a read fails no worse than
+  the landing memcpy (same SIGBUS exposure); several readers of one
+  stream still see every sub-packet once.
 
 ## Open
 
@@ -233,7 +227,8 @@ and close); W3's risks; W4 rejected; B's safety claim narrowed; mapping
 faults and allocator faults added; a measurement step first.
 - **A C++ IFile slice misses its 1.5x goal against @next.** [measured,
   2026-11-12] ENC-9: the in-place slice (SLOT-25) runs at 1.6-2.1x the
-  @next loop in C++ (Rust 1.15-1.7x), down from 5.4x. Not yet profiled;
-  candidates: the scratch-vector decode and move-append for non-bulk
-  elements in `mlc_append_from_voidstar`, page faults on first touch of
-  each piece (MADV_WILLNEED), and the compressed pieces' SHM landing.
+  @next loop in C++ (Rust 1.15-1.7x). The unit-step miss is first touch
+  of the result vector (165k faults per 600 MiB), not a copy
+  (call-and-stream-copies.md); other candidates: the scratch-vector decode
+  and move-append for non-bulk elements in `mlc_append_from_voidstar`,
+  and the compressed pieces' SHM landing.

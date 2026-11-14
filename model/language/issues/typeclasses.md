@@ -112,13 +112,6 @@
   separately: `sort` at `newtype Z = Real deriving (Eq, Ord)` in Python
   gives [0,-0,1] (derived order is totalOrder). Open: rulings Q4/Q6 in
   /work/plans/error-clusters/s2-rulings.md. Fixed by CLS-21's classes.
-- **map-py and map-cpp have no `Map Str val` head for a `pack` use.** [read
-  2026-11-05] map-r/main.loc:35 declares `Packable [(Str, val)] (Map Str
-  val)` with R implementations only. Language plays no part in a use's
-  selection (CLS-16), so a use of `pack` selects it at `Map Str v` in Python and
-  C++ too, which then depend on the unruled CLS-12 fall-through to map's general
-  head. Ruled fix 2026-11-06: map-py and map-cpp declare the Str head too.
-
 - **A signed term's class constraints cannot be instantiated when its
   signature binds a label.** [reproduced 2026-11-05, latent] Typecheck.hs
   `signatureConstraints` instantiates the signature with `instantiateAll`
@@ -195,3 +188,13 @@
   gives" it, though every program that imports a language module compiles. root
   declares `Integral` at every numeric type for this reason; the conversions
   could be declared there the same way.
+- **`Ord` does not give `Eq`.** [reproduced, 2026-11-14] Spec gap in CLS-15,
+  which declares both classes in `internal` but does not say whether `Eq` is
+  a superclass of `Ord`. `class Ord a` has no superclass
+  (lib/stdlib/internal/main.loc:44). So `neq :: Ord a => a -> a -> Bool;
+  neq x y = x != y` is refused with "needs Eq a but its signature does not
+  declare it (... give Ord a)". The same refusal hits
+  /work/tests/sumtypes/07-persistent-redblack/core/rbtree/main.loc:265:
+  `modelStep :: Ord k =>` calls `without :: Eq k => ...`. Ruling needed:
+  either `Ord` takes `Eq` as a superclass, or such signatures must name
+  both classes and that test changes.

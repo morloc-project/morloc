@@ -4,16 +4,18 @@ BASE-5 is ruled (2026-11-08): a `Str` is valid UTF-8 text. FMT-10 holds
 the runtime's rule. What remains:
 
 - **Some text conversions in the nexus and daemon are lossy.** [read,
-  2026-11-08] `cli_token_to_json` (morloc-nexus dispatch.rs ~567), the
-  top-level error text (~1291), daemon `result_json` (daemon_ffi.rs ~1304)
-  and a forked call's stdout (~1659, ~1725) use `to_string_lossy`. Their
+  2026-11-08] `cli_token_to_json` (morloc-nexus dispatch.rs:568), the
+  top-level error text (dispatch.rs:1296, daemon_ffi.rs:2060
+  `top_level_err`), a daemon reply's error text (daemon_ffi.rs:1351
+  `envelope`) and a forked subcommand's output (daemon_ffi.rs:1812, 1844
+  `classify_failed_command`) convert lossily. Their
   input is text the renderers produced, which is UTF-8 by FMT-10, except
   in a program built with `--unsafe-skip-utf8-check`, where invalid bytes
   are replaced silently. Make them strict, or document the opt-out's
   reach.
 - **Python's decode error names no producer.** [reproduced, 2026-11-08]
   A Str that reaches Python unchecked (only with the opt-out) fails with
-  "'utf-8' codec can't decode byte 0xff in position 2" from pymorloc.c ~2937,
+  "'utf-8' codec can't decode byte 0xff in position 2" from pymorloc.c:2016,
   naming the position but not the language that made it.
 - **Perf: the header fast path resolves each Str separately.**
   [read, 2026-11-08] `RebaseWalk::headers` (voidstar.rs) now resolves and
@@ -32,6 +34,3 @@ the runtime's rule. What remains:
   and write passes of the R encoder each call `r_str_utf8`, so a latin1 or
   native-locale string is converted twice, both copies held until the call
   returns.
-- **Perf: an IFile field walk infers its result schema twice.** [read,
-  2026-11-09] `shared_ifile_general` (stream.rs) calls `infer_chain_schema`
-  for the text check, and `walk_into_fresh` calls it again.

@@ -16,11 +16,17 @@ Details and evidence: /work/plans/runtime-audit-2026-10-10/C-processes.md.
   so each request pays a TCP connect, accept and close. The soak client in
   test-suite/daemon-tests says its requests ride persistent connections and
   exercise the keep-alive path; there is none.
-- [read] FORK-3 gap on non-Linux: accept and pipe set close-on-exec in a
-  second step (runtime-types fd.rs ~80-83, rmorloc.c mlc_accept_nonblocking and
-  mlc_pipe_cloexec), so a fork-and-exec in another thread can inherit the
-  descriptor. Live on macOS today. Open: macOS has no atomic form; a fork
-  gate held across the two steps would block forks behind a blocking accept.
+- **On macOS a descriptor is not close-on-exec from birth.** [read]
+  Against FORK-3 and NET-7. On non-Linux hosts morloc-runtime-types fd.rs
+  `pipe` (:14), `socket` (:38), `socketpair` (:51), `accept` (:75) and
+  `accept_nonblocking` (:90) set `FD_CLOEXEC` in a second step. A process
+  spawned by another thread in between (Rust's `Command` uses
+  `posix_spawn`, which runs no fork handlers) inherits the descriptor; for
+  a caller's connection the fork count `connect_to` checks does not see
+  it, so the connection may be kept, and its C++ or Rust callee then waits
+  on it until that process exits. Open: macOS has no atomic form; a fork
+  gate held across the two steps would block forks behind a blocking
+  accept.
 - [speculative] On macOS a connect to a full listen backlog (128) fails
   with ECONNREFUSED instead of blocking; `connect_to` then retries for at
   most 30 s (ipc_ffi.rs), a deadline on a pool call (DAEMON-6). Matters
@@ -32,14 +38,6 @@ Details and evidence: /work/plans/runtime-audit-2026-10-10/C-processes.md.
   while a copy of its descriptor lives on, or `connect` to a full backlog,
   blocks in the kernel and never reaches `send_parts`' once-a-second
   `Peer::alive` check. Only the reply read is liveness-checked.
-
-- **On macOS a socket is not close-on-exec from birth.** [read 2026-10-15]
-  Against FORK-3 and NET-7. `morloc_runtime_types::fd::socket` sets
-  `FD_CLOEXEC` after `socket()` on non-Linux hosts. A process spawned by
-  another thread in between (Rust's `Command` uses `posix_spawn`, which
-  runs no fork handlers) inherits a caller's connection; the fork count
-  `connect_to` checks does not see it, so the connection may be kept, and
-  its C++ or Rust callee then waits on it until that process exits.
 
 - **A connection made across a fork leaves the child a socket nobody
   closes.** [read 2026-10-15, from review] NET-7. When a fork lands between
@@ -87,7 +85,7 @@ Details and evidence: /work/plans/runtime-audit-2026-10-10/C-processes.md.
   [measured with strace, 2026-11-13] Per cpp->py call: 2 poll, 3
   recvfrom, 2 sendmsg; the extra poll is the reply wait
   (ipc_ffi.rs:783-787) and the extra recvfrom is the MSG_PEEK on the held
-  connection in the callee (fork_pool.rs:509; pool_ffi.rs:425 reads
+  connection in the callee (fork_pool.rs:513; pool_ffi.rs:424 reads
   directly and treats a closed peer as Closed). Removing the peek and the
   caller's reply poll gives 5, not 4: the callee's poll multiplexes the
   listener, the held connection and the lifeline. Est. 0.5-1 us per call;
@@ -98,16 +96,6 @@ Details and evidence: /work/plans/runtime-audit-2026-10-10/C-processes.md.
 - **Generated callers rebuild the socket path on every call.** [measured,
   2026-11-13] Python calls os.path.join per call (0.28 us); C++
   foreign_call_v builds a std::string per call.
-- **A Python worker grows and trims its heap twice per call near 64 KiB.**
-  [measured with strace, 2026-11-13] At 8000 Reals (64 KiB, inline) a
-  py->cpp loop makes 2050 brk calls per 1000 calls, all in the Python
-  worker: four ~64 KiB buffers are live at once, so glibc trims ~188 KiB
-  each time. Cause [read 2026-11-13]: Python and R fork pools never call
-  tune_allocator (pool_ffi.rs:654, called only from pool_main), which C++
-  and Rust pools use. Measured with MALLOC_TOP_PAD_=1M
-  MALLOC_TRIM_THRESHOLD_=4M: py->cpp 64 KiB 163-174 -> 127-136 us (-36 us);
-  none at 16 KiB. Fix planned (/work/plans/output-path-stages.md stage 3,
-  4 MiB pad ruled 2026-11-14).
 - **Every R pool leaves an `Rtmp*` directory in /tmp.** [reproduced
   2026-11-14] One run of any program with an R pool adds one empty
   `/tmp/RtmpXXXXXX` (R's per-session temp dir): the pool ends without R's

@@ -35,8 +35,8 @@ on 0.109.0 unless marked.
   leaves a set of tuples or records in the order it was built, since R has
   no ordering of them that matches C++ and Python, so `@hash` and `@eq` of
   equal `Set (Int, Str)` values built in different orders can differ.
-  [reproduced 2026-11-02, briefs/A5-B4.md] Also `Set ?Int` with a NULL.
-  Needs a ruling beyond the set-r sort: `Set (Set Int)` (the outer unpack
+  [reproduced 2026-11-02, briefs/A5-B4.md] set-r/R/set.R:30-37
+  `morloc_unpackSet` returns any non-scalar set unsorted. Needs a ruling beyond the set-r sort: `Set (Set Int)` (the outer unpack
   runs before the inner ones, so it sorts unsorted lists) and `Set Color`
   from an R source returning the enum as character (sorted by name, not
   tag) cannot be ordered without the element schema. Options: give
@@ -70,17 +70,10 @@ on 0.109.0 unless marked.
   reaches the decoder. Seen with Python `List U8 = "bytes"`, now refused by
   NATIVE-7; R's `List U8 = "raw"` works only because rmorloc routes every
   U8 array to raw.
-- **Comparison on `data` with fields.** [reproduced] Violates SUM-5.
-  `data Shape = Circle Real | Rect Real Real | Dot`, `lt a b = a < b`,
-  `eq a b = a == b`. Python is correct. R: `==` works, `<` fails at run
-  time "comparison of these types is not implemented" (root/main.loc:28).
-  C++: `==` and `<` fail to build (root-cpp core.hpp:682, :687, `morloc_le`
-  and `morloc_eq`: "no match for operator<=/operator==" on `Shape`). Enum-only `data Color = Red | Green |
-  Blue` works in all three.
 - **Table column sum fails in Python.** [reproduced] Violates WIRE-1.
   Census table built with `addCol`; `summarize t = fold (+) 0 (getCol "pop"
   t)` fails for CSV, Parquet, inline JSON and stdin input: "Expected int for
-  MORLOC_INT, but got numpy.int64" (pymorloc.c:890, py_size_step; still so on 0.110.1). The
+  MORLOC_INT, but got numpy.int64" (pymorloc.c:960-963, py_size_step: MORLOC_INT requires PyLong_Check). The
   manual shows `54585374`.
 - **No rule forbids a sourced function mutating its argument.** [read] A
   gap in EVAL-7. In Python a morloc value read twice is one shared object,
@@ -95,7 +88,7 @@ on 0.109.0 unless marked.
   "pathlib.Path"`, Py `mk :: Str -> Path` returning `pathlib.Path(s)`, Cpp
   caller `u s = unpack (mk s)`: builds with no warning; running `u
   notes.txt` fails "Expected str or bytes for MORLOC_STRING, but got
-  PosixPath (pymorloc.c:929)". Repro: /work/plans/model-audit-2026-10-21/repro/B/t/n7/c2.loc.
+  PosixPath (pymorloc.c:1000)" [reproduced 2026-11-14]. Repro: /work/plans/model-audit-2026-10-21/repro/B/t/n7/c2.loc.
 - **An unmapped record passed to a sourced C++ function does not compile.**
   [reproduced, 2026-10-21] Violates NATIVE-4; contradicts NATIVE-3.
   `record P where x :: Int; y :: Real`, no `record Cpp =>`, sourced
@@ -117,14 +110,21 @@ on 0.109.0 unless marked.
   (R drop-index); an `[Int]` fails "Cannot pack NA or NaN into MORLOC_INT".
   C++ `.[5]` on 3 elements returns garbage (`1`); `.[-1]` on `[]` is
   SIGSEGV. Python and the nexus raise "index out of range"; Rust throws.
-  Cause: root-cpp core.hpp:72-77 `morloc_at` has no bound check; root-r
-  R/core.R:207-216 adds `length(xs)` and indexes `xs[i + 1]`. Repro:
+  Cause: root-cpp core.hpp:73-78 `morloc_at` has no bound check; root-r
+  R/core.R:224-234 adds `length(xs)` and indexes `xs[i + 1]`. Repro:
   /work/plans/model-audit-2026-10-21/repro/C/coll/i-r.loc, /work/plans/model-audit-2026-10-21/repro/C/num/get-cpp.loc.
+- **The C++ `Deque` overload of `morloc_at` wraps no negative index and
+  checks no bound.** [read, 2026-11-14] Latent COLL-3 violation. root-cpp
+  core.hpp:591-593 returns `xs[*oi]`, so index -1 reads `xs[-1]`
+  (undefined behaviour), where the vector overload (:73-78) wraps
+  negatives. No program reaches it today: no stdlib module declares
+  `Indexable Deque` (only `Indexable List`, root-cpp main.loc:196-197).
+  Fix it with the vector overload, or delete it.
 - **`size` of a `Str` counts code points in Python and R, bytes in C++ and
   Rust.** [reproduced, 2026-10-21] Violates BASE-5, ruled 2026-11-08: a
   `Str` is text and its length is in characters (bytes belong in
   `Vector n U8`). C++ `morloc_size` is `x.size()` (root-cpp/core.hpp:331),
-  Rust `String::len` (root-rust/core.rs:240). Every stdlib `Str` operation
+  Rust `String::len` (root-rust/core.rs:239-241). Every stdlib `Str` operation
   (index, slice, take, drop, reverse, split positions) needs the same
   audit (COLL-3). `slen s = size s` on U+00E9: 1 in py and r, 2 in
   cpp and rust. Repro: /work/plans/model-audit-2026-10-21/repro/C/num/, /work/plans/model-audit-2026-10-21/repro/C/lit/nul.loc.
@@ -154,24 +154,21 @@ on 0.109.0 unless marked.
   ?a` at `[?Int]` on `[null, 2]`: a C++ `isNull` of the result is false,
   Python's true (OPT-7); spec-opt-7-1 leaves the C++ form out for this.
 - **R integer rules with no item.** [reproduced, 2026-10-21] The
-  2026-10-16 R integer ruling makes `[U8]` an R `raw` and truncates
-  fractional doubles at integer slots; no item records either.
+  2026-10-16 R integer ruling truncates fractional doubles at integer
+  slots; no item records it.
 - **Number rules with no item.** [reproduced, 2026-10-21] Gaps in
   numbers.md.
   - Real division by zero: `1.0 / 0.0` is `inf` in cpp, r and rust, an
     error "float division by zero" in py (likewise `//`). Candidates: IEEE
     everywhere; failure everywhere; stated per language.
   - Real `%` is floored in all four (`-7.0 % 2.0` is `1`) but in no item.
-  - `x :: Int; x = 3000000000 + 1` under root-cpp builds and prints
-    -1294967295: NUM-5 does not say whether an `Int` literal is checked
-    against `[[Int]]_L` of its realization (/work/plans/model-audit-2026-10-21/repro/C/lit/intc.loc).
   - Map pair order: py and r keep insertion order, cpp sorts by key. Is
     order part of a map's value (COLL-5 covers repeated keys only)?
 - **R overflow message names the wrong R type for `Int`.** [reproduced,
-  2026-10-21] data/lang/r/rmorloc.c:1759-1763 (array) and :1920-1924
+  2026-10-21] data/lang/r/rmorloc.c:2069-2074 (array) and :2232-2235
   (scalar): a multi-limb `Int` arriving in R fails "does not fit in R's
   numeric type (max 2^53 ...)"; `[[Int]]_R` is R integer, as the
-  single-limb branches (:1767-1770, :1915) say.
+  single-limb branches (:2076-2081, :2225-2227) say.
 - **`@schema` and `@typeof` evaluate their argument.** [reproduced,
   2026-10-21] Violates INTR-4. `schemaBoom x = @schema (boom x)` with a
   raising Python `boom` fails "run failed / boom". features-intrinsics.asc:
@@ -203,4 +200,7 @@ on 0.109.0 unless marked.
   `source Cpp from "h.hpp" ("ident")`, `ident :: [I8] -> [I8]`,
   `f :: Int -> [I8]`, `f n = ident [300, 1]`, with h.hpp defining
   `inline std::vector<int8_t> ident(const std::vector<int8_t>& x){ return x; }`;
-  `./nexus f 1` prints `[44,1]`.
+  `./nexus f 1` prints `[44,1]`. Likewise `x :: Int; x = 3000000000 + 1`
+  under root-cpp builds and prints -1294967295
+  (/work/plans/model-audit-2026-10-21/repro/C/lit/intc.loc). No literal
+  fit check exists; CppPrinter.hs:73 emits `static_cast<T>(i)`.

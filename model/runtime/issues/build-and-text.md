@@ -14,24 +14,30 @@
 - Stale text: `morloc-nexus --help` says launchers pass the wrapper (they
   pass the manifest); ProgramBuilder/Install.hs names
   `exe/<name>/manifest.json` (real: `exe/<name>/<name>-build/manifest.json`);
-  schema.rs:39 and data/morloc/morloc.h:161 call Int an array of limbs (one
-  limb is inline); stream.rs:153 says the salt is per process (per
-  registry); morloc.h:436-442 lacks metadata kind 0x08 (FOOTER_STATUS);
-  kind 0x02 is defined and unused.
-- [read] morloc-runtime/src/ipc.rs `send_and_receive`: public, uncalled,
-  underflows `offset - 32`. Delete.
-- **morloc.h expression structs drift from Rust.** [read] The header's
-  `morloc_tag_test_expression_s` holds `subject, constructor` (two
-  expression pointers); `MorlocTagTestExpression` in manifest_ffi.rs holds
-  `subject, tag: u8`. The header has no ctor-field or ctor-make struct and
-  its expression union lacks those members. `c_abi_layout.rs` checks neither
-  struct, so nothing caught it. Fix: mirror both and add them to
-  `expression_structs_match_the_header`.
+  morloc-runtime-types/src/schema.rs:39 and data/morloc/morloc.h:161 call
+  Int an array of limbs (one limb is inline); stream.rs:152 says the salt is
+  per process (per registry).
+- [read] morloc-runtime/src/ipc.rs is dead code: `send_and_receive` (:25)
+  and `read_packet` are public and uncalled (callers use ipc_ffi.rs), and
+  `read_packet` underflows `offset - 32` (:80). Delete the module.
+- **morloc.h drifts from the Rust runtime and nothing checks it.** [read]
+  The header's `morloc_tag_test_expression_s` (morloc.h:689-692) holds
+  `subject, constructor` (two expression pointers); `MorlocTagTestExpression`
+  (manifest_ffi.rs:247) holds `subject, tag: u8`. The header has no
+  ctor-field or ctor-make struct, and its expression union lacks
+  `ctor_field_expr` and `ctor_make_expr`. morloc.h:436-442 lacks metadata
+  kinds 0x08 FOOTER_STATUS and 0x09 PROGRAM_FILE (runtime-types
+  packet.rs:191, :207); kind 0x02 XXHASH is defined and unused. c_abi_layout.rs
+  `expression_structs_match_the_header` (:525) checks neither struct, and
+  `expression_union_is_wide_enough` (:672) compares only size and
+  alignment, so missing union members pass. Neither side tests that
+  BaseTypes.hs `mlcKind*` (:195-196) equals morloc.h `MLC_KIND_*`. Fix:
+  mirror the structs and kinds, and check members and kinds in tests.
 - **ABI version never gated.** [read] Spec gap: no item covers the ABI
   version. library/Morloc/Abi.hs:18-22 says provisioning compares
   `morloc_abi_version()` and `morloc-nexus --abi-version` against
   `abiVersion` and refuses a mismatch; nothing does. `abiVersion` is only
-  printed (executable/Subcommands.hs:748) and unit-tested
+  printed (executable/Subcommands.hs:795) and unit-tested
   (test-suite/AbiTests.hs). tooling/morloc-manager mim/src/provision.rs:8
   calls the gate deferred and relies on one release tag. A runtime built
   from another release's source loads silently. [reproduced] A program
@@ -42,11 +48,8 @@
   it was built for.
 - **Crate versions claim a lockstep they lack.** [read]
   morloc-runtime-types (0.87.0) and rustmorloc (0.95.0) say "Version
-  locked with morloc-runtime" (0.110.1); scripts/bump-version.sh:36 bumps
+  locked with morloc-runtime" (0.112.0); scripts/bump-version.sh:36 bumps
   only nexus, manifest and runtime.
-- **`mlcKind*` agreement with morloc.h untested on the Haskell side.**
-  [read] library/Morloc/BaseTypes.hs:196 requires `mlcKind*` to equal
-  morloc.h `MLC_KIND_*`; no test in test-suite/ compares them.
 - **Rust crates are resolved per pool, outside the environment's solve.**
   [read] Rust pools resolve rust-deps one pool at a time against an
   environment lock the compiler maintains (Build/CargoLock.hs), while
@@ -126,15 +129,16 @@
   module's directory (Reduce.hs).
 - **`cargo clippy` fails on morloc-runtime.** [reproduced 2026-10-15]
   `clippy::not_unsafe_ptr_arg_deref` (deny by default) at
-  morloc-runtime/src/stream.rs `shared_write_subpacket` (3956): a safe
+  morloc-runtime/src/stream.rs `shared_write_subpacket` (:4342): a safe
   public function takes an `AbsPtr` (`*mut u8`) it passes on to
   `voidstar::flatten_portable_in_place`.
   The crate's own lint denials (json.rs casts) go unchecked while this
-  stops the run.
+  stops the run. About 60 safe `pub fn`s in morloc-runtime take raw
+  pointers (heuristic).
 - [reproduced] `morloc init -f` exits 0 when data/lang/cpp/cppmorloc.cpp
   fails to compile, leaving the previous libcppmorloc.a installed. Strict
   conda mode now aborts; outside it the shim build is an `optionalStep`
-  that only warns (SystemConfig.hs:319-321).
+  that only warns (SystemConfig.hs:320).
 - [observed once] A `morloc make` run with the current compiler on PATH
   (`~/.local/bin/morloc`, built 2026-10-17) produced a Rust pool whose code
   only morloc 0.100.2 emits (`rustmorloc::FrameGuard`, removed in
@@ -149,15 +153,15 @@
   Against ART-2/ART-3. With a plain `q-build/` (no marker) or a symlink
   `r-build`, `morloc make -o q main.loc` fails "Refusing to overwrite
   '.../q-build': not a morloc build directory" and leaves
-  `q-build.tmp.<pid>/`. Build.hs:197 `liftIO $ swapIn ...` raises an
-  IOException (`ioError . userError`, :344) that the MorlocMonad
-  `catchError` (:199) does not catch, so `discardStagingDir` never runs;
+  `q-build.tmp.<pid>/`. Build.hs:198 `liftIO $ swapIn ...` raises an
+  IOException (`ioError . userError`, :345) that the MorlocMonad
+  `catchError` (:200) does not catch, so `discardStagingDir` never runs;
   any IO exception in `buildAll` escapes the same way. Repro: /work/plans/model-audit-2026-10-21/repro/I1/p1/.
 - **A failed owner record leaks an unsweepable run directory.** [read,
-  2026-10-21] morloc-nexus/src/process.rs make_tmpdir (1686-1713): if
-  writing or renaming `.owner.tmp` fails it returns Err after mkdtemp,
-  leaving `/tmp/morloc.XXXXXX`; the startup sweep skips directories without
-  `.owner` (process.rs:1764). Remove the directory on that path.
+  2026-10-21] morloc-nexus/src/process.rs make_tmpdir (:1691, the owner
+  write at :1715-1717): if writing or renaming `.owner.tmp` fails it
+  returns Err after mkdtemp, leaving `/tmp/morloc.XXXXXX`; the startup
+  sweep skips directories without `.owner` (process.rs:1769). Remove the directory on that path.
 - **Strings crossing two runtime-type copies.** [read, 2026-10-23]
   rustmorloc statically links its own copy of morloc-runtime-types beside
   the one in libmorloc.so. Strings and CSchema built by one copy and freed by
@@ -166,23 +170,17 @@
   (malloc_cstr), but a CSchema is Box/CString/Vec. Manifest expression
   strings (manifest_ffi.rs ~815, ~1048, ~1277) are never freed (the nexus
   is short-lived).
-- **ABI checks compare size, not members.** [read 2026-11-02]
-  `expression_union_is_wide_enough` checks only size and alignment, so the
-  missing union members `ctor_field_expr` and `ctor_make_expr` pass; morloc.h
-  also lacks metadata kind 0x09 PROGRAM_FILE; neither side tests MLC_KIND.
-  ipc.rs is dead code (its `offset - 32` underflow is in `read_packet`).
-  About 60 safe `pub fn`s in morloc-runtime take raw pointers (heuristic).
 - **`morloc init` rebuilds the runtime unless incremental, whatever `-f`
   says.** [read 2026-11-04, from mim's list] SystemConfig.hs:181 is
   `force == ForceOverwrite || not runtimeBuilt || not incremental`; the
-  comments at :174-179 and :329-330 describe other behaviour.
+  comments at :172-179 and :327-330 describe other behaviour.
 - **Dead C++ search paths.** [read 2026-11-04, from mim's list]
-  CodeGenerator/Pools/CAbi/Members/Cpp.hs:2933 and :2947 search
+  CodeGenerator/Pools/CAbi/Members/Cpp.hs:2876 and :2890-2891 search
   `STATE/src/<base>/...`, which nothing writes.
 - **Stale comments on locations.** [read 2026-11-04, from mim's list]
-  Namespace/State.hs:880-893 and SystemConfig.hs:186-191 place expose
+  Namespace/State.hs:878-890 and SystemConfig.hs:186-191 place expose
   targets and include/lib under `$MORLOC_HOME` (now the state root's
-  modules dir, `exposeDirsFor`, Module.hs:289); morloc-nexus cli.rs:330
+  modules dir, `exposeDirsFor`, Module.hs:289); morloc-nexus cli.rs:331
   says exe defaults to `$MORLOC_HOME/exe` (it is under STATE,
-  Config.hs:95); Build.hs:225 names the build hook `mim-env`. The router
+  Config.hs:96); Build.hs:225 names the build hook `mim-env`. The router
   scan path and transport comments in nexus cli.rs/main.rs are unchecked.

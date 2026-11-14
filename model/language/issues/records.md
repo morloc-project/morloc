@@ -39,7 +39,8 @@
   takes the record.** [reproduced] 82a8d98b lets a record with a phantom
   parameter pass through a pool without a language form for the parameter,
   but a record literal `{pos = 7} :: Loc Tag` that a Python-sourced function
-  takes, where `Tag` has only a Rust form, fails at the literal: "Could not
+  takes, where `Tag` has only a Rust form, fails at the Python use
+  (`pyPos loc`; reproduced 2026-11-14, TypeEval.hs:253): "Could not
   resolve type for variable 'Tag'". The Python form `record Py => (Loc k) =
   "dict" k` never uses `k`. Repro: lib/biolib/rnaseq/notes/repros/
   phantom-py-arg/ (`morloc make -o phantom main.loc`; drop `pyPos` from `f`
@@ -62,7 +63,7 @@
   'P'" when the program also uses a setter (`.(.a = 5) p`); getters and
   setters alone build, and so does the literal with only getters
   (reproduced 2026-10-31); `record Py => P = "dict"` fixes it.
-  Cause: CodeGenerator/Infer.hs:878 (`namesRecord`) throws for every
+  Cause: CodeGenerator/Infer.hs:957-959 (`namesRecord`) throws for every
   language. This is also why the manual writes `record Py` lines
   (manual.md). Repro: /work/plans/model-audit-2026-10-21/repro/C/rec/set-py.loc, nolit-py.loc.
 - **Recursive records: SUM-4 contradicts ALIAS-7, and the code splits the

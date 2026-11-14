@@ -6,15 +6,12 @@
   record literal (LEX-4); the message no longer points at the missing
   `let`.
 - **Lexical gaps.** [read/reproduced, 2026-10-21]
-  - LIT-5 lists the escapes `\n \t \r \0 \\ \"`, but a `"""` or `'''`
-    string also accepts `\'` (Lexer.hs `lexStringLit`). Candidates: add
-    `\'` to LIT-5 for every string, or for triple-quoted ones only.
-  - LEX-3's keyword list omits `deriving` (Lexer.hs:498 reserves it).
+  - LEX-3's keyword list omits `deriving` (Lexer.hs:512 reserves it).
   - LEX-1 says `--` always opens a comment, but an operator run spans it:
     `(+--)` is an operator, `1 +-- note` is not a comment. Candidates: `--`
     opens a comment anywhere; or only at a token start (Haskell).
   - LIT-1 rejects `0xfg` but `12abc` lexes as `12 abc` and `1e` as `1 e`.
-  - Lexer.hs:403 lexes `-NaN` as `NaN`; LIT-3 does not list it.
+  - Lexer.hs:423 lexes `-NaN` as `NaN`; LIT-3 does not list it.
   - OP-6 candidate (a) names `subtract`, which root lacks.
   - `x <+> y = ...` is a parse error; only `(<+>) x y = ...` defines an
     operator. OP-2 does not say so.

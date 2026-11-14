@@ -20,8 +20,9 @@
   resolves to, with every definition and method use inside it. Per use under
   root-py, `morloc typecheck`: about 0.65 ms for `x > k` and 0.4 ms for
   `x != k`, against 0.15 ms for a call to a definition in the same file
-  (bench typechecking, TYCK-3, TYCK-6, TYCK-7, quick run 2026-11-03). The
-  copies also reach code generation.
+  (bench typechecking, TYCK-3, TYCK-6, TYCK-7, quick run 2026-11-03; taken
+  before methods were elaborated from bodies checked once, so re-measure).
+  The copies also reach code generation.
 - **A key holding a Type variable the checker generated is never shared.**
   [read, 2026-11-06] Frontend/Specialize.hs `shareable` refuses a key with
   `generatedTypeVars`; it was written for Realize's selection by type, in

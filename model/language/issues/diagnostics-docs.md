@@ -1,9 +1,8 @@
 # Diagnostics and docstrings
 
-- [read] POLY-6 says the error names the variable; for a variable from a
-  library signature the name may be a generated one (e.g. `itemType_6`).
-  Only the `@` suffix is stripped (Infer.undeterminedError).
-  [reproduced] Two variables written with one name print as that name twice:
+- [reproduced] Violates POLY-6 (the error names the variable). Two
+  variables written with one name print as that name twice
+  (CodeGenerator/Infer.hs:177-198 `undeterminedError`):
   `ingest loadSource 3 p q` (biolib stream, both signatures say `a`) gives
   "nothing in the program fixes 'a', 'a'", which does not say which terms
   they belong to.
@@ -12,12 +11,10 @@
   the alias's other directives into the signature but not its media type,
   because the signature-level check (Docstrings.rejectAuthoredMime) would
   read it as written there.
-- [reproduced] Unused imports warned at library/Morloc/Frontend/Treeify.hs:38
-  (Control.Monad.IO.Class).
 - [reproduced] A `match` whose branches differ in type (a value beside a
   `do` suspension) is reported as "Branches of guard/if have incompatible
   types" with "then-branch" and "else-branch", constructs the program does
-  not contain: `match` reaches Typecheck.hs:1393 through IfS. Repro: in a
+  not contain: `match` reaches Typecheck.hs:1678 through IfS. Repro: in a
   `do` block, `match r | (Err e) = Err e | (Ok xs) = do { f xs; Ok xs }`.
 - [reproduced] Violates DIAG-5. A call of a named, non-recursive morloc
   function is beta-reduced into its caller (LambdaEval `reduce`), so it has
@@ -50,7 +47,8 @@
   lenn :: [a] -> Int; na x = lenn [{ann = "a", x = inc x}]` is refused
   with "No concrete py type for 'Record'... or import a module that
   provides one (e.g. root-py)", naming a module already imported
-  (Express.hs record fallback; C++ names root-cpp the same way).
+  (CodeGenerator/Infer.hs:957-963 fallback; C++ names root-cpp the same
+  way).
 - **An R pool load failure is printed twice.** [reproduced, 2026-10-21]
   A sourced R file assigning `.__morloc` prints "failed to load pool
   sources: cannot change value of locked binding" bare and again after
@@ -67,12 +65,15 @@
     and an unlocated process exception.
   Repro: /work/plans/model-audit-2026-10-21/repro/G/diag/bin.loc, nomod.loc, cfg/.
 - **Wrong or internal wording.** [reproduced, 2026-10-21] `@render` on an
-  argument is reported as `@with` (Frontend/Desugar.hs:1101-1110
+  argument is reported as `@with` (Frontend/Desugar.hs:1131-1137
   `rejectWithHere`). A bare `--' @literal` reads as false
-  (Desugar.hs `parseDocBool`, where other flags use `flagValue`), so it is
-  neither applied nor warned deprecated; `@literal true` is warned. A duplicate definition (`f x = x` twice) reports
-  "Unification error: Error in value checker: Cannot check beyond source
-  boundary". Repro: /work/plans/model-audit-2026-10-21/repro/G/diag/mis2.loc, lit*.loc, dupdef.loc.
+  (Desugar.hs:793-794 `parseDocBool`, where other flags use `flagValue`),
+  so it is neither applied nor warned deprecated; `@literal true` is
+  warned. Repro: /work/plans/model-audit-2026-10-21/repro/G/diag/mis2.loc,
+  lit*.loc. Open: a duplicate morloc definition (`f :: Int -> Int`,
+  `f x = x` twice) now builds and runs with no warning [reproduced
+  2026-11-14]; no item says whether two morloc definitions of one term are
+  two implementations (REAL-1) or an error.
 - **A literal `-0.0` loses its sign in the nexus.** [reproduced,
   2026-10-21] `c = -0.0` is stored as `"value":"0.0"` in the manifest and
   prints `0`; the same value from a CSV cell prints `-0`.
@@ -104,14 +105,6 @@
   mismatch.** [reproduced, 2026-10-23] `newtype Bag = [a]` reports
   `expected: [a] inferred: [a] Cannot compare types a and a@q0` instead of
   naming the unbound `a`.
-- **`SystemError` is documented as a compiler bug but carries user errors.**
-  [read, 2026-10-24] The constructor's comment (Namespace/State.hs,
-  `MorlocError`) says "Internal compiler error (bug)", yet every error with
-  a source position but no node index uses it: a syntax error, a malformed
-  docstring directive (Frontend/API.hs `readProgram`), an unresolved
-  concrete type. Its message prints plainly (no bug label; that is
-  `throwCompilerBug`), so users are not misled, but tests cannot tell a
-  user error at a position from a compiler bug (SpecTests `rejectUser`).
 - **Docstrings inside a function-type alias are dropped.** [reproduced,
   2026-10-25] Violates DOC-3. In the stdlib `stream` module, `type Reader a
   = --' Input file / --' @check.path r / Str -> ...` (and `Writer`) attach
@@ -157,3 +150,11 @@
   most common variable name, is almost never shown by its source name.
   Plain words should be matched only where they could be read as the
   variable (type positions), not against all of the prose.
+- **A C++ type with no concrete mapping kills the compiler with a Haskell
+  `error`.** [reproduced, 2026-11-14] Violates DIAG-1 and DIAG-2.
+  library/Morloc/CodeGenerator/Pools/CAbi/Members/Cpp.hs:399-404
+  `leakError` calls `error`, so `morloc make` exits 2 printing "Recursive
+  type alias `Vector` has no concrete C++ mapping ..." followed by
+  "CallStack (from HasCallStack): error, called at ... Cpp.hs:400:9",
+  with no source location. Reached by the nested-Vector source in
+  values.md (`makeN :: Int -> Vector n (Vector 2 Real)` from C++).

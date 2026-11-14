@@ -16,23 +16,26 @@ reference is not (PANIC-14).
   process; the callee would have to say who it is.
 - **Malformed argument exits 1, unknown command 2.** Gap in LIFE-3: is a
   malformed value a usage error? (`./prog cmd notanint` -> 1.)
-- **Top-level `Err` keyed by arm name.** Gap: morloc-nexus/src/dispatch.rs
-  `die_on_top_level_err` fails the run for any variant arm named `Err`, not
-  only `Try`. Open: should only `Try`'s `Err` fail the run?
+- **Top-level `Err` keyed by arm name.** Gap: morloc-runtime/src/daemon_ffi.rs
+  `top_level_err` (:2038, the tag test at :2045), called by morloc-nexus
+  dispatch.rs `die_on_top_level_err` (:1281), fails the run for any variant
+  arm named `Err`, not only `Try`. Open: should only `Try`'s `Err` fail the
+  run?
 - **Other C++ runtime failures still throw `std::runtime_error`.** [read,
   2026-10-21] A relptr that does not resolve with a reason
-  (cppmorloc.hpp:306, :319), `parse_schema_cpp`, `shmalloc_cpp` and
+  (cppmorloc.hpp:383, :397), `parse_schema_cpp`, `shmalloc_cpp` and
   `frame_init`'s `bad_alloc` throw catchable exceptions. A pool that runs
-  out of shared memory now ends (SHM-17); a `bad_alloc` from the C++ heap
+  out of shared memory ends (SHM-17); a `bad_alloc` from the C++ heap
   is still catchable.
 - **Requests queued at daemon shutdown are closed unanswered.** [read,
   2026-10-21] Violates DAEMON-6 (refusals answered 503). daemon_run pops
-  every queued job and `close`s it (daemon_ffi.rs:3693-3698); workers stop
-  popping once SHUTDOWN_REQUESTED is set (:3756). Only a popped request
-  gets "Daemon shutting down." (:2066).
+  every queued job and `close`s it (daemon_ffi.rs:3732-3733); workers stop
+  popping once SHUTDOWN_REQUESTED is set (:3792). Only a popped request
+  gets "Daemon shutting down." (:2177).
 - **Rules with no answer.** [read, 2026-10-21]
   - NET-5 bounds a reply wait to an unnamed callee at 30 s; the code waits
-    forever (ipc_ffi.rs:713-720), as DAEMON-6 (no call deadline) requires.
+    forever (ipc_ffi.rs:722-727 `reply_wait`), as DAEMON-6 (no call
+    deadline) requires.
     Candidates: the wait ends only at end of file; or the callee names
     itself.
   - A 503 refusal's class: NET-3's busy refusal is `{"error":"too many
@@ -40,8 +43,9 @@ reference is not (PANIC-14).
     (meant for restarting a crashed pool). deploy-serving.asc:143-152 lists
     neither, nor 401/403.
   - PANIC-4 says a thread finding a poisoned lock never uses the data;
-    fv.rs:69/113/160 (STATE-4), voidstar.rs:838, compression.rs:915,
-    shm.rs:1978, stream.rs:4316/4424 take it by design. State the exception
+    rustmorloc fv.rs:69/113/160 (STATE-4), voidstar.rs:991/1002/1022,
+    runtime-types compression.rs:739/765, shm.rs:2312/2498,
+    stream.rs:5115/5223/5257/5321 take it by design. State the exception
     or route them through `poisoned_lock()`.
   - Which user catches may hold morloc failures: a Rust `catch_unwind`, a
     Python bare `except:`, a C++ `catch (...)` all can. A dead peer and a
@@ -49,7 +53,7 @@ reference is not (PANIC-14).
     (LIFE-5); other failures still need the guarantee stated.
   - [speculative] The panic hook ignores `can_unwind`: a panic in an
     `extern "C"` callback inside a runtime catch scope (e.g. Arrow
-    `get_next` inside `decode`, arrow_ffi.rs:143) aborts unless wrapped in
+    `get_next` inside `decode`, arrow_ffi.rs:143-144) aborts unless wrapped in
     `outside_scope`; no source rule checks the wrapping.
 - **Untested C++ failure sites.** [read, 2026-10-21] No test covers a
   failed `shfree_cpp`, or an unresolved result, release or Arrow pointer,

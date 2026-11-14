@@ -13,10 +13,8 @@ Found by the 2026-10-21 audit; full notes in
   `./compare.py 2026-10-14-1430-7306021b+dirty-baseline-before-decode-ahead
   2026-10-14-1725-7306021b+dirty-decode-ahead --item ZIP-5`.
 - **`Measured: pending` though citable runs exist.** ZIP-1..7 and ZIP-10
-  have results/2026-10-14-1725; XL-1 has results/2026-10-16-2156 (which
-  XL-2 cites): all six pairs miss the 20 us goal (22-38 us) and cpp->py,
-  rs->py sit within 10% of the 40 us limit. ENC-2 cites a run directory
-  that does not exist.
+  have results/2026-10-14-1725. ENC-2 cites a run directory that does not
+  exist.
 - **ZIP-5/ZIP-6 count frames with F = 16 MiB; ZIP-9 cuts 2 MiB frames at
   levels 1-6.** bench.py:13 `FRAME = 16 * MiB`, :174 `k = ceil(r /
   FRAME)`. At level 3, 128 MiB is 64 frames, not 8, and ZIP-6's `h` (fit

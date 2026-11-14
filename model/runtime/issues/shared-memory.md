@@ -3,7 +3,8 @@
 Changes here touch locks and ownership: model first.
 
 - Spec text behind the code: topology.md says only the nexus unlinks
-  (code: the fork generation that made the primary volume, shm.rs:659-670);
+  (code: the fork generation that made the primary volume, shm.rs:611-620
+  `OWNER_GENERATION`, `owns_program`);
   topology.md's temp-file route does not apply to tables, which always use
   shared memory.
 - **C++ trackers on helper threads never flush.** [read] Per-thread
@@ -25,7 +26,7 @@ Changes here touch locks and ownership: model first.
   twice; each root's release is cleared after its first call, and the
   Arrow C data interface forbids calling it again.
 - Open (eval arena vs call sweep): a stream opened through a stream field
-  (intrinsics.rs `record_slot_if_active`) is also recorded in the eval
+  (intrinsics.rs:1973, eval_arena.rs `record_slot_if_active`) is also recorded in the eval
   arena, which closes it at a failed `@catch` body's rollback and at the
   arena's end; other opens rely on the call sweep alone. Should every open
   be recorded, or none?
@@ -87,8 +88,8 @@ Changes here touch locks and ownership: model first.
   for the run.** [read, 2026-10-21] Violates FORK-15. fork_policy.rs
   `prepare_fork_body` decides whether to stage a lease from
   `arrow_shm::any_views()`, a Relaxed read of VIEW_COUNT (arrow_shm.rs:
-  1379), before it takes BORROWABLE. A view registered (borrow_register,
-  :1383) in that gap leaves `staged == None` with `rels` non-empty: the
+  1506), before it takes BORROWABLE. A view registered (borrow_register,
+  :1510) in that gap leaves `staged == None` with `rels` non-empty: the
   child's references are taken, "could not record a forked child's view
   references" is printed, and they are never released. Reachable where
   user code forks a multithreaded process holding Arrow/NumPy views. Fix
@@ -130,7 +131,7 @@ Changes here touch locks and ownership: model first.
   generation without regard to wrapping, so a seeded volume can hand a
   recently used generation out again after a few claims.
 - **A SLURM worker's result block is never released.** [read, 2026-11-09]
-  SHM-4. The worker's return-egress rewrite (morloc-nexus main.rs ~1280)
+  SHM-4. The worker's return-egress rewrite (morloc-nexus main.rs:1259-1305)
   frees the pool's reply and sends an inline copy, without releasing the
   block the pool donated with it; only the process's exit cleans it up.
 - **Persisting a stream-bearing value by reference copies it whole.**

@@ -14,7 +14,7 @@ lexical error, never a literal followed by a name.
 
 ### LIT-2 A real literal has a decimal point or an exponent
 Intent: ruled 2026-10-09
-Code: deviates (issues/typecheck.md)
+Code: unaudited
 
 `1.0`, `1e0` and `6.022E23` are real literals; `1` is an integer literal.
 An integer literal takes a real type from a context that expects one; a

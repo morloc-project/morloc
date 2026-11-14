@@ -15,10 +15,12 @@
   from_voidstar on the payload), R (rmorloc.c) and Rust (rustmorloc
   lib.rs, MorlocSpace::payload). A value passed by reference is not walked
   either.
-- [read, 2026-10-31] A debug build's `MORLOC_CODE_CHECKS=1`
-  (data/rust/morloc-runtime/src/origin.rs) is inherited by any morloc
-  program a sourced function starts, which then runs code-level checks
-  although it was built for release. Cost only; nothing goes unchecked.
+- [speculative, 2026-11-14] A release nexus started by a sourced function of
+  a debug build inherits `MORLOC_CODE_CHECKS=1`. It clears the variable for
+  its pools (morloc-nexus/src/main.rs:476-480), but if its own runtime
+  config is loaded before that line (morloc-runtime/src/packet.rs:108-119,
+  read once), the nexus itself runs code-level checks. Cost only; nothing
+  goes unchecked.
 - [speculative, 2026-10-31] An `@unpack` argument is built by the nexus as
   the parent command loads it (morloc-nexus/src/dispatch.rs, the Embed
   arm), checked against the parent's schema; the entry decodes it as a
@@ -156,10 +158,10 @@
 - [read] Gap in POLY-4: an annotation in a body (`(x :: a)`) still means
   the enclosing signature's variable, while a `where` signature's `a` is
   its own.
-- [read] Violates POLY-7 and POLY-4. Only a signed top-level definition of the root
-  module is checked against its signature (Frontend/Treeify.hs
-  Validation); a `where` signature inside an unsigned definition, or in an
-  imported module, never has its Nat and Int variables held rigid, so
+- [reproduced, 2026-11-14] Violates POLY-7 and POLY-4. A `where` signature
+  inside an unsigned definition never has its Nat and Int variables held
+  rigid (only signed definitions are checked; Frontend/Treeify.hs
+  Validation), so
   `f x = g x where g :: Vector k Int -> Int; g y = h y` with `h ::
   Vector (m + 1) Int -> Int` is accepted.
 - [read] The POLY-7 check locates a refutation at the innermost condition

@@ -1,14 +1,13 @@
 # Nexus command-line parsing
 
-- **`view --pattern` side defects.** [reproduced, 0.109.0] A failed `view
-  -o` leaves an empty output file (`print_result_c` writes after
-  `redirect_stdout_to`, dispatch.rs/process.rs). `.(.0;(.1;.0))` does not
-  parse: no item says whether a group may hold a group. `.[i]` on a Str is
-  accepted by the pattern checker and refused by the walker at run time.
+- **A `view --pattern` group cannot hold a group.** [reproduced, 0.109.0]
+  `.(.0;(.1;.0))` does not parse; no item says whether a group may hold a
+  group.
 
 - **`-f mpk` output read back as an argument file is sniffed.** [read]
   Headerless MessagePack is told apart from JSON and text only by a `.mpk`
-  or `.msgpack` name (cli.rs `load_morloc_data_file`); `./prog f -f mpk >
+  or `.msgpack` name (cli.rs `load_morloc_data_file`, :2067; the name test
+  at :2346); `./prog f -f mpk >
   x; ./prog g x` reads a one-byte value 48..57 as a JSON digit. Gap in
   CLI-1; MessagePack is slated for deprecation.
 
@@ -37,21 +36,19 @@
   description with a warning, so `@tabel.header none` is accepted and the
   header-required default applies. Only `@table.*` is reserved. Open:
   should every unknown key be an error on an argument with `@form table`?
-- **Argument files are read by extension before their bytes.**
-  [reproduced, 2026-10-21] Violates CLI-1. A MessagePack packet copied to
-  `p.json` fails "serialization error: JSON parse error"; as `p.txt` it
-  works. cli.rs:2254 (`ends_with(".json")`) and :2275 (`.mpk`/`.msgpack`)
-  dispatch before the packet and magic checks. A missing `p.mp` gets "is
-  not inline JSON ... set `source: file`" (old spelling); a missing
-  `p.json` gets "not found". `@load` shares the loader (INTR-3): `@savej
-  "v.mpk" 49` reads back through the MessagePack decoder. The `.mpk` name
-  is what keeps a one-byte MessagePack value 48..57 from reading as a JSON
-  digit, so bytes-only detection waits on MessagePack's deprecation. Repro: /work/plans/model-audit-2026-10-21/repro/G/args/a1.loc.
+- **A non-packet argument file is read by its extension.**
+  [reproduced, 2026-10-21] Violates CLI-1. A file that is not a packet is
+  dispatched by name before its bytes: cli.rs:2325 (`ends_with(".json")`)
+  and :2346 (`.mpk`/`.msgpack`). `@load` shares the loader (INTR-3):
+  `@savej "v.mpk" 49` reads back through the MessagePack decoder. The
+  `.mpk` name is what keeps a one-byte MessagePack value 48..57 from
+  reading as a JSON digit, so bytes-only detection waits on MessagePack's
+  deprecation. Repro: /work/plans/model-audit-2026-10-21/repro/G/args/a1.loc.
 - **`-f packet`/`-f voidstar` of a top-level null or `()` writes
   nothing.** [reproduced, 2026-10-21] Violates CLI-5. `nul x = Null`:
   `-f packet nul 1 | wc -c` is 0 (`-f mpk` writes `c0`; `--keep-null`
   restores it), so a downstream `-` reader cannot tell no value from a
-  broken pipe. Deliberate in morloc-nexus dispatch.rs:1361-1365 and 1426-1430, to avoid a
+  broken pipe. Deliberate in morloc-nexus dispatch.rs:1441-1445 and 1506-1510, to avoid a
   phantom packet after an `@stdout` stream. Either CLI-5 carves out
   streaming commands or the code narrows the condition. Repro:
   /work/plans/model-audit-2026-10-21/repro/G/out/o.loc.
@@ -71,12 +68,13 @@
   [read]. Briefs/B5-B6.md (N-3, N-5).
 
 - **Output-path defects found reading dispatch.rs.** [read, 2026-10-29]
-  - `run_pure_command` passes `is_arrow = false` whatever the return type.
+  - `run_pure_command` passes `is_arrow = false` whatever the return type
+    (dispatch.rs:1976; `run_remote_command` derives it at :799).
     [reproduced 2026-11-02] A pool-free `idT t = t` over a Table fails in
     every output form ("Cannot render a Table to generic JSON"; "Arrow SHM
     header describes ranges outside the block").
   - `run_remote_command` neither checks nor frees the errmsg
-    `morloc_packet_size` sets, and the MessagePack output branch drops its
+    `morloc_packet_size` sets (dispatch.rs:657, :682), and the MessagePack output branch drops its
     errmsg on failure; the same unchecked errmsgs at two more
     `morloc_packet_size` calls and one `abs2rel` in dispatch.rs [read].
 - **Stream output can fail after writing part of a packet.** [read,
@@ -89,9 +87,11 @@
 - **`-o` empties its target before anything can fail.** [reproduced
   2026-11-02, data loss] `view t.packet -f json -o t.packet` emptied the
   input, and `./nexus -o in.pk --output-form packet @ echo in.pk` destroyed
-  in.pk; a failing run leaves an existing file empty. Fix: write a sibling
-  temporary file and rename it on success (process.rs); whether a failed
-  command must leave the target unchanged needs a ruling.
+  in.pk; a failing run leaves an existing file empty, and a failed `view
+  -o` leaves an empty output file [reproduced, 0.109.0]. The redirect
+  truncates first: process.rs `redirect_stdout_to` (`File::create`, :885).
+  Fix: write a sibling temporary file and rename it on success; whether a
+  failed command must leave the target unchanged needs a ruling.
 - **The view pattern checker accepts what the walker refuses.**
   [reproduced 2026-11-02] `.[i]` and `.[i:j]` on a Str pass pattern.rs and
   fail in the walker; one function (`infer_chain_schema`) should decide.
@@ -106,8 +106,12 @@
   [reproduced 2026-11-02] A `DNA` or `?DNA` argument from a `-f packet` file
   fails "JSON parse error: expected value at line 1 column 1", while a
   `[DNA]` argument reads the same kind of file as a packet (CLI-1, proposed).
+  [reproduced 2026-11-14, 0.112.0] golden enum-pattern-match: `./nexus -f
+  packet complement A > a.pk; ./nexus complement a.pk` fails the same way,
+  so the scalar path does not reach cli.rs's packet-magic check (:2324).
 - **The nexus IFile check sees only existence.** [read 2026-11-04]
-  dispatch.rs `check_ifile_arg` walks every IFile an argument holds and
+  dispatch.rs `check_ifile_arg` (:836, `check_ifile_path` :911) walks every
+  IFile an argument holds and
   refuses a missing path, a directory and `-`, but passes `/dev/stdin`,
   `/dev/fd/0`, a FIFO, an unreadable file and a file of another element
   type; those fail later, in the pool's open, which names the path but

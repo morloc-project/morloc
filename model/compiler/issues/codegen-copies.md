@@ -102,7 +102,7 @@ records and user-mapped types copy deeply.
 - **C++ closure forms copy each capture several times.** [read; not
   reproduced 2026-10-19] Per
   capture not moved: a `MorlocClosure` 2 (binder and reify thunk), a pap 6
-  (data/lang/cpp/pool.cpp `mlc_pap` ~1397-1440 copies `fn` and `reify`
+  (data/lang/cpp/pool.cpp `mlc_pap` ~1581-1600 copies `fn` and `reify`
   into the closure, then into `apply1`), a staged form 8; each pap step
   copies every capture and the applied argument 6-8 times (named by-value
   parameters). Reify reads through `const&` and needs no copy.

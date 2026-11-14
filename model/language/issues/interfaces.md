@@ -48,14 +48,13 @@ re-checked.
   NET-4..NET-7 cover the transport, but nothing states the LP request and
   response (methods, fields, `media`, packet mode, error kinds).
 - **An `IFile` given as JSON skips the existence check.** [read] Violates
-  IFACE-17. morloc-nexus/src/dispatch.rs `check_ifile_arg` runs only for
-  `ArgValue::Value` (a bare `-` is refused); a test asserts a JSON `"-"`
-  passes (~l.1969). IFACE-17 makes a JSON `"-"` a path named `-`; whether
+  IFACE-17. morloc-nexus/src/dispatch.rs `check_ifile_arg` (:836-871)
+  walks `Value`, `Many` and `Group` arguments but skips `ArgValue::Json`;
+  a test asserts a JSON `"-"` passes (:2079). IFACE-17 makes a JSON `"-"` a path named `-`; whether
   the pool then opens that file or standard input is unchecked.
 - **Internal argument errors are classed bad-request.** [read]
-  morloc-runtime/src/daemon_ffi.rs: any `call_arg_packet` or
-  `make_call_packet` error, SHM exhaustion included, answers 400
-  (IFACE-10).
+  morloc-runtime/src/daemon_ffi.rs:2553-2554: any `call_arg_packet` error,
+  SHM exhaustion included, answers 400 (IFACE-10).
 
 ## Output (IFACE-9)
 
@@ -81,9 +80,10 @@ re-checked.
 ## Discovery (IFACE-11)
 
 - **Daemon `/discover` and front-end `/discover/<module>` differ.**
-  [read, survey] The front end serves `--json-help` (mcp.rs:1891). The
-  daemon (morloc-runtime/src/manifest_ffi.rs:2173-2388) publishes the
-  concrete, language-hinted schemas that json_help.rs:609-613 says must
+  [read, survey] The front end serves `--json-help` (mcp.rs:2093-2099). The
+  daemon (morloc-runtime/src/manifest_ffi.rs:2368-2583,
+  `manifest_to_discovery_json`) publishes the
+  concrete, language-hinted schemas that json_help.rs:621-625 says must
   not be published, only the first description line, CLI-syntax defaults,
   no argument keys, no streaming flag, no groups, no default or
   required-ness for an unrolled `data` argument (`populate_arg` copies
@@ -111,7 +111,7 @@ re-checked.
   which output action ran. Violates IFACE-23 and IFACE-2.
 - **The router starts a child daemon from whatever `morloc-nexus` it
   finds.** [read] `find_morloc_nexus` (morloc-runtime/src/router_ffi.rs:
-  331-383) searches `$MORLOC_NEXUS`, `$MORLOC_HOME/bin`, `$PATH`,
+  373-430) searches `$MORLOC_NEXUS`, `$MORLOC_HOME/bin`, `$PATH`,
   `~/.local/bin`, never the front end's own binary, and children start
   lazily and after each crash. A child of another build can ignore request
   fields the front end relies on, or run another build's code. Violates
@@ -132,11 +132,10 @@ re-checked.
   `eval_refusal`: eval with no token set is refused unless waived, whatever
   the bind. One side is wrong; the code follows the front end.
 - **Eval request bodies are read differently.** [read] The front end's
-  `/eval` (morloc-nexus/src/mcp.rs `frontend_eval_api`) reads the body with
-  `from_utf8_lossy` and accepts `expr`, `expression` or a bare string; the
-  daemon's (morloc-runtime/src/http_ffi.rs) accepts only `expr` and refuses
-  a body that is not UTF-8.
+  `/eval` (morloc-nexus/src/mcp.rs:2514-2521 `frontend_eval_api`) accepts
+  `expr`, `expression` or a bare string; the daemon's
+  (morloc-runtime/src/http_ffi.rs:368) accepts only `expr`.
 - **Eval results have two shapes.** [read, survey] Daemon `/eval` returns
-  parsed JSON (`"result":2`, daemon_ffi.rs:1606-1614); front-end `/eval`
-  a string (`"result":"2"`, mcp.rs:2325). The front end's MCP `eval`
-  success lacks `isError: false`.
+  parsed JSON (`"result":2`); front-end `/eval` a string (`"result":"2"`:
+  `frontend_eval` returns a `String`, mcp.rs:2338, wrapped at :2528). The
+  front end's MCP `eval` success (mcp.rs:2675) lacks `isError: false`.

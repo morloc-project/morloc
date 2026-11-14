@@ -48,18 +48,17 @@ Generated code that a language's own tools refuse.
   call to 'Tok::Tok()'". Tail loops hold their result in `std::optional<T>`
   for this reason; a conditional does not. Spec gap: no item says what a
   native type must provide (here, a default constructor).
-- [reproduced, 2026-10-17, 9f24abe4] A tail-recursive C++ function that
-  builds a `data` value whose field is a Packable-mapped newtype does not
-  build. With `newtype Counted = Int`, `type Cpp => Counted = "Counted"`, a
+- [reproduced, 2026-10-17, 9f24abe4] A C++ or Rust function that builds
+  a `data` value whose field is a Packable-mapped newtype does not build.
+  With `newtype Counted = Int`, `type Cpp => Counted = "Counted"`, a
   Packable instance, and `data Chain = End | Link Counted Chain`,
   `build k acc ? k == 0 = acc : build (k - 1) (Link (one k) acc)` fails with
   "C++ pool: the data type Chain is used with two field types for its
   constructor Link: (Counted, Chain) and (int, Chain)"
-  (Grammars/Common.hs mergeVariantOccurrences). A non-recursive
-  `wrap k acc = Link (one k) acc` builds. `[Counted]` fails the same way
-  with `std::vector<int>`. [traced 2026-11-02, briefs/A5-B4.md] Recursion
-  is not the cause: exporting a plain `mkC`/`lenC` fails the same way, and
-  Rust too ("... (Counted, Chain) and (i64, Chain)"). The variant
+  (Grammars/Common.hs:1019, mergeVariantOccurrences). `[Counted]` fails
+  the same way with `std::vector<int>`. [traced 2026-11-02,
+  briefs/A5-B4.md] Recursion is not the cause: exporting a plain
+  `mkC`/`lenC` fails the same way, and Rust too ("... (Counted, Chain) and (i64, Chain)"). The variant
   collectors read the wire type (`serialAstToType`) under the native
   type's name, and `wireField` converts a field between its two forms only
   for closures. Fix: the collectors use the native type; `wireField` also
@@ -103,7 +102,3 @@ Generated code that a language's own tools refuse.
   `error`. Field names are neither escaped nor refused: one per-language
   field-name rule in lang.yaml, checked at the record declaration
   (briefs/B8-B9.md).
-- **A native-form template with a `$` not followed by a digit crashes the
-  compiler.** [read 2026-11-02] e.g. Rust `$crate`: Grammars/Macro.hs
-  `error (show err')`. A check when the template is declared covers it with
-  the `$0` and missing-argument cases.
