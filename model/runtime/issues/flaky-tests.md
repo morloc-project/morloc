@@ -101,3 +101,17 @@
   panicked with `Shm("Failed to find absptr 0x7f9db8d80110 in shared
   memory")`. It passed alone and in the next full run. Likely another
   test's registry teardown or volume reset racing it; unconfirmed.
+- **pool-kept-connections `parallel`: the R pool sometimes ends during a
+  call.** [reproduced 2026-11-14, dev 0267a31c7 + uncommitted allocator and
+  schema work; also with that work switched off by MORLOC_FORK_HEAP_PAD=off]
+  `MORLOC_POOL_IDLE_TIMEOUT_MS=0 ./nexus parallel 400` (four C++ threads
+  calling Python, each call calling R, workers retiring when idle) fails
+  about 1 run in 60 under load: "the r pool ended during the call (Recv
+  error)". Seen once in a full `-j 6` suite run and once in 60 stressed
+  runs with the allocator tuning off. The C++ thread that receives the
+  error then throws a std::runtime_error out of a std::thread, so the C++
+  pool aborts (SIGABRT) instead of failing the call. Two questions: why
+  an R pool ends while a call is in flight (FORK-*, the retire path), and
+  whether a failure on a user thread should end the pool (PANIC-5 says a
+  failure to reach the callee ends the pool). Four concurrent shell loops
+  of 15 runs each reproduce it in about a minute.
