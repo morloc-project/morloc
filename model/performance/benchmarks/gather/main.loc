@@ -1,4 +1,4 @@
-module main (gatherCpp, controlCpp, gatherPy, controlPy, gatherCross)
+module main (gatherCpp, controlCpp, gatherPy, controlPy, gatherCross, writeCpp, loadCpp, writePy, loadPy)
 
 import root
 import root-cpp
@@ -62,3 +62,39 @@ controlPy k b = loopP k b 0
 --' @render -s/--sum=summP
 gatherCross :: I64 -> I64 -> <IO> ()
 gatherCross k b = @collect (produceC k b)
+
+-- The gather's two halves, split at the file: write the batches to a
+-- stream file, and load that file whole into the handler.
+wr :: OStream [U64] -> [[U64]] -> <IO> ()
+wr o xs = do
+  Ok u <- @write 0 o xs
+  u
+
+--' C++ batches written to a stream file
+--' @arg path
+--' @check.path w
+writeCpp :: I64 -> I64 -> Str -> <IO> ()
+writeCpp k b path = do
+  Ok o <- @open path :: <IO> (Try Str (OStream [U64]))
+  produceC k b (wr o)
+  @close o
+
+--' A stream file loaded whole into a C++ handler
+--' @check.path r
+loadCpp :: Str -> <IO> Str
+loadCpp path = do
+  Ok xs <- @load path
+  summC xs
+
+--' Python batches written to a stream file
+writePy :: I64 -> I64 -> Str -> <IO> ()
+writePy k b path = do
+  Ok o <- @open path :: <IO> (Try Str (OStream [U64]))
+  produceP k b (wr o)
+  @close o
+
+--' A stream file loaded whole into a Python handler
+loadPy :: Str -> <IO> Str
+loadPy path = do
+  Ok xs <- @load path
+  summP xs
