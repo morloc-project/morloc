@@ -3334,7 +3334,8 @@ generate cs rASTs helperRASTs = do
     (,) i . (,) (calledNames t) <$> findSockets t
   let treesOfNode = Map.fromListWith (<>)
         [(n, [i]) | t@(AnnoS (Idx i _) _ _) <- allTrees, AnnoS (Idx n _) _ _ <- annoNodes t]
-      treesOfCall v = recursiveTargetOf nameMap langMap recTargets v >>= (`Map.lookup` treesOfNode)
+      targetOf = recursiveTargetOf nameMap langMap recTargets
+      treesOfCall v = targetOf v >>= (`Map.lookup` treesOfNode)
       everySocket = concatMap snd (Map.elems treeInfo)
       reachTrees seen unresolved [] = (seen, unresolved)
       reachTrees seen unresolved (v : vs) = case treesOfCall v of

@@ -2254,15 +2254,16 @@ polyFreeVars = go
 
 -- | The manifold a call of @v@ (a 'CallS' name) invokes: a concrete manifold
 -- (one with a language) named @v@, else the recursion target @v@ names.
+-- Apply it to the three maps once and reuse the result: the reverse name map
+-- is built when the maps are given.
 recursiveTargetOf :: Map.Map Int EVar -> Map.Map Int Lang -> Map.Map EVar Int -> EVar -> Maybe Int
-recursiveTargetOf nameMap langMap recTargets v =
-  case Map.lookup v reverseMap of
+recursiveTargetOf nameMap langMap recTargets =
+  let reverseMap = Map.fromList [(name, idx) | (idx, name) <- Map.toList nameMap, Map.member idx langMap]
+  in \v -> case Map.lookup v reverseMap of
     Just idx -> Just idx
     Nothing -> case Map.lookup v recTargets of
       Just idx | Map.member idx langMap -> Just idx
       _ -> Nothing
-  where
-    reverseMap = Map.fromList [(name, idx) | (idx, name) <- Map.toList nameMap, Map.member idx langMap]
 
 -- | Resolve a function name to its manifold ID and determine if the call is cross-language.
 -- Returns (manifold ID, Nothing) for same-pool calls, (manifold ID, Just targetLang) for foreign calls.
