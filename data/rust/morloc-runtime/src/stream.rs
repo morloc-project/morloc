@@ -11542,31 +11542,52 @@ mod tests {
         assert_eq!(ifile_open_error(stream_file_with_index(|_, _| {}), "idx_ok"), "");
     }
 
+    fn index_walk_error(mut bytes: Vec<u8>) -> String {
+        let size = bytes.len() as u64;
+        let ptr = bytes.as_mut_ptr();
+        let parsed = parse_stream_file("t.idx", ptr, size).unwrap();
+        match crate::stream_format::verified_index("t.idx", &parsed, ptr, size) {
+            Ok(_) => String::new(),
+            Err(e) => e.to_string(),
+        }
+    }
+
     #[test]
-    fn an_ifile_refuses_permuted_counts() {
+    #[cfg(debug_assertions)]
+    fn an_ifile_open_runs_the_index_walk_in_a_debug_build() {
         let msg = ifile_open_error(stream_file_with_index(|e, _| {
             let c = e[0].elem_count;
             e[0].elem_count = e[1].elem_count;
             e[1].elem_count = c;
-        }), "idx_perm");
+        }), "idx_perm_open");
+        assert!(msg.contains("corrupt sub-packet index"), "{msg}");
+    }
+
+    #[test]
+    fn an_ifile_refuses_permuted_counts() {
+        let msg = index_walk_error(stream_file_with_index(|e, _| {
+            let c = e[0].elem_count;
+            e[0].elem_count = e[1].elem_count;
+            e[1].elem_count = c;
+        }));
         assert!(msg.contains("corrupt sub-packet index"), "{msg}");
     }
 
     #[test]
     fn an_ifile_refuses_an_index_that_skips_the_first_sub_packet() {
-        let msg = ifile_open_error(stream_file_with_index(|e, n| {
+        let msg = index_walk_error(stream_file_with_index(|e, n| {
             *n -= e[0].elem_count;
             e.remove(0);
-        }), "idx_skip_first");
+        }));
         assert!(msg.contains("corrupt sub-packet index"), "{msg}");
     }
 
     #[test]
     fn an_ifile_refuses_an_index_that_skips_the_last_sub_packet() {
-        let msg = ifile_open_error(stream_file_with_index(|e, n| {
+        let msg = index_walk_error(stream_file_with_index(|e, n| {
             *n -= e[1].elem_count;
             e.pop();
-        }), "idx_skip_last");
+        }));
         assert!(msg.contains("corrupt sub-packet index"), "{msg}");
     }
 
