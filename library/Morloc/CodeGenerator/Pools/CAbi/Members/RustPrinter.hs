@@ -29,7 +29,10 @@ module Morloc.CodeGenerator.Pools.CAbi.Members.RustPrinter
   , rustRecordFields
   , stripTypeParams
   , printRustStruct
+  , printRustHandle
+  , rustRecordValue
   , printRecordImpls
+  , printRecordImplsWith
   , RecordFieldTypes(..)
   , printRustEnum
   , printRustVariant
@@ -486,6 +489,43 @@ printRustStruct name params fields =
     , "}"
     ]
 
+-- | A record that refers to itself, declared as a handle to its fields
+-- (GEN-1), read through Deref and released through the runtime's drain
+-- (STATE-8).
+printRustHandle :: MDoc -> [(MDoc, MDoc)] -> MDoc
+printRustHandle name fields =
+  vsep
+    [ "#[derive(Clone)]"
+    , "pub struct" <+> name <> "(pub ::std::mem::ManuallyDrop<::std::sync::Arc<" <> fieldsName <> ">>);"
+    , printRustStruct fieldsName [] fields
+    , "impl ::std::ops::Deref for" <+> name <+> "{"
+    , "    type Target =" <+> fieldsName <> ";"
+    , "    fn deref(&self) -> &" <> fieldsName <+> "{ &self.0 }"
+    , "}"
+    , "impl" <+> name <+> "{"
+    , "    pub fn new(f: " <> fieldsName <> ") -> Self { Self(::std::mem::ManuallyDrop::new(::std::sync::Arc::new(f))) }"
+    , "    pub fn into_parts(self) -> ::std::result::Result<" <> fieldsName <> ", ::std::sync::Arc<" <> fieldsName <> ">> {"
+    , "        let mut me = ::std::mem::ManuallyDrop::new(self);"
+    , "        // SAFETY: `me` is never dropped, so its node is taken exactly once."
+    , "        ::std::sync::Arc::try_unwrap(unsafe { ::std::mem::ManuallyDrop::take(&mut me.0) })"
+    , "    }"
+    , "}"
+    , "impl Drop for" <+> name <+> "{"
+    , "    fn drop(&mut self) {"
+    , "        // SAFETY: the field is taken exactly once, here."
+    , "        ::rustmorloc::rec_release(unsafe { ::std::mem::ManuallyDrop::take(&mut self.0) });"
+    , "    }"
+    , "}"
+    ]
+  where
+    fieldsName = name <> "Fields"
+
+-- | A record value from its fields: a struct literal, or a handle around one.
+rustRecordValue :: Bool -> MDoc -> [(Key, MDoc)] -> MDoc
+rustRecordValue handle name fields
+  | handle = name <> "::new(" <> name <> "Fields" <+> "{" <+> rustRecordFields fields <+> "})"
+  | otherwise = name <+> "{" <+> rustRecordFields fields <+> "}"
+
 -- | Emit the definition of a pool-owned @data@ type.
 --
 -- @repr(u8)@ with explicit discriminants is what makes the wire tag and the
@@ -730,7 +770,12 @@ data RecordFieldTypes = RenderedFieldTypes | StructFieldTypes
 -- short-circuit the size step to @schema.width@. A function field carries a
 -- 'ClosureMarshal' and is reified/reflected instead of marshalled directly.
 printRecordImpls :: RecordFieldTypes -> MDoc -> [MDoc] -> [(MDoc, MDoc, Bool, Maybe ClosureMarshal)] -> MDoc
-printRecordImpls fieldTypes name params fields = vsep [toImpl, "", fromImpl]
+printRecordImpls = printRecordImplsWith False
+
+-- | 'printRecordImpls', for a handle when the flag is set: it is read as
+-- its fields and then wrapped.
+printRecordImplsWith :: Bool -> RecordFieldTypes -> MDoc -> [MDoc] -> [(MDoc, MDoc, Bool, Maybe ClosureMarshal)] -> MDoc
+printRecordImplsWith handle fieldTypes name params fields = vsep [toImpl, "", fromImpl]
   where
     idx = indexed fields
     -- A closure field's wire form (ClosureOrigin) is variable-width, so a record
@@ -786,9 +831,9 @@ printRecordImpls fieldTypes name params fields = vsep [toImpl, "", fromImpl]
             , "}"
             , "unsafe fn read_finish(w: &mut ::rustmorloc::ReadWalk, schema: &::rustmorloc::Schema, data: *const u8) -> Self {"
             , indent 4 $ vsep
-                [ "Self {"
+                [ if handle then "Self::new(" <> name <> "Fields {" else "Self {"
                 , indent 4 $ vsep (map readField idx)
-                , "}"
+                , if handle then "})" else "}"
                 ]
             , "}"
             ]

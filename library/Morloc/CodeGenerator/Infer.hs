@@ -558,22 +558,22 @@ inheritedForm cscope gscope g = case g of
         , not (T.declaresFormAt cscope gscope g) -> T.expandWireParent gscope g
       _ -> Nothing
 
--- | In a compiled language a record mapped to a type the program declares
--- (@record Rust => Ops = "Ops"@) holds its fields as that declaration spells
--- them, in the host's convention: a function of type @A -> \<E\> C@ there
--- runs its effect when called and returns @C@. The record's concrete type
--- says so, so its native declaration, accessors and marshalling agree with
--- the value it holds; 'Morloc.CodeGenerator.EffectBoundary' adapts the
--- fields where such a record is built and where one is read. A record the
--- compiler generates (@"struct"@), and every record of a dynamic language,
+-- | In a compiled language a record holds its fields in the host's
+-- convention, whether the program declares its type (@record Rust => Ops =
+-- "Ops"@) or the compiler generates it (GEN-8): a function of type
+-- @A -> \<E\> C@ there runs its effect when called and returns @C@. The
+-- record's concrete type says so, so its native declaration, accessors and
+-- marshalling agree with the value it holds;
+-- 'Morloc.CodeGenerator.EffectBoundary' adapts the fields where such a
+-- record is built and where one is read. Every record of a dynamic language
 -- holds morloc values. Nested records are left to their own node.
 hostConvention :: Lang -> MorlocMonad TypeF -> MorlocMonad TypeF
 hostConvention lang built = do
   t <- built
   reg <- CMS.gets stateLangRegistry
   return $ case t of
-    NamF o v@(FV _ (CV cv)) ps rs
-      | cv /= "struct" && LR.registryIsCompiled reg (ML.langName lang) ->
+    NamF o v ps rs
+      | LR.registryIsCompiled reg (ML.langName lang) ->
           NamF o v ps [(k, eager f) | (k, f) <- rs]
     _ -> t
   where

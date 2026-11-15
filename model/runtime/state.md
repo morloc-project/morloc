@@ -135,7 +135,9 @@ deferred step; the outermost release empties the worklist, and the
 worklist is freed when its thread ends. An arm that can be neither moved
 nor copied, and a value user code builds itself, are released as C++
 releases them. In Rust a generated type's arms are
-`RecBox`es, which release a deep chain the same way.
+`RecBox`es, and a generated record that refers to itself drops its node
+through the same drain (`rustmorloc::rec_release`), which release a deep
+chain the same way.
 
 ### INIT-1 A process-wide value is initialised once, by a fork-safe primitive
 Status: implemented

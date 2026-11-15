@@ -1,5 +1,6 @@
 -- GEN-6: a sourced C++ header includes the generated header of its module
--- and names the generated types by their public names (GEN-4).
+-- and names the generated types by their public names (GEN-4); the header
+-- includes only the standard headers its definitions use.
 module main (fooCpp, age, area)
 
 import root-cpp (idcpp, Str, Int, Real, List)

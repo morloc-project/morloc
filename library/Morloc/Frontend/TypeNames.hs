@@ -23,12 +23,11 @@ module Morloc.Frontend.TypeNames
   , isReservedTypeName
   ) where
 
-import Data.List (isPrefixOf)
 import qualified Data.Set as Set
 import Control.Exception (SomeException, try)
 import qualified Data.Yaml.Config as YC
 import System.Directory (doesFileExist, makeAbsolute)
-import System.FilePath (addTrailingPathSeparator, takeDirectory, (</>))
+import System.FilePath (addTrailingPathSeparator, takeDirectory)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Morloc.Data.DAG as DAG

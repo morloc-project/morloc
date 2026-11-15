@@ -50,6 +50,7 @@ data/lang/r/rmorloc.c::mlc_trace_ipc::cached	thread
 data/lang/r/rmorloc.c::r_gc_budget::budget	thread		
 data/lang/r/rmorloc.c::r_gc_budget::budget_read	thread		
 library/Morloc/CodeGenerator/Guest/Futhark.hs::-::cur	fork-scoped		
+library/Morloc/CodeGenerator/Pools/CAbi/Members/CppPrinter.hs::-::mlc_empty	lazy		
 library/Morloc/CodeGenerator/Pools/CAbi/Members/RustPrinter.hs::-::__MORLOC_SCHEMA_STRS	startup		
 library/Morloc/CodeGenerator/Pools/CAbi/Members/RustPrinter.hs::-::__MORLOC_SCHEMA_TABLE	startup		
 morloc-runtime/arrow_ffi.rs::stats_enabled::FLAG	lazy		

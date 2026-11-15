@@ -95,3 +95,10 @@
   PatternAccessible Box "gives no cpp implementation of
   '__extract_pattern__'" [reproduced], not that Box has no Python form.
   Both need the declaration-driven definition GEN-9 describes.
+- **A record on a cycle through a `data` type is not unrolled canonically.**
+  [read, 2026-11-15] Violates GEN-1. Common.hs unifyRecords folds only a
+  record's own back-references and stops at another generated record, so
+  `record A where d :: D` with `data D = Leaf | Node B` and `record B where
+  as :: [A]` meets A unrolled to different depths; unifyField then marks the
+  field generic, A is not public, and its back-reference is refused ("the
+  record A refers to itself ..."). Self-reference alone is canonical.

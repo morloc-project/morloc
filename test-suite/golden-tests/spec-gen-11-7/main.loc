@@ -1,5 +1,6 @@
 -- GEN-11: a pydantic class whose field is a class of a child module (the
--- module of lib.math is a child package of the module of lib) imports.
+-- module of lib.math is a child package of the module of lib) imports; each
+-- class module imports only what its classes use.
 module main (roundTrip)
 import root-py
 import root-cpp (idcpp)

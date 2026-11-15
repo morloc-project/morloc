@@ -240,3 +240,10 @@ literal and record gaps. Reproduced on 0.109.0 unless marked.
   module's were checked. Generalize collects a definition's tree two or
   three times. Compile time then grows with the stdlib, not the program;
   measure it and consider caching per module.
+- [reproduced, 2026-11-15] Violates OPT-3. A setter on a receiver whose
+  type is not yet known when the setter is checked (a lambda parameter)
+  records the new value's type as the field's (`{x=Int, ...}`), so a `?Int`
+  field set from an `Int` is rejected once the receiver turns out to be the
+  record: `record R where x :: ?Int`, then `g r n = (\l -> (.(.x = n) l, l))
+  r` with `g :: R -> Int -> (R, R)` fails "Cannot compare types ?Int and
+  Int"; the same setter on a typed receiver (`f r n = .(.x = n) r`) passes.

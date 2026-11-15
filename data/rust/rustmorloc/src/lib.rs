@@ -3011,23 +3011,29 @@ unsafe fn rec_drop_thunk<T>(p: *mut u8) {
 impl<T> Drop for RecBox<T> {
     fn drop(&mut self) {
         // SAFETY: the field is taken exactly once, here.
-        let mut rc = unsafe { std::mem::ManuallyDrop::take(&mut self.0) };
-        // STATE-2: uniqueness, not a count, picks the owner that drains.
-        if std::sync::Arc::get_mut(&mut rc).is_none() {
-            drop(rc);
-            return;
-        }
-        match rec_drain::state() {
-            rec_drain::State::Active => {
-                let raw = std::sync::Arc::into_raw(rc) as *mut u8;
-                if rec_drain::push((raw, rec_drop_thunk::<T>)).is_err() {
-                    // SAFETY: `raw` came from `into_raw` just above.
-                    unsafe { rec_drop_thunk::<T>(raw) };
-                }
+        let rc = unsafe { std::mem::ManuallyDrop::take(&mut self.0) };
+        rec_release(rc);
+    }
+}
+
+/// Release one holder of a recursive node (STATE-8): a `RecBox`, or the node
+/// of a generated record that refers to itself (GEN-1).
+pub fn rec_release<T>(mut rc: std::sync::Arc<T>) {
+    // STATE-2: uniqueness, not a count, picks the owner that drains.
+    if std::sync::Arc::get_mut(&mut rc).is_none() {
+        drop(rc);
+        return;
+    }
+    match rec_drain::state() {
+        rec_drain::State::Active => {
+            let raw = std::sync::Arc::into_raw(rc) as *mut u8;
+            if rec_drain::push((raw, rec_drop_thunk::<T>)).is_err() {
+                // SAFETY: `raw` came from `into_raw` just above.
+                unsafe { rec_drop_thunk::<T>(raw) };
             }
-            rec_drain::State::Inactive => rec_drain::run(|| drop(rc)),
-            rec_drain::State::Unavailable => drop(rc),
         }
+        rec_drain::State::Inactive => rec_drain::run(|| drop(rc)),
+        rec_drain::State::Unavailable => drop(rc),
     }
 }
 

@@ -32,7 +32,11 @@ module Morloc.CodeGenerator.Pools.CAbi.Members.CppPrinter
   , printCppVariantArms
   , printCppVariantSerializers
   , printSerializer
+  , printSerializerWith
   , printDeserializer
+  , printDeserializerWith
+  , printHandleDecl
+  , printHandleDefs
   , WireField (..)
   , printArmMarshallers
   , printTemplateHeader
@@ -625,13 +629,61 @@ printStructTypedef params rname fields = vsep [template, struct]
         (vsep [t <+> k <> ";" | (k, t) <- fields])
         <> ";"
 
+-- | A record that refers to itself, declared as a handle to its fields
+-- (CPP-6).
+printHandleDecl :: MDoc -> MDoc
+printHandleDecl name =
+  vsep
+    [ "struct" <+> name
+    , "{"
+    , "    std::shared_ptr<const " <> fields <> "> p;"
+    , "    " <> name <> "();"
+    , "    explicit " <> name <> "(" <> fields <> " f);"
+    , "    explicit " <> name <> "(std::shared_ptr<const " <> fields <> "> q) : p(std::move(q)) {}"
+    , "    " <> name <> "(const " <> name <> "&) = default;"
+    , "    " <> name <> "(" <> name <> "&&) noexcept = default;"
+    , "    " <> name <> "& operator=(const " <> name <> "&) = default;"
+    , "    " <> name <> "& operator=(" <> name <> "&&) noexcept = default;"
+    , "    const " <> fields <> "* operator->() const { return p.get(); }"
+    , "    const " <> fields <> "& operator*() const { return *p; }"
+    , "};"
+    ]
+  where
+    fields = name <> "_fields"
+
+-- | The definitions of a handle's constructors, after its fields struct.
+printHandleDefs :: MDoc -> MDoc
+printHandleDefs name =
+  vsep
+    [ "inline " <> name <> "::" <> name <> "() {"
+    , "    static const auto mlc_empty = std::shared_ptr<const " <> fields <> ">(std::make_shared<" <> fields <> ">());"
+    , "    p = mlc_empty;"
+    , "}"
+    , "#ifdef MLC_REC_HPP"
+    , "inline " <> name <> "::" <> name <> "(" <> fields <> " f) : p(mlc::make_arm<" <> fields <> ">(std::move(f))) {}"
+    , "#else"
+    , "inline " <> name <> "::" <> name <> "(" <> fields <> " f) : p(std::make_shared<" <> fields <> ">(std::move(f))) {}"
+    , "#endif"
+    ]
+  where
+    fields = name <> "_fields"
+
 -- | Render the write step of a struct: each field into its slot.
 printSerializer ::
   [MDoc] -> -- template parameters
   MDoc -> -- type of thing being serialized
   [(MDoc, MDoc)] -> -- key and type for all fields
   MDoc
-printSerializer params rtype fields =
+printSerializer = printSerializerWith False
+
+-- | The write step of a struct, or of a handle (CPP-6) when the flag is set.
+printSerializerWith ::
+  Bool ->
+  [MDoc] ->
+  MDoc ->
+  [(MDoc, MDoc)] ->
+  MDoc
+printSerializerWith handle params rtype fields =
   [idoc|
 #{memberHeader params}void MlcNode<#{rtype}>::write_step(MlcWriteWalk& w, const Schema* schema, void* dest, const #{rtype}& obj, size_t)
 {
@@ -641,7 +693,8 @@ printSerializer params rtype fields =
   where
     writeField :: Int -> MDoc -> MDoc
     writeField idx key =
-      [idoc|w.child(schema->parameters[#{pretty idx}], (char*)dest + schema->offsets[#{pretty idx}], obj.#{key});|]
+      [idoc|w.child(schema->parameters[#{pretty idx}], (char*)dest + schema->offsets[#{pretty idx}], obj#{member}#{key});|]
+    member = if handle then "->" else "." :: MDoc
 
 -- | Render the read and size steps of a struct.
 printDeserializer ::
@@ -649,11 +702,21 @@ printDeserializer ::
   MDoc -> -- type of thing being deserialized
   [(MDoc, MDoc)] -> -- key and type for all fields
   MDoc
-printDeserializer params rtype fields =
+printDeserializer = printDeserializerWith False
+
+-- | The read and size steps of a struct, or of a handle (CPP-6) when the
+-- flag is set.
+printDeserializerWith ::
+  Bool ->
+  [MDoc] ->
+  MDoc ->
+  [(MDoc, MDoc)] ->
+  MDoc
+printDeserializerWith handle params rtype fields =
   [idoc|
 #{memberHeader params}void MlcNode<#{rtype}>::read_step(MlcReadWalk& w, const Schema* schema, const void* data, #{rtype}* out, size_t)
 {
-#{block 4 "" (vsep (mapIndexed readField (map fst fields)))}
+#{block 4 "" (vsep (open <> mapIndexed readField (map fst fields)))}
 }
 
 #{memberHeader params}void MlcNode<#{rtype}>::size_step(MlcSizeWalk& w, const Schema* schema, const #{rtype}& obj, size_t)
@@ -663,14 +726,19 @@ printDeserializer params rtype fields =
 }
 |]
   where
+    open =
+      [ "auto mlc_node = mlc::make_arm<" <> rtype <> "_fields>();" | handle ]
+        <> [ "*out = " <> rtype <> "(mlc_node);" | handle ]
+    target = if handle then "mlc_node->" else "out->" :: MDoc
     readField :: Int -> MDoc -> MDoc
     readField idx key =
-      [idoc|w.child(schema->parameters[#{pretty idx}], (const char*)data + schema->offsets[#{pretty idx}], &out->#{key});|]
+      [idoc|w.child(schema->parameters[#{pretty idx}], (const char*)data + schema->offsets[#{pretty idx}], &#{target}#{key});|]
 
     -- A field's fixed width lies inside the record's, so only its tail counts.
+    member = if handle then "->" else "." :: MDoc
     sizeField :: Int -> MDoc -> MDoc
     sizeField idx key =
-      [idoc|w.child(schema->parameters[#{pretty idx}], obj.#{key}, true);|]
+      [idoc|w.child(schema->parameters[#{pretty idx}], obj#{member}#{key}, true);|]
 
 gatherFn :: Bool -> MDoc
 gatherFn True = "_mlc_gather_native"

@@ -1,0 +1,144 @@
+-- GEN-1, CPP-6: a generated record that refers to itself, anywhere in its
+-- fields, is a handle to its shared fields. It is declared in its module's
+-- file and built, read, written and passed to sources like any other; a
+-- record holding one keeps the held record's value form, and a field read
+-- through a list element or a bracket step is the ordinary optional. The
+-- same program in C++ and in Rust.
+module main
+  ( roundChain
+  , roundHolder
+  , sumChain
+  , countTree
+  , holderSum
+  , mkChain
+  , mkHolder
+  , nextOf
+  , viaPy
+  , setNext
+  , setNextLive
+  , setVal
+  , firstKidNext
+  , kidNexts
+  , roundPairs
+  , mkPairs
+  , wrapLabel
+  , treeLabel
+  , firstKid
+  , relabel
+  , setInner
+  , grandKidLabel
+  , kidsOf
+  , deepBuild
+  )
+
+import root-rust
+import root-py
+
+record Chain where
+  val :: Int
+  next :: ?Chain
+
+record Tree where
+  label :: Str
+  kids :: [Tree]
+
+record Node where
+  val :: Int
+  next :: ?Node
+  kids :: [Node]
+
+record Pairs where
+  n :: Int
+  rest :: [(Int, Pairs)]
+  opts :: [?Pairs]
+
+record Wrap where
+  root :: Tree
+  tag :: Str
+
+record Inner where
+  a :: Str
+  b :: Str
+  c :: Str
+
+record Linked where
+  inner :: Inner
+  next :: ?Linked
+
+record Holder where
+  one :: Chain
+  maybe :: ?Chain
+  many :: [Chain]
+  tree :: Tree
+
+source Rust from "rec.rs" ("sum_chain" as sumChain, "count_tree" as countTree, "holder_sum" as holderSum, "deep_build" as deepBuild)
+sumChain :: Chain -> Int
+countTree :: Tree -> Int
+holderSum :: Holder -> Int
+deepBuild :: Int -> Int
+
+source Py from "rec.py" ("chainLength")
+chainLength :: Chain -> Int
+
+roundChain :: Chain -> Chain
+roundChain c = idrust c
+
+roundHolder :: Holder -> Holder
+roundHolder h = idrust h
+
+mkChain :: Int -> Chain
+mkChain n = idrust {val = n, next = {val = n, next = Null}}
+
+mkHolder :: Chain -> Tree -> Holder
+mkHolder c t = idrust {one = c, maybe = c, many = [c, c], tree = t}
+
+nextOf :: Chain -> ?Chain
+nextOf c = .next (idrust c)
+
+viaPy :: Chain -> Int
+viaPy c = chainLength (mkChain (sumChain c))
+
+setNext :: Chain -> Chain -> Chain
+setNext c n = .(.next = n) (idrust c)
+
+setNextLive :: Chain -> ?Chain -> (Chain, Chain)
+setNextLive c n = (\l -> (.(.next = n) l, l)) (idrust c)
+
+setVal :: Chain -> Chain
+setVal c = .(.val = 9) (idrust c)
+
+firstKidNext :: Node -> ?Node
+firstKidNext t = .kids.[0].next (idrust t)
+
+kidNexts :: Node -> [?Node]
+kidNexts t = map (\k -> .next k) (.kids (idrust t))
+
+roundPairs :: Pairs -> Pairs
+roundPairs p = idrust p
+
+mkPairs :: Int -> Pairs
+mkPairs k = idrust {n = k, rest = [(1, {n = 2, rest = [], opts = []})], opts = [Null, {n = 3, rest = [], opts = []}]}
+
+wrapLabel :: Wrap -> Str
+wrapLabel w = .root.label (idrust w)
+
+mkTree :: Str -> Tree
+mkTree s = idrust {label = s, kids = []}
+
+treeLabel :: Str -> Str
+treeLabel s = .label (mkTree s)
+
+firstKid :: Tree -> Tree
+firstKid t = .kids.[0] (idrust t)
+
+relabel :: Tree -> Tree
+relabel t = .(.label = "z") (idrust t)
+
+setInner :: Linked -> Linked
+setInner r = .(.inner.a = "x") (idrust r)
+
+grandKidLabel :: Tree -> Str
+grandKidLabel t = .kids.[0].kids.[0].label (idrust t)
+
+kidsOf :: Tree -> [Tree]
+kidsOf t = .kids (idrust t)

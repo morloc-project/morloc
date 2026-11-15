@@ -618,7 +618,7 @@ genericLowerConfig desc srcNamer debugInfo traceInfo debugMode = cfg
         , lcPackerName = srcNamer
         , lcUnpackerName = srcNamer
         , lcBorrowPackArg = \_ -> False
-        , lcRecordAccessor = genericRecordAccessor desc
+        , lcRecordAccessor = \nt (FV _ c) r k -> return (genericRecordAccessor desc nt c r k)
         , lcDeserialRecordAccessor = \_ k v -> case ldKeyAccess desc of
             "double_bracket" -> v <> "[[" <> dquotes (pretty k) <> "]]"
             _ -> v <> "[" <> dquotes (pretty k) <> "]"

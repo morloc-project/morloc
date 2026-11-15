@@ -15,6 +15,16 @@ A declared form is either a string, a type the user writes (NATIVE-1), or a
 bare word, a kind whose definition the compiler generates. No program fails
 for want of a per-language line.
 
+A record that refers to itself, anywhere in its fields, is generated in C++
+and Rust as a handle to its shared, immutable fields (ruled 2026-11-15):
+C++ as CPP-6 describes, Rust `pub struct R(pub Arc<RFields>)`, read through
+`Deref` (`r.k`). Its `?R` is the language's ordinary optional of `R`, so a
+field read borrows and a copy shares the node, and generic code sees one
+spelling of `?a`. In Rust a node is changed in place only while no other
+handle shares it (`Arc::make_mut`), and dropping a handle releases the `?R`
+and `[R]` fields below it in bounded stack. Records that refer to each other
+are refused unless a `data` type cuts the cycle (SUM-4).
+
 ### GEN-2 A kind is a word the language defines
 Intent: ruled 2026-11-14
 Tests: spec-gen-2-1
@@ -80,10 +90,11 @@ uses in `L`, the build writes one file under the build directory:
 sourced file, so a sourced file may name the type. A sourced C++ or
 Python file may also import the file itself, by the path above relative
 to `pools/types/<lang>`. In Rust every sourced file is part of the crate
-root, which also offers each generated type by its bare name; a sourced
-file names a type by its path or by that name, and two sourced files that
-both `use` the same name clash. Its contents are a function of the
-program's closure.
+root, which also offers each generated `data` type by its bare name; a
+sourced file names a type by its path or by that name, and two sourced
+files that both `use` the same name clash. Its contents are a function of
+the program's closure, and it includes or imports only what its
+definitions name.
 
 ### GEN-7 A generated file imports what its fields name
 Intent: ruled 2026-11-14
@@ -96,11 +107,15 @@ whose `import` the file then imports.
 
 ### GEN-8 A generated record in a compiled language holds host values
 Intent: ruled 2026-11-14
-Code: unaudited
+Tests: spec-gen-8-1, spec-gen-8-2
+Code: conforms 2026-11-15
 
 In C++ and Rust a field of a generated record is in the host's convention,
 as a field of a user-written struct is: a function field whose result is an
-effect runs the effect when called.
+effect runs the effect when called. A field that is itself a suspension
+stays a callable of no arguments. Morloc code that builds such a record or
+reads such a field adapts the function where it does so, so in morloc the
+field keeps its declared type (EFF-2).
 
 ### GEN-9 A generated definition follows its declaration
 Intent: proposed

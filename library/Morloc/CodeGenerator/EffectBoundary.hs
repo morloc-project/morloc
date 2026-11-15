@@ -1151,12 +1151,11 @@ intrinsicCallback lang m intr margT resT f = do
       _ -> MM.throwCompilerBug $ "The function passed to" <+> viaShow intr <+> "has no known type"
 
 -- | The record types among these whose value in this pool is already the
--- host's. In a compiled language a record mapped to a type the program
--- declares (@record Rust => Ops = "Ops"@) has the field types written in
--- that declaration, which follow the host's convention: building one is the
--- outbound boundary for its fields and reading a field the inbound one, and
--- the value crosses to a host as it is. A record the compiler generates
--- (@"struct"@), and every record of a dynamic language, holds morloc values.
+-- host's. In a compiled language every record, declared by the program or
+-- generated (GEN-8), holds its fields in the host's convention: building
+-- one is the outbound boundary for its fields and reading a field the
+-- inbound one, and the value crosses to a host as it is. Every record of a
+-- dynamic language holds morloc values.
 hostRecords :: Lang -> Int -> [Type] -> MorlocMonad (Set.Set TVar)
 hostRecords lang g ts = do
   reg <- MM.gets stateLangRegistry
@@ -1172,7 +1171,7 @@ hostRecords lang g ts = do
       ( do
           c <- inferConcreteType lang (Idx g t)
           return $ case c of
-            NamF _ (FV _ (CV cv)) _ _ | cv /= "struct" -> Just v
+            NamF {} -> Just v
             _ -> Nothing
         ) `MM.recoverRejected` (CMS.put st0 >> return Nothing)
 

@@ -51,6 +51,7 @@ import Morloc.CodeGenerator.Grammars.Macro (expandMacro)
 import Morloc.CodeGenerator.Grammars.Translator.Imperative
   (
   Low (..)
+  , nativeArgTypeF
   , LowArg (..)
   , LowN
   , LowS
@@ -164,10 +165,13 @@ data RustState = RustState
   , rsPublicDecls :: [(TVar, MDoc, Bool)]
   -- ^ The declarations of those types, to be written to their files, each
   -- with whether the crate root still offers its module's names.
+  , rsHandles :: Set.Set TVar
+  -- ^ The generated records that refer to themselves, each a handle to its
+  -- shared fields (GEN-1).
   }
 
 instance Defaultable RustState where
-  defaultValue = RustState 0 Map.empty Set.empty Set.empty (\_ -> Nothing) Map.empty [] Map.empty Set.empty Set.empty Map.empty Map.empty Map.empty Set.empty emptyPoolPlan Set.empty 0 [] Map.empty Map.empty []
+  defaultValue = RustState 0 Map.empty Set.empty Set.empty (\_ -> Nothing) Map.empty [] Map.empty Set.empty Set.empty Map.empty Map.empty Map.empty Set.empty emptyPoolPlan Set.empty 0 [] Map.empty Map.empty [] Set.empty
 
 -- | The ownership environment: the borrowed (@&T@) parameter indices of the
 -- manifold whose body is currently being lowered ('oeCurrent') and of its
@@ -272,9 +276,13 @@ rustTypeOf = f
     -- A recursive optional (?T where T points back to a containing record)
     -- must break the cycle with Box (an Option<T> of an infinite-size T won't
     -- compile). None == absent matches the voidstar single-relptr Optional.
-    f (OptionalF t@(RecF _)) = do
+    f (OptionalF t@(RecF (FV gv _))) = do
       t' <- f t
-      return $ "::std::option::Option<::std::boxed::Box<" <> t' <> ">>"
+      handles <- CMS.gets rsHandles
+      -- A handle has a size of its own, so its optional needs no box.
+      return $ if Set.member gv handles
+        then "::std::option::Option<" <> t' <> ">"
+        else "::std::option::Option<::std::boxed::Box<" <> t' <> ">>"
     f (OptionalF t) = do
       -- The payload is a stored position; a function payload boxes ('rustFieldType').
       t' <- rustFieldType t
@@ -514,7 +522,7 @@ rustEvalPattern t0 (PatSet s0 m0 (toList -> xs0)) = do
       let nameOf recType = CMS.evalState (runReaderT (rustStructCtor recType) env) st
           makeTuple _ xs = tupled xs
           makeRecord recType fields =
-            nameOf recType <+> "{" <+> RP.rustRecordFields [(k, x) | ((k, _), x) <- fields] <+> "}"
+            RP.rustRecordValue (isHandleType (rsHandles st) recType) (nameOf recType) [(k, x) | ((k, _), x) <- fields]
           accessTuple _ d i = d <> "." <> pretty i
           accessRecord _ d k = d <> "." <> RP.rustFieldIdent (Key k)
           -- An unchanged field is cloned into the owned rebuild; a changed
@@ -536,14 +544,44 @@ rustTakeSetter recv t sel (m : xs)
   , Just pxs <- zipExact paths xs
   , not (any overlaps (indexed paths)) = do
       own <- rustOwnership recv
+      handles <- CMS.gets rsHandles
+      -- GEN-1: a handle is set through `Arc::make_mut`; a path through
+      -- another handle is rebuilt instead.
+      let root = if isHandleType handles t then "::std::sync::Arc::make_mut(&mut *__morloc_rec.0)" else "__morloc_rec"
+          inPlace = not (any (throughHandle handles t) paths)
       return $
-        if own == Owned
-          then Just ("{ let mut __morloc_rec = " <> m <> "; " <> hsep [writeSelectorRust "__morloc_rec" p <+> "=" <+> x <> ";" | (p, x) <- pxs] <+> "__morloc_rec }")
+        if own == Owned && inPlace
+          then Just ("{ let mut __morloc_rec = " <> m <> "; " <> hsep [writeSelectorRust root p <+> "=" <+> x <> ";" | (p, x) <- pxs] <+> "__morloc_rec }")
           else Nothing
   where
     paths = ungroup sel
     overlaps (i, p) = or [q `isPrefixOf` p | (j, q) <- indexed paths, j /= i]
 rustTakeSetter _ _ _ _ = return Nothing
+
+-- | Whether a getter on a value of this type takes its fields from the
+-- handle's node: each path is one field of the handle.
+takesFromHandle :: Set.Set TVar -> TypeF -> Selector -> Bool
+takesFromHandle handles t sel = isHandleType handles t && all oneField (ungroup sel)
+  where
+    oneField [Right _] = True
+    oneField _ = False
+
+-- | Whether a type is a record that is a handle to its fields.
+isHandleType :: Set.Set TVar -> TypeF -> Bool
+isHandleType handles t = maybe False (`Set.member` handles) (recordNameOf t)
+
+-- | Whether a path, past its first step, reaches into a handle.
+throughHandle :: Set.Set TVar -> TypeF -> [Either Int Text] -> Bool
+throughHandle handles = go
+  where
+    go _ [] = False
+    go _ [_] = False
+    go t (step : rest) = case next t step of
+      Just t' -> isHandleType handles t' || go t' rest
+      Nothing -> False
+    next (NamF _ _ _ fs) (Right k) = lookup (Key k) fs
+    next (AppF _ (tyArgs -> ts)) (Left i) | i >= 0 && i < length ts = Just (ts !! i)
+    next _ _ = Nothing
 
 -- | Walk a 'Selector' that may contain bracket steps, emitting Rust source per
 -- step: @.field@ (record), @.i@ (tuple), @morloc_at(idx, &(rcv))@ (index),
@@ -571,8 +609,25 @@ writeSelectorRust d (Left i : rs) = writeSelectorRust (d <> "." <> pretty i) rs
 -- field of the record and no others. A receiver that is not a record or a
 -- tuple renders as 'lcEvalPattern' would.
 rustTakeGetter :: TypeF -> Selector -> MDoc -> RustM (Maybe MDoc)
-rustTakeGetter t0 sel0 subj0
-  | opens t0 = do
+rustTakeGetter t0 sel0 subj0 = do
+  handles <- CMS.gets rsHandles
+  rustTakeGetterWith handles t0 sel0 subj0
+
+-- | 'rustTakeGetter', given the records that are handles, which it never
+-- opens (GEN-1).
+rustTakeGetterWith :: Set.Set TVar -> TypeF -> Selector -> MDoc -> RustM (Maybe MDoc)
+rustTakeGetterWith handles t0 sel0 subj0
+  -- OWN-5: fields read at the last use of a handle are taken from its node
+  -- when no other handle shares it, and copied otherwise.
+  | takesFromHandle handles t0 sel0, Just ks <- mapM oneKey (ungroup sel0) =
+      let field v k = v <> "." <> RP.rustFieldIdent (Key k)
+          leaves v f = case ks of
+            [k] -> f (field v k)
+            _ -> tupled (map (f . field v) ks)
+       in return . Just $
+            "{ match (" <> subj0 <> ").into_parts() { Ok(__morloc_f) =>" <+> leaves "__morloc_f" id
+              <> ", Err(__morloc_a) =>" <+> leaves "__morloc_a" (<> ".clone()") <+> "} }"
+  | opens t0, not (any (readsHandle handles t0) (ungroup sel0)) = do
       (stmts, leaves) <- node t0 subj0 (indexed (ungroup sel0))
       let result = case map snd (sortOn fst leaves) of
             [x] -> x
@@ -580,8 +635,10 @@ rustTakeGetter t0 sel0 subj0
       return (Just ("{" <+> hsep stmts <+> result <+> "}"))
   | otherwise = return Nothing
   where
-    opens (NamF NamRecord _ _ _) = True
+    opens (NamF NamRecord (FV g _) _ _) = not (Set.member g handles)
     opens t = isJust (tupleArgs t)
+    oneKey [Right k] = Just k
+    oneKey _ = Nothing
 
     tupleArgs (AppF (VarF (FV (TV gv) _)) ts)
       | isTupleName gv = Just (tyArgs ts)
@@ -607,8 +664,9 @@ rustTakeGetter t0 sel0 subj0
             ( ("let" <+> whole <> ":" <+> tys <+> "=" <+> v <> ";") : ["let" <+> c <+> "=" <+> e <> ";" | (_, c, e) <- copies]
             , (lastWhole, whole) : [(k, c) | (k, c, _) <- copies]
             )
-    node t@(NamF NamRecord _ _ rs) v paths
-      | all (isKey . snd) paths
+    node t@(NamF NamRecord (FV g _) _ rs) v paths
+      | not (Set.member g handles)
+      , all (isKey . snd) paths
       , Just _ <- mapM (\h -> lookup h rs') (heads paths) = do
           n <- getCounter
           tys <- rustTypeOf t
@@ -824,30 +882,37 @@ thinClosures sinks stageTable heads es =
 -- owned sinks -- never moved); a getter of a borrowed value is a place; a
 -- constructor field that is not taken, and a list element of a variable or
 -- of such a field, is a reference (OWN-6); everything else is an owned value.
-ownerPure :: Set.Set Int -> Set.Set Int -> NativeExpr -> IOwnership
+ownerPure :: Set.Set TVar -> Set.Set Int -> Set.Set Int -> NativeExpr -> IOwnership
 -- A bound variable and a let variable both render as `n<i>` and share the index
 -- namespace, so both classify the same way ('classifyIndex').
 -- A last read of a value the pool owns takes it (OWN-2).
-ownerPure g s (BndVarN _ i r) = classifyRead g s i r
-ownerPure g s (LetVarN _ i r) = classifyRead g s i r
-ownerPure g s (ReturnN e) = ownerPure g s e
-ownerPure g s (NativeLetN _ _ e) = ownerPure g s e
-ownerPure g s (SerialLetN _ _ e) = ownerPure g s e
-ownerPure g s (PatN _ (PatGet _ [] recv)) =
-  case argOwnerPure g s recv of
+ownerPure _ g s (BndVarN _ i r) = classifyRead g s i r
+ownerPure _ g s (LetVarN _ i r) = classifyRead g s i r
+ownerPure h g s (ReturnN e) = ownerPure h g s e
+ownerPure h g s (NativeLetN _ _ e) = ownerPure h g s e
+ownerPure h g s (SerialLetN _ _ e) = ownerPure h g s e
+-- GEN-1: a getter that reads into a handle is a place, unless it takes
+-- fields at the handle's last use ('rustTakeGetterWith').
+ownerPure h g s (PatN _ (PatGet sel [] recv))
+  | any (readsHandle h (nativeArgTypeF recv)) (ungroup sel) =
+      if takesFromHandle h (nativeArgTypeF recv) sel && argOwnerPure h g s recv == Owned
+        then Owned
+        else BorrowedPlace
+ownerPure h g s (PatN _ (PatGet _ [] recv)) =
+  case argOwnerPure h g s recv of
     Owned -> Owned
     _ -> BorrowedPlace
-ownerPure g s (IntrinsicN t IntrCtorField _ (subj : _))
+ownerPure h g s (IntrinsicN t IntrCtorField _ (subj : _))
   | not (rustIsCopy t)
   , borrowableRoot subj
-  , not (isLastRead subj && ownerPure g s subj == Owned) =
+  , not (isLastRead subj && ownerPure h g s subj == Owned) =
       BorrowedRef
-ownerPure g s (IntrinsicN t IntrListElem _ (subj : _))
+ownerPure h g s (IntrinsicN t IntrListElem _ (subj : _))
   | not (rustIsCopy t)
   , borrowableRoot subj
-  , isJust (varIndex subj) || ownerPure g s subj == BorrowedRef =
+  , isJust (varIndex subj) || ownerPure h g s subj == BorrowedRef =
       BorrowedRef
-ownerPure _ _ _ = Owned
+ownerPure _ _ _ _ = Owned
 
 -- | Classify a variable index: a borrowed parameter (in @Gamma@) is a @&T@
 -- reference; a shared value (in @Shared@, used at more than one point) is a place
@@ -864,9 +929,9 @@ classifyIndex g s i
 -- materializes an owned value (a manifold's return type is always the owned @T@,
 -- and the return sink clones a borrowed body -- see 'ReturnN_'), so it is 'Owned'
 -- regardless of the sub-manifold body's internal ownership.
-argOwnerPure :: Set.Set Int -> Set.Set Int -> NativeArg -> IOwnership
-argOwnerPure g s (NativeArgExpr e) = ownerPure g s e
-argOwnerPure _ _ (NativeArgManifold _) = Owned
+argOwnerPure :: Set.Set TVar -> Set.Set Int -> Set.Set Int -> NativeArg -> IOwnership
+argOwnerPure h g s (NativeArgExpr e) = ownerPure h g s e
+argOwnerPure _ _ _ (NativeArgManifold _) = Owned
 
 classifyRead :: Set.Set Int -> Set.Set Int -> Int -> VarRead -> IOwnership
 classifyRead g s i r = case classifyIndex g s i of
@@ -877,7 +942,13 @@ rustOwnership :: NativeExpr -> RustM IOwnership
 rustOwnership e = do
   g <- asks oeCurrent
   s <- asks oeShared
-  return (ownerPure g s e)
+  h <- CMS.gets rsHandles
+  return (ownerPure h g s e)
+
+-- | Whether a getter path, on a value of the given type, reads a field of a
+-- handle.
+readsHandle :: Set.Set TVar -> TypeF -> [Either Int Text] -> Bool
+readsHandle handles t path = not (Set.null handles) && (isHandleType handles t || throughHandle handles t path)
 
 -- | Adapt an expression to an owned value at an owned sink (a container element,
 -- a return, a let RHS, a by-value parameter): clone a borrowed non-'Copy' value,
@@ -2038,6 +2109,7 @@ planRustPublic es = do
     [o | o@(_, ps, _) <- collectRustEnums es, null ps]
   let public = Set.fromList (recs <> [gv | (FV gv _, _, _) <- vars] <> [gv | (FV gv _, _, _) <- enums])
       names = Map.fromList [(gv, qualifiedRustName h) | gv <- Set.toList public, Just h <- [Map.lookup gv homes]]
+      handles = Set.fromList [gv | ((FV gv (CV "struct"), _), rec) <- recmap0, gv `elem` recs, recursiveRecord gv (recFields rec)]
       badWords =
         [ (gv, c)
         | gv <- Set.toList public, Just h <- [Map.lookup gv homes]
@@ -2046,6 +2118,7 @@ planRustPublic es = do
 
   CMS.modify $ \s -> s
     { rsPublic = names
+    , rsHandles = handles
     , rsRecmap =
         [ (k, maybe rec (\n -> rec {recName = pretty n}) (Map.lookup gv names))
         | (k@(FV gv _, _), rec) <- recmap0
@@ -2055,7 +2128,7 @@ planRustPublic es = do
             <> "`, which Rust cannot spell as a module name"
         | (gv, c) <- badWords ]
           <> [ "the generated Rust name " <> n <> " would name both " <> T.intercalate " and " (map unTVar gvs)
-             | (n, gvs) <- Map.toList (Map.fromListWith (flip (<>)) [(n, [gv]) | (gv, n) <- Map.toList names])
+             | (n, gvs) <- Map.toList (Map.fromListWith (flip (<>)) ([(n, [gv]) | (gv, n) <- Map.toList names] <> [(n <> "Fields", [gv]) | (gv, n) <- Map.toList names, Set.member gv handles]))
              , length gvs > 1 ]
           <> rsErrors s
     }
@@ -2222,10 +2295,14 @@ generateRustStructs closureAsts es = do
             let assigned = assignGenerics (1 :: Int) (recFields rec)
                 params = [p | (_, Left p) <- assigned]
             fields <- mapM (oneField gv (recName rec)) assigned
+            handle <- Set.member gv <$> CMS.gets rsHandles
             let hasFun = any (containsFunF . snd) rs
                 fields4 = [(fld, ty, w, Nothing) | (fld, ty, w) <- fields]
-                impls = [RP.printRecordImpls RP.RenderedFieldTypes (recName rec) params fields4 | not hasFun]
-            decl <- declareOrKeep False gv (\n -> RP.printRustStruct n params [(fld, ty) | (fld, ty, _) <- fields]) (recName rec)
+                impls = [RP.printRecordImplsWith handle RP.RenderedFieldTypes (recName rec) params fields4 | not hasFun]
+                printDecl n
+                  | handle = RP.printRustHandle n [(fld, ty) | (fld, ty, _) <- fields]
+                  | otherwise = RP.printRustStruct n params [(fld, ty) | (fld, ty, _) <- fields]
+            decl <- declareOrKeep False gv printDecl (recName rec)
             return $ map ((,) Nothing) (decl <> impls)
           Nothing -> error $ "Rust: autogenerated record missing from recmap: " <> show v
       -- User-mapped record: the user writes the (monomorphic) struct, so only the
@@ -2257,17 +2334,12 @@ generateRustStructs closureAsts es = do
     oneField :: TVar -> MDoc -> (Key, Either MDoc TypeF) -> RustM (MDoc, MDoc, Bool)
     oneField _ _ (k, Left param) = return (RP.rustFieldIdent k, param, True)
     oneField selfGv selfName (k, Right ty) = do
+      handles <- CMS.gets rsHandles
       ty' <- case ty of
-        OptionalF inner | refsRecord selfGv inner -> return $ "::std::option::Option<::std::boxed::Box<" <> selfName <> ">>"
+        OptionalF inner | refersTo selfGv inner, not (Set.member selfGv handles) -> return $ "::std::option::Option<::std::boxed::Box<" <> selfName <> ">>"
         _ -> rustFieldType ty
       return (RP.rustFieldIdent k, ty', isVarWidthF ty)
 
-    -- True when a type is an immediate reference back to the enclosing record.
-    refsRecord :: TVar -> TypeF -> Bool
-    refsRecord g (NamF _ (FV g' _) _ _) = g == g'
-    refsRecord g (VarF (FV g' _)) = g == g'
-    refsRecord g (RecF (FV g' _)) = g == g'
-    refsRecord _ _ = False
 
 -- | Conservative: only pure fixed-width scalar (and all-fixed tuple) fields let
 -- a record short-circuit shm_size to schema.width. Anything variable-region
@@ -2646,7 +2718,7 @@ rustLowerConfig mask makers consumed =
     -- A non-Copy arg to a pack/unpack function is borrowed to match the packer's
     -- `&T` parameter (a Copy arg is passed by value).
     , lcBorrowPackArg = \t -> not (rustIsCopy t)
-    , lcRecordAccessor = \_ _ record field -> record <> "." <> field
+    , lcRecordAccessor = \_ _ record field -> return (record <> "." <> field)
     , lcDeserialRecordAccessor = \_ k v -> v <> "." <> pretty k
     , lcTupleAccessor = \i v -> v <> "." <> pretty i
     , lcNewIndex = getCounter
@@ -2658,7 +2730,8 @@ rustLowerConfig mask makers consumed =
     , lcTupleConstructor = tupled
     , lcRecordConstructor = \recType _ _ _ rs -> do
         name <- rustStructCtor recType
-        return $ defaultValue {poolExpr = name <+> "{" <+> RP.rustRecordFields rs <+> "}"}
+        handles <- CMS.gets rsHandles
+        return $ defaultValue {poolExpr = RP.rustRecordValue (isHandleType handles recType) name rs}
     -- A function value already IS its stored representation, so storing one
     -- is the identity; re-boxing it would cost an allocation and an
     -- indirection on every store, and lose its registry identity (STATE-4).

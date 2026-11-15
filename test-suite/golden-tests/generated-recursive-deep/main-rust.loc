@@ -1,0 +1,24 @@
+-- GEN-1, STATE-8: a generated record that refers to itself is a handle, so a
+-- million-node chain built in a native loop is walked with one field read per
+-- step and no copy of a node, and released without one stack frame per node.
+-- The generic `isNull` and `require` of root see the ordinary optional.
+module main (deep)
+
+import root-rust
+
+record Chain where
+  val :: Int
+  next :: ?Chain
+
+build :: Int -> ?Chain -> ?Chain
+build n acc
+  ? n == 0 = acc
+  : build (n - 1) {val = 1, next = acc}
+
+walk :: Int -> ?Chain -> Int
+walk acc c
+  ? isNull c = acc
+  : walk (acc + .val (require c)) (.next (require c))
+
+deep :: Int -> Int
+deep n = walk 0 (build n Null)

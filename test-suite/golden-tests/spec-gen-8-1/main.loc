@@ -1,0 +1,50 @@
+-- GEN-8: a generated C++ record holds its function fields in the host's
+-- convention: a field of type `Int -> <IO> Int` is a C++ function that runs
+-- its effect and returns the Int. C++ sources call and build such fields
+-- directly; morloc code builds, reads and runs them; a record that refers
+-- to itself works the same; Python calls a field of one.
+module main (viaSource, viaRead, viaMade, viaChain, viaPy)
+
+import root-cpp
+import root-py
+
+record Ops where
+  step :: Int -> <IO> Int
+  name :: Str
+
+record Chain where
+  run :: Int -> <IO> Int
+  next :: ?Chain
+
+source Cpp from "ops.hpp"
+  ( "bump"
+  , "applyOps"
+  , "makeOps"
+  , "applyChain"
+  )
+
+bump :: Int -> <IO> Int
+applyOps :: Ops -> Int -> <IO> Int
+makeOps :: Str -> Ops
+applyChain :: Chain -> Int -> <IO> Int
+
+source Py from "ops.py" ("pyApply")
+pyApply :: Ops -> Int -> <IO> Int
+
+viaSource :: Int -> <IO> Int
+viaSource x = applyOps {step = bump, name = "a"} x
+
+opsB :: Ops
+opsB = {step = bump, name = "b"}
+
+viaRead :: Int -> <IO> Int
+viaRead x = (.step opsB) x
+
+viaMade :: Int -> <IO> Int
+viaMade x = (.step (makeOps "c")) x
+
+viaChain :: Int -> <IO> Int
+viaChain x = applyChain {run = bump, next = {run = bump, next = Null}} x
+
+viaPy :: Int -> <IO> Int
+viaPy x = pyApply {step = bump, name = "p"} x

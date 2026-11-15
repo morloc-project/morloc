@@ -43,6 +43,9 @@ module Morloc.CodeGenerator.Grammars.Common
   , collectRecords
   , collectRecordsWhere
   , unifyRecords
+  , recursiveRecord
+  , recordNameOf
+  , refersTo
   , mergeVariantOccurrences
   , mergeEnumOccurrences
   , structName
@@ -321,12 +324,12 @@ patternSetter makeTuple makeRecord accessTuple accessRecord finalizeSet dat0 t0 
 -- traversal and arg-threading are shared. Used by both the C++ and Rust
 -- getter-chain lowering.
 walkSelectorBrackets ::
-  (MDoc -> Text -> MDoc) ->                  -- record key step: receiver -> key -> receiver
-  (MDoc -> Int -> MDoc) ->                   -- tuple index step: receiver -> index -> receiver
-  (MDoc -> MDoc -> MDoc) ->                  -- bracket index: index-arg -> receiver -> expr
-  (MDoc -> MDoc -> MDoc -> MDoc -> MDoc) ->  -- bracket slice: start stop step receiver -> expr
-  ([MDoc] -> MDoc) ->                        -- multi-sibling group: results -> expr
-  MDoc -> [MDoc] -> Selector -> (MDoc, [MDoc])
+  (r -> Text -> r) ->        -- record key step: receiver -> key -> receiver
+  (r -> Int -> r) ->         -- tuple index step: receiver -> index -> receiver
+  (b -> r -> r) ->           -- bracket index: index-arg -> receiver -> expr
+  (b -> b -> b -> r -> r) -> -- bracket slice: start stop step receiver -> expr
+  ([r] -> r) ->              -- multi-sibling group: results -> expr
+  r -> [b] -> Selector -> (r, [b])
 walkSelectorBrackets keyStep idxStep bracketIndex bracketSlice groupStep = go
   where
     go rcv brs SelectorEnd = (rcv, brs)
@@ -993,7 +996,58 @@ unifyRecords xs =
     . map (\((v, ks), rss) -> ((v, ks), map unifyField (transpose (map snd rss))))
     . groupSort
     . unique
-    $ [((v, map fst es), (m, es)) | (v, m, es) <- xs]
+    $ [((v, map fst es), (m, map (fmap (foldSelf v . canonical)) es)) | (v, m, es) <- xs]
+  where
+    -- A recursive record occurs unrolled to different depths: at its root,
+    -- inside a record that holds it, and as a back-reference below itself,
+    -- which may also be spelled as a variable of its own name. Within each
+    -- generated record, its own nested occurrences become back-references,
+    -- so every occurrence agrees. Only a record's own fields are folded: a
+    -- record holding another keeps that record's value representation.
+    canonical t = case t of
+      NamF o v ps rs -> NamF o v (map (fmap canonical) ps) [(k, foldSelf v (canonical x)) | (k, x) <- rs]
+      FunF as r -> FunF (map canonical as) (canonical r)
+      AppF h as -> AppF (canonical h) (map (fmap canonical) as)
+      OptionalF x -> OptionalF (canonical x)
+      VariantF v ps as -> VariantF v (map (fmap canonical) ps) [(c, map canonical ts) | (c, ts) <- as]
+      _ -> t
+    foldSelf self@(FV gv (CV "struct")) t = case t of
+      _ | refersTo gv t -> RecF self
+      -- another generated record is already canonical
+      NamF _ (FV _ (CV "struct")) _ _ -> t
+      NamF o v ps rs -> NamF o v (map (fmap (foldSelf self)) ps) [(k, foldSelf self x) | (k, x) <- rs]
+      FunF as r -> FunF (map (foldSelf self) as) (foldSelf self r)
+      AppF h as -> AppF (foldSelf self h) (map (fmap (foldSelf self)) as)
+      OptionalF x -> OptionalF (foldSelf self x)
+      VariantF v ps as -> VariantF v (map (fmap (foldSelf self)) ps) [(c, map (foldSelf self) ts) | (c, ts) <- as]
+      _ -> t
+    foldSelf _ t = t
+
+-- | The record a type names, as itself, a back-reference to it, or a
+-- variable of its name.
+recordNameOf :: TypeF -> Maybe TVar
+recordNameOf t = case t of
+  NamF _ (FV g _) _ _ -> Just g
+  RecF (FV g _) -> Just g
+  VarF (FV g _) -> Just g
+  _ -> Nothing
+
+-- | Whether a type names the given record ('recordNameOf').
+refersTo :: TVar -> TypeF -> Bool
+refersTo g t = recordNameOf t == Just g
+
+-- | Whether a generated record's fields refer back to the record itself,
+-- anywhere in their types: such a record is a handle to its fields (CPP-6).
+recursiveRecord :: TVar -> [(Key, Maybe TypeF)] -> Bool
+recursiveRecord self fields = any mentions [t | (_, Just t) <- fields]
+  where
+    mentions t = refersTo self t || case t of
+      NamF _ _ ps rs -> any mentions (tyArgs ps) || any (mentions . snd) rs
+      FunF as r -> any mentions (r : as)
+      AppF h as -> mentions h || any mentions (tyArgs as)
+      OptionalF x -> mentions x
+      VariantF _ ps as -> any mentions (tyArgs ps) || any (any mentions . snd) as
+      _ -> False
 
 -- | The files of generated type definitions (GEN-6) as a directory tree
 -- below the language's types directory: each module's file at its path

@@ -66,9 +66,9 @@ a `const T&`, is safe while other threads do the same with the same object
 copying it.
 
 ### CPP-6 A C++ `data` value and a recursive record field are shared and never changed
-Intent: ruled 2026-10-19
+Intent: ruled 2026-11-15
 Tests: spec-cpp-6-1, spec-cpp-6-2
-Code: conforms 2026-10-19
+Code: conforms 2026-11-15
 
 A `data` type with payloads is a struct holding
 `std::variant<std::shared_ptr<const T_C>...> v`, one alternative per
@@ -92,3 +92,15 @@ Morloc moves a field out of an arm only when it built the arm itself and no
 other holder shares it, and copies it otherwise (OWN-5). An arm built with
 `mlc::make_arm` (from `mlc_rec.hpp`) is released in bounded stack (STATE-8);
 one built with `std::make_shared` is released recursively.
+
+A record morloc generates that refers to itself, anywhere in its fields, is
+a handle to its fields instead (GEN-1, ruled 2026-11-15): `struct R {
+std::shared_ptr<const R_fields> p; ... }`, read with `r->k`, beside
+`struct R_fields` holding the fields. Its `?R` is then the ordinary
+`std::optional<R>`, so a field read borrows the field and a copy of `R`
+shares the node. A handle is null only after it is moved from; its default
+constructor holds the one default node of its type. A source builds one as
+`R{{...}}` or `R(R_fields{...})`, whose node, like those pool code builds,
+comes from `mlc::make_arm` wherever `mlc_rec.hpp` can be included.
+
+Why: reversed 2026-11-15 for generated records, whose `?R` was a pointer read as a copy.

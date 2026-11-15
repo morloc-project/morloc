@@ -88,6 +88,7 @@ module Morloc.CodeGenerator.Grammars.Translator.Imperative
   , isLastRead
   , isBorrowableProjection
   , borrowableRoot
+  , nativeArgTypeF
 
     -- * Default serialize/deserialize (for Python/R)
   , defaultSerialize
@@ -636,7 +637,7 @@ data LowerConfig m = LowerConfig
   -- const-ref/by-value param implicitly); Rust borrows a non-'Copy' arg so it
   -- matches the packer's `&T` parameter. The argument is the arg's type.
   , lcBorrowPackArg :: TypeF -> Bool
-  , lcRecordAccessor :: NamType -> CVar -> MDoc -> MDoc -> MDoc
+  , lcRecordAccessor :: NamType -> FVar -> MDoc -> MDoc -> m MDoc
   , lcDeserialRecordAccessor :: Int -> Key -> MDoc -> MDoc
   -- ^ How to access record fields during deserialization.
   -- For Python/R: same as lcRecordAccessor (by key name)
@@ -954,15 +955,15 @@ nativeToWire cfg = go
       typeM <- lcSerialAstType cfg tup
       let v' = render $ (helperVar cfg) idx
       return (concat befores ++ [IAssign v' typeM (ITupleLit exprs)], IVar v')
-    construct v obj@(SerialObject namType fv@(FV _ constructor) _ rs) = do
-      let accessor = lcRecordAccessor cfg namType constructor
-      results <- mapM (\(key, s) -> go (accessor v (pretty key)) s) rs
+    construct v obj@(SerialObject namType fv _ rs) = do
+      results <- mapM (\(key, s) -> lcRecordAccessor cfg namType fv v (pretty key) >>= (`go` s)) rs
       let (befores, exprs) = unzip results
       idx <- lcNewIndex cfg
       typeM <- lcSerialAstType cfg obj
       let v' = render $ (helperVar cfg) idx
+      let lit = IRecordLit namType fv (zipSame (map fst rs) exprs)
       return
-        ( concat befores ++ [IAssign v' typeM (IRecordLit namType fv (zipSame (map fst rs) exprs))]
+        ( concat befores ++ [IAssign v' typeM lit]
         , IVar v'
         )
     construct v opt@(SerialOptional _ innerS) = do
@@ -1070,8 +1071,9 @@ wireToNative cfg = check
       typeM <- lcDeserialAstType cfg (SerialObject namType fv [] rs)
       idx <- lcNewIndex cfg
       let v' = render $ (helperVar cfg) idx
+      let lit = IRecordLit namType fv (zipSame (map fst rs) exprs)
       return
-        (IVar v', concat befores ++ [IAssign v' typeM (IRecordLit namType fv (zipSame (map fst rs) exprs))])
+        (IVar v', concat befores ++ [IAssign v' typeM lit])
     construct v opt@(SerialOptional _ innerS) = do
       idx <- lcNewIndex cfg
       resultType <- lcDeserialAstType cfg opt
