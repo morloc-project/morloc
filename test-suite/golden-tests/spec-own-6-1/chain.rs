@@ -6,16 +6,16 @@ static CLONES: AtomicI64 = AtomicI64::new(0);
 // recurses down the chain, as a derived one would; a release walks it.
 pub enum Chain {
     End,
-    Link(Box<(i64, Chain)>),
+    Link(i64, Box<Chain>),
 }
 
 impl Clone for Chain {
     fn clone(&self) -> Chain {
         match self {
             Chain::End => Chain::End,
-            Chain::Link(b) => {
+            Chain::Link(v, t) => {
                 CLONES.fetch_add(1, Ordering::SeqCst);
-                Chain::Link(Box::new((b.0, b.1.clone())))
+                Chain::Link(*v, t.clone())
             }
         }
     }
@@ -24,11 +24,11 @@ impl Clone for Chain {
 impl Drop for Chain {
     fn drop(&mut self) {
         let mut next = match self {
-            Chain::Link(b) => std::mem::replace(&mut b.1, Chain::End),
+            Chain::Link(_, t) => std::mem::replace(&mut **t, Chain::End),
             Chain::End => return,
         };
-        while let Chain::Link(b) = &mut next {
-            let tail = std::mem::replace(&mut b.1, Chain::End);
+        while let Chain::Link(_, t) = &mut next {
+            let tail = std::mem::replace(&mut **t, Chain::End);
             next = tail;
         }
     }

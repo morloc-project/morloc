@@ -1777,7 +1777,7 @@ isLastRead _ = False
 -- constructor field or a record field. Nested manifolds are left to their
 -- own scope, and an index bound more than once under the manifold never
 -- qualifies.
-loopBorrowLocals :: (TypeF -> Bool) -> Set.Set Int -> RNode -> Set.Set Int
+loopBorrowLocals :: (NativeExpr -> Bool) -> Set.Set Int -> RNode -> Set.Set Int
 loopBorrowLocals mayBorrow g root = go g root
   where
     go env n = case n of
@@ -1800,7 +1800,7 @@ loopBorrowLocals mayBorrow g root = go g root
 
 -- | The candidate parameters OWN-7 passes by value. The sinks are found
 -- only on the part of the body every evaluation runs.
-consumedParams :: (Int -> Set.Set Int) -> (TypeF -> Bool) -> Set.Set Int -> NativeManifold -> Set.Set Int
+consumedParams :: (Int -> Set.Set Int) -> (NativeExpr -> Bool) -> Set.Set Int -> NativeManifold -> Set.Set Int
 consumedParams byValue mayBorrow cands nm@(NativeManifold _ _ _ body) =
   Set.filter (\p -> Set.member p kept && Map.lookup p counts == Just 1) cands
   where
@@ -1841,7 +1841,7 @@ nativeManifoldsUnder n = here <> concatMap nativeManifoldsUnder (rnodeChildren n
       RNM nm -> [nm]
       _ -> []
 
-loopBorrows :: (TypeF -> Bool) -> Set.Set Int -> Set.Set Int -> [(Int, NativeExpr)] -> LoopBody NativeExpr SerialExpr NativeExpr -> Set.Set Int
+loopBorrows :: (NativeExpr -> Bool) -> Set.Set Int -> Set.Set Int -> [(Int, NativeExpr)] -> LoopBody NativeExpr SerialExpr NativeExpr -> Set.Set Int
 loopBorrows mayBorrow g reused starts body = settle (Set.fromList [i | (i, s) <- starts, borrowVar g s, not (Set.member i reused)])
   where
     settle b =
@@ -1890,11 +1890,11 @@ data BorrowTest
 
 -- | The part of a borrow an expression names, given which types may be
 -- borrowed and which locals hold a borrow.
-borrowPartOf :: (TypeF -> Bool) -> (Int -> Bool) -> NativeExpr -> Maybe BorrowPart
+borrowPartOf :: (NativeExpr -> Bool) -> (Int -> Bool) -> NativeExpr -> Maybe BorrowPart
 borrowPartOf mayBorrow = go
   where
     go env e
-      | not (mayBorrow (typeFof e)) = Nothing
+      | not (mayBorrow e) = Nothing
       | otherwise = case e of
           IntrinsicN _ IntrCtorField _ [s, StrN _ n, IntN _ k] -> (\p -> BorrowCtorField (typeFof s) p n k) <$> go env s
           IntrinsicN _ IntrListElem _ [s, IntN _ k] -> (`BorrowElem` k) <$> go env s

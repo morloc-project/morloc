@@ -1669,6 +1669,16 @@ impl SizeWalk {
         self.child(payload, a, false);
     }
 
+    /// A variant slot plus the out-of-line slot of one arm whose fields the
+    /// caller then sizes one by one, each inline (`child(.., true)`), from
+    /// the value itself: an arm of a user-written enum.
+    pub fn variant_arm<'s>(&mut self, schema: &Schema, arm: &'s Schema) -> &'s Schema {
+        let a = resolve_recur(arm);
+        self.total += (schema.width + (a.alignment().max(1) - 1)) as isize;
+        self.total += a.width as isize;
+        a
+    }
+
     /// As `variant_payload`, for a payload the step itself produced.
     pub fn variant_payload_owned<T: ToVoidstar + 'static>(&mut self, schema: &Schema, arm: &Schema, payload: T) {
         let r = self.keep_ref(payload);
@@ -1883,12 +1893,23 @@ impl<'a> WriteWalk<'a> {
     /// `dest` must point at a writable slot of at least the schema's width,
     /// and the buffer must have room for the payload (see `shm_size`).
     pub unsafe fn variant_payload<T: ToVoidstar>(&mut self, dest: *mut u8, arm: &Schema, tag: u8, payload: &T) {
+        let (slot, a) = self.variant_arm(dest, arm, tag);
+        self.child(payload, slot, a);
+    }
+
+    /// A variant slot and the out-of-line slot of one arm, whose fields the
+    /// caller then writes one by one at the arm's offsets, from the value
+    /// itself: an arm of a user-written enum.
+    ///
+    /// # Safety
+    /// As for `variant_payload`.
+    pub unsafe fn variant_arm<'s>(&mut self, dest: *mut u8, arm: &'s Schema, tag: u8) -> (*mut u8, &'s Schema) {
         *dest = tag;
         core::ptr::write_bytes(dest.add(1), 0, VARIANT_PAYLOAD - 1);
         let a = resolve_recur(arm);
         let slot = self.alloc(a);
         core::ptr::write_unaligned(dest.add(VARIANT_PAYLOAD) as *mut RelPtr, self.rel(slot));
-        self.child(payload, slot, a);
+        (slot, a)
     }
 
     /// As `variant_payload`, for a payload the step itself produced.
@@ -2796,6 +2817,141 @@ impl<T: FromVoidstar> FromVoidstar for Box<T> {
     }
 }
 
+// Transparent on the wire, exactly as Box: a field of a user-written type may
+// hold its value in an Arc.
+impl<T: ToVoidstar> ToVoidstar for std::sync::Arc<T> {
+    const IS_LEAF: bool = T::IS_LEAF;
+    fn shm_size(&self, schema: &Schema) -> usize {
+        (**self).shm_size(schema)
+    }
+    unsafe fn write(&self, dest: *mut u8, cursor: &mut *mut u8, schema: &Schema) {
+        (**self).write(dest, cursor, schema)
+    }
+    unsafe fn write_leaf(&self, w: &mut WriteWalk, dest: *mut u8, schema: &Schema) {
+        (**self).write_leaf(w, dest, schema)
+    }
+    fn size_step(&self, w: &mut SizeWalk, schema: &Schema, idx: usize) {
+        (**self).size_step(w, schema, idx)
+    }
+    unsafe fn write_step(&self, w: &mut WriteWalk, dest: *mut u8, schema: &Schema, idx: usize) {
+        (**self).write_step(w, dest, schema, idx)
+    }
+}
+impl<T: FromVoidstar> FromVoidstar for std::sync::Arc<T> {
+    const IS_LEAF: bool = T::IS_LEAF;
+    unsafe fn read(schema: &Schema, data: *const u8, space: MorlocSpace) -> Self {
+        std::sync::Arc::new(T::read(schema, data, space))
+    }
+    unsafe fn read_step(w: &mut ReadWalk, schema: &Schema, data: *const u8, _idx: usize) {
+        w.push_finish::<Self>(schema, data);
+        w.child_step::<T>(schema, data);
+    }
+    unsafe fn read_finish(w: &mut ReadWalk, schema: &Schema, data: *const u8) -> Self {
+        std::sync::Arc::new(w.child_read::<T>(schema, data))
+    }
+}
+
+// ---- Fields of a user-written enum arm --------------------------------------
+//
+// A user-written enum's arm is a tuple variant with one field per morloc
+// field, each holding the field's morloc type T as it is or behind a Box or
+// an Arc. Generated code names T and converts through these traits, so the
+// field type the user wrote is checked against morloc's and the value is
+// always marshalled at T.
+
+/// A field holding a value of morloc type `T`.
+#[diagnostic::on_unimplemented(
+    message = "a field of a user-written Rust enum arm holds `{Self}`, but morloc's field type is `{T}`",
+    label = "expected `{T}`, `Box<{T}>` or `Arc<{T}>`",
+    note = "an arm is a tuple variant with one field per morloc field (`Add(Box<Expr>, Box<Expr>)`); one box of a tuple (`Add(Box<(Expr, Expr)>)`) is not accepted"
+)]
+pub trait MlcField<T>: Sized {
+    fn field(&self) -> &T;
+    fn from_field(v: T) -> Self;
+    fn unfield(self) -> T
+    where
+        T: Clone;
+}
+
+impl<T> MlcField<T> for T {
+    fn field(&self) -> &T {
+        self
+    }
+    fn from_field(v: T) -> Self {
+        v
+    }
+    fn unfield(self) -> T
+    where
+        T: Clone,
+    {
+        self
+    }
+}
+
+impl<T> MlcField<T> for Box<T> {
+    fn field(&self) -> &T {
+        self
+    }
+    fn from_field(v: T) -> Self {
+        Box::new(v)
+    }
+    fn unfield(self) -> T
+    where
+        T: Clone,
+    {
+        *self
+    }
+}
+
+impl<T> MlcField<T> for std::sync::Arc<T> {
+    fn field(&self) -> &T {
+        self
+    }
+    fn from_field(v: T) -> Self {
+        std::sync::Arc::new(v)
+    }
+    fn unfield(self) -> T
+    where
+        T: Clone,
+    {
+        std::sync::Arc::try_unwrap(self).unwrap_or_else(|a| (*a).clone())
+    }
+}
+
+/// A field holding a value of morloc type `?T`.
+#[diagnostic::on_unimplemented(
+    message = "an optional field of a user-written Rust enum arm holds `{Self}`, but morloc's field type is `?{T}`",
+    label = "expected `Option<{T}>`, `Option<Box<{T}>>` or `Option<Arc<{T}>>`"
+)]
+pub trait MlcOptField<T>: Sized {
+    fn opt(&self) -> Option<&T>;
+    fn from_opt(v: Option<T>) -> Self;
+    fn unfield_opt(self) -> Option<T>
+    where
+        T: Clone;
+}
+
+impl<T, F: MlcField<T>> MlcOptField<T> for Option<F> {
+    fn opt(&self) -> Option<&T> {
+        self.as_ref().map(F::field)
+    }
+    fn from_opt(v: Option<T>) -> Self {
+        v.map(F::from_field)
+    }
+    fn unfield_opt(self) -> Option<T>
+    where
+        T: Clone,
+    {
+        self.map(F::unfield)
+    }
+}
+
+/// The field itself, once its type is known to hold morloc's `?T`: it is
+/// marshalled as it is, its pointer being transparent on the wire.
+pub fn opt_field<T, F: MlcOptField<T>>(f: &F) -> &F {
+    f
+}
+
 // ---- RecBox (deferred-release cycle-break indirection) --------------------
 //
 // A generated `data` type holds each constructor's fields behind a `RecBox`,
@@ -2929,8 +3085,8 @@ impl<T> RecBox<T> {
 /// The box around a constructor's payload, taken apart at the last use of
 /// the value that holds it: the payload is moved out when the box is its
 /// only owner, and otherwise the part needed is cloned from it. A generated
-/// type's arms are `RecBox`es; a user-mapped type may use `Box`, `Rc` or
-/// `Arc`.
+/// type's arms are its crate's nodes; a user-written arm's fields are taken
+/// through `MlcField` instead.
 pub trait MlcTake: Sized {
     type Payload;
     fn take_with<R>(self, owned: impl FnOnce(Self::Payload) -> R, shared: impl FnOnce(&Self::Payload) -> R) -> R;
@@ -4960,6 +5116,43 @@ mod panic_classifier_tests {
     #[ignore]
     fn child_user_index() {
         classify_in_child(|| { user_index(&[1], std::hint::black_box(5)); });
+    }
+}
+
+#[cfg(test)]
+mod user_field_tests {
+    use super::*;
+    use std::sync::Arc;
+
+    // Each field form a user-written enum arm may use converts to and from
+    // morloc's type.
+    #[test]
+    fn plain_box_and_arc_fields_hold_morloc_values() {
+        let p: i64 = MlcField::<i64>::from_field(3);
+        let b: Box<i64> = MlcField::<i64>::from_field(4);
+        let a: Arc<i64> = MlcField::<i64>::from_field(5);
+        assert_eq!(*MlcField::<i64>::field(&p) + *MlcField::<i64>::field(&b) + *MlcField::<i64>::field(&a), 12);
+        assert_eq!(MlcField::<i64>::unfield(b), 4);
+        assert_eq!(MlcField::<i64>::unfield(p), 3);
+    }
+
+    #[test]
+    fn an_arc_field_is_taken_when_unique_and_copied_when_shared() {
+        let a: Arc<String> = MlcField::<String>::from_field("x".to_string());
+        let keep = Arc::clone(&a);
+        assert_eq!(MlcField::<String>::unfield(a), "x");
+        assert_eq!(Arc::strong_count(&keep), 1);
+        assert_eq!(MlcField::<String>::unfield(keep), "x");
+    }
+
+    #[test]
+    fn optional_fields_behind_pointers_hold_optionals() {
+        let b: Option<Box<i64>> = MlcOptField::<i64>::from_opt(Some(7));
+        let a: Option<Arc<i64>> = MlcOptField::<i64>::from_opt(None);
+        assert_eq!(MlcOptField::<i64>::opt(&b), Some(&7));
+        assert_eq!(MlcOptField::<i64>::opt(&a), None);
+        assert_eq!(MlcOptField::<i64>::unfield_opt(b), Some(7));
+        assert!(std::ptr::eq(opt_field::<i64, _>(&a), &a));
     }
 }
 

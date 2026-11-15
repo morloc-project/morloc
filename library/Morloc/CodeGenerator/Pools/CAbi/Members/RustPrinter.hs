@@ -41,13 +41,19 @@ module Morloc.CodeGenerator.Pools.CAbi.Members.RustPrinter
   , armTypeName
   , printRustNode
   , printRustNodeImpls
-  , userBox
+  , printUserVariantImpls
+  , UserField
+  , userFieldRef
+  , userFieldFrom
+  , userFieldCopy
+  , userFieldTake
+  , userArmPattern
   , printEnumImpls
   , tupled1
   , ClosureMarshal (..)
   ) where
 
-import Morloc.Data.Zip (indexed)
+import Morloc.Data.Zip (indexed, zipSame)
 import qualified Data.Map as Map
 import qualified Data.Text as T
 import Text.Printf (printf)
@@ -660,12 +666,6 @@ tupled1 :: [MDoc] -> MDoc
 tupled1 [t] = parens (t <> ",")
 tupled1 ts = tupled ts
 
--- | The path of the box a user-written enum's arms sit behind: the plain
--- standard box the mapped-type contract names, whose release recursion is
--- the user's.
-userBox :: MDoc
-userBox = "::std::boxed::Box"
-
 -- | An arm that crosses as its wire tuple: that tuple's type, the
 -- conversion from the payload tuple, and the conversion back.
 data ArmWire = ArmWire
@@ -674,10 +674,136 @@ data ArmWire = ArmWire
   , awReflect :: MDoc -> MDoc
   }
 
--- | The marshalling impls of a payload-bearing @data@ type, given whether
--- its arms are the generated arm types (else the user's standard boxes).
-printVariantImpls :: Bool -> MDoc -> [(T.Text, [MDoc], Maybe ArmWire)] -> MDoc
-printVariantImpls generated name arms3 = vsep [toImpl, "", fromImpl]
+-- | A field of a user-written enum arm, by morloc's type of it: the type,
+-- rendered, and whether it is an optional of that type.
+type UserField = (MDoc, Bool)
+
+-- | The expression giving a user-written arm's field to a walk: the value
+-- of morloc's type behind the field, or, for an optional, the field itself
+-- once its type is checked (its pointer is transparent on the wire).
+userFieldRef :: UserField -> MDoc -> MDoc
+userFieldRef (t, False) f = "::rustmorloc::MlcField::<" <> t <> ">::field(" <> f <> ")"
+userFieldRef (t, True) f = "::rustmorloc::opt_field::<" <> t <> ", _>(" <> f <> ")"
+
+-- | The type a user-written arm's field is read at.
+userFieldReadTy :: UserField -> MDoc
+userFieldReadTy (t, False) = t
+userFieldReadTy (t, True) = "::std::option::Option<" <> t <> ">"
+
+-- | A user-written arm's field built from a value of morloc's type.
+userFieldFrom :: UserField -> MDoc -> MDoc
+userFieldFrom (t, False) v = "::rustmorloc::MlcField::<" <> t <> ">::from_field(" <> v <> ")"
+userFieldFrom (t, True) v = "::rustmorloc::MlcOptField::<" <> t <> ">::from_opt(" <> v <> ")"
+
+-- | A copy, of morloc's type, of a user-written arm's field.
+userFieldCopy :: UserField -> MDoc -> MDoc
+userFieldCopy (t, False) f = "::rustmorloc::MlcField::<" <> t <> ">::field(" <> f <> ").clone()"
+userFieldCopy (t, True) f = "::rustmorloc::MlcOptField::<" <> t <> ">::opt(" <> f <> ").cloned()"
+
+-- | A user-written arm's field taken as a value of morloc's type.
+userFieldTake :: UserField -> MDoc -> MDoc
+userFieldTake (t, False) f = "::rustmorloc::MlcField::<" <> t <> ">::unfield(" <> f <> ")"
+userFieldTake (t, True) f = "::rustmorloc::MlcOptField::<" <> t <> ">::unfield_opt(" <> f <> ")"
+
+-- | A tuple-variant pattern binding every field of an arm.
+userArmPattern :: MDoc -> T.Text -> [MDoc] -> MDoc
+userArmPattern hd c [] = hd <> "::" <> pretty c
+userArmPattern hd c vs = hd <> "::" <> pretty c <> tupled vs
+
+-- | The marshalling impls of a user-written payload-bearing @data@ type
+-- whose arms are tuple variants, one field per morloc field, each holding
+-- its morloc type as is, in a Box or in an Arc (an optional field: in an
+-- Option of one of those). Every field is walked at morloc's type, from the
+-- value itself.
+printUserVariantImpls :: MDoc -> [(T.Text, [UserField], Maybe ArmWire)] -> MDoc
+printUserVariantImpls name arms3 = vsep [toImpl, "", fromImpl]
+  where
+    idxArms = indexed arms3
+    vars fs = ["mlc_f" <> pretty j | (j, _) <- indexed fs]
+    pat c fs = userArmPattern "Self" c (vars fs)
+    badTag = "t => panic!(\"" <> name <> ": no constructor for tag {}\", t),"
+    -- A closure-bearing arm crosses as a wire tuple, built from its fields
+    -- by reference (an optional behind a pointer, by copy).
+    copied fs = tupled1 [viewOf f v | (f, v) <- zipSame fs (vars fs)]
+    viewOf f@(_, False) v = userFieldRef f v
+    viewOf f v = userFieldCopy f v
+    sizeArm i c fs mw = case (fs, mw) of
+      ([], _) -> pat c fs <+> "=> w.total += schema.width as isize,"
+      (_, Just aw) ->
+        pat c fs <+> "=> { let mlc_t = " <> copied fs <> "; w.variant_payload_owned(schema, &schema.parameters["
+          <> pretty i <> "], " <> awReify aw "mlc_t" <> ") }"
+      _ ->
+        pat c fs <+> "=> { let a = w.variant_arm(schema, &schema.parameters[" <> pretty i <> "]);"
+          <+> hsep ["w.child(" <> userFieldRef f v <> ", &a.parameters[" <> pretty j <> "], true);" | (j, (f, v)) <- indexed (zipSame fs (vars fs))]
+          <+> "}"
+    writeArm i c fs mw = case (fs, mw) of
+      ([], _) -> pat c fs <+> "=> ::rustmorloc::write_variant_nullary(dest, " <> pretty i <> "u8),"
+      (_, Just aw) ->
+        pat c fs <+> "=> { let mlc_t = " <> copied fs <> "; w.variant_payload_owned(dest, &schema.parameters["
+          <> pretty i <> "], " <> pretty i <> "u8, " <> awReify aw "mlc_t" <> ") }"
+      _ ->
+        pat c fs <+> "=> { let (slot, a) = w.variant_arm(dest, &schema.parameters[" <> pretty i <> "], " <> pretty i <> "u8);"
+          <+> hsep ["w.child(" <> userFieldRef f v <> ", slot.add(a.offsets[" <> pretty j <> "]), &a.parameters[" <> pretty j <> "]);" | (j, (f, v)) <- indexed (zipSame fs (vars fs))]
+          <+> "}"
+    stepArm i fs mw = case (fs, mw) of
+      ([], _) -> pretty i <+> "=> {}"
+      (_, Just aw) ->
+        pretty i <+> "=> { let p = w.payload_ptr(data, &schema.parameters[" <> pretty i <> "]); w.child_step::<"
+          <> awType aw <> ">(&schema.parameters[" <> pretty i <> "], p); }"
+      _ ->
+        pretty i <+> "=> { let p = w.payload_ptr(data, &schema.parameters[" <> pretty i <> "]); let a = ::rustmorloc::resolve_recur(&schema.parameters[" <> pretty i <> "]);"
+          <+> hsep ["w.child_step::<" <> userFieldReadTy f <> ">(&a.parameters[" <> pretty j <> "], p.add(a.offsets[" <> pretty j <> "]));" | (j, f) <- indexed fs]
+          <+> "}"
+    finishArm i c fs mw = case (fs, mw) of
+      ([], _) -> pretty i <+> "=> Self::" <> pretty c <> ","
+      (_, Just aw) ->
+        pretty i <+> "=> { let p = w.payload_ptr(data, &schema.parameters[" <> pretty i <> "]); let mlc_t = "
+          <> awReflect aw ("w.child_read::<" <> awType aw <> ">(&schema.parameters[" <> pretty i <> "], p)")
+          <> "; Self::" <> pretty c <> tupled [userFieldFrom f ("mlc_t." <> pretty j) | (j, f) <- indexed fs] <> " }"
+      _ ->
+        pretty i <+> "=> { let p = w.payload_ptr(data, &schema.parameters[" <> pretty i <> "]); let a = ::rustmorloc::resolve_recur(&schema.parameters[" <> pretty i <> "]); Self::" <> pretty c
+          <> tupled [userFieldFrom f ("w.child_read::<" <> userFieldReadTy f <> ">(&a.parameters[" <> pretty j <> "], p.add(a.offsets[" <> pretty j <> "]))") | (j, f) <- indexed fs]
+          <> " }"
+    toImpl =
+      vsep
+        [ "impl ::rustmorloc::ToVoidstar for" <+> name <+> "{"
+        , indent 4 $ vsep
+            [ "fn size_step(&self, w: &mut ::rustmorloc::SizeWalk, schema: &::rustmorloc::Schema, _idx: usize) {"
+            , indent 4 $ vsep ["match self {", indent 4 (vsep [sizeArm i c fs mw | (i, (c, fs, mw)) <- idxArms]), "}"]
+            , "}"
+            , "unsafe fn write_step(&self, w: &mut ::rustmorloc::WriteWalk, dest: *mut u8, schema: &::rustmorloc::Schema, _idx: usize) {"
+            , indent 4 $ vsep ["match self {", indent 4 (vsep [writeArm i c fs mw | (i, (c, fs, mw)) <- idxArms]), "}"]
+            , "}"
+            ]
+        , "}"
+        ]
+    fromImpl =
+      vsep
+        [ "impl ::rustmorloc::FromVoidstar for" <+> name <+> "{"
+        , indent 4 $ vsep
+            [ "unsafe fn read_step(w: &mut ::rustmorloc::ReadWalk, schema: &::rustmorloc::Schema, data: *const u8, _idx: usize) {"
+            , indent 4 $ vsep
+                [ "w.push_finish::<Self>(schema, data);"
+                , "match ::rustmorloc::read_variant_tag(data) {"
+                , indent 4 (vsep ([stepArm i fs mw | (i, (_, fs, mw)) <- idxArms] <> [badTag]))
+                , "}"
+                ]
+            , "}"
+            , "unsafe fn read_finish(w: &mut ::rustmorloc::ReadWalk, schema: &::rustmorloc::Schema, data: *const u8) -> Self {"
+            , indent 4 $ vsep
+                [ "match ::rustmorloc::read_variant_tag(data) {"
+                , indent 4 (vsep ([finishArm i c fs mw | (i, (c, fs, mw)) <- idxArms] <> [badTag]))
+                , "}"
+                ]
+            , "}"
+            ]
+        , "}"
+        ]
+
+-- | The marshalling impls of a generated payload-bearing @data@ type, whose
+-- arms are its generated arm types.
+printVariantImpls :: MDoc -> [(T.Text, [MDoc], Maybe ArmWire)] -> MDoc
+printVariantImpls name arms3 = vsep [toImpl, "", fromImpl]
   where
     idxArms = indexed arms3
     payload = "(**mlc_b)"
@@ -691,12 +817,8 @@ printVariantImpls generated name arms3 = vsep [toImpl, "", fromImpl]
     -- generic instantiation the impl is written for.
     armPat c ts = "Self::" <> pretty c <> (if null ts then "" else "(mlc_b)")
     -- The payload's native type, as the enum declares it, and its constructor.
-    armTy c ts
-      | generated = armTypeName name c
-      | otherwise = userBox <> "<" <> tupled1 ts <> ">"
-    armCtor c
-      | generated = armTypeName name c <> "::new"
-      | otherwise = userBox <> "::new"
+    armTy c _ = armTypeName name c
+    armCtor c = armTypeName name c <> "::new"
     -- The runtime range-checks a tag at the wire boundary, so reaching this
     -- arm means the value and its schema disagree: a bug, not bad input.
     -- Here the tag would otherwise index the arm list.

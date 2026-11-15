@@ -171,10 +171,13 @@ data RustState = RustState
   , rsNeedsNode :: Bool
   -- ^ Whether a generated `data` type of the pool has an arm, so the crate
   -- declares its node type (GEN-1).
+  , rsUserArms :: Map.Map Text [(Text, [RP.UserField])]
+  -- ^ The arms of each user-written `data` type at each occurrence, by its
+  -- rendered type: each constructor with morloc's types of its fields.
   }
 
 instance Defaultable RustState where
-  defaultValue = RustState 0 Map.empty Set.empty Set.empty (\_ -> Nothing) Map.empty [] Map.empty Set.empty Set.empty Map.empty Map.empty Map.empty Set.empty emptyPoolPlan Set.empty 0 [] Map.empty Map.empty [] Set.empty False
+  defaultValue = RustState 0 Map.empty Set.empty Set.empty (\_ -> Nothing) Map.empty [] Map.empty Set.empty Set.empty Map.empty Map.empty Map.empty Set.empty emptyPoolPlan Set.empty 0 [] Map.empty Map.empty [] Set.empty False Map.empty
 
 -- | The ownership environment: the borrowed (@&T@) parameter indices of the
 -- manifold whose body is currently being lowered ('oeCurrent') and of its
@@ -946,7 +949,12 @@ rustOwnership e = do
   g <- asks oeCurrent
   s <- asks oeShared
   h <- CMS.gets rsHandles
-  return (ownerPure h g s e)
+  cscope <- CMS.gets rsCScope
+  -- A part with nothing of its own type in memory to lend is read as a
+  -- fresh copy (RUST-4).
+  return $ case ownerPure h g s e of
+    BorrowedRef | not (ocLends (rustCaps cscope) e) -> Owned
+    o -> o
 
 -- | Whether a getter path, on a value of the given type, reads a field of a
 -- handle.
@@ -1555,7 +1563,7 @@ translate srcs es0 = do
   logTemplates <- collectRenderedTemplates rustLang
   stageTable <- stageTableEntries
   typeHomes <- MM.gets stateTypeHomes
-  let st0 = defaultValue {rsTypeHomes = typeHomes, rsDebugInfo = debugInfo, rsRecmap = recmap, rsCScope = mergedRustScope, rsSrcTypeVarMask = srcTypeVarMask, rsSrcMakers = srcMakers, rsLogTemplates = logTemplates, rsStageTable = stageTable, rsPool = planPool rustCaps es, rsBuilds = lastBuilds Map.empty Set.empty (rustSeeds (planPool rustCaps es) es0) es0}
+  let st0 = defaultValue {rsTypeHomes = typeHomes, rsDebugInfo = debugInfo, rsRecmap = recmap, rsCScope = mergedRustScope, rsSrcTypeVarMask = srcTypeVarMask, rsSrcMakers = srcMakers, rsLogTemplates = logTemplates, rsStageTable = stageTable, rsPool = planPool (rustCaps mergedRustScope) es, rsBuilds = lastBuilds Map.empty Set.empty (rustSeeds (planPool (rustCaps mergedRustScope) es) es0) es0}
       ((code, typeFiles), stEnd) = CMS.runState (runReaderT (makeRustCode includeDocs closureAsts closureTable es) emptyOwnEnv) st0
   mapM_ (MM.throwRejected . ("Rust pool:" <+>) . pretty) (rsErrors stEnd)
 
@@ -1994,12 +2002,21 @@ generateRustVariants closureAsts es = do
       wired <- case wireArms of
         Just was | hasFun -> mapM (\(c, ts) -> (,,) c ts <$> armWire ts (lookup c was)) arms'
         _ -> return [(c, ts, Nothing) | (c, ts) <- arms']
-      let impls generated = [RP.printVariantImpls generated name wired | not hasFun || isJust wireArms]
+      let impls = [RP.printVariantImpls name wired | not hasFun || isJust wireArms]
       if userMapped
-        then return (impls False)
+        then do
+          -- A user-written arm is a tuple variant, one field per morloc
+          -- field, walked at morloc's type of the field.
+          fields <- mapM (\(c, ts) -> (,) c <$> mapM userField ts) arms
+          CMS.modify $ \s -> s {rsUserArms = Map.insert (render name) fields (rsUserArms s)}
+          let userWired = [(c, fs, mw) | ((c, fs), (_, _, mw)) <- zipSame fields wired]
+          return [RP.printUserVariantImpls name userWired | not hasFun || isJust wireArms]
         else do
           CMS.modify $ \s -> s {rsNeedsNode = rsNeedsNode s || any (not . null . snd) arms'}
-          (<> impls True) <$> declareOrKeep (Just [c | (c, _ : _) <- arms']) gv (\n -> RP.printRustVariant n arms') name
+          (<> impls) <$> declareOrKeep (Just [c | (c, _ : _) <- arms']) gv (\n -> RP.printRustVariant n arms') name
+
+    userField (OptionalF x) = (\t -> (t, True)) <$> rustFieldType x
+    userField t = (\t' -> (t', False)) <$> rustFieldType t
 
     armWire :: [MDoc] -> Maybe [SerialAST] -> RustM (Maybe RP.ArmWire)
     armWire ts (Just ss)
@@ -2023,13 +2040,9 @@ generateRustVariants closureAsts es = do
     armWire _ _ = return Nothing
 
 -- | Whether the user maps this @data@ type to a Rust type of their own, whose
--- arms box their payloads in a plain 'Box'.
+-- arms are tuple variants (RUST-4).
 rustUserMapsVariant :: TVar -> Text -> RustM Bool
-rustUserMapsVariant gv cvText = do
-  cscope <- CMS.gets rsCScope
-  return $ case Map.lookup gv cscope of
-    Just entries -> any (\(_, body, _, _, _) -> bodyName body == Just cvText) entries
-    Nothing -> False
+rustUserMapsVariant gv cvText = (\cscope -> userMapsVariantIn cscope gv cvText) <$> CMS.gets rsCScope
 
 -- | Impls for every nullary @data@ type in the pool, plus the enum itself
 -- unless the user maps it.
@@ -2403,18 +2416,34 @@ rustWithCallerScope = local (\e -> e {oeCurrent = oeParent e, oeShared = oeParen
 rustSurround :: SurroundManifoldM RustM PoolDocs PoolDocs LowS LowN (TypeS, PoolDocs) LowArg
 rustSurround =
   defaultValue
-    { surroundSerialManifoldM = \recurse sm -> withPlan (planSerialManifold rustCaps sm) (recurse sm)
+    { surroundSerialManifoldM = \recurse sm -> do
+        cscope <- CMS.gets rsCScope
+        withPlan (planSerialManifold (rustCaps cscope) sm) (recurse sm)
     , surroundNativeManifoldM = \recurse nm -> do
         pp <- CMS.gets rsPool
-        withPlan (planNativeManifold rustCaps pp nm) (recurse nm)
+        cscope <- CMS.gets rsCScope
+        withPlan (planNativeManifold (rustCaps cscope) pp nm) (recurse nm)
     }
   where
     withPlan p = withManifoldScope (mpBorrowed p) (mpShared p) (mpCarried p)
 
 -- | No tag test may follow a take (see the projection-consume golden's
 -- secondMatchRust).
-rustCaps :: OwnCaps
-rustCaps = OwnCaps {ocCheap = rustIsCopy, ocTagAfterTake = False}
+rustCaps :: Scope -> OwnCaps
+rustCaps cscope = OwnCaps {ocCheap = rustIsCopy, ocTagAfterTake = False, ocLends = lends}
+  where
+    -- RUST-4: an optional field of a user-written enum may sit behind a
+    -- pointer, leaving no optional value in memory to lend.
+    lends (IntrinsicN (OptionalF _) IntrCtorField _ (s : _)) = case typeFof s of
+      VariantF (FV gv (CV cv)) _ _ -> not (userMapsVariantIn cscope gv cv)
+      _ -> True
+    lends _ = True
+
+-- | Whether the user maps a `data` type to a Rust type of their own.
+userMapsVariantIn :: Scope -> TVar -> Text -> Bool
+userMapsVariantIn cscope gv cvText = case Map.lookup gv cscope of
+  Just entries -> any (\(_, body, _, _, _) -> bodyName body == Just cvText) entries
+  Nothing -> False
 
 translateSegment :: SerialManifold -> RustM MDoc
 translateSegment m0@(SerialManifold root _ _ _ _) = do
@@ -2423,7 +2452,8 @@ translateSegment m0@(SerialManifold root _ _ _ _) = do
   mask <- CMS.gets rsSrcTypeVarMask
   makers <- CMS.gets rsSrcMakers
   consumed <- CMS.gets (ppByValue . rsPool)
-  e <- surroundFoldSerialManifoldM rustSurround (defaultFoldRules (rustLowerConfig mask makers consumed)) m0
+  userArms <- CMS.gets rsUserArms
+  e <- surroundFoldSerialManifoldM rustSurround (defaultFoldRules (rustLowerConfig mask makers consumed userArms)) m0
   return $ renderPoolDocs e
 
 -- | Local (filesystem-path) Rust crates declared in @local-deps: {rust: ...}@,
@@ -2619,8 +2649,8 @@ makeTheMaker crateName locks = do
 -- closures/partial application, remote calls, caching, and pattern evaluation
 -- raise a clear v1-unsupported error and are unreachable for the pool shapes
 -- v1 supports.
-rustLowerConfig :: Map.Map SrcName [(Bool, Bool)] -> Set.Set SrcName -> Map.Map Int (Set.Set Int) -> LowerConfig RustM
-rustLowerConfig mask makers consumed =
+rustLowerConfig :: Map.Map SrcName [(Bool, Bool)] -> Set.Set SrcName -> Map.Map Int (Set.Set Int) -> Map.Map Text [(Text, [RP.UserField])] -> LowerConfig RustM
+rustLowerConfig mask makers consumed userArms =
   LowerConfig
     { lcLocalPrefix = rustLocals
     , lcSrcName = \src -> pretty (T.cons userCallMark (unSrcName (srcName src)))
@@ -2694,20 +2724,21 @@ rustLowerConfig mask makers consumed =
     -- instantiation `MyBox<i64>` included, where `MyBox<i64>::Ctor` is not.
     -- In PATTERN position that path is not stable Rust, so a pattern names
     -- the bare head (`MyBox::Ctor`); the subject's type pins the arguments.
-    -- The fields are converted into whatever holder the arm declares, so one
-    -- spelling serves an enum the pool generates (its arm type) and one the
-    -- user wrote (Box).
+    -- A generated arm takes its fields as a tuple converted into its arm type;
+    -- a user-written arm takes each field converted into the form its
+    -- variant declares (RUST-4).
     , lcVariantLit = \ty n _ xs ->
         let arm = "<" <> ty <> ">::" <> pretty n
-        in if null xs
-             then arm
-             else arm <> parens (parens (RP.tupled1 xs) <> ".into()")
+        in case userArmFields userArms ty n of
+             _ | null xs -> arm
+             Just fs -> arm <> tupled [RP.userFieldFrom f x | (f, x) <- zipSame fs xs]
+             Nothing -> arm <> parens (parens (RP.tupled1 xs) <> ".into()")
     , lcEnumLit = \ty _ n _ -> "<" <> ty <> ">::" <> pretty n
     , lcVariantTagTest = \ty n _ subj ->
         "matches!" <> tupled [subj, RP.typeHead ty <> "::" <> pretty n <> " { .. }"]
-    -- The whole payload sits behind one box, mirroring the wire form, so an
-    -- arm has a single field whatever its arity and one spelling serves them
-    -- all. The guard has already established the arm, so the other branch is
+    -- A generated arm's whole payload sits in one node, mirroring the wire
+    -- form, so it has a single field whatever its arity; a user-written arm
+    -- is a tuple variant read field by field ('userCtorField', RUST-4). The guard has already established the arm, so the other branch is
     -- unreachable rather than a fallback.
     -- Matched through a REFERENCE. A pattern binding several fields emits
     -- one projection per field against the same subject, so matching by
@@ -2718,7 +2749,9 @@ rustLowerConfig mask makers consumed =
     -- spine by projection stays linear.
     -- At the subject's last read the field is taken out of the payload
     -- instead ('::rustmorloc::MlcTake').
-    , lcCtorField = \how ty n _ i subj -> case how of
+    , lcCtorField = \how ty n _ i subj -> case userArmFields userArms ty n of
+      Just fs -> userCtorField how ty n fs i subj
+      Nothing -> case how of
         FieldTake -> rustTakeField ty n i subj
         FieldBorrow -> parens (rustArmField ty n ("&" <> parens subj) ("&__morloc_lb." <> pretty i))
         FieldCopy -> rustArmField ty n ("&" <> parens subj) ("__morloc_lb." <> pretty i <> ".clone()")
@@ -2860,8 +2893,8 @@ rustLowerConfig mask makers consumed =
           , "|mlcTryV|" <+> okWrap "mlcTryV"
           , "|mlcTryM|" <+> errWrap "mlcTryM"
           ]
-    , lcSerialize = defaultSerialize (rustLowerConfig mask makers consumed)
-    , lcDeserialize = \_ -> defaultDeserialize (rustLowerConfig mask makers consumed)
+    , lcSerialize = defaultSerialize (rustLowerConfig mask makers consumed userArms)
+    , lcDeserialize = \_ -> defaultDeserialize (rustLowerConfig mask makers consumed userArms)
     -- Reify a crossing closure to its wire tuple via the arity-indexed trait
     -- method `reifyN` (`ClosureOrigin` = `(String, i64, Vec<Vec<u8>>)`). This is
     -- uniform across a closure built here and a proxy reflected from another
@@ -2919,7 +2952,13 @@ rustConsumeLetRhs i rhs@(IntrinsicN _ IntrCtorField _ [LetVarN t@(VariantF {}) s
   if letMode pp root i rhs == LetTake && not (Set.member subj borrowed)
     then do
       ty <- rustTypeOf t
-      return d {poolExpr = rustTakeField ty n (fromIntegral k) ((nvarNamer rustLocals) subj)}
+      userArms <- CMS.gets rsUserArms
+      let subj' = (nvarNamer rustLocals) subj
+      return d
+        { poolExpr = case userArmFields userArms ty n of
+            Just fs -> userCtorField FieldTake ty n fs (fromIntegral k) subj'
+            Nothing -> rustTakeField ty n (fromIntegral k) subj'
+        }
     else return d
 rustConsumeLetRhs _ _ d = return d
 
@@ -2940,7 +2979,10 @@ rustLoopBorrow i e = do
       BorrowCtorField t p n k -> do
         ty <- rustTypeOf t
         p' <- renderPart p
-        return (rustArmField ty n p' ("&__morloc_lb." <> pretty k))
+        userArms <- CMS.gets rsUserArms
+        return $ case userArmFields userArms ty n of
+          Just fs -> userCtorField FieldBorrow ty n fs (fromIntegral k) ("*" <> p')
+          Nothing -> rustArmField ty n p' ("&__morloc_lb." <> pretty k)
       BorrowField j path -> return ("&" <> writeSelectorRust ((nvarNamer rustLocals) j) path)
       BorrowElem p k -> (`rustElemRef` k) <$> renderPart p
       BorrowIf c a b -> do
@@ -2968,6 +3010,40 @@ rustLoopBorrow i e = do
 -- | A reference to element @k@ of a list.
 rustElemRef :: MDoc -> Integer -> MDoc
 rustElemRef subj k = parens ("&" <> parens subj <> "[" <> pretty k <> "]")
+
+-- | The fields of arm @n@ of a user-written `data` type at the given
+-- rendered type, if it is one.
+userArmFields :: Map.Map Text [(Text, [RP.UserField])] -> MDoc -> Text -> Maybe [RP.UserField]
+userArmFields userArms ty n = Map.lookup (render ty) userArms >>= lookup n
+
+-- | Read field @i@ of arm @n@ of a user-written `data` value (a tuple
+-- variant): borrowed, copied, or taken (OWN-5), each at morloc's type of
+-- the field. An optional field held through a pointer has no value of
+-- morloc's type to borrow, so its borrow is a copy.
+userCtorField :: FieldRead -> MDoc -> Text -> [RP.UserField] -> Int -> MDoc -> MDoc
+userCtorField how ty n fs i subj = case how of
+  FieldBorrow -> case field of
+    (_, False) -> parens (arm ("&" <> parens subj) (RP.userFieldRef field "__morloc_lf"))
+    (_, True) -> "&" <> parens (arm ("&" <> parens subj) (RP.userFieldCopy field "__morloc_lf"))
+  FieldCopy -> arm ("&" <> parens subj) (RP.userFieldCopy field "__morloc_lf")
+  FieldTake ->
+    "{ let __morloc_ls = ::std::mem::ManuallyDrop::new(" <> subj <> "); match &*__morloc_ls {"
+      <+> RP.userArmPattern (RP.typeHead ty) n all_
+      <+> "=> {" <+> hsep ["let" <+> v <+> "= unsafe { ::std::ptr::read(" <> v <> ") };" | v <- all_]
+      <+> RP.userFieldTake field ("__morloc_lf" <> pretty i) <+> "},"
+      <+> "#[allow(unreachable_patterns)] _ => unreachable!()"
+      <+> "} }"
+  where
+    field = case drop i fs of
+      (f : _) -> f
+      [] -> error ("userCtorField: arm " <> T.unpack n <> " has no field " <> show i)
+    all_ = ["__morloc_lf" <> pretty j | (j, _) <- indexed fs]
+    one = [if j == i then "__morloc_lf" else "_" | (j, _) <- indexed fs]
+    arm s' yield =
+      "match" <+> s' <+> "{"
+        <+> RP.userArmPattern (RP.typeHead ty) n one <+> "=>" <+> yield <> ","
+        <+> "#[allow(unreachable_patterns)] _ => unreachable!()"
+        <+> "}"
 
 -- | Match a subject already known to be in arm @n@ and yield an expression
 -- over its payload, @mlc_b@.

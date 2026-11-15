@@ -171,3 +171,13 @@ records and user-mapped types copy deeply.
   time. root-cpp `morloc_isNull` and `morloc_require` take their argument by
   value and copy it again. A read that only tests for null needs no copy,
   and a read from an owned receiver could move (`mlc::take_field`, OWN-5).
+
+## A mapped Rust enum's optional field is always read as a copy [read]
+
+RUST-4 lets a `?T` field of a user-written enum hold `Option<Box<T>>` or
+`Option<Arc<T>>`, which has no `Option<T>` in memory to lend, and the
+compiler cannot see which form the user wrote; Rust.hs rustCaps therefore
+never lends such a field (OWN-6) and reads it as a copy, deep behind a Box.
+A field held as plain `Option<T>` could be lent but is copied too.
+Candidate: a trait the generated code asks for the field's form at build
+time (an associated const) so `Option<T>` fields lend.

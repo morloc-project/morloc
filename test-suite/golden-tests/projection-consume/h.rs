@@ -1,7 +1,7 @@
 #[derive(Clone, Debug)]
 pub enum MyHolder<T> {
     Hollow,
-    Hold(std::boxed::Box<(T,)>),
+    Hold(T),
 }
 
 pub fn mk(n: u64) -> Vec<u8> { vec![7u8; n as usize] }

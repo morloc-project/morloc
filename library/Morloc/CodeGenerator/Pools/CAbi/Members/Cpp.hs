@@ -201,7 +201,7 @@ renderTemplatedType name argDocs
 -- | No type is cheap enough to copy rather than reference; a tag test may
 -- read a value a field was taken from, since the payload stays in its arm.
 cppCaps :: OwnCaps
-cppCaps = OwnCaps {ocCheap = const False, ocTagAfterTake = True}
+cppCaps = OwnCaps {ocCheap = const False, ocTagAfterTake = True, ocLends = const True}
 
 chooseCallSemantics :: TypeM -> CallSemantics
 chooseCallSemantics Passthrough = ConstPtr -- const uint8_t* packet

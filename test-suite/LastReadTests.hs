@@ -56,7 +56,7 @@ borrowCases =
           @?= [1]
     -- a part of a type that may not be borrowed is a value
     , testCase "spec-own-6-9" $
-        borrowsIf (/= cheap) [(1, par 5)] (LoopNLet 10 (IntrinsicN cheap IntrCtorField Nothing [rd 1, StrN fv "Link", IntN fv 0]) (LoopNLet 11 (field 1) (cont [rd 11])))
+        borrowsIf ((/= cheap) . typeFof) [(1, par 5)] (LoopNLet 10 (IntrinsicN cheap IntrCtorField Nothing [rd 1, StrN fv "Link", IntN fv 0]) (LoopNLet 11 (field 1) (cont [rd 11])))
           @?= [1, 11]
     -- an index bound twice is never a borrow, nor is a local replaced by it
     , testCase "spec-own-6-8" $
@@ -72,7 +72,7 @@ borrowCases =
           @?= []
     -- a match whose arm binds a type that may not be borrowed owns its value
     , testCase "spec-own-6-12" $
-        borrowsIf (/= cheap) [(1, par 5)] (LoopNLet 10 (IfN ty (tag 1 "Link") (NativeLetN 11 (IntrinsicN cheap IntrCtorField Nothing [rd 1, StrN fv "Link", IntN fv 0]) (rd 11)) (rd 1)) (cont [rd 10]))
+        borrowsIf ((/= cheap) . typeFof) [(1, par 5)] (LoopNLet 10 (IfN ty (tag 1 "Link") (NativeLetN 11 (IntrinsicN cheap IntrCtorField Nothing [rd 1, StrN fv "Link", IntN fv 0]) (rd 11)) (rd 1)) (cont [rd 10]))
           @?= []
     -- a conditional on anything but constructor tags owns its value
     , testCase "spec-own-6-13" $

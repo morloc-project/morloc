@@ -48,7 +48,14 @@ data OwnCaps = OwnCaps
   -- ^ a type whose copy costs nothing
   , ocTagAfterTake :: Bool
   -- ^ whether a tag test may read a value after a field was taken from it
+  , ocLends :: NativeExpr -> Bool
+  -- ^ whether a part of a value, as this projection reads it, has a value of
+  -- its own type in memory to lend a reference to (OWN-6)
   }
+
+-- | Whether a projection may be borrowed rather than copied (OWN-6).
+lendable :: OwnCaps -> NativeExpr -> Bool
+lendable caps e = not (ocCheap caps (typeFof e)) && ocLends caps e
 
 -- | The decisions that span a pool's manifolds.
 data PoolPlan = PoolPlan
@@ -82,7 +89,7 @@ planPool caps sms =
         , not (Set.member m asValues)
         , let args = typeMofForm form
               cands = Set.fromList [i | Arg i (Native tf) <- args, not (ocCheap caps tf)]
-              kept = consumedParams (\c -> Map.findWithDefault Set.empty c known) (not . ocCheap caps) cands nm
+              kept = consumedParams (\c -> Map.findWithDefault Set.empty c known) (lendable caps) cands nm
               positions = Set.fromList [j | (j, Arg i _) <- indexed args, Set.member i kept]
         ]
     natives = concatMap (nativeManifoldsUnder . RSM) sms
@@ -192,7 +199,7 @@ data ManifoldPlan = ManifoldPlan
 planSerialManifold :: OwnCaps -> SerialManifold -> ManifoldPlan
 planSerialManifold caps sm@(SerialManifold _ _ form _ e) =
   ManifoldPlan
-    { mpBorrowed = borrowed <> loopBorrowLocals (not . ocCheap caps) borrowed (RSM sm)
+    { mpBorrowed = borrowed <> loopBorrowLocals (lendable caps) borrowed (RSM sm)
     , mpShared = sharedOf (runIdentity (foldSerialExprM varUseCountOps e)) `Set.union` carried
     , mpCarried = carried
     }
@@ -203,7 +210,7 @@ planSerialManifold caps sm@(SerialManifold _ _ form _ e) =
 planNativeManifold :: OwnCaps -> PoolPlan -> NativeManifold -> ManifoldPlan
 planNativeManifold caps pp nm@(NativeManifold m _ form e) =
   ManifoldPlan
-    { mpBorrowed = borrowed <> loopBorrowLocals (not . ocCheap caps) borrowed (RNM nm)
+    { mpBorrowed = borrowed <> loopBorrowLocals (lendable caps) borrowed (RNM nm)
     , mpShared = sharedOf (runIdentity (foldNativeExprM varUseCountOps e))
     , mpCarried = Set.empty
     }

@@ -6,16 +6,16 @@ static CLONES: AtomicI64 = AtomicI64::new(0);
 // holding each arm's fields. Every clone of a link is counted.
 pub enum Chain {
     End,
-    Link(Box<(i64, Chain)>),
+    Link(i64, Box<Chain>),
 }
 
 impl Clone for Chain {
     fn clone(&self) -> Chain {
         match self {
             Chain::End => Chain::End,
-            Chain::Link(b) => {
+            Chain::Link(v, t) => {
                 CLONES.fetch_add(1, Ordering::SeqCst);
-                Chain::Link(Box::new((b.0, b.1.clone())))
+                Chain::Link(*v, t.clone())
             }
         }
     }

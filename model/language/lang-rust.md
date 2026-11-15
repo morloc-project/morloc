@@ -5,7 +5,7 @@ for them. These are the Rust forms of rules stated once for every language;
 each item cites its rule. Prefix: RUST.
 
 Rules for Rust stated elsewhere: HOST-8 (function values, `Send + Sync`),
-NATIVE-3 and NATIVE-4 (a record needs a user struct), NUM-1 (`Int` is the
+GEN (the types morloc generates), NUM-1 (`Int` is the
 native default integer), OWN (how generated Rust borrows, clones and
 moves).
 
@@ -39,3 +39,23 @@ A mapped type is `Sync` in practice, not only in its declaration: reading
 it through `&T` is safe while other threads do the same with the same value
 (EVAL-7). Morloc may share one value between parallel workers instead of
 cloning it.
+
+### RUST-4 A mapped Rust enum is written as Rust code usually is
+Intent: ruled 2026-11-15
+Tests: spec-rust-4-1
+Code: conforms 2026-11-15
+
+A `data` type mapped to a user's enum (`data Rust => Expr = "Expr"`) has
+one arm per constructor: a unit variant for a constructor with no fields,
+else a tuple variant with one field per morloc field, in order. Each field
+holds its morloc type `T` as `T`, `Box<T>` or `Arc<T>`, and a field of type
+`?T` as `Option<T>`, `Option<Box<T>>` or `Option<Arc<T>>`. Morloc reads and
+writes every field at its morloc type, so a field holding another type is a
+build error naming both. Releasing a deep value of the enum is the enum's
+own business (STATE-8). Morloc may take fields out of a value it holds alone
+without running the enum's own `Drop`. An optional field is read as a copy,
+never borrowed in place, since a pointer may leave no optional in memory to
+lend: a copy that is deep behind a `Box` and a count behind an `Arc`.
+
+Why: replaces 2026-10 contract, where every arm held one `Box` of a tuple of
+its fields.

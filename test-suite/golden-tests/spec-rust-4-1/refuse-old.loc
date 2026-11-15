@@ -1,0 +1,10 @@
+-- A user-written Rust enum arm whose field does not hold morloc's type of
+-- it is refused at build, naming the contract.
+module main (f)
+import root-rust
+data Sh = Circle Real | Dot
+data Rust => Sh = "Sh"
+source Rust from "refuse-old.rs" ("mk")
+mk :: Int -> Sh
+f :: Int -> Sh
+f n = idrust (mk n)
