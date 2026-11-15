@@ -40,7 +40,6 @@ strLen :: Str -> Int
 record Point where
   x :: Int
   y :: Int
-record Rust => Point = "struct"
 
 mkPoint :: Int -> Int -> Point
 mkPoint a b = {x = a, y = b}

@@ -15,7 +15,6 @@ record Padded = Padded
   , d :: Int
   , e :: Bool
   }
-record Cpp => Padded = "struct"
 
 bump :: Padded -> Padded
 bump p = shift p

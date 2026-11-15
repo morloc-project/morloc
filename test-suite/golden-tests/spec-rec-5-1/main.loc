@@ -7,7 +7,6 @@ import root-rust
 record Pair where
   left :: [Int]
   right :: [Int]
-record Rust => Pair = "struct"
 
 swap :: Pair -> Pair -> <IO> (Pair, Pair, Pair)
 swap main d = do

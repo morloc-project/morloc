@@ -17,7 +17,6 @@ savePoint :: [Int] -> <IO> ()
 record Job where
   run :: <IO> Int
   name :: Str
-record py => Job = "dict"
 record Cpp => Job = "Job"
 
 source Cpp from "take.hpp" ("takeThunk", "cppDec", "cppDone", "runJobTwice", "runOpt")

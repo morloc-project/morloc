@@ -5,7 +5,6 @@ import root-py
 
 record R where
   x :: Int
-record Py => R = "dict"
 
 newtype Vec (n :: Nat) a = [a]
 type Py => (Vec n a) = "list" a

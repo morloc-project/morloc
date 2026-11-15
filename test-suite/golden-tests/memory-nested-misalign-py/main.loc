@@ -20,12 +20,10 @@ type Py => List a = "list" a
 record PairBR where
   flag :: Bool
   value :: Real
-record Py => PairBR = "dict"
 
 record RecordWithOpt where
   flag :: Bool
   opt :: ?Real
-record Py => RecordWithOpt = "dict"
 
 makeOptRecord :: Bool -> Real -> ?PairBR
 fromNullRecord :: PairBR -> ?PairBR -> PairBR

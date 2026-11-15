@@ -62,9 +62,6 @@ record AlgConfig where
   --' @default 0
   n :: Int
 
-record Py => SysConfig = "dict"
-record Py => AlgConfig = "dict"
-
 bif :: SysConfig -> Str
 
 --' Do some foo stuff

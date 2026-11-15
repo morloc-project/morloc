@@ -15,21 +15,15 @@ module tests
 import root
 
 record Point = Point { x :: Real, y :: Real }
-record Py => Point = "dict"
-record R => Point = "list"
 record Cpp => Point = "point_t"
 
 -- Fields declared in reverse alphabetical order and read back in both
 -- orders: a rebuild that lays the record out by anything other than the
 -- receiver's own order shows up here.
 record Het = Het { zed :: Str, alpha :: Int }
-record Py => Het = "dict"
-record R => Het = "list"
 record Cpp => Het = "het_t"
 
 record Nest = Nest { inner :: Point, tag :: Str }
-record Py => Nest = "dict"
-record R => Nest = "list"
 record Cpp => Nest = "nest_t"
 
 points :: [Point]

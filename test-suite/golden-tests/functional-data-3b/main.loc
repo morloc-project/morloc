@@ -6,8 +6,6 @@ import root-cpp
 record Funs where
   f :: Int -> Int
   g :: Int -> Int
-record Py => Funs = "dict"
-record Cpp => Funs = "struct"
 
 source Cpp from "main.hpp" ("funf")
 funf :: Int -> Int

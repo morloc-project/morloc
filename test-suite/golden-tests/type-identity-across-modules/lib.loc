@@ -7,8 +7,6 @@ type Batch = [Int]
 record P where
   x :: Int
   y :: Int
-record Py => P = "dict"
-record Cpp => P = "struct"
 
 data Color = Red | Green
 data Shape = Circle Real | Square Real

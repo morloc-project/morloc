@@ -9,7 +9,6 @@ type Py => (Optional a) = "Optional" a
 
 record R where
   x :: Int
-record Py => R = "dict"
 
 source Py from "h.py" ("h_rev" as rev)
 rev :: [a] -> [a]

@@ -20,8 +20,6 @@ record Settings where
   f8 :: Str
   f9 :: Str
 
-record Rust => Settings = "struct"
-
 record Opts where
   input :: Str
   f0 :: Str
@@ -34,8 +32,6 @@ record Opts where
   f7 :: Str
   f8 :: Str
   f9 :: Str
-
-record Rust => Opts = "struct"
 
 source Py from "f.py" ("show" as pyShow)
 pyShow :: Str -> <IO> ()

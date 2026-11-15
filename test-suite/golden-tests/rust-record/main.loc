@@ -9,7 +9,6 @@ type Rust => (List a) = "Vec<$1>" a
 record Pair where
   a :: Int
   b :: Int
-record Rust => Pair = "struct"
 
 -- self-recursive via ?self (cycle broken by Box), user struct
 record LL where

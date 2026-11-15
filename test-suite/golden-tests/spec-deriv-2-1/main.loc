@@ -15,7 +15,6 @@ record Point
   where
   x :: Int
   y :: Int
-record Py => Point = "dict"
 
 checks :: [Bool]
 checks =

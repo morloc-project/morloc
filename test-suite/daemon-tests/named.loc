@@ -29,8 +29,6 @@ record Opts where
   --' @default 1
   count :: Int
 
-record Py => Opts = "dict"
-
 shiftBy :: Int -> Int -> Bool -> Int
 optsSummary :: Opts -> Str
 

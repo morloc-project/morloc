@@ -5,7 +5,6 @@ import root-py
 
 record R where
   x :: Int
-record Py => R = "dict"
 
 newtype Box k a = (k, [a])
 type Py => (Box k a) = "tuple" k a

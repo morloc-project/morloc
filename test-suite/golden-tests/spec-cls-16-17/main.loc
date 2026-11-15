@@ -10,7 +10,6 @@ type Py => (Optional a) = "Optional" a
 
 record R where
   x :: Int
-record Py => R = "dict"
 
 instance Sliceable List where
   source Py from "h.py" ("h_slice" as __get_slice__)

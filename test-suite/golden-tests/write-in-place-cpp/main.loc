@@ -39,8 +39,6 @@ data Dir = North | South | East
 record Pt where
   x :: Real
   label :: Str
-record Cpp => Pt = "struct"
-record Py => Pt = "dict"
 
 data Shape = Dot | Circle Real | Box Pt
 
@@ -49,8 +47,6 @@ record Two where
   tag :: U8
   xs :: [I16]
   more :: [Str]
-record Cpp => Two = "struct"
-record Py => Two = "dict"
 
 data Tree = Leaf | Node Int Tree Tree
 

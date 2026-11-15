@@ -12,8 +12,6 @@ record Foo = Foo
   , size :: Int
   }
 record Cpp => Foo = "foo_t"
-record Py  => Foo = "dict"
-record R   => Foo = "list"
 
 source Py from "foo.py" ("addShit" as addShitPy)
 source Cpp from "foo.hpp" ("addShit" as addShitCpp)

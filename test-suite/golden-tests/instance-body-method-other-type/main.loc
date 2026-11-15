@@ -10,8 +10,6 @@ record Q where
   num :: Int
   den :: Int
 
-record Py => Q = "dict"
-
 instance Eq Q where
   (==) a b = .num a * .den b == .num b * .den a
   (!=) a b = not (.num a * .den b == .num b * .den a)

@@ -31,14 +31,10 @@ record Trie a where
   val  :: ?a
   subs :: [(Str, Trie a)]
 
-record Py => Trie a = "dict"
-
 record TreeKV k v where
   key      :: k
   value    :: v
   children :: [(k, TreeKV k v)]
-
-record Py => TreeKV k v = "dict"
 
 source Py from "foo.py" ("build_trie"       as buildTriePy
                        , "trie_size"        as trieSizeRaw

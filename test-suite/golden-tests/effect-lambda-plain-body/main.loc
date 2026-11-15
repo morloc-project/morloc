@@ -23,7 +23,6 @@ import root-rust
 record Ops where
   inc :: Int -> <IO> Int
   same :: Int -> <IO> Int
-record Py => Ops = "dict"
 record Rust => Ops = "Ops"
 
 type Rust => Int = "i64"

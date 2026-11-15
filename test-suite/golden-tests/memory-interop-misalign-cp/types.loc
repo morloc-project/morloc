@@ -11,4 +11,3 @@ record PairBR where
   flag :: Bool
   value :: Real
 record Cpp => PairBR = "pair_br_t"
-record Py => PairBR = "dict"

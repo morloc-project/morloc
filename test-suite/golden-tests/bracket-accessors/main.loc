@@ -43,15 +43,11 @@ record Pt where
   x :: Int
   y :: Int
 record Cpp => Pt = "pt_t"
-record Py => Pt = "dict"
-record R => Pt = "list"
 
 record Row where
   a :: [(Int, Int)]
   b :: [Pt]
 record Cpp => Row = "row_t"
-record Py => Row = "dict"
-record R => Row = "list"
 
 -- Bring pt.hpp into the C++ pool so 'pt_t' / 'row_t' are defined when the
 -- code generator emits record literals against them. pt_passthrough is a

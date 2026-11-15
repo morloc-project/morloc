@@ -6,8 +6,6 @@ import root-cpp
 record Tools where
   f :: Int -> Int -> Int
   g :: Bool -> Bool -> Int
-record Py => Tools = "dict"
-record Cpp => Tools = "struct"
 
 source Cpp from "foo.hpp" ("funf", "fung")
 funf :: Int -> Int -> Int

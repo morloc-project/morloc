@@ -12,30 +12,24 @@ import root-py
 --' A box around anything
 record Box a where
   value :: a
-record py => Box a = "dict" a
 
 --' A box in a record
 record Wrap a where
   inner :: Box a
-record py => Wrap a = "dict" a
 
 record Tree a where
   node :: a
   kids :: [Tree a]
-record py => Tree a = "dict" a
 
 record Todo where
   title :: Str
-record py => Todo = "dict"
 
 type Task = Todo
 
 record Holder where
   task :: Task
-record py => Holder = "dict"
 
 record Foo = Bar {x :: Int}
-record py => Foo = "dict"
 
 type Pair a = (a, a)
 type Two a b = (a, b)
@@ -44,7 +38,6 @@ type Two a b = (a, b)
 record Q a b where
   same :: Pair a
   crossed :: Two b a
-record py => Q a b = "dict" a b
 
 data Item = Task Todo | Note Str
 

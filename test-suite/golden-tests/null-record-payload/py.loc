@@ -35,12 +35,6 @@ record Holder where
   name :: Str
   shape :: ?Shape
 
-record Py => (Inner c) = "dict" c
-record Py => (Outer t c) = "dict" t c
-record Py => PInner = "dict"
-record Py => POuter = "dict"
-record Py => Holder = "dict"
-
 pa :: [Outer Str Str]
 pa = [{ann = "a", inner = {ann = "i", x = 1}}, {ann = "b", inner = Null}]
 

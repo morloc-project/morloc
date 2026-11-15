@@ -6,7 +6,6 @@ import root-py
 
 record Two k a where
   foo :: Str
-record Py => Two k a = "dict"
 instance PatternAccessible (Two Int) where
   source Py from "h.py" ("walker" as __extract_pattern__)
 

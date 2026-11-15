@@ -29,7 +29,6 @@ record Opts where
   --' @arg -n/--name
   --' @default "x"
   name :: Str
-record Py => Opts = "dict"
 
 source Py from "h.py" ("show")
 

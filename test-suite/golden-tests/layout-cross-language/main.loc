@@ -12,8 +12,6 @@ import root-py
 record Small where
   a :: U8
   b :: U8
-record Cpp => Small = "struct"
-record Py => Small = "dict"
 
 data Dir = North | South | East
 

@@ -10,8 +10,6 @@ record Node where
   run :: Int -> <IO> Int
   next :: ?Node
 
-record Py => Node = "dict"
-
 source Py from "host.py" ("tick", "h_node" as hNode)
 
 tick :: Str -> <IO> Int

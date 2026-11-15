@@ -13,7 +13,6 @@ import root-cpp
 record Ops where
   inc :: Int -> Int
   scale :: Int -> Int
-record Py => Ops = "dict"
 record Cpp => Ops = "Ops"
 
 type Cpp => Int = "int"

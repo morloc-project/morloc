@@ -5,7 +5,6 @@ import root-py
 
 record Box a where
   foo :: Str
-record Py => Box a = "dict"
 
 source Py from "h.py" ("h_walk" as walk)
 walk :: Int -> Box a -> b

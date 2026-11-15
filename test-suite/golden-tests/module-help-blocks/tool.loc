@@ -40,8 +40,6 @@ record Person where
   name :: Str
   age :: Int
 
-record Py => Person = "dict"
-
 --' Describe a person
 --' Age is reported in whole years.
 describe :: Person -> Str

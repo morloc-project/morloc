@@ -13,14 +13,10 @@ record Flag where
   name :: Str
   ok :: Bool
 
-record R => Flag = "list"
-
 record Noted where
   name :: Str
   ok :: Bool
   note :: ?Str
-
-record R => Noted = "list"
 
 source R from "bad.R" ("na_strs" as naStrs, "na_bools" as naBools, "empty_bool" as emptyBool, "no_field" as noField, "no_note" as noNote, "empty_real" as emptyReal)
 

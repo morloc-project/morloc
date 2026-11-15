@@ -42,7 +42,6 @@ data Cpp => Color = "Color"
 record R where
   xs :: [Int]
   k :: Int
-record Cpp => R = "struct"
 
 mkR :: Int -> R
 mkR n = {xs = mk n, k = 1}

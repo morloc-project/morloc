@@ -40,7 +40,6 @@ record Hit where
   name :: Str
   --' Its score
   score :: I64
-record Py => Hit = "dict"
 
 source Cpp from "impl.hpp"
   ( "produce_route" as produceRouteC, "produce_forks" as produceForksC

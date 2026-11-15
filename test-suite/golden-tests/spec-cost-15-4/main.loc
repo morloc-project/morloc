@@ -6,7 +6,7 @@ import root-cpp
 
 record Box a where
   foo :: Str
-record Py => Box a = "dict"
+record Py => Box a = dict
 record Cpp => Box a = "BoxS"
 instance PatternAccessible Box where
   source Py from "h.py" ("walker" as __extract_pattern__)

@@ -14,8 +14,6 @@ record Point where
   x :: Int
   y :: Int
 record Cpp => Point = "Point"
-record Py => Point = "dict"
-record R => Point = "list"
 
 source Cpp from "impl.hpp" ("plus" as plusC)
 source Py from "impl.py" ("plus" as plusP)

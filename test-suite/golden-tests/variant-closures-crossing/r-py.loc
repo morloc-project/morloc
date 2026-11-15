@@ -10,8 +10,6 @@ import root-py
 record Ops where
   inc :: Int -> Int
   scale :: Int -> Int
-record R => Ops = "list"
-record Py => Ops = "dict"
 
 data Holder
   = Fn (Int -> Int) Int

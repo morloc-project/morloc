@@ -26,10 +26,6 @@ record Sequence where
   nucleotides :: Str
   length :: Int
 
-record Py => Sequence = "dict"
-record Cpp => Sequence = "struct"
-record R => Sequence = "list"
-
 -- Alignment result
 record Alignment where
   score :: Real
@@ -39,9 +35,7 @@ record Alignment where
   alignedSeq2 :: Str
   identity :: Real
 
-record Py => Alignment = "dict"
 record Cpp => Alignment = "Alignment"
-record R => Alignment = "list"
 
 -- K-mer profile
 record KmerProfile where
@@ -49,20 +43,12 @@ record KmerProfile where
   frequency :: Int
   positions :: [Int]
 
-record Py => KmerProfile = "dict"
-record Cpp => KmerProfile = "struct"
-record R => KmerProfile = "list"
-
 -- Sequence statistics
 record SeqStats where
   gcContent :: Real
   atContent :: Real
   length :: Int
   complexity :: Real
-
-record Py => SeqStats = "dict"
-record Cpp => SeqStats = "struct"
-record R => SeqStats = "list"
 
 -- Python I/O
 source Py from "sequence_io.py" ("createSequence", "getSampleSequence", "formatAlignment")

@@ -17,7 +17,6 @@ add :: Int -> Int -> Int
 inc :: Int -> Int
 
 record Opts = Opts { k :: Int, name :: Str }
-record Py => Opts = "dict"
 scale :: Opts -> Int -> Int
 
 n :: Int

@@ -22,10 +22,8 @@ type Py => List a = "list" a
 type Py => Tuple2 a b = "tuple" a b
 
 record R = R { x :: ?Int, y :: Str }
-record Py => R = "dict"
 
 record S = S { a :: ?(?Int) }
-record Py => S = "dict"
 
 source Py from "foo.py" ("doubleAll", "countNonNull", "identityList")
 

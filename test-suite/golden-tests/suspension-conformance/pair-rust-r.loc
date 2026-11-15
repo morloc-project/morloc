@@ -13,8 +13,6 @@ record Holder where
 record Caller where
   inc :: Int -> <IO> Int
 
-record R => Holder = "list"
-record R => Caller = "list"
 record Rust => Holder = "Holder"
 record Rust => Caller = "Caller"
 

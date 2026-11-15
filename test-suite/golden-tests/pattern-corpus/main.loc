@@ -58,16 +58,13 @@ import root
 record Person where
   name :: Str
   age :: Int
-record Py => Person = "dict"
 
 record NestedRow where
   label :: Str
   members :: [Person]
-record Py => NestedRow = "dict"
 
 record Deep where
   inner :: Person
-record Py => Deep = "dict"
 
 -- === Flat list of Int ===
 flatIdx :: Str -> <IO> [Int]

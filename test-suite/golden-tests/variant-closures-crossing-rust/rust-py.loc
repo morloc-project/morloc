@@ -11,7 +11,6 @@ record Ops where
   inc :: Int -> Int
   scale :: Int -> Int
 record Rust => Ops = "Ops"
-record Py => Ops = "dict"
 
 data Holder
   = Fn (Int -> Int) Int

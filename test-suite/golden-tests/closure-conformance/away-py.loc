@@ -3,10 +3,6 @@ module (*)
 import .harness
 import root-py
 
-record Py => Holder = "dict"
-record Py => Caller = "dict"
-record Py => Purer = "dict"
-
 source Py from "hosts.py"
   ( "away_ident" as identAway
   , "away_bump" as bumpAway

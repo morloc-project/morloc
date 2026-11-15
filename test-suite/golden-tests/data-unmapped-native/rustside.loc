@@ -32,8 +32,6 @@ eqDiff = Blue == Red
 record Crate where
   label :: Str
   item :: Box
-record Rust => Crate = "struct"
-record Cpp  => Crate = "struct"
 
 crated :: [Crate]
 crated = replicate 2 {label = "a", item = Wrap 3.5}

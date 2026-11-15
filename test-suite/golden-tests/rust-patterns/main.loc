@@ -34,12 +34,10 @@ record Rec where
   x :: Int
   y :: Str
   z :: Int
-record Rust => Rec = "struct"
 
 record Rec2 where
   a :: Int
   p :: (Str, Int)
-record Rust => Rec2 = "struct"
 
 -- string interpolation
 greet :: Str -> Str -> Str

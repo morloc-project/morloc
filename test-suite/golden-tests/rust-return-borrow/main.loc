@@ -5,7 +5,6 @@ import root-rust
 record Item where
   key :: Int
   tags :: [Int]
-record Rust => Item = "struct"
 
 -- `map` runs the closure over BORROWED `&Item` elements. Destructuring an
 -- element binds its non-Copy `tags` field via a let whose RHS is the field

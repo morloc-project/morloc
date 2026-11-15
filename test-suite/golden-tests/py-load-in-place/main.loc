@@ -15,7 +15,6 @@ import vector-py
 record P where
   name :: Str
   n :: Int
-record Py => P = "dict"
 
 newtype Bytes = [U8] deriving (Packable)
 type Py => Bytes = "bytes"

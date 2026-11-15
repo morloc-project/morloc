@@ -117,10 +117,6 @@ data Dir = North | South | East
 record Pt where
   x :: Real
   label :: Str
-record Cpp => Pt = "struct"
-record Py => Pt = "dict"
-record Rust => Pt = "struct"
-record R => Pt = "list"
 
 data Shape = Dot | Circle Real | Box Pt
 
@@ -129,19 +125,11 @@ record Two where
   tag :: U8
   xs :: [I16]
   more :: [Str]
-record Cpp => Two = "struct"
-record Py => Two = "dict"
-record Rust => Two = "struct"
-record R => Two = "list"
 
 record Units where
   u :: ()
   s :: Str
   v :: ()
-record Cpp => Units = "struct"
-record Py => Units = "dict"
-record Rust => Units = "struct"
-record R => Units = "list"
 
 data Tree = Leaf | Node Int Tree Tree
 

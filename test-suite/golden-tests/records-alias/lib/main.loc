@@ -4,5 +4,3 @@ import root-py (Int)
 
 record Foo where
   x :: Int
-
-record Py => Foo = "dict"

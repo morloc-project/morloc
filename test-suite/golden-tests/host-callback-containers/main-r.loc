@@ -16,9 +16,6 @@ record Ops where
 record Wrap where
   inner :: Ops
 
-record R => Ops = "list"
-record R => Wrap = "list"
-
 source R from "host.R"
   ( "tick" as tick
   , "h_apply" as hApply

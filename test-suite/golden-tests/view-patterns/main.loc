@@ -16,12 +16,10 @@ record Person where
   name :: Str
   age  :: Int
   tags :: [Str]
-record Py => Person = "dict"
 
 record NestedRow where
   label :: Str
   members :: [Person]
-record Py => NestedRow = "dict"
 
 mkFlatList :: Str -> <IO> ()
 mkFlatList path = do

@@ -11,13 +11,11 @@ record Point = Point
   { x :: Real
   , y :: Real
   }
-record Py => Point = "dict"
 
 record Line = Line
   { start :: Point
   , stop :: Point
   }
-record Py => Line = "dict"
 
 source Py from "lib.py" ("ident")
 

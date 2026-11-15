@@ -50,8 +50,6 @@ import root-rust
 record Pt where
   x :: Real
   y :: Real
-record Cpp => Pt = "struct"
-record Rust => Pt = "struct"
 
 data Expr = Lit Real | Neg Term | Add Expr Expr
 

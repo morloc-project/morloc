@@ -77,12 +77,10 @@ data Res = Bad Str | Good [Int]
 record R where
   xs :: [Int]
   k :: Int
-record Cpp => R = "struct"
 
 record B where
   ch :: Chain
   w :: Int
-record Cpp => B = "struct"
 
 build :: Int -> Chain -> Chain
 build k acc

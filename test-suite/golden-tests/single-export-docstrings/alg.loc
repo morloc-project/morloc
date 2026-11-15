@@ -15,8 +15,6 @@ record AlgConfig where
   --' @default 0
   n :: Int
 
-record Py => AlgConfig = "dict"
-
 --' @name foo
 foo ::
   AlgConfig ->

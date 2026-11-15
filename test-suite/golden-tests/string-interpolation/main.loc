@@ -39,7 +39,6 @@ trpCpp x y = """x=#{idcpp x};y=#{idcpp y};"""
 -- A hole closes at its own brace, not at one inside a record or a string
 record Pt where
   a :: Int
-record Py => Pt = "dict"
 
 braces :: Str -> Str
 braces x = "#{x}#{show (.a ({a = 1} :: Pt))}"

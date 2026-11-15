@@ -4,7 +4,6 @@ import root-py
 
 record R where
   x :: Int
-record Py => R = "dict"
 
 run :: [R] -> [Int]
 run xs = .[:].x xs

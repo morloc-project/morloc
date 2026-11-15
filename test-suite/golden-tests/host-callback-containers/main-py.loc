@@ -16,9 +16,6 @@ record Ops where
 record Wrap where
   inner :: Ops
 
-record Py => Ops = "dict"
-record Py => Wrap = "dict"
-
 source Py from "host.py"
   ( "tick" as tick
   , "h_apply" as hApply

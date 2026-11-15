@@ -33,7 +33,6 @@ record Holder = Holder
   { tag :: Str
   , payload :: Box Str
   }
-record Py => Holder = "dict"
 
 held :: Holder
 held = { tag = "t", payload = mkbox "p" }

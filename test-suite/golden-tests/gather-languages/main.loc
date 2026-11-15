@@ -24,7 +24,6 @@ record Hit where
   --' Its score
   score :: U64
 record Cpp => Hit = "hit_t"
-record Py => Hit = "dict"
 record Rust => Hit = "Hit"
 
 source Cpp from "impl.hpp"

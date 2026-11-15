@@ -7,7 +7,6 @@ import root-py
 source Py from "src.py" ("mk")
 
 record Row = Row { x :: Int, y :: Str }
-record Py => Row = "dict"
 
 mk :: Int -> [Row]
 

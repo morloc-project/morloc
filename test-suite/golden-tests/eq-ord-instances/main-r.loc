@@ -24,7 +24,6 @@ pairMod a b = (mod3 a, 7) == (mod3 b, 7)
 record P where
   a :: Int
   b :: Str
-record R => P = "list"
 
 pId :: P -> P
 pId x = x

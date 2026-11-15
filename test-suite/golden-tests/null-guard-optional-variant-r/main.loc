@@ -13,8 +13,6 @@ import root-r
 data Tag = Plain | Named Str
 
 record Link = Link { label :: Str, next :: ?Link }
-record R => Link = "list"
-record Py => Link = "dict"
 
 source Py from "mk.py" ("in_opt", "in_tag", "in_chain", "clean_opt", "clean_tag")
 in_opt :: Str -> ?Str

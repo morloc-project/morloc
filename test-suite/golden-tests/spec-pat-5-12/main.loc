@@ -5,7 +5,6 @@ import root-py
 
 record Box a where
   foo :: Str
-record Py => Box a = "dict"
 instance PatternAccessible Box where
   source Py from "h.py" ("walker" as __extract_pattern__)
 

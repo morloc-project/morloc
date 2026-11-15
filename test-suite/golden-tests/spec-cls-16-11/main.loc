@@ -5,7 +5,6 @@ import root-py
 
 record R where
   x :: Int
-record Py => R = "dict"
 
 newtype Bag a = List a
 type Py => (Bag a) = "list" a

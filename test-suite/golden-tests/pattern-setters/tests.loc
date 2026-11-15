@@ -7,8 +7,6 @@ record Location = Location
   , longitude :: Real
   , altitude :: Real
   }
-record Py => Location = "dict"
-record R => Location = "list"
 record Cpp => Location = "location_t"
 
 record Worker = Worker
@@ -16,8 +14,6 @@ record Worker = Worker
   , age :: Int
   , job :: (Bool, Location)
   }
-record Py => Worker = "dict"
-record R => Worker = "list"
 record Cpp => Worker = "worker_t"
 
 defaultLocation :: Location

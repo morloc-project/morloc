@@ -16,7 +16,6 @@ instance Packable Int Lbl where
 record Tree where
   label :: Lbl
   children :: [Tree]
-record Py => Tree = "dict"
 
 source Py from "tree.py" ("sum_tree" as sumTree, "pack_lbl" as mkLbl)
 

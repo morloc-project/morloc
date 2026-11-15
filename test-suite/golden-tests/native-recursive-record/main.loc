@@ -50,16 +50,12 @@ record Tree where
   children :: [Tree]
 
 record Cpp => Tree = "tree_t"
-record Py  => Tree = "dict"
-record R   => Tree = "list"
 
 record LL where
   head :: Int
   tail :: ?LL
 
 record Cpp => LL = "ll_t"
-record Py  => LL = "dict"
-record R   => LL = "list"
 
 -- Parameterized recursive record. Polymorphic analog of LL: the
 -- recursive `sub` field carries an optional-guarded back-reference,
@@ -68,7 +64,6 @@ record Container a where
   val :: a
   sub :: ?(Container a)
 
-record Py  => Container a = "dict"
 record Cpp => Container a = "container_t<$1>" a
 
 source Py  from "foo.py"  ("sum_tree"        as sumTreePy

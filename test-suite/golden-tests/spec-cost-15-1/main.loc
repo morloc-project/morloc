@@ -112,9 +112,6 @@ record Holder where
   act :: <IO> Int
   base :: Int
 
-record Py => Holder = "dict"
-record Cpp => Holder = "struct"
-
 useHolder :: Holder -> <IO> Int
 useHolder hd = do
   a <- .act hd

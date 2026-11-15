@@ -15,7 +15,6 @@ record Point
   where
   x :: Int
   y :: Int
-record R => Point = "list"
 
 checks :: [Bool]
 checks =
