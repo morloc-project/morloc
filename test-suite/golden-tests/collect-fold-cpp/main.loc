@@ -8,6 +8,10 @@ module main (stream, pstream)
 -- The accumulator records the size of every batch it saw, so a lowering that
 -- flattens the stream rather than preserving the producer's batch boundaries
 -- gives a visibly different answer.
+--
+-- The folded result written to a file leaves the whole list to stdout, so
+-- the four threads write one stdout stream at once (SLOT-16), and the fold
+-- replays the recorded batches into one accumulator: no merges.
 
 import root-cpp
 

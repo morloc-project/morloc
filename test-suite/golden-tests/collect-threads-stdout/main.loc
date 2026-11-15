@@ -1,0 +1,24 @@
+-- Threads of one producer writing a whole-list @collect to stdout at once.
+--
+-- Four threads put five batches each; batch b of thread t is
+-- t*100 .. t*100+b: 60 elements summing to 9080. Every batch must reach
+-- stdout, each one whole (SLOT-16, SLOT-11).
+
+module main (threadsPy, threadsCpp)
+
+import root-py
+import root-cpp
+
+source Py from "impl.py" ("produce_threads" as threadsP)
+source Cpp from "impl.hpp" ("produce_threads" as threadsC)
+
+threadsP :: ([I64] -> <IO> ()) -> <IO> ()
+threadsC :: ([I64] -> <IO> ()) -> <IO> ()
+
+--' Collect batches from four Python threads
+threadsPy :: <IO> ()
+threadsPy = @collect threadsP
+
+--' Collect batches from four C++ threads
+threadsCpp :: <IO> ()
+threadsCpp = @collect threadsC

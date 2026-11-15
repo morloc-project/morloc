@@ -64,21 +64,21 @@ None is scheduled.
   rendered JSON from a Rust String into a malloc'd C string, about 2-3% of
   a large serve (SERVE-1) and under 1 us of a small one; the CLI does not
   use this path.
-- **Calling a C++ function value copies a list argument.** [measured
-  2026-11-14] A morloc function value in C++ is a `std::function` whose
-  parameters are by value, so every call of a sink or callback copies a
-  non-scalar argument (cpp-copy-count: 4 allocations per batch, one of them
-  this copy). Rendering every function type's non-scalar parameters as
-  `const T&` (patch: /work/plans/output-path-stages-notes/
-  cpp-const-ref-function-args.patch) gives 3 and passed 245 C++, closure and
-  callback goldens, but changes the C++ type user headers receive: a header
-  that pattern-matches `std::function` parameter types breaks (biolib
-  convert-cpp convert.hpp `cv_fn<SinkFn>`), and a header declaring a
-  by-value `std::function` parameter gets a converting wrapper that hides
-  `MorlocClosure` from `target<>()`, so the closure can no longer cross a
-  pool. A by-value callee that moves from its parameter then copies even
-  when the caller had an rvalue. Needs a ruling: is the C++ spelling of a
-  function type part of the interface users write against?
+- **A C++ sink still copies its batch into the suspension it returns.**
+  [measured 2026-11-15] cpp-copy-count is 3 allocations per batch: the
+  batch, the batch copied into the suspension (a closure reads a kept
+  parameter by reference, OWN-7), and the sink's captured list copied into
+  it. Moving an owned argument at its last read (in dev since the native
+  gather) already removed the by-value `std::function` call copy, so the
+  `const T&` rendering of function parameters
+  (/work/plans/output-path-stages-notes/cpp-const-ref-function-args.patch)
+  gains nothing more there and is rejected: it changes the C++ type user
+  headers receive (biolib convert.hpp `cv_fn<SinkFn>`) and a converting
+  wrapper hides `MorlocClosure` from `target<>()`, so closures could no
+  longer cross a pool. Smaller fix for the suspension copy: a closure that
+  keeps a parameter takes it by value (an OWN-7 extension; expected 3 -> 2);
+  only if a benchmark shows the gain. The captured-list copy needs shared
+  capture storage.
 - **A Rust fold step copies its accumulator every put.** [read
   2026-11-15] HOST-8 gives a Rust step the type `Fn(&A, &B) -> A`, so a
   step that returns a grown accumulator clones it: O(n) per put, O(n^2)

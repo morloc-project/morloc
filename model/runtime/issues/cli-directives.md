@@ -42,21 +42,6 @@
   `mlcr_draw_out :: [U8] -> PNG` after the real exports. Repro:
   web/morloc-studio/public/assets/home-examples/trees.
 
-- **A threaded `@collect` writing to a file aborts the C++ pool.**
-  [reproduced 2026-11-02] The shipped collect-fold-cpp program,
-  `./nexus pstream --parallel=p.txt`, prints a partly interleaved list, then
-  "attach_process_local_slot called on a stdio slot ... missing its stdio
-  RPC short-circuit" (stream.rs), SIGABRT, and writes no p.txt. The
-  Python-fold variant fails the same way; `-p` to stdout passes. Repro:
-  /work/plans/error-clusters/briefs/S5-steps0-2.md.
-  A threaded Python producer writing a whole-list `@collect` to stdout
-  [reproduced 2026-11-15] fails the same way in its threads ("Exception in
-  thread", same message from pybinding__mlc_write); the threads' batches
-  are lost and the command exits 0 with a short result (four threads of
-  five batches at two sites: 63 to 111 of 120 elements seen). A
-  fold over two such sites (the replay entry) counted 0:29 for 0:40.
-  Repro: a `produce_threads` like golden fold-native's impl.py under
-  `@render --n=showLen` with two `@collect`s.
 - **A pure IFile whole-list handler is refused.** [reproduced, 2026-11-13]
   Gap in STRM-4. `sliceFile :: IFile [I64] -> [I64]` as a `@render`
   handler fails to compile with "Cannot force a non-effectful value (got
@@ -100,3 +85,20 @@
   from the runtime, or the binding to do it at checkout), or key slots by
   worker index instead of ThreadId. Model the change in ForkSide.tla
   first (it touches FOLD-2's seal and FOLD-4's count).
+- **A sequential producer's fold batches may be combined out of order.**
+  [speculative 2026-11-15, DA review] Callbacks from another pool run on any
+  idle C++/Rust pool worker, and fold slots are keyed by thread
+  (morloc-runtime fold.rs), so a sequential producer in Python feeding a
+  native C++ fold can split its batches across slots; take combines in slot
+  order, so a non-commutative fold (concatenation) is reordered. STRM-5
+  requires commutativity only for threaded or forking producers. Same with
+  the former SHM cells. Repro to try: warm a C++ pool with a parallel map,
+  then fold 100 string batches from a sequential Python producer. Fix
+  direction: checkout takes any FREE slot (re-entry by a per-thread flag);
+  also bounds slots under worker turnover. Plan:
+  /work/plans/next-session-open-issues.md.
+- **A producer that swallows a sink error exits 0 with short output.**
+  [read 2026-11-15] A Python thread's default excepthook drops the error
+  of a failed put (encode failure, closed stream), and nothing marks the
+  stream failed, so the command succeeds with missing batches. Same for a
+  remote job. Needs a spec item: a failed write fails its stream.

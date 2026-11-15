@@ -169,11 +169,12 @@ benchmark (issues/streams.md).
 
 ### SLOT-16 Stdout and stderr streams go through the queue
 Status: implemented
-Checked by: a_stdout_stream_reaches_the_nexus_before_its_close_returns, a_stdout_sub_packet_reaches_the_sink_in_parts_that_make_the_packet
+Checked by: a_stdout_stream_reaches_the_nexus_before_its_close_returns, a_stdout_sub_packet_reaches_the_sink_in_parts_that_make_the_packet, threads_write_one_stdio_stream_at_once_and_keep_each_write_whole, golden:collect-threads-stdout, golden:collect-fold-cpp
 
 The nexus's stdout and stderr writer is the custodian's consumer. A
 sub-packet reaches it as its header block, payload and padding, which it
-writes in order without joining them. A pool
+writes in order without joining them. Threads of the opening process
+write one stdout or stderr stream at once, each write whole (SLOT-11). A pool
 finishes the stdio streams a call left open before replying, so a call's
 output precedes its result. A write returns once its batches are queued,
 not written; text a pool prints to the shared stdout meanwhile may land

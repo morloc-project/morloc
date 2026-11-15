@@ -1294,17 +1294,20 @@ fn attach_process_local_slot(
         "stream handle {:#x}: slot raced during attach (the handle names generation {})",
         handle, cached_generation,
     )))?;
-    // Stdio slots must be routed through the nexus RPC by every op
-    // (write/next/flush/close). If we get here, an op forgot its
-    // stdio short-circuit; fail loudly rather than trying to open
-    // the sentinel path ("-", "-2") as a real file.
+    // SLOT-16
     if view.is_stdio != 0 {
-        return Err(MorlocError::Other(format!(
-            "stream handle {:#x}: attach_process_local_slot called on a \
-             stdio slot (kind byte {}); the caller is missing its stdio \
-             RPC short-circuit",
-            handle, view.stdio_kind,
-        )));
+        if view.kind != MLC_KIND_OSTREAM {
+            return Err(MorlocError::Other(format!(
+                "stream handle {:#x}: attach_process_local_slot called on a \
+                 stdio input slot (kind byte {}); the caller is missing its stdio \
+                 RPC short-circuit",
+                handle, view.stdio_kind,
+            )));
+        }
+        let schema_str = std::str::from_utf8(&view.schema).map_err(|e| MorlocError::Other(format!(
+            "stream handle {:#x}: schema_str is not UTF-8: {}", handle, e,
+        )))?;
+        return Ok(stdio_local(cached_generation, stdio_value_schema(view.kind, schema_str)?, view.kind));
     }
     let kind = view.kind;
     // A channel has no file: this process needs only its schemas.
@@ -2463,21 +2466,7 @@ pub(crate) fn open_stdio_in(kind: u8, stdio_kind: u8, schema_str: &str, mode: St
     // redirect; still meaningful as a stream position on pipes).
     // The schema string is the value schema `[a]` -- streams are
     // list-shaped and the on-disk metadata must match the wire data.
-    let value_schema_parsed = if schema_str.is_empty() {
-        morloc_runtime_types::schema::Schema::primitive(
-            morloc_runtime_types::schema::SerialType::Nil,
-        )
-    } else if kind == MLC_KIND_OSTREAM {
-        parse_schema(schema_str).map_err(|e| MorlocError::Schema(format!(
-            "open_stdio: unparseable schema '{}': {}", schema_str, e,
-        )))?
-    } else {
-        parse_schema(schema_str).unwrap_or_else(|_| {
-            morloc_runtime_types::schema::Schema::primitive(
-                morloc_runtime_types::schema::SerialType::Nil,
-            )
-        })
-    };
+    let value_schema_parsed = stdio_value_schema(kind, schema_str)?;
     if kind == MLC_KIND_OSTREAM && !schema_str.is_empty() {
         reject_non_list_stream_schema(
             &value_schema_parsed, "open_stdio", stdio_kind_name(stdio_kind),
@@ -2576,37 +2565,42 @@ pub(crate) fn open_stdio_in(kind: u8, stdio_kind: u8, schema_str: &str, mode: St
         }
     }
 
-    // Install a process-local slot so the buffered write path
-    // (`with_process_local_slot` -> `append_one_element`) can flow
-    // straight through the same machinery as file-backed OStreams.
-    // For OStream, value_schema is `[a]` and elem_schema is
-    // parameters[0]. For IStream, both fields hold the placeholder --
-    // IStream stdio reads discover the real element type from
-    // incoming packet headers.
-    let (value_schema_cached, elem_schema_cached) =
-        if kind == MLC_KIND_OSTREAM && !schema_str.is_empty() {
-            let elem = value_schema_parsed.parameters[0].clone();
-            (value_schema_parsed, elem)
-        } else {
-            let value = value_schema_parsed.clone();
-            (value, value_schema_parsed)
-        };
-    let local = ProcessLocalSlot {
-        cached_generation: new_gen,
+    install_process_local_slot(handle, stdio_local(new_gen, value_schema_parsed, kind));
+    Ok(handle)
+}
+
+fn stdio_value_schema(kind: u8, schema_str: &str) -> Result<Schema, MorlocError> {
+    if schema_str.is_empty() {
+        Ok(Schema::primitive(SerialType::Nil))
+    } else if kind == MLC_KIND_OSTREAM {
+        parse_schema(schema_str).map_err(|e| MorlocError::Schema(format!(
+            "open_stdio: unparseable schema '{}': {}", schema_str, e,
+        )))
+    } else {
+        Ok(parse_schema(schema_str).unwrap_or_else(|_| Schema::primitive(SerialType::Nil)))
+    }
+}
+
+fn stdio_local(generation: u64, value_schema: Schema, kind: u8) -> ProcessLocalSlot {
+    let elem_schema = if kind == MLC_KIND_OSTREAM && value_schema.serial_type != SerialType::Nil {
+        value_schema.parameters[0].clone()
+    } else {
+        value_schema.clone()
+    };
+    ProcessLocalSlot {
+        cached_generation: generation,
         mmap_ptr: std::ptr::null_mut(),
         mmap_size: 0,
         pages_dropped: 0,
         map_file: None,
         cache: crate::fork_policy::ForkLocal::new(Box::new(StreamCache::new(0))),
-        value_schema: value_schema_cached,
-        elem_schema: elem_schema_cached,
+        value_schema,
+        elem_schema,
         subpacket_entries_local: Vec::new(),
         subpacket_elem_cum: None,
         is_data_packet: false,
         fork_epoch: fork_epoch(),
-    };
-    install_process_local_slot(handle, local);
-    Ok(handle)
+    }
 }
 
 fn stdio_kind_name(k: u8) -> &'static str {
@@ -14172,6 +14166,61 @@ mod write_behind_tests {
         }
         assert!(data >= 2, "the batch did not fill several sub-packets");
         assert!(sent == on_disk, "the stdout sub-packets differ from the same batch's sub-packets in a file");
+    }
+
+    // SLOT-16, SLOT-11
+    #[test]
+    fn threads_write_one_stdio_stream_at_once_and_keep_each_write_whole() {
+        let _shm = crate::own_test_registry();
+        crate::custody::set_stdio_sink(recording_sink);
+        crate::stream::set_test_write_buffer_bytes(Some(4096));
+        let list = parse_schema("as").unwrap();
+        let elem = parse_schema("s").unwrap();
+        for stdio in [STDIO_KIND_STDOUT, STDIO_KIND_STDERR] {
+            let seen = SINK.lock().unwrap().len();
+            let h = open_stdio(MLC_KIND_OSTREAM, stdio, "as").unwrap();
+            let (inside, held) = (std::sync::Barrier::new(2), std::sync::Barrier::new(2));
+            std::thread::scope(|s| {
+                s.spawn(|| with_process_local_slot(h, |_, _| {
+                    inside.wait();
+                    held.wait();
+                    Ok(())
+                }).unwrap());
+                inside.wait();
+                let lone = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| write_one(h, &batch(9, 0), 0)));
+                held.wait();
+                assert!(lone.is_ok(), "a write failed while another thread held the stream's local slot");
+            });
+            std::thread::scope(|s| {
+                for t in 0..4 {
+                    s.spawn(move || for b in 0..25 { write_one(h, &batch(t, b), 0) });
+                }
+            });
+            shared_close_handle(h).unwrap();
+            let mut got: Vec<String> = Vec::new();
+            for (x, bytes, _) in SINK.lock().unwrap()[seen..].iter() {
+                let header = morloc_runtime_types::packet::PacketHeader::from_bytes(bytes[..32].try_into().unwrap()).unwrap();
+                if *x != h || !header.is_data() {
+                    continue;
+                }
+                let arr = shared_materialize_subpacket_from_bytes(bytes, &elem).unwrap();
+                got.extend(serde_json::from_str::<Vec<String>>(&crate::json::voidstar_to_json_string(arr, &list).unwrap()).unwrap());
+                shm::shfree(arr).unwrap();
+            }
+            let mut want: Vec<String> = (0..4).flat_map(|t| (0..25).flat_map(move |b| batch(t, b))).chain(batch(9, 0)).collect();
+            let mut sorted = got.clone();
+            sorted.sort();
+            want.sort();
+            assert!(sorted == want, "stdio kind {stdio}: {} elements arrived, {} were written", got.len(), want.len());
+            for w in got.chunks(40) {
+                let mut p = w[0].split(':').map(|x| x.parse::<usize>().unwrap());
+                assert!(w == batch(p.next().unwrap(), p.next().unwrap()), "stdio kind {stdio}: a write was split or interleaved");
+            }
+        }
+        crate::stream::set_test_write_buffer_bytes(None);
+        fn batch(t: usize, b: usize) -> Vec<String> {
+            (0..40).map(|i| format!("{t}:{b}:{i}:{}", "w".repeat(i % 29))).collect()
+        }
     }
 
     // DAEMON-15
