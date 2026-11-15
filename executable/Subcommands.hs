@@ -35,6 +35,7 @@ import Morloc.CodeGenerator.Emit (TranslateFn)
 import Morloc.CodeGenerator.Grammars.Translator.PseudoCode (pseudocodeSerialManifold)
 import Morloc.CodeGenerator.Pools.Pool (Member (..))
 import Morloc.CodeGenerator.Pools.CAbi.Pool (memberFor)
+import Morloc.CodeGenerator.Pools.CAbi.Members.Rust (rustStandaloneLib)
 import Morloc.CodeGenerator.Namespace (SerialManifold (..))
 import qualified Morloc.CodeGenerator.EnvSpec as ES
 import qualified Morloc.CodeGenerator.SystemConfig as MSC
@@ -51,6 +52,7 @@ import qualified Morloc.Frontend.API as F
 import Morloc.Module (OverwriteProtocol (..), findMainLocFile)
 import qualified Morloc.Module as Mod
 import qualified Morloc.Monad as MM
+import qualified Morloc.System as MS
 import Morloc.Namespace.Expr
 import Morloc.Namespace.Prim
 import Morloc.Namespace.State
@@ -106,6 +108,7 @@ runMorloc args = do
     (CmdLangSupport g) -> cmdLangSupport g
     (CmdEnvspec g) -> cmdEnvspec g verbose config buildConfig
     (CmdVersions g) -> cmdVersions g
+    (CmdTypes g) -> cmdTypes g config buildConfig
   case runPassed of
     True -> exitSuccess
     False -> exitFailure
@@ -125,6 +128,7 @@ getConfig (CmdNew _) = getConfig' "" False
 getConfig (CmdLangSupport _) = getConfig' "" False
 getConfig (CmdEnvspec g) = getConfig' (envspecConfig g) (envspecVanilla g)
 getConfig (CmdVersions _) = getConfig' "" False
+getConfig (CmdTypes g) = getConfig' (typesConfig g) (typesVanilla g)
 
 getConfig' :: String -> Bool -> IO Config.Config
 getConfig' _ True = Config.loadMorlocConfig Nothing
@@ -145,6 +149,7 @@ getVerbosity (CmdConfig _) = 0
 getVerbosity (CmdLangSupport _) = 0
 getVerbosity (CmdEnvspec _) = 0
 getVerbosity (CmdVersions _) = 0
+getVerbosity (CmdTypes g) = typesVerbose g
 
 readScript :: Bool -> String -> IO (Maybe Path, Code)
 readScript True code = return (Nothing, Code (MT.pack code))
@@ -779,6 +784,65 @@ cmdLangSupport _ =
     coreReq = DF.embededFileText DF.requirementsCore
     langReqs = [(name, DF.embededFileText ef) | (name, ef) <- DF.requirementsFiles]
     installScripts = [(name, DF.embededFileText ef) | (name, ef) <- DF.installScriptFiles]
+
+-- | Write a program's generated type definitions under a directory, one
+-- subdirectory per language, for programs outside morloc (GEN-13). The Rust
+-- subdirectory is a crate of its own.
+cmdTypes :: TypesCommand -> Config.Config -> BuildConfig -> IO Bool
+cmdTypes args config buildConfig = do
+  (path, code) <- readScript False (typesScript args)
+  r@((result, _), _) <-
+    MM.runMorlocMonad Nothing (typesVerbose args) config buildConfig (M.emitPoolScripts translator path code)
+  case result of
+    Left _ -> MM.writeMorlocReturn r
+    Right pools -> do
+      let allTrees = [(l, ts) | s' <- pools, (l, ts) <- typeTrees (scriptCode s')]
+          trees = [(l, ts) | (l, ts) <- allTrees, maybe True (== l) (typesLang args)]
+      case typesLang args of
+        Just l | null trees -> do
+          hPutStrLn stderr $
+            "Error: the program generates no types in language '" <> l <> "'"
+              <> (if null allTrees then "" else "; it generates types in " <> intercalate ", " (map fst allTrees))
+          return False
+        _ -> do
+          oks <- mapM (writeTypes (typesOut args)) trees
+          (&&) (and oks) <$> MM.writeMorlocReturn r
+  where
+    typeTrees (_ MS.:/ MS.Dir "pools" cs) = [(l, ts) | MS.Dir "types" langs <- cs, MS.Dir l ts <- langs]
+    typeTrees _ = []
+    -- Each language's directory is replaced whole, so no file of an earlier
+    -- run is left to import.
+    writeTypes out (l, ts) = do
+      let dir = out MS.</> l
+      exists <- MS.doesDirectoryExist dir
+      when exists (MS.removeDirectoryRecursive dir)
+      let paths = concatMap (filesUnder []) [cs | MS.Dir "mlc" ms <- ts, MS.Dir "types" cs <- ms]
+          crate =
+            [ MS.File "Cargo.toml" (Code cargoToml)
+            , MS.Dir "src" [MS.File "lib.rs" (Code (rustStandaloneLib paths))]
+            ]
+      (_ MS.:/ tree) <- MS.writeDirectoryWith (\f c -> MT.writeFile f (unCode c)) (out MS.:/ MS.Dir l (ts <> (if l == "rust" then crate else [])))
+      case MS.failures tree of
+        [] -> return True
+        errs -> do
+          mapM_ (\e -> hPutStrLn stderr ("Error: cannot write " <> show e)) errs
+          return False
+    filesUnder prefix = concatMap (filesAt prefix)
+    filesAt prefix (MS.Dir n cs) = filesUnder (prefix <> [MT.pack n]) cs
+    filesAt prefix (MS.File n _) = [prefix <> [MT.pack (MS.dropExtension n)]]
+    filesAt _ _ = []
+    cargoToml =
+      MT.unlines
+        [ "[package]"
+        , "name = \"mlc_types\""
+        , "version = \"0.0.0\""
+        , "edition = \"2021\""
+        , ""
+        , "[lib]"
+        , "path = \"src/lib.rs\""
+        , ""
+        , "[workspace]"
+        ]
 
 -- | Print, as JSON, the contract versions this compiler emits: the ABI version,
 -- the envspec_version, and the lang-support schema_version. The environment

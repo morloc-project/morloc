@@ -170,7 +170,14 @@ A nullary constructor is a class with no fields.
 
 ### GEN-13 `morloc types` writes the generated files anywhere
 Intent: ruled 2026-11-14
-Code: unaudited
+Tests: spec-gen-13-1
+Code: deviates (issues/records.md)
 
 `morloc types FILE.loc -o DIR [--lang L]` writes the files GEN-6 names for
-the program, under `DIR`, for programs outside morloc.
+the program, under `DIR`, for programs outside morloc: `DIR/cpp` a header
+tree (`-I DIR/cpp`), `DIR/py` a package root (`mlc_types`), and `DIR/rust`
+a crate of its own (`Cargo.toml`, `src/lib.rs`) with no dependency. Each
+language the program generates types in gets its directory, replaced whole;
+`--lang` writes one, and a language with no generated types is an error.
+Outside a pool a recursive value is released as the language releases it,
+without the pool's bounded-stack drain (STATE-8).

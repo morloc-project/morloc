@@ -14,6 +14,7 @@ main API consumed by the CLI.
 -}
 module Morloc
   ( writeProgram
+  , emitPoolScripts
   , typecheck
   , typecheckFrontend
   , generatePools
@@ -65,7 +66,7 @@ import qualified Morloc.Data.PoolHash as PoolHash
 import qualified Morloc.Data.GMap as GMap
 import qualified Morloc.Version
 import qualified Morloc.Monad as MM
-import Morloc.ProgramBuilder.Build (buildProgram, withStagingCleanup)
+import Morloc.ProgramBuilder.Build (buildProgram, discardStagingDir, withStagingCleanup)
 
 -- | Check the general types only
 typecheckFrontend ::
@@ -259,6 +260,14 @@ writeProgram translateFn path code =
   withStagingCleanup $ do
     (nexus, envspec, wrappers, pools) <- emitProgram translateFn path code
     buildEmitted nexus envspec wrappers pools
+
+-- | The pool scripts of a program, generated but not built: what
+-- @morloc types@ takes the generated type files from (GEN-13).
+emitPoolScripts :: TranslateFn -> Maybe Path -> Code -> MorlocMonad [Script]
+emitPoolScripts translateFn path code = withStagingCleanup $ do
+  (_, _, _, pools) <- emitProgram translateFn path code
+  discardStagingDir
+  return pools
 
 -- | Typecheck, realize and emit the nexus and every pool.
 emitProgram :: TranslateFn -> Maybe Path -> Code -> MorlocMonad (Script, Script, [WrapperFile], [Script])

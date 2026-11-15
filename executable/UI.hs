@@ -16,6 +16,7 @@ module UI
   , InitCommand (..)
   , InstallCommand (..)
   , TypecheckCommand (..)
+  , TypesCommand (..)
   , DumpCommand (..)
   , ListCommand (..)
   , ListKind (..)
@@ -60,6 +61,7 @@ data CliCommand
   | CmdLangSupport LangSupportCommand
   | CmdEnvspec EnvspecCommand
   | CmdVersions VersionsCommand
+  | CmdTypes TypesCommand
 
 cliParser :: Parser CliCommand
 cliParser =
@@ -77,6 +79,7 @@ cliParser =
         <> langSupportSubcommand
         <> envspecSubcommand
         <> versionsSubcommand
+        <> typesSubcommand
     )
 
 data MakeCommand = MakeCommand
@@ -349,6 +352,32 @@ typecheckSubcommand =
 dumpSubcommand :: Mod CommandFields CliCommand
 dumpSubcommand =
   command "dump" (info (CmdDump <$> makeDumpParser) (progDesc "Dump parsed code"))
+
+-- | @types@ writes the generated type definitions of a program (GEN-13).
+data TypesCommand = TypesCommand
+  { typesConfig :: String
+  , typesVanilla :: Bool
+  , typesVerbose :: Int
+  , typesOut :: String
+  , typesLang :: Maybe String
+  , typesScript :: String
+  }
+
+makeTypesParser :: Parser TypesCommand
+makeTypesParser =
+  TypesCommand
+    <$> optConfig
+    <*> optVanilla
+    <*> optVerbose
+    <*> strOption (long "out" <> short 'o' <> metavar "DIR" <> help "The directory to write the generated types under, one subdirectory per language")
+    <*> optional (strOption (long "lang" <> metavar "LANG" <> help "Write only this language's types (cpp, rust or py)"))
+    <*> optScript
+
+typesSubcommand :: Mod CommandFields CliCommand
+typesSubcommand =
+  command
+    "types"
+    (info (CmdTypes <$> makeTypesParser) (progDesc "Write a program's generated type definitions for use outside morloc"))
 
 data DumpCommand = DumpCommand
   { dumpConfig :: String

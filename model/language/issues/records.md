@@ -102,3 +102,13 @@
   as :: [A]` meets A unrolled to different depths; unifyField then marks the
   field generic, A is not public, and its back-reference is refused ("the
   record A refers to itself ..."). Self-reference alone is canonical.
+- **`morloc types` writes a Rust crate that does not build when a generated
+  type names a type it does not generate.** [read, 2026-11-15] Violates
+  GEN-13. A public Rust record may hold a field of a dependency's type
+  (`ndarray::Array2<f64>`, the table type) or of a type a sourced file
+  declares at the pool crate's root (Rust.hs planRustPublic has no field
+  check); the standalone crate declares no dependencies and no sourced
+  files, so it fails to build, and the command still succeeds. Needs GEN-7
+  (imports through package.yaml dependencies); until then such a type could
+  be left out of the standalone files with an error naming it. C++ headers
+  are header-safe already (std and generated names only).
