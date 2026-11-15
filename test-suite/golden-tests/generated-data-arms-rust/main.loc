@@ -1,0 +1,63 @@
+-- GEN-1, STATE-8: a generated Rust `data` type holds each constructor's
+-- fields in a generated arm type of standard Rust. Sourced Rust builds and
+-- reads one with the generated names only (`.into()`, `Deref`); a value a
+-- million constructors deep, built by a source, is released in the pool in
+-- bounded stack; both fields of a two-field arm are read, at a last use and
+-- while the value is shared; a mutually recursive pair and a Python round
+-- trip use the same arms.
+module main
+  ( deepLen
+  , oneCell
+  , firstOf
+  , secondOf
+  , bothShared
+  , roundTerm
+  , viaPy
+  )
+
+import root-rust
+import root-py
+
+data Seq = Nil | Cons Int Seq
+
+data Pair = Pair Str Int
+
+data Expr = Lit Real | Neg Expr | Wrap Term
+data Term = Zero | Twice Expr
+
+source Rust from "arms.rs"
+  ( "deep_len" as deepLen
+  , "make_pair" as makePair
+  , "build_term" as buildTerm
+  )
+
+deepLen :: Int -> Int
+makePair :: Str -> Int -> Pair
+buildTerm :: Real -> Term
+
+source Py from "arms.py" ("pyId")
+pyId :: Term -> Term
+
+firstOf :: Str -> Str
+firstOf s = fstOf (makePair s 2)
+
+fstOf :: Pair -> Str
+fstOf | (Pair a _) = a
+
+secondOf :: Str -> Int
+secondOf s = sndOf (makePair s 3)
+
+sndOf :: Pair -> Int
+sndOf | (Pair _ b) = b
+
+bothShared :: Str -> (Str, Int, Str)
+bothShared s = (\p -> (fstOf p, sndOf p, fstOf p)) (makePair s 4)
+
+roundTerm :: Real -> Term
+roundTerm v = idrust (buildTerm v)
+
+viaPy :: Real -> Term
+viaPy v = idrust (pyId (buildTerm v))
+
+oneCell :: Int -> Seq
+oneCell n = idrust (Cons n Nil)

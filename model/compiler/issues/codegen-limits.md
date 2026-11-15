@@ -102,3 +102,10 @@ Generated code that a language's own tools refuse.
   `error`. Field names are neither escaped nor refused: one per-language
   field-name rule in lang.yaml, checked at the record declaration
   (briefs/B8-B9.md).
+- [read, 2026-11-15] The generated Rust arm aliases of a pool-private
+  `data` type (`<name>_<Ctor>`, declared at the crate root) are not checked
+  against the crate root's other names, as public types' are (Rust.hs
+  planRustPublic collision check); a clash with another generated type or a
+  sourced file's item reaches rustc as E0428 instead of a morloc error.
+  Likewise the crate root's `mlc` module, declared when the pool generates
+  arms or handles, clashes with a sourced `mod mlc`.

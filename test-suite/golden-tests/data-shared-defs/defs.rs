@@ -38,7 +38,7 @@ pub fn rs_plan_desc(p: &Plan) -> String {
 }
 
 pub fn rs_make_plan(label: &String) -> Plan {
-    // A generated arm holds its fields in the runtime's RecBox; a tuple of
+    // A generated arm holds its fields in its generated arm type; a tuple of
     // the fields converts into it.
     Plan { label: label.clone(), first: Action::Rename(("a".to_string(), "b".to_string()).into()), level: Level::Warn }
 }

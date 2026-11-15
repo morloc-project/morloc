@@ -162,16 +162,19 @@ data RustState = RustState
   , rsPublic :: Map.Map TVar Text
   -- ^ The generated types this pool declares in their module's file, each
   -- with its path from the crate root (GEN-6).
-  , rsPublicDecls :: [(TVar, MDoc, Bool)]
+  , rsPublicDecls :: [(TVar, MDoc, Maybe [Text])]
   -- ^ The declarations of those types, to be written to their files, each
   -- with whether the crate root still offers its module's names.
   , rsHandles :: Set.Set TVar
   -- ^ The generated records that refer to themselves, each a handle to its
   -- shared fields (GEN-1).
+  , rsNeedsNode :: Bool
+  -- ^ Whether a generated `data` type of the pool has an arm, so the crate
+  -- declares its node type (GEN-1).
   }
 
 instance Defaultable RustState where
-  defaultValue = RustState 0 Map.empty Set.empty Set.empty (\_ -> Nothing) Map.empty [] Map.empty Set.empty Set.empty Map.empty Map.empty Map.empty Set.empty emptyPoolPlan Set.empty 0 [] Map.empty Map.empty [] Set.empty
+  defaultValue = RustState 0 Map.empty Set.empty Set.empty (\_ -> Nothing) Map.empty [] Map.empty Set.empty Set.empty Map.empty Map.empty Map.empty Set.empty emptyPoolPlan Set.empty 0 [] Map.empty Map.empty [] Set.empty False
 
 -- | The ownership environment: the borrowed (@&T@) parameter indices of the
 -- manifold whose body is currently being lowered ('oeCurrent') and of its
@@ -1778,7 +1781,9 @@ makeRustCode includeDocs0 closureAsts closureTable0 es = do
   let closureWrappers = stageLookupDoc stageTable : closureWrappers0
   CMS.modify $ \s -> s {rsReifyInfo = reifyInfo, rsThinClosures = thin, rsPapplyHeads = heads}
   homes <- CMS.gets rsTypeHomes
-  (typeFiles, typeTree) <- rustTypeFiles homes <$> CMS.gets rsPublicDecls
+  needsNode <- CMS.gets rsNeedsNode
+  needsHook <- (\h -> needsNode || not (Set.null h)) <$> CMS.gets rsHandles
+  (typeFiles, typeTree) <- rustTypeFiles homes needsHook needsNode <$> CMS.gets rsPublicDecls
   let includeDocs = includeDocs0 <> typeTree
   program <- buildProgramM Map.empty Map.empty includeDocs [] es translateSegment getRustSchemaTable closureTable
   -- structDocs go in the schema-table section; the closure dispatch wrappers are
@@ -1989,10 +1994,12 @@ generateRustVariants closureAsts es = do
       wired <- case wireArms of
         Just was | hasFun -> mapM (\(c, ts) -> (,,) c ts <$> armWire ts (lookup c was)) arms'
         _ -> return [(c, ts, Nothing) | (c, ts) <- arms']
-      let impls box = [RP.printVariantImpls box name wired | not hasFun || isJust wireArms]
+      let impls generated = [RP.printVariantImpls generated name wired | not hasFun || isJust wireArms]
       if userMapped
-        then return (impls RP.userBox)
-        else (<> impls RP.recBox) <$> declareOrKeep True gv (\n -> RP.printRustVariant n arms') name
+        then return (impls False)
+        else do
+          CMS.modify $ \s -> s {rsNeedsNode = rsNeedsNode s || any (not . null . snd) arms'}
+          (<> impls True) <$> declareOrKeep (Just [c | (c, _ : _) <- arms']) gv (\n -> RP.printRustVariant n arms') name
 
     armWire :: [MDoc] -> Maybe [SerialAST] -> RustM (Maybe RP.ArmWire)
     armWire ts (Just ss)
@@ -2049,7 +2056,7 @@ generateRustEnums es = do
       let impls = RP.printEnumImpls name ctors
       if userMapped
         then return [impls]
-        else (<> [impls]) <$> declareOrKeep True gv (\n -> RP.printRustEnum n ctors) name
+        else (<> [impls]) <$> declareOrKeep (Just []) gv (\n -> RP.printRustEnum n ctors) name
 
     -- True iff the concrete scope holds an entry for @gv@ whose body names
     -- @cvText@; that is what distinguishes a real per-language mapping from
@@ -2064,10 +2071,11 @@ generateRustEnums es = do
 -- | The declaration of a generated type: set aside for its module's file
 -- under the type's own name when the type is declared there (GEN-6), else
 -- returned for the pool under the given name. A `data` type is also
--- offered at the crate root under its own name, which sourced files named
--- it by before it had a file; a record never had a name a source could
--- write, so it is not.
-declareOrKeep :: Bool -> TVar -> (MDoc -> MDoc) -> MDoc -> RustM [MDoc]
+-- offered at the crate root under its own name and its arm types' (the
+-- given constructors), which sourced files named it by before it had a
+-- file; a record (no list) never had a name a source could write, so it is
+-- not.
+declareOrKeep :: Maybe [Text] -> TVar -> (MDoc -> MDoc) -> MDoc -> RustM [MDoc]
 declareOrKeep keepRootName gv decl poolName = do
   public <- CMS.gets rsPublic
   homes <- CMS.gets rsTypeHomes
@@ -2128,7 +2136,12 @@ planRustPublic es = do
             <> "`, which Rust cannot spell as a module name"
         | (gv, c) <- badWords ]
           <> [ "the generated Rust name " <> n <> " would name both " <> T.intercalate " and " (map unTVar gvs)
-             | (n, gvs) <- Map.toList (Map.fromListWith (flip (<>)) ([(n, [gv]) | (gv, n) <- Map.toList names] <> [(n <> "Fields", [gv]) | (gv, n) <- Map.toList names, Set.member gv handles]))
+             | (n, gvs) <- Map.toList (Map.fromListWith (flip (<>)) ([(n, [gv]) | (gv, n) <- Map.toList names] <> [(n <> "Fields", [gv]) | (gv, n) <- Map.toList names, Set.member gv handles]
+                   <> [ (n <> "_" <> c, [gv])
+                      | (gv, arms) <- Map.toList (Map.fromList [(gv, arms) | (FV gv _, _, arms) <- vars])
+                      , Just n <- [Map.lookup gv names]
+                      , (c, _ : _) <- arms
+                      ]))
              , length gvs > 1 ]
           <> rsErrors s
     }
@@ -2158,13 +2171,18 @@ rustUnspellable = Set.fromList ["crate", "self", "super", "Self"]
 -- | The files of the generated types set aside in 'rsPublicDecls', one per
 -- module path, and the module tree that includes them at the crate root,
 -- given the path from the pool's main file to the types directory.
-rustTypeFiles :: Map.Map TVar TypeHome -> [(TVar, MDoc, Bool)] -> ([([Text], Text)], [MDoc])
-rustTypeFiles homes decls = (files, [tree | not (null files)] <> aliases)
+rustTypeFiles :: Map.Map TVar TypeHome -> Bool -> Bool -> [(TVar, MDoc, Maybe [Text])] -> ([([Text], Text)], [MDoc])
+rustTypeFiles homes needsHook needsNode decls = (files, [tree | needsHook || needsNode || not (null files)] <> aliases)
   where
     byPath = Map.fromListWith (flip (<>)) [(typeHomePath h, [d]) | (gv, d, _) <- decls, Just h <- [Map.lookup gv homes]]
     -- The `data` types of each file, which the crate root offered by their
     -- own names before they had a file.
-    rootNames = Map.fromListWith (flip (<>)) [(typeHomePath h, [typeHomeName h]) | (gv, _, True) <- decls, Just h <- [Map.lookup gv homes]]
+    rootNames =
+      Map.fromListWith (flip (<>))
+        [ (typeHomePath h, typeHomeName h : [typeHomeName h <> "_" <> c | c <- arms])
+        | (gv, _, Just arms) <- decls
+        , Just h <- [Map.lookup gv homes]
+        ]
     -- A glob over a module re-exporting only those types, so that the crate
     -- root offers them as before while a sourced file's own item or `use`
     -- of the same name takes precedence. Records are left out: a glob at
@@ -2185,7 +2203,16 @@ rustTypeFiles homes decls = (files, [tree | not (null files)] <> aliases)
         )
       | (p, ds) <- Map.toList byPath
       ]
-    tree = "pub mod mlc { pub mod types {" <+> hsep (map node (grouped (map fst files) [])) <+> "} }"
+    -- The release hook every generated arm and handle drops through
+    -- (STATE-8), beside the module tree of the generated files.
+    tree =
+      vsep
+        [ "pub mod mlc {"
+        , if needsHook then "pub fn rec_release<T>(a: ::std::sync::Arc<T>) { ::rustmorloc::rec_release(a) }" else ""
+        , if needsNode then vsep [RP.printRustNode "::rustmorloc::rec_release", RP.printRustNodeImpls] else ""
+        , if null files then "" else "pub mod types {" <+> hsep (map node (grouped (map fst files) [])) <+> "}"
+        , "}"
+        ]
     grouped ps prefix =
       [ (c, prefix <> [c], [rest | (c' : rest) <- ps, c' == c])
       | c <- unique [c | (c : _) <- ps]
@@ -2302,7 +2329,7 @@ generateRustStructs closureAsts es = do
                 printDecl n
                   | handle = RP.printRustHandle n [(fld, ty) | (fld, ty, _) <- fields]
                   | otherwise = RP.printRustStruct n params [(fld, ty) | (fld, ty, _) <- fields]
-            decl <- declareOrKeep False gv printDecl (recName rec)
+            decl <- declareOrKeep Nothing gv printDecl (recName rec)
             return $ map ((,) Nothing) (decl <> impls)
           Nothing -> error $ "Rust: autogenerated record missing from recmap: " <> show v
       -- User-mapped record: the user writes the (monomorphic) struct, so only the
@@ -2667,9 +2694,9 @@ rustLowerConfig mask makers consumed =
     -- instantiation `MyBox<i64>` included, where `MyBox<i64>::Ctor` is not.
     -- In PATTERN position that path is not stable Rust, so a pattern names
     -- the bare head (`MyBox::Ctor`); the subject's type pins the arguments.
-    -- The fields are converted into whatever box the arm declares, so one
-    -- spelling serves an enum the pool generates (RecBox) and one the user
-    -- wrote (Box).
+    -- The fields are converted into whatever holder the arm declares, so one
+    -- spelling serves an enum the pool generates (its arm type) and one the
+    -- user wrote (Box).
     , lcVariantLit = \ty n _ xs ->
         let arm = "<" <> ty <> ">::" <> pretty n
         in if null xs
@@ -2949,7 +2976,7 @@ rustArmField ty n subj yield =
   "match" <+> subj <+> "{"
     <+> RP.typeHead ty <> "::" <> pretty n <> "(__morloc_lb)"
     <+> "=>" <+> yield <> ","
-    <+> "_ => unreachable!()"
+    <+> "#[allow(unreachable_patterns)] _ => unreachable!()"
     <+> "}"
 
 -- | Take field @i@ out of arm @n@'s payload (OWN-5): the box gives the
@@ -2962,7 +2989,7 @@ rustTakeField ty n i subj =
     <+> RP.typeHead ty <> "::" <> pretty n <> "(__morloc_lb)"
     <+> "=> ::rustmorloc::MlcTake::take_with(unsafe { ::std::ptr::read(__morloc_lb) }, |__morloc_lv| __morloc_lv." <> pretty i
     <> ", |__morloc_lv| __morloc_lv." <> pretty i <> ".clone()),"
-    <+> "_ => unreachable!()"
+    <+> "#[allow(unreachable_patterns)] _ => unreachable!()"
     <+> "} }"
 
 -- | A native let of the IR that holds a borrow (OWN-6) is typed as a

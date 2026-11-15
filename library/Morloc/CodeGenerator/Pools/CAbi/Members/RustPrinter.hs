@@ -38,7 +38,9 @@ module Morloc.CodeGenerator.Pools.CAbi.Members.RustPrinter
   , printRustVariant
   , printVariantImpls
   , ArmWire (..)
-  , recBox
+  , armTypeName
+  , printRustNode
+  , printRustNodeImpls
   , userBox
   , printEnumImpls
   , tupled1
@@ -490,8 +492,8 @@ printRustStruct name params fields =
     ]
 
 -- | A record that refers to itself, declared as a handle to its fields
--- (GEN-1), read through Deref and released through the runtime's drain
--- (STATE-8).
+-- (GEN-1), read through Deref and released through the crate's release
+-- function (STATE-8).
 printRustHandle :: MDoc -> [(MDoc, MDoc)] -> MDoc
 printRustHandle name fields =
   vsep
@@ -513,7 +515,7 @@ printRustHandle name fields =
     , "impl Drop for" <+> name <+> "{"
     , "    fn drop(&mut self) {"
     , "        // SAFETY: the field is taken exactly once, here."
-    , "        ::rustmorloc::rec_release(unsafe { ::std::mem::ManuallyDrop::take(&mut self.0) });"
+    , "        crate::mlc::rec_release(unsafe { ::std::mem::ManuallyDrop::take(&mut self.0) });"
     , "    }"
     , "}"
     ]
@@ -546,46 +548,117 @@ printRustEnum name ctors =
     , "}"
     ]
 
--- | Emit a Rust @enum@ for a payload-bearing @data@ type.
+-- | Emit a Rust @enum@ for a payload-bearing @data@ type, with one
+-- generated arm type per payload-bearing constructor.
 --
--- Every arm's fields sit behind ONE box, holding a tuple, which mirrors the
--- wire form: a tag plus a relative pointer to the arm's fields. Boxing
--- uniformly rather than only at self-referential positions is what lets a
--- recursive type have a finite size without any recursion analysis here --
--- and mutual recursion (@A@ through @B@ back to @A@) has no single-type
--- test that would find it.
---
--- The box is the runtime's @RecBox@, a reference-counted box whose drop
--- hands a deep chain of arms to an iterative drain, so releasing a value
--- costs heap rather than one frame per level, and whose clone shares the
--- arm, so projecting a field out of a value costs a count rather than a
--- copy of the subtree.
+-- Every arm's fields sit behind one shared node, holding a tuple, which
+-- mirrors the wire form: a tag plus a relative pointer to the arm's fields.
+-- Boxing every arm rather than only at self-referential positions is what
+-- lets a recursive type have a finite size without any recursion analysis
+-- here, mutual recursion included. An arm type is standard Rust (CPP-6's
+-- arm structs, in Rust): a reference-counted node read through Deref, so a
+-- copy is a count, and dropped through the crate's release hook (STATE-8).
 --
 -- Deliberately NOT @Copy@ and NOT @#[repr(u8)]@, both of which the
--- argument-free form carries. A box is not @Copy@, so deriving it would
--- fail to compile on the first payload arm, and it must stay non-@Copy@ to
--- agree with the ownership classifier. @repr(u8)@ describes a layout these
--- hand-written impls do not use.
+-- argument-free form carries.
 printRustVariant :: MDoc -> [(T.Text, [MDoc])] -> MDoc
 printRustVariant name arms =
-  vsep
-    [ "#[derive(Clone)]"
-    , "pub enum" <+> name <+> "{"
-    , indent 4 (vsep [armDecl c ts | (c, ts) <- arms])
-    , "}"
-    ]
+  vsep $
+    [printRustArm (armTypeName name c) ts | (c, ts@(_ : _)) <- arms]
+      <> [ "#[derive(Clone)]"
+         , "pub enum" <+> name <+> "{"
+         , indent 4 (vsep [armDecl c ts | (c, ts) <- arms])
+         , "}"
+         ]
   where
     armDecl c [] = pretty c <> ","
-    armDecl c ts = pretty c <> parens (recBox <> "<" <> tupled1 ts <> ">") <> ","
+    armDecl c _ = pretty c <> parens (armTypeName name c) <> ","
+
+-- | The generated type of one constructor's arm, given its enum's type:
+-- @Shape@ and @Circle@ give @Shape_Circle@.
+armTypeName :: MDoc -> T.Text -> MDoc
+armTypeName name c = name <> "_" <> pretty c
+
+-- | One arm's type: the crate's shared node holding the constructor's
+-- fields ('printRustNode').
+printRustArm :: MDoc -> [MDoc] -> MDoc
+printRustArm arm ts =
+  vsep
+    [ "#[allow(non_camel_case_types)]"
+    , "pub type" <+> arm <+> "= crate::mlc::Node<" <> tupled1 ts <> ">;"
+    ]
+
+-- | The node every generated arm is (GEN-1): standard Rust, a
+-- reference-counted value read through Deref, dropped through the release
+-- function it is given (STATE-8). One per crate, in its @mlc@ module.
+printRustNode :: MDoc -> MDoc
+printRustNode release =
+  vsep
+    [ "pub struct Node<T> { pub(crate) node: ::std::mem::ManuallyDrop<::std::sync::Arc<T>> }"
+    , "impl<T> ::std::clone::Clone for Node<T> {"
+    , "    fn clone(&self) -> Self { Self { node: ::std::mem::ManuallyDrop::new(::std::sync::Arc::clone(&self.node)) } }"
+    , "}"
+    , "impl<T> ::std::ops::Deref for Node<T> {"
+    , "    type Target = T;"
+    , "    fn deref(&self) -> &T { &self.node }"
+    , "}"
+    , "impl<T> ::std::convert::From<T> for Node<T> {"
+    , "    fn from(v: T) -> Self { Self::new(v) }"
+    , "}"
+    , "impl<T> Node<T> {"
+    , "    pub fn new(v: T) -> Self { Self { node: ::std::mem::ManuallyDrop::new(::std::sync::Arc::new(v)) } }"
+    , "    pub fn try_into_inner(self) -> ::std::result::Result<T, Self> {"
+    , "        let mut me = ::std::mem::ManuallyDrop::new(self);"
+    , "        // SAFETY: `me` is never dropped, so its node is taken exactly once."
+    , "        let rc = unsafe { ::std::mem::ManuallyDrop::take(&mut me.node) };"
+    , "        ::std::sync::Arc::try_unwrap(rc).map_err(|rc| Self { node: ::std::mem::ManuallyDrop::new(rc) })"
+    , "    }"
+    , "    pub fn into_inner(self) -> T where T: Clone {"
+    , "        match self.try_into_inner() { Ok(v) => v, Err(b) => (*b).clone() }"
+    , "    }"
+    , "}"
+    , "impl<T> ::std::ops::Drop for Node<T> {"
+    , "    fn drop(&mut self) {"
+    , "        // SAFETY: the node is taken exactly once, here."
+    , "        " <> release <> "(unsafe { ::std::mem::ManuallyDrop::take(&mut self.node) });"
+    , "    }"
+    , "}"
+    ]
+
+-- | The pool-side impls of the crate's node: marshalling as its payload, and
+-- taking the payload at a last use (OWN-5).
+printRustNodeImpls :: MDoc
+printRustNodeImpls =
+  vsep
+    [ "impl<T> ::rustmorloc::MlcTake for crate::mlc::Node<T> {"
+    , "    type Payload = T;"
+    , "    fn take_with<R>(self, owned: impl FnOnce(T) -> R, shared: impl FnOnce(&T) -> R) -> R {"
+    , "        match self.try_into_inner() { Ok(v) => owned(v), Err(b) => shared(&b) }"
+    , "    }"
+    , "}"
+    , "impl<T: ::rustmorloc::ToVoidstar> ::rustmorloc::ToVoidstar for crate::mlc::Node<T> {"
+    , "    const IS_LEAF: bool = T::IS_LEAF;"
+    , "    fn shm_size(&self, schema: &::rustmorloc::Schema) -> usize { (**self).shm_size(schema) }"
+    , "    unsafe fn write(&self, dest: *mut u8, cursor: &mut *mut u8, schema: &::rustmorloc::Schema) { (**self).write(dest, cursor, schema) }"
+    , "    unsafe fn write_leaf(&self, w: &mut ::rustmorloc::WriteWalk, dest: *mut u8, schema: &::rustmorloc::Schema) { (**self).write_leaf(w, dest, schema) }"
+    , "    fn size_step(&self, w: &mut ::rustmorloc::SizeWalk, schema: &::rustmorloc::Schema, idx: usize) { (**self).size_step(w, schema, idx) }"
+    , "    unsafe fn write_step(&self, w: &mut ::rustmorloc::WriteWalk, dest: *mut u8, schema: &::rustmorloc::Schema, idx: usize) { (**self).write_step(w, dest, schema, idx) }"
+    , "}"
+    , "impl<T: ::rustmorloc::FromVoidstar> ::rustmorloc::FromVoidstar for crate::mlc::Node<T> {"
+    , "    const IS_LEAF: bool = T::IS_LEAF;"
+    , "    unsafe fn read(schema: &::rustmorloc::Schema, data: *const u8, space: ::rustmorloc::MorlocSpace) -> Self { Self::new(T::read(schema, data, space)) }"
+    , "    unsafe fn read_step(w: &mut ::rustmorloc::ReadWalk, schema: &::rustmorloc::Schema, data: *const u8, _idx: usize) {"
+    , "        w.push_finish::<Self>(schema, data);"
+    , "        w.child_step::<T>(schema, data);"
+    , "    }"
+    , "    unsafe fn read_finish(w: &mut ::rustmorloc::ReadWalk, schema: &::rustmorloc::Schema, data: *const u8) -> Self { Self::new(w.child_read::<T>(schema, data)) }"
+    , "}"
+    ]
 
 -- | A one-element tuple needs its trailing comma or it is just parentheses.
 tupled1 :: [MDoc] -> MDoc
 tupled1 [t] = parens (t <> ",")
 tupled1 ts = tupled ts
-
--- | The path of the box a generated enum's arms sit behind.
-recBox :: MDoc
-recBox = "::rustmorloc::RecBox"
 
 -- | The path of the box a user-written enum's arms sit behind: the plain
 -- standard box the mapped-type contract names, whose release recursion is
@@ -601,25 +674,29 @@ data ArmWire = ArmWire
   , awReflect :: MDoc -> MDoc
   }
 
--- | The marshalling impls of a payload-bearing @data@ type, with the box
--- type its arms use (@recBox@ for an enum the pool generates, @userBox@ for
--- one the user wrote).
-printVariantImpls :: MDoc -> MDoc -> [(T.Text, [MDoc], Maybe ArmWire)] -> MDoc
-printVariantImpls box name arms3 = vsep [toImpl, "", fromImpl]
+-- | The marshalling impls of a payload-bearing @data@ type, given whether
+-- its arms are the generated arm types (else the user's standard boxes).
+printVariantImpls :: Bool -> MDoc -> [(T.Text, [MDoc], Maybe ArmWire)] -> MDoc
+printVariantImpls generated name arms3 = vsep [toImpl, "", fromImpl]
   where
     idxArms = indexed arms3
     payload = "(**mlc_b)"
-    readTy ts mw = maybe (armTy ts) awType mw
-    readArm i ts mw p = case mw of
-      Nothing -> "w.child_read::<" <> armTy ts <> ">(&schema.parameters[" <> pretty i <> "], " <> p <> ")"
-      Just aw -> box <> "::new" <> parens (awReflect aw ("w.child_read::<" <> awType aw <> ">(&schema.parameters[" <> pretty i <> "], " <> p <> ")"))
+    readTy c ts mw = maybe (armTy c ts) awType mw
+    readArm i c ts mw p = case mw of
+      Nothing -> "w.child_read::<" <> armTy c ts <> ">(&schema.parameters[" <> pretty i <> "], " <> p <> ")"
+      Just aw -> armCtor c <> parens (awReflect aw ("w.child_read::<" <> awType aw <> ">(&schema.parameters[" <> pretty i <> "], " <> p <> ")"))
 
     -- Constructors are spelled through `Self` inside the impl: it is legal
     -- in expression and pattern position alike, for a plain name and for a
     -- generic instantiation the impl is written for.
     armPat c ts = "Self::" <> pretty c <> (if null ts then "" else "(mlc_b)")
-    -- The payload's native type, as the enum declares it.
-    armTy ts = box <> "<" <> tupled1 ts <> ">"
+    -- The payload's native type, as the enum declares it, and its constructor.
+    armTy c ts
+      | generated = armTypeName name c
+      | otherwise = userBox <> "<" <> tupled1 ts <> ">"
+    armCtor c
+      | generated = armTypeName name c <> "::new"
+      | otherwise = userBox <> "::new"
     -- The runtime range-checks a tag at the wire boundary, so reaching this
     -- arm means the value and its schema disagree: a bug, not bad input.
     -- Here the tag would otherwise index the arm list.
@@ -678,8 +755,8 @@ printVariantImpls box name arms3 = vsep [toImpl, "", fromImpl]
                           (if null ts
                              then "{}"
                              else "{ let p = w.payload_ptr(data, &schema.parameters[" <> pretty i <> "]); w.child_step::<"
-                                    <> readTy ts mw <> ">(&schema.parameters[" <> pretty i <> "], p); }")
-                      | (i, (_, ts, mw)) <- idxArms ]
+                                    <> readTy c ts mw <> ">(&schema.parameters[" <> pretty i <> "], p); }")
+                      | (i, (c, ts, mw)) <- idxArms ]
                       <> [badTag]
                     )
                 , "}"
@@ -693,7 +770,7 @@ printVariantImpls box name arms3 = vsep [toImpl, "", fromImpl]
                           (if null ts
                              then "Self::" <> pretty c <> ","
                              else "{ let p = w.payload_ptr(data, &schema.parameters[" <> pretty i <> "]); Self::" <> pretty c
-                                    <> parens (readArm i ts mw "p") <> " }")
+                                    <> parens (readArm i c ts mw "p") <> " }")
                       | (i, (c, ts, mw)) <- idxArms ]
                       <> [badTag]
                     )

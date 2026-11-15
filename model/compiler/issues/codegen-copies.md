@@ -8,8 +8,8 @@ wire. Reproduced 2026-10-17 at 9f24abe4 by counting copies (a counting Rust
 `Clone`, C++ allocations of a 64 KiB payload); entries already in
 codegen-ownership.md are not repeated.
 
-Generated `data` arms are shared boxes in both languages (Rust `RecBox`, C++
-`shared_ptr`), so a copy of a `data` value is O(1); lists, strings, tuples,
+Generated `data` arms are shared nodes in both languages (a generated Rust
+arm type over `Arc`, C++ `shared_ptr`), so a copy of a `data` value is O(1); lists, strings, tuples,
 records and user-mapped types copy deeply.
 
 - **A projection is copied when its consumer only reads it.** [reproduced]

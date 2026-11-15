@@ -257,6 +257,12 @@ writeProgram translateFn path code =
   -- program builder runs, so a failure anywhere in between must discard that
   -- tree or an aborted build leaves a .tmp.<pid> directory beside the program.
   withStagingCleanup $ do
+    (nexus, envspec, wrappers, pools) <- emitProgram translateFn path code
+    buildEmitted nexus envspec wrappers pools
+
+-- | Typecheck, realize and emit the nexus and every pool.
+emitProgram :: TranslateFn -> Maybe Path -> Code -> MorlocMonad (Script, Script, [WrapperFile], [Script])
+emitProgram translateFn path code =
   typecheck path code
     -- Evaluate applied lambdas. gASTs run in the pure nexus evaluator, which
     -- cannot hold a native closure, so let-bound lambdas are always inlined
@@ -303,6 +309,11 @@ writeProgram translateFn path code =
         pools <-
           lowerPools (map fst concreteRASTs)
             >>= mapM (uncurry (emit translateFn))
+        return (nexus, envspec, wrappers, pools)
+
+-- | Hash the emitted pools into the manifest, then write and build them.
+buildEmitted :: Script -> Script -> [WrapperFile] -> [Script] -> MorlocMonad ()
+buildEmitted nexus envspec wrappers pools = do
         -- Fingerprint each pool's emitted source and substitute the
         -- hex hashes into the @<MORLOC_POOL_HASH:lang>@ placeholders
         -- the nexus manifest carries. The hashes are computed AFTER

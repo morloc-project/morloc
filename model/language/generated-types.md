@@ -94,7 +94,13 @@ root, which also offers each generated `data` type by its bare name; a
 sourced file names a type by its path or by that name, and two sourced
 files that both `use` the same name clash. Its contents are a function of
 the program's closure, and it includes or imports only what its
-definitions name.
+definitions name. A generated Rust `data` type holds each constructor's fields
+in a generated arm type, `D_C` for constructor `C` of `D`: an alias of the
+crate's generated node type `crate::mlc::Node<(fields...)>`, a standard
+`Arc` read through `Deref` and built with `D_C::new` or `.into()`. A type
+file names no morloc type; the crate's `mlc` module, which the pool or a
+standalone crate supplies, holds the node and the release function its
+drops call.
 
 ### GEN-7 A generated file imports what its fields name
 Intent: ruled 2026-11-14

@@ -35,14 +35,14 @@ spec should still state the outcome.
 
 ## Recursive values shared across threads contend on refcounts [measured]
 
-A projection out of a recursive value clones the child's `RecBox` (one
+A projection out of a recursive value clones the child's arm (one
 atomic increment and decrement per node visit). Single-threaded, `Arc` and
 `Rc` measured equal (13-30 ns per node, ratio 0.83-1.01, noisy machine).
 Threads walking ONE shared tree contend: a 2^21-node walk x4 took 110 ms
 on one thread and 620 ms on two (separate trees: 148 ms and 214 ms). So
 `pmap` over elements that share subtrees can be slower than `map`.
 Candidate: match projections borrow instead of clone. Benchmark source:
-a Rust replica of the generated walk (Rc vs Arc RecBox).
+a Rust replica of the generated walk (Rc vs Arc arms).
 
 ## Registry costs where nothing crosses [read]
 
