@@ -33,6 +33,7 @@ import Morloc.Data.Map (Map)
 import qualified Morloc.Data.Map as Map
 import qualified Morloc.Frontend.AST as AST
 import Morloc.Frontend.Namespace
+import qualified Morloc.LangRegistry as LR
 import qualified Morloc.Monad as MM
 import qualified Morloc.TypeEval as TE
 import Morloc.Frontend.Rename (renameLocals)
@@ -1238,9 +1239,9 @@ collectTypes fullDag = do
           , let hs = [(l, fields) | (l, fields, _) <- headerLabels b]
           , not (null hs)
           ]
-      concrete =
-        Map.map (completeRecords general) $
-          Map.unionsWith (Map.unionWith mergeEntries) (map snd found)
+  reg <- MM.gets stateLangRegistry
+  let declared = Map.unionsWith (Map.unionWith mergeEntries) (map snd found)
+      concrete = Map.map (completeRecords general) (withDefaultKinds reg general declared)
   let modules = map fst (Map.elems fullDag)
   checkFormLists modules
   checkConflictingForms modules Nothing general
@@ -1721,6 +1722,46 @@ checkInstanceOnRoot dag gscope =
           | otherwise                = Just v
         headOf bnd (AppU h _)        = headOf bnd h
         headOf _   _                 = Nothing
+
+-- | Give every record without a form in a language the program uses that
+-- language's default kind (GEN-1), as if the program had written the form. An @object@ is a
+-- class the user writes, so it gets none. The entry's fields
+-- are left empty for 'completeRecords' to fill from the declaration.
+withDefaultKinds :: LR.LangRegistry -> Scope -> Map Lang Scope -> Map Lang Scope
+withDefaultKinds reg general declared = foldr addLang declared langs
+  where
+    -- Only the languages the program gives forms in: the keys of the
+    -- concrete scope are the languages it uses.
+    langs =
+      [ (lang, form)
+      | (n, e) <- Map.toList (LR.lrEntries reg)
+      , let lang = Lang n (LR.lreExtension e)
+      , Map.member lang declared
+      , let kinds = LR.lreTypeKinds e
+      , Just def <- [LR.tkRecordDefault kinds]
+      , Just spec <- [Map.lookup def (LR.tkRecordKinds kinds)]
+      , let form = LR.ksForm spec
+      ]
+    -- A record with a parameter no field uses keeps having no form: the
+    -- form's argument list would then ask every language for a form of
+    -- each phantom argument (issues/records.md).
+    records =
+      [ (v, (ps, o, d))
+      | (v, (ps, NamU o@NamRecord _ _ rs, d, _, TypedefNewtype) : _) <- Map.toList general
+      , and [any (usesVar p . snd) rs | Left (p, _) <- ps]
+      ]
+    usesVar p t = case t of
+      VarU p' | p' == p -> True
+      _ -> any (usesVar p) (typeUChildren t)
+    addLang (lang, form) m =
+      let have = Map.findWithDefault Map.empty lang m
+          synthesized =
+            Map.fromList
+              [ (v, [(ps, NamU o (TV form) (map (either (VarU . fst) id) ps) [], d, True, TypedefAlias)])
+              | (v, (ps, o, d)) <- records
+              , not (Map.member v have)
+              ]
+       in if Map.null synthesized then m else Map.insert lang (Map.union have synthesized) m
 
 {- | links the general entries from records to their abbreviated concrete cousins.
 For example:

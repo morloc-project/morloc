@@ -56,16 +56,6 @@
   a conversion between a record and an anonymous type in another order,
   which is sound under either answer; (b) would replace that rejection
   with an inserted reordering.
-- **A record literal in Python or R needs a native form.** [reproduced,
-  2026-10-21] Violates NATIVE-3 (Python and R need no native definition).
-  `record P = P { a :: Int, b :: Str }; lit n = inc { b = "z", a = n }`
-  under root-py or root-r fails at make "No concrete py type for record
-  'P'" when the program also uses a setter (`.(.a = 5) p`); getters and
-  setters alone build, and so does the literal with only getters
-  (reproduced 2026-10-31); `record Py => P = "dict"` fixes it.
-  Cause: CodeGenerator/Infer.hs:957-959 (`namesRecord`) throws for every
-  language. This is also why the manual writes `record Py` lines
-  (manual.md). Repro: /work/plans/model-audit-2026-10-21/repro/C/rec/set-py.loc, nolit-py.loc.
 - **Recursive records: SUM-4 contradicts ALIAS-7, and the code splits the
   difference.** [reproduced, 2026-10-21] SUM-4 makes a cycle of records
   and aliases alone an error; ALIAS-7 (ruled) allows a guarded recursive
@@ -91,3 +81,13 @@
   selection never fixes an open class argument (Instances.hs `resolve` returns
   Undetermined first), so only Packable improvement (CLS-20) can reach the REC-4
   check. The message also shows the internal name `record_2`.
+- **Parameterized and phantom records still need a per-language line in
+  C++ and Rust.** [read, 2026-11-15] Violates GEN-1 and GEN-9. A
+  generated record with type parameters is still built per pool from its
+  uses (Grammars/Common.hs unifyRecords) and is never declared in its
+  module's file, so a recursive one (`record Container a` with
+  `sub :: ?(Container a)`) is refused in C++ and Rust, asking for a
+  `record Cpp =>` line (Cpp.hs and Rust.hs, RecF "struct"). A record with
+  a parameter no field uses gets no default form at all
+  (Restructure.hs withDefaultKinds), as before GEN-1. Both need the
+  declaration-driven definition GEN-9 describes.

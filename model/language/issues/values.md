@@ -89,19 +89,20 @@ on 0.109.0 unless marked.
   caller `u s = unpack (mk s)`: builds with no warning; running `u
   notes.txt` fails "Expected str or bytes for MORLOC_STRING, but got
   PosixPath (pymorloc.c:1000)" [reproduced 2026-11-14]. Repro: /work/plans/model-audit-2026-10-21/repro/B/t/n7/c2.loc.
-- **An unmapped record passed to a sourced C++ function does not compile.**
-  [reproduced, 2026-10-21] Violates NATIVE-4; contradicts NATIVE-3.
-  `record P where x :: Int; y :: Real`, no `record Cpp =>`, sourced
-  `getx :: P -> Int` (`template <class T> int getx(const T& p)`),
-  `f p = getx p`: g++ fails "pool.cpp:137: 'P' was not declared in this
-  scope". With no sourced function (`f p = .x p`) the same record builds
-  and runs in C++ and Rust, so a struct is generated on one path only,
-  though NATIVE-3 (ruled) requires a user struct. Either reject naming P
-  and Cpp, or always generate (#66). Repro: /work/plans/model-audit-2026-10-21/repro/B/t/nat/b.loc, a.loc, c.loc.
 - **A Python record class form is accepted and ignored.** [reproduced,
-  2026-10-21] Gap in NATIVE-5 (open). `record Py => P = "MyCls"` builds;
-  the Python function receives a `dict`. No candidate answer describes a
-  silent drop. Repro: /work/plans/model-audit-2026-10-21/repro/B/t/nat/n5.loc.
+  2026-10-21] Violates GEN-11. `record Py => P = "MyCls"` builds;
+  the Python function receives a `dict`. The golden object-1-py passes only
+  because its function is an identity and the output is JSON. Repro: /work/plans/model-audit-2026-10-21/repro/B/t/nat/n5.loc.
+- **A Python record literal is an OrderedDict, a received record a dict.**
+  [read, 2026-11-15] Violates NATIVE-9. Literals are built with
+  `ldRecordConstructor: "OrderedDict"` (data/lang/py/lang.yaml:50;
+  PseudoCode.hs:122 matches it); pymorloc.c reads every record with
+  `PyDict_New` (MORLOC_MAP, ~2178). `type()` and `repr()` differ.
+- **Reading a field of a Python `object` emits attribute access on a dict.**
+  [read, 2026-11-15, not reproduced] Violates GEN-11. genericRecordAccessor
+  (Grammars/Translator/Generic.hs:768-769) emits `.f` for `NamObject`, but
+  pymorloc builds the value as a dict, so `.f p` on an `object Py` record
+  should fail at run time. object-1-py never reads a field.
 - **Out-of-range list index gives a wrong value in C++ and R.**
   [reproduced, 2026-10-21] Violates COLL-3 (same result in every language);
   every COLL-4 candidate excludes a silent wrong value. With a pool-computed

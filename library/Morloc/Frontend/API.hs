@@ -113,10 +113,12 @@ parse f (Code code) = do
         Nothing -> return ()
     _ -> return ()
 
+  reg <- MM.gets stateLangRegistry
   let parserState =
         emptyPState
           { psModuleConfig = moduleConfig
           , psLangMap = langMap
+          , psTypeKinds = Map.map LR.lreTypeKinds (LR.lrEntries reg)
           , psProjectRoot = projectRoot
           }
 

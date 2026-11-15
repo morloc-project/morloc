@@ -99,3 +99,11 @@ model/issues/LIST.md), checked against the code 2026-11-04 [read].
 - **`install` writes wrappers and completions under `$MORLOC_HOME`.**
   Install.hs:70 (`bin`) and :108 (`completions`), and the uninstall side
   (Subcommands.hs:1290, :1319), use `configHome`, not the state root.
+- **A plugin language's lang.yaml that fails to parse is dropped
+  silently, and its record kinds are never read.** [read, 2026-11-15]
+  Gap in GEN-2 (a malformed descriptor is refused naming the file and
+  key). Frontend/API.hs buildLangMap' `scanLangDir` returns Nothing on
+  any parse error, so every `source Plug ...` then fails "unknown
+  language"; plugin languages get no registry entry, so their
+  `generated_types` are ignored (Frontend/API.hs psTypeKinds and
+  Restructure.hs withDefaultKinds read the built-in registry only).

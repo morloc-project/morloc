@@ -11,6 +11,16 @@
   timeout) leaves it, and later builds have other pids, so none removes it.
   The golden tree holds 8, dated 2026-09-02 to 2026-10-17, two of them
   from a suite run stopped on 2026-10-17.
+- [read, 2026-11-15] A generated record missing from the pool's record
+  map ends the compiler with a Haskell `error`, not a sourced message
+  (CodeGenerator/Pools/CAbi/Members/Cpp.hs `Record missing from recmap`,
+  Rust.hs `record missing from recmap`, and Rust.hs RecF `has no concrete
+  mapping`).
+- [read, 2026-11-15] Dead code: the `IAccess` printers are never reached,
+  nothing builds an `IAccess` (Grammars/Translator/Generic.hs:1254-1259,
+  CppPrinter.hs:86-88, RustPrinter.hs:99-101). The comment at
+  data/lang/py/pymorloc.c:2191-2196 cites a code-generator note that does
+  not exist and calls the variant pair form interim.
 - [read] morloc-runtime/src/ipc.rs is dead code: `send_and_receive` (:25)
   and `read_packet` are public and uncalled (callers use ipc_ffi.rs), and
   `read_packet` underflows `offset - 32` (:80). Delete the module.

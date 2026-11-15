@@ -1,0 +1,4 @@
+{"name":"a","age":3,"inner":{"label":"x","tags":["t"]}}
+3
+6
+3

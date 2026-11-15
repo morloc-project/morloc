@@ -23,6 +23,7 @@ module Morloc.Namespace.State
   , MorlocMonad
   , MorlocReturn
   , MorlocState (..)
+  , TypeHome (..)
   , ModuleCommands (..)
   , WrapperSpec (..)
   , WrapperMode (..)
@@ -140,6 +141,16 @@ data WrapperFile = WrapperFile
   }
   deriving (Show, Eq)
 
+-- | Where a type is declared (GEN-4): the declaring module as a path of
+-- identifier components below the generated-type prefix (@["bio_seq",
+-- "align"]@, or @["_local", ...]@ for a module that is not installed), and
+-- the name the module declares the type under.
+data TypeHome = TypeHome
+  { typeHomePath :: [Text]
+  , typeHomeName :: Text
+  }
+  deriving (Show, Eq, Ord)
+
 {- | Mutable compiler state threaded through the entire pipeline.
 Accumulates type signatures, source bindings, typedefs, and metadata
 as modules are parsed, linked, and typechecked.
@@ -162,6 +173,9 @@ data MorlocState = MorlocState
   , stateNewtypeHeaders :: Map.Map TVar [(TVar, [Int])]
   -- ^ Each newtype's header labels (DIM-9): the parameter and the tuple
   -- fields that reach its integer in the representation.
+  , stateTypeHomes :: Map.Map TVar TypeHome
+  -- ^ For each declared type, by its program-wide name, the module that
+  -- declares it and the name it is declared under (GEN-4).
   , stateExportTypes :: Map.Map Int TypeU
   -- ^ Each export's inferred general type, by its index, with its Nat
   -- variables: the contract of an export without a signature (DIM-3).
@@ -1117,6 +1131,7 @@ instance Defaultable MorlocState where
       , stateConcreteTypedefs = Map.empty
       , stateGeneralTypedefs = Map.empty
       , stateNewtypeHeaders = Map.empty
+      , stateTypeHomes = Map.empty
       , stateExportTypes = Map.empty
       , stateSources = GMap Map.empty Map.empty
       , stateAnnotations = Map.empty

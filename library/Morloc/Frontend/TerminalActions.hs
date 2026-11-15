@@ -119,6 +119,7 @@ mkDState idx srcMap = Desugar.DState
   , Desugar.dsModuleConfig = defaultValue
   , Desugar.dsSourceLines = []
   , Desugar.dsLangMap = Map.empty
+  , Desugar.dsTypeKinds = Map.empty
   , Desugar.dsProjectRoot = Nothing
   , Desugar.dsOwnModule = True
   , Desugar.dsTermDocs = Map.empty

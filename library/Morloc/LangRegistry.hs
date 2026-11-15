@@ -14,6 +14,9 @@ at parse time.
 module Morloc.LangRegistry
   ( LangRegistry (..)
   , LangRegistryEntry (..)
+  , TypeKinds (..)
+  , KindSpec (..)
+  , noTypeKinds
   , emptyRegistry
   , buildDefaultRegistry
   , extendRegistry
@@ -36,6 +39,8 @@ module Morloc.LangRegistry
 
 import Data.Aeson ((.!=), (.:), (.:?))
 import qualified Data.Aeson as Aeson
+import qualified Data.Aeson.Key as AK
+import qualified Data.Aeson.KeyMap as KM
 import qualified Data.ByteString as BS
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
@@ -70,8 +75,55 @@ data LangRegistryEntry = LangRegistryEntry
   -- across the boundary is in-process, not a socket foreign call. Nothing for
   -- ordinary languages, which host their own pool. See 'poolOf'.
   , lreHost :: !(Maybe Text)
+  -- | The record kinds the language generates definitions for (GEN-2).
+  , lreTypeKinds :: !TypeKinds
   }
   deriving (Show)
+
+-- | A language's record kinds and its default kind (GEN-2), from the
+-- @generated_types@ section of its lang.yaml.
+data TypeKinds = TypeKinds
+  { tkRecordDefault :: Maybe Text
+  , tkRecordKinds :: Map Text KindSpec
+  }
+  deriving (Show, Eq)
+
+-- | One kind: the form text the compiler carries for a record of this
+-- kind, and the strings a program may still write for it (GEN-3).
+data KindSpec = KindSpec
+  { ksForm :: Text
+  , ksLegacy :: [Text]
+  }
+  deriving (Show, Eq)
+
+noTypeKinds :: TypeKinds
+noTypeKinds = TypeKinds Nothing Map.empty
+
+instance Aeson.FromJSON TypeKinds where
+  parseJSON = Aeson.withObject "generated_types" $ \o -> do
+    onlyKeys "generated_types" ["records"] o
+    recs <- o .:? "records"
+    case recs of
+      Nothing -> return noTypeKinds
+      Just r -> flip (Aeson.withObject "generated_types.records") r $ \ro -> do
+        onlyKeys "generated_types.records" ["default", "kinds"] ro
+        def <- ro .: "default"
+        kinds <- ro .: "kinds"
+        if Map.member def kinds
+          then return (TypeKinds (Just def) kinds)
+          else fail $ "generated_types.records.default names `" <> T.unpack def <> "`, which is not one of its kinds"
+
+instance Aeson.FromJSON KindSpec where
+  parseJSON = Aeson.withObject "record kind" $ \o -> do
+    onlyKeys "record kind" ["form", "legacy"] o
+    KindSpec <$> o .: "form" <*> o .:? "legacy" .!= []
+
+-- | Refuse an object holding a key outside the given set, so a misspelled
+-- key in a descriptor is an error rather than silently ignored.
+onlyKeys :: String -> [Text] -> Aeson.Object -> Y.Parser ()
+onlyKeys what allowed o = case [k | k <- map AK.toText (KM.keys o), k `notElem` allowed] of
+  [] -> return ()
+  ks -> fail $ what <> " has unknown keys " <> show ks <> "; its keys are " <> show allowed
 
 emptyRegistry :: LangRegistry
 -- | No languages and no preference, until languages.yaml is read.
@@ -193,6 +245,7 @@ data LangYamlMeta = LangYamlMeta
   , lymPreamble :: [Text]
   , lymAllowStringNull :: Bool
   , lymHost :: Maybe Text
+  , lymTypeKinds :: TypeKinds
   }
   deriving (Show)
 
@@ -208,6 +261,7 @@ instance Aeson.FromJSON LangYamlMeta where
       <*> o .:? "preamble" .!= []
       <*> o .:? "allow_string_null" .!= True
       <*> o .:? "host"
+      <*> o .:? "generated_types" .!= noTypeKinds
 
 newtype LanguagesYaml = LanguagesYaml {lysLanguageOrder :: [Text]}
   deriving (Show)
@@ -225,6 +279,7 @@ entryFromYaml ly =
     , lrePreamble = lymPreamble ly
     , lreAllowStringNull = lymAllowStringNull ly
     , lreHost = lymHost ly
+    , lreTypeKinds = lymTypeKinds ly
     }
 
 -- | Parse a lang.yaml file from the filesystem, returning (canonical name, extension)

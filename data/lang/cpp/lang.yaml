@@ -7,6 +7,13 @@ run_command: []
 serial_type: "uint8_t*"
 # std::string is length-prefixed and supports interior NUL bytes.
 allow_string_null: true
+# Record kinds the compiler generates definitions for (GEN-2). A record with
+# no form of its own in this language takes the default kind.
+generated_types:
+  records:
+    default: struct
+    kinds:
+      struct: { form: struct, legacy: [struct] }
 # A sourced symbol is a C++ identifier (allowing ::) or operator.
 ldNamePattern: "[A-Za-z_][A-Za-z0-9_]*(::[A-Za-z_][A-Za-z0-9_]*)*"
 ldOperatorPattern: "[-!%&*+./<=>^|~]+"

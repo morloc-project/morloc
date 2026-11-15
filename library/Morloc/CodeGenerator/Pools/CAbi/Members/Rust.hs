@@ -156,10 +156,18 @@ data RustState = RustState
   -- ^ The top-level manifold being lowered (the takes in 'rsPool' are keyed
   -- by it).
   , rsErrors :: [Text]
+  , rsTypeHomes :: Map.Map TVar TypeHome
+  -- ^ The declaring module and name of every declared type (GEN-4).
+  , rsPublic :: Map.Map TVar Text
+  -- ^ The generated types this pool declares in their module's file, each
+  -- with its path from the crate root (GEN-6).
+  , rsPublicDecls :: [(TVar, MDoc, Bool)]
+  -- ^ The declarations of those types, to be written to their files, each
+  -- with whether the crate root still offers its module's names.
   }
 
 instance Defaultable RustState where
-  defaultValue = RustState 0 Map.empty Set.empty Set.empty (\_ -> Nothing) Map.empty [] Map.empty Set.empty Set.empty Map.empty Map.empty Map.empty Set.empty emptyPoolPlan Set.empty 0 []
+  defaultValue = RustState 0 Map.empty Set.empty Set.empty (\_ -> Nothing) Map.empty [] Map.empty Set.empty Set.empty Map.empty Map.empty Map.empty Set.empty emptyPoolPlan Set.empty 0 [] Map.empty Map.empty []
 
 -- | The ownership environment: the borrowed (@&T@) parameter indices of the
 -- manifold whose body is currently being lowered ('oeCurrent') and of its
@@ -238,16 +246,21 @@ rustTypeOf = f
           return . pretty $ expandMacro x (map render ts')
       | otherwise = return (pretty (nativeTypeName x))
 
+    -- A generated type declared in its module's file goes by its path from
+    -- the crate root (GEN-4); any other by the name given.
+    publicOr :: TVar -> MDoc -> RustM MDoc
+    publicOr gv d = maybe d pretty . Map.lookup gv <$> CMS.gets rsPublic
+
     f :: TypeF -> RustM MDoc
     f (UnkF (FV _ x)) = return (pretty (nativeTypeName (unCVar x)))
-    f (VarF (FV _ x)) = return (pretty (nativeTypeName (unCVar x)))
+    f (VarF (FV gv x)) = publicOr gv (pretty (nativeTypeName (unCVar x)))
     -- An enum lowers to its concrete name; the `#[repr(u8)] enum` that
     -- name refers to is either generated for this pool or supplied by the
     -- user through a `data Rust => X = "..."` mapping.
-    f (EnumF (FV _ (CV x)) ps _) = nominalTypeName x ps
+    f (EnumF (FV gv (CV x)) ps _) = nominalTypeName x ps >>= publicOr gv
     -- A variant lowers to its concrete name; the `enum` carrying the arms
     -- is generated for this pool or supplied by a `data Rust => X = "..."`.
-    f (VariantF (FV _ (CV x)) ps _) = nominalTypeName x ps
+    f (VariantF (FV gv (CV x)) ps _) = nominalTypeName x ps >>= publicOr gv
     f (AppF t ts) = do
       t' <- f t
       let typeTs = tyArgs ts
@@ -291,18 +304,28 @@ rustTypeOf = f
     -- fields would name a struct that does not exist yet, and the cycle
     -- needs a box the user's own struct must place. Users must map such a
     -- record to a Rust struct of their own.
-    f (RecF (FV _ (CV "struct"))) =
-      error $
-        "Recursive record without an explicit Rust concrete type mapping " ++
-        "is not yet supported. Add `record Rust => <Name> = \"<struct-name>\"` " ++
-        "in the morloc source."
-    f (RecF (FV gv@(TV gvText) (CV cv)))
-      | cv /= gvText = return (pretty (nativeTypeName cv))
-      | otherwise = do
-          cscope <- CMS.gets rsCScope
-          case Map.lookup gv cscope of
-            Just ((_, body, _, _, _) : _) | Just name <- bodyName body -> return (pretty name)
-            _ -> error $ "Rust: recursive record `" <> T.unpack gvText <> "` has no concrete mapping"
+    f (RecF (FV gv (CV "struct"))) = do
+      public <- CMS.gets rsPublic
+      case Map.lookup gv public of
+        Just name -> return (pretty name)
+        Nothing -> do
+          CMS.modify $ \s -> s
+            { rsErrors =
+                ( "the record " <> unTVar gv <> " refers to itself, and its Rust definition cannot be"
+                    <> " generated in its module's file; give it a Rust form, `record Rust => "
+                    <> unTVar gv <> " = \"<struct-name>\"`, naming a struct you write" ) : rsErrors s }
+          return (pretty (tvarIdentifier gv))
+    f (RecF (FV gv@(TV gvText) (CV cv))) = do
+      public <- CMS.gets rsPublic
+      case Map.lookup gv public of
+        Just name -> return (pretty name)
+        Nothing
+          | cv /= gvText -> return (pretty (nativeTypeName cv))
+          | otherwise -> do
+              cscope <- CMS.gets rsCScope
+              case Map.lookup gv cscope of
+                Just ((_, body, _, _, _) : _) | Just name <- bodyName body, name /= "struct" -> return (pretty name)
+                _ -> error $ "Rust: recursive record `" <> T.unpack gvText <> "` has no concrete mapping"
 
 
 -- | The bare struct name for a record-literal constructor: 'rustTypeOf' with any
@@ -1457,8 +1480,9 @@ translate srcs es0 = do
   let closureTable = Map.map closureSchemaTexts closureAsts
   logTemplates <- collectRenderedTemplates rustLang
   stageTable <- stageTableEntries
-  let st0 = defaultValue {rsDebugInfo = debugInfo, rsRecmap = recmap, rsCScope = mergedRustScope, rsSrcTypeVarMask = srcTypeVarMask, rsSrcMakers = srcMakers, rsLogTemplates = logTemplates, rsStageTable = stageTable, rsPool = planPool rustCaps es, rsBuilds = lastBuilds Map.empty Set.empty (rustSeeds (planPool rustCaps es) es0) es0}
-      (code, stEnd) = CMS.runState (runReaderT (makeRustCode includeDocs closureAsts closureTable es) emptyOwnEnv) st0
+  typeHomes <- MM.gets stateTypeHomes
+  let st0 = defaultValue {rsTypeHomes = typeHomes, rsDebugInfo = debugInfo, rsRecmap = recmap, rsCScope = mergedRustScope, rsSrcTypeVarMask = srcTypeVarMask, rsSrcMakers = srcMakers, rsLogTemplates = logTemplates, rsStageTable = stageTable, rsPool = planPool rustCaps es, rsBuilds = lastBuilds Map.empty Set.empty (rustSeeds (planPool rustCaps es) es0) es0}
+      ((code, typeFiles), stEnd) = CMS.runState (runReaderT (makeRustCode includeDocs closureAsts closureTable es) emptyOwnEnv) st0
   mapM_ (MM.throwRejected . ("Rust pool:" <+>) . pretty) (rsErrors stEnd)
 
   home <- MM.asks configHome
@@ -1501,13 +1525,14 @@ translate srcs es0 = do
       , scriptLang = rustLang
       , scriptCode =
           "." :/ Dir "pools"
-            [ Dir poolSubdir
+            ([ Dir poolSubdir
                 [ File "Cargo.toml" (Code (render cargoToml))
                 , File "Cargo.lock" (Code lockText)
                 , File "build.rs" (Code (render buildRs))
                 , Dir "src" [File "main.rs" (Code poolSrc), File "__morloc_user_ops.rs" (Code rustUserOps)]
                 ]
-            ]
+            ] <> [Dir "types" [Dir "rust" (typeFileTree ".rs" typeFiles)] | not (null typeFiles)]
+            )
       , scriptMake = maker
       }
 
@@ -1658,8 +1683,9 @@ rustUserOps = render . vsep $ "#![allow(dead_code)]" : map shimDoc rustOperatorS
 subVersion :: Text -> Text
 subVersion = T.replace "__MORLOC_VERSION__" (MT.pack MV.versionStr)
 
-makeRustCode :: [MDoc] -> Map.Map Int ([SerialAST], [SerialAST], SerialAST) -> Map.Map Int ([Text], [Text], Text) -> [SerialManifold] -> RustM MDoc
-makeRustCode includeDocs closureAsts closureTable0 es = do
+makeRustCode :: [MDoc] -> Map.Map Int ([SerialAST], [SerialAST], SerialAST) -> Map.Map Int ([Text], [Text], Text) -> [SerialManifold] -> RustM (MDoc, [([Text], Text)])
+makeRustCode includeDocs0 closureAsts closureTable0 es = do
+  planRustPublic es
   structDocs <- generateRustStructs closureAsts es
   enumDocs <- generateRustEnums es
   variantDocs <- generateRustVariants closureAsts es
@@ -1680,10 +1706,13 @@ makeRustCode includeDocs closureAsts closureTable0 es = do
   (closureWrappers0, reifyInfo) <- makeClosureDispatch closureAsts closureTable es
   let closureWrappers = stageLookupDoc stageTable : closureWrappers0
   CMS.modify $ \s -> s {rsReifyInfo = reifyInfo, rsThinClosures = thin, rsPapplyHeads = heads}
+  homes <- CMS.gets rsTypeHomes
+  (typeFiles, typeTree) <- rustTypeFiles homes <$> CMS.gets rsPublicDecls
+  let includeDocs = includeDocs0 <> typeTree
   program <- buildProgramM Map.empty Map.empty includeDocs [] es translateSegment getRustSchemaTable closureTable
   -- structDocs go in the schema-table section; the closure dispatch wrappers are
   -- free functions spliced into the signatures section.
-  return $ RP.printProgram (structDocs <> enumDocs <> variantDocs) closureWrappers [] program
+  return (RP.printProgram (structDocs <> enumDocs <> variantDocs) closureWrappers [] program, typeFiles)
 
 -- | A closure value's Rust signature: result type + tupled argument types.
 -- Matches the signature seen at a serialize site for the same closure, so a
@@ -1890,9 +1919,9 @@ generateRustVariants closureAsts es = do
         Just was | hasFun -> mapM (\(c, ts) -> (,,) c ts <$> armWire ts (lookup c was)) arms'
         _ -> return [(c, ts, Nothing) | (c, ts) <- arms']
       let impls box = [RP.printVariantImpls box name wired | not hasFun || isJust wireArms]
-      return $ if userMapped
-                 then impls RP.userBox
-                 else RP.printRustVariant name arms' : impls RP.recBox
+      if userMapped
+        then return (impls RP.userBox)
+        else (<> impls RP.recBox) <$> declareOrKeep True gv (\n -> RP.printRustVariant n arms') name
 
     armWire :: [MDoc] -> Maybe [SerialAST] -> RustM (Maybe RP.ArmWire)
     armWire ts (Just ss)
@@ -1947,9 +1976,9 @@ generateRustEnums es = do
       userMapped <- cscopeDeclares gv cvText
       name <- rustTypeOf (EnumF (FV gv (CV cvText)) ps ctors)
       let impls = RP.printEnumImpls name ctors
-      return $ if userMapped
-                 then [impls]
-                 else [RP.printRustEnum name ctors, impls]
+      if userMapped
+        then return [impls]
+        else (<> [impls]) <$> declareOrKeep True gv (\n -> RP.printRustEnum n ctors) name
 
     -- True iff the concrete scope holds an entry for @gv@ whose body names
     -- @cvText@; that is what distinguishes a real per-language mapping from
@@ -1960,6 +1989,150 @@ generateRustEnums es = do
       return $ case Map.lookup gv cscope of
         Just entries -> any (\(_, body, _, _, _) -> bodyName body == Just cvText) entries
         Nothing -> False
+
+-- | The declaration of a generated type: set aside for its module's file
+-- under the type's own name when the type is declared there (GEN-6), else
+-- returned for the pool under the given name. A `data` type is also
+-- offered at the crate root under its own name, which sourced files named
+-- it by before it had a file; a record never had a name a source could
+-- write, so it is not.
+declareOrKeep :: Bool -> TVar -> (MDoc -> MDoc) -> MDoc -> RustM [MDoc]
+declareOrKeep keepRootName gv decl poolName = do
+  public <- CMS.gets rsPublic
+  homes <- CMS.gets rsTypeHomes
+  case (Map.member gv public, Map.lookup gv homes) of
+    (True, Just h) -> do
+      CMS.modify $ \s -> s {rsPublicDecls = rsPublicDecls s <> [(gv, decl (pretty (typeHomeName h)), keepRootName)]}
+      return []
+    _ -> return [decl poolName]
+
+-- | Choose the generated types this pool declares in a file of their own,
+-- one per declaring module (GEN-6), and give them their paths from the crate
+-- root (GEN-4). A type qualifies when its definition cannot depend on its
+-- uses: a record with no parameters whose uses all have the same fields, a
+-- `data` type with no parameters. Any other generated type is declared at
+-- the crate root under its pool-local name (GEN-10).
+planRustPublic :: [SerialManifold] -> RustM ()
+planRustPublic es = do
+  homes <- CMS.gets rsTypeHomes
+  recmap0 <- CMS.gets rsRecmap
+  cscope <- CMS.gets rsCScope
+  let unparameterized gv = case Map.lookup gv cscope of
+        Just ((ps, _, _, _, _) : _) -> null ps
+        _ -> False
+      -- A type named like a prelude type would hide it in its own module,
+      -- where native forms name the prelude type unqualified (`Vec<$1>`),
+      -- so it stays in the pool under its pool-local name.
+      eligible gv = unparameterized gv && maybe False (not . (`Set.member` rustPreludeTypes) . typeHomeName) (Map.lookup gv homes)
+      recCounts = Map.fromListWith (+) [(gv, 1 :: Int) | ((FV gv _, _), _) <- recmap0]
+      recs =
+        [ gv
+        | ((FV gv (CV "struct"), _), rec) <- recmap0
+        , Map.lookup gv recCounts == Just 1
+        , all (isJust . snd) (recFields rec)
+        , eligible gv
+        ]
+  vars <- filterM (\(FV gv (CV cv), _, _) -> (&&) (eligible gv) . not <$> rustUserMapsVariant gv cv)
+    [o | o@(_, ps, _) <- collectRustVariants es, null ps]
+  enums <- filterM (\(FV gv (CV cv), _, _) -> (&&) (eligible gv) . not <$> rustUserMapsVariant gv cv)
+    [o | o@(_, ps, _) <- collectRustEnums es, null ps]
+  let public = Set.fromList (recs <> [gv | (FV gv _, _, _) <- vars] <> [gv | (FV gv _, _, _) <- enums])
+      names = Map.fromList [(gv, qualifiedRustName h) | gv <- Set.toList public, Just h <- [Map.lookup gv homes]]
+      badWords =
+        [ (gv, c)
+        | gv <- Set.toList public, Just h <- [Map.lookup gv homes]
+        , c <- typeHomePath h, Set.member c rustUnspellable || not (isIdentifier c)
+        ]
+
+  CMS.modify $ \s -> s
+    { rsPublic = names
+    , rsRecmap =
+        [ (k, maybe rec (\n -> rec {recName = pretty n}) (Map.lookup gv names))
+        | (k@(FV gv _, _), rec) <- recmap0
+        ]
+    , rsErrors =
+        [ "the generated Rust type for " <> unTVar gv <> " cannot be written: its module path would hold `" <> c
+            <> "`, which Rust cannot spell as a module name"
+        | (gv, c) <- badWords ]
+          <> [ "the generated Rust name " <> n <> " would name both " <> T.intercalate " and " (map unTVar gvs)
+             | (n, gvs) <- Map.toList (Map.fromListWith (flip (<>)) [(n, [gv]) | (gv, n) <- Map.toList names])
+             , length gvs > 1 ]
+          <> rsErrors s
+    }
+
+-- | A generated type's path from the crate root (GEN-4).
+qualifiedRustName :: TypeHome -> Text
+qualifiedRustName h = "crate::mlc::types::" <> render (rustModPath (typeHomePath h)) <> "::" <> typeHomeName h
+
+-- | A module path below @crate::mlc::types@, each keyword written as a raw
+-- identifier.
+rustModPath :: [Text] -> MDoc
+rustModPath = pretty . T.intercalate "::" . map rustModIdent
+
+rustModIdent :: Text -> Text
+rustModIdent c
+  | Set.member c rustReservedWords = "r#" <> c
+  | otherwise = c
+
+-- | Types of the Rust prelude, which no generated type may be named.
+rustPreludeTypes :: Set.Set Text
+rustPreludeTypes = Set.fromList ["Vec", "String", "Option", "Result", "Box", "Some", "None", "Ok", "Err"]
+
+-- | Module path components Rust cannot spell even as raw identifiers.
+rustUnspellable :: Set.Set Text
+rustUnspellable = Set.fromList ["crate", "self", "super", "Self"]
+
+-- | The files of the generated types set aside in 'rsPublicDecls', one per
+-- module path, and the module tree that includes them at the crate root,
+-- given the path from the pool's main file to the types directory.
+rustTypeFiles :: Map.Map TVar TypeHome -> [(TVar, MDoc, Bool)] -> ([([Text], Text)], [MDoc])
+rustTypeFiles homes decls = (files, [tree | not (null files)] <> aliases)
+  where
+    byPath = Map.fromListWith (flip (<>)) [(typeHomePath h, [d]) | (gv, d, _) <- decls, Just h <- [Map.lookup gv homes]]
+    -- The `data` types of each file, which the crate root offered by their
+    -- own names before they had a file.
+    rootNames = Map.fromListWith (flip (<>)) [(typeHomePath h, [typeHomeName h]) | (gv, _, True) <- decls, Just h <- [Map.lookup gv homes]]
+    -- A glob over a module re-exporting only those types, so that the crate
+    -- root offers them as before while a sourced file's own item or `use`
+    -- of the same name takes precedence. Records are left out: a glob at
+    -- the root would shadow a prelude name (`Vec`, `Result`).
+    aliases =
+      [ "pub use crate::mlc::types::" <> rustModPath p <> "::__morloc_data::*;"
+      | p <- Map.keys rootNames ]
+    files =
+      [ ( p
+        , render . vsep $
+            [ "// Generated by morloc; do not edit."
+            , "#[allow(unused_imports)]"
+            , "use crate::*;"
+            ] <> ds
+              <> [ "#[doc(hidden)] pub mod __morloc_data { pub use super::{" <> hsep (punctuate "," (map pretty ns)) <> "}; }"
+                 | Just ns <- [Map.lookup p rootNames] ]
+              <> [""]
+        )
+      | (p, ds) <- Map.toList byPath
+      ]
+    tree = "pub mod mlc { pub mod types {" <+> hsep (map node (grouped (map fst files) [])) <+> "} }"
+    grouped ps prefix =
+      [ (c, prefix <> [c], [rest | (c' : rest) <- ps, c' == c])
+      | c <- unique [c | (c : _) <- ps]
+      ]
+    node (c, full, rests) =
+      "pub mod" <+> pretty (rustModIdent c) <+> "{"
+        <+> (if [] `elem` rests then "include!(" <> dquotes (pretty ("../../types/rust/mlc/types/" <> T.intercalate "/" full <> ".rs")) <> ");" else "")
+        <+> hsep (map node (grouped (filter (not . null) rests) full))
+        <+> "}"
+
+-- | Rust keywords, written as raw identifiers in a generated module path.
+rustReservedWords :: Set.Set Text
+rustReservedWords =
+  Set.fromList
+    [ "as", "async", "await", "break", "const", "continue", "crate", "dyn", "else", "enum", "extern"
+    , "false", "fn", "for", "if", "impl", "in", "let", "loop", "match", "mod", "move", "mut", "pub"
+    , "ref", "return", "self", "Self", "static", "struct", "super", "trait", "true", "type", "unsafe"
+    , "use", "where", "while", "abstract", "become", "box", "do", "final", "macro", "override", "priv"
+    , "typeof", "unsized", "virtual", "yield", "try", "gen"
+    ]
 
 -- | Emit a struct definition (only for autogenerated @= "struct"@ records) plus
 -- @ToVoidstar/FromVoidstar@ impls for every record used in the pool. User-mapped
@@ -2052,7 +2225,8 @@ generateRustStructs closureAsts es = do
             let hasFun = any (containsFunF . snd) rs
                 fields4 = [(fld, ty, w, Nothing) | (fld, ty, w) <- fields]
                 impls = [RP.printRecordImpls RP.RenderedFieldTypes (recName rec) params fields4 | not hasFun]
-            return $ map ((,) Nothing) (RP.printRustStruct (recName rec) params [(fld, ty) | (fld, ty, _) <- fields] : impls)
+            decl <- declareOrKeep False gv (\n -> RP.printRustStruct n params [(fld, ty) | (fld, ty, _) <- fields]) (recName rec)
+            return $ map ((,) Nothing) (decl <> impls)
           Nothing -> error $ "Rust: autogenerated record missing from recmap: " <> show v
       -- User-mapped record: the user writes the (monomorphic) struct, so only the
       -- marshalling impls are emitted, with concrete field types. A closure field

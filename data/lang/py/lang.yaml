@@ -10,6 +10,13 @@ run_command: ["python3"]
 serial_type: "str"
 # Python's str natively supports interior NUL bytes.
 allow_string_null: true
+# Record kinds the compiler generates definitions for (GEN-2). A record with
+# no form of its own in this language takes the default kind.
+generated_types:
+  records:
+    default: dict
+    kinds:
+      dict: { form: dict, legacy: [dict, OrderedDict] }
 # Python reuses a pyc whose whole-second mtime and size match its source, so
 # a same-size edit in the same second would run the old code; the build
 # removes the bytecode of every file it sources (PY-3). The check compiles a

@@ -1,0 +1,11 @@
+-- GEN-5: a generated type whose field cannot be spelled in C++ is a
+-- compile error naming the word.
+module main (f)
+
+import root-cpp (idcpp, Int)
+
+record P where
+  delete :: Int
+
+f :: P -> P
+f p = idcpp p

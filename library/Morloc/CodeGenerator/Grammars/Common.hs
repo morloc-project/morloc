@@ -45,6 +45,8 @@ module Morloc.CodeGenerator.Grammars.Common
   , mergeVariantOccurrences
   , mergeEnumOccurrences
   , structName
+  , typeFileTree
+  , isIdentifier
 
     -- * Dispatch extraction
   , DispatchEntry (..)
@@ -985,6 +987,27 @@ unifyRecords xs =
     . groupSort
     . unique
     $ [((v, map fst es), (m, es)) | (v, m, es) <- xs]
+
+-- | The files of generated type definitions (GEN-6) as a directory tree
+-- below the language's types directory: each module's file at its path
+-- under @mlc/types@, with the given extension.
+typeFileTree :: String -> [([Text], Text)] -> [DirTree Code]
+typeFileTree ext files = [Dir "mlc" [Dir "types" (go files)]]
+  where
+    go fs =
+      [File (MT.unpack c <> ext) (Code t) | ([c], t) <- fs]
+        <> [ Dir (MT.unpack c) (go [(rest, t) | (c' : rest@(_ : _), t) <- fs, c' == c])
+           | c <- unique [c | (c : _ : _, _) <- fs]
+           ]
+
+-- | Whether a name is an ASCII identifier: a letter or underscore, then
+-- letters, digits and underscores.
+isIdentifier :: Text -> Bool
+isIdentifier t = case MT.uncons t of
+  Just (c, rest) -> (isAsciiLetter c || c == '_') && MT.all (\x -> isAsciiLetter x || (x >= '0' && x <= '9') || x == '_') rest
+  Nothing -> False
+  where
+    isAsciiLetter x = (x >= 'a' && x <= 'z') || (x >= 'A' && x <= 'Z')
 
 structName :: Int -> FVar -> MDoc
 structName i (FV v (CV "struct")) = "mlc_" <> pretty (tvarIdentifier v) <> "_" <> pretty i

@@ -27,6 +27,7 @@ module Morloc.Frontend.Desugar
 import Morloc.Data.Zip (indexed, indexedFrom, mapIndexed, zipExact, zipPrefix, zipSame)
 import qualified Control.Monad.State.Strict as State
 import qualified Data.Map.Strict as Map
+import qualified Morloc.LangRegistry as LR
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -113,6 +114,7 @@ data DState = DState
   , dsModuleConfig :: !ModuleConfig
   , dsSourceLines :: ![Text]
   , dsLangMap :: !(Map.Map Text Lang) -- alias -> Lang for all known languages
+  , dsTypeKinds :: !(Map.Map Text LR.TypeKinds) -- each language's generated record kinds (GEN-2)
   , dsProjectRoot :: !(Maybe Path) -- project root (directory of entry-point file)
   , dsOwnModule :: !Bool -- the program's own module, not one of an installed package
   , dsTermDocs :: !(Map.Map EVar [Text]) -- declaration-level docstrings
@@ -1361,6 +1363,38 @@ promoteRecVars = promoteVars RecVarU
 
 promoteStrVars :: Set.Set TVar -> TypeU -> TypeU
 promoteStrVars = promoteVars StrVarU
+
+-- | The form a per-language record line gives its record. A bare word is a
+-- kind the language defines (GEN-2) and becomes that kind's form; a string
+-- is a type the user writes, unless it is a legacy spelling of a kind,
+-- which means the kind and is warned about (GEN-3).
+recordForm :: Pos -> Lang -> TVar -> Text -> Bool -> D Text
+recordForm pos l (TV record) name isString = do
+  kinds <- Map.findWithDefault LR.noTypeKinds (langName l) <$> State.gets dsTypeKinds
+  let known = Map.toList (LR.tkRecordKinds kinds)
+      kindList = T.intercalate ", " (map fst known)
+  if isString
+    then case [(k, spec) | (k, spec) <- known, name `elem` LR.ksLegacy spec] of
+      ((k, spec) : _) -> do
+        ownModule <- State.gets dsOwnModule
+        when ownModule $ dwarn
+          [ "warning: " <> T.pack (posFile pos) <> ":" <> T.pack (show (posLine pos)) <> ":" <> T.pack (show (posCol pos))
+              <> ": \"" <> name <> "\" is the old spelling of the " <> langName l <> " record kind `" <> k
+              <> "`; write `= " <> k <> "` instead"
+          ]
+        return (LR.ksForm spec)
+      [] -> return name
+    else case lookup name known of
+      Just spec -> return (LR.ksForm spec)
+      Nothing
+        | null known ->
+            dfail pos . T.unpack $
+              langName l <> " defines no record kinds, so the form of " <> record
+                <> " must be a string naming a " <> langName l <> " type"
+        | otherwise ->
+            dfail pos . T.unpack $
+              langName l <> " has no record kind `" <> name <> "`; its kinds are " <> kindList
+                <> " (a string names a type you write instead)"
 
 parseLang :: Located -> D Lang
 parseLang tok = do
@@ -3617,14 +3651,17 @@ desugarTypeDef sp (CstNamTypeLegacy maybeLangTok nt (v, vs) (conName, isTerminal
   -- per-language @record Cpp => Foo = "struct"@ (lang=Just, feeds
   -- cscope; reduction relies on TypedefAlias + isTerminal=True to
   -- terminate at the native form, so we keep TypedefAlias there).
-  lang <- case maybeLangTok of
-    Nothing -> return Nothing
+  (lang, conName') <- case maybeLangTok of
+    Nothing -> return (Nothing, conName)
     Just tok -> do
       l <- parseLang tok
-      return (Just (l, isTerminal))
+      form <- if nt == NamObject && isTerminal
+        then return conName
+        else recordForm (startPos sp) l v conName isTerminal
+      return (Just (l, True), form)
   doc <- namTypeDocs (startPos sp) locEntries
   let entries = [(k, ty) | (_, k, ty) <- locEntries]
-      con = if T.null conName then v else TV conName
+      con = if T.null conName' then v else TV conName'
       -- If the user supplied explicit args after the constructor string
       -- (e.g. `"container_t<$1>" a`, parallel to the type-alias
       -- concrete_rhs syntax), use those as the body's positional args.

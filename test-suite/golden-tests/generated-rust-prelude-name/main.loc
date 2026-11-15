@@ -1,0 +1,13 @@
+-- A record named like a Rust prelude type (Vec) is not declared in its
+-- module's file, where it would hide the prelude type that native forms
+-- name unqualified; it stays in the pool and the program builds.
+module main (f, g)
+import root-rust (idrust, Real, List, Str)
+record Vec where
+  x :: Real
+  ys :: [Real]
+data Shape = Circle Real | Sq Real
+f :: Vec -> Vec
+f v = idrust v
+g :: [Shape] -> [Shape]
+g s = idrust s

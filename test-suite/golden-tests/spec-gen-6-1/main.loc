@@ -1,0 +1,24 @@
+-- GEN-6: a sourced C++ header includes the generated header of its module
+-- and names the generated types by their public names (GEN-4).
+module main (fooCpp, age, area)
+
+import root-cpp (idcpp, Str, Int, Real, List)
+
+record Inner where
+  label :: Str
+  tags :: [Str]
+
+record Person where
+  name :: Str
+  age :: Int
+  inner :: Inner
+
+data Shape = Circle Real | Rect Real Real
+
+source Cpp from "geo.hpp" ("personAge" as age, "shapeArea" as area)
+
+age :: Person -> Int
+area :: Shape -> Real
+
+fooCpp :: Person -> Person
+fooCpp p = idcpp p

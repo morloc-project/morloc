@@ -31,6 +31,7 @@ import qualified Control.Monad.State as CMS
 import qualified Morloc.CodeGenerator.Pools.CAbi.Members.CppPrinter as CP
 import qualified Data.Char as DC
 import Data.Ord (comparing)
+import qualified Data.Graph as Graph
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -244,7 +245,12 @@ instance {-# OVERLAPPABLE #-} (HasTypeF e) => HasCppType e where
             let typeTs = tyArgs ps
             ts' <- mapM f typeTs
             return . pretty $ expandMacro x (map render ts')
-        | otherwise = return (pretty (nativeTypeName x))
+        | otherwise = publicOr gv (pretty (nativeTypeName x))
+
+      -- A generated type declared in its module's header goes by its
+      -- qualified name (GEN-4); any other by the name given.
+      publicOr :: TVar -> MDoc -> CppTranslator MDoc
+      publicOr gv d = maybe d pretty . Map.lookup gv <$> CMS.gets translatorPublic
 
       f (UnkF (FV _ x)) = return $ pretty (nativeTypeName (unCVar x))
       -- An enum lowers to its concrete name; the `enum class X : uint8_t`
@@ -279,7 +285,7 @@ instance {-# OVERLAPPABLE #-} (HasTypeF e) => HasCppType e where
         -- The generated-type set is what separates them.
         declared <- CMS.gets translatorVariantNames
         if legit || Set.member gv declared
-          then return (pretty (nativeTypeName cvText))
+          then publicOr gv (pretty (nativeTypeName cvText))
           else leakError gvText
       f (VarF (FV _ x)) = return $ pretty (nativeTypeName (unCVar x))
       f (FunF ts t) = do
@@ -326,11 +332,18 @@ instance {-# OVERLAPPABLE #-} (HasTypeF e) => HasCppType e where
       -- not carry. Users hitting this must add an explicit
       -- @record Cpp => T = "<concrete-name>"@ mapping. This matches the
       -- limitation already documented for cross-language records.
-      f (RecF (FV _ (CV "struct"))) =
-        error $
-          "Recursive record without an explicit C++ concrete type mapping " ++
-          "is not yet supported. Add `record Cpp => <Name> = \"<struct-name>\"` " ++
-          "in the morloc source."
+      f (RecF (FV gv (CV "struct"))) = do
+        public <- CMS.gets translatorPublic
+        case Map.lookup gv public of
+          Just name -> return (pretty name)
+          Nothing -> do
+            CMS.modify $ \s -> s {translatorErrors = recursiveMsg : translatorErrors s}
+            return (pretty (tvarIdentifier gv))
+        where
+          recursiveMsg =
+            "the record " <> unTVar gv <> " refers to itself, and its C++ definition cannot be"
+              <> " generated in its module's header; give it a C++ form, `record Cpp => "
+              <> unTVar gv <> " = \"<struct-name>\"`, naming a struct you write"
       -- Back-reference to a recursive alias or record. The FVar's CVar
       -- slot is unreliable (often the leaked morloc TVar text from
       -- weave's bnd-protect path), so resolve the concrete name via
@@ -341,13 +354,16 @@ instance {-# OVERLAPPABLE #-} (HasTypeF e) => HasCppType e where
         cscope <- CMS.gets translatorCScope
         variantNames <- CMS.gets translatorVariantNames
         case Map.lookup gv cscope of
+          -- A generated record's entry names no type ("struct"); its
+          -- back-reference is the refusal above.
+          Just ((_, body, _, _, _) : _) | Just "struct" <- bodyCV body -> f (RecF (FV gv (CV "struct")))
           Just ((_, body, _, _, _) : _) | Just cv <- bodyCV body -> return (pretty cv)
           -- A back-reference to a `data` type names a type this pool
           -- GENERATES, so it is already declared and needs no user mapping.
           -- The leak diagnostic below is for recursive ALIASES, which have
           -- no generated form and would otherwise reach the pool as a bare
           -- morloc identifier.
-          _ | Set.member gv variantNames -> return (pretty (nativeTypeName gvName))
+          _ | Set.member gv variantNames -> publicOr gv (pretty (nativeTypeName gvName))
           _ -> leakError (unTVar gv)
       -- Recursive optional (?T where T points back to a containing record)
       -- collapses to a single `std::shared_ptr<const T>` with `nullptr ==
@@ -396,14 +412,26 @@ instance {-# OVERLAPPABLE #-} (HasTypeF e) => HasCppType e where
       -- guards (where pairEval bnd-protection leaks @gv == cv@ and
       -- cscope confirms no legitimate mapping) and from the RecF rule
       -- (where the back-reference's TVar has no cscope entry).
-      leakError gv =
-        error $
-          "Recursive type alias `" ++ T.unpack gv ++ "` has no concrete C++ mapping. " ++
-          "Add either `type Cpp => " ++ T.unpack gv ++ " ... = \"<cpp-template>\" ...` " ++
-          "(for tuple/list aliases mapped to a user-provided struct template) or " ++
-          "`record Cpp => " ++ T.unpack gv ++ " = \"<struct-name>\"` " ++
-          "(for records), where the template/struct names a user-provided C++ type. " ++
-          "See test-suite/golden-tests/native-recursive-record/foo.hpp for the pattern."
+      -- Recorded as a pool error, reported before any C++ is written.
+      leakError :: Text -> CppTranslator MDoc
+      leakError gv = do
+        cscope <- CMS.gets translatorCScope
+        let generated = case Map.lookup (TV gv) cscope of
+              Just entries -> any (\(_, body, _, _, _) -> bodyCV body == Just "struct") entries
+              Nothing -> False
+            msg
+              | generated =
+                  "the record " <> gv <> " refers to itself, and its C++ definition cannot be"
+                    <> " generated in its module's header; give it a C++ form, `record Cpp => "
+                    <> gv <> " = \"<struct-name>\"`, naming a struct you write"
+              | otherwise =
+                  "Recursive type alias `" <> gv <> "` has no concrete C++ mapping. "
+                    <> "Add either `type Cpp => " <> gv <> " ... = \"<cpp-template>\" ...` "
+                    <> "(for tuple/list aliases mapped to a user-provided struct template) or "
+                    <> "`record Cpp => " <> gv <> " = \"<struct-name>\"` "
+                    <> "(for records), where the template/struct names a user-provided C++ type."
+        CMS.modify $ \st -> st {translatorErrors = msg : translatorErrors st}
+        return (pretty (tvarIdentifier (TV gv)))
 
   cppArgOf s (Arg i t) = do
     t' <- cppTypeOf (typeFof t)
@@ -468,6 +496,11 @@ data CppTranslatorState = CppTranslatorState
   -- lets and parameters a last read moves, and the (manifold, local) pairs
   -- its code moves into a manifold as it is built.
   , translatorErrors :: [Text]
+  , translatorTypeHomes :: Map.Map TVar TypeHome
+  -- ^ The declaring module and name of every declared type (GEN-4).
+  , translatorPublic :: Map.Map TVar Text
+  -- ^ The generated types this pool declares in their module's header,
+  -- each with its qualified name (GEN-6).
   }
 
 instance Defaultable CppTranslatorState where
@@ -495,6 +528,8 @@ instance Defaultable CppTranslatorState where
       , translatorMovedBuilds = Set.empty
       , translatorLowered = []
       , translatorErrors = []
+      , translatorTypeHomes = Map.empty
+      , translatorPublic = Map.empty
       }
 
 type CppTranslator a = CMS.StateT CppTranslatorState Identity a
@@ -560,6 +595,7 @@ translate srcs es = do
   traceInfo <- makeTraceLabelLookup
   debugMode <- MM.gets stateDebugTrace
   closureTable <- computeClosureSchemas cppLang es
+  typeHomes <- MM.gets stateTypeHomes
   stageTable <- stageTableEntries
   let recmap = unifyRecords . concatMap collectRecords $ es
       translatorState = defaultValue
@@ -571,16 +607,19 @@ translate srcs es = do
         , translatorTraceInfo = traceInfo
         , translatorDebugMode = debugMode
         , translatorPool = pool
+        , translatorTypeHomes = typeHomes
         }
       pool = planPool cppCaps es
-      (code, stEnd) = CMS.runState (makeCppCode labels srcs' es universalScopeMap closureTable stageTable nativeEntries) translatorState
+      ((code, headers), stEnd) = CMS.runState (makeCppCode labels srcs' es universalScopeMap closureTable stageTable nativeEntries) translatorState
   mapM_ (MM.throwRejected . ("C++ pool:" <+>) . pretty) (translatorErrors stEnd)
   when checkOn $
     case concatMap (checkOne pool) (translatorLowered stEnd) of
       [] -> return ()
       vs -> MM.throwCompilerBug ("C++ pool: ownership check failed (OWN-1):" <+> vsep (map pretty vs))
 
-  maker <- makeTheMaker cxxFlags includeDirs
+  -- The generated headers' directory is searched first, so that a stale
+  -- copy of one in a source directory never shadows it.
+  maker <- makeTheMaker cxxFlags ["pools" </> "types" </> "cpp" | not (null headers)] includeDirs
 
   let poolSubdir = ML.poolDirKey cppLang
 
@@ -588,10 +627,11 @@ translate srcs es = do
     Script
       { scriptBase = "pool"
       , scriptLang = cppLang
-      , scriptCode = "." :/ Dir "pools" [Dir poolSubdir
+      , scriptCode = "." :/ Dir "pools" ([Dir poolSubdir
           [ File "pool.cpp" (Code (subVersion (render code)))
           , File "pool_host.cpp" (Code (subVersion (DF.embededFileText (DF.poolHostTemplate "cpp"))))
-          ]]
+          ]] <> [Dir "types" [Dir "cpp" (typeFileTree ".hpp" headers)] | not (null headers)]
+          )
       , scriptMake = maker
       }
 
@@ -607,17 +647,22 @@ makeCppCode ::
   Map.Map Int ([SerialAST], [SerialAST], SerialAST) ->
   Map.Map Int StageEntry ->
   Set.Set Int ->
-  CppTranslator MDoc
+  CppTranslator (MDoc, [([Text], Text)])
 makeCppCode labels srcs es univeralScopeMap closureTable0 stageTable nativeEntries = do
   -- Seeded before any type is rendered: 'cppTypeOf' consults it to tell a
   -- back-reference into a generated `data` type from an unmapped alias.
   CMS.modify $ \st -> st
     { translatorVariantNames = Set.fromList [gv | (FV gv _, _, _) <- collectCppVariants es] }
+  headers <- planPublicTypes es
   templates <- CMS.gets translatorLogTemplates
   (srcFwds, srcSerial, srcDeserial) <- generateSourcedSerializers univeralScopeMap es
 
   -- write include statements for sources
-  let includeDocs = map translateSource (unique . mapMaybe srcPath $ srcs)
+  -- The generated headers come first, so a sourced file may name their
+  -- types (GEN-6).
+  let includeDocs =
+        ["#include" <+> dquotes (pretty (cppHeaderPath p)) | (p, _) <- headers]
+          <> map translateSource (unique . mapMaybe srcPath $ srcs)
 
   signatures0 <- concat <$> mapM (makeSignature nativeEntries) es
 
@@ -652,7 +697,7 @@ makeCppCode labels srcs es univeralScopeMap closureTable0 stageTable nativeEntri
   program <- buildProgramM labels templates includeDocs [] es (translateSegment closureGen) getCppSchemaTable (Map.map closureSchemaTexts closureTable)
 
   -- create and return complete pool script
-  return $ CP.printProgram serializationCode signatures closureWrappers program
+  return (CP.printProgram serializationCode signatures closureWrappers program, headers)
 
 -- | A closure's C++ callable signature "Ret(Arg...)" -- the same string
 -- 'lcClosureSig' produces and 'MorlocClosure<Sig>' is keyed on. Rendered from
@@ -779,8 +824,8 @@ collectNamedRecordTVars e0 =
     seekNamedRecs (VariantF (FV _ _) ps as) = Set.unions (map seekNamedRecs (tyArgs ps ++ concatMap snd as))
     seekNamedRecs _ = Set.empty
 
-makeTheMaker :: [Text] -> [Path] -> MorlocMonad [SysCommand]
-makeTheMaker flags includes = do
+makeTheMaker :: [Text] -> [Path] -> [Path] -> MorlocMonad [SysCommand]
+makeTheMaker flags generated includes = do
   let poolSubdir = ML.poolDirKey cppLang
   let outfile = pretty $ "pools" </> poolSubdir </> ML.makeExecutablePoolName cppLang
   let src = pretty $ "pools" </> poolSubdir </> ML.makeSourcePoolName cppLang
@@ -799,7 +844,7 @@ makeTheMaker flags includes = do
   -- header (a program called `tuple`) never replaces it.
   -- Paths are quoted: the command runs through a shell, and a project under
   -- a directory with spaces (iCloud Drive, Google Drive) is ordinary.
-  let incs = concat [[pretty ("-iquote" <> MS.shellQuote i), pretty ("-idirafter" <> MS.shellQuote i)] | i <- "." : includes]
+  let incs = concat [[pretty ("-iquote" <> MS.shellQuote i), pretty ("-idirafter" <> MS.shellQuote i)] | i <- generated <> ("." : includes)]
   let flags' = map pretty (flags ++ sanitizeFlags)
 
   let cmd =
@@ -2365,8 +2410,10 @@ generateCppEnums es = do
       unmapped <- filterM (\gv -> not <$> variantIsUserMapped gv cvText) gvs
       case (unmapped, gvs) of
         ([], _) -> return []
-        (_, [_]) -> case mergeEnumOccurrences cvText (map snd (Set.toList occs)) of
-          Right ctors -> return [CP.printCppEnumDecl (pretty (nativeTypeName cvText)) ctors]
+        (_, [gv]) -> case mergeEnumOccurrences cvText (map snd (Set.toList occs)) of
+          Right ctors -> do
+            public <- CMS.gets translatorPublic
+            return [CP.printCppEnumDecl (pretty (nativeTypeName cvText)) ctors | not (Map.member gv public)]
           Left msg -> failWith msg
         _ -> failWith $ "the `data` types " <> MT.intercalate ", " (map unTVar gvs) <> " share the C++ name " <> cvText
     failWith :: Text -> CppTranslator [MDoc]
@@ -2467,7 +2514,8 @@ generateCppVariants cfg closureAsts es = do
           payloadArms = filter (not . null . snd) arms'
           fwds = CP.printMarshalDecls [] name : [CP.printMarshalDecls [] (CP.armName name c) | (c, _) <- payloadArms]
       (armSerials, armLate) <- bimap concat concat . unzip <$> mapM armSerial payloadArms
-      return $ if userMapped
+      public <- CMS.gets translatorPublic
+      return $ if userMapped || Map.member gv public
                  then ([], [], fwds, armSerials <> [serial], armLate)
                  else ( [CP.printCppVariantDecl name arms']
                       , [CP.printCppVariantArms name arms']
@@ -2491,6 +2539,213 @@ variantIsUserMapped gv cvText = do
     outerName (NamU _ (TV n) _ _) = Just n
     outerName _ = Nothing
 
+-- | The generated types this pool declares in a header of their own, one
+-- header per declaring module (GEN-6), under their qualified names (GEN-4).
+-- A type qualifies when its definition cannot depend on its uses (a
+-- record with no parameters whose uses all have the same fields, a `data`
+-- type with no parameters) and when each field names only C++ builtins,
+-- the standard library and other such types, so that the header compiles
+-- ahead of every sourced file. Any other generated type is declared in the
+-- pool under its pool-local name (GEN-10). Each header is returned with its
+-- module path.
+planPublicTypes :: [SerialManifold] -> CppTranslator [([Text], Text)]
+planPublicTypes es = do
+  homes <- CMS.gets translatorTypeHomes
+  recmap0 <- CMS.gets translatorRecmap
+  cscope <- CMS.gets translatorCScope
+  let unparameterized gv = case Map.lookup gv cscope of
+        Just ((ps, _, _, _, _) : _) -> null ps
+        _ -> False
+      eligible gv = unparameterized gv && Map.member gv homes
+      recCounts = Map.fromListWith (+) [(gv, 1 :: Int) | ((FV gv _, _), _) <- recmap0]
+      recCands =
+        Map.fromList
+          [ (gv, rec)
+          | ((FV gv (CV "struct"), _), rec) <- recmap0
+          , Map.lookup gv recCounts == Just 1
+          , all (isJust . snd) (recFields rec)
+          , eligible gv
+          ]
+  varOccs <- filterM (\(FV gv (CV cv), _, _) -> not <$> variantIsUserMapped gv cv)
+    [o | o@(_, ps, _) <- collectCppVariants es, null ps]
+  enumOccs <- filterM (\(FV gv (CV cv), _) -> not <$> variantIsUserMapped gv cv) (collectCppEnums es)
+  let varCands = Map.fromList [(gv, arms) | (FV gv _, _, arms) <- varOccs, eligible gv, not (null arms)]
+      varAllArms = Map.fromListWith (<>) [(gv, [arms]) | (FV gv _, _, arms) <- varOccs, not (null arms)]
+      enumCands = Map.fromList [(gv, ns) | (FV gv _, ns) <- enumOccs, eligible gv]
+      qualified gv = maybe (unTVar gv) (\h -> qualifiedCppName h) (Map.lookup gv homes)
+      install cands = do
+        let names = Map.fromList [(gv, qualified gv) | gv <- Set.toList cands]
+        CMS.modify $ \s -> s
+          { translatorPublic = names
+          , translatorRecmap =
+              [ (k, if Map.member gv names then rec {recName = pretty (qualified gv)} else rec)
+              | (k@(FV gv _, _), rec) <- recmap0
+              ]
+          }
+        return (Set.fromList (Map.elems names))
+      fieldTypes gv
+        | Just rec <- Map.lookup gv recCands = mapMaybe snd (recFields rec)
+        | Just arms <- Map.lookup gv varCands = concatMap snd arms
+        | otherwise = []
+      -- Every occurrence of a variant must render the same arms for the
+      -- header to declare them; one that does not stays in the pool, whose
+      -- merge reports the conflict.
+      agrees gv = case Map.lookup gv varAllArms of
+        Just occs -> (== 1) . length . unique <$> mapM (mapM (\(c, ts) -> (,) c . map render <$> mapM cppTypeOf ts)) occs
+        Nothing -> return True
+      -- Dropping a type can make another unsafe, so repeat to a fixed point.
+      settle cands = do
+        known <- install cands
+        safe <- filterM
+          (\gv -> (&&) <$> (all (headerSafe known . render) <$> mapM cppTypeOf (fieldTypes gv)) <*> agrees gv)
+          (Set.toList cands)
+        if length safe == Set.size cands then return cands else settle (Set.fromList safe)
+  -- Planning renders types speculatively; an error one of those renders
+  -- records is the final render's to report.
+  errors0 <- CMS.gets translatorErrors
+  public <- settle (Set.unions [Map.keysSet recCands, Map.keysSet varCands, Map.keysSet enumCands])
+  CMS.modify $ \s -> s {translatorErrors = errors0}
+  mapM_ (checkComponents homes) (Set.toList public)
+  mapM_ checkFields [(gv, rec) | ((FV gv (CV "struct"), _), rec) <- recmap0]
+  checkCollisions
+    [ (n, unTVar gv)
+    | gv <- Set.toList public
+    , n <- qualified gv : [CP.armNameText (qualified gv) c | Just arms <- [Map.lookup gv varCands], (c, _) <- arms]
+    ]
+  let byPath = Map.fromListWith (<>) [(typeHomePath h, [gv]) | gv <- Set.toList public, Just h <- [Map.lookup gv homes]]
+      pathOf = Map.fromList [(qualified gv, typeHomePath h) | gv <- Set.toList public, Just h <- [Map.lookup gv homes]]
+  mapM (header homes recCands varCands enumCands pathOf) (Map.toList byPath)
+  where
+    header homes recCands varCands enumCands pathOf (path, gvs) = do
+      let leaf gv = pretty (maybe (unTVar gv) typeHomeName (Map.lookup gv homes))
+          enums = [CP.printCppEnumDecl (leaf gv) ns | gv <- gvs, Just ns <- [Map.lookup gv enumCands]]
+      variants <- sequence
+        [ (\arms' -> (CP.printCppVariantDecl (leaf gv) arms', CP.printCppVariantArms (leaf gv) arms', concatMap snd arms'))
+            <$> mapM (\(c, ts) -> (,) c <$> mapM cppTypeOf ts) arms
+        | gv <- gvs, Just arms <- [Map.lookup gv varCands] ]
+      records <- sequence
+        [ (\fields -> (gv, CP.printStructTypedef [] (leaf gv) fields, map snd fields))
+            <$> mapM (\(k, t) -> (,) (pretty k) <$> cppTypeOf t) [(k, t) | (k, Just t) <- recFields rec]
+        | gv <- gvs, Just rec <- [Map.lookup gv recCands] ]
+      let recNames = Map.fromList [(qualifiedCppName h, gv) | (gv, _, _) <- records, Just h <- [Map.lookup gv homes]]
+          -- A record holds the records its fields name by value, so those
+          -- are declared first.
+          ordered =
+            Graph.flattenSCCs . Graph.stronglyConnComp $
+              [ (decl, gv, [d | tok <- concatMap (cppTokens . render) ts, Just d <- [Map.lookup tok recNames], d /= gv])
+              | (gv, decl, ts) <- records ]
+          used = concatMap (cppTokens . render) (concat [ts | (_, _, ts) <- records] <> concat [ts | (_, _, ts) <- variants])
+          deps = Set.toList (Set.fromList [p | tok <- used, Just p <- [Map.lookup tok pathOf], p /= path])
+          body =
+            vsep $
+              [ "// Generated by morloc; do not edit."
+              , "#pragma once"
+              ]
+                <> ["#include <" <> pretty h <> ">" | h <- cppStdHeaders]
+                <> ["#include" <+> dquotes (pretty (cppHeaderPath p)) | p <- deps]
+                <> [ "namespace mlc::types::" <> pretty (T.intercalate "::" path) <+> "{"
+                   , vsep enums
+                   , vsep [w | (w, _, _) <- variants]
+                   , vsep ["struct" <+> leaf gv <> ";" | (gv, _, _) <- records]
+                   , vsep ordered
+                   , vsep [a | (_, a, _) <- variants]
+                   , "}"
+                   , ""
+                   ]
+      return (path, render body)
+
+    -- A generated type's namespace and fields must be spellable in C++
+    -- (GEN-5), and no two generated names may coincide.
+    complain msg = CMS.modify $ \s -> s {translatorErrors = msg : translatorErrors s}
+    checkComponents homes gv =
+      mapM_
+        (\c -> complain ("the generated C++ type for " <> unTVar gv <> " cannot be written: its namespace would hold `"
+                          <> c <> "`, which is not an identifier, is a C++ keyword, or is a namespace the generated code names"))
+        [c | Just h <- [Map.lookup gv homes], c <- typeHomePath h, Set.member c cppReservedComponents || not (isIdentifier c)]
+    checkFields (gv, rec) =
+      mapM_
+        (\k -> complain ("the generated C++ type for " <> unTVar gv <> " cannot be written: `" <> k <> "` is a C++ keyword"))
+        [unKey k | (k, _) <- recFields rec, Set.member (unKey k) cppKeywords]
+    checkCollisions named =
+      mapM_
+        (\(n, owners) -> complain ("the generated C++ name " <> n <> " would name both " <> T.intercalate " and " owners))
+        [(n, os) | (n, os) <- Map.toList (Map.fromListWith (flip (<>)) [(n, [o]) | (n, o) <- named]), length os > 1]
+
+-- | The qualified C++ name of a generated type (GEN-4).
+qualifiedCppName :: TypeHome -> Text
+qualifiedCppName h = "::mlc::types::" <> T.intercalate "::" (typeHomePath h <> [typeHomeName h])
+
+-- | Where a module's generated header lives below @types/cpp@, which is how
+-- a sourced file includes it (GEN-6).
+cppHeaderPath :: [Text] -> Text
+cppHeaderPath p = "mlc/types/" <> T.intercalate "/" p <> ".hpp"
+
+-- | The names in a rendered C++ type: identifiers with their @::@
+-- qualifiers, and numbers.
+cppTokens :: Text -> [Text]
+cppTokens = filter (not . T.null) . T.split (\c -> not (DC.isAlphaNum c || c == '_' || c == ':'))
+
+-- | Whether a rendered field type can be written in a header that comes
+-- before every sourced file: each name in it is a builtin, from the
+-- standard library, or one of the given generated types.
+headerSafe :: Set.Set Text -> Text -> Bool
+headerSafe known = all ok . cppTokens
+  where
+    ok t
+      | "::mlc::types::" `T.isPrefixOf` t = Set.member t known
+      | "std::" `T.isPrefixOf` t = Set.member t cppStdTypeNames
+      | T.all DC.isDigit t = True
+      | otherwise = Set.member t cppBuiltinTypeWords
+
+cppBuiltinTypeWords :: Set.Set Text
+cppBuiltinTypeWords =
+  Set.fromList
+    [ "int", "double", "float", "bool", "char", "long", "short", "unsigned", "signed", "void", "const"
+    , "size_t", "int8_t", "int16_t", "int32_t", "int64_t", "uint8_t", "uint16_t", "uint32_t", "uint64_t"
+    , "char8_t", "char16_t", "char32_t", "wchar_t"
+    ]
+
+-- | The standard names a generated header may use: those its fixed
+-- includes ('cppStdHeaders') declare.
+cppStdTypeNames :: Set.Set Text
+cppStdTypeNames =
+  Set.fromList . map ("std::" <>) $
+    [ "string", "vector", "array", "deque", "list", "map", "multimap", "set", "multiset"
+    , "unordered_map", "unordered_set", "tuple", "pair", "optional", "variant", "monostate"
+    , "shared_ptr", "unique_ptr", "function", "size_t", "ptrdiff_t", "nullptr_t", "byte"
+    , "int8_t", "int16_t", "int32_t", "int64_t", "uint8_t", "uint16_t", "uint32_t", "uint64_t"
+    ]
+
+-- | Standard headers every generated header includes, covering the
+-- standard types a field may name.
+cppStdHeaders :: [Text]
+cppStdHeaders =
+  [ "cstdint", "cstddef", "string", "vector", "array", "deque", "list", "map", "set"
+  , "unordered_map", "unordered_set", "tuple", "utility", "optional", "variant", "memory", "functional"
+  ]
+
+-- | Words a generated namespace component may not be (GEN-5): C++
+-- keywords, and the namespaces a generated header names without
+-- qualification, which a namespace of that name would capture.
+cppReservedComponents :: Set.Set Text
+cppReservedComponents = Set.insert "std" (Set.insert "mlc" cppKeywords)
+
+-- | C++ keywords, which no generated field may be (GEN-5).
+cppKeywords :: Set.Set Text
+cppKeywords =
+  Set.fromList
+    [ "alignas", "alignof", "and", "and_eq", "asm", "auto", "bitand", "bitor", "bool", "break", "case"
+    , "catch", "char", "char8_t", "char16_t", "char32_t", "class", "compl", "concept", "const", "consteval"
+    , "constexpr", "constinit", "const_cast", "continue", "co_await", "co_return", "co_yield", "decltype"
+    , "default", "delete", "do", "double", "dynamic_cast", "else", "enum", "explicit", "export", "extern"
+    , "false", "float", "for", "friend", "goto", "if", "inline", "int", "long", "mutable", "namespace"
+    , "new", "noexcept", "not", "not_eq", "nullptr", "operator", "or", "or_eq", "private", "protected"
+    , "public", "register", "reinterpret_cast", "requires", "return", "short", "signed", "sizeof"
+    , "static", "static_assert", "static_cast", "struct", "switch", "template", "this", "thread_local"
+    , "throw", "true", "try", "typedef", "typeid", "typename", "union", "unsigned", "using", "virtual"
+    , "void", "volatile", "wchar_t", "while", "xor", "xor_eq"
+    ]
+
 -- | The struct, the marshaller signatures, and the marshaller definitions
 -- for every generated record, returned apart so the signatures can precede
 -- every definition in the pool.
@@ -2498,12 +2753,13 @@ generateAnonymousStructs :: CppTranslator ([MDoc], [MDoc], [MDoc])
 generateAnonymousStructs = do
   recmap <- CMS.gets translatorRecmap
 
-  xs <- mapM makeSerializers (reverse . map snd $ recmap)
+  public <- CMS.gets translatorPublic
+  xs <- mapM (makeSerializers public) (reverse recmap)
 
   return (concatMap (\(d, _, _) -> d) xs, concatMap (\(_, f, _) -> f) xs, concatMap (\(_, _, x) -> x) xs)
   where
-    makeSerializers :: RecEntry -> CppTranslator ([MDoc], [MDoc], [MDoc])
-    makeSerializers rec = do
+    makeSerializers :: Map.Map TVar Text -> ((FVar, [Key]), RecEntry) -> CppTranslator ([MDoc], [MDoc], [MDoc])
+    makeSerializers public ((FV gv _, _), rec) = do
       let rs' = [("T" <> pretty i, f) | (i, f) <- indexedFrom 1 (recFields rec)]
 
       let params = [t | (t, (_, Nothing)) <- rs']
@@ -2517,7 +2773,9 @@ generateAnonymousStructs = do
           serializer = CP.printSerializer params rtype fields
           deserializer = CP.printDeserializer params rtype fields
 
-      return ([structDecl], [fwd], [serializer, deserializer])
+      -- A record declared in its module's header is not declared again.
+      let decls = if Map.member gv public then [] else [structDecl]
+      return (decls, [fwd], [serializer, deserializer])
 
     -- monadic form of `maybe` function
     maybeM :: (Monad m) => a -> (b -> m a) -> Maybe b -> m a

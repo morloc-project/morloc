@@ -12,6 +12,7 @@ import Morloc.Data.Zip (zip3Prefix, zipWithPrefix)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Map.Strict as Map
+import qualified Morloc.LangRegistry as LR
 import qualified Data.Set as Set
 import qualified Data.Scientific as DS
 import Data.List (sortBy, foldl')
@@ -1154,11 +1155,12 @@ data PState = PState
   , psInRep :: !Bool -- inside a newtype's representation
   , psLabelSites :: ![(Text, Pos)] -- labels not yet checked against their signature
   , psMatchSites :: !(Map.Map Text MatchSite)
+  , psTypeKinds :: !(Map.Map T.Text LR.TypeKinds) -- each language's generated record kinds, by canonical name
   }
   deriving (Show)
 
 emptyPState :: PState
-emptyPState = PState 1 Map.empty Nothing defaultValue Map.empty [] Map.empty Nothing Map.empty [] [] [] Map.empty True False [] Map.empty
+emptyPState = PState 1 Map.empty Nothing defaultValue Map.empty [] Map.empty Nothing Map.empty [] [] [] Map.empty True False [] Map.empty Map.empty
 
 type P a = State.StateT PState (Either ParseError) a
 
@@ -1467,6 +1469,7 @@ toDState ps = DState
   , dsModuleConfig = psModuleConfig ps
   , dsSourceLines = psSourceLines ps
   , dsLangMap = psLangMap ps
+  , dsTypeKinds = psTypeKinds ps
   , dsProjectRoot = psProjectRoot ps
   , dsOwnModule = psOwnModule ps
   , dsTermDocs = psTermDocs ps

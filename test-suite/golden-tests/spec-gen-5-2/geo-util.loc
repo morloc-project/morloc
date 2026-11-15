@@ -1,0 +1,6 @@
+module geo-util (fa)
+import root-cpp (Int, idcpp)
+record Pt where
+  x :: Int
+fa :: Pt -> Pt
+fa p = idcpp p

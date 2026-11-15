@@ -23,7 +23,12 @@ module Morloc.Frontend.TypeNames
   , isReservedTypeName
   ) where
 
+import Data.List (isPrefixOf)
 import qualified Data.Set as Set
+import Control.Exception (SomeException, try)
+import qualified Data.Yaml.Config as YC
+import System.Directory (doesFileExist, makeAbsolute)
+import System.FilePath (addTrailingPathSeparator, takeDirectory, (</>))
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Morloc.Data.DAG as DAG
@@ -77,6 +82,22 @@ resolveTypeNames d = do
       qualifier m
         | length [k | k <- Map.keys d, bare k == bare m] > 1 = unMVar m
         | otherwise = bare m
+  srcMap <- MM.gets stateSourceMap
+  library <- MM.asks configLibrary
+  projectRoot <- MM.gets stateProjectRoot
+  packages <-
+    MM.liftIO . fmap Map.fromList $
+      mapM
+        (\(m, (ExprI i _, _)) -> (,) m <$> packageOf library projectRoot (Map.lookup i srcMap >>= srcLocPath))
+        (Map.toList d)
+  let homes =
+        Map.fromList
+          [ (canonical m v, TypeHome (homePath (Map.findWithDefault Nothing m packages) m) n)
+          | (m, (e, _)) <- Map.toList d
+          , v@(TV n) <- localTypes e
+          , not (isReservedTypeName n)
+          ]
+  MM.modify' $ \s -> s {stateTypeHomes = homes}
   result <- DAG.synthesize (resolveModule canonical) rewriteEdge d
   case result of
     Nothing -> MM.throwCompilerBug "the module graph has a cycle after loading"
@@ -131,6 +152,57 @@ resolveModule canonical m e children = do
               <+> squotes (pretty alias) <+> "from" <+> squotes (pretty from)
               <+> "and also declares a type of that name; remove the import or rename one of them"
       | otherwise = return ()
+
+-- | A module's path below the generated-type prefix (GEN-4), given the
+-- package its file belongs to. Components split at @.@ and @-@ becomes @_@;
+-- installed names hold no @_@, so the mapping is one to one for them. A
+-- package's local submodule (@.lib.x@) is placed under the package's name,
+-- so its path is the same while the package is developed and once it is
+-- installed. A module of no package (a script, its local imports) goes
+-- under @_local@, which no installed name produces.
+homePath :: Maybe Text -> MVar -> [Text]
+homePath package (MV name) = case package of
+  Just p
+    | T.isPrefixOf "." name -> parts p <> parts (T.dropWhile (== '.') name)
+    | otherwise -> parts name
+  Nothing -> "_local" : parts (T.dropWhile (== '.') name)
+  where
+    parts = map (T.replace "-" "_") . filter (not . T.null) . T.splitOn "."
+
+-- | The name of the package a module file belongs to: that of the nearest
+-- @package.yaml@ in its directory or above it, searching no higher than the
+-- module library (for an installed module) or the project root (for any
+-- other). Nothing when there is none, or it names no package.
+packageOf :: Path -> Maybe Path -> Maybe Path -> IO (Maybe Text)
+packageOf _ _ Nothing = return Nothing
+packageOf library projectRoot (Just file0) = do
+  -- An implicit main module has no file of its own; it is the entry file,
+  -- in the project root.
+  file <- case (file0, projectRoot) of
+    ("", Just root) -> makeAbsolute (root </> "main.loc")
+    ("", Nothing) -> makeAbsolute "main.loc"
+    _ -> makeAbsolute file0
+  lib <- makeAbsolute library
+  root <- traverse makeAbsolute projectRoot
+  let limit
+        | addTrailingPathSeparator lib `isPrefixOf` file = Just lib
+        | otherwise = root
+      within dir = maybe False (\l -> addTrailingPathSeparator l `isPrefixOf` addTrailingPathSeparator dir) limit
+      go dir
+        | not (within dir) = return Nothing
+        | otherwise = do
+            let f = dir </> "package.yaml"
+            found <- doesFileExist f
+            if found
+              then do
+                -- A package.yaml that cannot be read is reported where the
+                -- loader reads it; here it names no package.
+                meta <- try (YC.loadYamlSettings [f] [] YC.ignoreEnv) :: IO (Either SomeException PackageMeta)
+                return $ case meta of
+                  Right m | not (T.null (packageName m)) -> Just (packageName m)
+                  _ -> Nothing
+              else if takeDirectory dir == dir then return Nothing else go (takeDirectory dir)
+  go (takeDirectory file)
 
 -- | The general types a module declares.
 localTypes :: ExprI -> [TVar]

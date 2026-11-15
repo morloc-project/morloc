@@ -30,29 +30,22 @@ An alias has the native forms of its expansion (ALIAS-1, ALIAS-6). A newtype
 with no form in `L` at its arguments has its representation's (NEWT-2).
 
 ### NATIVE-3 In C++ and Rust a record needs a user-defined struct
-Intent: ruled 2026-10-05
-Code: deviates (issues/values.md)
-
-A record used in C++ is a struct the user defines and links with
-`record Cpp => R = "R"`; in Rust, with `record Rust => R`. Python and R need
-no user-written native definition.
-
-### NATIVE-4 An unmapped record in C++ or Rust is a compile error
-Intent: proposed
-Code: deviates (issues/values.md)
-
-A program that needs a record in C++ or Rust with no linked struct is
-rejected with an error naming the record and the language. It never builds
-generated code that fails to compile.
-
-### NATIVE-5 Native forms for records in Python and R
-Intent: open
+Intent: retired 2026-11-14
 Code: unaudited
 
-NATIVE-3 says Python and R need nothing, but the manual writes
-`record Py => R = "dict"` and `record R => R = "list"`. Candidates: (a) such
-lines are optional and name the only legal forms; (b) they are optional and
-may name another class, built through `Packable`; (c) they are an error.
+Replaced by GEN-1: a record with no user-written form gets a generated one.
+
+### NATIVE-4 An unmapped record in C++ or Rust is a compile error
+Intent: retired 2026-11-14
+Code: unaudited
+
+Replaced by GEN-1: there is no unmapped record.
+
+### NATIVE-5 Native forms for records in Python and R
+Intent: retired 2026-11-14
+Code: unaudited
+
+Replaced by GEN-1, GEN-2, GEN-3 and GEN-11.
 
 ### NATIVE-6 Two native forms for one type and language
 Intent: open

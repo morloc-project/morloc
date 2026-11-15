@@ -54,6 +54,7 @@ split later.
 | [newtypes.md](newtypes.md) | NEWT | `newtype`: a distinct type over a representation, and conversion to and from it |
 | [deriving.md](deriving.md) | DERIV | `deriving` clauses: instances the compiler builds from a declaration |
 | [native-types.md](native-types.md) | NATIVE | per-language type mappings (`type Py => X = ...`, `record Cpp => R`) and their agreement |
+| [generated-types.md](generated-types.md) | GEN | kinds, names, files and imports of the native definitions the compiler generates |
 | [type-equality.md](type-equality.md) | TEQ | when two types are the same type |
 | [base-types.md](base-types.md) | BASE | `Unit`, `Bool`, `Str`: value spaces and operations |
 | [numbers.md](numbers.md) | NUM | `Int`, fixed-width integers, floats: value spaces, defaulting, arithmetic across languages |

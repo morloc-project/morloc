@@ -26,6 +26,7 @@ module Morloc.CodeGenerator.Pools.CAbi.Members.CppPrinter
   , printStructTypedef
   , printMarshalDecls
   , armName
+  , armNameText
   , printCppEnumDecl
   , printCppVariantDecl
   , printCppVariantArms
@@ -471,9 +472,12 @@ printCppVariantArms name arms = vsep [armStruct c ts | (c, ts) <- arms]
 -- template of its own, taking the wrapper's arguments. A user who maps a
 -- parameterized @data@ writes the arms to that convention.
 armName :: MDoc -> Text -> MDoc
-armName n c =
-  let (headT, args) = T.breakOn "<" (render n)
-  in pretty headT <> "_" <> pretty c <> pretty args
+armName n c = pretty (armNameText (render n) c)
+
+armNameText :: Text -> Text -> Text
+armNameText n c =
+  let (headT, args) = T.breakOn "<" n
+  in headT <> "_" <> c <> args
 
 -- | Emit the three walk steps of a variant wrapper.
 --
