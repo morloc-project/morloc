@@ -22,3 +22,4 @@ it is solved, and a file when it is empty.
 - [effects.md](effects.md): suspension in a record rejected (EFF-2), `do` tail run by expected type (EFF-4), `!` outside a do-block (EFF-7 vs manual), effect rules with no item, malformed foreign `Try` decoded silently
 - [guests.md](guests.md): an unsourced Futhark `bool` entry breaks its file (GUEST-3), unnamed rejections
 - [evaluation.md](evaluation.md): no item says how often the work a function does before the function it returns runs (staging)
+- [modules.md](modules.md): an external dotted import resolves its local imports from the wrong root (MOD-6)

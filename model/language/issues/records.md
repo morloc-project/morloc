@@ -88,6 +88,10 @@
   module's file, so a recursive one (`record Container a` with
   `sub :: ?(Container a)`) is refused in C++ and Rust, asking for a
   `record Cpp =>` line (Cpp.hs and Rust.hs, RecF "struct"). A record with
-  a parameter no field uses gets no default form at all
-  (Restructure.hs withDefaultKinds), as before GEN-1. Both need the
-  declaration-driven definition GEN-9 describes.
+  a parameter no field uses gets no default form in any language
+  (Restructure.hs withDefaultKinds), as before GEN-1, so it still needs a
+  line such as `record Py => Box a = dict` (spec-cost-15-4). Without the
+  line the error misleads: spec-cost-15-4 reports that the instance
+  PatternAccessible Box "gives no cpp implementation of
+  '__extract_pattern__'" [reproduced], not that Box has no Python form.
+  Both need the declaration-driven definition GEN-9 describes.
