@@ -4,24 +4,41 @@
 -- handle is a stream both pools write to.
 --
 -- cmd2 uses the same sink function from a second command. cmd3 hands the
--- sink to a recursive function, whose body is not in the gather's own
--- tree, so the gather cannot see every use of its handle and takes the
--- temp-file route: its last batch is 1000 plus the gather files it sees.
+-- sink to a recursive function that gives it to Python at every level, so
+-- it takes the temp-file route: its last batch is 1000 plus the gather
+-- files it sees.
+--
+-- cmd4 gathers through a recursive C++ producer and cmd5 folds in Python
+-- through a recursive Python producer. Neither hands the sink to another
+-- pool, so both hold their batches natively and see no gather file.
 
-module main (cmd, cmd2, cmd3)
+module main (cmd, cmd2, cmd3, cmd4, cmd5)
 
 import root-cpp
 import root-py
 
 source Cpp from "impl.hpp"
   ("produce" as produceC, "show_ints" as showC, "dec" as decC, "is_zero" as isZeroC, "produce_route" as routeC)
-source Py from "impl.py" ("produce" as produceP)
+source Py from "impl.py"
+  ( "produce" as produceP, "produce_route" as routeP, "dec" as decP, "is_zero" as isZeroP
+  , "add_sum" as addSumP, "merge" as mergeP, "show_n" as showNP )
 
 produceC :: ([I64] -> <IO> ()) -> <IO> ()
 produceP :: ([I64] -> <IO> ()) -> <IO> ()
 routeC :: ([I64] -> <IO> ()) -> <IO> ()
 decC :: I64 -> I64
 isZeroC :: I64 -> Bool
+routeP :: ([I64] -> <IO> ()) -> <IO> ()
+decP :: I64 -> I64
+isZeroP :: I64 -> Bool
+addSumP :: Int -> [I64] -> Int
+mergeP :: Int -> Int -> Int
+
+--' The sum, shown by Python
+showNP :: Int -> Str
+
+zero :: Int
+zero = 0
 
 --' The elements, shown by C++
 showC :: [I64] -> Str
@@ -54,3 +71,29 @@ many n sink
 --' @render --show=showC
 cmd3 :: I64 -> <IO> ()
 cmd3 n = @collect (many n)
+
+--' Batches from n levels of C++ recursion
+manyC :: I64 -> ([I64] -> <IO> ()) -> <IO> ()
+manyC n sink
+  ? isZeroC n = routeC sink
+  : do
+      produceC sink
+      manyC (decC n) sink
+
+--' Gather through a recursive C++ producer
+--' @render --show=showC
+cmd4 :: I64 -> <IO> ()
+cmd4 n = @collect (manyC n)
+
+--' Batches from n levels of Python recursion
+manyP :: I64 -> ([I64] -> <IO> ()) -> <IO> ()
+manyP n sink
+  ? isZeroP n = routeP sink
+  : do
+      produceP sink
+      manyP (decP n) sink
+
+--' Fold through a recursive Python producer
+--' @render --n=showNP @fold=addSumP @init=zero @combine=mergeP
+cmd5 :: I64 -> <IO> ()
+cmd5 n = @collect (manyP n)

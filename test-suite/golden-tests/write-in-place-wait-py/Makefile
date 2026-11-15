@@ -4,7 +4,7 @@ export MORLOC_WRITE_BEHIND_DEPTH = 1
 all:
 	rm -f *.err obs.txt *.dat
 	morloc make -o nexus main.loc 2> build.err
-	test $$(grep -c 'morloc.mlc_write(' nexus-build/pools/py/pool.py) -eq 17 && echo py-writes >> obs.txt || echo UNEXPECTED_PY_WRITES >> obs.txt
+	test $$(sed -n '/AUTO include manifolds start/,/AUTO include manifolds end/p' nexus-build/pools/py/pool.py | grep -c 'morloc.mlc_write(') -eq 17 && echo py-writes >> obs.txt || echo UNEXPECTED_PY_WRITES >> obs.txt
 	for z in 0 3; do \
 	  for tk in Reals:np I32s:np I8s:np U8s:np U8s:bytes U8s:bytearray Bools:np Bools:bytes I16s:np I16s:np8; do \
 	    t=$${tk%%:*}; k=$${tk#*:}; \

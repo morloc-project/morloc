@@ -65,7 +65,7 @@ A result that aliases an argument has two holders and two references. On
 a thread with an eval arena, the arena holds the reference of each block
 allocated there and of each block a holder that held it alone gives it
 (SHM-14). A reference anything else takes on a block -- a stream's cache,
-a cache hit the eval reads, a cell, an Arrow view, the daemon's copy of a
+a cache hit the eval reads, an Arrow view, the daemon's copy of a
 pool's reply -- belongs to its holder, which releases it without touching
 the arena.
 

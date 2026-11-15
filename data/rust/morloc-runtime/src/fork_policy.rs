@@ -349,7 +349,6 @@ fn after_fork_in_child_body() {
     // FORK-16: the dispatches running anywhere in the parent, none of which
     // the child has.
     INHERITED_DISPATCHES.store(crate::intrinsics::dispatches_in_flight(), Ordering::Relaxed);
-    crate::cell::after_fork_in_child();
     crate::fork_side::after_fork_in_child();
     crate::shm::forget_held_references();
     if let Some(mut held) = take_fork_held() {

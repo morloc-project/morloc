@@ -3423,105 +3423,66 @@ SEXP morloc_mlc_write(SEXP schema_str_r, SEXP level_r, SEXP value_r, SEXP handle
     return R_NilValue;
 }
 
-// -- Fold accumulators (the `@fold` stream-handler form) ------------------
-// One accumulator per thread that folds into it; @cellreduce reads them all
-// (morloc_mlc_cell_slots in pool.R) and merges them with the handler's
-// `combine`.
+// -- Native folds (model/runtime/fold.md) --------------------------------
+// FOLD-6, FOLD-10
 
-SEXP morloc_mlc_cell_new(SEXP schema_str_r, SEXP init_r) { MAYFAIL
-    if (TYPEOF(schema_str_r) != STRSXP || LENGTH(schema_str_r) != 1) {
-        MORLOC_INTERNAL_ABORT("mlc_cell_new: schema must be a single string");
-    }
-    const char* schema_str = CHAR(STRING_ELT(schema_str_r, 0));
-    Schema* schema = R_TRY(parse_schema, schema_str);
-    void* voidstar = to_voidstar(init_r, schema, NULL);
-    int64_t handle = R_TRY_WITH(
-        { char* err = NULL; shfree(voidstar, &err); free(err); free_schema(schema); },
-        mlc_cell_new, schema, voidstar);
-    {
-        char* shfree_errmsg = NULL;
-        shfree(voidstar, &shfree_errmsg);
-        free(shfree_errmsg);
-    }
-    free_schema(schema);
-    return make_integer64_scalar(handle);
+static void* r_fold_fresh(void* init) {
+    return init;
 }
 
-// Shared tail for the accumulator readers. R's from_voidstar copies into
-// R vectors rather than viewing the block, so the block is released here
-// rather than deferred to the end of the call -- a fold reads one of these
-// per batch, and deferring would hold one block per batch.
-static SEXP cell_value_to_r(void* voidstar, Schema* schema) {
-    SEXP obj = from_voidstar(voidstar, schema, morloc_shm_space());
-    char* shfree_errmsg = NULL;
-    shfree(voidstar, &shfree_errmsg);
-    free(shfree_errmsg);
-    free_schema(schema);
-    return obj;
+static void r_fold_release(void** values, size_t n) {
+    for (size_t i = 0; i < n; i++) R_ReleaseObject((SEXP)values[i]);
+    free(values);
 }
 
-SEXP morloc_mlc_cell_get(SEXP handle_r, SEXP schema_str_r) { MAYFAIL
-    if (TYPEOF(schema_str_r) != STRSXP || LENGTH(schema_str_r) != 1) {
-        MORLOC_INTERNAL_ABORT("mlc_cell_get: schema must be a single string");
-    }
-    int64_t handle = i64_from_sexp(handle_r);
-    const char* schema_str = CHAR(STRING_ELT(schema_str_r, 0));
-    Schema* schema = R_TRY(parse_schema, schema_str);
-    void* voidstar = R_TRY_WITH(free_schema(schema), mlc_cell_get, handle, schema);
-    return cell_value_to_r(voidstar, schema);
+SEXP morloc_mlc_fold_new(SEXP init_r) { MAYFAIL
+    int64_t h = R_TRY(mlc_fold_new, (void*)init_r, r_fold_fresh);
+    return make_integer64_scalar(h);
 }
 
-SEXP morloc_mlc_cell_put(SEXP handle_r, SEXP schema_str_r, SEXP value_r) { MAYFAIL
-    if (TYPEOF(schema_str_r) != STRSXP || LENGTH(schema_str_r) != 1) {
-        MORLOC_INTERNAL_ABORT("mlc_cell_put: schema must be a single string");
+// list(kind, value, fresh): kind 1 with this thread's value, 0 for the side
+// file, 2 for a stream handle (FOLD-9); a fresh value is init, which the
+// caller copies (FOLD-6).
+SEXP morloc_mlc_fold_checkout(SEXP h_r) { MAYFAIL
+    int64_t h = i64_from_sexp(h_r);
+    SEXP out = PROTECT(allocVector(VECSXP, 3));
+    SET_VECTOR_ELT(out, 2, ScalarLogical(FALSE));
+    if (h >= 0) {
+        SET_VECTOR_ELT(out, 0, ScalarInteger(2));
+        UNPROTECT(1);
+        return out;
     }
-    int64_t handle = i64_from_sexp(handle_r);
-    const char* schema_str = CHAR(STRING_ELT(schema_str_r, 0));
-    Schema* schema = R_TRY(parse_schema, schema_str);
-    void* voidstar = to_voidstar(value_r, schema, NULL);
-    R_TRY_WITH(
-        { char* err = NULL; shfree(voidstar, &err); free(err); free_schema(schema); },
-        mlc_cell_put, handle, schema, voidstar);
-    {
-        char* shfree_errmsg = NULL;
-        shfree(voidstar, &shfree_errmsg);
-        free(shfree_errmsg);
+    void* value = NULL;
+    int32_t fresh = 0;
+    int32_t r = R_TRY_WITH(UNPROTECT(1), mlc_fold_checkout, h, &value, &fresh);
+    SET_VECTOR_ELT(out, 0, ScalarInteger(r));
+    if (r == 1) {
+        SET_VECTOR_ELT(out, 1, (SEXP)value);
+        SET_VECTOR_ELT(out, 2, ScalarLogical(fresh != 0));
+        if (!fresh) R_ReleaseObject((SEXP)value);
     }
-    free_schema(schema);
+    UNPROTECT(1);
+    return out;
+}
+
+SEXP morloc_mlc_fold_store(SEXP h_r, SEXP value_r) { MAYFAIL
+    int64_t h = i64_from_sexp(h_r);
+    R_PreserveObject(value_r);
+    R_TRY_WITH(R_ReleaseObject(value_r), mlc_fold_store, h, (void*)value_r);
     return R_NilValue;
 }
 
-SEXP morloc_mlc_cell_count(SEXP handle_r) { MAYFAIL
-    int64_t handle = i64_from_sexp(handle_r);
-    int64_t n = R_TRY(mlc_cell_count, handle);
-    return ScalarReal((double)n);
-}
-
-SEXP morloc_mlc_cell_slot(SEXP handle_r, SEXP index_r, SEXP schema_str_r) { MAYFAIL
-    if (TYPEOF(schema_str_r) != STRSXP || LENGTH(schema_str_r) != 1) {
-        MORLOC_INTERNAL_ABORT("mlc_cell_slot: schema must be a single string");
-    }
-    int64_t handle = i64_from_sexp(handle_r);
-    int64_t index = i64_from_sexp(index_r);
-    const char* schema_str = CHAR(STRING_ELT(schema_str_r, 0));
-    Schema* schema = R_TRY(parse_schema, schema_str);
-    void* voidstar = R_TRY_WITH(free_schema(schema), mlc_cell_slot, handle, index, schema);
-    return cell_value_to_r(voidstar, schema);
-}
-
-SEXP morloc_mlc_cell_free(SEXP handle_r) { MAYFAIL
-    int64_t handle = i64_from_sexp(handle_r);
-    R_TRY(mlc_cell_free, handle);
+SEXP morloc_mlc_fold_failed(SEXP h_r) {
+    mlc_fold_failed(i64_from_sexp(h_r));
     return R_NilValue;
 }
 
-// -- Fold side files (model/runtime/side.md) -----------------------------
-
-// TRUE when a fold batch is folded here, FALSE when it goes to the side file.
-SEXP morloc_mlc_side_route(SEXP id_r) { MAYFAIL
-    int64_t id = i64_from_sexp(id_r);
-    int32_t r = R_TRY(mlc_side_route, id);
-    return ScalarLogical(r == 1);
+SEXP morloc_mlc_fold_drop(SEXP h_r) {
+    void** values = NULL;
+    size_t n = 0;
+    mlc_fold_drop(i64_from_sexp(h_r), &values, &n);
+    r_fold_release(values, n);
+    return R_NilValue;
 }
 
 // A NULL schema (no wire form) fails the fold (SIDE-10).
@@ -3560,25 +3521,40 @@ static void side_reader_r_free(SEXP p) {
     R_ClearExternalPtr(p);
 }
 
-// The reader over a side file's batches. With a NULL schema, a batch in
-// the file fails the take.
-SEXP morloc_mlc_side_take(SEXP id_r, SEXP schema_str_r) { MAYFAIL
-    int64_t id = i64_from_sexp(id_r);
+// list(values, reader): the fold's stored values and the reader over its
+// side batches. With a NULL schema, a batch in the file fails the take.
+SEXP morloc_mlc_fold_take(SEXP h_r, SEXP schema_str_r) { MAYFAIL
+    int64_t h = i64_from_sexp(h_r);
+    void** values = NULL;
+    size_t n = 0;
+    char* errmsg = NULL;
+    void* reader = mlc_fold_take(h, &values, &n, &errmsg);
+    SEXP vs = PROTECT(allocVector(VECSXP, (R_xlen_t)n));
+    for (size_t i = 0; i < n; i++) SET_VECTOR_ELT(vs, (R_xlen_t)i, (SEXP)values[i]);
+    r_fold_release(values, n);
+    if (reader == NULL) {
+        UNPROTECT(1);
+        morloc_error_take("", errmsg);
+    }
     Schema* schema = NULL;
     if (TYPEOF(schema_str_r) == STRSXP && LENGTH(schema_str_r) == 1) {
-        schema = R_TRY(parse_schema, CHAR(STRING_ELT(schema_str_r, 0)));
+        schema = R_TRY_WITH({ mlc_side_reader_free(reader); UNPROTECT(1); }, parse_schema, CHAR(STRING_ELT(schema_str_r, 0)));
     }
     side_reader_r* r = (side_reader_r*)calloc(1, sizeof(side_reader_r));
     if (r == NULL) {
+        mlc_side_reader_free(reader);
         free_schema(schema);
         MORLOC_ERROR("out of memory");
     }
+    r->reader = reader;
     r->schema = schema;
     SEXP p = PROTECT(R_MakeExternalPtr(r, R_NilValue, R_NilValue));
     R_RegisterCFinalizerEx(p, side_reader_r_free, TRUE);
-    r->reader = R_TRY_WITH(UNPROTECT(1), mlc_side_take, id);
-    UNPROTECT(1);
-    return p;
+    SEXP out = PROTECT(allocVector(VECSXP, 2));
+    SET_VECTOR_ELT(out, 0, vs);
+    SET_VECTOR_ELT(out, 1, p);
+    UNPROTECT(3);
+    return out;
 }
 
 // The next side batch in a list of one, or an empty list at the end.
@@ -4912,15 +4888,13 @@ static void _r_init_impl(DllInfo *info) {
         {"morloc_get_value", (DL_FUNC) &morloc_get_value, 3},
         {"morloc_put_value", (DL_FUNC) &morloc_put_value, 3},
         {"morloc_mlc_show", (DL_FUNC) &morloc_mlc_show, 2},
-        {"morloc_mlc_cell_new", (DL_FUNC) &morloc_mlc_cell_new, 2},
-        {"morloc_mlc_cell_get", (DL_FUNC) &morloc_mlc_cell_get, 2},
-        {"morloc_mlc_cell_put", (DL_FUNC) &morloc_mlc_cell_put, 3},
-        {"morloc_mlc_cell_count", (DL_FUNC) &morloc_mlc_cell_count, 1},
-        {"morloc_mlc_cell_slot", (DL_FUNC) &morloc_mlc_cell_slot, 3},
-        {"morloc_mlc_cell_free", (DL_FUNC) &morloc_mlc_cell_free, 1},
-        {"morloc_mlc_side_route", (DL_FUNC) &morloc_mlc_side_route, 1},
+        {"morloc_mlc_fold_new", (DL_FUNC) &morloc_mlc_fold_new, 1},
+        {"morloc_mlc_fold_checkout", (DL_FUNC) &morloc_mlc_fold_checkout, 1},
+        {"morloc_mlc_fold_store", (DL_FUNC) &morloc_mlc_fold_store, 2},
+        {"morloc_mlc_fold_failed", (DL_FUNC) &morloc_mlc_fold_failed, 1},
+        {"morloc_mlc_fold_drop", (DL_FUNC) &morloc_mlc_fold_drop, 1},
+        {"morloc_mlc_fold_take", (DL_FUNC) &morloc_mlc_fold_take, 2},
         {"morloc_mlc_side_put", (DL_FUNC) &morloc_mlc_side_put, 3},
-        {"morloc_mlc_side_take", (DL_FUNC) &morloc_mlc_side_take, 2},
         {"morloc_mlc_side_next", (DL_FUNC) &morloc_mlc_side_next, 1},
         {"r_morloc_log_next_id", (DL_FUNC) &morloc_log_next_id_r, 0},
         {"r_morloc_log_emit", (DL_FUNC) &morloc_log_emit_r, 4},

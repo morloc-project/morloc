@@ -380,12 +380,14 @@ rewrite lang m (PolyIntrinsic t@(Idx _ resT) intr xs) = do
       gatherArg = case expandT scope resT of
         EffectT _ l@(AppT _ [_]) -> Just (AppT (VarT BT.cellVar) [TyA l])
         _ -> Nothing
+      foldArg = case expandT scope resT of
+        EffectT _ b -> Just (AppT (VarT BT.cellVar) [TyA b])
+        _ -> Nothing
   PolyIntrinsic t intr <$> case (intr, xs') of
     (IntrReplay, [h, f]) -> (\f' -> [h, f']) <$> intrinsicCallback lang m intr ((\a -> AppT (VarT BT.list) [a]) <$> param h) resT f
     (IntrSpawn, [h, f]) -> (\f' -> [h, f']) <$> intrinsicCallback lang m intr ((\a -> AppT (VarT BT.ostreamVar) [a]) <$> param h) resT f
     (IntrGather, [f]) -> (: []) <$> intrinsicCallback lang m intr gatherArg (unitOf resT) f
-    (IntrCellSink, [h, c, f]) -> (\f' -> [h, c, f']) <$> intrinsicCallback lang m intr (expandT scope <$> polyOuterType c) resT f
-    (IntrCellSide, [h, f]) -> (\f' -> [h, f']) <$> intrinsicCallback lang m intr Nothing resT f
+    (IntrFold, [i, s, c, f]) -> (\f' -> [i, s, c, f']) <$> intrinsicCallback lang m intr foldArg (unitOf resT) f
     _ -> return xs'
 rewrite lang m (PolyVariant t n i xs) = PolyVariant t n i <$> mapM (rewrite lang m) xs
 rewrite _ _ leaf = return leaf
@@ -1135,9 +1137,9 @@ rebuildIn dir lang g hv@(HostView scope _ _ _ _) d t0 e = do
 
 -- | The function an intrinsic's pool helper calls as @f(x)@, exactly as a
 -- host calls a callback: @replay's @([a] -> \<IO\> ())@, @spawn's
--- @(OStream a -> \<IO\> ())@, @gather's @(Cell [a] -> \<IO\> ())@ and the
--- fold step of @cellsink and @cellside, given the type of its argument where
--- it is known and the type of its result.
+-- @(OStream a -> \<IO\> ())@, and the @(Cell b -> \<IO\> ())@ of @gather and
+-- @fold, given the type of its argument where it is known and the type of
+-- its result.
 intrinsicCallback :: Lang -> Int -> Intrinsic -> Maybe Type -> Type -> PolyExpr -> MorlocMonad PolyExpr
 intrinsicCallback lang m intr margT resT f = do
   scope <- MM.getGeneralScope

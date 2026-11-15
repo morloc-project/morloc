@@ -305,17 +305,76 @@ def mlc_gather_native(schema, f):
     return morloc.mlc_gather_take(h, schema, acc)
 
 
-def mlc_cell_sink(schema, h, batch, k):
-    # SIDE-4, SIDE-10
-    if morloc.mlc_side_route(h):
-        k(batch)
-    else:
+def _mlc_fold_combine(init, combine, values):
+    if not values:
+        return copy.deepcopy(init)
+    acc = values[0]
+    for v in values[1:]:
+        acc = combine(acc, v)
+    return acc
+
+
+def mlc_fold(schema, init, step, combine, f):
+    # fold.md: each thread's slot starts from its own copy of init (FOLD-6);
+    # forked children's batches are stepped from another (FOLD-3).
+    h = morloc.mlc_fold_new(init)
+    try:
+        f(h)
+    except BaseException:
+        morloc.mlc_fold_drop(h)
+        raise
+    side = []
+
+    def replay(batch):
+        if not side:
+            side.append(copy.deepcopy(init))
+        side[0] = step(side[0], batch)
+
+    values = morloc.mlc_fold_take(h, schema, replay)
+    return _mlc_fold_combine(init, combine, values + side)
+
+
+def mlc_fold_file(schema, init, step, combine, f):
+    # FOLD-9: the handle is a stream; its batches are stepped once the
+    # producer returns.
+    path = morloc.mlc_tmpfile()
+    o = morloc.mlc_open_ostream(schema, path)
+    try:
+        f(o)
+    finally:
+        morloc.mlc_close(o)
+    acc = [copy.deepcopy(init)]
+
+    def each(batch):
+        acc[0] = step(acc[0], batch)
+
+    i = morloc.mlc_open_istream(schema, path)
+    try:
+        morloc.mlc_replay(schema, i, each)
+    finally:
+        morloc.mlc_close(i)
+        morloc.mlc_unlink_tmp(path)
+    return acc[0]
+
+
+def mlc_fold_put(schema, step, h, batch):
+    # FOLD-1, FOLD-9
+    if h >= 0:
+        morloc.mlc_write(schema, 0, batch, h)
+        morloc.mlc_flush(h)
+        return
+    native, value, fresh = morloc.mlc_fold_checkout(h)
+    if not native:
         morloc.mlc_side_put(h, schema, batch)
-
-
-def mlc_cell_side(schema, h, k):
-    # SIDE-7
-    morloc.mlc_side_take(h, schema, k)
+        return
+    try:
+        if fresh:
+            value = copy.deepcopy(value)
+        value = step(value, batch)
+    except BaseException:
+        morloc.mlc_fold_failed(h)
+        raise
+    morloc.mlc_fold_store(h, value)
 
 
 def mlc_spawn(f, handle, schema):

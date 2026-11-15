@@ -976,12 +976,11 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
               <+> "command is not yet supported. Add the `@stream` modifier for"
               <+> "per-batch streaming, or involve a foreign function in the"
               <+> "command body."
-    -- The fold accumulator lives in the runtime and its step and combine
-    -- run in a pool. The nexus interpreter cannot call a morloc function
-    -- by name, so a pure (all-morloc) folding command is rejected here
-    -- rather than falling off the evaluator.
+    -- A fold's slots are held in the pool where its step runs. The nexus
+    -- interpreter holds none, so a pure (all-morloc) folding command is
+    -- rejected here rather than falling off the evaluator.
     toNexusExpr (AnnoS (Idx iCell _) _ (IntrinsicS intr _))
-      | intr `elem` [IntrCellNew, IntrCellGet, IntrCellPut, IntrCellReduce, IntrCellSink, IntrCellSide] =
+      | intr `elem` [IntrFold, IntrFoldFile, IntrFoldPut] =
           MM.throwSourcedError iCell $
             "a folding `@render`/`@with` handler currently requires a command"
               <+> "that dispatches to a foreign pool; a pure (all-morloc) fold"

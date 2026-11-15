@@ -25,3 +25,9 @@ Language.makeExecutableName's compiled list, Pool.memberFor). [read,
   test covers plugins.
 - **Dead registry functions.** Unused: registryMakeExecutablePoolName, registryMakeSourcePoolName,
   registryMakeExtension, registrySerialType, Monad.readLang.
+- **Fork-pool languages are hard-coded.** [read 2026-11-15]
+  Serialize.hs ~666 (the FOLD-9 route) tests the language name against
+  the literal list ["py", "r"] for "the home is a fork pool". A new fork-pool language, or
+  a change of a language's pool model, gets the NATIVE route silently,
+  whose puts from sibling workers fail (NET-9). The fact belongs in
+  lang.yaml / LangRegistry as a flag the route reads.

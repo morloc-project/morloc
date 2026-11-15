@@ -8,6 +8,10 @@ all:
 	./nexus cmd2 --show >> obs.txt 2>> obs.err
 	rm -rf $(TMP) && mkdir -p $(TMP)
 	MORLOC_TMPDIR=$(TMP) ./nexus cmd3 --show 2 >> obs.txt 2>> obs.err
+	rm -rf $(TMP) && mkdir -p $(TMP)
+	MORLOC_TMPDIR=$(TMP) ./nexus cmd4 --show 2 >> obs.txt 2>> obs.err
+	rm -rf $(TMP) && mkdir -p $(TMP)
+	MORLOC_TMPDIR=$(TMP) ./nexus cmd5 --n 2 >> obs.txt 2>> obs.err
 
 clean:
 	rm -rf nexus pools __pycache__ *.err $(TMP)

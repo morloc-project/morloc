@@ -101,3 +101,10 @@ leaks its argument blocks for the life of the process. Not reproduced.
   classifier reads frame files, which inlining changes. Generated pools
   are optimized, so a runtime defect there may be reported as a call
   failure instead of status 70 (PANIC standard).
+- **A C++ exception thrown inside a sink call loses its type in the
+  producer.** [observed 2026-11-15, not narrowed] A `std::bad_alloc` raised
+  by a fold put inside a sourced C++ producer is not caught by the
+  producer's `catch (const std::bad_alloc&)`; `catch (...)` catches it, and
+  it escapes as a "std::bad_alloc" message. The type is lost somewhere
+  between the generated sink and the producer (rethrown as another type?).
+  Found writing fold-step-failures copyCpp.

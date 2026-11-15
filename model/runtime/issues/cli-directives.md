@@ -1,17 +1,5 @@
 # @collect, @fold, @parse, @render
 
-- **Cross-language @fold crosses pools with its cell.** Violates STRM-4.
-  Cells live in one pool process (morloc-runtime/src/cell.rs) but
-  realization can split `@cellnew` and `@cellreduce` across pools (S5 in
-  /work/plans/error-clusters). A Python producer with a C++ fold works:
-  its `@cellsink` is placed in C++, so the handle goes cpp -> py -> cpp
-  (golden gather-relay foldPyCpp). The other direction fails
-  [reproduced 2026-11-14]: a C++ producer calling its sink from four
-  threads, with `@fold`, `@init` and `@combine` in Python: every
-  callback's `@cellget` fails with "mlc_cell_get: no such fold
-  accumulator" and the run fails. Cause not narrowed; the likely one is
-  that the callbacks run in another Python process than the one that made
-  the cell (SIDE-11 makes such a miss certain rather than a wrong cell).
 - **A fold batch with no wire form cannot come from a forked child.**
   [reproduced, stage 6 prototype] SIDE-10: a batch type with a packer
   (`[Map Str I64]` in C++ or Python) sent from a forked child poisons the
@@ -31,8 +19,6 @@
   requires Str, [Str], Vector U8, or [Vector U8]"). `@mime` has the check
   (CodeGenerator/Nexus.hs:325 `mediaSerialValid`); terminals (:3388) do not.
 - **@render ignores -f.** [reproduced] Contradicts CLI-5; CLI-9 open.
-- STRM-5 open; code merges accumulators in first-fold thread order
-  (cell.rs:31).
 - Gap: two `@collect`s under `-f json` print two JSON arrays
   (morloc-nexus/src/stdio_server.rs:698).
 - Gap: `-o FILE` is a truncating redirect, not write-then-rename like action
@@ -63,6 +49,14 @@
   RPC short-circuit" (stream.rs), SIGABRT, and writes no p.txt. The
   Python-fold variant fails the same way; `-p` to stdout passes. Repro:
   /work/plans/error-clusters/briefs/S5-steps0-2.md.
+  A threaded Python producer writing a whole-list `@collect` to stdout
+  [reproduced 2026-11-15] fails the same way in its threads ("Exception in
+  thread", same message from pybinding__mlc_write); the threads' batches
+  are lost and the command exits 0 with a short result (four threads of
+  five batches at two sites: 63 to 111 of 120 elements seen). A
+  fold over two such sites (the replay entry) counted 0:29 for 0:40.
+  Repro: a `produce_threads` like golden fold-native's impl.py under
+  `@render --n=showLen` with two `@collect`s.
 - **A pure IFile whole-list handler is refused.** [reproduced, 2026-11-13]
   Gap in STRM-4. `sliceFile :: IFile [I64] -> [I64]` as a `@render`
   handler fails to compile with "Cannot force a non-effectful value (got
@@ -95,3 +89,14 @@
   the unlink, so the stream's slot and its temp file stay until the
   dispatch's sweep (if any reaches them). The native route drops its entry
   on the same path.
+- **A fold's slots are never reclaimed while it runs.** [read
+  2026-11-15] FOLD-1, FOLD-6 say nothing on it. fold.rs keeps one slot per
+  ThreadId that ever put, until take; MAX_SLOTS (4096) then fails the put.
+  Pool worker threads retire and respawn, so a long fold fed by
+  cross-pool callbacks (each batch on whichever worker serves it) can
+  reach the cap with few live threads. The message now names both causes.
+  Fix direction: let a FREE slot whose thread has ended be merged, by
+  combine, into another slot or a carried value (needs combine reachable
+  from the runtime, or the binding to do it at checkout), or key slots by
+  worker index instead of ThreadId. Model the change in ForkSide.tla
+  first (it touches FOLD-2's seal and FOLD-4's count).

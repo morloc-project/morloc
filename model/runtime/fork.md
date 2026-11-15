@@ -91,7 +91,7 @@ forking thread holds any. Model: `ForkLocks_misordered.bug` and
 
 ### FORK-8 A reset lock is never the parent's in the child
 Status: implemented
-Checked by: a_child_forked_while_a_thread_holds_a_reset_lock_gets_a_fresh_one, a_fork_from_a_thread_holding_a_reset_lock_aborts, a_forked_child_never_resolves_its_parents_cell, tla:ResetPublish, tla:ResetPublish_store.bug, tla:ResetPublish_no_generation.bug, tla:ResetPublish_free_observed.bug, golden:futhark-basic
+Checked by: a_child_forked_while_a_thread_holds_a_reset_lock_gets_a_fresh_one, a_fork_from_a_thread_holding_a_reset_lock_aborts, tla:ResetPublish, tla:ResetPublish_store.bug, tla:ResetPublish_no_generation.bug, tla:ResetPublish_free_observed.bug, golden:futhark-basic
 
 A reset lock and its state are replaced on first use in a new fork
 generation; the parent's copy is forgotten, never released or waited on.
@@ -104,7 +104,6 @@ too. Model: `tla/ResetPublish.tla`
 (`ResetPublish` passes; the `store`, `no_generation` and `free_observed`
 variants fail). Tests: a_child_forked_while_a_thread_holds_a_reset_lock_gets_a_fresh_one,
 a_fork_from_a_thread_holding_a_reset_lock_aborts,
-a_forked_child_never_resolves_its_parents_cell,
 a_forked_child_leaves_its_parents_spooled_inputs,
 a_forked_child_leaves_its_parents_temp_files. A fresh
 value that depends on the parent's state is seeded from it: the temp
@@ -194,8 +193,8 @@ its lease until that process is gone. Models: `tla/ViewFork.tla`,
 Status: implemented
 Checked by: a_child_forked_by_a_dispatch_helper_thread_keeps_its_temps, a_helper_temp_goes_once_the_dispatches_running_at_its_making_end, the_temp_directory_of_a_process_that_is_gone_is_removed, a_process_in_another_pid_namespace_leaves_live_temp_directories_alone, a_dispatch_in_a_forked_child_keeps_the_temps_of_the_dispatch_it_forked_inside, tla:TempEpoch, tla:TempEpoch_child, tla:TempEpoch_zero_rule.bug, tla:TempEpoch_no_phantom.bug
 
-A dispatch removes the temp files it made when it ends. A temp file or
-fold cell made on a thread no dispatch owns (a helper thread user code
+A dispatch removes the temp files it made when it ends. A temp file
+made on a thread no dispatch owns (a helper thread user code
 started) belongs to every dispatch running when it was made: it records the
 next dispatch id, and goes at the first dispatch end after which no older
 dispatch is still running. It is never kept waiting for the process to have
@@ -241,11 +240,10 @@ this item. Model: `tla/DispatchFork.tla`.
 
 ### FORK-13 A cached process identity is refreshed in a forked child
 Status: implemented
-Checked by: a_forked_child_logs_its_own_pid, a_forked_child_never_resolves_its_parents_cell
+Checked by: a_forked_child_logs_its_own_pid
 
 A value derived from the process id and cached on first use would name the
-parent in a child that inherits it. Logging reads the pid when it writes,
-and fold cells draw a new tag in the child, never equal to the parent's.
+parent in a child that inherits it. Logging reads the pid when it writes.
 
 ### FORK-14 State inherited across fork is owned by fork generation, never by pid
 Status: implemented

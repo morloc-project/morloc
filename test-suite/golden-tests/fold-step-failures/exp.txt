@@ -1,0 +1,9 @@
+--- copyPy ---
+exit 1
+a step of this fold failed
+--- copyCpp ---
+exit 1
+a step of this fold failed
+--- conditionR ---
+exit 1
+a step of this fold failed

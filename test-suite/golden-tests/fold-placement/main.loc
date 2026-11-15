@@ -1,0 +1,37 @@
+-- A fold whose step, combine and handler exist in C++ and in Python is
+-- placed with its producer, since a fold elsewhere costs one crossing per
+-- batch (F4). The handler says where it ran, and the producer reports the
+-- route: its first batch is 1000 plus the gather files it sees.
+--
+-- cmd: a C++ producer; the fold is native in C++: 1000 + 2 + 3.
+-- cmdPy: a Python producer; the fold is in Python, and its handle does not
+-- cross, so it is native there too (FOLD-9): 1000 + 2 + 3.
+
+module main (cmd, cmdPy)
+
+import root-cpp
+import root-py
+
+source Cpp from "impl.hpp" ("produce_route" as produceC, "add_sum", "merge", "show_n")
+source Py from "impl.py" ("produce_route" as produceP, "add_sum", "merge", "show_n")
+
+produceC :: ([I64] -> <IO> ()) -> <IO> ()
+produceP :: ([I64] -> <IO> ()) -> <IO> ()
+add_sum :: Int -> [I64] -> Int
+merge :: Int -> Int -> Int
+
+--' The sum, shown by the language that folded it
+show_n :: Int -> Str
+
+zero :: Int
+zero = 0
+
+--' Fold C++ batches with a step in two languages
+--' @render --n=show_n @fold=add_sum @init=zero @combine=merge
+cmd :: <IO> ()
+cmd = @collect produceC
+
+--' Fold Python batches with a step in two languages
+--' @render --n=show_n @fold=add_sum @init=zero @combine=merge
+cmdPy :: <IO> ()
+cmdPy = @collect produceP

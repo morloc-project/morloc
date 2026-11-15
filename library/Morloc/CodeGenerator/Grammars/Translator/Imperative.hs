@@ -203,8 +203,6 @@ data IExpr
   | IIntrinsicRead Int (Maybe IType) IExpr -- schemaId, returnType, json_string -> typed data (nullable)
   | IIntrinsicUnpack Int (Maybe IType) IExpr -- schemaId, returnType, packet bytes -> typed data
   | IIntrinsicConform Int IExpr -- schemaId, wire-form literal -> the form the decoder gives the schema
-  | IIntrinsicCellSlots Int (Maybe IType) IExpr -- element schemaId, list type, handle -> every accumulator
-  | IIntrinsicReduceList IExpr IExpr -- combine, non-empty list -> the list folded with combine
   | IIntrinsicOpenIFile Int IExpr -- schema id of what the file stores, path -> handle
   | IIntrinsicClose IExpr -- handle -> ()
   | IIntrinsicUnlinkTemp IExpr
@@ -265,34 +263,23 @@ data IExpr
   | IIntrinsicTell
       -- ^ @tell :: <IO> U64: nullary. Number of elements written to the
       --   process's @stdout OStream so far (its element_count).
-  | IIntrinsicCellNew Int IExpr
-      -- ^ @cellnew: schemaId of the accumulator type, seed expression.
-  | IIntrinsicCellGet Int (Maybe IType) IExpr
-      -- ^ @cellget: schemaId, accumulator type, handle. The type appears
-      --   nowhere but the return, so a statically typed member needs it
-      --   given rather than deduced (as for @load).
-  | IIntrinsicCellPut Int IExpr IExpr
-      -- ^ @cellput: schemaId, handle, value.
   | IIntrinsicReplay Int (Maybe IType) IExpr IExpr
       -- ^ @replay: schemaId of one frame (the list `[a]`), element type
       --   `a`, stream handle, function. The per-language helper reads the
       --   stream to its end and calls the function on each frame.
-      -- ^ @cellreduce: schemaId, accumulator type, combine function,
-      --   handle. The combine is an ordinary native callable in the pool
-      --   the reduce was realized in; the per-language helper applies it
-      --   over the accumulators and releases the cell.
   | IIntrinsicGather Bool Int (Maybe IType) IExpr
       -- ^ @gather: whether the batches are held natively (else gathered
       --   through a temp-file stream), schemaId of the `[a]` result, its
       --   type, the function run on the handle.
   | IIntrinsicGatherPut Int IExpr IExpr
       -- ^ native @gatherput: schemaId of the batch, handle, batch.
-  | IIntrinsicCellSink (Maybe Int) IExpr IExpr IExpr
-      -- ^ @cellsink: schemaId of the batch (Nothing: it has no wire form),
-      --   handle, batch, fold step.
-  | IIntrinsicCellSide (Maybe Int) (Maybe IType) IExpr IExpr
-      -- ^ @cellside: schemaId of a batch (Nothing: no wire form), the
-      --   batch's type, handle, fold step.
+  | IIntrinsicFold Bool (Maybe Int) (Maybe IType) (Maybe IType) IExpr IExpr IExpr IExpr
+      -- ^ @fold: whether its batches go through a temp-file stream (FOLD-9),
+      --   schemaId of a batch (Nothing: no wire form), the accumulator and
+      --   batch types, init, step, combine, the function run on the handle.
+  | IIntrinsicFoldPut (Maybe Int) (Maybe IType) (Maybe IType) IExpr IExpr IExpr
+      -- ^ @foldput: schemaId of the batch (Nothing: no wire form), the
+      --   accumulator and batch types, step, handle, batch.
   | IIntrinsicTmpfile
       -- ^ @tmpfile :: <IO> Str: nullary. Create a fresh empty file in the
       --   morloc tmpdir, register it for removal at end-of-call, and return
@@ -2130,6 +2117,12 @@ adaptOwnedElem cfg origE pd = do
   own <- lcOwnership cfg origE
   return pd {poolExpr = lcOwnArg cfg own (typeFof origE) (poolExpr pd)}
 
+-- | The batch type of a fold step @b -> [a] -> b@.
+stepBatchType :: (Monad m) => LowerConfig m -> NativeExpr -> m (Maybe IType)
+stepBatchType cfg stepE = case typeFof stepE of
+  FunF [_, l] _ -> lcTypeOf cfg l
+  _ -> return Nothing
+
 -- | Adapt a value a read-only sink takes the address of (see 'lcReadArg').
 adaptReadElem :: (Monad m) => LowerConfig m -> NativeExpr -> PoolDocs -> m PoolDocs
 adaptReadElem cfg origE pd = do
@@ -3124,41 +3117,6 @@ lowerNativeExprRaw cfg _ (IntrinsicN_ _ IntrTell _ []) =
 -- @tmpfile: nullary; create + register a temp file, return its path.
 lowerNativeExprRaw cfg _ (IntrinsicN_ _ IntrTmpfile _ []) =
   return $ defaultValue { poolExpr = lcPrintExpr cfg IIntrinsicTmpfile }
--- The fold accumulator. @cellnew and @cellput hand a value into the
--- runtime, which reads it through a 'ToVoidstar' (&T) sink, like @write's.
-lowerNativeExprRaw cfg _ (IntrinsicN_ _ IntrCellNew (Just schema) [Low initE initDocs]) = do
-  sid <- lcRegisterSchema cfg schema
-  initDocs' <- adaptReadElem cfg initE initDocs
-  return $ initDocs'
-    { poolExpr = lcPrintExpr cfg
-        (IIntrinsicCellNew sid (IRawExpr (render (poolExpr initDocs')))) }
-lowerNativeExprRaw cfg origExpr (IntrinsicN_ _ IntrCellGet (Just schema) [Low _ handleDocs]) = do
-  sid <- lcRegisterSchema cfg schema
-  innerType <- lcTypeOf cfg (typeFof origExpr)
-  return $ handleDocs
-    { poolExpr = lcPrintExpr cfg
-        (IIntrinsicCellGet sid innerType (IRawExpr (render (poolExpr handleDocs)))) }
-lowerNativeExprRaw cfg _ (IntrinsicN_ _ IntrCellPut (Just schema)
-                                  [Low _ handleDocs, Low valueE valueDocs]) = do
-  sid <- lcRegisterSchema cfg schema
-  valueDocs' <- adaptReadElem cfg valueE valueDocs
-  let raw d = IRawExpr (render (poolExpr d))
-      putExpr = IIntrinsicCellPut sid (raw handleDocs) (raw valueDocs')
-  return $ mergePoolDocs (const $ lcPrintExpr cfg putExpr) [handleDocs, valueDocs']
-lowerNativeExprRaw cfg origExpr (IntrinsicN_ _ IntrCellSlots (Just schema) [Low _ handleDocs]) = do
-  sid <- lcRegisterSchema cfg schema
-  listType <- lcTypeOf cfg (typeFof origExpr)
-  idx <- lcNewIndex cfg
-  -- Bound with its type, which is the only place a language that infers the
-  -- element type can read it.
-  let v = render ((helperVar cfg) idx)
-      call = IIntrinsicCellSlots sid listType (IRawExpr (render (poolExpr handleDocs)))
-  return $ handleDocs
-    { poolPriorLines = poolPriorLines handleDocs ++ [lcPrintStmt cfg (IAssign v listType call)]
-    , poolExpr = pretty v }
-lowerNativeExprRaw cfg _ (IntrinsicN_ _ IntrReduceList _ [Low _ combineDocs, Low _ listDocs]) = do
-  let raw d = IRawExpr (render (poolExpr d))
-  return $ mergePoolDocs (const $ lcPrintExpr cfg (IIntrinsicReduceList (raw combineDocs) (raw listDocs))) [combineDocs, listDocs]
 lowerNativeExprRaw cfg origExpr (IntrinsicN_ _ intr (Just schema) [Low _ fnDocs])
   | intr `elem` [IntrGather, IntrGatherNative] = do
       sid <- lcRegisterSchema cfg schema
@@ -3175,20 +3133,25 @@ lowerNativeExprRaw cfg _ (IntrinsicN_ _ intr (Just schema) [Low _ handleDocs, Lo
             | native = IIntrinsicGatherPut sid (raw handleDocs) (raw valueDocs')
             | otherwise = IIntrinsicWrite sid (IIntLit Nothing 0) (raw valueDocs') (raw handleDocs)
       return $ mergePoolDocs (const $ lcPrintExpr cfg putExpr) [handleDocs, valueDocs']
-lowerNativeExprRaw cfg _ (IntrinsicN_ _ IntrCellSink mschema [Low _ handleDocs, Low batchE batchDocs, Low _ fnDocs]) = do
+lowerNativeExprRaw cfg origExpr (IntrinsicN_ _ intr mschema [Low iniE iniDocs, Low stepE stepDocs, Low _ combDocs, Low _ fnDocs])
+  | intr `elem` [IntrFold, IntrFoldFile] = do
+      msid <- traverse (lcRegisterSchema cfg) mschema
+      accType <- lcTypeOf cfg (typeFof origExpr)
+      batchType <- stepBatchType cfg stepE
+      iniDocs' <- adaptReadElem cfg iniE iniDocs
+      let raw d = IRawExpr (render (poolExpr d))
+          call = IIntrinsicFold (intr == IntrFoldFile) msid accType batchType (raw iniDocs') (raw stepDocs) (raw combDocs) (raw fnDocs)
+      return $ mergePoolDocs (const $ lcPrintExpr cfg call) [iniDocs', stepDocs, combDocs, fnDocs]
+lowerNativeExprRaw cfg _ (IntrinsicN_ _ IntrFoldPut mschema [Low stepE stepDocs, Low _ handleDocs, Low batchE batchDocs]) = do
   msid <- traverse (lcRegisterSchema cfg) mschema
+  accType <- case typeFof stepE of
+    FunF [b, _] _ -> lcTypeOf cfg b
+    _ -> return Nothing
+  batchType <- stepBatchType cfg stepE
   batchDocs' <- adaptReadElem cfg batchE batchDocs
   let raw d = IRawExpr (render (poolExpr d))
-      sinkExpr = IIntrinsicCellSink msid (raw handleDocs) (raw batchDocs') (raw fnDocs)
-  return $ mergePoolDocs (const $ lcPrintExpr cfg sinkExpr) [handleDocs, batchDocs', fnDocs]
-lowerNativeExprRaw cfg _ (IntrinsicN_ _ IntrCellSide mschema [Low _ handleDocs, Low fnE fnDocs]) = do
-  msid <- traverse (lcRegisterSchema cfg) mschema
-  batchType <- case typeFof fnE of
-    FunF [b] _ -> lcTypeOf cfg b
-    _ -> return Nothing
-  let raw d = IRawExpr (render (poolExpr d))
-      sideExpr = IIntrinsicCellSide msid batchType (raw handleDocs) (raw fnDocs)
-  return $ mergePoolDocs (const $ lcPrintExpr cfg sideExpr) [handleDocs, fnDocs]
+      putExpr = IIntrinsicFoldPut msid accType batchType (raw stepDocs) (raw handleDocs) (raw batchDocs')
+  return $ mergePoolDocs (const $ lcPrintExpr cfg putExpr) [stepDocs, handleDocs, batchDocs']
 lowerNativeExprRaw cfg _ (IntrinsicN_ _ IntrReplay (Just schema)
                                   [Low handleE handleDocs, Low _ fnDocs]) = do
   sid <- lcRegisterSchema cfg schema
@@ -3307,8 +3270,6 @@ lowerNativeExprRaw cfg _ (WireToNativeN_ _ s intr schema argLows) = do
     (IntrLoad, [p]) -> return $ IIntrinsicLoad sid rawType (arg p)
     (IntrRead, [x]) -> return $ IIntrinsicRead sid rawType (arg x)
     (IntrUnpack, [x]) -> return $ IIntrinsicUnpack sid rawType (arg x)
-    (IntrCellGet, [h]) -> return $ IIntrinsicCellGet sid rawType (arg h)
-    (IntrCellSlots, [h]) -> return $ IIntrinsicCellSlots sid rawType (arg h)
     (IntrGather, [f]) -> return $ IIntrinsicGather False sid rawType (arg f)
     _ -> error ("morloc bug: WireToNativeN over " <> show intr)
   idx <- lcNewIndex cfg

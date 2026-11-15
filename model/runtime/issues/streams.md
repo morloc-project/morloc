@@ -172,9 +172,8 @@ here touch locks and ownership: model first.
   `drop_ended_slots` walks every attached handle per doorbell ring and per
   fork-pool retire check; `unlock_and_close` filters every locked
   descriptor per close; `custody::shares` revisits every hosted writer per
-  open, idle and end (quadratic in streams opened); `cell.rs` scans every
-  cell ever made per new cell and per dispatch end, and every thread per
-  fold step; `intrinsics.rs` scans every temp file per `@close` and per
+  open, idle and end (quadratic in streams opened); `fold.rs` scans every
+  thread's slot per fold put; `intrinsics.rs` scans every temp file per `@close` and per
   dispatch end; `arrow_shm.rs` `try_borrow` walks every live view per Arrow
   table returned and `borrow_forget` per view released (quadratic to
   release them all); `daemon_ffi.rs` counts remote jobs in the whole queue

@@ -171,3 +171,17 @@
 - **Dead C++ search paths.** [read 2026-11-04, from mim's list]
   CodeGenerator/Pools/CAbi/Members/Cpp.hs:2876 and :2890-2891 search
   `STATE/src/<base>/...`, which nothing writes.
+- **The shared Rust target dir grows without bound.** [measured
+  2026-11-15] `makeTheMaker` (CodeGenerator/Pools/CAbi/Members/Rust.hs)
+  builds every pool into `STATE/cache/rust-build` under a crate named for
+  its build dir, then `cp`s the binary out; nothing ever removes the
+  crate's outputs. Each new build dir (every golden run, every temp dir)
+  adds about 24 MB: 2192 pools, 63 GB of 75 GB in the dev env. `mim clean`
+  (mim ENV-12) removes them after the fact; the fix is to delete the pool's
+  own outputs (`release/pool_X`, `deps/pool_X-*`, `build/pool_X-*`,
+  `.fingerprint/pool_X-*`) after the copy.
+- **`morloc eval` leaves empty work dirs.** [observed 2026-11-15, cause
+  not found] `MORLOC_HOME/tmp` holds 342 empty `morloc-eval-*` dirs dated
+  2026-10-01 to now, though Subcommands.hs:557 removes the dir in a
+  `bracket`. A SIGKILL (the MCP eval wall-clock kill, memguard) skips a
+  bracket; unconfirmed.

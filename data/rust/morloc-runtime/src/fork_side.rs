@@ -1,5 +1,5 @@
 //! The fork side (side.md): the record that lets a forked child's batches
-//! reach an in-pool accumulator, a native gather's list or a fold cell,
+//! reach an in-pool accumulator, a native gather's list or a fold's slots,
 //! through a side file.
 
 use std::collections::HashMap;
@@ -27,9 +27,25 @@ const HEADER: u64 = 17;
 
 const POISON: u64 = u64::MAX;
 
+/// What an entry accumulates: its route (FOLD-1) and what its errors name.
+#[derive(Clone, Copy, PartialEq)]
+pub enum Kind {
+    Gather,
+    Fold,
+}
+
+impl Kind {
+    fn noun(self) -> &'static str {
+        match self {
+            Kind::Gather => "gather",
+            Kind::Fold => "fold",
+        }
+    }
+}
+
 pub struct SideEntry {
+    kind: Kind,
     owner: u64,
-    fold: bool,
     temp_owner: u64,
     born: u64,
     state: AtomicI64,
@@ -80,8 +96,7 @@ impl Sides {
 }
 
 // SIDE-2: held across fork, so a child sees every entry its parent made.
-// SIDE-4: gather ids are negative, apart from every fold cell handle (the
-// key of its cell's entry) and every stream handle.
+// SIDE-4: gather and fold ids are negative, apart from every stream handle.
 pub(crate) static REGISTRY: crate::fork_policy::Held<Option<Sides>> = crate::fork_policy::Held::new(19, None);
 
 // SIDE-2, SIDE-3
@@ -95,8 +110,8 @@ fn err(msg: &str) -> MorlocError {
     MorlocError::Other(msg.to_string())
 }
 
-fn late() -> MorlocError {
-    err("a sink was called after its stream was gathered")
+fn late(noun: &str) -> MorlocError {
+    MorlocError::Other(format!("a sink was called after its {noun} finished"))
 }
 
 fn torn() -> MorlocError {
@@ -150,17 +165,30 @@ fn lookup(id: i64) -> Option<Arc<SideEntry>> {
 }
 
 // SIDE-11: an id with no entry here was taken, or names another process's.
-fn missing(id: i64) -> MorlocError {
+fn missing(id: i64, noun: &str) -> MorlocError {
     let here = registry_lock().as_ref().is_some_and(|m| m.made_here(id));
     if id >= 0 || here {
-        late()
+        late(noun)
     } else {
-        err("a native gather handle reached another process")
+        MorlocError::Other(format!("a native {noun} handle reached another process"))
     }
 }
 
-fn entry(id: i64) -> Result<Arc<SideEntry>, MorlocError> {
-    lookup(id).ok_or_else(|| missing(id))
+fn entry(id: i64, noun: &str) -> Result<Arc<SideEntry>, MorlocError> {
+    lookup(id).ok_or_else(|| missing(id, noun))
+}
+
+fn mismatched(e: &SideEntry, kind: Kind) -> MorlocError {
+    MorlocError::Other(format!("internal error: a {} call reached a {} entry", kind.noun(), e.kind.noun()))
+}
+
+// SIDE-4: a call of one kind never reads another kind's native pointer.
+fn entry_of(id: i64, kind: Kind) -> Result<Arc<SideEntry>, MorlocError> {
+    let e = entry(id, kind.noun())?;
+    if e.kind != kind {
+        return Err(mismatched(&e, kind));
+    }
+    Ok(e)
 }
 
 impl Drop for SideEntry {
@@ -196,7 +224,7 @@ impl SideEntry {
         let fd = unsafe { libc::open(c.as_ptr(), libc::O_RDWR | libc::O_CLOEXEC) };
         if fd < 0 {
             let e = std::io::Error::last_os_error();
-            return Err(if e.kind() == std::io::ErrorKind::NotFound { late() } else { MorlocError::Io(e) });
+            return Err(if e.kind() == std::io::ErrorKind::NotFound { late(self.kind.noun()) } else { MorlocError::Io(e) });
         }
         let f = SideFd(fd);
         loop {
@@ -220,7 +248,7 @@ impl SideEntry {
         let f = self.lock_file()?;
         let (state, committed) = read_header(f.0)?;
         if state != OPEN {
-            return Err(late());
+            return Err(late(self.kind.noun()));
         }
         #[cfg(test)]
         tests::hook(&tests::AFTER_APPEND_CHECK);
@@ -260,9 +288,10 @@ impl SideEntry {
         Ok(Reader { file: Some(f), at: HEADER, end: committed })
     }
 
-    // SIDE-1: one CAS to TAKEN, after any prepare settles the word; the
-    // native list is cleared under its mutex (SIDE-5). The state taken from.
-    fn end(&self) -> i64 {
+    // SIDE-1: one CAS to TAKEN, after any prepare settles the word. FOLD-2:
+    // the CAS and the clearing of the native pointer are one locked step.
+    // The state taken from, and the native pointer it held.
+    fn end(&self) -> (i64, *mut c_void) {
         loop {
             let st = self.state.load(Ordering::Acquire);
             if st == SWITCHING {
@@ -271,10 +300,9 @@ impl SideEntry {
             }
             #[cfg(test)]
             tests::hook(&tests::AFTER_TAKE_LOAD);
+            let _g = self.lock.lock().unwrap_or_else(|p| p.into_inner());
             if st == TAKEN || self.state.compare_exchange(st, TAKEN, Ordering::AcqRel, Ordering::Acquire).is_ok() {
-                let _g = self.lock.lock().unwrap_or_else(|p| p.into_inner());
-                self.native.store(ptr::null_mut(), Ordering::Release);
-                return st;
+                return (st, self.native.swap(ptr::null_mut(), Ordering::AcqRel));
             }
         }
     }
@@ -299,7 +327,7 @@ fn pread_exact(fd: i32, buf: &mut [u8], mut offset: u64) -> Result<(), MorlocErr
     Ok(())
 }
 
-// A side file's descriptor; closing it releases its lock.
+// SIDE-10: a side file's descriptor; closing it releases its flock.
 struct SideFd(i32);
 
 impl Drop for SideFd {
@@ -308,20 +336,11 @@ impl Drop for SideFd {
     }
 }
 
-/// A gather's entry, holding `native`.
-pub fn new(native: *mut c_void) -> Result<i64, MorlocError> {
-    insert(None, false, native)
-}
-
-/// A fold cell's entry, keyed by its handle.
-pub(crate) fn new_for_cell(handle: i64) {
-    let _ = insert(Some(handle), true, ptr::null_mut());
-}
-
-fn insert(id: Option<i64>, fold: bool, native: *mut c_void) -> Result<i64, MorlocError> {
+/// A gather's or a fold's entry, holding `native`.
+pub fn new(native: *mut c_void, kind: Kind) -> Result<i64, MorlocError> {
     let e = Arc::new(SideEntry {
+        kind,
         owner: generation(),
-        fold,
         temp_owner: crate::intrinsics::current_temp_owner(),
         born: crate::intrinsics::next_dispatch_id(),
         state: AtomicI64::new(NATIVE),
@@ -334,10 +353,7 @@ fn insert(id: Option<i64>, fold: bool, native: *mut c_void) -> Result<i64, Morlo
         let mut reg = registry_lock();
         if FORKING.load(Ordering::SeqCst) == 0 {
             let sides = reg.get_or_insert_with(Sides::default);
-            let id = match id {
-                Some(id) => id,
-                None => sides.fresh_id()?,
-            };
+            let id = sides.fresh_id()?;
             sides.entries.insert(id, e);
             return Ok(id);
         }
@@ -356,30 +372,31 @@ fn remove_own(id: i64) -> Option<Arc<SideEntry>> {
 }
 
 pub fn drop_entry(id: i64) {
-    let Some(e) = remove_own(id) else { return };
-    if e.end() == SIDE {
+    drop_native(id, Kind::Gather);
+}
+
+/// The native pointer of an entry ended unread; null if there was none.
+pub(crate) fn drop_native(id: i64, kind: Kind) -> *mut c_void {
+    if let Some(e) = lookup(id).filter(|e| e.kind != kind) {
+        morloc_runtime_types::panic::fatal(&format!("morloc: {}", mismatched(&e, kind)));
+    }
+    let Some(e) = remove_own(id) else { return ptr::null_mut() };
+    let (st, native) = e.end();
+    if st == SIDE {
         let _ = e.close();
     }
+    native
 }
 
-/// SIDE-4: a fold handle with no entry here was made in another pool,
-/// whose step reaches its cell (SIDE-5).
-pub fn route(id: i64) -> Result<bool, MorlocError> {
-    match lookup(id) {
-        Some(e) => route_entry(&e),
-        None if id > 0 => Ok(true),
-        None => Err(missing(id)),
-    }
-}
-
+// FOLD-1: a fold's owner puts natively in every state but TAKEN.
 fn route_entry(e: &SideEntry) -> Result<bool, MorlocError> {
     let st = e.state.load(Ordering::Acquire);
     if st == TAKEN {
-        return Err(late());
+        return Err(late(e.kind.noun()));
     }
     if generation() == e.owner {
         return match st {
-            _ if e.fold => Ok(true),
+            _ if e.kind == Kind::Fold => Ok(true),
             NATIVE | SWITCHING => Ok(true),
             SIDE => Ok(false),
             _ => Err(err("the side file for a forked child could not be made")),
@@ -394,33 +411,36 @@ fn route_entry(e: &SideEntry) -> Result<bool, MorlocError> {
     }
 }
 
-pub type AppendFn = unsafe extern "C" fn(container: *mut c_void, item: *mut c_void);
-
-/// SIDE-5
-///
-/// # Safety
-/// `append` must accept the container registered for `id` and `item`.
-pub unsafe fn put_native(id: i64, append: AppendFn, item: *mut c_void) -> Result<bool, MorlocError> {
-    let e = entry(id)?;
+/// SIDE-5, FOLD-1: `f` applied to the native pointer under the entry lock;
+/// None when the put goes to the side file. A null pointer in the owner is
+/// a late put.
+pub(crate) fn with_native<R>(id: i64, kind: Kind, f: impl FnOnce(*mut c_void) -> R) -> Result<Option<R>, MorlocError> {
+    let e = entry_of(id, kind)?;
     if !route_entry(&e)? {
-        return Ok(false);
+        return Ok(None);
     }
     let _g = e.lock.lock().unwrap_or_else(|p| p.into_inner());
     let c = e.native.load(Ordering::Acquire);
     if c.is_null() {
-        return Err(late());
+        return Err(late(e.kind.noun()));
     }
-    append(c, item);
-    Ok(true)
+    Ok(Some(f(c)))
 }
+
+/// SIDE-4: whether a gather's put holds its batch natively.
+pub fn route(id: i64) -> Result<bool, MorlocError> {
+    entry_of(id, Kind::Gather).and_then(|e| route_entry(&e))
+}
+
+pub type NativeFn = unsafe extern "C" fn(native: *mut c_void, arg: *mut c_void);
 
 /// SIDE-10: a batch with no schema (no wire form) poisons the side file.
 ///
 /// # Safety
 /// `value` points at a value laid out as `schema` describes.
 pub unsafe fn put_side(id: i64, schema: Option<&Schema>, value: AbsPtr) -> Result<(), MorlocError> {
-    let e = entry(id)?;
-    if route_entry(&e)? && (e.fold || e.state.load(Ordering::Acquire) != SIDE) {
+    let e = entry(id, "gather or fold")?;
+    if route_entry(&e)? && (e.kind == Kind::Fold || e.state.load(Ordering::Acquire) != SIDE) {
         return Err(err("a native put was sent to its side file"));
     }
     match schema {
@@ -434,18 +454,29 @@ pub unsafe fn put_side(id: i64, schema: Option<&Schema>, value: AbsPtr) -> Resul
 
 /// SIDE-1, SIDE-7, SIDE-8
 pub fn take(id: i64) -> Result<Reader, MorlocError> {
-    let e = lookup(id).ok_or_else(|| err("a gather was finished twice"))?;
-    if generation() != e.owner {
-        return Err(err("a forked child cannot finish its parent's gather"));
+    finish(id, Kind::Gather).1
+}
+
+/// The native pointer the take cleared (null if none), and the side records.
+pub(crate) fn finish(id: i64, kind: Kind) -> (*mut c_void, Result<Reader, MorlocError>) {
+    let noun = kind.noun();
+    let twice = || MorlocError::Other(format!("a {noun} was finished twice"));
+    let Some(e) = lookup(id) else { return (ptr::null_mut(), Err(twice())) };
+    if e.kind != kind {
+        return (ptr::null_mut(), Err(mismatched(&e, kind)));
     }
-    let st = e.end();
+    if generation() != e.owner {
+        return (ptr::null_mut(), Err(MorlocError::Other(format!("a forked child cannot finish its parent's {noun}"))));
+    }
+    let (st, native) = e.end();
     remove_own(id);
-    match st {
+    let records = match st {
         NATIVE => Ok(Reader { file: None, at: 0, end: 0 }),
         SIDE => e.close(),
-        TAKEN => Err(err("a gather was finished twice")),
+        TAKEN => Err(twice()),
         _ => Err(err("a forked child's batches were lost: the side file could not be made")),
-    }
+    };
+    (native, records)
 }
 
 // SIDE-2: called from the prepare handler before any held lock is taken.
@@ -538,7 +569,7 @@ mod c_abi {
     #[no_mangle]
     pub unsafe extern "C" fn mlc_side_new(native: *mut c_void, errmsg: *mut *mut c_char) -> i64 {
         crate::error::clear_errmsg(errmsg);
-        match new(native) {
+        match new(native, Kind::Gather) {
             Ok(id) => id,
             Err(e) => {
                 crate::error::set_errmsg(errmsg, &e);
@@ -547,7 +578,8 @@ mod c_abi {
         }
     }
 
-    /// 1 for a native put, 0 for a side put, -1 on error.
+    /// 1 if a gather's batch is held natively here, 0 if it goes to the
+    /// side file, -1 on error. A native put may still find the side route.
     ///
     /// # Safety
     /// `errmsg` is a valid out-pointer.
@@ -563,15 +595,18 @@ mod c_abi {
         }
     }
 
-    /// 1 if appended natively, 0 if the batch goes to the side file, -1 on error.
+    /// 1 if `f` ran on the native pointer, 0 if the batch goes to the side
+    /// file, -1 on error. `is_fold` names the fold in an error that finds no
+    /// entry.
     ///
     /// # Safety
-    /// As `put_native`.
+    /// `f` must accept the native pointer registered for `id` and `arg`.
     #[no_mangle]
-    pub unsafe extern "C" fn mlc_side_put_native(id: i64, append: AppendFn, item: *mut c_void, errmsg: *mut *mut c_char) -> i32 {
+    pub unsafe extern "C" fn mlc_side_with_native(id: i64, is_fold: i32, f: NativeFn, arg: *mut c_void, errmsg: *mut *mut c_char) -> i32 {
         crate::error::clear_errmsg(errmsg);
-        match put_native(id, append, item) {
-            Ok(native) => native as i32,
+        let kind = if is_fold != 0 { Kind::Fold } else { Kind::Gather };
+        match with_native(id, kind, |c| f(c, arg)) {
+            Ok(ran) => ran.is_some() as i32,
             Err(e) => {
                 crate::error::set_errmsg(errmsg, &e);
                 -1
@@ -661,10 +696,10 @@ mod c_abi {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
-    pub(super) static AFTER_TAKE_LOAD: Mutex<Option<fn()>> = Mutex::new(None);
+    pub(crate) static AFTER_TAKE_LOAD: Mutex<Option<fn()>> = Mutex::new(None);
     pub(super) static AFTER_APPEND_CHECK: Mutex<Option<fn()>> = Mutex::new(None);
     fn take_all(id: i64) -> Result<Vec<Vec<u8>>, MorlocError> {
         let mut r = take(id)?;
@@ -690,7 +725,7 @@ mod tests {
     #[test]
     fn a_fork_between_takes_read_and_its_end_loses_no_child_batch() {
         in_child(|| {
-            let id = new(ptr::null_mut()).unwrap();
+            let id = new(ptr::null_mut(), Kind::Gather).unwrap();
             HOOK_ID.store(id, Ordering::SeqCst);
             fn fork_a_writer() {
                 let id = HOOK_ID.load(Ordering::SeqCst);
@@ -712,7 +747,7 @@ mod tests {
     #[test]
     fn an_owner_write_racing_take_is_in_the_result_or_fails() {
         in_child(|| {
-            let id = new(ptr::null_mut()).unwrap();
+            let id = new(ptr::null_mut(), Kind::Gather).unwrap();
             force_side(id);
             HOOK_ID.store(id, Ordering::SeqCst);
             fn take_meanwhile() {
@@ -746,6 +781,15 @@ mod tests {
         assert!(libc::WIFEXITED(st) && libc::WEXITSTATUS(st) == 0, "status {st}");
     }
 
+    pub(crate) fn side_with_record(id: i64) -> bool {
+        force_side(id);
+        write_side(id, b"side")
+    }
+
+    pub(crate) fn write_side(id: i64, rec: &[u8]) -> bool {
+        lookup(id).is_some_and(|e| e.write_record(rec).is_ok())
+    }
+
     fn state(id: i64) -> i64 {
         lookup(id).unwrap().state.load(Ordering::Acquire)
     }
@@ -765,24 +809,66 @@ mod tests {
     #[test]
     fn a_put_after_take_fails_and_take_without_fork_has_no_side() {
         in_child(|| {
-            let id = new(ptr::null_mut()).unwrap();
+            let id = new(ptr::null_mut(), Kind::Gather).unwrap();
             route(id).unwrap() && take_all(id).unwrap().is_empty() && route(id).is_err() && take_all(id).is_err()
         });
     }
 
     #[test]
-    fn a_fold_owner_folds_natively_until_and_after_take() {
+    fn an_unordered_owner_puts_natively_until_take() {
         in_child(|| {
-            new_for_cell(7);
-            force_side(7);
-            route(7).unwrap() && take_all(7).unwrap().is_empty() && route(7).ok() == Some(true)
+            let id = new(ptr::null_mut(), Kind::Fold).unwrap();
+            force_side(id);
+            let native = entry(id, "fold").and_then(|e| route_entry(&e)).ok() == Some(true);
+            let none = finish(id, Kind::Fold).1.is_ok_and(|mut r| r.next().unwrap().is_none());
+            native && none && with_native(id, Kind::Fold, |_| ()).is_err()
+        });
+    }
+
+    #[test]
+    fn a_fold_owners_side_write_is_refused_and_writes_nothing() {
+        in_child(|| {
+            let id = new(ptr::null_mut(), Kind::Fold).unwrap();
+            force_side(id);
+            let e = lookup(id).unwrap();
+            let refused = unsafe { put_side(id, None, ptr::null_mut()) }
+                .err()
+                .is_some_and(|e| format!("{e}").contains("native put was sent"));
+            refused && committed(&e) == HEADER && finish(id, Kind::Fold).1.is_ok_and(|mut r| r.next().unwrap().is_none())
+        });
+    }
+
+    #[test]
+    fn a_call_of_the_other_kind_is_refused_and_leaves_the_entry() {
+        in_child(|| {
+            let mut native = 7u8;
+            let p = &mut native as *mut u8 as *mut c_void;
+            let gather = new(p, Kind::Gather).unwrap();
+            let fold = new(p, Kind::Fold).unwrap();
+            let refused = |r: Result<Option<()>, MorlocError>| {
+                r.err().is_some_and(|e| format!("{e}").contains("internal error"))
+            };
+            let (fp, fr) = finish(gather, Kind::Fold);
+            let (gp, gr) = finish(fold, Kind::Gather);
+            let calls = refused(with_native(gather, Kind::Fold, |_| ()))
+                && refused(with_native(fold, Kind::Gather, |_| ()))
+                && route(fold).is_err()
+                && fp.is_null()
+                && fr.is_err()
+                && gp.is_null()
+                && gr.is_err();
+            let drops = std::panic::catch_unwind(|| drop_native(gather, Kind::Fold)).is_err()
+                && std::panic::catch_unwind(|| drop_native(fold, Kind::Gather)).is_err();
+            let kept = with_native(gather, Kind::Gather, |n| n == p).unwrap() == Some(true)
+                && with_native(fold, Kind::Fold, |n| n == p).unwrap() == Some(true);
+            calls && drops && kept && finish(gather, Kind::Gather).0 == p && finish(fold, Kind::Fold).0 == p
         });
     }
 
     #[test]
     fn a_gather_owner_writes_the_side_once_switched() {
         in_child(|| {
-            let id = new(ptr::null_mut()).unwrap();
+            let id = new(ptr::null_mut(), Kind::Gather).unwrap();
             lookup(id).unwrap().state.store(SWITCHING, Ordering::Release);
             let switching = route(id).unwrap();
             lookup(id).unwrap().state.store(NATIVE, Ordering::Release);
@@ -796,7 +882,7 @@ mod tests {
     #[test]
     fn a_forked_child_cannot_take_and_its_record_reaches_the_owner() {
         in_child(|| {
-            let id = new(ptr::null_mut()).unwrap();
+            let id = new(ptr::null_mut(), Kind::Gather).unwrap();
             force_side(id);
             let e = lookup(id).unwrap();
             e.write_record(b"parent").unwrap();
@@ -817,7 +903,7 @@ mod tests {
     #[test]
     fn a_write_after_take_fails() {
         in_child(|| {
-            let id = new(ptr::null_mut()).unwrap();
+            let id = new(ptr::null_mut(), Kind::Gather).unwrap();
             force_side(id);
             let e = lookup(id).unwrap();
             let path = e.path().unwrap().to_string();
@@ -834,24 +920,20 @@ mod tests {
     #[test]
     fn a_schemaless_child_batch_fails_the_take() {
         in_child(|| {
-            new_for_cell(9);
-            force_side(9);
-            let e = lookup(9).unwrap();
-            let owner_refused = unsafe { put_side(9, None, ptr::null_mut()) }.is_err() && committed(&e) == HEADER;
+            let id = new(ptr::null_mut(), Kind::Gather).unwrap();
+            let owner_refused = unsafe { put_side(id, None, ptr::null_mut()) }.is_err();
+            force_side(id);
+            let e = lookup(id).unwrap();
+            let unwritten = committed(&e) == HEADER;
             let pid = unsafe { libc::fork() };
             if pid == 0 {
-                let failed = unsafe { put_side(9, None, ptr::null_mut()) }.is_err();
+                let failed = unsafe { put_side(id, None, ptr::null_mut()) }.is_err();
                 unsafe { libc::_exit(if failed { 0 } else { 1 }) };
             }
             let child_ok = reaped(pid);
-            let failed = take_all(9).err().is_some_and(|e| format!("{e}").contains("no wire form"));
-            owner_refused && child_ok && failed
+            let failed = take_all(id).err().is_some_and(|e| format!("{e}").contains("no wire form"));
+            owner_refused && unwritten && child_ok && failed
         });
-    }
-
-    #[test]
-    fn a_fold_put_with_no_entry_here_runs_the_step() {
-        in_child(|| route(12345).ok() == Some(true));
     }
 
     #[test]
@@ -864,29 +946,27 @@ mod tests {
             let pid = unsafe { libc::fork() };
             if pid == 0 {
                 unsafe {
-                    *slot = new(ptr::null_mut()).unwrap();
+                    *slot = new(ptr::null_mut(), Kind::Gather).unwrap();
                     libc::_exit(0)
                 };
             }
-            let mine = new(ptr::null_mut()).unwrap();
+            let mine = new(ptr::null_mut(), Kind::Gather).unwrap();
             let child_ok = reaped(pid);
             let theirs = unsafe { *slot };
             unsafe { libc::munmap(page, 8) };
             let foreign = |r: Result<bool, MorlocError>| r.err().is_some_and(|e| format!("{e}").contains("another process"));
             let refused = foreign(route(theirs))
-                && foreign(unsafe { put_native(theirs, noop_append, ptr::null_mut()) });
+                && foreign(with_native(theirs, Kind::Gather, |_| ()).map(|r| r.is_some()));
             let taken = take_all(mine).is_ok();
-            let late_mine = route(mine).err().is_some_and(|e| format!("{e}").contains("after its stream was gathered"));
+            let late_mine = route(mine).err().is_some_and(|e| format!("{e}").contains("after its gather finished"));
             child_ok && mine != theirs && refused && taken && late_mine
         });
     }
 
-    unsafe extern "C" fn noop_append(_: *mut c_void, _: *mut c_void) {}
-
     #[test]
     fn owner_threads_writing_while_take_runs_lose_and_tear_nothing() {
         in_child(|| {
-            let id = new(ptr::null_mut()).unwrap();
+            let id = new(ptr::null_mut(), Kind::Gather).unwrap();
             force_side(id);
             let e = lookup(id).unwrap();
             let (ok, taken) = std::thread::scope(|s| {
@@ -934,7 +1014,7 @@ mod tests {
     #[test]
     fn a_write_that_fails_midway_leaves_no_torn_record() {
         in_child(|| {
-            let id = new(ptr::null_mut()).unwrap();
+            let id = new(ptr::null_mut(), Kind::Gather).unwrap();
             force_side(id);
             let e = lookup(id).unwrap();
             e.write_record(b"first").unwrap();
@@ -947,7 +1027,7 @@ mod tests {
     #[test]
     fn a_failed_commit_leaves_exactly_the_committed_records() {
         in_child(|| {
-            let id = new(ptr::null_mut()).unwrap();
+            let id = new(ptr::null_mut(), Kind::Gather).unwrap();
             force_side(id);
             let e = lookup(id).unwrap();
             e.write_record(b"first").unwrap();
@@ -962,7 +1042,7 @@ mod tests {
     #[test]
     fn a_torn_commit_fails_later_writes_and_the_take() {
         in_child(|| {
-            let id = new(ptr::null_mut()).unwrap();
+            let id = new(ptr::null_mut(), Kind::Gather).unwrap();
             force_side(id);
             let e = lookup(id).unwrap();
             e.write_record(b"first").unwrap();
@@ -1006,7 +1086,7 @@ mod tests {
     #[test]
     fn a_fork_settles_a_live_native_entry_and_a_spawn_does_not() {
         in_child(|| {
-            let id = new(ptr::null_mut()).unwrap();
+            let id = new(ptr::null_mut(), Kind::Gather).unwrap();
             let path = std::ffi::CString::new("/bin/true").unwrap();
             let argv = [path.as_ptr(), ptr::null()];
             let mut child: libc::pid_t = 0;

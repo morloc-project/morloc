@@ -634,21 +634,6 @@ data Intrinsic
                     -- call ends, and return its path. NOT user-facing;
                     -- synthesized by the whole-form `@with`/`@render` handler
                     -- to gather a stream to disk before applying the handler.
-  | IntrCellNew     -- ^ @cellnew :: b -> <IO> (Cell b)@ -- create a fold
-                    -- accumulator seeded with the given value. NOT
-                    -- user-facing; synthesized by the `@fold` handler form.
-  | IntrCellGet     -- ^ @cellget :: Cell b -> <IO> b@ -- read the calling
-                    -- thread's accumulator, or the seed if that thread has
-                    -- not folded yet.
-  | IntrCellPut     -- ^ @cellput :: Cell b -> b -> <IO> ()@ -- replace the
-                    -- calling thread's accumulator. Thread-local, so a
-                    -- producer driving its sink from several threads loses
-                    -- no updates and needs no lock.
-  | IntrCellReduce  -- ^ @cellreduce :: (b -> b -> b) -> Cell b -> <IO> b@ --
-                    -- merge every thread's accumulator with the handler's
-                    -- `combine` and release the cell. Never sees an empty
-                    -- cell: one that was never folded into answers with its
-                    -- seed, which is what an empty stream folds to.
   | IntrReplay      -- ^ @replay :: IStream a -> ([a] -> <IO> ()) -> <IO> ()@ --
                     -- call the function on every frame (sub-packet) of the
                     -- stream, in order, empty frames included. Synthesized
@@ -668,12 +653,16 @@ data Intrinsic
                     -- around the wire form of a Packable literal: gives it
                     -- the form the pool's decoder gives a received value of
                     -- its schema (NATIVE-8). Python and R only.
-  | IntrCellSlots   -- ^ internal @cellslots :: Cell b -> <IO> [b]: every
-                    -- accumulator of a cell, in its wire form, and the cell
-                    -- released. With IntrReduceList it is how @cellreduce
-                    -- runs when a packer builds the accumulator's native form.
-  | IntrReduceList  -- ^ internal @reducelist :: (b -> b -> b) -> [b] -> b,
-                    -- over a non-empty list.
+  | IntrFold        -- ^ internal @fold :: b -> (b -> [a] -> b) -> (b -> b -> b)
+                    -- -> (Cell b -> <IO> ()) -> <IO> b: run the function on a
+                    -- fresh fold handle and return the slots it folded,
+                    -- combined (fold.md). Synthesized by the `@fold` handler.
+  | IntrFoldFile    -- ^ internal: the @fold of a Python or R pool whose handle
+                    -- crosses pools: batches go through a temp-file stream
+                    -- and are stepped after the function returns (FOLD-9).
+  | IntrFoldPut     -- ^ internal @foldput :: (b -> [a] -> b) -> Cell b -> [a]
+                    -- -> <IO> (): step this thread's slot by a batch
+                    -- (FOLD-1), or send it on (SIDE-4, FOLD-9).
   | IntrGather      -- ^ internal @gather :: (Cell [a] -> <IO> ()) -> <IO> [a]:
                     -- run the function on a fresh gather handle and return
                     -- every batch put into it, in order (SIDE-6). Synthesized
@@ -684,13 +673,6 @@ data Intrinsic
                     -- own list, chosen by Serialize where the batch has a
                     -- wire form and the language holds batches natively.
   | IntrGatherPutNative -- ^ internal: the @gatherput of a native gather.
-  | IntrCellSink    -- ^ internal @cellsink :: Cell b -> [a] -> ([a] -> <IO> ())
-                    -- -> <IO> (): fold a batch with the function in the cell's
-                    -- own process, or send it to the cell's side file from a
-                    -- forked child (SIDE-4).
-  | IntrCellSide    -- ^ internal @cellside :: Cell b -> ([a] -> <IO> ()) ->
-                    -- <IO> (): fold every batch forked children sent the cell
-                    -- (SIDE-7).
   | IntrIFileWalk   -- ^ Unified IFile pattern walker. Synthesized by Express.hs
                     -- and Nexus.hs from any pattern application with an IFile
                     -- receiver (`.[i] f`, `.[s:e:p] f`, `.foo.bar f`, mixed
@@ -779,10 +761,6 @@ intrinsicSig IntrTell = IntrSig "tell" (Just 0) True True
 intrinsicSig IntrCollect = IntrSig "collect" (Just 1) True True
 intrinsicSig IntrShape = IntrSig "shape" (Just 2) False False
 intrinsicSig IntrTmpfile = IntrSig "tmpfile" (Just 0) True False
-intrinsicSig IntrCellNew = IntrSig "cellnew" (Just 1) True False
-intrinsicSig IntrCellGet = IntrSig "cellget" (Just 1) True False
-intrinsicSig IntrCellPut = IntrSig "cellput" (Just 2) True False
-intrinsicSig IntrCellReduce = IntrSig "cellreduce" (Just 2) True False
 intrinsicSig IntrReplay = IntrSig "replay" (Just 2) True False
 intrinsicSig IntrChannel = IntrSig "channel" (Just 0) True False
 intrinsicSig IntrSpawn = IntrSig "spawn" (Just 2) True False
@@ -791,12 +769,11 @@ intrinsicSig IntrGather = IntrSig "gather" (Just 1) True False
 intrinsicSig IntrGatherPut = IntrSig "gatherput" (Just 2) True False
 intrinsicSig IntrGatherNative = IntrSig "gathernative" (Just 1) True False
 intrinsicSig IntrGatherPutNative = IntrSig "gatherputnative" (Just 2) True False
-intrinsicSig IntrCellSink = IntrSig "cellsink" (Just 3) True False
-intrinsicSig IntrCellSide = IntrSig "cellside" (Just 2) True False
+intrinsicSig IntrFold = IntrSig "fold" (Just 4) True False
+intrinsicSig IntrFoldFile = IntrSig "foldfile" (Just 4) True False
+intrinsicSig IntrFoldPut = IntrSig "foldput" (Just 3) True False
 intrinsicSig IntrIFileWalk = IntrSig "ifile_walk" Nothing True False
 intrinsicSig IntrConform = IntrSig "conform" (Just 1) False False
-intrinsicSig IntrCellSlots = IntrSig "cellslots" (Just 1) True False
-intrinsicSig IntrReduceList = IntrSig "reducelist" (Just 2) False False
 
 intrinsicName :: Intrinsic -> Text
 intrinsicName = sigName . intrinsicSig

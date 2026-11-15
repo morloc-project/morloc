@@ -155,17 +155,16 @@ extern "C" {
     fn mlc_spawn(socket_path: *const c_char, mid: u32, args: *const *const u8, nargs: usize, handle: i64, errmsg: *mut *mut c_char) -> bool;
     fn mlc_tell(errmsg: *mut *mut c_char) -> u64;
     fn mlc_tmpfile(errmsg: *mut *mut c_char) -> *mut c_char;
-    fn mlc_cell_new(schema: *const CSchema, init: *const c_void, errmsg: *mut *mut c_char) -> i64;
-    fn mlc_cell_get(handle: i64, schema: *const CSchema, errmsg: *mut *mut c_char) -> *mut c_void;
-    fn mlc_cell_put(handle: i64, schema: *const CSchema, value: *const c_void, errmsg: *mut *mut c_char) -> i32;
-    fn mlc_cell_count(handle: i64, errmsg: *mut *mut c_char) -> i64;
-    fn mlc_cell_slot(handle: i64, index: i64, schema: *const CSchema, errmsg: *mut *mut c_char) -> *mut c_void;
-    fn mlc_cell_free(handle: i64, errmsg: *mut *mut c_char) -> i32;
     fn mlc_side_new(native: *mut c_void, errmsg: *mut *mut c_char) -> i64;
-    fn mlc_side_route(id: i64, errmsg: *mut *mut c_char) -> i32;
-    fn mlc_side_put_native(id: i64, append: unsafe extern "C" fn(*mut c_void, *mut c_void), item: *mut c_void, errmsg: *mut *mut c_char) -> i32;
+    fn mlc_side_with_native(id: i64, is_fold: i32, f: unsafe extern "C" fn(*mut c_void, *mut c_void), arg: *mut c_void, errmsg: *mut *mut c_char) -> i32;
     fn mlc_side_put(id: i64, schema: *const CSchema, value: *const c_void, errmsg: *mut *mut c_char) -> i32;
     fn mlc_side_take(id: i64, errmsg: *mut *mut c_char) -> *mut c_void;
+    fn mlc_fold_new(ctx: *mut c_void, fresh: unsafe extern "C" fn(*mut c_void) -> *mut c_void, errmsg: *mut *mut c_char) -> i64;
+    fn mlc_fold_checkout(id: i64, value: *mut *mut c_void, fresh: *mut i32, errmsg: *mut *mut c_char) -> i32;
+    fn mlc_fold_store(id: i64, value: *mut c_void, errmsg: *mut *mut c_char) -> i32;
+    fn mlc_fold_failed(id: i64);
+    fn mlc_fold_take(id: i64, values: *mut *mut *mut c_void, n: *mut usize, errmsg: *mut *mut c_char) -> *mut c_void;
+    fn mlc_fold_drop(id: i64, values: *mut *mut *mut c_void, n: *mut usize);
     fn mlc_side_next(reader: *mut c_void, schema: *const CSchema, eof: *mut i32, errmsg: *mut *mut c_char) -> *mut c_void;
     fn mlc_side_reader_free(reader: *mut c_void);
     fn mlc_side_drop(id: i64);
@@ -4099,83 +4098,7 @@ pub unsafe fn tmpfile() -> String {
     cstr_take(s)
 }
 
-/// @cellnew: create a fold accumulator seeded with `init`.
-pub unsafe fn cell_new<T: ToVoidstar>(schema: &Schema, init: &T) -> u64 {
-    let mut handle: i64 = -1;
-    let rc = with_voidstar(init, schema, |vs, cs, err| {
-        handle = mlc_cell_new(cs, vs, err);
-        if handle < 0 { 1 } else { 0 }
-    });
-    if rc != 0 {
-        failed_without_reason("@fold");
-    }
-    handle as u64
-}
-
-/// @cellget: this thread's accumulator.
-pub unsafe fn cell_get<T: FromVoidstar>(schema: &Schema, handle: u64) -> T {
-    let mut err: *mut c_char = std::ptr::null_mut();
-    let voidstar = mlc_cell_get(handle as i64, cschema_of(schema), &mut err);
-    read_runtime_voidstar(voidstar, err, schema, "@fold")
-}
-
-/// @cellput: replace this thread's accumulator.
-pub unsafe fn cell_put<T: ToVoidstar>(schema: &Schema, handle: u64, value: &T) {
-    let rc = with_voidstar(value, schema, |vs, cs, err| {
-        mlc_cell_put(handle as i64, cs, vs, err)
-    });
-    if rc != 0 {
-        failed_without_reason("@fold");
-    }
-}
-
-/// Every accumulator of a cell, in its wire form; with `reduce_list` it
-/// runs @cellreduce.
-pub unsafe fn cell_slots<T: FromVoidstar>(schema: &Schema, handle: u64) -> Vec<T> {
-    let mut err: *mut c_char = std::ptr::null_mut();
-    struct FreeOnUnwind(i64);
-    impl Drop for FreeOnUnwind {
-        fn drop(&mut self) {
-            let mut err: *mut c_char = std::ptr::null_mut();
-            unsafe {
-                mlc_cell_free(self.0, &mut err);
-                discard_err(err);
-            }
-        }
-    }
-    let guard = FreeOnUnwind(handle as i64);
-    let n = mlc_cell_count(handle as i64, &mut err);
-    check_err(err);
-    if n < 1 {
-        failed_without_reason("@fold");
-    }
-    let mut xs = Vec::with_capacity(n.max(0) as usize);
-    for i in 0..n {
-        let mut serr: *mut c_char = std::ptr::null_mut();
-        let vs = mlc_cell_slot(handle as i64, i, cschema_of(schema), &mut serr);
-        xs.push(read_runtime_voidstar(vs, serr, schema, "@fold"));
-    }
-    std::mem::forget(guard);
-    let mut ferr: *mut c_char = std::ptr::null_mut();
-    mlc_cell_free(handle as i64, &mut ferr);
-    check_err(ferr);
-    xs
-}
-
-/// A non-empty list folded with `combine`.
-pub fn reduce_list<T, F: Invoke2<T, T, T>>(combine: F, xs: Vec<T>) -> T {
-    let mut items = xs.into_iter();
-    let mut acc = match items.next() {
-        Some(first) => first,
-        None => failed_without_reason("@fold"),
-    };
-    for x in items {
-        acc = combine.invoke(&acc, &x);
-    }
-    acc
-}
-
-// -- Gathers and fold side files (model/runtime/side.md) ----------------
+// -- Gathers and folds (model/runtime/side.md, fold.md) -----------------
 
 pub trait Batch: Sized + 'static {
     fn join(batches: Vec<Self>) -> Self;
@@ -4238,13 +4161,6 @@ unsafe fn side_each<L: FromVoidstar>(schema: &Schema, reader: &SideReader, mut e
     }
 }
 
-unsafe fn side_route(h: u64) -> bool {
-    let mut err: *mut c_char = std::ptr::null_mut();
-    let r = mlc_side_route(h as i64, &mut err);
-    check_err(err);
-    r == 1
-}
-
 unsafe fn side_put<T: ToVoidstar>(schema: &Schema, h: u64, batch: &T) {
     let rc = with_voidstar(batch, schema, |vs, cs, err| mlc_side_put(h as i64, cs, vs, err));
     if rc != 0 {
@@ -4253,7 +4169,7 @@ unsafe fn side_put<T: ToVoidstar>(schema: &Schema, h: u64, batch: &T) {
 }
 
 /// SIDE-6
-pub unsafe fn gather_native<L: Batch + FromVoidstar, F: Invoke1<u64, ()>>(schema: &Schema, f: F) -> L {
+pub unsafe fn gather_native<L: Batch + FromVoidstar + Send, F: Invoke1<u64, ()>>(schema: &Schema, f: F) -> L {
     let mut list = GatherList::<L> { tag: std::any::TypeId::of::<L>(), batches: Vec::new() };
     let mut err: *mut c_char = std::ptr::null_mut();
     let h = mlc_side_new(&mut list as *mut GatherList<L> as *mut c_void, &mut err);
@@ -4276,14 +4192,14 @@ pub unsafe fn gather_native<L: Batch + FromVoidstar, F: Invoke1<u64, ()>>(schema
 }
 
 /// SIDE-4: a gather id puts to its record, a stream handle to its stream.
-pub unsafe fn gather_put<L: Batch + ToVoidstar>(schema: &Schema, h: u64, batch: L) {
+pub unsafe fn gather_put<L: Batch + ToVoidstar + Send>(schema: &Schema, h: u64, batch: L) {
     if (h as i64) >= 0 {
         write(schema, 0, &batch, h);
         return;
     }
     let mut slot = std::mem::ManuallyDrop::new(batch);
     let mut err: *mut c_char = std::ptr::null_mut();
-    let r = mlc_side_put_native(h as i64, gather_append::<L>, &mut *slot as *mut L as *mut c_void, &mut err);
+    let r = mlc_side_with_native(h as i64, 0, gather_append::<L>, &mut *slot as *mut L as *mut c_void, &mut err);
     if r == 1 {
         return;
     }
@@ -4306,39 +4222,206 @@ pub unsafe fn gather_file<L: FromVoidstar, F: Invoke1<u64, ()>>(schema: &Schema,
     xs
 }
 
-/// SIDE-4, SIDE-10
-pub unsafe fn cell_sink<L: ToVoidstar, F: Invoke1<L, ()>>(schema: &Schema, h: u64, batch: &L, k: F) {
-    if side_route(h) {
-        k.invoke(batch);
+#[repr(C)]
+struct FoldValue<B> {
+    tag: std::any::TypeId,
+    value: B,
+}
+
+unsafe fn fold_value<B: 'static>(p: *mut c_void) -> Box<FoldValue<B>> {
+    if *(p as *const std::any::TypeId) != std::any::TypeId::of::<B>() {
+        morloc_infra_abort("@fold: a batch was put with another accumulator type than its fold's");
+    }
+    Box::from_raw(p as *mut FoldValue<B>)
+}
+
+// FOLD-8: producer threads copy init one at a time, since B need not be Sync.
+#[repr(C)]
+struct FoldInit<B> {
+    tag: std::any::TypeId,
+    value: std::sync::Mutex<B>,
+}
+
+// FOLD-6: under the entry lock, so it only counts a reference to init; the
+// put copies it.
+unsafe extern "C" fn fold_fresh<B: 'static>(init: *mut c_void) -> *mut c_void {
+    std::sync::Arc::increment_strong_count(init as *const FoldInit<B>);
+    init
+}
+
+unsafe fn fold_init<B: Clone + 'static>(p: *mut c_void) -> Box<FoldValue<B>> {
+    let init = std::sync::Arc::from_raw(p as *const FoldInit<B>);
+    if init.tag != std::any::TypeId::of::<B>() {
+        morloc_infra_abort("@fold: a batch was put with another accumulator type than its fold's");
+    }
+    let value = init.value.lock().unwrap_or_else(|p| p.into_inner()).clone();
+    Box::new(FoldValue { tag: init.tag, value })
+}
+
+struct FoldValues<B: 'static>(Vec<Box<FoldValue<B>>>);
+
+unsafe fn fold_values<B: 'static>(values: *mut *mut c_void, n: usize) -> FoldValues<B> {
+    let mut out = Vec::with_capacity(n);
+    for i in 0..n {
+        out.push(fold_value::<B>(*values.add(i)));
+    }
+    libc::free(values as *mut c_void);
+    FoldValues(out)
+}
+
+/// fold.md, FOLD-8: the slots, and the side records `replay` steps from
+/// init (FOLD-3), combined; an empty fold is its init.
+unsafe fn fold_with<B, C, F>(init: &B, combine: C, f: F, replay: impl FnOnce(&SideReader) -> Option<B>) -> B
+where
+    B: Clone + Send + 'static,
+    C: Invoke2<B, B, B>,
+    F: Invoke1<u64, ()>,
+{
+    let ctx = std::sync::Arc::into_raw(std::sync::Arc::new(FoldInit {
+        tag: std::any::TypeId::of::<B>(),
+        value: std::sync::Mutex::new(init.clone()),
+    }));
+    struct Ctx<B>(*const FoldInit<B>);
+    impl<B> Drop for Ctx<B> {
+        fn drop(&mut self) {
+            drop(unsafe { std::sync::Arc::from_raw(self.0) });
+        }
+    }
+    let _ctx = Ctx(ctx);
+    let mut err: *mut c_char = std::ptr::null_mut();
+    let h = mlc_fold_new(ctx as *mut c_void, fold_fresh::<B>, &mut err);
+    check_err(err);
+    struct Abandon<B: 'static>(Option<i64>, std::marker::PhantomData<B>);
+    impl<B: 'static> Drop for Abandon<B> {
+        fn drop(&mut self) {
+            if let Some(h) = self.0 {
+                let (mut values, mut n) = (std::ptr::null_mut(), 0usize);
+                unsafe {
+                    mlc_fold_drop(h, &mut values, &mut n);
+                    drop(fold_values::<B>(values, n));
+                }
+            }
+        }
+    }
+    let mut abandon = Abandon::<B>(Some(h), std::marker::PhantomData);
+    f.invoke(&(h as u64));
+    abandon.0 = None;
+    let (mut values, mut n) = (std::ptr::null_mut(), 0usize);
+    let r = mlc_fold_take(h, &mut values, &mut n, &mut err);
+    let held = fold_values::<B>(values, n);
+    check_err(err);
+    if r.is_null() {
+        failed_without_reason("@fold");
+    }
+    let side = replay(&SideReader(r));
+    let mut acc: Option<B> = None;
+    for v in held.0.into_iter().map(|v| v.value).chain(side) {
+        acc = Some(match acc {
+            Some(a) => combine.invoke(&a, &v),
+            None => v,
+        });
+    }
+    acc.unwrap_or_else(|| init.clone())
+}
+
+pub unsafe fn fold<B, L, S, C, F>(schema: &Schema, init: &B, step: S, combine: C, f: F) -> B
+where
+    B: Clone + Send + 'static,
+    L: FromVoidstar,
+    S: Invoke2<B, L, B>,
+    C: Invoke2<B, B, B>,
+    F: Invoke1<u64, ()>,
+{
+    fold_with(init, combine, f, |reader| {
+        let mut side: Option<B> = None;
+        side_each::<L>(schema, reader, |b| {
+            let acc = side.take().unwrap_or_else(|| init.clone());
+            side = Some(step.invoke(&acc, &b));
+        });
+        side
+    })
+}
+
+/// SIDE-10: a schemaless side file holds only poison records.
+pub unsafe fn fold_schemaless<B, L, S, C, F>(init: &B, _step: S, combine: C, f: F) -> B
+where
+    B: Clone + Send + 'static,
+    S: Invoke2<B, L, B>,
+    C: Invoke2<B, B, B>,
+    F: Invoke1<u64, ()>,
+{
+    fold_with(init, combine, f, |reader| {
+        let mut err: *mut c_char = std::ptr::null_mut();
+        let mut eof: i32 = 0;
+        mlc_side_next(reader.0, std::ptr::null(), &mut eof, &mut err);
+        check_err(err);
+        None
+    })
+}
+
+/// FOLD-1: step this thread's slot, or hand the batch to `side`.
+unsafe fn fold_step<B, L, S>(step: S, h: u64, batch: &L, side: impl FnOnce())
+where
+    B: Clone + Send + 'static,
+    S: Invoke2<B, L, B>,
+{
+    let mut err: *mut c_char = std::ptr::null_mut();
+    let (mut p, mut fresh) = (std::ptr::null_mut(), 0i32);
+    let r = mlc_fold_checkout(h as i64, &mut p, &mut fresh, &mut err);
+    check_err(err);
+    if r == 0 {
+        side();
         return;
     }
-    side_put(schema, h, batch);
+    struct Failed(Option<i64>);
+    impl Drop for Failed {
+        fn drop(&mut self) {
+            if let Some(h) = self.0 {
+                unsafe { mlc_fold_failed(h) };
+            }
+        }
+    }
+    let mut failed = Failed(Some(h as i64));
+    let mut v = if fresh != 0 { fold_init::<B>(p) } else { fold_value::<B>(p) };
+    v.value = step.invoke(&v.value, batch);
+    failed.0 = None;
+    let raw = Box::into_raw(v);
+    if mlc_fold_store(h as i64, raw as *mut c_void, &mut err) != 0 {
+        drop(Box::from_raw(raw));
+        check_err(err);
+        failed_without_reason("@fold");
+    }
 }
 
-/// SIDE-4, SIDE-10: a batch with no wire form poisons the side file.
-pub unsafe fn cell_sink_schemaless<L, F: Invoke1<L, ()>>(h: u64, batch: &L, k: F) {
-    if side_route(h) {
-        k.invoke(batch);
+/// FOLD-1, FOLD-9
+pub unsafe fn fold_put<B, L, S>(schema: &Schema, step: S, h: u64, batch: &L)
+where
+    B: Clone + Send + 'static,
+    L: ToVoidstar,
+    S: Invoke2<B, L, B>,
+{
+    if (h as i64) >= 0 {
+        write(schema, 0, batch, h);
+        flush(h);
         return;
     }
-    let mut err: *mut c_char = std::ptr::null_mut();
-    mlc_side_put(h as i64, std::ptr::null(), std::ptr::null(), &mut err);
-    check_err(err);
+    fold_step(step, h, batch, || side_put(schema, h, batch));
 }
 
-/// SIDE-7
-pub unsafe fn cell_side<L: FromVoidstar, F: Invoke1<L, ()>>(schema: &Schema, h: u64, k: F) {
-    let reader = side_take(h);
-    side_each::<L>(schema, &reader, |b| k.invoke(&b));
-}
-
-/// SIDE-7, SIDE-10: a schemaless side file holds only poison records.
-pub unsafe fn cell_side_schemaless(h: u64) {
-    let reader = side_take(h);
-    let mut err: *mut c_char = std::ptr::null_mut();
-    let mut eof: i32 = 0;
-    mlc_side_next(reader.0, std::ptr::null(), &mut eof, &mut err);
-    check_err(err);
+/// SIDE-10: a batch with no wire form poisons the side file.
+pub unsafe fn fold_put_schemaless<B, L, S>(step: S, h: u64, batch: &L)
+where
+    B: Clone + Send + 'static,
+    S: Invoke2<B, L, B>,
+{
+    if (h as i64) >= 0 {
+        morloc_throw("@fold: this fold reads its batches from a stream, but its batch type has no wire form in Rust");
+    }
+    fold_step(step, h, batch, || {
+        let mut err: *mut c_char = std::ptr::null_mut();
+        mlc_side_put(h as i64, std::ptr::null(), std::ptr::null(), &mut err);
+        check_err(err);
+    });
 }
 
 /// @open (OStream): open a file for writing with the element schema.
@@ -4703,11 +4786,11 @@ mod panic_classifier_tests {
 
     #[test]
     fn a_runtime_crates_frame_is_the_runtimes_from_any_file() {
-        assert!(runtime_symbol("morloc_runtime[1a2b]::cell::cell_put"));
+        assert!(runtime_symbol("morloc_runtime[1a2b]::fold::checkout"));
         assert!(runtime_symbol("<rustmorloc::X as core::ops::Drop>::drop"));
         assert!(!runtime_symbol("morloc_runtimex::f"));
         assert!(!runtime_symbol("pool_ab12::m1"));
-        let t = trace(&[], &[("morloc_runtime[h]::cell::cell_put", Some("/elsewhere/cell.rs")), ("u", Some(USER))], false);
+        let t = trace(&[], &[("morloc_runtime[h]::fold::checkout", Some("/elsewhere/fold.rs")), ("u", Some(USER))], false);
         assert!(walk_is_runtime(&t, &[POOL], &[USER, "/"], &[]));
     }
 
@@ -6131,5 +6214,81 @@ mod frame_stack_tests {
             assert_eq!(other, 0);
             assert_eq!(frame_depth(), 1);
         })
+    }
+}
+
+#[cfg(test)]
+mod fold_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    extern "C" {
+        fn shinit(basename: *const c_char, size: usize, errmsg: *mut *mut c_char) -> *mut c_void;
+        fn shclose(errmsg: *mut *mut c_char) -> bool;
+    }
+
+    const CHILD_ENV: &str = "MORLOC_FOLD_TEST_CHILD";
+
+    static COPYING: AtomicUsize = AtomicUsize::new(0);
+    static OVERLAPS: AtomicUsize = AtomicUsize::new(0);
+
+    // A Send accumulator need not be Sync, so two threads must never copy
+    // one value at once (FOLD-8). This one counts copies that overlap.
+    struct Probe(u64);
+    impl Clone for Probe {
+        fn clone(&self) -> Self {
+            if COPYING.fetch_add(1, Ordering::SeqCst) > 0 {
+                OVERLAPS.fetch_add(1, Ordering::SeqCst);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            COPYING.fetch_sub(1, Ordering::SeqCst);
+            Probe(self.0)
+        }
+    }
+
+    fn step(acc: &Probe, xs: &Vec<i64>) -> Probe {
+        Probe(acc.0 + xs.len() as u64)
+    }
+
+    // The fold needs shared memory, so it runs in a child process of its own.
+    #[test]
+    fn producer_threads_never_copy_init_at_once() {
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["fold_tests::child_folds_from_four_threads", "--exact", "--ignored", "--nocapture"])
+            .env(CHILD_ENV, "1")
+            .stdout(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert_eq!(status.code(), Some(0));
+    }
+
+    #[test]
+    #[ignore]
+    fn child_folds_from_four_threads() {
+        if std::env::var_os(CHILD_ENV).is_none() {
+            return;
+        }
+        let name = CString::new(format!("/morloc-fold-test-{}", std::process::id())).unwrap();
+        let mut err: *mut c_char = std::ptr::null_mut();
+        assert!(!unsafe { shinit(name.as_ptr(), 0x100000, &mut err) }.is_null());
+        let sum = unsafe {
+            fold_schemaless::<Probe, Vec<i64>, _, _, _>(
+                &Probe(0),
+                step,
+                |a: &Probe, b: &Probe| Probe(a.0 + b.0),
+                |h: &u64| {
+                    let h = *h;
+                    std::thread::scope(|s| {
+                        for _ in 0..4 {
+                            s.spawn(move || fold_put_schemaless::<Probe, Vec<i64>, _>(step, h, &vec![1, 2]));
+                        }
+                    });
+                },
+            )
+        };
+        let overlaps = OVERLAPS.load(Ordering::SeqCst);
+        unsafe { shclose(&mut err) };
+        eprintln!("sum {} overlaps {}", sum.0, overlaps);
+        unsafe { libc::_exit(if sum.0 == 8 && overlaps == 0 { 0 } else { 1 }) };
     }
 }

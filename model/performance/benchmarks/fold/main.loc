@@ -1,0 +1,72 @@
+module main (foldNCpp, controlNCpp, foldMapCpp, controlMapCpp, foldMapPy, controlMapPy)
+
+import root
+import root-cpp
+import root-py
+import map-cpp (Map)
+import map-py
+
+source Cpp from "f.hpp"
+  ( "produce" as produceC, "zero_n" as zeroNC, "add_len" as addLenC, "plus" as plusC
+  , "show_n" as showNC, "zero_map" as zeroMapC, "add_map" as addMapC
+  , "plus_map" as plusMapC, "show_map" as showMapC
+  , "control_map" as controlMapC, "control_n" as controlNC )
+
+source Py from "f.py"
+  ( "produce" as produceP, "zero_map" as zeroMapP, "add_map" as addMapP
+  , "plus_map" as plusMapP, "show_map" as showMapP, "control_map" as controlMapP )
+
+produceC :: I64 -> I64 -> I64 -> ([I64] -> <IO> ()) -> <IO> ()
+produceP :: I64 -> I64 -> I64 -> ([I64] -> <IO> ()) -> <IO> ()
+
+zeroNC :: I64
+addLenC :: I64 -> [I64] -> I64
+plusC :: I64 -> I64 -> I64
+--' The count, in C++
+showNC :: I64 -> Str
+
+zeroMapC :: Map I64 I64
+addMapC :: Map I64 I64 -> [I64] -> Map I64 I64
+plusMapC :: Map I64 I64 -> Map I64 I64 -> Map I64 I64
+--' Keys and total, in C++
+showMapC :: Map I64 I64 -> Str
+
+zeroMapP :: Map I64 I64
+addMapP :: Map I64 I64 -> [I64] -> Map I64 I64
+plusMapP :: Map I64 I64 -> Map I64 I64 -> Map I64 I64
+--' Keys and total, in Python
+showMapP :: Map I64 I64 -> Str
+
+--' The same count done where the batches are made, in C++
+controlNC :: I64 -> I64 -> I64 -> Str
+--' The same counting done where the batches are made, in C++
+controlMapC :: I64 -> I64 -> I64 -> Str
+--' The same counting done where the batches are made, in Python
+controlMapP :: I64 -> I64 -> I64 -> Str
+
+--' Count elements with a scalar fold, in C++
+--' @render --n=showNC @fold=addLenC @init=zeroNC @combine=plusC
+foldNCpp :: I64 -> I64 -> I64 -> <IO> ()
+foldNCpp k s b = @collect (produceC k s b)
+
+--' Scalar control, in C++
+controlNCpp :: I64 -> I64 -> I64 -> Str
+controlNCpp k s b = controlNC k s b
+
+--' Count keys with a map fold, in C++
+--' @render --n=showMapC @fold=addMapC @init=zeroMapC @combine=plusMapC
+foldMapCpp :: I64 -> I64 -> I64 -> <IO> ()
+foldMapCpp k s b = @collect (produceC k s b)
+
+--' Map control, in C++
+controlMapCpp :: I64 -> I64 -> I64 -> Str
+controlMapCpp k s b = controlMapC k s b
+
+--' Count keys with a map fold, in Python
+--' @render --n=showMapP @fold=addMapP @init=zeroMapP @combine=plusMapP
+foldMapPy :: I64 -> I64 -> I64 -> <IO> ()
+foldMapPy k s b = @collect (produceP k s b)
+
+--' Map control, in Python
+controlMapPy :: I64 -> I64 -> I64 -> Str
+controlMapPy k s b = controlMapP k s b

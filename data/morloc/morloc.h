@@ -1929,61 +1929,24 @@ char* mlc_tmpfile(ERRMSG);
 int32_t mlc_unlink_tmp(const char* path, ERRMSG);
 
 // ------------------------------------------------------------------------
-// Fold accumulators (the `@fold` stream-handler form)
-//
-// A folding handler turns a stream into one value. The sink cannot return
-// anything, so the running accumulator lives behind one of these handles
-// between batches.
-//
-// A cell holds one accumulator per thread that folds into it: a producer
-// may drive its sink from several threads, and the read-modify-write
-// around a morloc `step` cannot be made atomic from the runtime, since
-// applying `step` means running user code in a pool. Each thread therefore
-// folds without contention and the handler's `combine` merges the slots at
-// the end.
-//
-// Every value a cell is given is copied, and every value it hands back is
-// a fresh single block the caller releases with one shfree.
-
-// Create a cell seeded with `init`. Returns a handle, or -1 on error.
-int64_t mlc_cell_new(const Schema* schema, const void* init, ERRMSG);
-
-// This thread's accumulator; the seed if it has not folded yet.
-void* mlc_cell_get(int64_t handle, const Schema* schema, ERRMSG);
-
-// Replace this thread's accumulator. Returns 0 on success.
-int32_t mlc_cell_put(int64_t handle, const Schema* schema,
-                     const void* value, ERRMSG);
-
-// How many accumulators the final merge must fold. Never zero: an
-// untouched cell answers with its seed, which is what an empty stream
-// folds to.
-int64_t mlc_cell_count(int64_t handle, ERRMSG);
-
-// Accumulator `index`, for the merge. Returns NULL on error.
-void* mlc_cell_slot(int64_t handle, int64_t index, const Schema* schema,
-                    ERRMSG);
-
-// Release a cell and every accumulator in it. Returns 0 on success. A cell
-// still live when its dispatch ends is swept, so a handler that raises
-// before its merge cannot leak one.
-int32_t mlc_cell_free(int64_t handle, ERRMSG);
-
 // The fork side (model/runtime/side.md): an in-pool accumulator's record,
-// through which a forked child's batches reach it. A fold cell has one,
-// keyed by its handle. Each returns -1 (or NULL) on error.
+// through which a forked child's batches reach it. Each returns -1 (or
+// NULL) on error.
 
-// A new gather entry holding `native`, the container mlc_side_put_native
-// appends to.
+// A new gather entry holding `native`, the container mlc_side_with_native
+// gives its function.
 int64_t mlc_side_new(void* native, ERRMSG);
 
-// 1 when a put is native here, 0 when it goes to the side file.
+// 1 when a gather's put holds its batch natively, 0 when it goes to the
+// side file. A put that then finds the side route reports it.
 int32_t mlc_side_route(int64_t id, ERRMSG);
 
-// 1 after `append(native, item)` (SIDE-5), 0 when the batch goes to the
-// side file instead.
-int32_t mlc_side_put_native(int64_t id, void (*append)(void* container, void* item),
-                            void* item, ERRMSG);
+// 1 after `f(native, arg)` ran under the entry lock (SIDE-5), 0 when the
+// batch goes to the side file instead. A fold's entry puts natively in its
+// owner in every state but taken (FOLD-1). `is_fold` names the fold in an
+// error that finds no entry.
+int32_t mlc_side_with_native(int64_t id, int32_t is_fold,
+                             void (*f)(void* native, void* arg), void* arg, ERRMSG);
 
 // Write a batch to the side file. Returns 0 on success. A NULL schema (a
 // batch with no wire form) poisons the file, so the take fails, and fails.
@@ -1999,6 +1962,32 @@ void mlc_side_reader_free(void* reader);
 
 // End an entry without reading it.
 void mlc_side_drop(int64_t id);
+
+// Native fold slots (model/runtime/fold.md). Values are the binding's own
+// pointers; the runtime never reads them.
+
+// A fold entry; `fresh(ctx)` makes a slot's first value (FOLD-6) under the
+// entry lock.
+int64_t mlc_fold_new(void* ctx, void* (*fresh)(void* ctx), ERRMSG);
+
+// FOLD-1 phase one: 1 with this thread's value checked out (*fresh set when
+// `fresh` just made it), 0 when the batch goes to the side file.
+int32_t mlc_fold_checkout(int64_t id, void** value, int32_t* fresh, ERRMSG);
+
+// FOLD-1 phase three. Returns 0 once stored; on error the caller keeps
+// `value`.
+int32_t mlc_fold_store(int64_t id, void* value, ERRMSG);
+
+// FOLD-4: this thread's checked-out step failed.
+void mlc_fold_failed(int64_t id);
+
+// FOLD-2..4: seal and end the fold. *values (free with free()) holds every
+// stored value, the caller's to release, even on error. Returns the reader
+// over the side batches, or NULL on error.
+void* mlc_fold_take(int64_t id, void*** values, size_t* n, ERRMSG);
+
+// End a fold unread; its stored values as for mlc_fold_take.
+void mlc_fold_drop(int64_t id, void*** values, size_t* n);
 
 // ========================================================================
 // Section 25: Function declarations -- Slurm

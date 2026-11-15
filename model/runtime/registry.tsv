@@ -68,8 +68,6 @@ morloc-runtime/cache.rs::-::CACHE_HITS	counter
 morloc-runtime/cache.rs::-::CACHE_MISSES	counter		
 morloc-runtime/cache.rs::-::CACHE_STORES	counter		
 morloc-runtime/cache.rs::read_cache_compression_level::CACHED	lazy		
-morloc-runtime/cell.rs::-::TAG	fork-scoped		
-morloc-runtime/cell.rs::-::CELL_REGISTRY	reset		
 morloc-runtime/fork_side.rs::-::REGISTRY	held	19	
 morloc-runtime/fork_side.rs::-::FORKING	fork-scoped		
 morloc-runtime/fork_side.rs::-::SideEntry.lock	instance		
@@ -78,6 +76,10 @@ morloc-runtime/fork_side.rs::-::AFTER_APPEND_CHECK	test-only
 morloc-runtime/fork_side.rs::-::HOOK_ID	test-only		
 morloc-runtime/fork_side.rs::-::TAKER	test-only		
 morloc-runtime/fork_side.rs::-::FAIL_COMMIT	test-only		
+morloc-runtime/fold.rs::-::BEFORE_STORE	test-only		
+morloc-runtime/fold.rs::-::FRESH	test-only		
+morloc-runtime/fold.rs::-::ID	test-only		
+morloc-runtime/fold.rs::-::RESULT	test-only		
 morloc-runtime/cli.rs::-::STDIN_CLAIMED	counter		
 morloc-runtime/cli.rs::-::SPOOLED	reset		
 morloc-runtime/crash.rs::-::LANG	startup		
@@ -276,6 +278,9 @@ rustmorloc/lib.rs::-::FRAMES_FREE	thread
 rustmorloc/lib.rs::-::QUEUE	thread		
 rustmorloc/lib.rs::-::TMPDIR	startup		
 rustmorloc/lib.rs::-::REGISTERED	startup		
+rustmorloc/lib.rs::-::FoldInit.value	instance		
+rustmorloc/lib.rs::-::COPYING	test-only		
+rustmorloc/lib.rs::-::OVERLAPS	test-only		
 morloc-nexus/main.rs::-::FRONTEND_ROUTER	exec-only		
 morloc-nexus/mcp.rs::new_session_id::CTR	exec-only		
 morloc-nexus/mcp.rs::-::CallSlots.free	exec-only		

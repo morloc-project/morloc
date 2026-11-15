@@ -157,6 +157,18 @@ A handler that takes the whole list holds it in memory whatever the
 mechanism, so the gather needs no file: the batches are moved into one
 list where the handler runs. 
 
+### ENC-14 A folding @collect costs little more than its step
+Intent: proposed
+Bench: fold
+Model: t(b) = c + s*b for b batches of 64 keys through `@collect` into a folding `@render` handler (scalar count; key-count Map with k = 1k, 10k keys), against a control that does the same counting where the batches are made; `<series>.extra` = s_fold - s_control in us per batch, C++ and Python
+Measured: 2026-11-15-0120-3e8e8f406+dirty-d2 (native slots, the checked-out accumulator moved into step), load 1.7-4.6. extra: cpp.n 0.11, cpp.map1k 0.55, cpp.map10k 7.06, py.map1k 1.16, py.map10k 0.91 us/batch. Before, 2026-11-14 native-fold-baseline (SHM cells), load 0.5-1.1: cpp.n 0.69, cpp.map1k 143, cpp.map10k 1468, py.map1k 143, py.map10k 1708.
+Goal: cpp.map10k.extra <= 50 us/batch, py.map10k.extra <= 50 us/batch
+
+A fold holds one accumulator per thread; where it is kept in shared memory
+every batch decodes and re-encodes it, so the cost grows with the
+accumulator, not the batch. Kept native where step runs, a batch costs the
+step alone.
+
 ### ENC-13 A strided or field-tail IFile slice costs near a unit slice of its output
 Intent: proposed
 Bench: ifile-slice

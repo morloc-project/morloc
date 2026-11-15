@@ -1,0 +1,151 @@
+-- Folds held natively where step runs (fold.md).
+--
+-- empty: a producer that puts nothing folds to init, in every language,
+-- after a fork that put nothing (the side route), and with a Python or R
+-- fold fed from C++ (the file route, FOLD-9).
+--
+-- threads: four C++ threads put into a Python and an R fold (FOLD-9),
+-- four Rust threads into a Rust fold, four C++ threads into a C++ fold.
+-- Thread t puts batches t*100 .. t*100+b for b in 0..4, summing to 9080.
+--
+-- inplace: four Python threads fold with a step that mutates its
+-- accumulator in place, from an init that is one module-level dict. Each
+-- slot starts from its own copy (FOLD-6): 0:20,1:16,2:12,3:8,4:4.
+--
+-- late: the producer keeps its sink and puts 1 and 2; the handler, which
+-- runs after the fold returned, calls the kept sink and says whether the
+-- late put failed.
+
+module main
+  ( emptyCpp, emptyPy, emptyR, emptyRust, emptyForkCpp, emptyForkPy, emptyFilePy, emptyFileR
+  , threadsCpp, threadsPy, threadsR, threadsRust, inplacePy, lateCpp )
+
+import root-cpp
+import root-py
+import root-r
+import root-rust
+import map-py (Map)
+
+source Cpp from "impl.hpp"
+  ( "produce_none" as noneC, "produce_fork_none" as forkNoneC, "produce_threads" as threadsC
+  , "produce_store" as storeC, "show_late" as showLateC
+  , "add_sum" as addSumC, "merge" as mergeC, "show_n" as showNC )
+source Py from "impl.py"
+  ( "produce_none" as noneP, "produce_fork_none" as forkNoneP, "produce_threads" as threadsP
+  , "zero_counts" as zeroCountsP, "count_into" as countIntoP, "merge_counts" as mergeCountsP
+  , "show_counts" as showCountsP
+  , "add_sum" as addSumP, "merge" as mergeP, "show_n" as showNP )
+source R from "impl.R"
+  ("produce_none" as noneR, "add_sum" as addSumR, "merge" as mergeR, "show_n" as showNR)
+source Rust from "impl.rs"
+  ( "produce_none" as noneRs, "produce_threads" as threadsRs
+  , "add_sum" as addSumRs, "merge" as mergeRs, "show_n" as showNRs )
+
+noneC :: ([I64] -> <IO> ()) -> <IO> ()
+forkNoneC :: ([I64] -> <IO> ()) -> <IO> ()
+threadsC :: ([I64] -> <IO> ()) -> <IO> ()
+storeC :: ([I64] -> <IO> ()) -> <IO> ()
+noneP :: ([I64] -> <IO> ()) -> <IO> ()
+forkNoneP :: ([I64] -> <IO> ()) -> <IO> ()
+threadsP :: ([I64] -> <IO> ()) -> <IO> ()
+noneR :: ([I64] -> <IO> ()) -> <IO> ()
+noneRs :: ([I64] -> <IO> ()) -> <IO> ()
+threadsRs :: ([I64] -> <IO> ()) -> <IO> ()
+
+addSumC :: Int -> [I64] -> Int
+mergeC :: Int -> Int -> Int
+--' The sum, shown by C++
+showNC :: Int -> Str
+--' The sum, and what a late put did
+showLateC :: Int -> Str
+addSumP :: Int -> [I64] -> Int
+mergeP :: Int -> Int -> Int
+--' The sum, shown by Python
+showNP :: Int -> Str
+addSumR :: Int -> [I64] -> Int
+mergeR :: Int -> Int -> Int
+--' The sum, shown by R
+showNR :: Int -> Str
+addSumRs :: Int -> [I64] -> Int
+mergeRs :: Int -> Int -> Int
+--' The sum, shown by Rust
+showNRs :: Int -> Str
+
+zeroCountsP :: Map Int Int
+countIntoP :: Map Int Int -> [I64] -> Map Int Int
+mergeCountsP :: Map Int Int -> Map Int Int -> Map Int Int
+--' The counts, shown by Python
+showCountsP :: Map Int Int -> Str
+
+zero :: Int
+zero = 0
+
+--' Fold nothing in C++
+--' @render --n=showNC @fold=addSumC @init=zero @combine=mergeC
+emptyCpp :: <IO> ()
+emptyCpp = @collect noneC
+
+--' Fold nothing in Python
+--' @render --n=showNP @fold=addSumP @init=zero @combine=mergeP
+emptyPy :: <IO> ()
+emptyPy = @collect noneP
+
+--' Fold nothing in R
+--' @render --n=showNR @fold=addSumR @init=zero @combine=mergeR
+emptyR :: <IO> ()
+emptyR = @collect noneR
+
+--' Fold nothing in Rust
+--' @render --n=showNRs @fold=addSumRs @init=zero @combine=mergeRs
+emptyRust :: <IO> ()
+emptyRust = @collect noneRs
+
+--' Fold nothing from a C++ fork
+--' @render --n=showNC @fold=addSumC @init=zero @combine=mergeC
+emptyForkCpp :: <IO> ()
+emptyForkCpp = @collect forkNoneC
+
+--' Fold nothing from a Python fork
+--' @render --n=showNP @fold=addSumP @init=zero @combine=mergeP
+emptyForkPy :: <IO> ()
+emptyForkPy = @collect forkNoneP
+
+--' Fold nothing from C++ in Python
+--' @render --n=showNP @fold=addSumP @init=zero @combine=mergeP
+emptyFilePy :: <IO> ()
+emptyFilePy = @collect noneC
+
+--' Fold nothing from C++ in R
+--' @render --n=showNR @fold=addSumR @init=zero @combine=mergeR
+emptyFileR :: <IO> ()
+emptyFileR = @collect noneC
+
+--' Fold C++ threads in C++
+--' @render --n=showNC @fold=addSumC @init=zero @combine=mergeC
+threadsCpp :: <IO> ()
+threadsCpp = @collect threadsC
+
+--' Fold C++ threads in Python
+--' @render --n=showNP @fold=addSumP @init=zero @combine=mergeP
+threadsPy :: <IO> ()
+threadsPy = @collect threadsC
+
+--' Fold C++ threads in R
+--' @render --n=showNR @fold=addSumR @init=zero @combine=mergeR
+threadsR :: <IO> ()
+threadsR = @collect threadsC
+
+--' Fold Rust threads in Rust
+--' @render --n=showNRs @fold=addSumRs @init=zero @combine=mergeRs
+threadsRust :: <IO> ()
+threadsRust = @collect threadsRs
+
+--' Fold Python threads in place
+--' @render --n=showCountsP @fold=countIntoP @init=zeroCountsP @combine=mergeCountsP
+inplacePy :: <IO> ()
+inplacePy = @collect threadsP
+
+--' Call a finished fold's sink
+--' @render --n=showLateC @fold=addSumC @init=zero @combine=mergeC
+lateCpp :: <IO> ()
+lateCpp = @collect storeC

@@ -47,7 +47,7 @@ import qualified Morloc.CodeGenerator.Infer as Infer
 import Morloc.CodeGenerator.Segment (checkScopes, segment)
 import Morloc.CodeGenerator.Serial (checkPackerCoherence)
 import Morloc.CodeGenerator.Reduce (reduce)
-import Morloc.CodeGenerator.Serialize (serialize)
+import Morloc.CodeGenerator.Serialize (headsById, serialize)
 import Morloc.CodeGenerator.Suspension (lowerSuspensions)
 import qualified Morloc.Data.DAG as DAG
 import qualified Morloc.Frontend.API as F
@@ -214,7 +214,7 @@ lowerPools rASTs = do
     >>= mapM segment |>> concat
     -- every variable a generated manifold refers to is bound in it
     >>= mapM checkScopes
-    >>= mapM serialize
+    >>= (\hs -> mapM (serialize (headsById hs)) hs)
     >>= mapM reduce
     >>= (\ms -> checkManifoldIds reg ms >> return (pool reg ms))
 

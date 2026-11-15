@@ -1818,44 +1818,28 @@ synthE _ g (IntrinsicS IntrWrite [levelE, handleE, listE]) = do
          )
 synthE i _ (IntrinsicS IntrWrite args) =
   MM.throwCompilerBugAt i $ "IntrWrite expects 3 args (level, handle, list), got " <> pretty (length args)
--- The fold accumulator. `Cell b` carries the accumulated type, forcing a
--- folding handler's init, step and combine to agree; an untyped handle
--- would be unsound.
-synthE _ g (IntrinsicS IntrCellNew [initE]) = do
-  let (g1, b) = newvar "cell_acc_" g
-  (g2, _, initE') <- checkG g1 initE b
-  return ( g2
-         , EffectU ioEffectSet (AppU (VarU BT.cellVar) [apply g2 b])
-         , IntrinsicS IntrCellNew [initE']
-         )
-synthE i _ (IntrinsicS IntrCellNew args) =
-  MM.throwCompilerBugAt i $ "IntrCellNew expects 1 arg (init), got " <> pretty (length args)
-synthE _ g (IntrinsicS IntrCellGet [handleE]) = do
+-- @fold :: b -> (b -> [a] -> b) -> (b -> b -> b) -> (Cell b -> <IO> ()) -> <IO> b.
+-- `Cell b` carries the accumulated type, so every put's step agrees with
+-- the fold's.
+synthE _ g (IntrinsicS IntrFold [initE, stepE, combineE, fnE]) = do
+  let (g1, a) = newvar "fold_a_" g
+      (g2, b) = newvar "fold_b_" g1
+  (g3, _, initE') <- checkG g2 initE b
+  (g4, _, stepE') <- checkG g3 stepE (FunU [apply g3 b, BT.listU (apply g3 a)] (apply g3 b))
+  (g5, _, combineE') <- checkG g4 combineE (FunU [apply g4 b, apply g4 b] (apply g4 b))
+  (g6, _, fnE') <- checkG g5 fnE (FunU [AppU (VarU BT.cellVar) [apply g5 b]] (EffectU ioEffectSet BT.unitU))
+  return (g6, EffectU ioEffectSet (apply g6 b), IntrinsicS IntrFold [initE', stepE', combineE', fnE'])
+synthE i _ (IntrinsicS IntrFold args) =
+  MM.throwCompilerBugAt i $ "IntrFold expects 4 args (init, step, combine, function), got " <> pretty (length args)
+-- @foldput :: (b -> [a] -> b) -> Cell b -> [a] -> <IO> ()
+synthE _ g (IntrinsicS IntrFoldPut [stepE, handleE, listE]) = do
   (g1, b, handleE') <- checkCellHandle g handleE
-  return ( g1
-         , EffectU ioEffectSet b
-         , IntrinsicS IntrCellGet [handleE']
-         )
-synthE i _ (IntrinsicS IntrCellGet args) =
-  MM.throwCompilerBugAt i $ "IntrCellGet expects 1 arg (handle), got " <> pretty (length args)
-synthE _ g (IntrinsicS IntrCellPut [handleE, valE]) = do
-  (g2, b, handleE') <- checkCellHandle g handleE
-  (g3, _, valE')    <- checkG g2 valE b
-  return ( g3
-         , EffectU ioEffectSet BT.unitU
-         , IntrinsicS IntrCellPut [handleE', valE']
-         )
-synthE i _ (IntrinsicS IntrCellPut args) =
-  MM.throwCompilerBugAt i $ "IntrCellPut expects 2 args (handle, value), got " <> pretty (length args)
-synthE _ g (IntrinsicS IntrCellReduce [combineE, handleE]) = do
-  (g2, bT, handleE') <- checkCellHandle g handleE
-  (g3, _, combineE') <- checkG g2 combineE (FunU [bT, bT] bT)
-  return ( g3
-         , EffectU ioEffectSet (apply g3 bT)
-         , IntrinsicS IntrCellReduce [combineE', handleE']
-         )
-synthE i _ (IntrinsicS IntrCellReduce args) =
-  MM.throwCompilerBugAt i $ "IntrCellReduce expects 2 args (combine, handle), got " <> pretty (length args)
+  let (g2, a) = newvar "foldput_a_" g1
+  (g3, _, listE') <- checkG g2 listE (BT.listU a)
+  (g4, _, stepE') <- checkG g3 stepE (FunU [apply g3 b, BT.listU (apply g3 a)] (apply g3 b))
+  return (g4, EffectU ioEffectSet BT.unitU, IntrinsicS IntrFoldPut [stepE', handleE', listE'])
+synthE i _ (IntrinsicS IntrFoldPut args) =
+  MM.throwCompilerBugAt i $ "IntrFoldPut expects 3 args (step, handle, list), got " <> pretty (length args)
 -- @replay :: IStream a -> ([a] -> <IO> ()) -> <IO> (); each frame is a list.
 synthE _ g (IntrinsicS IntrReplay [handleE, fnE]) = do
   let (g1, a) = newvar "replay_a_" g
@@ -1898,23 +1882,6 @@ synthE _ g (IntrinsicS IntrGatherPut [handleE, listE]) = do
   return (g3, EffectU ioEffectSet BT.unitU, IntrinsicS IntrGatherPut [handleE', listE'])
 synthE i _ (IntrinsicS IntrGatherPut args) =
   MM.throwCompilerBugAt i $ "IntrGatherPut expects 2 args (handle, list), got " <> pretty (length args)
--- @cellsink :: Cell b -> [a] -> ([a] -> <IO> ()) -> <IO> ()
-synthE _ g (IntrinsicS IntrCellSink [handleE, listE, fnE]) = do
-  let (g1, a) = newvar "cellsink_a_" g
-  (g2, _, handleE') <- checkCellHandle g1 handleE
-  (g3, _, listE') <- checkG g2 listE (BT.listU a)
-  (g4, _, fnE') <- checkG g3 fnE (FunU [BT.listU (apply g3 a)] (EffectU ioEffectSet BT.unitU))
-  return (g4, EffectU ioEffectSet BT.unitU, IntrinsicS IntrCellSink [handleE', listE', fnE'])
-synthE i _ (IntrinsicS IntrCellSink args) =
-  MM.throwCompilerBugAt i $ "IntrCellSink expects 3 args (handle, list, function), got " <> pretty (length args)
--- @cellside :: Cell b -> ([a] -> <IO> ()) -> <IO> ()
-synthE _ g (IntrinsicS IntrCellSide [handleE, fnE]) = do
-  let (g1, a) = newvar "cellside_a_" g
-  (g2, _, handleE') <- checkCellHandle g1 handleE
-  (g3, _, fnE') <- checkG g2 fnE (FunU [BT.listU a] (EffectU ioEffectSet BT.unitU))
-  return (g3, EffectU ioEffectSet BT.unitU, IntrinsicS IntrCellSide [handleE', fnE'])
-synthE i _ (IntrinsicS IntrCellSide args) =
-  MM.throwCompilerBugAt i $ "IntrCellSide expects 2 args (handle, function), got " <> pretty (length args)
 -- @settle :: IStream a -> <IO> ().
 synthE _ g (IntrinsicS IntrSettle [handleE]) = do
   let (g1, a) = newvar "settle_a_" g
@@ -2039,8 +2006,8 @@ intrinsicTypeG g IntrThrow _ =
   in Just (g', a)
 intrinsicTypeG g intr _ = (,) g <$> intrinsicType intr
 
--- | Check a @Cell b@ handle and return @b@. Called before a cell
--- intrinsic's other arguments are checked, as for IntrWrite.
+-- | Check a @Cell b@ handle and return @b@. Called before a fold put's
+-- other arguments are checked, as for IntrWrite.
 checkCellHandle ::
   Gamma ->
   AnnoS Int ManyPoly Int ->
@@ -2081,10 +2048,6 @@ intrinsicType IntrWrite = Just (EffectU ioEffectSet (BT.tryU BT.strU BT.unitU))
 -- One clause each, not a guard over a list: this match is exhaustive on
 -- purpose, so that a new Intrinsic constructor fails the build here rather
 -- than falling through to a runtime error.
-intrinsicType IntrCellNew = Nothing
-intrinsicType IntrCellGet = Nothing
-intrinsicType IntrCellPut = Nothing
-intrinsicType IntrCellReduce = Nothing
 intrinsicType IntrReplay = Nothing
 intrinsicType IntrChannel = Nothing
 intrinsicType IntrSpawn = Nothing
@@ -2093,8 +2056,9 @@ intrinsicType IntrGather = Nothing
 intrinsicType IntrGatherPut = Nothing
 intrinsicType IntrGatherNative = Nothing
 intrinsicType IntrGatherPutNative = Nothing
-intrinsicType IntrCellSink = Nothing
-intrinsicType IntrCellSide = Nothing
+intrinsicType IntrFold = Nothing
+intrinsicType IntrFoldFile = Nothing
+intrinsicType IntrFoldPut = Nothing
 intrinsicType IntrAppend = Nothing
 intrinsicType IntrConcat = Just (EffectU ioEffectSet (BT.tryU BT.strU BT.unitU))
 intrinsicType IntrFlush = Just (EffectU ioEffectSet (BT.tryU BT.strU BT.unitU))
@@ -2114,8 +2078,6 @@ intrinsicType IntrTry = Nothing
 intrinsicType IntrCollect = Nothing
 intrinsicType IntrIFileWalk = Nothing
 intrinsicType IntrConform = Nothing
-intrinsicType IntrCellSlots = Nothing
-intrinsicType IntrReduceList = Nothing
 intrinsicType IntrShape = Nothing
 
 -- | Synthesize types for a list of arguments

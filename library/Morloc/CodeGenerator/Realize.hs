@@ -608,6 +608,8 @@ data Ctx = Ctx
   { ctxHeads :: [(EVar, Lang)]
   , ctxCopies :: Map EVar (Scored, Lang)
   , ctxCopyLog :: IORef (Map Int (Map Int (Maybe Lang)))
+  , ctxFolds :: Map EVar Lang
+  -- ^ fold handles in scope, each with its fold's language
   }
 
 -- | Languages a tree must keep when it is placed. @pinHeads@ are recursive
@@ -670,7 +672,7 @@ realizeWithRegistry registry tables pins seedLangs s00 = do
       scored <- maybe (return scored0) (pinRoot scored0) (pinWork pins)
       hostCulprit scored
       copyLog <- MM.liftIO (newIORef Map.empty)
-      e@(AnnoS g li x) <- collapseAnnoS (Ctx (pinHeads pins) Map.empty copyLog) ctx scored
+      e@(AnnoS g li x) <- collapseAnnoS (Ctx (pinHeads pins) Map.empty copyLog Map.empty) ctx scored
       copies <- MM.liftIO (readIORef copyLog)
       checkPlacement copies s0' scored ctx e
       case (li, ctx) of
@@ -1101,6 +1103,18 @@ realizeWithRegistry registry tables pins seedLangs s00 = do
             | null (kidTable k) = [(l, mempty) | l <- rLangs rstat]
             | otherwise = [(l, soften (reachKid l k)) | l <- langs]
       return (IntrinsicS IntrGather [f'], Idx i best)
+    -- A fold follows its step, where its slots are held natively. Its
+    -- producer puts once per batch (F4), so reaching it counts as a
+    -- gather's producer does: below every crossing.
+    scoreExpr rstat (IntrinsicS IntrFold xs, i) = do
+      xs' <- mapM (scoreAnnoS rstat) xs
+      let (held, producer) = splitAt 3 (map kid xs')
+          reach l = mconcat [soften (reachKid l k) | k <- producer, not (null (kidTable k))]
+          base
+            | all (null . kidTable) held = [(l, mempty) | l <- rLangs rstat]
+            | otherwise = scoreApp [] held
+          best = [(l, s <> reach l) | (l, s) <- base]
+      return (IntrinsicS IntrFold xs', Idx i best)
     scoreExpr rstat (IntrinsicS intr xs, i) = do
       xs' <- mapM (scoreAnnoS rstat) xs
       let Idx _ langScores = zipLang i rstat
@@ -1552,6 +1566,19 @@ realizeWithRegistry registry tables pins seedLangs s00 = do
       lang <- pickLanguage heads l1 [x] ss
       x' <- collapseAnnoS heads lang x
       return (LabelS k x', Idx i lang)
+    -- A put runs where its fold's slots are (FOLD-1).
+    collapseExpr heads _ l1 (IntrinsicS IntrFold [ini, step, comb, f], Idx i ss) = do
+      lang <- pickLanguage heads l1 [ini, step, comb] ss
+      held <- mapM (collapseAnnoS heads lang) [ini, step, comb]
+      let heads' = case (lang, f) of
+            (Just l, AnnoS _ _ (LamS [h] _)) -> heads {ctxFolds = Map.insert h l (ctxFolds heads)}
+            _ -> heads
+      f' <- collapseAnnoS heads' lang f
+      return (IntrinsicS IntrFold (held <> [f']), Idx i lang)
+    collapseExpr heads _ _ (IntrinsicS IntrFoldPut xs@[_, AnnoS _ _ (BndS h), _], Idx i _)
+      | Just l <- Map.lookup h (ctxFolds heads) = do
+          xs' <- mapM (collapseAnnoS heads (Just l)) xs
+          return (IntrinsicS IntrFoldPut xs', Idx i (Just l))
     collapseExpr heads _ l1 (IntrinsicS intr xs, Idx i ss) = do
       lang <- pickLanguage heads l1 xs ss
       xs' <- mapM (collapseAnnoS heads lang) xs

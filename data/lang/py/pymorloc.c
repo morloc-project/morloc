@@ -5026,101 +5026,6 @@ error:
     return NULL;
 }
 
-// -- Fold accumulators (the `@fold` stream-handler form) ------------------
-// One accumulator per thread that folds into it; @cellreduce reads them all
-// (mlc_cell_slots) and merges them with the handler's `combine`.
-
-// mlc_cell_new(schema, init) -> handle
-static PyObject* pybinding__mlc_cell_new(PyObject* self, PyObject* args) { MAYFAIL
-    const char* schema_str;
-    PyObject* init_obj;
-    Schema* schema = NULL;
-    void* voidstar = NULL;
-    PARSE_ARGS_OR_ABORT(args, "sO", &schema_str, &init_obj);
-    schema = PyTRY(parse_schema, schema_str);
-    voidstar = to_voidstar(schema, init_obj);
-    PyTRACE(voidstar == NULL)
-    int64_t handle = PyTRY(mlc_cell_new, schema, voidstar);
-    {
-        char* shfree_errmsg = NULL;
-        shfree(voidstar, &shfree_errmsg);
-        free(shfree_errmsg);
-    }
-    free_schema(schema);
-    return PyLong_FromLongLong((long long)handle);
-error:
-    if (voidstar) {
-        char* shfree_errmsg = NULL;
-        shfree(voidstar, &shfree_errmsg);
-        free(shfree_errmsg);
-    }
-    free_schema(schema);
-    return NULL;
-}
-
-// Shared tail for the two accumulator readers.
-static PyObject* cell_value_to_py(Schema* schema, void* voidstar) {
-    // Any view of the block holds it through its owner; the block's own
-    // reference is released as soon as the value is read.
-    PyObject* obj = from_voidstar_owned(schema, voidstar);
-    {
-        char* shfree_errmsg = NULL;
-        shfree(voidstar, &shfree_errmsg);
-        free(shfree_errmsg);
-    }
-    free_schema(schema);
-    if (obj == NULL) {
-        return NULL;
-    }
-    return obj;
-}
-
-// mlc_cell_get(handle, schema) -> value
-static PyObject* pybinding__mlc_cell_get(PyObject* self, PyObject* args) { MAYFAIL
-    long long handle_ll;
-    const char* schema_str;
-    Schema* schema = NULL;
-    PARSE_ARGS_OR_ABORT(args, "Ls", &handle_ll, &schema_str);
-    schema = PyTRY(parse_schema, schema_str);
-    void* voidstar = PyTRY(mlc_cell_get, (int64_t)handle_ll, schema);
-    return cell_value_to_py(schema, voidstar);
-error:
-    free_schema(schema);
-    return NULL;
-}
-
-// mlc_cell_put(handle, schema, value) -> None
-static PyObject* pybinding__mlc_cell_put(PyObject* self, PyObject* args) { MAYFAIL
-    long long handle_ll;
-    const char* schema_str;
-    PyObject* value_obj;
-    Schema* schema = NULL;
-    void* voidstar = NULL;
-    PARSE_ARGS_OR_ABORT(args, "LsO", &handle_ll, &schema_str, &value_obj);
-    schema = PyTRY(parse_schema, schema_str);
-    voidstar = to_voidstar(schema, value_obj);
-    PyTRACE(voidstar == NULL)
-    PyTRY(mlc_cell_put, (int64_t)handle_ll, schema, voidstar);
-    {
-        char* shfree_errmsg = NULL;
-        shfree(voidstar, &shfree_errmsg);
-        free(shfree_errmsg);
-    }
-    free_schema(schema);
-    Py_RETURN_NONE;
-error:
-    if (voidstar) {
-        char* shfree_errmsg = NULL;
-        shfree(voidstar, &shfree_errmsg);
-        free(shfree_errmsg);
-    }
-    free_schema(schema);
-    return NULL;
-}
-
-
-
-
 // mlc_replay(schema, handle, fn) -> None. Call `fn` on every frame
 // (sub-packet) of the stream, in order, each as the list it holds. An empty
 // frame is an empty list; only the end of the stream stops the loop.
@@ -5155,43 +5060,6 @@ static PyObject* pybinding__mlc_replay(PyObject* self, PyObject* args) { MAYFAIL
     Py_RETURN_NONE;
 error:
     if (schema) free_schema(schema);
-    return NULL;
-}
-
-// mlc_cell_slots(schema, handle) -> list. Every accumulator of a cell, in
-// its wire form; with mlc_reduce_list it runs @cellreduce.
-static PyObject* pybinding__mlc_cell_slots(PyObject* self, PyObject* args) { MAYFAIL
-    const char* schema_str;
-    long long handle_ll = -1;
-    Schema* schema = NULL;
-    PyObject* xs = NULL;
-    PARSE_ARGS_OR_ABORT(args, "sL", &schema_str, &handle_ll);
-    int64_t n = PyTRY(mlc_cell_count, (int64_t)handle_ll);
-    if (n < 1) {
-        PyINTERNAL_ABORT("mlc_cell_slots: fold accumulator holds nothing to merge");
-    }
-    xs = PyList_New(0);
-    if (xs == NULL) { goto error; }
-    for (int64_t i = 0; i < n; i++) {
-        schema = PyTRY(parse_schema, schema_str);
-        void* voidstar = PyTRY(mlc_cell_slot, (int64_t)handle_ll, i, schema);
-        PyObject* v = cell_value_to_py(schema, voidstar);
-        schema = NULL;
-        if (v == NULL) { goto error; }
-        int r = PyList_Append(xs, v);
-        Py_DECREF(v);
-        if (r != 0) { goto error; }
-    }
-    PyTRY(mlc_cell_free, (int64_t)handle_ll);
-    return xs;
-error:
-    {
-        char* free_errmsg = NULL;
-        mlc_cell_free((int64_t)handle_ll, &free_errmsg);
-        free(free_errmsg);
-    }
-    Py_XDECREF(xs);
-    free_schema(schema);
     return NULL;
 }
 
@@ -5357,7 +5225,7 @@ static PyObject* pybinding__mlc_gather_put(PyObject* self, PyObject* args) { MAY
         formed = py_gather_form(schema, batch);
         if (formed == NULL) goto error;
         py_gather_item_t item = {formed, 0};
-        r = PyTRY(mlc_side_put_native, (int64_t)h_ll, py_gather_append, (void*)&item);
+        r = PyTRY(mlc_side_with_native, (int64_t)h_ll, 0, py_gather_append, (void*)&item);
         if (item.failed) goto error;
     }
     if (r == 0) {
@@ -5421,17 +5289,140 @@ static PyObject* pybinding__mlc_side_drop(PyObject* self, PyObject* args) {
     Py_RETURN_NONE;
 }
 
-// -- Fold side files (model/runtime/side.md) -----------------------------
+// -- Native folds (model/runtime/fold.md) --------------------------------
+// FOLD-1, FOLD-6
 
-// mlc_side_route(id) -> True when a batch is folded here, False when it goes
-// to the side file.
-static PyObject* pybinding__mlc_side_route(PyObject* self, PyObject* args) { MAYFAIL
-    long long id_ll;
-    PARSE_ARGS_OR_ABORT(args, "L", &id_ll);
-    int32_t r = PyTRY(mlc_side_route, (int64_t)id_ll);
-    return PyBool_FromLong(r == 1);
+static void* py_fold_fresh(void* init) {
+    Py_INCREF((PyObject*)init);
+    return init;
+}
+
+static void py_fold_release(void** values, size_t n) {
+    for (size_t i = 0; i < n; i++) Py_DECREF((PyObject*)values[i]);
+    free(values);
+}
+
+// mlc_fold_new(init) -> handle. FOLD-6, FOLD-10
+static PyObject* pybinding__mlc_fold_new(PyObject* self, PyObject* args) { MAYFAIL
+    PyObject* init;
+    PARSE_ARGS_OR_ABORT(args, "O", &init);
+    int64_t h = PyTRY(mlc_fold_new, (void*)init, py_fold_fresh);
+    return PyLong_FromLongLong((long long)h);
 error:
     return NULL;
+}
+
+// mlc_fold_checkout(h) -> (True, value, fresh) with this thread's value
+// (fresh: init itself, to be copied), or (False, None, False) for the side
+// file.
+static PyObject* pybinding__mlc_fold_checkout(PyObject* self, PyObject* args) { MAYFAIL
+    long long h_ll;
+    void* value = NULL;
+    int32_t fresh = 0;
+    PARSE_ARGS_OR_ABORT(args, "L", &h_ll);
+    int32_t r = PyTRY(mlc_fold_checkout, (int64_t)h_ll, &value, &fresh);
+    if (r == 0) return Py_BuildValue("(OOO)", Py_False, Py_None, Py_False);
+    PyObject* out = Py_BuildValue("(OOO)", Py_True, (PyObject*)value, fresh ? Py_True : Py_False);
+    Py_DECREF((PyObject*)value);
+    return out;
+error:
+    return NULL;
+}
+
+// mlc_fold_store(h, value) -> None
+static PyObject* pybinding__mlc_fold_store(PyObject* self, PyObject* args) { MAYFAIL
+    long long h_ll;
+    PyObject* value;
+    PARSE_ARGS_OR_ABORT(args, "LO", &h_ll, &value);
+    Py_INCREF(value);
+    char* errmsg = NULL;
+    if (mlc_fold_store((int64_t)h_ll, (void*)value, &errmsg) != 0) {
+        Py_DECREF(value);
+        PyErr_SetString(PyMorlocException, errmsg ? errmsg : "@fold: storing a step failed");
+        free(errmsg);
+        return NULL;
+    }
+    Py_RETURN_NONE;
+error:
+    return NULL;
+}
+
+// mlc_fold_failed(h) -> None
+static PyObject* pybinding__mlc_fold_failed(PyObject* self, PyObject* args) {
+    long long h_ll;
+    if (!PyArg_ParseTuple(args, "L", &h_ll)) return NULL;
+    mlc_fold_failed((int64_t)h_ll);
+    Py_RETURN_NONE;
+}
+
+// mlc_fold_take(h, schema, k) -> the stored values, after k is applied to
+// each side batch in order. With a schema of None, a batch in the side
+// file fails the take.
+static PyObject* pybinding__mlc_fold_take(PyObject* self, PyObject* args) { MAYFAIL
+    long long h_ll;
+    PyObject* schema_obj;
+    PyObject* k;
+    Schema* schema = NULL;
+    void* reader = NULL;
+    void** values = NULL;
+    size_t n = 0;
+    PyObject* out = NULL;
+    char* errmsg = NULL;
+    PARSE_ARGS_OR_ABORT(args, "LOO", &h_ll, &schema_obj, &k);
+    reader = mlc_fold_take((int64_t)h_ll, &values, &n, &errmsg);
+    out = PyList_New((Py_ssize_t)n);
+    if (out == NULL) {
+        py_fold_release(values, n);
+        free(errmsg);
+        if (reader) mlc_side_reader_free(reader);
+        return NULL;
+    }
+    for (size_t i = 0; i < n; i++) PyList_SET_ITEM(out, (Py_ssize_t)i, (PyObject*)values[i]);
+    free(values);
+    if (reader == NULL) {
+        PyErr_SetString(PyMorlocException, errmsg ? errmsg : "@fold: the take failed");
+        free(errmsg);
+        Py_DECREF(out);
+        return NULL;
+    }
+    if (schema_obj != Py_None) {
+        const char* schema_str = PyUnicode_AsUTF8(schema_obj);
+        if (schema_str == NULL) goto error;
+        schema = PyTRY(cached_schema, schema_str);
+    }
+    while (1) {
+        int32_t eof = 0;
+        void* voidstar = PyTRY(mlc_side_next, reader, schema, &eof);
+        if (eof) break;
+        PyObject* v = from_voidstar_owned(schema, voidstar);
+        {
+            char* shfree_errmsg = NULL;
+            shfree(voidstar, &shfree_errmsg);
+            free(shfree_errmsg);
+        }
+        if (v == NULL) goto error;
+        PyObject* r = PyObject_CallFunctionObjArgs(k, v, NULL);
+        Py_DECREF(v);
+        if (r == NULL) goto error;
+        Py_DECREF(r);
+    }
+    mlc_side_reader_free(reader);
+    return out;
+error:
+    if (reader) mlc_side_reader_free(reader);
+    Py_XDECREF(out);
+    return NULL;
+}
+
+// mlc_fold_drop(h) -> None: end a fold unread.
+static PyObject* pybinding__mlc_fold_drop(PyObject* self, PyObject* args) {
+    long long h_ll;
+    if (!PyArg_ParseTuple(args, "L", &h_ll)) return NULL;
+    void** values = NULL;
+    size_t n = 0;
+    mlc_fold_drop((int64_t)h_ll, &values, &n);
+    py_fold_release(values, n);
+    Py_RETURN_NONE;
 }
 
 // mlc_side_put(id, schema, batch) -> None. A schema of None (no wire form)
@@ -5464,70 +5455,6 @@ error:
         free(shfree_errmsg);
     }
     return NULL;
-}
-
-// mlc_side_take(id, schema, k) -> None: k applied to each side batch, in
-// order. With a schema of None, a batch in the file fails the take.
-static PyObject* pybinding__mlc_side_take(PyObject* self, PyObject* args) { MAYFAIL
-    long long id_ll;
-    PyObject* schema_obj;
-    PyObject* k;
-    Schema* schema = NULL;
-    void* reader = NULL;
-    PARSE_ARGS_OR_ABORT(args, "LOO", &id_ll, &schema_obj, &k);
-    if (schema_obj != Py_None) {
-        const char* schema_str = PyUnicode_AsUTF8(schema_obj);
-        if (schema_str == NULL) goto error;
-        schema = PyTRY(cached_schema, schema_str);
-    }
-    reader = PyTRY(mlc_side_take, (int64_t)id_ll);
-    while (1) {
-        int32_t eof = 0;
-        void* voidstar = PyTRY(mlc_side_next, reader, schema, &eof);
-        if (eof) break;
-        PyObject* v = from_voidstar_owned(schema, voidstar);
-        {
-            char* shfree_errmsg = NULL;
-            shfree(voidstar, &shfree_errmsg);
-            free(shfree_errmsg);
-        }
-        if (v == NULL) { goto error; }
-        PyObject* r = PyObject_CallFunctionObjArgs(k, v, NULL);
-        Py_DECREF(v);
-        if (r == NULL) { goto error; }
-        Py_DECREF(r);
-    }
-    mlc_side_reader_free(reader);
-    Py_RETURN_NONE;
-error:
-    if (reader) mlc_side_reader_free(reader);
-    return NULL;
-}
-
-// mlc_reduce_list(combine, xs) -> value. A non-empty list folded with
-// `combine`.
-static PyObject* pybinding__mlc_reduce_list(PyObject* self, PyObject* args) {
-    PyObject* combine;
-    PyObject* xs;
-    if (!PyArg_ParseTuple(args, "OO", &combine, &xs)) return NULL;
-    PyObject* items = PySequence_Fast(xs, "mlc_reduce_list: not a sequence");
-    if (items == NULL) return NULL;
-    Py_ssize_t n = PySequence_Fast_GET_SIZE(items);
-    if (n < 1) {
-        Py_DECREF(items);
-        PyErr_SetString(PyExc_RuntimeError, "mlc_reduce_list: nothing to reduce");
-        return NULL;
-    }
-    PyObject* acc = PySequence_Fast_GET_ITEM(items, 0);
-    Py_INCREF(acc);
-    for (Py_ssize_t i = 1; i < n; i++) {
-        PyObject* merged = PyObject_CallFunctionObjArgs(combine, acc, PySequence_Fast_GET_ITEM(items, i), NULL);
-        Py_DECREF(acc);
-        acc = merged;
-        if (acc == NULL) break;
-    }
-    Py_DECREF(items);
-    return acc;
 }
 
 static PyMethodDef Methods[] = {
@@ -5600,19 +5527,18 @@ static PyMethodDef Methods[] = {
     {"mlc_tell", pybinding__mlc_tell, METH_NOARGS, "Elements written to @stdout so far"},
     {"mlc_tmpfile", pybinding__mlc_tmpfile, METH_NOARGS, "Create a temp file for the whole-form gather"},
     {"mlc_unlink_tmp", pybinding__mlc_unlink_tmp, METH_VARARGS, "Unlink a registered temp file"},
-    {"mlc_cell_new", pybinding__mlc_cell_new, METH_VARARGS, "Create a fold accumulator"},
-    {"mlc_cell_get", pybinding__mlc_cell_get, METH_VARARGS, "Read this thread's fold accumulator"},
-    {"mlc_cell_put", pybinding__mlc_cell_put, METH_VARARGS, "Replace this thread's fold accumulator"},
-    {"mlc_cell_slots", pybinding__mlc_cell_slots, METH_VARARGS, "Every fold accumulator, and the cell released"},
-    {"mlc_reduce_list", pybinding__mlc_reduce_list, METH_VARARGS, "Fold a non-empty list with a function"},
     {"mlc_replay", pybinding__mlc_replay, METH_VARARGS, "Call a function on every element of an IStream"},
-    {"mlc_side_route", pybinding__mlc_side_route, METH_VARARGS, "Whether a fold batch is folded here"},
     {"mlc_gather_new", pybinding__mlc_gather_new, METH_VARARGS, "Start a native gather"},
     {"mlc_gather_put", pybinding__mlc_gather_put, METH_VARARGS, "Add a batch to a native gather"},
     {"mlc_gather_take", pybinding__mlc_gather_take, METH_VARARGS, "End a native gather"},
     {"mlc_side_drop", pybinding__mlc_side_drop, METH_VARARGS, "End a gather without reading it"},
     {"mlc_side_put", pybinding__mlc_side_put, METH_VARARGS, "Send a fold batch to the side file"},
-    {"mlc_side_take", pybinding__mlc_side_take, METH_VARARGS, "Apply a function to each of the side file's batches"},
+    {"mlc_fold_new", pybinding__mlc_fold_new, METH_VARARGS, "Start a native fold"},
+    {"mlc_fold_checkout", pybinding__mlc_fold_checkout, METH_VARARGS, "Check this thread's fold slot out"},
+    {"mlc_fold_store", pybinding__mlc_fold_store, METH_VARARGS, "Store this thread's stepped fold slot"},
+    {"mlc_fold_failed", pybinding__mlc_fold_failed, METH_VARARGS, "Mark this thread's fold step failed"},
+    {"mlc_fold_take", pybinding__mlc_fold_take, METH_VARARGS, "End a native fold"},
+    {"mlc_fold_drop", pybinding__mlc_fold_drop, METH_VARARGS, "End a native fold unread"},
     {"mlc_throw", pybinding__mlc_throw, METH_VARARGS, "Raise a MorlocException with the given message"},
     {"mlc_try", pybinding__mlc_try, METH_VARARGS, "Evaluate body; wrap the value with ok, or a caught message with err"},
     {"set_failure_message", pybinding__set_failure_message, METH_VARARGS, "Register the function that renders a failure as text"},

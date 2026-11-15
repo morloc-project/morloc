@@ -120,20 +120,6 @@ printExpr (IIntrinsicLoad sid Nothing path) =
   [idoc|_mlc_load(mlc_schema_table[#{pretty sid}], #{printExpr path})|]
 printExpr (IIntrinsicShow sid e) =
   [idoc|_mlc_show(#{printExpr e}, mlc_schema_table[#{pretty sid}])|]
-printExpr (IIntrinsicCellNew sid e) =
-  [idoc|_mlc_cell_new(mlc_schema_table[#{pretty sid}], #{printExpr e})|]
-printExpr (IIntrinsicCellGet sid (Just t) h) =
-  [idoc|_mlc_cell_get<#{renderIType t}>(mlc_schema_table[#{pretty sid}], #{printExpr h})|]
-printExpr (IIntrinsicCellGet sid Nothing h) =
-  [idoc|_mlc_cell_get(mlc_schema_table[#{pretty sid}], #{printExpr h})|]
-printExpr (IIntrinsicCellPut sid h e) =
-  [idoc|_mlc_cell_put(mlc_schema_table[#{pretty sid}], #{printExpr h}, #{printExpr e})|]
-printExpr (IIntrinsicCellSlots sid (Just t) h) =
-  [idoc|_mlc_cell_slots<#{renderIType t}>(mlc_schema_table[#{pretty sid}], #{printExpr h})|]
-printExpr (IIntrinsicCellSlots sid Nothing h) =
-  [idoc|_mlc_cell_slots(mlc_schema_table[#{pretty sid}], #{printExpr h})|]
-printExpr (IIntrinsicReduceList f xs) =
-  [idoc|_mlc_reduce_list(#{printExpr f}, #{printExpr xs})|]
 printExpr (IIntrinsicChannel sid) =
   [idoc|_mlc_open_channel(mlc_schema_table[#{pretty sid}])|]
 printExpr (IIntrinsicSpawn sid h f) =
@@ -146,16 +132,16 @@ printExpr (IIntrinsicGather native sid Nothing f) =
   [idoc|#{gatherFn native}(mlc_schema_table[#{pretty sid}], #{printExpr f})|]
 printExpr (IIntrinsicGatherPut sid h v) =
   [idoc|_mlc_gather_put(mlc_schema_table[#{pretty sid}], #{printExpr h}, #{printExpr v})|]
-printExpr (IIntrinsicCellSink (Just sid) h v f) =
-  [idoc|_mlc_cell_sink(mlc_schema_table[#{pretty sid}], #{printExpr h}, #{printExpr v}, #{printExpr f})|]
-printExpr (IIntrinsicCellSink Nothing h v f) =
-  [idoc|_mlc_cell_sink_schemaless(#{printExpr h}, #{printExpr v}, #{printExpr f})|]
-printExpr (IIntrinsicCellSide (Just sid) (Just t) h f) =
-  [idoc|_mlc_cell_side<#{renderIType t}>(mlc_schema_table[#{pretty sid}], #{printExpr h}, #{printExpr f})|]
-printExpr (IIntrinsicCellSide (Just sid) Nothing h f) =
-  [idoc|_mlc_cell_side(mlc_schema_table[#{pretty sid}], #{printExpr h}, #{printExpr f})|]
-printExpr (IIntrinsicCellSide Nothing _ h _) =
-  [idoc|_mlc_cell_side_schemaless(#{printExpr h})|]
+printExpr (IIntrinsicFold True _ _ _ _ _ _ _) =
+  error "morloc bug: a C++ fold was given the file route, which only Python and R folds take (FOLD-9)"
+printExpr (IIntrinsicFold False (Just sid) mb ml ini step comb f) =
+  [idoc|_mlc_fold#{foldTypes mb ml}(mlc_schema_table[#{pretty sid}], #{printExpr ini}, #{printExpr step}, #{printExpr comb}, #{printExpr f})|]
+printExpr (IIntrinsicFold False Nothing mb ml ini step comb f) =
+  [idoc|_mlc_fold_schemaless#{foldTypes mb ml}(#{printExpr ini}, #{printExpr step}, #{printExpr comb}, #{printExpr f})|]
+printExpr (IIntrinsicFoldPut (Just sid) mb ml step h v) =
+  [idoc|_mlc_fold_put#{foldTypes mb ml}(mlc_schema_table[#{pretty sid}], #{printExpr step}, #{printExpr h}, #{printExpr v})|]
+printExpr (IIntrinsicFoldPut Nothing mb ml step h v) =
+  [idoc|_mlc_fold_put_schemaless#{foldTypes mb ml}(#{printExpr step}, #{printExpr h}, #{printExpr v})|]
 printExpr (IIntrinsicReplay sid (Just t) h f) =
   [idoc|_mlc_replay<#{renderIType t}>(mlc_schema_table[#{pretty sid}], #{printExpr h}, #{printExpr f})|]
 printExpr (IIntrinsicReplay sid Nothing h f) =
@@ -685,4 +671,10 @@ printDeserializer params rtype fields =
 gatherFn :: Bool -> MDoc
 gatherFn True = "_mlc_gather_native"
 gatherFn False = "_mlc_gather_file"
+
+-- | The accumulator and batch types of a fold, which its helper cannot
+-- deduce from a callable.
+foldTypes :: Maybe IType -> Maybe IType -> MDoc
+foldTypes (Just b) (Just l) = "<" <> renderIType b <> ", " <> renderIType l <> ">"
+foldTypes _ _ = ""
 

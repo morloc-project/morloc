@@ -53,11 +53,20 @@ itself rather than a copy, so a producer that refills one buffer and hands
 it on each time would gather that buffer's last contents many times over.
 
 ### STRM-5 What `@fold` promises when `@init` and `@combine` break their laws
-Intent: open
-Code: unaudited
+Intent: ruled 2026-11-14
+Code: conforms 2026-11-15
+Tests: spec-strm-5-1
 
-`@init` must be an identity for `@combine`, and `@combine` associative, and
-commutative if the producer is threaded. Nothing checks this, so the answer
-can vary with thread count. Either (a) the result is unspecified, the user's
-obligation; or (b) accumulators merge in a fixed order so only identity and
-associativity matter; or (c) a fold over a threaded producer is opt-in.
+`@fold init step combine` promises the sequential fold `foldl step init xs`
+over the batches `xs` the producer put, for any split of the batches across
+threads, forked children and the side replay, provided:
+- identity: combine init a == a == combine a init;
+- associativity: combine a (combine b c) == combine (combine a b) c;
+- commutativity, when the producer is threaded or forks:
+  combine a b == combine b a;
+- homomorphism over splits: for every xs = ys ++ zs,
+  combine (foldl step init ys) (foldl step init zs) == foldl step init xs.
+These are the user's obligation; nothing checks them, and a fold that
+breaks one may answer differently with the thread split. A step may
+mutate its accumulator: every slot starts from its own copy of init
+(FOLD-6).

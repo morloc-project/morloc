@@ -4507,83 +4507,42 @@ composeFoldIntoCollect params argSrcs fs handler =
 
 -- | Build the fold do-block for one @collect arg@:
 --
--- > do  h <- @cellnew init
--- >     _ <- arg (\c -> do { _ <- @cellsink h c k; () })
--- >     _ <- @cellside h k
--- >     b <- @cellreduce combine h
+-- > do  b <- @fold init step combine
+-- >            (\h -> do { _ <- arg (\c -> do { _ <- @foldput step h c; () }); () })
 -- >     handler b
 --
--- where @k = \c -> do { acc <- @cellget h; @cellput h (step acc c) }@,
--- written out at both uses (SIDE-4, SIDE-7). @init@ and @combine@ obey STRM-5.
+-- Each put steps its thread's slot; @fold combines the slots (fold.md).
+-- @init@, @step@ and @combine@ obey FOLD-7.
 wrapFoldCollect :: [EVar] -> [ArgSource] -> FoldSpec -> EVar -> ExprI -> ExprI -> D ExprI
 wrapFoldCollect params argSrcs (FoldSpec step ini comb) handler ref collectArg = do
   idx <- freshIdPos (Pos 0 0 "")
   let nm base = EV (base <> T.pack (show idx))
-      hV   = nm "_fold_h_"
-      bV   = nm "_fold_b_"
-      cV   = nm "_fold_c_"
-      gV   = nm "_fold_g_"
-      sV   = EV (BT.doDiscardPrefix <> "fold_s_" <> T.pack (show idx))
-      hRef = freshExprFrom ref (VarE defaultValue hV)
-  handlerRef <- freshExprFrom ref (VarE defaultValue handler)
-  -- h <- @cellnew init
-  newBind <- do
-    iniRef <- freshExprFrom ref (VarE defaultValue ini)
-    n <- freshExprFrom ref (IntrinsicE IntrCellNew [iniRef])
-    freshExprFrom ref (EvalE n)
-  -- \c -> do { acc <- @cellget h; @cellput h (step acc c) }
-  let foldStep = do
-        k <- freshIdPos (Pos 0 0 "")
-        let accV = EV ("_fold_acc_" <> T.pack (show k))
-            c2V = EV ("_fold_c2_" <> T.pack (show k))
-            dV = EV (BT.doDiscardPrefix <> "fold_p_" <> T.pack (show k))
-        getE <- hRef >>= \h -> freshExprFrom ref (IntrinsicE IntrCellGet [h])
-        getBind <- freshExprFrom ref (EvalE getE)
-        stepRef <- freshExprFrom ref (VarE defaultValue step)
-        accRef <- freshExprFrom ref (VarE defaultValue accV)
-        cRef <- freshExprFrom ref (VarE defaultValue c2V)
-        stepApp <- freshExprFrom ref (AppE stepRef [accRef, cRef])
-        putE <- hRef >>= \h -> freshExprFrom ref (IntrinsicE IntrCellPut [h, stepApp])
-        forcePut <- freshExprFrom ref (EvalE putE)
+      hV = nm "_fold_h_"
+      bV = nm "_fold_b_"
+      cV = nm "_fold_c_"
+      var v = freshExprFrom ref (VarE defaultValue v)
+      discard d e = do
+        force <- freshExprFrom ref (EvalE e)
         unitE <- freshExprFrom ref UniE
-        putBody <- freshExprFrom ref (LetE [(dV, forcePut)] unitE)
-        inner <- freshExprFrom ref (LetE [(accV, getBind)] putBody)
-        blk <- freshExprFrom ref (DoBlockE inner)
-        freshExprFrom ref (LamE [c2V] blk)
-  -- \c -> @cellsink h c k
+        body <- freshExprFrom ref (LetE [(EV (BT.doDiscardPrefix <> d <> T.pack (show idx)), force)] unitE)
+        freshExprFrom ref (DoBlockE body)
+  handlerRef <- var handler
   sink <- do
-    h <- hRef
-    cRef <- freshExprFrom ref (VarE defaultValue cV)
-    k <- foldStep
-    e <- freshExprFrom ref (IntrinsicE IntrCellSink [h, cRef, k])
-    forceSink <- freshExprFrom ref (EvalE e)
-    unitE <- freshExprFrom ref UniE
-    body <- freshExprFrom ref (LetE [(EV (BT.doDiscardPrefix <> "fold_k_" <> T.pack (show idx)), forceSink)] unitE)
-    blk <- freshExprFrom ref (DoBlockE body)
+    putE <- sequence [var step, var hV, var cV] >>= freshExprFrom ref . IntrinsicE IntrFoldPut
+    blk <- discard "fold_p_" putE
     freshExprFrom ref (LamE [cV] blk)
-  -- _ <- arg (\c -> ...)
-  prodBare <- do
+  producer <- do
     app <- freshExprFrom ref (AppE collectArg [sink])
-    freshExprFrom ref (EvalE app)
-  -- _ <- @cellside h k
-  sideBare <- do
-    h <- hRef
-    k <- foldStep
-    e <- freshExprFrom ref (IntrinsicE IntrCellSide [h, k])
+    blk <- discard "fold_g_" app
+    freshExprFrom ref (LamE [hV] blk)
+  foldBind <- do
+    args <- sequence [var ini, var step, var comb]
+    e <- freshExprFrom ref (IntrinsicE IntrFold (args <> [producer]))
     freshExprFrom ref (EvalE e)
-  -- b <- @cellreduce combine h   (the cell is released here)
-  reduceBind <- do
-    combRef <- freshExprFrom ref (VarE defaultValue comb)
-    h <- hRef
-    r <- freshExprFrom ref (IntrinsicE IntrCellReduce [combRef, h])
-    freshExprFrom ref (EvalE r)
   appArgs <- buildStreamArgs ref params Nothing bV argSrcs
   handlerApp <- freshExprFrom ref (AppE handlerRef appArgs)
-  t1 <- freshExprFrom ref (LetE [(bV, reduceBind)] handlerApp)
-  t1' <- freshExprFrom ref (LetE [(sV, sideBare)] t1)
-  t2 <- freshExprFrom ref (LetE [(gV, prodBare)] t1')
-  t3 <- freshExprFrom ref (LetE [(hV, newBind)] t2)
-  freshExprFrom ref (DoBlockE t3)
+  t1 <- freshExprFrom ref (LetE [(bV, foldBind)] handlerApp)
+  freshExprFrom ref (DoBlockE t1)
 
 -- | Rewrite every @collect node into a whole-list gather-then-apply: gather the
 -- producer's stream to a temp file, then apply the handler once to the complete

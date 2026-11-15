@@ -15,6 +15,7 @@ The result is the 'SerialManifold' tree consumed by the translators.
 -}
 module Morloc.CodeGenerator.Serialize
   ( serialize
+  , headsById
   ) where
 
 import Data.Foldable (toList)
@@ -39,10 +40,14 @@ import Morloc.CodeGenerator.Grammars.Common (renameNE, renameSE)
 language. Here we need to determine where inputs are (de)serialized and the
 serialization states of arguments and variables.
 -}
-serialize :: MonoHead -> MorlocMonad SerialManifold
-serialize mh = do
+serialize :: Map.Map Int [MonoHead] -> MonoHead -> MorlocMonad SerialManifold
+serialize heads mh = do
   reg <- MM.gets stateLangRegistry
-  serializeHosted reg mh
+  serializeHosted reg heads mh
+
+-- | Every segmented head, by its manifold id.
+headsById :: [MonoHead] -> Map.Map Int [MonoHead]
+headsById hs = Map.fromListWith (++) [(m, [h]) | h@(MonoHead _ m _ _ _) <- hs]
 
 -- After segmentation a 'MonoHead' carries the language its terms were WRITTEN
 -- in. For a co-located guest (e.g. Futhark hosted in the C++ pool) that home
@@ -52,13 +57,14 @@ serialize mh = do
 -- language ('LR.poolOf'), so a host-only 'Packable' (e.g. the C++ Matrix
 -- packer) is visible and the value marshals exactly as a native host value
 -- would. 'poolOf' is identity for ordinary (self-hosting) languages.
-serializeHosted :: LR.LangRegistry -> MonoHead -> MorlocMonad SerialManifold
-serializeHosted reg mh = do
+serializeHosted :: LR.LangRegistry -> Map.Map Int [MonoHead] -> MonoHead -> MorlocMonad SerialManifold
+serializeHosted reg heads mh = do
   argTypes <- MM.gets stateArgTypes
-  serializeHosted' reg argTypes mh
+  serializeHosted' reg heads argTypes mh
 
-serializeHosted' :: LR.LangRegistry -> Map.Map Int (Indexed Type) -> MonoHead -> MorlocMonad SerialManifold
-serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
+serializeHosted' ::
+  LR.LangRegistry -> Map.Map Int [MonoHead] -> Map.Map Int (Indexed Type) -> MonoHead -> MorlocMonad SerialManifold
+serializeHosted' reg heads argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
   form0 <- ManifoldFull <$> mapM prepareArg args0
 
   se1 <- serialExpr m0 e0
@@ -622,7 +628,8 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
       f' <- nativeExpr m f
       ast <- Serial.makeSerialAST m lang tf
       sch <- Serial.schemaOfHeld m lang ast
-      let staysHere = maybe False (not . handleCrosses) (gatherHandles f)
+      entries <- MM.gets stateNativeRecEntries
+      let staysHere = maybe False (not . handleCrosses entries) (gatherHandles f)
       return $ case () of
         _ | Serial.isSerializable ast && holdsNatively sch && staysHere -> IntrinsicN tf IntrGatherNative (Just sch) [f']
           | Serial.isSerializable ast -> IntrinsicN tf IntrGather (Just sch) [f']
@@ -645,25 +652,36 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
               wsch <- Serial.schemaOfHeld m lang wast
               return $ IntrinsicN tf IntrGatherPut (Just wsch) [h', w]
             _ -> MM.throwCompilerBugAt tidx "@gatherput: the batch did not pack to one value"
+    -- FOLD-9: a Python or R fold whose handle crosses pools steps its
+    -- batches from a temp-file stream; every other fold holds its slots here.
+    nativeExpr m (MonoIntrinsic t@(Idx tidx _) IntrFold [ini, step, comb, f]) = do
+      tf <- inferType t
+      es <- mapM (nativeExpr m) [ini, step, comb, f]
+      ltf <- case es of
+        [_, s', _, _] | FunF [_, l] _ <- typeFof s' -> return l
+        _ -> MM.throwCompilerBugAt tidx "@fold: its step is not a function of an accumulator and a batch"
+      msch <- batchSchema m ltf
+      entries <- MM.gets stateNativeRecEntries
+      let crosses = maybe True (handleCrosses entries) (gatherHandles f)
+      if langName lang `elem` ["py", "r"] && crosses
+        then case msch of
+          Just sch -> return $ IntrinsicN tf IntrFoldFile (Just sch) es
+          Nothing ->
+            MM.throwSourcedError tidx $
+              "A" <+> pretty (langName lang) <+> "fold fed from another pool keeps its batches in a file,"
+                <+> "but its batch type" <+> squotes (pretty (renderTypeFName ltf)) <+> "has no wire form here."
+        else return $ IntrinsicN tf IntrFold msch es
     -- SIDE-10: a batch with no wire form here carries no schema.
-    nativeExpr m (MonoIntrinsic t@(Idx tidx _) IntrCellSink [h, c, k]) = do
+    nativeExpr m (MonoIntrinsic t@(Idx tidx _) IntrFoldPut [s', h, c]) = do
       tf <- inferType t
-      es <- mapM (nativeExpr m) [h, c, k]
+      es <- mapM (nativeExpr m) [s', h, c]
       case es of
-        [_, c', _] -> do
+        [_, _, c'] -> do
           let ctf = typeFof c'
-          Serial.checkWriteDataType tidx IntrCellSink (Serial.containsFunF ctf) (pretty (renderTypeFName ctf))
+          Serial.checkWriteDataType tidx IntrFoldPut (Serial.containsFunF ctf) (pretty (renderTypeFName ctf))
           msch <- batchSchema m ctf
-          return $ IntrinsicN tf IntrCellSink msch es
-        _ -> MM.throwCompilerBugAt tidx "@cellsink expects 3 args"
-    nativeExpr m (MonoIntrinsic t@(Idx tidx _) IntrCellSide [h, k]) = do
-      tf <- inferType t
-      es <- mapM (nativeExpr m) [h, k]
-      case es of
-        [_, k'] | FunF [ltf] _ <- typeFof k' -> do
-          msch <- batchSchema m ltf
-          return $ IntrinsicN tf IntrCellSide msch es
-        _ -> MM.throwCompilerBugAt tidx "@cellside expects a handle and a function of one batch"
+          return $ IntrinsicN tf IntrFoldPut msch es
+        _ -> MM.throwCompilerBugAt tidx "@foldput expects 3 args"
     -- Runtime intrinsics (save/load, streams, @try, ...). The C functions
     -- are eager; an intrinsic declared with a suspension result reaches
     -- here as the body of the closure manifold that suspends it
@@ -675,7 +693,6 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
                      IntrWrite, IntrAppend, IntrConcat, IntrFlush,
                      IntrStdin, IntrStdout, IntrStderr, IntrThrow,
                      IntrTell, IntrTmpfile,
-                     IntrCellNew, IntrCellGet, IntrCellPut, IntrCellReduce,
                      IntrReplay, IntrTry, IntrChannel, IntrSpawn, IntrSettle] = do
           when (intr `elem` [IntrLoad, IntrRead, IntrUnpack, IntrNext, IntrOpen, IntrStdin]) $
             Serial.checkReadDataType tidx intr gt
@@ -688,11 +705,6 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
             (IntrSave, _ : _ : d : _) -> writeCheck d
             (IntrSaveJ, _ : d : _) -> writeCheck d
             (IntrWrite, _ : _ : d : _) -> writeCheck d
-            -- An accumulator crosses into the runtime the same way a
-            -- written element does, so it is subject to the same rule: a
-            -- value carrying a function has no wire form.
-            (IntrCellNew, d : _) -> writeCheck d
-            (IntrCellPut, _ : d : _) -> writeCheck d
             _ -> return ()
           -- @try's body must reach mlc_try as a no-arg callable; see
           -- 'thunkifyForTry' below.
@@ -718,12 +730,8 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
           mAst <- if intr == IntrTry
                     then return Nothing
                     else resultSerialAst m intr payloadTf
-          mSlots <- if intr == IntrCellReduce
-                      then cellReduceSlots m payloadTf msch es''
-                      else return Nothing
-          let packed = case (mSlots, mAst, msch) of
-                (Just reduced, _, _) -> reduced
-                (_, Just ast, Just sch) -> WireToNativeN payloadTf ast intr sch es''
+          let packed = case (mAst, msch) of
+                (Just ast, Just sch) -> WireToNativeN payloadTf ast intr sch es''
                 _ -> IntrinsicN (if intr == IntrTry then innerTf else payloadTf) intr msch es''
           -- Reuse @try rather than a bespoke wrap: converting a raised
           -- failure into an Ok/Err value is exactly what it does, and
@@ -810,10 +818,9 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
     unpackDataArgIfNeeded m IntrWrite (levelArg : handleArg : dataArg : rest) = do
       rest' <- packDataArg m dataArg
       return (levelArg : handleArg : rest' ++ rest)
-    -- @savej/@cellput's args are [path-or-handle, value]; the value
-    -- is at index 1.
+    -- @savej's args are [path, value]; the value is at index 1.
     unpackDataArgIfNeeded m intr (pathArg : dataArg : rest)
-      | intr `elem` [IntrSaveJ, IntrCellPut] = do
+      | intr == IntrSaveJ = do
           rest' <- packDataArg m dataArg
           return (pathArg : rest' ++ rest)
     unpackDataArgIfNeeded m intr [aArg, bArg]
@@ -822,7 +829,7 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
           bArgs <- packDataArg m bArg
           return (aArgs ++ bArgs)
     unpackDataArgIfNeeded m intr (dataArg : rest)
-      | intr `elem` [IntrShow, IntrHash, IntrCellNew] = do
+      | intr `elem` [IntrShow, IntrHash] = do
           rest' <- packDataArg m dataArg
           return (rest' ++ rest)
     unpackDataArgIfNeeded _ _ args = return args
@@ -848,30 +855,16 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
     packedVariant a@(SerialVariant {}) = not (Serial.isSerializable a)
     packedVariant a = any packedVariant (Serial.serialKids a)
 
-    -- @load, @read, @unpack and @cellget return their value in its wire
+    -- @load, @read and @unpack return their value in its wire
     -- form, as the runtime decodes it. Where a packer builds the native form
     -- at any level, the serial AST is returned so the value is finished as a
     -- received argument is.
     resultSerialAst :: Int -> Intrinsic -> TypeF -> MorlocMonad (Maybe SerialAST)
     resultSerialAst m intr resultTf
-      | intr `elem` [IntrLoad, IntrRead, IntrUnpack, IntrCellGet] = do
+      | intr `elem` [IntrLoad, IntrRead, IntrUnpack] = do
           ast <- Serial.makeSerialAST m lang resultTf
           return $ if Serial.isSerializable ast then Nothing else Just ast
       | otherwise = return Nothing
-
-    -- @cellreduce: the slots are read as one list, given their native form
-    -- as @cellget's value is, and folded by the user's combine, which so
-    -- sees only native values.
-    cellReduceSlots :: Int -> TypeF -> Maybe Text -> [NativeExpr] -> MorlocMonad (Maybe NativeExpr)
-    cellReduceSlots m accTf (Just sch) [combine, handle] = do
-      listFv <- inferConcreteVar lang (Idx m BT.list)
-      let listTf = AppF (VarF listFv) [TyA accTf]
-      listAst <- Serial.makeSerialAST m lang listTf
-      let slots
-            | Serial.isSerializable listAst = IntrinsicN listTf IntrCellSlots (Just sch) [handle]
-            | otherwise = WireToNativeN listTf listAst IntrCellSlots sch [handle]
-      return . Just $ IntrinsicN accTf IntrReduceList Nothing [combine, slots]
-    cellReduceSlots _ _ _ _ = return Nothing
 
     -- The handle a @gather hands its function, and every name it is bound
     -- to below; Nothing where the function is not a manifold.
@@ -881,23 +874,44 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
     gatherHandles _ = Nothing
 
     -- A gather keeps its batches natively only if every use of its handle
-    -- is seen here and stays in this pool: a handle, or a value holding it,
-    -- given to another pool or to a function whose body is not in this tree
-    -- (a recursive call, a function value, a spawned call) must be a real
+    -- is seen and stays in this pool. Uses are followed through recursive
+    -- calls that take a native entry of this pool, into the heads they
+    -- run. A handle, or a value holding it, given to another pool, to a
+    -- remote worker, or to a function whose body is not seen (any other
+    -- recursive call, a function value, a spawned call) must be a real
     -- stream, so that its writer can reach it.
-    handleCrosses :: Set.Set Int -> Bool
-    handleCrosses hs = any crossing (subExprs e0)
+    handleCrosses :: Map.Map Int Int -> Set.Set Int -> Bool
+    handleCrosses entries hs = or [crossing (letManifolds b) x | b <- bodies, x <- subExprs b]
       where
-        cs = carriers e0 hs
+        owners = Map.fromList [(v, k) | (k, v) <- Map.toList entries]
+        -- The head a recursive call runs here, if it runs one natively.
+        localHead r = do
+          k <- if Map.member r entries then Just r else Map.lookup r owners
+          hds <- Map.lookup k heads
+          if all inPool hds then Just (k, hds) else Nothing
+        inPool (MonoHead l _ _ form _) = LR.coLocated reg lang l && form /= HeadManifoldFormRemoteWorker
+        recTargets b = [r | MonoExe _ (RecCallP r _) <- subExprs b]
+        reached = go Set.empty [e0]
+          where
+            go seen new =
+              let ks = Set.fromList [k | b <- new, r <- recTargets b, Just (k, _) <- [localHead r]]
+                  fresh = Set.difference ks seen
+               in if Set.null fresh
+                    then seen
+                    else go (Set.union seen fresh) [b | k <- Set.toList fresh, MonoHead _ _ _ _ b <- Map.findWithDefault [] k heads]
+        bodies = e0 : [b | k <- Set.toList reached, MonoHead _ _ _ _ b <- Map.findWithDefault [] k heads]
+        params r = maybe [] (\(_, hds) -> [[i | Arg i _ <- as] | MonoHead _ _ as _ _ <- hds]) (localHead r)
+        cs = carriers params bodies hs
         holds' e = any (`Set.member` cs) (varsIn e)
-        crossing (MonoApp f es) | opaque f = any holds' es
-        crossing (MonoPoolCall _ _ _ _ ctx) = any (`Set.member` cs) [i | Arg i _ <- ctx]
-        crossing (MonoIntrinsic _ IntrSpawn es) = any holds' es
-        crossing _ = False
-        opaque MonoManifold {} = False
-        opaque (MonoExe _ SrcCallP {}) = False
-        opaque (MonoExe _ (LocalCallP w)) = not (Map.member w (letManifolds e0))
-        opaque _ = True
+        crossing lets (MonoApp f es) | opaque lets f = any holds' es
+        crossing _ (MonoPoolCall _ _ _ _ ctx) = any (`Set.member` cs) [i | Arg i _ <- ctx]
+        crossing _ (MonoIntrinsic _ IntrSpawn es) = any holds' es
+        crossing _ _ = False
+        opaque _ MonoManifold {} = False
+        opaque _ (MonoExe _ SrcCallP {}) = False
+        opaque lets (MonoExe _ (LocalCallP w)) = not (Map.member w lets)
+        opaque _ (MonoExe _ (RecCallP r _)) = isNothing (localHead r)
+        opaque _ _ = True
 
     -- C++ and Rust hold a gather's batches by their static types; Python
     -- in a plain list, each batch given @load's form as it is put (NATIVE-9),
@@ -921,14 +935,13 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
     intrinsicSchema m IntrSave _ (_levelArg : _pathArg : dataArg : _) = do
       ast <- Serial.makeSerialAST m lang (typeFof dataArg)
       Just <$> Serial.schemaOfHeld m lang ast
-    -- @savej/@cellput's data is the second positional arg (after the
-    -- path or handle).
+    -- @savej's data is the second positional arg (after the path).
     intrinsicSchema m intr _ (_pathArg : dataArg : _)
-      | intr `elem` [IntrSaveJ, IntrCellPut] = do
+      | intr == IntrSaveJ = do
           ast <- Serial.makeSerialAST m lang (typeFof dataArg)
           Just <$> Serial.schemaOfHeld m lang ast
     intrinsicSchema m intr _ (dataArg:_)
-      | intr `elem` [IntrHash, IntrShow, IntrSchema, IntrCellNew, IntrEq, IntrLe] = do
+      | intr `elem` [IntrHash, IntrShow, IntrSchema, IntrEq, IntrLe] = do
           ast <- Serial.makeSerialAST m lang (typeFof dataArg)
           Just <$> Serial.schemaOfHeld m lang ast
     intrinsicSchema _ IntrTypeof _ (dataArg:_) =
@@ -998,13 +1011,6 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
     intrinsicSchema m IntrWrite _ (_levelArg : _handleArg : dataArg : _) = do
       ast <- Serial.makeSerialAST m lang (typeFof dataArg)
       Just <$> Serial.schemaOfHeld m lang ast
-    -- The accumulator's schema, from the result type. @cellnew and @cellput
-    -- take theirs from their value argument, above; both name the same type,
-    -- which is the point of parameterising the handle.
-    intrinsicSchema m intr tf _
-      | intr `elem` [IntrCellGet, IntrCellReduce] = do
-          ast <- Serial.makeSerialAST m lang tf
-          Just <$> Serial.schemaOfHeld m lang ast
     -- @open names what the file stores: an OStream writes it into the
     -- header, and an IFile or IStream checks the file against it.
     intrinsicSchema m IntrOpen tf _ = case unwrapHandleHead tf of
@@ -1795,20 +1801,22 @@ aliases body s0 = go s0
 letManifolds :: MonoExpr -> Map.Map Int (ManifoldForm None (Maybe Type))
 letManifolds body = Map.fromList [(j, form) | MonoLet j (MonoManifold _ form _ _) _ <- subExprs body]
 
--- | The names bound to a value that holds one of a set of variables: a let
--- whose right side names one, or a parameter of a manifold applied to one,
--- directly or through a let-bound name.
-carriers :: MonoExpr -> Set.Set Int -> Set.Set Int
-carriers body = go
+-- | The names bound, in a set of bodies, to a value that holds one of a set
+-- of variables: a let whose right side names one, or a parameter of a
+-- manifold applied to one, directly, through a let-bound name, or through a
+-- recursive call whose parameter lists are given.
+carriers :: (Int -> [[Int]]) -> [MonoExpr] -> Set.Set Int -> Set.Set Int
+carriers params bodies = go
   where
-    lets = letManifolds body
-    step s = Set.union s . Set.fromList $ concatMap (more s) (subExprs body)
+    lets = Map.unions (map letManifolds bodies)
+    step s = Set.union s . Set.fromList $ concatMap (more s) (concatMap subExprs bodies)
     touches s e = any (`Set.member` s) (varsIn e)
     more s (MonoLet j rhs _) | touches s rhs = [j]
-    more s (MonoApp (MonoManifold _ form _ _) args) = bound s form args
-    more s (MonoApp (MonoExe _ (LocalCallP w)) args) | Just form <- Map.lookup w lets = bound s form args
+    more s (MonoApp (MonoManifold _ form _ _) args) = bound s [j | Arg j _ <- manifoldBound form] args
+    more s (MonoApp (MonoExe _ (LocalCallP w)) args) | Just form <- Map.lookup w lets = bound s [j | Arg j _ <- manifoldBound form] args
+    more s (MonoApp (MonoExe _ (RecCallP r _)) args) = concatMap (\ps -> bound s ps args) (params r)
     more _ _ = []
-    bound s form args = [j | (Arg j _, a) <- zipPrefix (manifoldBound form) args, touches s a]
+    bound s ps args = [j | (j, a) <- zipPrefix ps args, touches s a]
     go s = let s' = step s in if Set.size s' == Set.size s then s else go s'
 
 -- | An expression and every expression below it.

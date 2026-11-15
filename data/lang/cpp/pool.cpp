@@ -19,6 +19,7 @@
 #include <stdexcept>
 #include <exception>
 #include <optional>
+#include <atomic>
 #include <fstream>
 #include <system_error>
 #include <unordered_map>
@@ -1242,99 +1243,6 @@ inline void _mlc_unlink_tmp(const std::string& path) {
     if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
 }
 
-// -- Fold-accumulator wrappers ------------------------------------------
-// A folding stream handler carries one accumulator per thread that folds
-// into it; @cellreduce reads them all (`_mlc_cell_slots`) and merges them
-// with the handler's `combine` (`_mlc_reduce_list`).
-
-// @cellnew: create an accumulator seeded with `init`.
-template <typename B>
-int64_t _mlc_cell_new(Schema* schema, const B& init) {
-    void* voidstar = to_voidstar(schema, init);
-    char* errmsg = NULL;
-    int64_t handle = mlc_cell_new(schema, voidstar, &errmsg);
-    shfree_cpp(voidstar);
-    if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
-    return handle;
-}
-
-// @cellget: this thread's accumulator, or the seed if it has not folded yet.
-template <typename B>
-B _mlc_cell_get(Schema* schema, int64_t handle) {
-    char* errmsg = NULL;
-    void* voidstar = mlc_cell_get(handle, schema, &errmsg);
-    if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
-    B* dummy = nullptr;
-    B result = from_voidstar(schema, voidstar, dummy);
-    shfree_cpp(voidstar);
-    return result;
-}
-
-// @cellput: replace this thread's accumulator.
-template <typename B>
-void _mlc_cell_put(Schema* schema, int64_t handle, const B& value) {
-    void* voidstar = to_voidstar(schema, value);
-    char* errmsg = NULL;
-    mlc_cell_put(handle, schema, voidstar, &errmsg);
-    shfree_cpp(voidstar);
-    if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
-}
-
-// One accumulator, for the merge below.
-template <typename B>
-B _mlc_cell_slot(Schema* schema, int64_t handle, int64_t index) {
-    char* errmsg = NULL;
-    void* voidstar = mlc_cell_slot(handle, index, schema, &errmsg);
-    if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
-    B* dummy = nullptr;
-    B result = from_voidstar(schema, voidstar, dummy);
-    shfree_cpp(voidstar);
-    return result;
-}
-
-// @cellreduce: fold every accumulator into one with `combine`, then release
-// the cell. The count is never zero -- an untouched cell answers with its
-// seed -- so this always has a value to return.
-// Releases its cell however the reduce below leaves. The end-of-dispatch
-// sweep would reclaim an abandoned one, but a @try-wrapped fold that fails
-// and retries inside a single dispatch would strand a cell per attempt.
-struct MlcCellGuard {
-    int64_t handle;
-    ~MlcCellGuard() {
-        char* errmsg = NULL;
-        mlc_cell_free(handle, &errmsg);
-        free(errmsg);
-    }
-};
-
-// Every accumulator of a cell, in its wire form; with _mlc_reduce_list it
-// runs @cellreduce.
-template <typename L>
-L _mlc_cell_slots(Schema* schema, int64_t handle) {
-    MlcCellGuard guard{handle};
-    char* errmsg = NULL;
-    int64_t n = mlc_cell_count(handle, &errmsg);
-    if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
-    if (n < 1) { PROPAGATE_ERROR(strdup("@fold: the accumulator holds nothing to merge")) }
-    L xs;
-    xs.reserve((size_t)n);
-    for (int64_t i = 0; i < n; i++) {
-        xs.push_back(_mlc_cell_slot<typename L::value_type>(schema, handle, i));
-    }
-    return xs;
-}
-
-// A non-empty list folded with `combine`.
-template <typename F, typename L>
-typename L::value_type _mlc_reduce_list(F combine, L xs) {
-    if (xs.empty()) { PROPAGATE_ERROR(strdup("@fold: nothing to merge")) }
-    typename L::value_type acc = std::move(xs[0]);
-    for (size_t i = 1; i < xs.size(); i++) {
-        acc = combine(acc, xs[i]);
-    }
-    return acc;
-}
-
 template <typename T>
 T _mlc_from_voidstar_freed(Schema* schema, void* voidstar) {
     struct Freed {
@@ -1362,7 +1270,7 @@ mlc::Unit _mlc_replay(Schema* schema, int64_t handle, F fn) {
     return mlc::Unit{};
 }
 
-// -- Gathers and fold side files (model/runtime/side.md) ----------------
+// -- Gathers (model/runtime/side.md) -------------------------------------
 
 struct MlcGatherBase {
     const std::type_info* type;
@@ -1443,7 +1351,7 @@ mlc::Unit _mlc_gather_put(Schema* schema, uint64_t h, L batch) {
         return mlc::Unit{};
     }
     char* errmsg = NULL;
-    int32_t r = mlc_side_put_native((int64_t)h, &_mlc_gather_append<L>, &batch, &errmsg);
+    int32_t r = mlc_side_with_native((int64_t)h, 0, &_mlc_gather_append<L>, &batch, &errmsg);
     if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
     if (r == 0) {
         void* voidstar = to_voidstar(schema, batch);
@@ -1466,61 +1374,184 @@ L _mlc_gather_file(Schema* schema, F f) {
     return xs;
 }
 
-inline bool _mlc_side_route(uint64_t h) {
-    char* errmsg = NULL;
-    int32_t r = mlc_side_route((int64_t)h, &errmsg);
-    if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
-    return r == 1;
+// -- Native folds (model/runtime/fold.md) --------------------------------
+
+struct MlcFoldValueBase {
+    const std::type_info* type;
+};
+
+template <typename B>
+struct MlcFoldValue : MlcFoldValueBase {
+    B value;
+    explicit MlcFoldValue(const B& v) : MlcFoldValueBase{&typeid(B)}, value(v) {}
+};
+
+template <typename B, typename T>
+T* _mlc_fold_cast(void* p) {
+    auto* base = static_cast<MlcFoldValueBase*>(p);
+    if (*base->type != typeid(B)) {
+        MLC_INTERNAL_ABORT("@fold: a batch was put with another accumulator type than its fold's");
+    }
+    return static_cast<T*>(base);
 }
 
-// SIDE-4, SIDE-10
-template <typename L, typename F>
-mlc::Unit _mlc_cell_sink(Schema* schema, uint64_t h, const L& batch, F k) {
-    if (_mlc_side_route(h)) {
-        k(batch);
+template <typename B>
+MlcFoldValue<B>* _mlc_fold_value(void* p) {
+    return _mlc_fold_cast<B, MlcFoldValue<B>>(p);
+}
+
+// FOLD-6, FOLD-10: the fold's init, held by its bracket and by each put
+// that copies it.
+template <typename B>
+struct MlcFoldInit : MlcFoldValueBase {
+    std::atomic<size_t> refs{1};
+    const B value;
+    explicit MlcFoldInit(const B& v) : MlcFoldValueBase{&typeid(B)}, value(v) {}
+};
+
+template <typename B>
+struct MlcFoldInitRef {
+    MlcFoldInit<B>* init;
+    ~MlcFoldInitRef() {
+        if (init->refs.fetch_sub(1, std::memory_order_acq_rel) == 1) delete init;
+    }
+};
+
+// FOLD-6
+template <typename B>
+void* _mlc_fold_fresh(void* init) noexcept {
+    static_cast<MlcFoldInit<B>*>(init)->refs.fetch_add(1, std::memory_order_relaxed);
+    return init;
+}
+
+template <typename B>
+MlcFoldInit<B>* _mlc_fold_init(void* p) {
+    return _mlc_fold_cast<B, MlcFoldInit<B>>(p);
+}
+
+template <typename B>
+struct MlcFoldValues {
+    void** values = NULL;
+    size_t n = 0;
+    ~MlcFoldValues() {
+        for (size_t i = 0; i < n; i++) delete _mlc_fold_value<B>(values[i]);
+        free(values);
+    }
+};
+
+// FOLD-2..4: the slots, and the side records `replay` steps from a fresh
+// init, combined; an empty fold is its init.
+template <typename B, typename C, typename F, typename R>
+B _mlc_fold_with(const B& init, C combine, F f, R replay) {
+    char* errmsg = NULL;
+    MlcFoldInitRef<B> ctx{new MlcFoldInit<B>(init)};
+    int64_t h = mlc_fold_new(ctx.init, &_mlc_fold_fresh<B>, &errmsg);
+    if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
+    try {
+        f((uint64_t)h);
+    } catch (...) {
+        MlcFoldValues<B> dropped;
+        mlc_fold_drop(h, &dropped.values, &dropped.n);
+        throw;
+    }
+    MlcFoldValues<B> vs;
+    void* reader = mlc_fold_take(h, &vs.values, &vs.n, &errmsg);
+    if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
+    std::optional<B> side = replay(reader);
+    std::optional<B> acc;
+    for (size_t i = 0; i < vs.n; i++) {
+        B& v = _mlc_fold_value<B>(vs.values[i])->value;
+        if (acc) acc = combine(std::move(*acc), std::move(v)); else acc.emplace(std::move(v));
+    }
+    if (side) {
+        if (acc) acc = combine(std::move(*acc), std::move(*side)); else acc.emplace(std::move(*side));
+    }
+    return acc ? std::move(*acc) : init;
+}
+
+template <typename B, typename L, typename S, typename C, typename F>
+B _mlc_fold(Schema* schema, const B& init, S step, C combine, F f) {
+    return _mlc_fold_with(init, combine, f, [&](void* reader) {
+        std::optional<B> side;
+        _mlc_side_each<L>(schema, reader, [&](L& b) {
+            if (!side) side.emplace(init);
+            side = step(std::move(*side), b);
+        });
+        return side;
+    });
+}
+
+// SIDE-10: a schemaless side file holds only poison records.
+template <typename B, typename L, typename S, typename C, typename F>
+B _mlc_fold_schemaless(const B& init, S, C combine, F f) {
+    return _mlc_fold_with(init, combine, f, [](void* reader) {
+        MlcSideReader guard{reader};
+        char* errmsg = NULL;
+        int32_t eof = 0;
+        mlc_side_next(reader, NULL, &eof, &errmsg);
+        if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
+        return std::optional<B>();
+    });
+}
+
+// FOLD-1: step this thread's slot, or hand the batch to `side`.
+template <typename B, typename L, typename S, typename P>
+mlc::Unit _mlc_fold_step(S step, uint64_t h, const L& batch, P side) {
+    char* errmsg = NULL;
+    void* p = NULL;
+    int32_t fresh = 0;
+    int32_t r = mlc_fold_checkout((int64_t)h, &p, &fresh, &errmsg);
+    if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
+    if (r == 0) {
+        side();
         return mlc::Unit{};
     }
-    void* voidstar = to_voidstar(schema, batch);
-    char* errmsg = NULL;
-    mlc_side_put((int64_t)h, schema, voidstar, &errmsg);
-    shfree_cpp(voidstar);
+    std::unique_ptr<MlcFoldValue<B>> v;
+    try {
+        if (fresh) {
+            MlcFoldInitRef<B> init{_mlc_fold_init<B>(p)};
+            v.reset(new MlcFoldValue<B>(init.init->value));
+        } else {
+            v.reset(_mlc_fold_value<B>(p));
+        }
+        v->value = step(std::move(v->value), batch);
+    } catch (...) {
+        mlc_fold_failed((int64_t)h);
+        throw;
+    }
+    if (mlc_fold_store((int64_t)h, v.get(), &errmsg) == 0) v.release();
     if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
     return mlc::Unit{};
 }
 
-// SIDE-4, SIDE-10: a batch with no wire form poisons the side file.
-template <typename L, typename F>
-mlc::Unit _mlc_cell_sink_schemaless(uint64_t h, const L& batch, F k) {
-    if (_mlc_side_route(h)) {
-        k(batch);
+// FOLD-1, FOLD-9: a fold id steps its slot, a stream handle takes the batch.
+template <typename B, typename L, typename S>
+mlc::Unit _mlc_fold_put(Schema* schema, S step, uint64_t h, const L& batch) {
+    if ((int64_t)h >= 0) {
+        _mlc_write(schema, 0, batch, (int64_t)h);
+        _mlc_flush((int64_t)h);
         return mlc::Unit{};
     }
-    char* errmsg = NULL;
-    mlc_side_put((int64_t)h, NULL, NULL, &errmsg);
-    if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
-    return mlc::Unit{};
+    return _mlc_fold_step<B>(step, h, batch, [&]() {
+        char* errmsg = NULL;
+        void* voidstar = to_voidstar(schema, batch);
+        mlc_side_put((int64_t)h, schema, voidstar, &errmsg);
+        shfree_cpp(voidstar);
+        if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
+    });
 }
 
-// SIDE-7
-template <typename L, typename F>
-mlc::Unit _mlc_cell_side(Schema* schema, uint64_t h, F k) {
-    char* errmsg = NULL;
-    void* reader = mlc_side_take((int64_t)h, &errmsg);
-    if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
-    _mlc_side_each<L>(schema, reader, [&](L& b) { k(b); });
-    return mlc::Unit{};
-}
-
-// SIDE-7, SIDE-10: a schemaless side file holds only poison records.
-inline mlc::Unit _mlc_cell_side_schemaless(uint64_t h) {
-    char* errmsg = NULL;
-    void* reader = mlc_side_take((int64_t)h, &errmsg);
-    if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
-    MlcSideReader guard{reader};
-    int32_t eof = 0;
-    mlc_side_next(reader, NULL, &eof, &errmsg);
-    if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
-    return mlc::Unit{};
+// SIDE-10: a batch with no wire form poisons the side file.
+template <typename B, typename L, typename S>
+mlc::Unit _mlc_fold_put_schemaless(S step, uint64_t h, const L& batch) {
+    if ((int64_t)h >= 0) {
+        throw MorlocException("@fold: this fold reads its batches from a stream, but its batch type has no wire form in C++");
+    }
+    return _mlc_fold_step<B>(step, h, batch, [&]() {
+        char* errmsg = NULL;
+        mlc_side_put((int64_t)h, NULL, NULL, &errmsg);
+        if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
+    });
 }
 
 // Array-based foreign call: send a local-call packet carrying a runtime-sized

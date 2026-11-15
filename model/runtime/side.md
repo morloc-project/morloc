@@ -1,6 +1,6 @@
 # Fork side
 
-An in-pool accumulator (a native gather's list, a fold cell) lives in one
+An in-pool accumulator (a native gather's list, a fold's slot table) lives in one
 process's memory. A forked child that calls the accumulator's sink would
 append to its own copy-on-write copy, and the batch would be lost. The fork
 side is the runtime record that sends those batches through a side file
@@ -49,20 +49,22 @@ entry maker in the child waiting forever.
 
 ### SIDE-4 A put goes where its process and the state word say
 Status: implemented
-Checked by: a_fold_owner_folds_natively_until_and_after_take, a_fold_put_with_no_entry_here_runs_the_step, a_gather_owner_writes_the_side_once_switched, a_schemaless_child_batch_fails_the_take, golden:gather-native, golden:gather-crossing, golden:gather-relay, golden:gather-fold-packed, tla:ForkSide, tla:ForkSide_fold, tla:ForkSide_route_by_pid.bug, tla:ForkSide_fold_route_by_pid.bug
+Checked by: an_unordered_owner_puts_natively_until_take, a_fold_owners_side_write_is_refused_and_writes_nothing, a_call_of_the_other_kind_is_refused_and_leaves_the_entry, a_forked_childs_put_goes_to_the_side_file, a_gather_owner_writes_the_side_once_switched, a_schemaless_child_batch_fails_the_take, golden:gather-native, golden:gather-crossing, golden:gather-relay, golden:gather-fold-packed, golden:fold-native, tla:ForkSide, tla:ForkSide_fold, tla:ForkSide_route_by_pid.bug, tla:ForkSide_fold_route_by_pid.bug
 
 Ownership is the entry's fork generation (FORK-14), never the pid. In the
 owner:
 - a gather appends to the native list while the word is NATIVE or
   SWITCHING, and writes to the side stream while it is SIDE;
-- a fold folds natively in every state but TAKEN;
+- a fold checks its slot out natively in every state but TAKEN (FOLD-1);
 - a gather put on FAILED fails;
 - a side write of a put that routes natively (any fold put, a gather put
   while the word is not SIDE) is refused and writes nothing.
-A fold put whose handle has no entry in its process (the fold's cell and
-entry live in another pool, or its entry was taken) runs the fold's step,
-which reaches the cell in its own pool; the cell takes it or refuses it
-(SIDE-5).
+A call made for one kind of entry (gather or fold) on an entry of the
+other kind fails and leaves the entry as it was; it never reads the other
+kind's native pointer. A drop of the wrong kind is fatal.
+A fold put whose id has no entry in its process fails as a gather put does
+(SIDE-11); a Python or R fold fed from another pool takes the file route
+instead (FOLD-9).
 A gather put chooses its route by the batch's type alone: where the type
 can be held natively, one put dispatches on the handle at run time, a
 gather id (negative) to this record, a stream handle to the stream.
@@ -74,7 +76,7 @@ have inherited locked; it forgets them and never destroys them.
 
 ### SIDE-5 A put that returned is in the result exactly once
 Status: implemented
-Checked by: a_write_after_take_fails, a_put_once_the_reduce_has_counted_fails, a_truncated_record_fails_the_take, an_owner_write_racing_take_is_in_the_result_or_fails, owner_threads_writing_while_take_runs_lose_and_tear_nothing, tla:ForkSide, tla:ForkSide_two, tla:ForkSide_nested, tla:ForkSide_fold, tla:ForkSide_append_ignores_taken.bug, tla:ForkSide_fold_append_ignores_taken.bug, tla:ForkSide_take_skips_cas.bug
+Checked by: a_write_after_take_fails, a_store_after_the_seal_fails_and_the_fold_fails, a_truncated_record_fails_the_take, an_owner_write_racing_take_is_in_the_result_or_fails, owner_threads_writing_while_take_runs_lose_and_tear_nothing, tla:ForkSide, tla:ForkSide_two, tla:ForkSide_nested, tla:ForkSide_fold, tla:ForkSide_append_ignores_taken.bug, tla:ForkSide_fold_store_ignores_seal.bug, tla:ForkSide_take_skips_cas.bug
 
 A native append checks, under the list's mutex, that take has not yet
 drained the list, and fails if it has; take drains under the same mutex. A
@@ -84,10 +86,8 @@ mutex, so its owner may free the list once the drop returns. So a put
 that read the word before take's CAS
 either lands before the drain or close and is in the result, or fails. No
 put returns success after take has returned. For a fold the drain is the
-reduce: the reduce seals the cell, under the cell registry's lock, before
-it counts the slots it merges, and the cell refuses a put once sealed;
-the side replay, which runs after TAKEN and before the reduce, still folds
-in.
+seal (FOLD-2): a store after it fails late (FOLD-1), and the side replay
+(FOLD-3) folds the child batches in.
 
 ### SIDE-6 A gather's result keeps causal order
 Status: implemented
@@ -100,7 +100,7 @@ comes later in the result. Every native append's route read precedes the
 fork that switched the entry, and every child write follows it; a parent
 put that read NATIVE or SWITCHING before the switch and appends after it is
 concurrent with every child write. A fold's result has no order (its
-combine is commutative).
+laws are FOLD-7).
 
 ### SIDE-7 Take in the owner closes the side; take anywhere else closes nothing
 Status: implemented
@@ -108,8 +108,8 @@ Checked by: a_forked_child_cannot_take_and_its_record_reaches_the_owner, tla:For
 
 Take in the owner CASes NATIVE or SIDE to TAKEN, waiting while the word is
 SWITCHING. From SIDE it closes the side stream and returns it to be
-decoded after the native list (gather) or replayed into the accumulator
-before the reduce (fold). Take in any other process fails and leaves the
+decoded after the native list (gather) or replayed through step (fold,
+FOLD-3). Take in any other process fails and leaves the
 stream open: the owner's take is the only close, and a child's would cut
 off the parent's and its siblings' later writes.
 
@@ -162,16 +162,15 @@ A returned write is in the file whatever its writer does next. A child
 that cannot encode its batch (a fold whose batch type has no wire form in
 its language) writes a poison record in its place, and the take fails.
 
-### SIDE-11 A gather id and a fold handle name one process's record in the whole program
+### SIDE-11 A gather or fold id names one process's record in the whole program
 Status: implemented
-Checked by: gather_ids_are_program_unique_and_a_foreign_one_is_refused, a_handle_from_another_process_is_refused, a_forked_child_never_resolves_its_parents_cell
+Checked by: gather_ids_are_program_unique_and_a_foreign_one_is_refused, golden:fold-native
 
 Each process draws an ordinal from a counter in the program's primary
-volume the first time it makes a gather or a fold cell, and again after a
-fork. A gather id packs the ordinal with a number counted in the process;
-a fold handle carries its process's ordinal as its tag. So no two
-processes of a program make the same id or tag, and a handle that reaches
-another process names nothing there. A gather put whose id has no entry
+volume the first time it makes a gather or a fold, and again after a
+fork. An id packs the ordinal with a number counted in the process. So no
+two processes of a program make the same id, and an id that reaches
+another process names nothing there. A gather or fold put whose id has no entry
 in its process fails: as a late put if the process or an ancestor made the
 id, and otherwise as a handle that reached another process. It never
 appends to another gather.

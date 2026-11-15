@@ -174,17 +174,6 @@ printExpr (IIntrinsicConcat paths dest) =
 printExpr (IIntrinsicFlush h) = "::rustmorloc::flush(" <> printExpr h <> ")"
 printExpr IIntrinsicTell = "::rustmorloc::tell()"
 printExpr IIntrinsicTmpfile = "::rustmorloc::tmpfile()"
-printExpr (IIntrinsicCellNew sid e) =
-  "::rustmorloc::cell_new(" <> schemaRef sid <> ", " <> refExpr e <> ")"
-printExpr (IIntrinsicCellGet sid mt h) =
-  "::rustmorloc::cell_get" <> turbofish mt <> "(" <> schemaRef sid <> ", " <> printExpr h <> ")"
-printExpr (IIntrinsicCellPut sid h e) =
-  "::rustmorloc::cell_put(" <> schemaRef sid <> ", " <> printExpr h <> ", " <> refExpr e <> ")"
--- The element type comes from the list the binding is annotated with.
-printExpr (IIntrinsicCellSlots sid _ h) =
-  "::rustmorloc::cell_slots(" <> schemaRef sid <> ", " <> printExpr h <> ")"
-printExpr (IIntrinsicReduceList f xs) =
-  "::rustmorloc::reduce_list(" <> printExpr f <> ", " <> printExpr xs <> ")"
 printExpr (IIntrinsicChannel sid) =
   "::rustmorloc::open_channel(" <> schemaRef sid <> ")"
 printExpr (IIntrinsicSpawn sid h f) =
@@ -195,14 +184,20 @@ printExpr (IIntrinsicGather native sid mt f) =
   "::rustmorloc::" <> rustGatherFn native <> reduceTurbofish mt <> "(" <> schemaRef sid <> ", " <> printExpr f <> ")"
 printExpr (IIntrinsicGatherPut sid h v) =
   "::rustmorloc::gather_put(" <> schemaRef sid <> ", " <> printExpr h <> ", " <> printExpr v <> ")"
-printExpr (IIntrinsicCellSink (Just sid) h v f) =
-  "::rustmorloc::cell_sink(" <> schemaRef sid <> ", " <> printExpr h <> ", " <> refExpr v <> ", " <> printExpr f <> ")"
-printExpr (IIntrinsicCellSink Nothing h v f) =
-  "::rustmorloc::cell_sink_schemaless(" <> printExpr h <> ", " <> refExpr v <> ", " <> printExpr f <> ")"
-printExpr (IIntrinsicCellSide (Just sid) mt h f) =
-  "::rustmorloc::cell_side" <> reduceTurbofish mt <> "(" <> schemaRef sid <> ", " <> printExpr h <> ", " <> printExpr f <> ")"
-printExpr (IIntrinsicCellSide Nothing _ h _) =
-  "::rustmorloc::cell_side_schemaless(" <> printExpr h <> ")"
+printExpr (IIntrinsicFold True _ _ _ _ _ _ _) =
+  error "morloc bug: a Rust fold was given the file route, which only Python and R folds take (FOLD-9)"
+printExpr (IIntrinsicFold False (Just sid) mb ml ini step comb f) =
+  "::rustmorloc::fold" <> foldTurbofish 3 mb ml <> "(" <> schemaRef sid <> ", "
+    <> refExpr ini <> ", " <> printExpr step <> ", " <> printExpr comb <> ", " <> printExpr f <> ")"
+printExpr (IIntrinsicFold False Nothing mb ml ini step comb f) =
+  "::rustmorloc::fold_schemaless" <> foldTurbofish 3 mb ml <> "("
+    <> refExpr ini <> ", " <> printExpr step <> ", " <> printExpr comb <> ", " <> printExpr f <> ")"
+printExpr (IIntrinsicFoldPut (Just sid) mb ml step h v) =
+  "::rustmorloc::fold_put" <> foldTurbofish 1 mb ml <> "(" <> schemaRef sid <> ", " <> printExpr step <> ", "
+    <> printExpr h <> ", " <> refExpr v <> ")"
+printExpr (IIntrinsicFoldPut Nothing mb ml step h v) =
+  "::rustmorloc::fold_put_schemaless" <> foldTurbofish 1 mb ml <> "(" <> printExpr step <> ", "
+    <> printExpr h <> ", " <> refExpr v <> ")"
 printExpr (IIntrinsicReplay sid mt h f) =
   -- The element type is given, the function's closure type is left to
   -- inference.
@@ -243,6 +238,12 @@ refExpr e = "&" <> parens (printExpr e)
 rustGatherFn :: Bool -> MDoc
 rustGatherFn True = "gather_native"
 rustGatherFn False = "gather_file"
+
+-- | The accumulator and batch types of a fold; its @n@ callables' are
+-- inferred.
+foldTurbofish :: Int -> Maybe IType -> Maybe IType -> MDoc
+foldTurbofish n (Just b) (Just l) = "::<" <> rustType b <> ", " <> rustType l <> mconcat (replicate n ", _") <> ">"
+foldTurbofish _ _ _ = ""
 
 -- | Optional turbofish for a typed-result intrinsic: `::<T>` when the result
 -- type is known (always, for Rust), empty otherwise. Lets a generic shim

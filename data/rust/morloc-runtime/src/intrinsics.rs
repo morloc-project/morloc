@@ -574,7 +574,6 @@ pub fn end_dispatch(call_id: u64, prev: u64) {
     for p in doomed {
         let _ = std::fs::remove_file(&p);
     }
-    crate::cell::sweep_dispatch(call_id, oldest);
     crate::lease::reclaim_if_due();
     crate::stream::release_ended_if_rung();
 }

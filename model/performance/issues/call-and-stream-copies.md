@@ -79,3 +79,11 @@ None is scheduled.
   pool. A by-value callee that moves from its parameter then copies even
   when the caller had an rvalue. Needs a ruling: is the C++ spelling of a
   function type part of the interface users write against?
+- **A Rust fold step copies its accumulator every put.** [read
+  2026-11-15] HOST-8 gives a Rust step the type `Fn(&A, &B) -> A`, so a
+  step that returns a grown accumulator clones it: O(n) per put, O(n^2)
+  over a fold whose accumulator grows with the input (a Vec or Map of
+  every key seen). C++ moves the checked-out value into step (golden
+  fold-copy-count); Python and R mutate in place. Taking the accumulator
+  by value (`Fn(A, &B) -> A`) changes the Rust type user code is written
+  against. Needs an interface ruling.

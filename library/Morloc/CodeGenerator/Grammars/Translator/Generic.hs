@@ -1393,32 +1393,15 @@ genericPrintExpr desc = go
     go IIntrinsicTmpfile =
       let prefix = ldIntrinsicPrefix desc
        in pretty prefix <> "mlc_tmpfile()"
-    go (IIntrinsicCellNew sid initE) =
-      let prefix = ldIntrinsicPrefix desc
-       in pretty prefix <> "mlc_cell_new("
-            <> schemaRef sid <> ", " <> go initE <> ")"
-    go (IIntrinsicCellGet sid _ handle) =
-      let prefix = ldIntrinsicPrefix desc
-       in pretty prefix <> "mlc_cell_get("
-            <> go handle <> ", " <> schemaRef sid <> ")"
-    go (IIntrinsicCellPut sid handle value) =
-      let prefix = ldIntrinsicPrefix desc
-       in pretty prefix <> "mlc_cell_put("
-            <> go handle <> ", " <> schemaRef sid <> ", " <> go value <> ")"
-    go (IIntrinsicCellSlots sid _ handle) =
-      let prefix = ldIntrinsicPrefix desc
-       in pretty prefix <> "mlc_cell_slots(" <> schemaRef sid <> ", " <> go handle <> ")"
-    go (IIntrinsicReduceList combine xs) =
-      let prefix = ldIntrinsicPrefix desc
-       in pretty prefix <> "mlc_reduce_list(" <> go combine <> ", " <> go xs <> ")"
     go (IIntrinsicGather native sid _ fn) =
       pool desc (if native then "mlc_gather_native" else "mlc_gather") <> "(" <> schemaRef sid <> ", " <> go fn <> ")"
     go (IIntrinsicGatherPut sid handle value) =
       pretty (ldIntrinsicPrefix desc) <> "mlc_gather_put(" <> go handle <> ", " <> schemaRef sid <> ", " <> go value <> ")"
-    go (IIntrinsicCellSink msid handle value fn) =
-      pool desc "mlc_cell_sink" <> "(" <> schemaOrNull msid <> ", " <> go handle <> ", " <> go value <> ", " <> go fn <> ")"
-    go (IIntrinsicCellSide msid _ handle fn) =
-      pool desc "mlc_cell_side" <> "(" <> schemaOrNull msid <> ", " <> go handle <> ", " <> go fn <> ")"
+    go (IIntrinsicFold file msid _ _ ini step comb fn) =
+      pool desc (if file then "mlc_fold_file" else "mlc_fold") <> "(" <> schemaOrNull msid <> ", "
+        <> go ini <> ", " <> go step <> ", " <> go comb <> ", " <> go fn <> ")"
+    go (IIntrinsicFoldPut msid _ _ step handle value) =
+      pool desc "mlc_fold_put" <> "(" <> schemaOrNull msid <> ", " <> go step <> ", " <> go handle <> ", " <> go value <> ")"
     go (IIntrinsicReplay sid _ handle fn) =
       let prefix = ldIntrinsicPrefix desc
        in pretty prefix <> "mlc_replay("

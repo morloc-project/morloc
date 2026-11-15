@@ -120,15 +120,13 @@ morloc_mlc_close                     <- function(...){ .Call("morloc_mlc_close",
 morloc_mlc_tmpfile                   <- function(...){ .Call("morloc_mlc_tmpfile",                   ...) }
 morloc_mlc_unlink_tmp                <- function(...){ .Call("morloc_mlc_unlink_tmp",                ...) }
 morloc_mlc_tell                      <- function(...){ .Call("morloc_mlc_tell",                      ...) }
-morloc_mlc_cell_new                  <- function(...){ .Call("morloc_mlc_cell_new",                  ...) }
-morloc_mlc_cell_get                  <- function(...){ .Call("morloc_mlc_cell_get",                  ...) }
-morloc_mlc_cell_put                  <- function(...){ .Call("morloc_mlc_cell_put",                  ...) }
-morloc_mlc_cell_count                <- function(...){ .Call("morloc_mlc_cell_count",                ...) }
-morloc_mlc_cell_slot                 <- function(...){ .Call("morloc_mlc_cell_slot",                 ...) }
-morloc_mlc_cell_free                 <- function(...){ .Call("morloc_mlc_cell_free",                 ...) }
-morloc_mlc_side_route                <- function(...){ .Call("morloc_mlc_side_route",                ...) }
 morloc_mlc_side_put                  <- function(...){ .Call("morloc_mlc_side_put",                  ...) }
-morloc_mlc_side_take                 <- function(...){ .Call("morloc_mlc_side_take",                 ...) }
+morloc_mlc_fold_new                  <- function(...){ .Call("morloc_mlc_fold_new",                  ...) }
+morloc_mlc_fold_checkout             <- function(...){ .Call("morloc_mlc_fold_checkout",             ...) }
+morloc_mlc_fold_store                <- function(...){ .Call("morloc_mlc_fold_store",                ...) }
+morloc_mlc_fold_failed               <- function(...){ .Call("morloc_mlc_fold_failed",               ...) }
+morloc_mlc_fold_drop                 <- function(...){ .Call("morloc_mlc_fold_drop",                 ...) }
+morloc_mlc_fold_take                 <- function(...){ .Call("morloc_mlc_fold_take",                 ...) }
 morloc_mlc_side_next                 <- function(...){ .Call("morloc_mlc_side_next",                 ...) }
 morloc_mlc_fschema                   <- function(...){ .Call("morloc_mlc_fschema",                   ...) }
 morloc_mlc_ifile_walk                <- function(...){ .Call("morloc_mlc_ifile_walk",                ...) }
@@ -149,20 +147,6 @@ morloc_mlc_flush                     <- function(...){ .Call("morloc_mlc_flush",
 morloc_mlc_open_channel              <- function(...){ .Call("morloc_mlc_open_channel",              ...) }
 morloc_mlc_settle                    <- function(...){ .Call("morloc_mlc_settle",                    ...) }
 morloc_mlc_spawn                     <- function(...){ .Call("morloc_mlc_spawn",                     ...) }
-# Every accumulator of a cell, in its wire form; with morloc_mlc_reduce_list
-# it runs @cellreduce.
-morloc_mlc_cell_slots <- function(schema, handle) {
-  on.exit(try(morloc_mlc_cell_free(handle), silent = TRUE), add = TRUE)
-  n <- morloc_mlc_cell_count(handle)
-  if (n < 1) stop("@fold: the accumulator holds nothing to merge")
-  lapply(seq_len(n) - 1, function(i) morloc_mlc_cell_slot(handle, i, schema))
-}
-
-# A non-empty list folded with `combine`.
-morloc_mlc_reduce_list <- function(combine, xs) {
-  Reduce(combine, xs)
-}
-
 # @replay: call `fn` on every frame (sub-packet) of the stream, in order,
 # each as the list it holds. Only the end of the stream (NULL) stops it.
 morloc_mlc_replay <- function(schema, handle, fn) {
@@ -186,17 +170,62 @@ mlc_gather <- function(schema, f) {
   xs
 }
 
-# SIDE-4, SIDE-10
-mlc_cell_sink <- function(schema, h, batch, k) {
-  if (morloc_mlc_side_route(h)) k(batch) else morloc_mlc_side_put(h, schema, batch)
-  NULL
+# FOLD-6: a deep copy, so an environment or R6 init is never shared.
+mlc_fold_copy <- function(x) unserialize(serialize(x, NULL))
+
+# fold.md: the slots, and forked children's batches stepped from a copy of
+# init (FOLD-3), combined; an empty fold is a copy of its init.
+mlc_fold <- function(schema, init, step, combine, f) {
+  h <- morloc_mlc_fold_new(init)
+  taken <- FALSE
+  on.exit(if (!taken) morloc_mlc_fold_drop(h), add = TRUE)
+  f(h)
+  taken <- TRUE
+  t <- morloc_mlc_fold_take(h, schema)
+  values <- t[[1L]]
+  side <- NULL
+  while (length(b <- morloc_mlc_side_next(t[[2L]])) == 1L) {
+    if (is.null(side)) side <- list(mlc_fold_copy(init))
+    side[[1L]] <- step(side[[1L]], b[[1L]])
+  }
+  values <- c(values, side)
+  if (length(values) == 0L) mlc_fold_copy(init) else Reduce(combine, values)
 }
 
-# SIDE-7
-mlc_cell_side <- function(schema, h, k) {
-  r <- morloc_mlc_side_take(h, schema)
-  while (length(b <- morloc_mlc_side_next(r)) == 1L) k(b[[1L]])
-  NULL
+# FOLD-9: the handle is a stream; its batches are stepped once the
+# producer returns.
+mlc_fold_file <- function(schema, init, step, combine, f) {
+  path <- morloc_mlc_tmpfile()
+  o <- morloc_mlc_open_ostream(schema, path)
+  tryCatch(f(o), finally = morloc_mlc_close(o))
+  acc <- mlc_fold_copy(init)
+  i <- morloc_mlc_open_istream(schema, path)
+  on.exit({
+    morloc_mlc_close(i)
+    morloc_mlc_unlink_tmp(path)
+  }, add = TRUE)
+  morloc_mlc_replay(schema, i, function(b) acc <<- step(acc, b))
+  acc
+}
+
+# FOLD-1, FOLD-9
+mlc_fold_put <- function(schema, step, h, batch) {
+  co <- morloc_mlc_fold_checkout(h)
+  if (co[[1L]] == 2L) {
+    morloc_mlc_write(schema, 0L, batch, h)
+    morloc_mlc_flush(h)
+  } else if (co[[1L]] == 0L) {
+    morloc_mlc_side_put(h, schema, batch)
+  } else {
+    stepped <- FALSE
+    on.exit(if (!stepped) morloc_mlc_fold_failed(h), add = TRUE)
+    v <- co[[2L]]
+    if (co[[3L]]) v <- mlc_fold_copy(v)
+    v <- step(v, batch)
+    stepped <- TRUE
+    morloc_mlc_fold_store(h, v)
+  }
+  invisible(NULL)
 }
 
 # @throw: raise a classed condition.
