@@ -103,6 +103,14 @@ on 0.109.0 unless marked.
   (Grammars/Translator/Generic.hs:768-769) emits `.f` for `NamObject`, but
   pymorloc builds the value as a dict, so `.f p` on an `object Py` record
   should fail at run time. object-1-py never reads a field.
+- **Python equality of class records is the class's, not morloc's.**
+  [read, 2026-11-15] Gap in GEN-11. root-py core.py `morloc_eq` compares
+  dicts field by field through itself, so a dict record's fields compare
+  as morloc values (a list equals a tuple, numpy fields compare
+  elementwise); a dataclass or pydantic record falls to its class's `==`,
+  which compares fields with Python `==` and type. Fix in root-py: compare
+  class records field by field like dicts (not done: root-py had another
+  session's uncommitted edits on master, 2026-11-15).
 - **Out-of-range list index gives a wrong value in C++ and R.**
   [reproduced, 2026-10-21] Violates COLL-3 (same result in every language);
   every COLL-4 candidate excludes a silent wrong value. With a pool-computed

@@ -16,7 +16,9 @@ module Morloc.LangRegistry
   , LangRegistryEntry (..)
   , TypeKinds (..)
   , KindSpec (..)
+  , ClassKind (..)
   , noTypeKinds
+  , classKindForms
   , emptyRegistry
   , buildDefaultRegistry
   , extendRegistry
@@ -43,6 +45,7 @@ import qualified Data.Aeson.Key as AK
 import qualified Data.Aeson.KeyMap as KM
 import qualified Data.ByteString as BS
 import Data.Map.Strict (Map)
+import Data.Maybe (isJust, isNothing)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -85,6 +88,9 @@ data LangRegistryEntry = LangRegistryEntry
 data TypeKinds = TypeKinds
   { tkRecordDefault :: Maybe Text
   , tkRecordKinds :: Map Text KindSpec
+  , tkPrefix :: Maybe Text
+  -- ^ The package or namespace a class kind's generated classes live under
+  -- (GEN-4), for languages whose names are dotted module paths.
   }
   deriving (Show, Eq)
 
@@ -93,30 +99,50 @@ data TypeKinds = TypeKinds
 data KindSpec = KindSpec
   { ksForm :: Text
   , ksLegacy :: [Text]
+  , ksClass :: Maybe ClassKind
+  -- ^ Set when a record of this kind is an instance of a generated class.
   }
   deriving (Show, Eq)
 
+-- | How a generated class holds its fields (GEN-11).
+data ClassKind = DataclassKind | PydanticKind
+  deriving (Show, Eq, Ord)
+
 noTypeKinds :: TypeKinds
-noTypeKinds = TypeKinds Nothing Map.empty
+noTypeKinds = TypeKinds Nothing Map.empty Nothing
+
+-- | The forms of a language's class kinds (GEN-11), with each one's class.
+classKindForms :: TypeKinds -> Map Text ClassKind
+classKindForms tk = Map.fromList [(ksForm k, c) | k <- Map.elems (tkRecordKinds tk), Just c <- [ksClass k]]
 
 instance Aeson.FromJSON TypeKinds where
   parseJSON = Aeson.withObject "generated_types" $ \o -> do
-    onlyKeys "generated_types" ["records"] o
+    onlyKeys "generated_types" ["records", "prefix"] o
+    prefix <- o .:? "prefix"
     recs <- o .:? "records"
     case recs of
-      Nothing -> return noTypeKinds
+      Nothing -> return noTypeKinds {tkPrefix = prefix}
       Just r -> flip (Aeson.withObject "generated_types.records") r $ \ro -> do
         onlyKeys "generated_types.records" ["default", "kinds"] ro
         def <- ro .: "default"
         kinds <- ro .: "kinds"
-        if Map.member def kinds
-          then return (TypeKinds (Just def) kinds)
-          else fail $ "generated_types.records.default names `" <> T.unpack def <> "`, which is not one of its kinds"
+        if not (Map.member def kinds)
+          then fail $ "generated_types.records.default names `" <> T.unpack def <> "`, which is not one of its kinds"
+          else
+            if any (isJust . ksClass) (Map.elems kinds) && isNothing prefix
+              then fail "generated_types declares a class kind but no prefix for its classes"
+              else return (TypeKinds (Just def) kinds prefix)
 
 instance Aeson.FromJSON KindSpec where
   parseJSON = Aeson.withObject "record kind" $ \o -> do
-    onlyKeys "record kind" ["form", "legacy"] o
-    KindSpec <$> o .: "form" <*> o .:? "legacy" .!= []
+    onlyKeys "record kind" ["form", "legacy", "class"] o
+    cls <- o .:? "class"
+    cls' <- case cls :: Maybe Text of
+      Nothing -> return Nothing
+      Just "dataclass" -> return (Just DataclassKind)
+      Just "pydantic" -> return (Just PydanticKind)
+      Just other -> fail $ "record kind class `" <> T.unpack other <> "` is not one of dataclass, pydantic"
+    KindSpec <$> o .: "form" <*> o .:? "legacy" .!= [] <*> pure cls'
 
 -- | Refuse an object holding a key outside the given set, so a misspelled
 -- key in a descriptor is an error rather than silently ignored.

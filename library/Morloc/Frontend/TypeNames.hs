@@ -97,7 +97,7 @@ resolveTypeNames d = do
           , v@(TV n) <- localTypes e
           , not (isReservedTypeName n)
           ]
-  MM.modify' $ \s -> s {stateTypeHomes = homes}
+  MM.modify' $ \s -> s {stateTypeHomes = homes, stateModulePackages = Map.mapMaybe id packages}
   result <- DAG.synthesize (resolveModule canonical) rewriteEdge d
   case result of
     Nothing -> MM.throwCompilerBug "the module graph has a cycle after loading"

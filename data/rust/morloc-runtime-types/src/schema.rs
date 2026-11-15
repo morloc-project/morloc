@@ -416,7 +416,12 @@ fn parse_hint_arm(
 ) -> Result<(Schema, usize), MorlocError> {
     let (hint, after_hint) = parse_hint(bytes, cur)?;
     let (mut schema, end) = parse_schema_r(bytes, after_hint, declared, depth + 1)?;
-    schema.hint = Some(hint);
+    // A record keeps its own hint under an outer one (a Packable whose
+    // unpacked form is the record): a record's hint names the class its
+    // values are built as, which the outer type's hint does not.
+    if !(schema.serial_type == SerialType::Map && schema.hint.is_some()) {
+        schema.hint = Some(hint);
+    }
     Ok((schema, end))
 }
 
@@ -1295,6 +1300,17 @@ mod tests {
         let s = parse_schema("<std::vector<$1>>ai4").unwrap();
         assert_eq!(s.serial_type, SerialType::Array);
         assert_eq!(s.hint.as_deref(), Some("std::vector<$1>"));
+    }
+
+    #[test]
+    fn record_keeps_its_own_hint_under_an_outer_one() {
+        let s = parse_schema("<Outer><mlc_types.m.P>m11xi4").unwrap();
+        assert_eq!(s.serial_type, SerialType::Map);
+        assert_eq!(s.hint.as_deref(), Some("mlc_types.m.P"));
+        let s = parse_schema("<Outer>m11xi4").unwrap();
+        assert_eq!(s.hint.as_deref(), Some("Outer"));
+        let s = parse_schema("<bytes><list>au1").unwrap();
+        assert_eq!(s.hint.as_deref(), Some("bytes"));
     }
 
     #[test]

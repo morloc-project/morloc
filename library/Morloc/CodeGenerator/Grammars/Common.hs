@@ -41,11 +41,13 @@ module Morloc.CodeGenerator.Grammars.Common
   , RecEntry (..)
   , RecMap
   , collectRecords
+  , collectRecordsWhere
   , unifyRecords
   , mergeVariantOccurrences
   , mergeEnumOccurrences
   , structName
   , typeFileTree
+  , fileTree
   , isIdentifier
 
     -- * Dispatch extraction
@@ -935,7 +937,12 @@ data RecEntry = RecEntry
 type RecMap = [((FVar, [Key]), RecEntry)]
 
 collectRecords :: SerialManifold -> [(FVar, Int, [(Key, TypeF)])]
-collectRecords e0@(SerialManifold i0 _ _ _ _) =
+collectRecords = collectRecordsWhere (== "struct")
+
+-- | Every occurrence of a record whose concrete name passes the test, with
+-- the manifold it occurs in and its fields there.
+collectRecordsWhere :: (Text -> Bool) -> SerialManifold -> [(FVar, Int, [(Key, TypeF)])]
+collectRecordsWhere wanted e0@(SerialManifold i0 _ _ _ _) =
   unique $ CMS.evalState (surroundFoldSerialManifoldM manifoldIndexer fm e0) i0
   where
     fm = defaultValue {opFoldWithNativeExprM = nativeExpr, opFoldWithSerialExprM = serialExpr}
@@ -958,7 +965,7 @@ collectRecords e0@(SerialManifold i0 _ _ _ _) =
     serialExpr _ e = return $ foldlSE (<>) [] e
 
     seekRecs :: Int -> TypeF -> [(FVar, Int, [(Key, TypeF)])]
-    seekRecs m (NamF _ v@(FV _ (CV "struct")) _ rs) = [(v, m, rs)] <> concatMap (seekRecs m . snd) rs
+    seekRecs m (NamF _ v@(FV _ (CV c)) _ rs) | wanted c = [(v, m, rs)] <> concatMap (seekRecs m . snd) rs
     seekRecs m (NamF _ _ _ rs) = concatMap (seekRecs m . snd) rs
     seekRecs m (FunF ts t) = concatMap (seekRecs m) (t : ts)
     seekRecs m (AppF t ts) = concatMap (seekRecs m) (t : tyArgs ts)
@@ -992,13 +999,15 @@ unifyRecords xs =
 -- below the language's types directory: each module's file at its path
 -- under @mlc/types@, with the given extension.
 typeFileTree :: String -> [([Text], Text)] -> [DirTree Code]
-typeFileTree ext files = [Dir "mlc" [Dir "types" (go files)]]
-  where
-    go fs =
-      [File (MT.unpack c <> ext) (Code t) | ([c], t) <- fs]
-        <> [ Dir (MT.unpack c) (go [(rest, t) | (c' : rest@(_ : _), t) <- fs, c' == c])
-           | c <- unique [c | (c : _ : _, _) <- fs]
-           ]
+typeFileTree ext files = [Dir "mlc" [Dir "types" (fileTree [(init p <> [last p <> MT.pack ext], t) | (p@(_ : _), t) <- files])]]
+
+-- | Files, each at its path of directories, as a directory tree.
+fileTree :: [([Text], Text)] -> [DirTree Code]
+fileTree fs =
+  [File (MT.unpack c) (Code t) | ([c], t) <- fs]
+    <> [ Dir (MT.unpack c) (fileTree [(rest, t) | (c' : rest@(_ : _), t) <- fs, c' == c])
+       | c <- unique [c | (c : _ : _, _) <- fs]
+       ]
 
 -- | Whether a name is an ASCII identifier: a letter or underscore, then
 -- letters, digits and underscores.

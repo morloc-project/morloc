@@ -1,0 +1,21 @@
+-- GEN-11: dataclass records inside a list and an optional, held by a
+-- record of the default dict kind, cross to C++ and back.
+module main (roundTrip, kinds)
+
+import root-py
+import root-cpp (idcpp)
+
+record Pt where
+  x :: Int
+  y :: Int
+record Py => Pt = dataclass
+
+record Box where
+  pts :: [Pt]
+  best :: ?Pt
+
+source Py from "f.py" ("kinds")
+kinds :: Box -> Str
+
+roundTrip :: Box -> Box
+roundTrip b = idcpp (idpy b)

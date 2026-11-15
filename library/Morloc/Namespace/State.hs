@@ -176,6 +176,12 @@ data MorlocState = MorlocState
   , stateTypeHomes :: Map.Map TVar TypeHome
   -- ^ For each declared type, by its program-wide name, the module that
   -- declares it and the name it is declared under (GEN-4).
+  , stateModulePackages :: Map.Map MVar Text
+  -- ^ The package each module of a package belongs to (GEN-4); a module of
+  -- no package is absent.
+  , stateGeneratedClasses :: Map.Map Text (LR.ClassKind, TVar)
+  -- ^ Each generated class (GEN-11), by its qualified name, which is also
+  -- its record's concrete name: the class kind and the record.
   , stateExportTypes :: Map.Map Int TypeU
   -- ^ Each export's inferred general type, by its index, with its Nat
   -- variables: the contract of an export without a signature (DIM-3).
@@ -1132,6 +1138,8 @@ instance Defaultable MorlocState where
       , stateGeneralTypedefs = Map.empty
       , stateNewtypeHeaders = Map.empty
       , stateTypeHomes = Map.empty
+      , stateGeneratedClasses = Map.empty
+      , stateModulePackages = Map.empty
       , stateExportTypes = Map.empty
       , stateSources = GMap Map.empty Map.empty
       , stateAnnotations = Map.empty

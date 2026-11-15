@@ -595,7 +595,8 @@ typedef enum {
     PY_SLOT_TUPLE,  // PyTuple_SET_ITEM(parent, index, obj)
     PY_SLOT_LIST,   // PyList_SET_ITEM(parent, index, obj)
     PY_SLOT_DICT,   // PyDict_SetItemString(parent, key, obj)
-    PY_SLOT_NPY     // PyArray_SETITEM(parent, index, obj)
+    PY_SLOT_NPY,    // PyArray_SETITEM(parent, index, obj)
+    PY_SLOT_OFFSET  // the slot at byte offset `slot` of a dataclass instance
 } py_slot_kind_t;
 
 typedef struct {
@@ -615,6 +616,10 @@ typedef struct {
 typedef struct py_keyset {
     const Schema* schema;
     PyObject** keys;
+    PyTypeObject* cls;      // the record's generated class (GEN-11), or NULL for a dict
+    int kind;               // 0 dataclass, 1 pydantic
+    Py_ssize_t* offsets;    // dataclass: each field's slot offset, by field index
+    PyObject* given;        // pydantic: the frozenset of field names a model holds
 } py_keyset_t;
 
 typedef struct {
@@ -631,7 +636,7 @@ typedef struct {
     ssize_t total;          // size pass
     void** cursor;          // write pass
     void* end;              // write pass: the end of the block the size pass measured
-    struct py_keyset* keysets; // record key objects made by this walk
+    struct py_keyset** keysets; // record key objects made by this walk, each allocated alone
     size_t n_keysets;
     morloc_space_t space;   // read pass: where relptrs lead
     PyObject* result;       // read pass: the root, owned until returned
@@ -679,6 +684,8 @@ static void py_walk_init(py_walk_t* w, const Schema* root) {
     w->env_base = recur_env_depth;
 }
 
+static void py_keyset_free(py_keyset_t* ks);
+
 static void py_walk_free(py_walk_t* w) {
     free(w->frames);
     w->frames = NULL;
@@ -688,10 +695,7 @@ static void py_walk_free(py_walk_t* w) {
     w->later_cap = 0;
     Py_CLEAR(w->keep);
     for (size_t i = 0; i < w->n_keysets; i++) {
-        for (size_t k = 0; k < w->keysets[i].schema->size; k++) {
-            Py_XDECREF(w->keysets[i].keys[k]);
-        }
-        free(w->keysets[i].keys);
+        py_keyset_free(w->keysets[i]);
     }
     free(w->keysets);
     w->keysets = NULL;
@@ -699,41 +703,192 @@ static void py_walk_free(py_walk_t* w) {
     recur_env_depth = w->env_base;
 }
 
-// The key objects of a record schema, made once per walk rather than once
-// per record. NULL with a Python error set.
-static PyObject** py_record_keys(py_walk_t* w, const Schema* schema) {
-    for (size_t i = 0; i < w->n_keysets; i++) {
-        if (w->keysets[i].schema == schema) return w->keysets[i].keys;
+// Generated record classes (GEN-11), by schema hint: the hint of a record
+// of a class kind is the class's qualified name. Each entry is a tuple
+// (class, kind, slot offsets), kind 0 a frozen slotted dataclass whose
+// offsets map each field name to its slot, kind 1 a pydantic v2 model.
+static PyObject* py_class_registry = NULL;
+
+// A record schema's key objects and its generated class, if any, resolved
+// once per walk rather than once per record. NULL with a Python error set.
+static void py_keyset_free(py_keyset_t* ks) {
+    if (ks == NULL) return;
+    if (ks->keys != NULL) {
+        for (size_t k = 0; k < ks->schema->size; k++) Py_XDECREF(ks->keys[k]);
     }
-    py_keyset_t* grown = (py_keyset_t*)realloc(w->keysets, (w->n_keysets + 1) * sizeof(py_keyset_t));
-    if (grown == NULL) {
-        PyErr_NoMemory();
-        return NULL;
-    }
-    w->keysets = grown;
-    PyObject** keys = (PyObject**)calloc(schema->size ? schema->size : 1, sizeof(PyObject*));
-    if (keys == NULL) {
-        PyErr_NoMemory();
-        return NULL;
-    }
-    w->keysets[w->n_keysets].schema = schema;
-    w->keysets[w->n_keysets].keys = keys;
-    w->n_keysets++;
-    for (size_t k = 0; k < schema->size; k++) {
-        keys[k] = PyUnicode_InternFromString(schema->keys[k]);
-        if (keys[k] == NULL) return NULL;
-    }
-    return keys;
+    free(ks->keys);
+    free(ks->offsets);
+    Py_XDECREF(ks->given);
+    free(ks);
 }
 
-// A record field's value, or NULL with a Python error set when the dict
-// lacks the field.
-static PyObject* py_record_field(const Schema* schema, PyObject** keys, PyObject* dict, size_t i) {
-    PyObject* value = PyDict_GetItemWithError(dict, keys[i]);
+static py_keyset_t* py_record_set(py_walk_t* w, const Schema* schema) {
+    for (size_t i = 0; i < w->n_keysets; i++) {
+        if (w->keysets[i]->schema == schema) return w->keysets[i];
+    }
+    py_keyset_t* ks = (py_keyset_t*)calloc(1, sizeof(py_keyset_t));
+    if (ks == NULL) { PyErr_NoMemory(); return NULL; }
+    ks->schema = schema;
+    ks->keys = (PyObject**)calloc(schema->size ? schema->size : 1, sizeof(PyObject*));
+    if (ks->keys == NULL) { PyErr_NoMemory(); goto fail; }
+    for (size_t k = 0; k < schema->size; k++) {
+        ks->keys[k] = PyUnicode_InternFromString(schema->keys[k]);
+        if (ks->keys[k] == NULL) goto fail;
+    }
+    PyObject* entry = (schema->hint != NULL && py_class_registry != NULL)
+        ? PyDict_GetItemString(py_class_registry, schema->hint) : NULL;
+    if (entry != NULL) {
+        ks->cls = (PyTypeObject*)PyTuple_GET_ITEM(entry, 0);
+        ks->kind = (int)PyLong_AsLong(PyTuple_GET_ITEM(entry, 1));
+        if (ks->kind == 0) {
+            PyObject* offsets = PyTuple_GET_ITEM(entry, 2);
+            ks->offsets = (Py_ssize_t*)calloc(schema->size ? schema->size : 1, sizeof(Py_ssize_t));
+            if (ks->offsets == NULL) { PyErr_NoMemory(); goto fail; }
+            for (size_t k = 0; k < schema->size; k++) {
+                PyObject* off = PyDict_GetItemWithError(offsets, ks->keys[k]);
+                if (off == NULL) {
+                    if (!PyErr_Occurred()) {
+                        PyErr_Format(PyExc_TypeError, "the class %s has no field '%s'", schema->hint, schema->keys[k]);
+                    }
+                    goto fail;
+                }
+                ks->offsets[k] = PyLong_AsSsize_t(off);
+            }
+        } else {
+            PyObject* names = PyTuple_New((Py_ssize_t)schema->size);
+            if (names == NULL) goto fail;
+            for (size_t k = 0; k < schema->size; k++) {
+                Py_INCREF(ks->keys[k]);
+                PyTuple_SET_ITEM(names, (Py_ssize_t)k, ks->keys[k]);
+            }
+            ks->given = PyFrozenSet_New(names);
+            Py_DECREF(names);
+            if (ks->given == NULL) goto fail;
+        }
+    }
+    {
+        py_keyset_t** grown = (py_keyset_t**)realloc(w->keysets, (w->n_keysets + 1) * sizeof(py_keyset_t*));
+        if (grown == NULL) { PyErr_NoMemory(); goto fail; }
+        w->keysets = grown;
+        w->keysets[w->n_keysets++] = ks;
+    }
+    return ks;
+fail:
+    py_keyset_free(ks);
+    return NULL;
+}
+
+static PyObject* pybinding__register_class(PyObject* self, PyObject* args) {
+    (void)self;
+    const char* hint;
+    PyObject* cls;
+    int kind;
+    if (!PyArg_ParseTuple(args, "sOi", &hint, &cls, &kind)) return NULL;
+    if (!PyType_Check(cls)) {
+        PyErr_Format(PyExc_TypeError, "register_class: %s is not a class", hint);
+        return NULL;
+    }
+    PyObject* offsets = PyDict_New();
+    if (offsets == NULL) return NULL;
+    if (kind == 0) {
+        PyObject* fields = PyObject_GetAttrString(cls, "__dataclass_fields__");
+        if (fields == NULL || !PyDict_Check(fields)) {
+            Py_XDECREF(fields);
+            Py_DECREF(offsets);
+            PyErr_Format(PyExc_TypeError, "register_class: %s is not a dataclass", hint);
+            return NULL;
+        }
+        Py_ssize_t pos = 0;
+        PyObject* name;
+        PyObject* field;
+        while (PyDict_Next(fields, &pos, &name, &field)) {
+            PyObject* descr = PyDict_GetItemWithError(((PyTypeObject*)cls)->tp_dict, name);
+            if (descr == NULL || !Py_IS_TYPE(descr, &PyMemberDescr_Type)) {
+                Py_DECREF(fields);
+                Py_DECREF(offsets);
+                if (!PyErr_Occurred()) {
+                    PyErr_Format(PyExc_TypeError, "register_class: field %S of %s is not a slot", name, hint);
+                }
+                return NULL;
+            }
+            PyObject* off = PyLong_FromSsize_t(((PyMemberDescrObject*)descr)->d_member->offset);
+            if (off == NULL || PyDict_SetItem(offsets, name, off) != 0) {
+                Py_XDECREF(off);
+                Py_DECREF(fields);
+                Py_DECREF(offsets);
+                return NULL;
+            }
+            Py_DECREF(off);
+        }
+        Py_DECREF(fields);
+    } else if (kind == 1) {
+        PyObject* pydantic = PyImport_ImportModule("pydantic");
+        if (pydantic == NULL) { Py_DECREF(offsets); return NULL; }
+        PyObject* version = PyObject_GetAttrString(pydantic, "VERSION");
+        Py_DECREF(pydantic);
+        if (version == NULL) { Py_DECREF(offsets); return NULL; }
+        const char* v = PyUnicode_AsUTF8(version);
+        int major = v ? atoi(v) : 0;
+        Py_DECREF(version);
+        if (major < 2) {
+            Py_DECREF(offsets);
+            PyErr_Format(PyExc_RuntimeError, "register_class: %s needs pydantic 2 or later", hint);
+            return NULL;
+        }
+    } else {
+        Py_DECREF(offsets);
+        PyErr_Format(PyExc_ValueError, "register_class: unknown class kind %d", kind);
+        return NULL;
+    }
+    if (py_class_registry == NULL) {
+        py_class_registry = PyDict_New();
+        if (py_class_registry == NULL) { Py_DECREF(offsets); return NULL; }
+    }
+    PyObject* entry = Py_BuildValue("(OiN)", cls, kind, offsets);
+    if (entry == NULL) return NULL;
+    int r = PyDict_SetItemString(py_class_registry, hint, entry);
+    Py_DECREF(entry);
+    if (r != 0) return NULL;
+    Py_RETURN_NONE;
+}
+
+// A record field's value, borrowed, from a dict or an instance of the
+// record's generated class (GEN-11), or NULL with a Python error set when
+// the field is missing.
+static PyObject* py_set_field(py_keyset_t* ks, PyObject* obj, size_t i) {
+    PyObject* value = NULL;
+    if (ks->cls == NULL) {
+        value = PyDict_GetItemWithError(obj, ks->keys[i]);
+    } else if (ks->kind == 0) {
+        value = *(PyObject**)((char*)obj + ks->offsets[i]);
+    } else {
+        PyObject** dictptr = _PyObject_GetDictPtr(obj);
+        if (dictptr != NULL && *dictptr != NULL) {
+            value = PyDict_GetItemWithError(*dictptr, ks->keys[i]);
+        }
+    }
     if (value == NULL && !PyErr_Occurred()) {
-        PyErr_Format(PyExc_KeyError, "record field '%s' is missing", schema->keys[i]);
+        PyErr_Format(PyExc_KeyError, "record field '%s' is missing", ks->schema->keys[i]);
     }
     return value;
+}
+
+// The record value a schema node expects: an instance of exactly its
+// generated class, or a dict. Returns 0, or -1 with a Python error set.
+static int py_check_record(py_keyset_t* ks, const Schema* schema, PyObject* obj) {
+    if (ks->cls != NULL) {
+        if (Py_TYPE(obj) != ks->cls) {
+            PyErr_Format(PyExc_TypeError, "Expected an instance of %s for a record, but got %s",
+                         schema->hint, Py_TYPE(obj)->tp_name);
+            return -1;
+        }
+        return 0;
+    }
+    if (!PyDict_Check(obj)) {
+        PyErr_Format(PyExc_TypeError, "Expected dict for MORLOC_MAP, but got %s", Py_TYPE(obj)->tp_name);
+        return -1;
+    }
+    return 0;
 }
 
 // An element the walk was about to visit is gone: Python code run during
@@ -1172,14 +1327,12 @@ static int py_size_step(py_walk_t* w, const Schema* schema, PyObject* obj, size_
         }
 
         case MORLOC_MAP: {
-            if (!PyDict_Check(obj)) {
-                PyRAISE("Expected dict for MORLOC_MAP, but got %s", Py_TYPE(obj)->tp_name);
-            }
+            py_keyset_t* ks = py_record_set(w, schema);
+            if (ks == NULL) return -1;
+            if (py_check_record(ks, schema, obj) != 0) goto error;
             w->total += (ssize_t)schema->width;
-            PyObject** keys = py_record_keys(w, schema);
-            if (keys == NULL) return -1;
             for (size_t i = 0; i < schema->size; ++i) {
-                PyObject* value = py_record_field(schema, keys, obj, i);
+                PyObject* value = py_set_field(ks, obj, i);
                 if (value == NULL) return -1;
                 if (py_size_child(w, schema->parameters[i], value, 1) != 0) return -1;
             }
@@ -1683,15 +1836,12 @@ static int py_write_step(py_walk_t* w, const Schema* schema, void* dest, PyObjec
             break;
 
         case MORLOC_MAP:
-            if (!PyDict_Check(obj)) {
-                PyRAISE("Expected dict for MORLOC_MAP, but got %s", Py_TYPE(obj)->tp_name);
-            }
-
             {
-                PyObject** keys = py_record_keys(w, schema);
-                if (keys == NULL) goto error;
+                py_keyset_t* ks = py_record_set(w, schema);
+                if (ks == NULL) goto error;
+                if (py_check_record(ks, schema, obj) != 0) goto error;
                 for (size_t i = 0; i < schema->size; ++i) {
-                    PyObject* value = py_record_field(schema, keys, obj, i);
+                    PyObject* value = py_set_field(ks, obj, i);
                     if (value == NULL) goto error;
                     if (py_write_child(w, schema->parameters[i], (char*)dest + schema->offsets[i], value) != 0) {
                         goto error;
@@ -1836,6 +1986,34 @@ error:
 
 // -- read pass --------------------------------------------------------------
 
+// Give a freshly allocated pydantic v2 model the state model_construct
+// gives one: a field dict, the set of fields given (all of them), and no
+// extra or private attributes. Sets *fields to the field dict.
+static int py_pydantic_prepare(PyObject* obj, py_keyset_t* ks, PyObject** fields) {
+    PyObject* d = PyDict_New();
+    if (d == NULL) return -1;
+    PyObject* given = PySet_New(ks->given);
+    if (given == NULL) { Py_DECREF(d); return -1; }
+    static PyObject* names[4] = {NULL, NULL, NULL, NULL};
+    static const char* spelled[4] = {"__dict__", "__pydantic_fields_set__", "__pydantic_extra__", "__pydantic_private__"};
+    for (int j = 0; j < 4; j++) {
+        if (names[j] == NULL && (names[j] = PyUnicode_InternFromString(spelled[j])) == NULL) {
+            Py_DECREF(given);
+            Py_DECREF(d);
+            return -1;
+        }
+    }
+    int r = PyObject_GenericSetAttr(obj, names[0], d);
+    if (r == 0) r = PyObject_GenericSetAttr(obj, names[1], given);
+    if (r == 0) r = PyObject_GenericSetAttr(obj, names[2], Py_None);
+    if (r == 0) r = PyObject_GenericSetAttr(obj, names[3], Py_None);
+    Py_DECREF(given);
+    if (r != 0) { Py_DECREF(d); return -1; }
+    *fields = d;
+    Py_DECREF(d);
+    return 0;
+}
+
 // Store a finished node into its parent's slot (or as the root). Steals
 // `obj`; on failure it is released and -1 returned.
 static int py_store(py_walk_t* w, unsigned char slot_kind, PyObject* parent, Py_ssize_t slot, const char* key, PyObject* obj) {
@@ -1860,6 +2038,13 @@ static int py_store(py_walk_t* w, unsigned char slot_kind, PyObject* parent, Py_
             int r = PyArray_SETITEM((PyArrayObject*)parent, PyArray_GETPTR1((PyArrayObject*)parent, slot), obj);
             Py_DECREF(obj);
             return r;
+        }
+        case PY_SLOT_OFFSET: {
+            PyObject** field = (PyObject**)((char*)parent + slot);
+            PyObject* old = *field;
+            *field = obj;
+            Py_XDECREF(old);
+            return 0;
         }
     }
     Py_DECREF(obj);
@@ -2178,14 +2363,31 @@ static int py_read_step(py_walk_t* w, const Schema* schema, const void* data, si
             return 0;
         }
         case MORLOC_MAP: {
-            obj = PyDict_New();
-            if(obj == NULL){
-                PyRAISE("Failed in map");
+            py_keyset_t* ks = py_record_set(w, schema);
+            if (ks == NULL) goto error;
+            PyObject* fields_into = NULL;
+            unsigned char field_slot = PY_SLOT_DICT;
+            if (ks->cls == NULL) {
+                obj = PyDict_New();
+                if(obj == NULL){
+                    PyRAISE("Failed in map");
+                }
+                fields_into = obj;
+            } else {
+                obj = ks->cls->tp_alloc(ks->cls, 0);
+                if (obj == NULL) goto error;
+                if (ks->kind == 0) {
+                    fields_into = obj;
+                    field_slot = PY_SLOT_OFFSET;
+                } else if (py_pydantic_prepare(obj, ks, &fields_into) != 0) {
+                    goto error;
+                }
             }
             if (py_store(w, slot_kind, parent, slot, key, obj) != 0) return -1;
             for (size_t i = 0; i < schema->size; i++) {
                 void* item_ptr = (char*)data + schema->offsets[i];
-                if (py_read_child(w, schema->parameters[i], item_ptr, PY_SLOT_DICT, obj, 0, schema->keys[i]) != 0) return -1;
+                Py_ssize_t field_at = field_slot == PY_SLOT_OFFSET ? ks->offsets[i] : 0;
+                if (py_read_child(w, schema->parameters[i], item_ptr, field_slot, fields_into, field_at, schema->keys[i]) != 0) return -1;
             }
             return 0;
         }
@@ -5458,6 +5660,7 @@ error:
 }
 
 static PyMethodDef Methods[] = {
+    {"register_class", pybinding__register_class, METH_VARARGS, "Register a generated record class by its schema hint"},
     {"log_next_id", pybinding__log_next_id, METH_NOARGS, "Allocate a fresh log call id"},
     {"log_emit", pybinding__log_emit, METH_VARARGS, "Emit a formatted log line via libmorloc"},
     {"bench_record", pybinding__bench_record, METH_VARARGS, "Record one benchmark timing via libmorloc"},

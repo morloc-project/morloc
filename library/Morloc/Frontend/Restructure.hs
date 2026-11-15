@@ -1240,8 +1240,14 @@ collectTypes fullDag = do
           , not (null hs)
           ]
   reg <- MM.gets stateLangRegistry
+  homes <- MM.gets stateTypeHomes
+  packages <- MM.gets stateModulePackages
+  checkClassKindPlacement reg packages fullDag
   let declared = Map.unionsWith (Map.unionWith mergeEntries) (map snd found)
-      concrete = Map.map (completeRecords general) (withDefaultKinds reg general declared)
+      (concrete, classes) =
+        classForms reg homes . Map.map (completeRecords general) $
+          withDefaultKinds reg general declared
+  MM.modify' $ \s -> s {stateGeneratedClasses = classes}
   let modules = map fst (Map.elems fullDag)
   checkFormLists modules
   checkConflictingForms modules Nothing general
@@ -1722,6 +1728,84 @@ checkInstanceOnRoot dag gscope =
           | otherwise                = Just v
         headOf bnd (AppU h _)        = headOf bnd h
         headOf _   _                 = Nothing
+
+-- | Give each record of a class kind (GEN-11) its class's qualified name as
+-- its form: the language's class prefix, the declaring module's path and
+-- the record's name. That name is also the record's schema hint, by which
+-- the runtime finds the class. Returns the classes, by qualified name.
+classForms ::
+  LR.LangRegistry ->
+  Map TVar TypeHome ->
+  Map Lang Scope ->
+  (Map Lang Scope, Map Text (LR.ClassKind, TVar))
+classForms reg homes scopes = (Map.mapWithKey rewrite scopes, classes)
+  where
+    kindsOf lang = maybe LR.noTypeKinds LR.lreTypeKinds (Map.lookup (langName lang) (LR.lrEntries reg))
+    classOf = LR.classKindForms . kindsOf
+    qualified lang v = do
+      p <- LR.tkPrefix (kindsOf lang)
+      h <- Map.lookup v homes
+      return $ T.intercalate "." (p : typeHomePath h <> [typeHomeName h])
+    rewrite lang = Map.mapWithKey $ \v -> map $ \e@(ps, body, d, terminal, k) -> case body of
+      NamU o (TV f) args rs
+        | Map.member f (classOf lang), Just q <- qualified lang v -> (ps, NamU o (TV q) args rs, d, terminal, k)
+      _ -> e
+    classes =
+      Map.fromList
+        [ (q, (c, v))
+        | (lang, scope) <- Map.toList scopes
+        , (v, entries) <- Map.toList scope
+        , (_, NamU _ (TV f) _ _, _, _, _) <- entries
+        , Just c <- [Map.lookup f (classOf lang)]
+        , Just q <- [qualified lang v]
+        ]
+
+-- | A class kind changes how every value of the record is built and read,
+-- so only the package declaring the record, or the package's
+-- implementation module for the language (@<package>-py@, M3), may choose
+-- one; a record of another package keeps the form its own package gives
+-- it. The modules of no package (a script and its local imports) are one
+-- package. A record may have one class kind in a language, whatever its
+-- parameters.
+checkClassKindPlacement :: LR.LangRegistry -> Map MVar Text -> DAG MVar [AliasedSymbol] ExprI -> MorlocMonad ()
+checkClassKindPlacement reg packages fullDag = mapM_ check perModule >> mapM_ checkOne (Map.toList formsByRecord)
+  where
+    perModule = [(m, AST.findTypedefs e) | (m, (e, _)) <- Map.toList fullDag]
+    packageOf m = Map.findWithDefault "." m packages
+    declaringModule = Map.fromList [(v, m) | (m, (g, _)) <- perModule, v <- Map.keys g]
+    classForms' lang = Map.keysSet . LR.classKindForms $
+      maybe LR.noTypeKinds LR.lreTypeKinds (Map.lookup (langName lang) (LR.lrEntries reg))
+    formsByRecord =
+      Map.fromListWith Set.union
+        [ ((lang, v), Set.singleton f)
+        | (_, (_, concretes)) <- perModule
+        , (lang, scope) <- Map.toList concretes
+        , (v, entries) <- Map.toList scope
+        , (_, NamU _ (TV f) _ _, _, _, _) <- entries
+        ]
+    checkOne :: ((Lang, TVar), Set.Set Text) -> MorlocMonad ()
+    checkOne ((lang, v), fs)
+      | Set.size fs > 1 && not (Set.null (Set.intersection fs (classForms' lang))) =
+          MM.throwRejected $
+            "the record" <+> pretty v <+> "is given more than one" <+> pretty (langName lang)
+              <+> "form, and one of them is a class kind; a record has one class in a language"
+      | otherwise = return ()
+    check :: (MVar, (Scope, Map Lang Scope)) -> MorlocMonad ()
+    check (m, (_, concretes)) =
+      sequence_
+        [ MM.throwRejected $
+            "the" <+> pretty (langName lang) <+> "class kind of the record" <+> pretty v
+              <+> "is chosen in module" <+> squotes (pretty m) <> ", but only the module declaring it ("
+              <> squotes (pretty d) <> ") or its package's" <+> squotes (pretty (packageOf d <> "-" <> langName lang))
+              <+> "may choose it"
+        | (lang, scope) <- Map.toList concretes
+        , (v, entries) <- Map.toList scope
+        , (_, NamU _ (TV f) _ _, _, _, _) <- entries
+        , Set.member f (classForms' lang)
+        , Just d <- [Map.lookup v declaringModule]
+        , packageOf m /= packageOf d
+        , packageOf d == "." || unMVar m /= packageOf d <> "-" <> langName lang
+        ]
 
 -- | Give every record without a form in a language the program uses that
 -- language's default kind (GEN-1), as if the program had written the form. An @object@ is a

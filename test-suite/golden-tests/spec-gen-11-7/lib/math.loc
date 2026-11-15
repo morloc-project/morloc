@@ -1,0 +1,5 @@
+module lib.math (Pt)
+import root-py
+record Pt where
+  x :: Int
+record Py => Pt = pydantic

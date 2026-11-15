@@ -51,6 +51,8 @@ import Morloc.CodeGenerator.Grammars.Translator.Imperative
   , defaultSerialize
   )
 import Morloc.CodeGenerator.Grammars.Translator.PseudoCode (pseudocodeSerialManifold)
+import Morloc.CodeGenerator.Grammars.Translator.PyClasses (PyClasses (..), pythonClasses)
+import qualified Data.Set as Set
 import Morloc.CodeGenerator.LanguageDescriptor
 import qualified Morloc.CodeGenerator.Serial as Serial
 import Morloc.CodeGenerator.LogTemplate (RenderedTemplate (..), collectRenderedTemplates)
@@ -89,17 +91,43 @@ translate lang srcs es = do
 
 -- | Translate using the built-in generic renderer.
 translateBuiltin :: Lang -> LangDescriptor -> [Source] -> [SerialManifold] -> MorlocMonad Script
-translateBuiltin lang desc srcs es = do
+translateBuiltin lang desc0 srcs es = do
+  -- The program's generated classes in this language (GEN-11), which the
+  -- record constructors build by name.
+  registry0 <- gets stateLangRegistry
+  generated <- gets stateGeneratedClasses
+  let classPrefix = LR.lrEntries registry0 Map.!? ML.langName lang >>= LR.tkPrefix . LR.lreTypeKinds
+      langClasses =
+        Map.fromList
+          [ (q, k)
+          | Just p <- [classPrefix]
+          , (q, (k, _)) <- Map.toList generated
+          , (p <> ".") `MT.isPrefixOf` q
+          ]
+      desc = desc0 {ldGeneratedClasses = Map.map classKindName langClasses}
+  general <- gets stateGeneralTypedefs
+  let parameterized =
+        Set.fromList
+          [ q
+          | (q, (_, v)) <- Map.toList generated
+          , Map.member q langClasses
+          , Just ((ps, _, _, _, _) : _) <- [Map.lookup v general]
+          , not (null ps)
+          ]
+  pyClasses <- either (MM.throwRejected . vsep . map pretty) return $
+    pythonClasses langClasses parameterized (Set.fromList (ldKeywords desc)) es
   home <- pretty <$> asks MC.configHome
   lib <- MT.pack <$> asks MC.configLibrary
   state <- MT.pack <$> asks MC.configState
   let opt = home <> "/opt"
 
   -- translate source imports
-  includeDocs <-
+  -- The class modules load ahead of every sourced file, which may import them.
+  sourceDocs <-
     mapM
       (translateSource desc)
       (nubOrdOn normalise . mapMaybe srcPath $ srcs)
+  let includeDocs = map pretty (pcLoad pyClasses) <> sourceDocs
 
   debugLog (vsep (map pseudocodeSerialManifold es) <> "\n")
 
@@ -142,10 +170,17 @@ translateBuiltin lang desc srcs es = do
     Script
       { scriptBase = "pool"
       , scriptLang = lang
-      , scriptCode = "." :/ Dir "pools" [Dir poolSubdir [File exefile (Code rendered)]]
+      , scriptCode =
+          "." :/ Dir "pools"
+            ( Dir poolSubdir [File exefile (Code rendered)]
+                : [Dir "types" [Dir "py" (fileTree (pcFiles pyClasses))] | not (null (pcFiles pyClasses))]
+            )
       , scriptMake = hooks
       }
   where
+    classKindName LR.PydanticKind = "pydantic"
+    classKindName LR.DataclassKind = "dataclass"
+
     substitutePreamble :: MDoc -> Text -> Text -> MDoc -> Path -> Text -> MDoc
     substitutePreamble homeDoc libText stateText optDoc _homeDir t =
       pretty
@@ -594,7 +629,7 @@ genericLowerConfig desc srcNamer debugInfo traceInfo debugMode = cfg
         , lcNewIndex = newIndex
         , lcPrintExpr = genericPrintExpr desc
         , lcPrintStmt = genericPrintStmt desc
-        , lcEvalPattern = \t _ app -> return $ genericEvalPattern desc t app
+        , lcEvalPattern = \t ats app -> return $ genericEvalPattern desc t (if null ats then Nothing else Just (last ats)) app
         , lcTakeGetter = \_ _ _ -> return Nothing
         , lcListConstructor = \_ v _ es -> return $ case ldListStyle desc of
             BracketList -> list es
@@ -606,12 +641,10 @@ genericLowerConfig desc srcNamer debugInfo traceInfo debugMode = cfg
         , lcTupleConstructor = case ldTupleConstructor desc of
             "" -> tupled
             name -> \es -> pretty name <> tupled es
-        , lcRecordConstructor = \_ _ _ _ rs ->
+        , lcRecordConstructor = \_ _ (FV _ cname) _ rs ->
             return $
               defaultValue
-                { poolExpr =
-                    pretty (ldRecordConstructor desc)
-                      <> tupled [pretty k <+> "=" <+> v | (k, v) <- rs]
+                { poolExpr = genericRecordCtor desc cname [(pretty k, v) | (k, v) <- rs]
                 }
         , lcTakeSetter = \_ _ _ _ -> return Nothing
         , lcKeepContextArg = \_ _ _ _ v -> return v
@@ -760,11 +793,23 @@ genericLowerConfig desc srcNamer debugInfo traceInfo debugMode = cfg
         , lcTableImportFn = ldTableImportFn desc
         }
 
+-- | A record value from its fields: an instance of its generated class
+-- (GEN-11), built without validation for a pydantic model, or the
+-- language's record container.
+genericRecordCtor :: LangDescriptor -> CVar -> [(MDoc, MDoc)] -> MDoc
+genericRecordCtor desc (CV c) kvs = case Map.lookup c (ldGeneratedClasses desc) of
+  Just "pydantic" -> pretty c <> ".model_construct" <> args
+  Just _ -> pretty c <> args
+  Nothing -> pretty (ldRecordConstructor desc) <> args
+  where
+    args = tupled [k <+> "=" <+> v | (k, v) <- kvs]
+
 {- | Record access: for languages with ldDictStyleRecords=True,
 use bracket access for NamRecord and dot access for others.
 -}
 genericRecordAccessor :: LangDescriptor -> NamType -> CVar -> MDoc -> MDoc -> MDoc
-genericRecordAccessor desc namType _constructor record field
+genericRecordAccessor desc namType (CV constructor) record field
+  | Map.member constructor (ldGeneratedClasses desc) = record <> "." <> field
   | ldDictStyleRecords desc = case namType of
       NamRecord -> record <> "[" <> dquotes field <> "]"
       _ -> record <> "." <> field
@@ -1245,9 +1290,8 @@ genericPrintExpr desc = go
     go (ITupleLit es) = case ldTupleConstructor desc of
       "" -> tupled (map go es)
       name -> pretty name <> tupled (map go es)
-    go (IRecordLit _ _ entries) =
-      pretty (ldRecordConstructor desc)
-        <> tupled [pretty k <+> "=" <+> go e | (k, e) <- entries]
+    go (IRecordLit _ (FV _ cname) entries) =
+      genericRecordCtor desc cname [(pretty k, go e) | (k, e) <- entries]
     go (IAccess e (IIdx i)) = case ldIndexStyle desc of
       ZeroBracket -> go e <> "[" <> pretty i <> "]"
       OneBracket -> go e <> "[" <> pretty (i + 1) <> "]"
@@ -1730,8 +1774,8 @@ printProgram desc prog =
     isEmpty d = T.null (render d)
 
 -- | Generic pattern evaluation
-genericEvalPattern :: LangDescriptor -> TypeF -> PatApp MDoc -> MDoc
-genericEvalPattern desc _ (PatText firstStr xs) =
+genericEvalPattern :: LangDescriptor -> TypeF -> Maybe TypeF -> PatApp MDoc -> MDoc
+genericEvalPattern desc _ _ (PatText firstStr xs) =
   case ldPatternStyle desc of
     FStringPattern ->
       let qt = pretty (ldQuoteTerminator desc)
@@ -1744,22 +1788,22 @@ genericEvalPattern desc _ (PatText firstStr xs) =
       in pretty (ldConcatFn desc)
         <> tupled (wrap (esc firstStr) : concat [[x, wrap (esc s)] | (x, s) <- xs])
 -- getters (always have exactly one argument)
-genericEvalPattern desc _ (PatGet (ungroup -> [ss]) [] m) =
-  hcat (m : map (writeSelector desc) ss)
-genericEvalPattern desc _ (PatGet (ungroup -> sss) [] m) =
+genericEvalPattern desc _ recv (PatGet (ungroup -> [ss]) [] m) =
+  hcat (m : writeTypedSelector desc recv ss)
+genericEvalPattern desc _ recv (PatGet (ungroup -> sss) [] m) =
   case ldTupleConstructor desc of
-    "" -> tupled [hcat (m : map (writeSelector desc) ss) | ss <- sss]
-    name -> pretty name <> tupled [hcat (m : map (writeSelector desc) ss) | ss <- sss]
+    "" -> tupled [hcat (m : writeTypedSelector desc recv ss) | ss <- sss]
+    name -> pretty name <> tupled [hcat (m : writeTypedSelector desc recv ss) | ss <- sss]
 -- PatternStruct with bracket steps inside the Selector. App args
 -- are [bracket_bounds..., receiver] (DFS order, last is receiver).
 -- Walks the Selector recursively, threading the bracket-args list
 -- through siblings, and emits per-step native code: field access for
 -- field steps, language-native bracket syntax (or morloc_at/slice
 -- helper) for bracket steps. Multi-sibling groups produce a tuple.
-genericEvalPattern desc _ (PatGet s bracketArgs receiver) =
+genericEvalPattern desc _ _ (PatGet s bracketArgs receiver) =
   fst (walkGenericSelectorBrackets desc receiver bracketArgs s)
 -- setters
-genericEvalPattern desc t0 (PatSet s0 m0 xs0) =
+genericEvalPattern desc t0 _ (PatSet s0 m0 xs0) =
   patternSetter makeTuple makeRecord accessTuple accessRecord finalizeSet m0 t0 s0 (toList xs0)
   where
     -- dynamically-typed members copy by value at the runtime level, so an
@@ -1770,9 +1814,11 @@ genericEvalPattern desc t0 (PatSet s0 m0 xs0) =
       "" -> tupled xs
       name -> pretty name <> tupled xs
 
-    makeRecord _ fields =
-      pretty (ldRecordConstructor desc)
-        <> tupled [pretty k <+> "=" <+> x | ((k, _), x) <- fields]
+    makeRecord t fields =
+      let cname = case t of
+            NamF _ (FV _ c) _ _ -> c
+            _ -> CV ""
+       in genericRecordCtor desc cname [(pretty k, x) | ((k, _), x) <- fields]
 
     accessTuple _ m i = case ldIndexStyle desc of
       ZeroBracket -> m <> "[" <> pretty i <> "]"
@@ -1784,7 +1830,7 @@ genericEvalPattern desc t0 (PatSet s0 m0 xs0) =
     accessRecord t _ _ = error $ "Invalid record type: " <> show t
 -- Bracket index: receiver[index]. Emits native indexing syntax per
 -- language. Args are [index, receiver].
-genericEvalPattern desc _ (PatIndex i m) =
+genericEvalPattern desc _ _ (PatIndex i m) =
   case ldIndexStyle desc of
     ZeroBracket -> m <> "[" <> i <> "]"
     OneBracket -> m <> "[(" <> i <> ") + 1]"
@@ -1792,12 +1838,29 @@ genericEvalPattern desc _ (PatIndex i m) =
 -- Bracket slice: receiver[start:stop:step]. For now uses native Python-style
 -- slicing where the language supports it. Args are [start, stop, step, receiver].
 -- start/stop/step may be Null (rendered as a language-specific null).
-genericEvalPattern desc _ (PatSlice start stop step m) =
+genericEvalPattern desc _ _ (PatSlice start stop step m) =
   case ldIndexStyle desc of
     ZeroBracket -> m <> "[" <> start <> ":" <> stop <> ":" <> step <> "]"
     -- Non-zero-based languages (R) don't have native Python-style step
     -- slicing. Emit a fallback that will need a runtime helper.
     _ -> "morloc_slice" <> tupled [start, stop, step, m]
+
+-- | A getter's steps, each a field read by attribute where the record at
+-- that step is a generated class (GEN-11) and by the language's key access
+-- otherwise. Where a step's type is unknown the key access is used, which
+-- a generated class also answers.
+writeTypedSelector :: LangDescriptor -> Maybe TypeF -> [Either Int Text] -> [MDoc]
+writeTypedSelector _ _ [] = []
+writeTypedSelector desc t (s : ss) = case (s, t) of
+  (Right k, Just (NamF _ (FV _ (CV c)) _ rs))
+    | Map.member c (ldGeneratedClasses desc) -> ("." <> pretty k) : writeTypedSelector desc (lookup (Key k) rs) ss
+    | otherwise -> writeSelector desc s : writeTypedSelector desc (lookup (Key k) rs) ss
+  (Left i, Just (AppF _ args)) -> writeSelector desc s : writeTypedSelector desc (nth i (tyArgs args)) ss
+  _ -> writeSelector desc s : writeTypedSelector desc Nothing ss
+  where
+    nth i xs = case drop i xs of
+      (x : _) -> Just x
+      [] -> Nothing
 
 writeSelector :: LangDescriptor -> Either Int Text -> MDoc
 writeSelector desc (Right k) = case ldKeyAccess desc of

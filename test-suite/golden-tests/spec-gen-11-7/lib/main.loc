@@ -1,0 +1,6 @@
+module lib (Shape, Pt)
+import root-py
+import .lib.math (Pt)
+record Shape where
+  pts :: [Pt]
+record Py => Shape = pydantic

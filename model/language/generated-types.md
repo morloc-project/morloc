@@ -124,14 +124,20 @@ program refused?
 
 ### GEN-11 A Python class kind holds its fields as attributes
 Intent: proposed
-Code: unaudited
+Tests: spec-gen-11-1, spec-gen-11-3, spec-gen-11-4, spec-gen-11-5, spec-gen-11-6, spec-gen-11-7
+Code: deviates (issues/values.md: a user-written class form)
 
 A record of kind `dataclass` is an instance of a frozen, slotted dataclass;
 of kind `pydantic`, an instance of a frozen pydantic v2 model built without
-validation. Fields are read and updated as attributes. A value sent from
-Python must be an instance of exactly the generated class. A
-user-written Python form (`record Py => R = "Cls"`) is constructed by
-calling the class with the fields as keywords and read by attribute.
+validation. Its fields are read as attributes, and also by subscript
+(`p["name"]`), so code written for the dict kind keeps reading them. A value
+sent from Python must be an instance of exactly the generated class. Only
+the package declaring a record, or that package's implementation module
+for Python (`<package>-py`), may give it a class kind; the modules of no
+package (a script and its local imports) count as one package. A record
+has at most one class kind in a language. A user-written Python form
+(`record Py => R = "Cls"`) is constructed by calling the class with the
+fields as keywords and read by attribute.
 
 ### GEN-12 A Python `data` value is an instance of its arm's class
 Intent: proposed

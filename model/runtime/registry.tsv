@@ -26,6 +26,8 @@ data/lang/py/pymorloc.c::-::recur_env_cap	thread
 data/lang/py/pymorloc.c::-::Methods	startup		
 data/lang/py/pymorloc.c::-::pymorloc	startup		
 data/lang/py/pymorloc.c::-::reading_runtime_value	thread		
+data/lang/py/pymorloc.c::-::py_class_registry	lazy		
+data/lang/py/pymorloc.c::py_pydantic_prepare::names	lazy		
 data/lang/r/rmorloc.c::-::shm_tracker	fork-scoped		
 data/lang/r/rmorloc.c::-::shm_tracker_count	fork-scoped		
 data/lang/r/rmorloc.c::-::shm_tracker_cap	fork-scoped		

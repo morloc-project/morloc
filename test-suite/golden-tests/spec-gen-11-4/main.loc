@@ -1,0 +1,16 @@
+-- GEN-11: a value sent from Python as a dataclass record must be an
+-- instance of exactly its generated class; a dict is refused.
+module main (bad)
+
+import root-py
+import root-cpp (idcpp)
+
+record Pt where
+  x :: Int
+record Py => Pt = dataclass
+
+source Py from "f.py" ("mkDict")
+mkDict :: Int -> Pt
+
+bad :: Int -> Pt
+bad n = idcpp (mkDict n)

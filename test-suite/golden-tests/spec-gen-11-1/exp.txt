@@ -1,0 +1,5 @@
+{"name":"a","age":3,"inner":{"label":"x","tags":["t"]}}
+{"name":"a","age":3,"inner":{"label":"x","tags":["t"]}}
+{"name":"a","age":4,"inner":{"label":"x","tags":["t"]}}
+"Person True Inner {'label': 'x', 'tags': ['t']} a"
+{"name":"bob","age":2,"inner":{"label":"x","tags":["bob"]}}

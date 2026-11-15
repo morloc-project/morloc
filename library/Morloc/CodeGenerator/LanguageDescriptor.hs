@@ -200,6 +200,9 @@ data LangDescriptor = LangDescriptor
     ldCodegenCommand :: !(Maybe Text) -- e.g. "morloc-codegen-generic"
   , -- Converter from an Arrow record batch to a module's mapped table type
     ldTableImportFn :: !(Maybe Text) -- e.g. "mlc_table_import"
+  , -- The program's generated record classes (GEN-11): qualified name to
+    -- kind ("dataclass" or "pydantic"). Set by the compiler, never by lang.yaml.
+    ldGeneratedClasses :: !(Map.Map Text Text)
   , -- Build steps run per sourced file (lang.yaml @build: per_source:@)
     ldSourceHooks :: ![SourceHook]
   , -- == Template fields (Layer 1 & 2) ==
@@ -372,6 +375,7 @@ instance Y.FromJSON LangDescriptor where
             . ins "ldLazyArgs" (Y.Bool False)
             . ins "ldCodegenCommand" Y.Null
             . ins "ldTableImportFn" Y.Null
+            . ins "ldGeneratedClasses" (Y.Object mempty)
             . ins "ldRealPosInf" (Y.String "")
             . ins "ldListLengthTemplate" (Y.String "")
             . ins "ldRealNegInf" (Y.String "")
@@ -503,6 +507,7 @@ defaultLangDescriptor name ext =
     , ldLazyArgs = False
     , ldCodegenCommand = Nothing
     , ldTableImportFn = Nothing
+    , ldGeneratedClasses = Map.empty
     , ldSourceHooks = []
     , -- Template fields
       ldAssignOp = "="
