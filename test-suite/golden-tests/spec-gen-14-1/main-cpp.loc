@@ -1,0 +1,65 @@
+-- GEN-14: a generated record converts its packed fields itself, once per
+-- write. `Stamp` holds a packed `Date` beside an Int; `Box a` holds a list
+-- of its parameter and a packed `Date`; crossing either to Python and back
+-- runs each unpacker once per value written (the size of the write and the
+-- write itself share it), which `unpacksAfter` counts. A packer that throws
+-- fails the call. The C++ twin of main-rust.loc.
+module main (roundStamp, roundBox, countUnpacks, failing, roundBoxes, roundCrate)
+
+import root-cpp
+import root-py
+
+newtype Date = Str
+type Cpp => Date = "MlcDate"
+
+instance Packable Str Date where
+  source Cpp from "gen14.hpp" ("packDate" as pack, "unpackDate" as unpack)
+
+record Stamp where
+  d :: Date
+  n :: Int
+
+-- A packed type whose written form holds records with packed fields of
+-- their own: each record converts itself inside the bag's written form.
+newtype Bag a = [a]
+type Cpp => Bag a = "MlcBag<$1>" a
+
+instance Packable [a] (Bag a) where
+  source Cpp from "gen14.hpp" ("packBag" as pack, "unpackBag" as unpack)
+
+record Crate where
+  bag :: Bag Stamp
+  label :: Str
+
+record Box a where
+  items :: [a]
+  when :: Date
+
+source Cpp from "gen14.hpp" ("dateOf", "unpacksAfter", "badDate", "bagOf", "toI64")
+dateOf :: Int -> Date
+unpacksAfter :: [Stamp] -> <IO> Int
+badDate :: Int -> Date
+bagOf :: [a] -> Bag a
+toI64 :: Int -> I64
+
+source Py from "gen14.py" ("pyid")
+pyid :: a -> a
+
+roundStamp :: Int -> Stamp
+roundStamp x = pyid {d = dateOf x, n = x}
+
+roundBox :: Int -> Box Int
+roundBox x = pyid {items = [x, x + 1], when = dateOf x}
+
+countUnpacks :: Int -> <IO> Int
+countUnpacks x = unpacksAfter (pyid [{d = dateOf x, n = x}, {d = dateOf (x + 1), n = x}])
+
+failing :: Int -> Stamp
+failing x = pyid {d = badDate x, n = x}
+
+-- `Box Int` and `Box I64` may be one native type; they convert alike.
+roundBoxes :: Int -> (Box Int, Box I64)
+roundBoxes x = pyid ({items = [x], when = dateOf x}, {items = [toI64 x], when = dateOf (x + 1)})
+
+roundCrate :: Int -> Crate
+roundCrate x = pyid {bag = bagOf [{d = dateOf x, n = x}, {d = dateOf (x + 1), n = x + 1}], label = "c"}

@@ -1062,13 +1062,15 @@ inline int64_t _mlc_open_stderr(Schema* schema) {
 // @write from a voidstar copy of the batch, which the runtime lays out;
 // `known` is its size when the caller has it, else 0.
 template <typename T>
-inline void _mlc_write_copy(Schema* schema, int64_t level, const T& value, int64_t handle, size_t known = 0) {
+inline void _mlc_write_copy(Schema* schema, int64_t level, const T& value, int64_t handle, size_t known = 0, MlcConverted* converted = nullptr) {
     char* errmsg = NULL;
-    size_t bytes = known != 0 ? known : get_shm_size(schema, value);
+    MlcConverted own;
+    if (converted == nullptr) converted = &own;
+    size_t bytes = known != 0 ? known : get_shm_size(schema, value, converted);
     void* voidstar = shmalloc_cpp(bytes);
     void* cursor = (uint8_t*)voidstar + schema->width;
     try {
-        to_voidstar(voidstar, &cursor, schema, value);
+        to_voidstar(voidstar, &cursor, schema, value, converted);
     } catch (...) {
         shfree_cpp(voidstar);
         throw;
@@ -1100,8 +1102,9 @@ inline void _mlc_write_batch(Schema* schema, int64_t level, const std::vector<E>
     // A table element has no voidstar size; the stream refuses it in place.
     const bool sized = !run && elem->type != MORLOC_TABLE;
     std::vector<size_t> sizes;
+    MlcConverted converted;
     if (sized) {
-        MlcSizeWalk sw(elem);
+        MlcSizeWalk sw(elem, &converted);
         sizes.reserve(n);
         for (size_t i = 0; i < n; i++) {
             sw.total = 0;
@@ -1120,14 +1123,14 @@ inline void _mlc_write_batch(Schema* schema, int64_t level, const std::vector<E>
             known = schema->width + (n > 0 ? elem->data_alignment - 1 : 0);
             for (size_t s : sizes) known += s;
         }
-        _mlc_write_copy(schema, level, xs, handle, known);
+        _mlc_write_copy(schema, level, xs, handle, known, &converted);
         return;
     }
     MLC_WRITE_RESULT(rc, errmsg, "mlc_write_begin");
     if (!run && !sized) mlc_runtime_defect("@write: a table batch was opened in place");
     MlcWriteTxn txn;
     const uint8_t* reached = nullptr;
-    MlcWriteWalk ww(elem, nullptr);
+    MlcWriteWalk ww(elem, nullptr, &converted);
     if (run) {
         void* no_cursor = nullptr;
         ww.place(&no_cursor, nullptr, nullptr);

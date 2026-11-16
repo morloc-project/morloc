@@ -33,6 +33,10 @@ module Morloc.CodeGenerator.Pools.CAbi.Members.RustPrinter
   , rustRecordValue
   , printRecordImpls
   , printRecordImplsWith
+  , printRecordImplsWhere
+  , printFieldTrait
+  , printFieldTraitImpl
+  , FieldTraitImpl (..)
   , RecordFieldTypes(..)
   , printRustEnum
   , printRustVariant
@@ -730,8 +734,8 @@ printUserVariantImpls name arms3 = vsep [toImpl, "", fromImpl]
     sizeArm i c fs mw = case (fs, mw) of
       ([], _) -> pat c fs <+> "=> w.total += schema.width as isize,"
       (_, Just aw) ->
-        pat c fs <+> "=> { let mlc_t = " <> copied fs <> "; w.variant_payload_owned(schema, &schema.parameters["
-          <> pretty i <> "], " <> awReify aw "mlc_t" <> ") }"
+        pat c fs <+> "=> w.variant_payload_converted(schema, &schema.parameters["
+          <> pretty i <> "], self as *const Self as usize, " <> pretty i <> ", || { let mlc_t = " <> copied fs <> "; " <> awReify aw "mlc_t" <> " }),"
       _ ->
         pat c fs <+> "=> { let a = w.variant_arm(schema, &schema.parameters[" <> pretty i <> "]);"
           <+> hsep ["w.child(" <> userFieldRef f v <> ", &a.parameters[" <> pretty j <> "], true);" | (j, (f, v)) <- indexed (zipSame fs (vars fs))]
@@ -739,8 +743,8 @@ printUserVariantImpls name arms3 = vsep [toImpl, "", fromImpl]
     writeArm i c fs mw = case (fs, mw) of
       ([], _) -> pat c fs <+> "=> ::rustmorloc::write_variant_nullary(dest, " <> pretty i <> "u8),"
       (_, Just aw) ->
-        pat c fs <+> "=> { let mlc_t = " <> copied fs <> "; w.variant_payload_owned(dest, &schema.parameters["
-          <> pretty i <> "], " <> pretty i <> "u8, " <> awReify aw "mlc_t" <> ") }"
+        pat c fs <+> "=> w.variant_payload_converted(dest, &schema.parameters["
+          <> pretty i <> "], " <> pretty i <> "u8, self as *const Self as usize, " <> pretty i <> ", || { let mlc_t = " <> copied fs <> "; " <> awReify aw "mlc_t" <> " }),"
       _ ->
         pat c fs <+> "=> { let (slot, a) = w.variant_arm(dest, &schema.parameters[" <> pretty i <> "], " <> pretty i <> "u8);"
           <+> hsep ["w.child(" <> userFieldRef f v <> ", slot.add(a.offsets[" <> pretty j <> "]), &a.parameters[" <> pretty j <> "]);" | (j, (f, v)) <- indexed (zipSame fs (vars fs))]
@@ -838,8 +842,8 @@ printVariantImpls name arms3 = vsep [toImpl, "", fromImpl]
                            else case mw of
                              Nothing -> "w.variant_payload(schema, &schema.parameters["
                                           <> pretty i <> "], mlc_b),"
-                             Just aw -> "w.variant_payload_owned(schema, &schema.parameters["
-                                          <> pretty i <> "], " <> awReify aw payload <> "),")
+                             Just aw -> "w.variant_payload_converted(schema, &schema.parameters["
+                                          <> pretty i <> "], self as *const Self as usize, " <> pretty i <> ", || " <> awReify aw payload <> "),")
                     | (i, (c, ts, mw)) <- idxArms ]
                 , "}"
                 ]
@@ -854,8 +858,8 @@ printVariantImpls name arms3 = vsep [toImpl, "", fromImpl]
                            else case mw of
                              Nothing -> "w.variant_payload(dest, &schema.parameters["
                                           <> pretty i <> "], " <> pretty i <> "u8, mlc_b),"
-                             Just aw -> "w.variant_payload_owned(dest, &schema.parameters["
-                                          <> pretty i <> "], " <> pretty i <> "u8, " <> awReify aw payload <> "),")
+                             Just aw -> "w.variant_payload_converted(dest, &schema.parameters["
+                                          <> pretty i <> "], " <> pretty i <> "u8, self as *const Self as usize, " <> pretty i <> ", || " <> awReify aw payload <> "),")
                     | (i, (c, ts, mw)) <- idxArms ]
                 , "}"
                 ]
@@ -951,15 +955,89 @@ printEnumImpls name ctors = vsep [toImpl, "", fromImpl]
 -- | Per-field marshalling strategy for a record function field. A closure field
 -- is stored natively as a function value (no @ToVoidstar@), so it is reified
 -- to its @ClosureOrigin@ wire tuple on write/shm_size and reflected back on read.
-newtype ClosureMarshal = ClosureMarshal
-  { cmReflect :: MDoc -> MDoc    -- ^ a @ClosureOrigin@ slot-read expression -> the reflected function value
-  }
+data ClosureMarshal
+  = ClosureMarshal
+      { cmReflect :: MDoc -> MDoc    -- ^ a @ClosureOrigin@ slot-read expression -> the reflected function value
+      }
+  | -- | A field written in converted form (GEN-14): the type it is written
+    -- as, and the functions converting the field to it and back.
+    PackMarshal
+      { pmRaw :: MDoc
+      , pmTo :: MDoc
+      , pmFrom :: MDoc
+      }
+  | -- | A field whose conversion depends on the record's arguments,
+    -- marshalled through the trait for that field, implemented by the
+    -- field's type at each instance (GEN-14).
+    ViaTrait
+      { vtTrait :: MDoc
+      }
 
 -- | Whose field types a record's reader names: a generated struct's are the
 -- rendered ones; a user-written struct's are whatever the user declared, so
 -- the reader takes each from the struct itself (a user may hold a recursive
 -- field in a plain 'Box' or in the runtime's deferred-release box).
 data RecordFieldTypes = RenderedFieldTypes | StructFieldTypes
+
+-- | The trait a field whose conversion depends on its record's arguments
+-- is marshalled through: implemented by the field's type at each instance,
+-- written as it is held or converted (GEN-14).
+printFieldTrait :: MDoc -> MDoc
+printFieldTrait tr =
+  vsep
+    [ "#[allow(non_camel_case_types)]"
+    , "pub trait" <+> tr <+> "{"
+    , "    fn mlc_size(&self, w: &mut ::rustmorloc::SizeWalk, schema: &::rustmorloc::Schema);"
+    , "    unsafe fn mlc_write(&self, w: &mut ::rustmorloc::WriteWalk, dest: *mut u8, schema: &::rustmorloc::Schema);"
+    , "    unsafe fn mlc_step(w: &mut ::rustmorloc::ReadWalk, schema: &::rustmorloc::Schema, data: *const u8);"
+    , "    unsafe fn mlc_read(w: &mut ::rustmorloc::ReadWalk, schema: &::rustmorloc::Schema, data: *const u8) -> Self;"
+    , "}"
+    ]
+
+-- | How one instance's field type implements its field trait.
+data FieldTraitImpl
+  = TraitPlain
+  -- ^ written as it is held
+  | TraitPack MDoc MDoc MDoc
+  -- ^ converted: the type written, and the functions to it and back
+  | TraitClosure (MDoc -> MDoc)
+  -- ^ a function, reified to its origin and reflected back
+
+-- | The field trait's impl for one instance's field type, a converted value
+-- kept in the walk's table of converted values, keyed by the field index.
+printFieldTraitImpl :: MDoc -> MDoc -> Int -> FieldTraitImpl -> MDoc
+printFieldTraitImpl tr ty i conv =
+  vsep
+    [ "impl" <+> tr <+> "for" <+> ty <+> "{"
+    , indent 4 $ vsep $ case conv of
+        TraitPlain ->
+          [ "fn mlc_size(&self, w: &mut ::rustmorloc::SizeWalk, schema: &::rustmorloc::Schema) { w.child(self, schema, true); }"
+          , "unsafe fn mlc_write(&self, w: &mut ::rustmorloc::WriteWalk, dest: *mut u8, schema: &::rustmorloc::Schema) { w.child(self, dest, schema); }"
+          , "unsafe fn mlc_step(w: &mut ::rustmorloc::ReadWalk, schema: &::rustmorloc::Schema, data: *const u8) { w.child_step::<Self>(schema, data); }"
+          , "unsafe fn mlc_read(w: &mut ::rustmorloc::ReadWalk, schema: &::rustmorloc::Schema, data: *const u8) -> Self { w.child_read::<Self>(schema, data) }"
+          ]
+        TraitClosure reflect ->
+          [ "fn mlc_size(&self, w: &mut ::rustmorloc::SizeWalk, schema: &::rustmorloc::Schema) {"
+          , "    w.child_converted(self as *const _ as usize, ::std::any::TypeId::of::<::rustmorloc::ClosureOrigin>(), " <> pretty i <> ", || ::rustmorloc::require_origin(::rustmorloc::reify(self)), schema, true);"
+          , "}"
+          , "unsafe fn mlc_write(&self, w: &mut ::rustmorloc::WriteWalk, dest: *mut u8, schema: &::rustmorloc::Schema) {"
+          , "    w.child_converted(self as *const _ as usize, ::std::any::TypeId::of::<::rustmorloc::ClosureOrigin>(), " <> pretty i <> ", || ::rustmorloc::require_origin(::rustmorloc::reify(self)), dest, schema);"
+          , "}"
+          , "unsafe fn mlc_step(w: &mut ::rustmorloc::ReadWalk, schema: &::rustmorloc::Schema, data: *const u8) { w.child_step::<::rustmorloc::ClosureOrigin>(schema, data); }"
+          , "unsafe fn mlc_read(w: &mut ::rustmorloc::ReadWalk, schema: &::rustmorloc::Schema, data: *const u8) -> Self { " <> reflect "w.child_read::<::rustmorloc::ClosureOrigin>(schema, data)" <> " }"
+          ]
+        TraitPack raw to from ->
+          [ "fn mlc_size(&self, w: &mut ::rustmorloc::SizeWalk, schema: &::rustmorloc::Schema) {"
+          , "    w.child_converted(self as *const _ as usize, ::std::any::TypeId::of::<" <> raw <> ">(), " <> pretty i <> ", || " <> to <> "(self), schema, true);"
+          , "}"
+          , "unsafe fn mlc_write(&self, w: &mut ::rustmorloc::WriteWalk, dest: *mut u8, schema: &::rustmorloc::Schema) {"
+          , "    w.child_converted(self as *const _ as usize, ::std::any::TypeId::of::<" <> raw <> ">(), " <> pretty i <> ", || " <> to <> "(self), dest, schema);"
+          , "}"
+          , "unsafe fn mlc_step(w: &mut ::rustmorloc::ReadWalk, schema: &::rustmorloc::Schema, data: *const u8) { w.child_step::<" <> raw <> ">(schema, data); }"
+          , "unsafe fn mlc_read(w: &mut ::rustmorloc::ReadWalk, schema: &::rustmorloc::Schema, data: *const u8) -> Self { " <> from <> "(w.child_read::<" <> raw <> ">(schema, data)) }"
+          ]
+    , "}"
+    ]
 
 -- | Emit @impl ToVoidstar/FromVoidstar@ for a record, marshalling each field in
 -- place at its schema offset (mirrors the hand-written LL template). Fields are
@@ -974,7 +1052,15 @@ printRecordImpls = printRecordImplsWith False
 -- | 'printRecordImpls', for a handle when the flag is set: it is read as
 -- its fields and then wrapped.
 printRecordImplsWith :: Bool -> RecordFieldTypes -> MDoc -> [MDoc] -> [(MDoc, MDoc, Bool, Maybe ClosureMarshal)] -> MDoc
-printRecordImplsWith handle fieldTypes name params fields = vsep [toImpl, "", fromImpl]
+printRecordImplsWith handle fieldTypes name params fields =
+  printRecordImplsWhere handle fieldTypes name params Nothing fields
+
+-- | 'printRecordImplsWith', with the impls' bounds given as `where`
+-- clauses (one list for writing, one for reading) in place of a bound on
+-- each parameter.
+printRecordImplsWhere ::
+  Bool -> RecordFieldTypes -> MDoc -> [MDoc] -> Maybe ([MDoc], [MDoc]) -> [(MDoc, MDoc, Bool, Maybe ClosureMarshal)] -> MDoc
+printRecordImplsWhere handle fieldTypes name params wheres fields = vsep [toImpl, "", fromImpl]
   where
     idx = indexed fields
     -- A closure field's wire form (ClosureOrigin) is variable-width, so a record
@@ -983,10 +1069,25 @@ printRecordImplsWith handle fieldTypes name params fields = vsep [toImpl, "", fr
     isPlain Nothing = True
     isPlain (Just _) = False
     ty = name <> paramList params
-    -- Bound every generic param by `bound` for the impl's `impl<..>` header.
-    boundedParams bound = paramList [p <> ":" <+> bound | p <- params]
+    -- Bound every generic param by `bound` for the impl's `impl<..>` header,
+    -- unless the bounds are given as `where` clauses.
+    boundedParams bound = case wheres of
+      Nothing -> paramList [p <> ":" <+> bound | p <- params]
+      Just _ -> paramList params
+    whereOf sel = case wheres of
+      Just ws | not (null (sel ws)) -> " where" <+> hcat (punctuate ", " (sel ws))
+      _ -> ""
 
     fieldSchema i = "&schema.parameters[" <> pretty i <> "]"
+    -- GEN-14: the field's identity in the walk's table of converted values,
+    -- and how to convert it.
+    converted i f raw to =
+      "&self." <> f <> " as *const _ as usize, ::std::any::TypeId::of::<" <> raw <> ">(), " <> pretty i
+        <> ", || " <> to <> "(&self." <> f <> ")"
+    -- A closure field reifies once per write.
+    closureKey i f =
+      "&self." <> f <> " as *const _ as usize, ::std::any::TypeId::of::<::rustmorloc::ClosureOrigin>(), " <> pretty i
+        <> ", || ::rustmorloc::require_origin(::rustmorloc::reify(&self." <> f <> "))"
     fieldSlot i = "dest.add(schema.offsets[" <> pretty i <> "])"
     fieldData i = "data.add(schema.offsets[" <> pretty i <> "])"
 
@@ -995,18 +1096,24 @@ printRecordImplsWith handle fieldTypes name params fields = vsep [toImpl, "", fr
     -- the walk since the step's own frame does not outlive the call.
     sizeField (i, (f, _, _, Nothing)) =
       "w.child(&self." <> f <> ", " <> fieldSchema i <> ", true);"
+    sizeField (i, (f, _, _, Just (PackMarshal raw to _))) =
+      "w.child_converted(" <> converted i f raw to <> ", " <> fieldSchema i <> ", true);"
+    sizeField (i, (f, t, _, Just (ViaTrait tr))) =
+      "<" <> t <> " as " <> tr <> ">::mlc_size(&self." <> f <> ", w, " <> fieldSchema i <> ");"
     sizeField (i, (f, _, _, Just _)) =
-      "w.child_owned(::rustmorloc::require_origin(::rustmorloc::reify(&self." <> f <> ")), "
-        <> fieldSchema i <> ", true);"
+      "w.child_converted(" <> closureKey i f <> ", " <> fieldSchema i <> ", true);"
     writeField (i, (f, _, _, Nothing)) =
       "w.child(&self." <> f <> ", " <> fieldSlot i <> ", " <> fieldSchema i <> ");"
+    writeField (i, (f, _, _, Just (PackMarshal raw to _))) =
+      "w.child_converted(" <> converted i f raw to <> ", " <> fieldSlot i <> ", " <> fieldSchema i <> ");"
+    writeField (i, (f, t, _, Just (ViaTrait tr))) =
+      "<" <> t <> " as " <> tr <> ">::mlc_write(&self." <> f <> ", w, " <> fieldSlot i <> ", " <> fieldSchema i <> ");"
     writeField (i, (f, _, _, Just _)) =
-      "w.child_owned(::rustmorloc::require_origin(::rustmorloc::reify(&self." <> f <> ")), "
-        <> fieldSlot i <> ", " <> fieldSchema i <> ");"
+      "w.child_converted(" <> closureKey i f <> ", " <> fieldSlot i <> ", " <> fieldSchema i <> ");"
 
     toImpl =
       vsep
-        [ "impl" <> boundedParams "::rustmorloc::ToVoidstar" <+> "::rustmorloc::ToVoidstar for" <+> ty <+> "{"
+        [ "impl" <> boundedParams "::rustmorloc::ToVoidstar" <+> "::rustmorloc::ToVoidstar for" <+> ty <> whereOf fst <+> "{"
         , indent 4 $ vsep
             [ "fn size_step(&self, w: &mut ::rustmorloc::SizeWalk, schema: &::rustmorloc::Schema, _idx: usize) {"
             , indent 4 sizeBody
@@ -1023,7 +1130,7 @@ printRecordImplsWith handle fieldTypes name params fields = vsep [toImpl, "", fr
 
     fromImpl =
       vsep
-        [ "impl" <> boundedParams "::rustmorloc::FromVoidstar" <+> "::rustmorloc::FromVoidstar for" <+> ty <+> "{"
+        [ "impl" <> boundedParams "::rustmorloc::FromVoidstar" <+> "::rustmorloc::FromVoidstar for" <+> ty <> whereOf snd <+> "{"
         , indent 4 $ vsep
             [ "unsafe fn read_step(w: &mut ::rustmorloc::ReadWalk, schema: &::rustmorloc::Schema, data: *const u8, _idx: usize) {"
             , indent 4 $ vsep ("w.push_finish::<Self>(schema, data);" : map stepField idx)
@@ -1045,6 +1152,10 @@ printRecordImplsWith handle fieldTypes name params fields = vsep [toImpl, "", fr
         "w.child_step::<" <> t <> ">(" <> fieldSchema i <> ", " <> fieldData i <> ");"
       StructFieldTypes ->
         "w.child_step_for(" <> fieldSchema i <> ", " <> fieldData i <> ", |x: &Self| &x." <> f <> ");"
+    stepField (i, (_, t, _, Just (ViaTrait tr))) =
+      "<" <> t <> " as " <> tr <> ">::mlc_step(w, " <> fieldSchema i <> ", " <> fieldData i <> ");"
+    stepField (i, (_, _, _, Just (PackMarshal raw _ _))) =
+      "w.child_step::<" <> raw <> ">(" <> fieldSchema i <> ", " <> fieldData i <> ");"
     stepField (i, (_, _, _, Just _)) =
       "w.child_step::<::rustmorloc::ClosureOrigin>(" <> fieldSchema i <> ", " <> fieldData i <> ");"
     -- A plain field reads via the walk directly; a closure field reads its
@@ -1054,7 +1165,11 @@ printRecordImplsWith handle fieldTypes name params fields = vsep [toImpl, "", fr
         f <> ": w.child_read::<" <> t <> ">(" <> fieldSchema i <> ", " <> fieldData i <> "),"
       StructFieldTypes ->
         f <> ": w.child_read_for(" <> fieldSchema i <> ", " <> fieldData i <> ", |x: &Self| &x." <> f <> "),"
-    readField (i, (f, _, _, Just cm)) =
+    readField (i, (f, t, _, Just (ViaTrait tr))) =
+      f <> ": <" <> t <> " as " <> tr <> ">::mlc_read(w, " <> fieldSchema i <> ", " <> fieldData i <> "),"
+    readField (i, (f, _, _, Just (PackMarshal raw _ from))) =
+      f <> ": " <> from <> "(w.child_read::<" <> raw <> ">(" <> fieldSchema i <> ", " <> fieldData i <> ")),"
+    readField (i, (f, _, _, Just (ClosureMarshal reflect))) =
       let slotRead =
             "w.child_read::<::rustmorloc::ClosureOrigin>(" <> fieldSchema i <> ", " <> fieldData i <> ")"
-       in f <> ": " <> cmReflect cm slotRead <> ","
+       in f <> ": " <> reflect slotRead <> ","

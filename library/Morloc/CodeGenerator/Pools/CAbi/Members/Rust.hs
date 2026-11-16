@@ -46,6 +46,7 @@ import qualified Data.Text as T
 import qualified Data.ByteString as BS
 import qualified Data.Text.Encoding as TE
 import qualified System.Info as SI
+import Data.Char (isAlphaNum, isDigit)
 import Morloc.CodeGenerator.Grammars.Common hiding (manNamer, manifoldIdOf)
 import Morloc.CodeGenerator.LogTemplate (RenderedTemplate (..), collectRenderedTemplates)
 import Morloc.CodeGenerator.Grammars.Macro (expandMacro)
@@ -80,6 +81,8 @@ import Morloc.CodeGenerator.Grammars.Translator.Imperative
   , defaultFoldRules
   , defaultSerialize
   , toIType
+  , nativeToWire
+  , wireToNative
   )
 import Morloc.CodeGenerator.Namespace
 import Morloc.CodeGenerator.Ownership
@@ -87,7 +90,7 @@ import Morloc.Build.CargoLock (mergeCargoLocks)
 import qualified Morloc.Build.Params as BP
 import qualified Morloc.Data.PoolHash as PH
 import qualified Morloc.CodeGenerator.Pools.CAbi.Members.RustPrinter as RP
-import Morloc.CodeGenerator.Serial (containsFunF, serialAstToMsgpackSchema, serialAstToNativeType, serialAstToType, shallowType, wireSerialAstToType)
+import Morloc.CodeGenerator.Serial (containsFunF, generatedObject, isSerializableThroughNodes, recordsConvertInNode, serialAstToMsgpackSchema, serialAstToNativeType, serialAstToTypeThroughNodes, serialSubtrees, shallowType, unpackedAsTypeF, wireSerialAstToTypeThroughNodes)
 import qualified Morloc.Frontend.Instances as FI
 import Morloc.Typecheck.Internal (unqualify)
 import Morloc.CodeGenerator.EffectBoundary (declaredFun, expandT)
@@ -101,6 +104,7 @@ import qualified Morloc.Version as MV
 import Morloc.Quasi
 import System.Directory (findExecutable)
 import System.FilePath (takeDirectory)
+import Morloc.CodeGenerator.GenDefs (Disagreement (..), GenDef (..), RecordUse, disagreements, intrinsicSerialASTs, placeTypes, checkUse, genDefs, nativeParam, nativeParams, placeholders, recordUses, templateArgs, useArgs)
 
 -- | Duplicated here (as in Cpp.hs) to match data/lang/rust/lang.yaml. The
 -- second field is the source extension and must match lang.yaml's @extension@
@@ -121,9 +125,6 @@ data RustState = RustState
   , rsLogTemplates :: Map.Map Int RenderedTemplate
   -- ^ Rendered @log:@ / @benchmark:@ templates per labeled manifold midx.
   -- Drives the '::rustmorloc::LogGuard' wrap in 'rustMakeFunction'.
-  , rsRecmap :: RecMap
-  -- ^ Unified record types used in this pool; drives struct generation, the
-  -- concrete struct name in 'rustTypeOf', and per-record marshalling impls.
   , rsCScope :: Scope
   -- ^ The merged Rust concrete typedef scope; resolves a recursive back-ref
   -- (@RecF@) to its concrete struct name (as C++'s translatorCScope does).
@@ -175,10 +176,64 @@ data RustState = RustState
   , rsUserArms :: Map.Map Text [(Text, [RP.UserField])]
   -- ^ The arms of each user-written `data` type at each occurrence, by its
   -- rendered type: each constructor with morloc's types of its fields.
+  , rsGenDefs :: Map.Map TVar GenDef
+  -- ^ Each generated record's definition from its declaration (GEN-9).
+  , rsRecords :: Map.Map TVar GenDef
+  -- ^ The generated records of the pool, each defined from its declaration
+  -- (GEN-9).
+  , rsRecordNames :: Map.Map TVar Text
+  -- ^ The path of each from the crate root: in its module's file, or in
+  -- the pool's private module (GEN-10).
+  , rsGenFailures :: Map.Map TVar Text
+  -- ^ Why a used record has no definition, for each that has none.
+  , rsRecordUses :: [RecordUse]
+  -- ^ Every occurrence of a generated record in the pool.
+  , rsRecordObjects :: Map.Map TVar [[(Key, SerialAST)]]
+  -- ^ The fields of each generated record at each instance the pool
+  -- marshals.
+  , rsConvHelpers :: [MDoc]
+  -- ^ The functions converting packed fields of generated records to the
+  -- form they are written in and back (GEN-14).
+  , rsPrivateDecls :: [(Text, MDoc)]
+  -- ^ The generated records the pool keeps to itself, each with its module
+  -- path from the crate root (GEN-10).
   }
 
 instance Defaultable RustState where
-  defaultValue = RustState 0 Map.empty Set.empty Set.empty (\_ -> Nothing) Map.empty [] Map.empty Set.empty Set.empty Map.empty Map.empty Map.empty Set.empty emptyPoolPlan Set.empty 0 [] Map.empty Map.empty [] Set.empty False Map.empty
+  defaultValue =
+    RustState
+      { rsCounter = 0
+      , rsSchemas = Map.empty
+      , rsLocalSet = Set.empty
+      , rsRemoteSet = Set.empty
+      , rsDebugInfo = (\_ -> Nothing)
+      , rsLogTemplates = Map.empty
+      , rsCScope = Map.empty
+      , rsThinClosures = Set.empty
+      , rsSrcMakers = Set.empty
+      , rsSrcTypeVarMask = Map.empty
+      , rsReifyInfo = Map.empty
+      , rsStageTable = Map.empty
+      , rsPapplyHeads = Set.empty
+      , rsPool = emptyPoolPlan
+      , rsBuilds = Set.empty
+      , rsCurrentRoot = 0
+      , rsErrors = []
+      , rsTypeHomes = Map.empty
+      , rsPublic = Map.empty
+      , rsPublicDecls = []
+      , rsHandles = Set.empty
+      , rsNeedsNode = False
+      , rsUserArms = Map.empty
+      , rsGenDefs = Map.empty
+      , rsRecords = Map.empty
+      , rsRecordNames = Map.empty
+      , rsGenFailures = Map.empty
+      , rsRecordUses = []
+      , rsRecordObjects = Map.empty
+      , rsConvHelpers = []
+      , rsPrivateDecls = []
+      }
 
 -- | The ownership environment: the borrowed (@&T@) parameter indices of the
 -- manifold whose body is currently being lowered ('oeCurrent') and of its
@@ -300,19 +355,40 @@ rustTypeOf = f
     f (FunF ts t) = rustFieldType (FunF ts t)
     -- Autogenerated record: resolve the concrete struct name from the recmap
     -- (keyed by the record FVar + field keys).
-    f (NamF _ v@(FV _ (CV "struct")) _ rs) = do
-      recmap <- CMS.gets rsRecmap
-      case lookup (v, map fst rs) recmap of
-        Just rec -> do
-          -- A field whose native and wire types diverge (a custom-packer field)
-          -- is a generic parameter of the struct; render its concrete type at
-          -- THIS occurrence as a type argument: `Name<Ta, Tb>`.
-          params <- mapM f [t | ((_, Nothing), (_, t)) <- zipSame (recFields rec) rs]
-          return $ recName rec <> if null params then "" else "<" <> hcat (punctuate ", " params) <> ">"
-        Nothing -> error $ "Rust: record missing from recmap: " <> show v
+    -- A generated record is its definition at the arguments its fields
+    -- bind, never at the ones it carries, which on the unpacked side are
+    -- the native ones (GEN-9).
+    f (NamF _ (FV gc (CV "struct")) _ rs) = do
+      records <- CMS.gets rsRecords
+      names <- CMS.gets rsRecordNames
+      defs <- CMS.gets rsGenDefs
+      let q = pretty (Map.findWithDefault (unTVar gc) gc names)
+          complain :: Text -> RustM ()
+          complain msg = CMS.modify $ \st -> st {rsErrors = msg : rsErrors st}
+      case Map.lookup gc records of
+        Just gd
+          | null (nativeParams gd) -> return q
+          | otherwise -> case templateArgs defs gd rs of
+              Right args -> do
+                as <- mapM rustFieldType args
+                return (q <> "<" <> hcat (punctuate ", " as) <> ">")
+              Left e -> do
+                complain ("the generated Rust type for " <> unTVar gc <> " cannot serve a use: " <> e)
+                return q
+        Nothing -> do
+          -- A record refused in planning has said why.
+          fails <- CMS.gets rsGenFailures
+          unless (Map.member gc defs) $
+            complain ("the record " <> unTVar gc <> " has no Rust definition: "
+              <> Map.findWithDefault "its declaration could not be resolved in Rust" gc fails)
+          return q
     -- User-mapped record: the concrete struct name is the CVar text, or the
     -- template it holds instantiated with this occurrence's arguments.
-    f (NamF _ (FV _ (CV s)) ps _) = nominalTypeName s ps
+    -- A user-mapped record is spelled at the arguments its fields bind,
+    -- never at the native ones an unpacked use carries (GEN-9).
+    f (NamF _ (FV gv (CV s)) ps rs) = do
+      defs <- CMS.gets rsGenDefs
+      nominalTypeName s (useArgs defs gv s ps rs)
     -- Back-reference to a recursive record: resolve the concrete struct name
     -- via the concrete scope (the CVar slot is unreliable after weave).
     -- A record the compiler would generate cannot refer to itself: its
@@ -320,8 +396,8 @@ rustTypeOf = f
     -- needs a box the user's own struct must place. Users must map such a
     -- record to a Rust struct of their own.
     f (RecF (FV gv (CV "struct"))) = do
-      public <- CMS.gets rsPublic
-      case Map.lookup gv public of
+      names <- CMS.gets rsRecordNames
+      case Map.lookup gv names of
         Just name -> return (pretty name)
         Nothing -> do
           CMS.modify $ \s -> s
@@ -1243,7 +1319,7 @@ closureArgPush i ast sid = do
 closureResultRead :: SerialAST -> MDoc -> Int -> RustM MDoc
 closureResultRead out call sid = do
   fromWire <- reflectInPlace out
-  wireT <- rustTypeOf (wireSerialAstToType rustClosureWireLeaf out)
+  wireT <- rustTypeOf (unpackedAsTypeF (wireSerialAstToTypeThroughNodes rustClosureWireLeaf out))
   let got = "::rustmorloc::get_value::<" <> wireT <> ">(" <> call <> ", " <> RP.schemaRef sid <> ")"
   return $ maybe got ($ got) fromWire
 
@@ -1552,7 +1628,6 @@ translate srcs es0 = do
   generalScope <- MM.gets stateGeneralTypedefs
   let rustScope = fromMaybe Map.empty (Map.lookup rustLang universalScopeMap)
       mergedRustScope = Map.union rustScope generalScope
-      recmap = unifyRecords . concatMap collectRecords $ es
 
   srcTypeVarMask <- buildSrcTypeVarMask
   srcMakers <- buildSrcMakers
@@ -1564,9 +1639,18 @@ translate srcs es0 = do
   logTemplates <- collectRenderedTemplates rustLang
   stageTable <- stageTableEntries
   typeHomes <- MM.gets stateTypeHomes
-  let st0 = defaultValue {rsTypeHomes = typeHomes, rsDebugInfo = debugInfo, rsRecmap = recmap, rsCScope = mergedRustScope, rsSrcTypeVarMask = srcTypeVarMask, rsSrcMakers = srcMakers, rsLogTemplates = logTemplates, rsStageTable = stageTable, rsPool = planPool (rustCaps mergedRustScope) es, rsBuilds = lastBuilds Map.empty Set.empty (rustSeeds (planPool (rustCaps mergedRustScope) es) es0) es0}
+  -- Closures' captured and bound arguments are deserialized by their
+  -- dispatch wrappers, not by any manifold, so their types are added.
+  let uses = recordUses (concatMap (poolTypesWith serialAstToTypeThroughNodes) es <> map (unpackedAsTypeF . serialAstToTypeThroughNodes) (closureSerialASTs closureAsts))
+  (gdefs, gfails) <- genDefs rustLang (Set.fromList [g | (g, _, _, _) <- uses])
+  intrAsts <- intrinsicSerialASTs rustLang es
+  let poolAsts = concatMap allSerialASTs es <> intrAsts <> closureSerialASTs closureAsts
+      recordObjects = Map.map unique (Map.fromListWith (<>) [(g, [rs]) | a <- poolAsts, o@(SerialObject _ (FV g _) _ rs) <- serialSubtrees a, generatedObject o])
+  let st0 = defaultValue {rsRecordObjects = recordObjects, rsGenFailures = gfails, rsGenDefs = gdefs, rsRecordUses = uses, rsTypeHomes = typeHomes, rsDebugInfo = debugInfo, rsCScope = mergedRustScope, rsSrcTypeVarMask = srcTypeVarMask, rsSrcMakers = srcMakers, rsLogTemplates = logTemplates, rsStageTable = stageTable, rsPool = pool, rsBuilds = lastBuilds Map.empty Set.empty (rustSeeds pool es0) es0}
+      pool = planPool (rustCaps mergedRustScope) es
       ((code, typeFiles), stEnd) = CMS.runState (runReaderT (makeRustCode includeDocs closureAsts closureTable es) emptyOwnEnv) st0
   mapM_ (MM.throwRejected . ("Rust pool:" <+>) . pretty) (rsErrors stEnd)
+  let privateNote = poolPrivateNote [unTVar gv | gv <- Map.keys (rsRecords stEnd), Map.notMember gv (rsPublic stEnd)]
 
   home <- MM.asks configHome
   deps <- rustDepsUnion
@@ -1614,7 +1698,7 @@ translate srcs es0 = do
                 , File "build.rs" (Code (render buildRs))
                 , Dir "src" [File "main.rs" (Code poolSrc), File "__morloc_user_ops.rs" (Code rustUserOps)]
                 ]
-            ] <> [Dir "types" [Dir "rust" (typeFileTree ".rs" typeFiles)] | not (null typeFiles)]
+            ] <> [Dir "types" [Dir "rust" (typeFileTree ".rs" typeFiles <> privateNote)] | not (null typeFiles && null privateNote)]
             )
       , scriptMake = maker
       }
@@ -1770,6 +1854,8 @@ makeRustCode :: [MDoc] -> Map.Map Int ([SerialAST], [SerialAST], SerialAST) -> M
 makeRustCode includeDocs0 closureAsts closureTable0 es = do
   planRustPublic es
   structDocs <- generateRustStructs closureAsts es
+  convHelpers <- CMS.gets rsConvHelpers
+  privateDocs <- (convHelpers <>) <$> privateModuleTree
   enumDocs <- generateRustEnums es
   variantDocs <- generateRustVariants closureAsts es
   stageTable <- CMS.gets rsStageTable
@@ -1797,7 +1883,7 @@ makeRustCode includeDocs0 closureAsts closureTable0 es = do
   program <- buildProgramM Map.empty Map.empty includeDocs [] es translateSegment getRustSchemaTable closureTable
   -- structDocs go in the schema-table section; the closure dispatch wrappers are
   -- free functions spliced into the signatures section.
-  return (RP.printProgram (structDocs <> enumDocs <> variantDocs) closureWrappers [] program, typeFiles)
+  return (RP.printProgram (structDocs <> privateDocs <> enumDocs <> variantDocs) closureWrappers [] program, typeFiles)
 
 -- | A closure value's Rust signature: result type + tupled argument types.
 -- Matches the signature seen at a serialize site for the same closure, so a
@@ -1838,7 +1924,7 @@ makeClosureDispatch closureAsts closureTable es = do
       argReflects <- mapM reflectInPlace (capAsts <> bndAsts)
       argTs <- sequence
         [ if isJust refl
-            then rustTypeOf (wireSerialAstToType rustClosureWireLeaf ast)
+            then rustTypeOf (unpackedAsTypeF (wireSerialAstToTypeThroughNodes rustClosureWireLeaf ast))
             else rustTypeOf t
         | (t, ast, refl) <- zip3Same (ctxTs <> bndTs) (capAsts <> bndAsts) argReflects
         ]
@@ -1902,15 +1988,17 @@ collectRustRecords =
   -- covers every instantiation with generic parameters, so it is one entry
   -- per general name. A user-mapped struct may be a template the user
   -- wrote, whose instantiations each need their own marshalling, so those are
-  -- one entry per (name, arguments); 'generateRustStructs' keeps one impl
-  -- for instantiations that render the same struct.
-  nubBy ((==) `on` \(FV gv cv, ps, _) -> (gv, if cv == CV "struct" then [] else ps))
+  -- one entry per (name, arguments, fields): a native use and an unpacked
+  -- one carry the same arguments but are spelled at different ones
+  -- (GEN-9). 'generateRustStructs' keeps one impl for instantiations that
+  -- render the same struct.
+  nubBy ((==) `on` \(FV gv cv, ps, rs) -> (gv, if cv == CV "struct" then ([], []) else (ps, rs)))
     . concatMap (runIdentity . foldWithSerialManifoldM fm)
   where
     fm = defaultValue {opFoldWithNativeExprM = ne, opFoldWithSerialExprM = se}
-    ne _ (DeserializeN_ t s xs) = return $ xs <> seek t <> seek (serialAstToType s)
+    ne _ (DeserializeN_ t s xs) = return $ xs <> seek t <> seek (unpackedAsTypeF (serialAstToTypeThroughNodes s))
     ne efull e = return $ foldlNE (<>) (seek (typeFof efull)) e
-    se _ (SerializeS_ s xs) = return $ seek (serialAstToType s) <> xs
+    se _ (SerializeS_ s xs) = return $ seek (unpackedAsTypeF (serialAstToTypeThroughNodes s)) <> xs
     se _ e = return $ foldlSE (<>) [] e
 
     seek :: TypeF -> [(FVar, [ArgF], [(Key, TypeF)])]
@@ -1939,9 +2027,9 @@ collectRustEnums :: [SerialManifold] -> [(FVar, [ArgF], [Text])]
 collectRustEnums = concatMap (runIdentity . foldWithSerialManifoldM fm)
   where
     fm = defaultValue {opFoldWithNativeExprM = ne, opFoldWithSerialExprM = se}
-    ne _ (DeserializeN_ t s xs) = return $ xs <> seek t <> seek (serialAstToType s)
+    ne _ (DeserializeN_ t s xs) = return $ xs <> seek t <> seek (unpackedAsTypeF (serialAstToTypeThroughNodes s))
     ne efull e = return $ foldlNE (<>) (seek (typeFof efull)) e
-    se _ (SerializeS_ s xs) = return $ seek (serialAstToType s) <> xs
+    se _ (SerializeS_ s xs) = return $ seek (unpackedAsTypeF (serialAstToTypeThroughNodes s)) <> xs
     se _ e = return $ foldlSE (<>) [] e
 
     seek :: TypeF -> [(FVar, [ArgF], [Text])]
@@ -1958,9 +2046,9 @@ collectRustVariants :: [SerialManifold] -> [(FVar, [ArgF], [(Text, [TypeF])])]
 collectRustVariants = concatMap (runIdentity . foldWithSerialManifoldM fm)
   where
     fm = defaultValue {opFoldWithNativeExprM = ne, opFoldWithSerialExprM = se}
-    ne _ (DeserializeN_ t s xs) = return $ xs <> seek t <> seek (serialAstToType s)
+    ne _ (DeserializeN_ t s xs) = return $ xs <> seek t <> seek (unpackedAsTypeF (serialAstToTypeThroughNodes s))
     ne efull e = return $ foldlNE (<>) (seek (typeFof efull)) e
-    se _ (SerializeS_ s xs) = return $ seek (serialAstToType s) <> xs
+    se _ (SerializeS_ s xs) = return $ seek (unpackedAsTypeF (serialAstToTypeThroughNodes s)) <> xs
     se _ e = return $ foldlSE (<>) [] e
 
     seek :: TypeF -> [(FVar, [ArgF], [(Text, [TypeF])])]
@@ -2026,7 +2114,7 @@ generateRustVariants closureAsts es = do
       , any (maybe False pathHasClosure) paths = do
           reifies <- mapM (traverse renderReify) paths
           reflects <- mapM (traverse renderReflect) paths
-          wireTs <- mapM (\(t, (s, p)) -> maybe (return t) (const (rustTypeOf (wireSerialAstToType rustClosureWireLeaf s))) p) fields
+          wireTs <- mapM (\(t, (s, p)) -> maybe (return t) (const (rustTypeOf (unpackedAsTypeF (wireSerialAstToTypeThroughNodes rustClosureWireLeaf s)))) p) fields
           u <- getCounter
           let slot v j = v <> "." <> pretty j
               t = "__morloc_arm" <> pretty u
@@ -2099,6 +2187,151 @@ declareOrKeep keepRootName gv decl poolName = do
       return []
     _ -> return [decl poolName]
 
+-- | Declare a generated record: in its module's file when it is public,
+-- else in the pool's private module (GEN-10), which 'privateModuleTree'
+-- writes once all are known.
+declareRecord :: TVar -> (MDoc -> MDoc) -> RustM [MDoc]
+declareRecord gv decl = do
+  public <- CMS.gets rsPublic
+  names <- CMS.gets rsRecordNames
+  let q = Map.findWithDefault (unTVar gv) gv names
+      (path, leaf) = T.breakOnEnd "::" q
+  if Map.member gv public
+    then declareOrKeep Nothing gv decl (pretty leaf)
+    else do
+      CMS.modify $ \st -> st {rsPrivateDecls = rsPrivateDecls st <> [(fromMaybe path (T.stripSuffix "::" path), decl (pretty leaf))]}
+      return []
+
+-- | The pool's private module tree, holding the generated records no
+-- module's file holds (GEN-10).
+privateModuleTree :: RustM [MDoc]
+privateModuleTree = do
+  decls <- CMS.gets rsPrivateDecls
+  let byPath = Map.fromListWith (flip (<>)) [(maybe [] (T.splitOn "::") (T.stripPrefix "crate::" p), [d]) | (p, d) <- decls]
+      tree pre = Map.fromListWith (<>) [(c, [(rest, ds)]) | (c : rest, ds) <- pre]
+      render' entries =
+        vsep $
+          [d | ([], ds) <- entries, d <- ds]
+            <> [ vsep ["pub mod" <+> pretty (rustModIdent c) <+> "{", indent 4 ("#[allow(unused_imports)] use crate::*;" <> line <> render' sub), "}"]
+               | (c, sub) <- Map.toList (tree [(p, ds) | (p@(_ : _), ds) <- entries]) ]
+  return [render' (Map.toList byPath) | not (null decls)]
+
+-- | The marshalling of a generated record the pool marshals (GEN-14): one
+-- generic impl, each field written as it is held, converted the same way
+-- at every instance (its declared type names no parameter), or, when its
+-- conversion depends on the arguments, through a trait for that field
+-- implemented by the field's type at each instance. Nothing for a record
+-- the pool never marshals.
+recordImpls :: Bool -> GenDef -> MDoc -> [MDoc] -> RustM [MDoc]
+recordImpls handle gd name params = do
+  objectsOf <- CMS.gets rsRecordObjects
+  mask <- CMS.gets rsSrcTypeVarMask
+  makers <- CMS.gets rsSrcMakers
+  consumed <- CMS.gets (ppByValue . rsPool)
+  userArms <- CMS.gets rsUserArms
+  homesOf <- CMS.gets rsTypeHomes
+  let gv = gdVar gd
+      cfg = rustLowerConfig mask makers consumed userArms
+      objects = Map.findWithDefault [] gv objectsOf
+      converts fa = case fa of
+        SerialClosure _ _ -> True
+        _ -> not (isSerializableThroughNodes fa) || not (null (serialClosuresOutsideNodes fa))
+      -- Names derived from the record are global to the crate, so they
+      -- carry its module path.
+      leaf = Map.findWithDefault (tvarIdentifier gv) gv homeKeys
+      homeKeys = Map.map (\h -> encodeModulePath (typeHomePath h <> [typeHomeName h])) homesOf
+      complain :: Text -> RustM ()
+      complain msg = CMS.modify $ \st -> st {rsErrors = msg : rsErrors st}
+  if null objects
+    then return []
+    else do
+      planned <- mapIndexedM (field cfg converts leaf complain objects) (gdFields gd)
+      let fields4 = [f | (f, _, _) <- planned]
+          wheres = ([w | (_, Just (w, _), _) <- planned], [w | (_, Just (_, w), _) <- planned])
+          extras = concat [d | (_, _, d) <- planned]
+          impls = RP.printRecordImplsWhere handle RP.RenderedFieldTypes name params (if null params then Nothing else Just wheres) fields4
+      return (extras <> [impls])
+  where
+    -- One field: its marshalling, its where clauses (writing, reading),
+    -- and the helpers and trait items it needs.
+    field cfg converts leaf complain objects i (k, declT) = do
+      let fas = unique [fa | rs <- objects, Just fa <- [lookup k rs]]
+          held = not (null (placeholders declT))
+          fld = RP.rustFieldIdent k
+      ty <- rustFieldType declT
+      let plainWheres = if held then Just (ty <> ": ::rustmorloc::ToVoidstar", ty <> ": ::rustmorloc::FromVoidstar") else Nothing
+          width = isVarWidthF declT || held
+      case filter converts fas of
+        [] -> return ((fld, ty, width, Nothing), plainWheres, [])
+        cs@(c : _)
+          | not held -> do
+              when (length (unique cs) > 1) $
+                complain ("the field `" <> unKey k <> "` of the generated Rust type for " <> unTVar (gdVar gd) <> " converts two ways")
+              nestedClosure c
+              m <- marshal cfg (pretty leaf) i 0 c
+              return ((fld, ty, True, Just m), Nothing, [])
+          | otherwise -> do
+              let tr = "MlcConv_" <> pretty leaf <> "_" <> pretty i
+              byType <- mapM (\fa -> (\t -> (render t, fa)) <$> rustFieldType (serialAstToNativeType fa)) fas
+              let groups = Map.fromListWith (flip (<>)) [(t, [fa]) | (t, fa) <- byType]
+              sequence_
+                [ complain ( "the generated Rust type " <> render name <> " is used at two morloc types that convert its field `"
+                               <> unKey k <> "` differently, so one Rust type cannot hold both; give " <> unTVar (gdVar gd)
+                               <> " a Rust form, `record Rust => " <> unTVar (gdVar gd) <> " = \"...\"`" )
+                | (_, g) <- Map.toList groups, length (unique [if converts fa then Just fa else Nothing | fa <- g]) > 1 ]
+              impls <- mapIndexedM
+                (\j (t, g) -> case g of
+                    fa : _ | converts fa -> do
+                      nestedClosure fa
+                      m <- marshal cfg (pretty leaf) i (j + 1) fa
+                      let how = case m of
+                            RP.PackMarshal raw to from -> RP.TraitPack raw to from
+                            RP.ClosureMarshal reflect -> RP.TraitClosure reflect
+                            RP.ViaTrait _ -> RP.TraitPlain
+                      return [RP.printFieldTraitImpl tr (pretty t) i how]
+                    _ -> return [RP.printFieldTraitImpl tr (pretty t) i RP.TraitPlain])
+                (Map.toList groups)
+              return ((fld, ty, True, Just (RP.ViaTrait tr)), Just (ty <> ": " <> tr, ty <> ": " <> tr), RP.printFieldTrait tr : concat impls)
+      where
+        nestedClosure fa = case fa of
+          SerialClosure _ _ -> return ()
+          _ | not (null (serialClosuresOutsideNodes fa)) ->
+                complain ("the field `" <> unKey k <> "` of the generated Rust type for " <> unTVar (gdVar gd)
+                            <> " holds a function inside a container, which cannot cross into or out of a Rust pool yet; give "
+                            <> unTVar (gdVar gd) <> " a Rust form, `record Rust => " <> unTVar (gdVar gd) <> " = \"...\"`")
+            | otherwise -> return ()
+
+    -- How a converting field is marshalled; its conversion functions go to
+    -- the pool's helpers.
+    marshal cfg leaf i j fa = case fa of
+      SerialClosure _ _ -> do
+        assembler <- rustReflectClosureAssembler fa
+        return (RP.ClosureMarshal {RP.cmReflect = assembler})
+      _ -> do
+        ty <- rustFieldType (serialAstToNativeType fa)
+        (toStmts, toE) <- nativeToWire cfg "(*mlc_x)" fa
+        (fromE, fromStmts) <- wireToNative cfg "mlc_r" fa
+        raw <- rustTypeOf (unpackedAsTypeF (wireSerialAstToTypeThroughNodes rustClosureWireLeaf fa))
+        let base = "mlc_conv_" <> leaf <> "_" <> pretty (i :: Int) <> "_" <> pretty (j :: Int)
+            to = base <> "_to"
+            from = base <> "_from"
+        CMS.modify $ \st -> st
+          { rsConvHelpers =
+              rsConvHelpers st
+                <> [ vsep
+                       [ "#[allow(non_snake_case, unused_variables)]"
+                       , "fn" <+> to <> "(mlc_x: &" <> ty <> ") ->" <+> raw <+> "{"
+                       , indent 4 (vsep (map RP.printStmt toStmts <> [RP.printExpr toE]))
+                       , "}"
+                       , "#[allow(non_snake_case, unused_variables)]"
+                       , "fn" <+> from <> "(mlc_r:" <+> raw <> ") ->" <+> ty <+> "{"
+                       , indent 4 (vsep (map RP.printStmt fromStmts <> [RP.printExpr fromE]))
+                       , "}"
+                       ]
+                   ]
+          }
+        return (RP.PackMarshal raw to from)
+
 -- | Choose the generated types this pool declares in a file of their own,
 -- one per declaring module (GEN-6), and give them their paths from the crate
 -- root (GEN-4). A type qualifies when its definition cannot depend on its
@@ -2108,47 +2341,90 @@ declareOrKeep keepRootName gv decl poolName = do
 planRustPublic :: [SerialManifold] -> RustM ()
 planRustPublic es = do
   homes <- CMS.gets rsTypeHomes
-  recmap0 <- CMS.gets rsRecmap
   cscope <- CMS.gets rsCScope
+  defs <- CMS.gets rsGenDefs
   let unparameterized gv = case Map.lookup gv cscope of
         Just ((ps, _, _, _, _) : _) -> null ps
         _ -> False
       -- A type named like a prelude type would hide it in its own module,
       -- where native forms name the prelude type unqualified (`Vec<$1>`),
-      -- so it stays in the pool under its pool-local name.
-      eligible gv = unparameterized gv && maybe False (not . (`Set.member` rustPreludeTypes) . typeHomeName) (Map.lookup gv homes)
-      recCounts = Map.fromListWith (+) [(gv, 1 :: Int) | ((FV gv _, _), _) <- recmap0]
-      recs =
-        [ gv
-        | ((FV gv (CV "struct"), _), rec) <- recmap0
-        , Map.lookup gv recCounts == Just 1
-        , all (isJust . snd) (recFields rec)
-        , eligible gv
-        ]
+      -- so it stays in the pool under a pool-private name.
+      nameOk gv = maybe False (not . (`Set.member` rustPreludeTypes) . typeHomeName) (Map.lookup gv homes)
+      eligible gv = unparameterized gv && nameOk gv
+      -- Every generated record the pool uses has one definition, from its
+      -- declaration (GEN-9). One that refers to itself and has parameters
+      -- cannot be generated yet.
+      selfRef gd = recursiveRecord (gdVar gd) (gdFields gd)
+      recDefs0 = Map.filter ((== "struct") . gdForm) defs
+      refused = Map.filter (\gd -> selfRef gd && not (null (nativeParams gd))) recDefs0
+      recDefs = Map.difference recDefs0 refused
+      -- Rust refuses a generic parameter no field's type names (E0392); a
+      -- parameter held only inside a record the pool keeps to itself is
+      -- not named.
+      usesParams gd = do
+        tokens <- Set.fromList . concatMap (T.split (\c -> not (isAlphaNum c || c == '_')) . render) <$> mapM (rustTypeOf . snd) (gdFields gd)
+        return (all ((`Set.member` tokens) . nativeParam) (nativeParams gd))
+      -- A private record named like a prelude type would hide it in its
+      -- module, so its name there is prefixed.
+      privateLeaf n = if Set.member n rustPreludeTypes then "Mlc" <> n else n
+      privateName gv = "crate::mlc_pool::" <> maybe ("_nohome::" <> privateLeaf (tvarIdentifier gv)) (\h -> render (rustModPath (typeHomePath h)) <> "::" <> privateLeaf (typeHomeName h)) (Map.lookup gv homes)
   vars <- filterM (\(FV gv (CV cv), _, _) -> (&&) (eligible gv) . not <$> rustUserMapsVariant gv cv)
     [o | o@(_, ps, _) <- collectRustVariants es, null ps]
   enums <- filterM (\(FV gv (CV cv), _, _) -> (&&) (eligible gv) . not <$> rustUserMapsVariant gv cv)
     [o | o@(_, ps, _) <- collectRustEnums es, null ps]
-  let public = Set.fromList (recs <> [gv | (FV gv _, _, _) <- vars] <> [gv | (FV gv _, _, _) <- enums])
+  allVars <- filterM (\(FV gv (CV cv), _, _) -> not <$> rustUserMapsVariant gv cv) (collectRustVariants es)
+  allEnums <- filterM (\(FV gv (CV cv), _, _) -> not <$> rustUserMapsVariant gv cv) (collectRustEnums es)
+  -- A type's place follows from its declaration alone (GEN-10): a file
+  -- can name only what any crate can import -- the standard library, the
+  -- language's own types, its parameters, and the generated types other
+  -- files hold.
+  let candidates = Map.filterWithKey (\gv gd -> nameOk gv && all (isIdentifier . nativeParam) (nativeParams gd)) recDefs
+      nameAll pub = Map.mapWithKey (\gv _ -> if Set.member gv pub then maybe (privateName gv) qualifiedRustName (Map.lookup gv homes) else privateName gv) recDefs
+      generated = Set.unions [Map.keysSet recDefs0, Set.fromList [gv | (FV gv _, _, _) <- allVars], Set.fromList [gv | (FV gv _, _, _) <- allEnums]]
+      placed =
+        placeTypes (rustImportable Set.empty Set.empty) generated . Map.fromList $
+          [(gv, map snd (gdFields gd)) | (gv, gd) <- Map.toList candidates]
+            <> [(gv, concatMap snd arms) | (FV gv _, _, arms) <- vars]
+            <> [(gv, []) | (FV gv _, _, _) <- enums]
+      recPublic = Set.intersection placed (Map.keysSet candidates)
+  CMS.modify $ \s -> s {rsRecords = recDefs, rsRecordNames = nameAll recPublic}
+  unnamed <- filterM (fmap not . usesParams) (Map.elems recDefs)
+  let public = placed
       names = Map.fromList [(gv, qualifiedRustName h) | gv <- Set.toList public, Just h <- [Map.lookup gv homes]]
-      handles = Set.fromList [gv | ((FV gv (CV "struct"), _), rec) <- recmap0, gv `elem` recs, recursiveRecord gv (recFields rec)]
+      handles = Map.keysSet (Map.filter selfRef recDefs)
       badWords =
         [ (gv, c)
-        | gv <- Set.toList public, Just h <- [Map.lookup gv homes]
+        | gv <- Set.toList (Set.union public (Map.keysSet recDefs)), Just h <- [Map.lookup gv homes]
         , c <- typeHomePath h, Set.member c rustUnspellable || not (isIdentifier c)
         ]
+  -- Every use of a generated record is an instance of its definition
+  -- (GEN-9).
+  uses <- CMS.gets rsRecordUses
+  forM_ (disagreements recDefs uses) $ \(gv, d) -> do
+    msg <- case d of
+      FieldDiffers k decl use -> do
+        dr <- render <$> rustTypeOf decl
+        ur <- render <$> rustTypeOf use
+        return ("the generated Rust type for " <> unTVar gv <> " cannot serve one of its uses: its field `" <> unKey k
+                 <> "` is `" <> ur <> "` there but `" <> dr <> "` in the definition; give " <> unTVar gv
+                 <> " a Rust form, `record Rust => " <> unTVar gv <> " = \"...\"`")
+      Unmatched e -> return ("the generated Rust type for " <> unTVar gv <> " cannot serve one of its uses: " <> e)
+    CMS.modify $ \s -> s {rsErrors = msg : rsErrors s}
 
   CMS.modify $ \s -> s
     { rsPublic = names
     , rsHandles = handles
-    , rsRecmap =
-        [ (k, maybe rec (\n -> rec {recName = pretty n}) (Map.lookup gv names))
-        | (k@(FV gv _, _), rec) <- recmap0
-        ]
     , rsErrors =
-        [ "the generated Rust type for " <> unTVar gv <> " cannot be written: its module path would hold `" <> c
+        [ "the generated Rust type for " <> unTVar (gdVar gd) <> " cannot be written: a parameter its declaration"
+            <> " holds is spelled by none of its fields' Rust forms; give it a Rust form, `record Rust => "
+            <> unTVar (gdVar gd) <> " = \"...\"`"
+        | gd <- unnamed ]
+          <> [ "the record " <> unTVar gv <> " refers to itself and has parameters, and its Rust definition cannot be"
+            <> " generated; give it a Rust form, `record Rust => " <> unTVar gv <> " = \"<struct-name>\"`, naming a struct you write"
+        | gv <- Map.keys refused ]
+          <> [ "the generated Rust type for " <> unTVar gv <> " cannot be written: its module path would hold `" <> c
             <> "`, which Rust cannot spell as a module name"
-        | (gv, c) <- badWords ]
+             | (gv, c) <- badWords ]
           <> [ "the generated Rust name " <> n <> " would name both " <> T.intercalate " and " (map unTVar gvs)
              | (n, gvs) <- Map.toList (Map.fromListWith (flip (<>)) ([(n, [gv]) | (gv, n) <- Map.toList names] <> [(n <> "Fields", [gv]) | (gv, n) <- Map.toList names, Set.member gv handles]
                    <> [ (n <> "_" <> c, [gv])
@@ -2159,6 +2435,33 @@ planRustPublic es = do
              , length gvs > 1 ]
           <> rsErrors s
     }
+
+-- | Whether a rendered Rust type names only what a crate of generated
+-- types can import (GEN-10): the standard library, the language's own and
+-- prelude types, the given generated types, and the given parameters.
+rustImportable :: Set.Set Text -> Set.Set Text -> Text -> Bool
+rustImportable known params = all ok . rustPaths
+  where
+    ok p
+      | Set.member p known = True
+      | Set.member p params = True
+      | Set.member p rustOwnTypes = True
+      | any (`T.isPrefixOf` p) ["::std::", "std::", "::core::", "core::"] = True
+      | T.all isDigit p = True
+      | otherwise = False
+    rustOwnTypes =
+      Set.fromList
+        [ "i8", "i16", "i32", "i64", "i128", "isize", "u8", "u16", "u32", "u64", "u128", "usize"
+        , "f32", "f64", "bool", "char", "str", "String", "Vec", "Option", "Box", "dyn", "Fn", "Send", "Sync", "static"
+        ]
+    -- The paths a type names, each with its separators: `a::b::C`.
+    rustPaths t = case T.uncons t of
+      Nothing -> []
+      Just (c, _)
+        | isAlphaNum c || c == '_' || c == ':' ->
+            let (p, rest) = T.span (\x -> isAlphaNum x || x == '_' || x == ':') t
+             in [T.dropWhileEnd (== ':') p | T.any (\x -> isAlphaNum x || x == '_') p] <> rustPaths rest
+        | otherwise -> rustPaths (T.drop 1 t)
 
 -- | A generated type's path from the crate root (GEN-4).
 qualifiedRustName :: TypeHome -> Text
@@ -2250,7 +2553,7 @@ rustStandaloneLib :: [[Text]] -> Text
 rustStandaloneLib paths =
   render . vsep $
     [ "// Generated by morloc; do not edit."
-    , "#![allow(dead_code)]"
+    , "#![allow(dead_code, non_camel_case_types)]"
     , "pub mod mlc {"
     , "pub fn rec_release<T>(a: ::std::sync::Arc<T>) { drop(a) }"
     , RP.printRustNode "crate::mlc::rec_release"
@@ -2276,7 +2579,14 @@ rustReservedWords =
 -- emitted for them.
 generateRustStructs :: Map.Map Int ([SerialAST], [SerialAST], SerialAST) -> [SerialManifold] -> RustM [MDoc]
 generateRustStructs closureAsts es = do
-  keyed <- concat <$> mapM makeOne (collectRustRecords es)
+  defs <- CMS.gets rsGenDefs
+  -- A user-mapped record's occurrence that is not an instance of its
+  -- definition (its unpacked form, where the struct is not generic) names
+  -- no struct of its own.
+  let instanceOf (FV gv (CV cv), ps, rs) = case Map.lookup gv defs of
+        Just gd | cv /= "struct", gdForm gd == cv -> isNothing (checkUse defs gd ps rs)
+        _ -> True
+  keyed <- concat <$> mapM makeOne (filter instanceOf (collectRustRecords es))
   -- A Rust struct gets one impl. Instantiations of a user-mapped record that
   -- render the same struct must agree on its fields (they differ only in
   -- parameters no field uses); otherwise one struct cannot hold both.
@@ -2342,32 +2652,26 @@ generateRustStructs closureAsts es = do
 
     makeOne :: (FVar, [ArgF], [(Key, TypeF)]) -> RustM [(Maybe (MDoc, TVar, [(MDoc, MDoc, Bool)]), MDoc)]
     makeOne (v@(FV gv _), ps, rs) = case v of
-      -- Autogenerated `= "struct"` record: drive from the unified RecEntry so a
-      -- field whose native and wire types diverge (a custom-packer field)
-      -- becomes a GENERIC parameter -- one struct `S<T1> { w: T1, .. }` covers
-      -- both the native (`S<MyWrap>`) and wire (`S<i64>`) instantiations, the
-      -- Rust analogue of C++'s template-field records. A closure field also
-      -- diverges (native `Arc<dyn Fn>` vs wire `ClosureOrigin`), so it is a
-      -- generic param here and cannot carry a per-field reify/reflect -- an
-      -- autogenerated struct with a function field is therefore struct-only (use
-      -- a user-mapped `record Rust => X = "..."` for a crossing closure record).
+      -- A generated record is defined from its declaration (GEN-9) and
+      -- marshalled by one impl ('recordImpls', GEN-14).
       FV _ (CV "struct") -> do
-        recmap <- CMS.gets rsRecmap
-        case lookup (v, map fst rs) recmap of
-          Just rec -> do
-            let assigned = assignGenerics (1 :: Int) (recFields rec)
-                params = [p | (_, Left p) <- assigned]
-            fields <- mapM (oneField gv (recName rec)) assigned
+        records <- CMS.gets rsRecords
+        case Map.lookup gv records of
+          Nothing -> return []
+          Just gd -> do
+            names <- CMS.gets rsRecordNames
             handle <- Set.member gv <$> CMS.gets rsHandles
-            let hasFun = any (containsFunF . snd) rs
-                fields4 = [(fld, ty, w, Nothing) | (fld, ty, w) <- fields]
-                impls = [RP.printRecordImplsWith handle RP.RenderedFieldTypes (recName rec) params fields4 | not hasFun]
-                printDecl n
+            let name = pretty (Map.findWithDefault (unTVar gv) gv names)
+                params = map (pretty . nativeParam) (nativeParams gd)
+            -- A field holding a parameter has the width of its argument,
+            -- which may vary.
+            fields <- mapM (\(k, t) -> (\ty -> (RP.rustFieldIdent k, ty, isVarWidthF t || not (null (placeholders t)))) <$> rustFieldType t) (gdFields gd)
+            let printDecl n
                   | handle = RP.printRustHandle n [(fld, ty) | (fld, ty, _) <- fields]
                   | otherwise = RP.printRustStruct n params [(fld, ty) | (fld, ty, _) <- fields]
-            decl <- declareOrKeep Nothing gv printDecl (recName rec)
+            decl <- declareRecord gv printDecl
+            impls <- recordImpls handle gd name params
             return $ map ((,) Nothing) (decl <> impls)
-          Nothing -> error $ "Rust: autogenerated record missing from recmap: " <> show v
       -- User-mapped record: the user writes the (monomorphic) struct, so only the
       -- marshalling impls are emitted, with concrete field types. A closure field
       -- reifies/reflects in place (via 'fieldMarshal'); the impl is emitted only
@@ -2792,9 +3096,9 @@ rustLowerConfig mask makers consumed userArms =
     -- in an aggregate travels as its reified `ClosureOrigin` tuple, so the closure
     -- slot is typed as that tuple ('rustClosureWireLeaf'), not the native
     -- `impl Fn`/`Arc<dyn Fn>`. Mirrors the C++ 'cppClosureWireLeaf'.
-    , lcSerialAstType = \s -> Just . toIType <$> rustTypeOf (wireSerialAstToType rustClosureWireLeaf s)
+    , lcSerialAstType = \s -> Just . toIType <$> rustTypeOf (unpackedAsTypeF (wireSerialAstToTypeThroughNodes rustClosureWireLeaf s))
     , lcDeserialAstType = \s -> Just . toIType <$> rustTypeOf (shallowType s)
-    , lcRawDeserialAstType = \s -> Just . toIType <$> rustTypeOf (wireSerialAstToType rustClosureWireLeaf s)
+    , lcRawDeserialAstType = \s -> Just . toIType <$> rustTypeOf (unpackedAsTypeF (wireSerialAstToTypeThroughNodes rustClosureWireLeaf s))
     , lcTypeMOf = \_ -> return Nothing
     , lcPackerName = \src -> pretty (srcName src)
     , lcUnpackerName = \src -> pretty (srcName src)
@@ -2938,6 +3242,7 @@ rustLowerConfig mask makers consumed userArms =
     -- so a record node -- and a list/optional OF records ([R]/?R) -- is NOT
     -- diverted (it falls through to Vec/Option + the record impl). See
     -- 'rustDivertsClosure'.
+    , lcRecordsConvertInNode = recordsConvertInNode rustLang
     , lcDivertNestedClosure = rustDivertsClosure
     , lcMakeFunction = rustMakeFunction
     -- A bare function passed to a HOF is a closure over all its params with no

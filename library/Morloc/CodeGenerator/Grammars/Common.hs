@@ -38,17 +38,18 @@ module Morloc.CodeGenerator.Grammars.Common
   , walkSelectorBrackets
 
     -- * Record collection/unification
-  , RecEntry (..)
-  , RecMap
-  , collectRecords
+  , recordsInType
+  , poolPrivateNote
+  , encodeModulePath
+  , poolPrivateNoteName
+  , poolTypesWith
+  , intrinsicValueTypes
   , collectRecordsWhere
-  , unifyRecords
   , recursiveRecord
   , recordNameOf
   , refersTo
   , mergeVariantOccurrences
   , mergeEnumOccurrences
-  , structName
   , typeFileTree
   , fileTree
   , isIdentifier
@@ -67,6 +68,10 @@ module Morloc.CodeGenerator.Grammars.Common
   , crossingClosures
   , serialClosuresOf
   , serialClosuresOutsideVariants
+  , serialClosuresOutsideNodes
+  , fieldConverts
+  , closureSerialASTs
+  , allSerialASTs
   , collectSerialObjects
   , serialObjectsOfAST
   , variantWireArms
@@ -86,7 +91,7 @@ module Morloc.CodeGenerator.Grammars.Common
   , makeTraceLabelLookup
   ) where
 
-import Morloc.Data.Zip (indexed, indexedFrom, zipSame, zipWithSameM)
+import Morloc.Data.Zip (indexed, zipSame, zipWithSameM)
 import Morloc.Frontend.Rename (displayName)
 import qualified Control.Monad.State as CMS
 import Data.Binary (Binary)
@@ -96,7 +101,7 @@ import qualified Data.Sequence as Seq
 import Data.List.NonEmpty (NonEmpty)
 import GHC.Generics (Generic)
 import Morloc.CodeGenerator.Namespace
-import Morloc.CodeGenerator.Serial (containsFunF, serialAstToNativeType, serialAstToType, makeSerialAST, serialAstToMsgpackSchema)
+import Morloc.CodeGenerator.Serial (Unpacked, containsFunF, generatedObject, isSerializableThroughNodes, serialAstToNativeType, serialAstToType, makeSerialAST, serialAstToMsgpackSchema, unpackedAsTypeF)
 import Morloc.Data.Doc
 import Morloc.Data.Text (Text)
 import qualified Morloc.Data.Text as MT
@@ -919,28 +924,58 @@ invertSerialManifold next sm0 =
     invertNativeArgM (NativeArgManifold_ (D nm deps)) = return $ D (NativeArgManifold nm) deps
     invertNativeArgM (NativeArgExpr_ (D ne deps)) = return $ D (NativeArgExpr ne) deps
 
-{- | A record entry stores the common name, keys, and types of records that are
-not imported from source. These records are generated as structs (or
-equivalent) in the pool. 'unifyRecords' takes all such records and "unifies"
-ones with the same name and keys. The unified records may have different
-types, but they will all be instances of the same generic struct. Fields that
-differ between instances are made generic.
--}
-data RecEntry = RecEntry
-  { recName :: MDoc
-  , recFields ::
-      [ ( Key
-        , Maybe TypeF
-        )
-      ]
-  }
-  deriving (Show)
+-- | A module path as one identifier part, distinct for distinct paths:
+-- each component is preceded by its length.
+encodeModulePath :: [Text] -> Text
+encodeModulePath = MT.concat . map (\c -> MT.pack (show (MT.length c)) <> "_" <> c)
 
--- | Lookup table mapping (FVar, keys) to their unified RecEntry.
-type RecMap = [((FVar, [Key]), RecEntry)]
+-- | The note a pool leaves beside its generated type files naming the
+-- generated records it defines only for itself (GEN-10), which `morloc
+-- types` reports and does not write.
+poolPrivateNote :: [Text] -> [DirTree Code]
+poolPrivateNote [] = []
+poolPrivateNote names = [File poolPrivateNoteName (Code (MT.unlines names))]
 
-collectRecords :: SerialManifold -> [(FVar, Int, [(Key, TypeF)])]
-collectRecords = collectRecordsWhere (== "struct")
+poolPrivateNoteName :: String
+poolPrivateNoteName = "pool-private.txt"
+
+-- | Every occurrence of a record, generated or user-mapped, anywhere in a
+-- type, the arguments a type carries included: its name, those arguments
+-- and its fields.
+recordsInType :: TypeF -> [(FVar, [ArgF], [(Key, TypeF)])]
+recordsInType t = case t of
+  NamF NamTable _ ps rs -> concatMap recordsInType (tyArgs ps <> map snd rs)
+  NamF _ v ps rs -> (v, ps, rs) : concatMap recordsInType (tyArgs ps <> map snd rs)
+  FunF ts r -> concatMap recordsInType (r : ts)
+  AppF h ts -> concatMap recordsInType (h : tyArgs ts)
+  OptionalF x -> recordsInType x
+  EnumF _ ps _ -> concatMap recordsInType (tyArgs ps)
+  VariantF _ ps as -> concatMap recordsInType (tyArgs ps <> concatMap snd as)
+  _ -> []
+
+
+-- | The values intrinsics may marshal: the arguments and results of every
+-- one but those that read no value. Collecting a type no intrinsic writes
+-- costs an unused marshaller; missing one leaves a value with none.
+intrinsicValueTypes :: SerialManifold -> [TypeF]
+intrinsicValueTypes = unique . runIdentity . foldWithSerialManifoldM fm
+  where
+    fm = defaultValue {opFoldWithNativeExprM = nativeExpr, opFoldWithSerialExprM = \_ e -> return (foldlSE (<>) [] e)}
+    nativeExpr (IntrinsicN t intr _ args) e
+      | marshals intr = return $ foldlNE (<>) (t : map typeFof args) e
+    nativeExpr _ e = return $ foldlNE (<>) [] e
+    marshals intr = intr `notElem` [IntrVersion, IntrCompiled, IntrLang, IntrDatafile]
+
+-- | 'poolTypes', with a serialized value's type taken by the given
+-- projection.
+poolTypesWith :: (SerialAST -> Unpacked) -> SerialManifold -> [TypeF]
+poolTypesWith unpacked = unique . runIdentity . foldWithSerialManifoldM fm
+  where
+    fm = defaultValue {opFoldWithNativeExprM = nativeExpr, opFoldWithSerialExprM = serialExpr}
+    nativeExpr _ (DeserializeN_ t s xs) = return $ t : unpackedAsTypeF (unpacked s) : xs
+    nativeExpr efull e = return $ foldlNE (<>) [typeFof efull] e
+    serialExpr _ (SerializeS_ s xs) = return $ unpackedAsTypeF (unpacked s) : xs
+    serialExpr _ e = return $ foldlSE (<>) [] e
 
 -- | Every occurrence of a record whose concrete name passes the test, with
 -- the manifold it occurs in and its fields there.
@@ -955,7 +990,7 @@ collectRecordsWhere wanted e0@(SerialManifold i0 _ _ _ _) =
     nativeExpr _ (DeserializeN_ t s xs) = do
       manifoldIndex <- CMS.get
       let tRecs = seekRecs manifoldIndex t
-          sRecs = seekRecs manifoldIndex (serialAstToType s)
+          sRecs = seekRecs manifoldIndex (unpackedAsTypeF (serialAstToType s))
       return $ xs <> tRecs <> sRecs
     nativeExpr efull e = do
       manifoldIndex <- CMS.get
@@ -964,7 +999,7 @@ collectRecordsWhere wanted e0@(SerialManifold i0 _ _ _ _) =
 
     serialExpr _ (SerializeS_ s xs) = do
       manifoldIndex <- CMS.get
-      return $ seekRecs manifoldIndex (serialAstToType s) <> xs
+      return $ seekRecs manifoldIndex (unpackedAsTypeF (serialAstToType s)) <> xs
     serialExpr _ e = return $ foldlSE (<>) [] e
 
     seekRecs :: Int -> TypeF -> [(FVar, Int, [(Key, TypeF)])]
@@ -983,45 +1018,6 @@ collectRecordsWhere wanted e0@(SerialManifold i0 _ _ _ _) =
     -- A variant's arms can hold records, so they are walked.
     seekRecs d (VariantF _ _ as) = concatMap (concatMap (seekRecs d) . snd) as
 
-unifyRecords ::
-  [ ( FVar
-    , Int
-    , [(Key, TypeF)]
-    )
-  ] ->
-  RecMap
-unifyRecords xs =
-  map (\(i, ((v, ks), es)) -> ((v, ks), RecEntry (structName i v) es))
-    . indexedFrom 1
-    . map (\((v, ks), rss) -> ((v, ks), map unifyField (transpose (map snd rss))))
-    . groupSort
-    . unique
-    $ [((v, map fst es), (m, map (fmap (foldSelf v . canonical)) es)) | (v, m, es) <- xs]
-  where
-    -- A recursive record occurs unrolled to different depths: at its root,
-    -- inside a record that holds it, and as a back-reference below itself,
-    -- which may also be spelled as a variable of its own name. Within each
-    -- generated record, its own nested occurrences become back-references,
-    -- so every occurrence agrees. Only a record's own fields are folded: a
-    -- record holding another keeps that record's value representation.
-    canonical t = case t of
-      NamF o v ps rs -> NamF o v (map (fmap canonical) ps) [(k, foldSelf v (canonical x)) | (k, x) <- rs]
-      FunF as r -> FunF (map canonical as) (canonical r)
-      AppF h as -> AppF (canonical h) (map (fmap canonical) as)
-      OptionalF x -> OptionalF (canonical x)
-      VariantF v ps as -> VariantF v (map (fmap canonical) ps) [(c, map canonical ts) | (c, ts) <- as]
-      _ -> t
-    foldSelf self@(FV gv (CV "struct")) t = case t of
-      _ | refersTo gv t -> RecF self
-      -- another generated record is already canonical
-      NamF _ (FV _ (CV "struct")) _ _ -> t
-      NamF o v ps rs -> NamF o v (map (fmap (foldSelf self)) ps) [(k, foldSelf self x) | (k, x) <- rs]
-      FunF as r -> FunF (map (foldSelf self) as) (foldSelf self r)
-      AppF h as -> AppF (foldSelf self h) (map (fmap (foldSelf self)) as)
-      OptionalF x -> OptionalF (foldSelf self x)
-      VariantF v ps as -> VariantF v (map (fmap (foldSelf self)) ps) [(c, map (foldSelf self) ts) | (c, ts) <- as]
-      _ -> t
-    foldSelf _ t = t
 
 -- | The record a type names, as itself, a back-reference to it, or a
 -- variable of its name.
@@ -1038,8 +1034,8 @@ refersTo g t = recordNameOf t == Just g
 
 -- | Whether a generated record's fields refer back to the record itself,
 -- anywhere in their types: such a record is a handle to its fields (CPP-6).
-recursiveRecord :: TVar -> [(Key, Maybe TypeF)] -> Bool
-recursiveRecord self fields = any mentions [t | (_, Just t) <- fields]
+recursiveRecord :: TVar -> [(Key, TypeF)] -> Bool
+recursiveRecord self fields = any (mentions . snd) fields
   where
     mentions t = refersTo self t || case t of
       NamF _ _ ps rs -> any mentions (tyArgs ps) || any (mentions . snd) rs
@@ -1072,9 +1068,6 @@ isIdentifier t = case MT.uncons t of
   where
     isAsciiLetter x = (x >= 'a' && x <= 'z') || (x >= 'A' && x <= 'Z')
 
-structName :: Int -> FVar -> MDoc
-structName i (FV v (CV "struct")) = "mlc_" <> pretty (tvarIdentifier v) <> "_" <> pretty i
-structName _ (FV _ v) = pretty v
 
 -- | Merge every occurrence of one `data` type in a pool into the one
 -- declaration to emit. Each occurrence lists the type's arms in declaration
@@ -1118,14 +1111,6 @@ mergeEnumOccurrences name (o : os) = case filter (/= o) os of
       "the `data` type " <> name <> " has occurrences listing different constructors: ("
         <> MT.intercalate ", " o <> ") and (" <> MT.intercalate ", " other <> ")"
 
-unifyField :: [(Key, TypeF)] -> (Key, Maybe TypeF)
-unifyField [] = error "Empty field"
-unifyField rs@((v, _) : _)
-  | not (all ((== v) . fst) rs) =
-      error $ "Bad record - unequal fields: " <> show (unique rs)
-  | otherwise = case unique (map snd rs) of
-      [t] -> (v, Just t)
-      _ -> (v, Nothing)
 
 -- | Collect every manifold ID reachable from the given top-level segments.
 -- Walks both SerialManifold and NativeManifold spines (a 'SerialExpr'
@@ -1254,6 +1239,30 @@ serialClosuresOf = closuresWithin True
 serialClosuresOutsideVariants :: SerialAST -> [SerialAST]
 serialClosuresOutsideVariants = closuresWithin False
 
+-- | Whether a field of a generated record is not written as it is held: it
+-- holds a packed value or a closure outside any record that converts itself
+-- (GEN-14).
+fieldConverts :: SerialAST -> Bool
+fieldConverts fa = not (isSerializableThroughNodes fa) || not (null (serialClosuresOutsideNodes fa))
+
+-- | The serial forms a pool's closures carry: captured, bound and result.
+closureSerialASTs :: Map.Map k ([SerialAST], [SerialAST], SerialAST) -> [SerialAST]
+closureSerialASTs t = [a | (cs, bs, r) <- Map.elems t, a <- cs <> bs <> [r]]
+
+-- | The closures a value holds outside any node that converts its own
+-- fields: a `data` type's arms, and a generated record (GEN-14).
+serialClosuresOutsideNodes :: SerialAST -> [SerialAST]
+serialClosuresOutsideNodes = go
+  where
+    go s | generatedObject s = []
+    go c@(SerialClosure ins out) = c : concatMap go ins <> go out
+    go (SerialPack _ (_, s)) = go s
+    go (SerialList _ _ s) = go s
+    go (SerialTuple _ ss) = concatMap go ss
+    go (SerialObject _ _ _ rs) = concatMap (go . snd) rs
+    go (SerialOptional _ s) = go s
+    go _ = []
+
 closuresWithin :: Bool -> SerialAST -> [SerialAST]
 closuresWithin intoVariants = go
   where
@@ -1289,7 +1298,7 @@ variantWireArms renderType closureAsts es =
   where
     asts = concatMap allSerialASTs es <> concat [cs <> bs <> [r] | (cs, bs, r) <- Map.elems closureAsts]
     variants = [(sv, as) | sv@(SerialVariant _ _ as@(_ : _)) <- concatMap serialVariantsOfAST asts]
-    keyed (sv, as) = (\n -> (render n, as)) <$> renderType (serialAstToType sv)
+    keyed (sv, as) = (\n -> (render n, as)) <$> renderType (unpackedAsTypeF (serialAstToType sv))
 
 serialVariantsOfAST :: SerialAST -> [SerialAST]
 serialVariantsOfAST v@(SerialVariant _ _ as@(_ : _)) = v : concatMap (concatMap serialVariantsOfAST . snd) as
@@ -1310,6 +1319,9 @@ allSerialASTs = runIdentity . surroundFoldSerialManifoldM defaultValue fw
         { opFoldWithSerialExprM = \_ folded ->
             return $ case folded of
               SerializeS_ s child -> s : child
+              -- A cached or traced call writes its result and its arguments.
+              CacheBodyS_ _ resSa _ _ args child -> resSa : map snd args <> child
+              DebugWrapS_ _ _ args child -> map snd args <> child
               _ -> foldlSE (<>) mempty folded
         , opFoldWithNativeExprM = \_ folded ->
             return $ case folded of

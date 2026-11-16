@@ -124,24 +124,45 @@ reads such a field adapts the function where it does so, so in morloc the
 field keeps its declared type (EFF-2).
 
 ### GEN-9 A generated definition follows its declaration
-Intent: proposed
-Code: unaudited
+Intent: ruled 2026-11-15
+Tests: spec-gen-9-1, spec-gen-9-2
+Code: deviates (issues/records.md)
 
 A generated record or `data` type has the declaration's type parameters as
-its own (C++ template parameters, Rust generic parameters) and each field
-the form of the declared field type. Whether a program uses `Pair Int`,
-`Pair Str` or both, `Pair a` has one definition.
+its own (C++ template parameters, Rust generic parameters), each spelled
+`T_<param>`, and each field the form of the declared field type. Whether a
+program uses `Pair Int`, `Pair Str` or both, `Pair a` has one definition,
+`template <class T_a> struct Pair` / `pub struct Pair<T_a>`, which sources
+name at their arguments (`Pair<int64_t>`).
+
+A use's arguments are read from its fields, matched against the declared
+fields; they are never taken from the arguments a type carries, which on
+the wire side of a packed argument are the native ones (`Pair Date` is
+`Pair<int64_t>` natively and is sent as `Pair<std::string>`'s fields). A use
+whose fields do not render as the definition does at those arguments is a
+compile error naming the record, the field and both renderings.
+
+A parameter no field holds natively, and a parameter of another kind
+(`Nat`, `Str`, `Rec`), is erased: `Grid2 3` and `Grid2 4` are one native
+type. A record with a packed field holds the field's native form. A
+recursive type used at an argument that needs conversion is refused.
+
+Why: one nameable definition per declared type, the same in every program
+and every pool, is what a source and a program outside morloc can be
+written against.
 
 ### GEN-10 A generated type that cannot be written alone stays in the pool
-Intent: open
-Code: unaudited
+Intent: ruled 2026-11-15
+Tests: spec-gen-10-1
+Code: conforms 2026-11-16
 
-A generated type whose field names a type no generated file can import
-(a user-written type from a sourced file, a type with no dependency
-namespace), or whose fields differ between uses other than by its
-parameters, is defined only inside the pool, after the sourced files, and
-is absent from the generated file. Open: is that the rule, or is such a
-program refused?
+A generated type whose field names a type no generated file can import (a
+user-written type from a sourced file, a type with no dependency
+namespace), or whose field holds such a type, or that has no module to be
+written in (a record named like a type the compiler defines), is defined
+only inside the pool, after the sourced files, in a pool-private namespace
+(C++ `mlc_pool::`, Rust `crate::mlc_pool`). It is absent from the generated
+file and from `morloc types`, which says so; sources cannot name it.
 
 ### GEN-11 A Python class kind holds its fields as attributes
 Intent: proposed
@@ -171,7 +192,7 @@ A nullary constructor is a class with no fields.
 ### GEN-13 `morloc types` writes the generated files anywhere
 Intent: ruled 2026-11-14
 Tests: spec-gen-13-1
-Code: deviates (issues/records.md)
+Code: conforms 2026-11-16
 
 `morloc types FILE.loc -o DIR [--lang L]` writes the files GEN-6 names for
 the program, under `DIR`, for programs outside morloc: `DIR/cpp` a header
@@ -181,3 +202,22 @@ language the program generates types in gets its directory, replaced whole;
 `--lang` writes one, and a language with no generated types is an error.
 Outside a pool a recursive value is released as the language releases it,
 without the pool's bounded-stack drain (STATE-8).
+
+### GEN-14 A generated record converts its own fields, once per write
+Intent: ruled 2026-11-15
+Tests: spec-gen-14-1, spec-gen-14-2, spec-gen-14-3, spec-gen-14-4
+Code: conforms 2026-11-16
+
+In C++ and Rust a generated record is marshalled as it is held: its node
+converts each field that is not written as it is held (a packed value, a
+closure) outside any record it holds, which converts its own. The value
+that sizing a write converts is the value written, so a packer runs once
+per field per write, and a packer that returns values of different sizes
+cannot overrun the space sized for them. Where a field's conversion
+depends on the record's arguments, each instance converts as its use says;
+two morloc types that are one native type and convert a field differently
+are a compile error naming the type. A packer that fails during a write
+fails the write as any packer failure does.
+
+Why: converting in the node copies nothing the field does not need, and
+converting once is what makes the size of a write the size written.

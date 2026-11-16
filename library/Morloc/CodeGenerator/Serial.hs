@@ -24,6 +24,13 @@ module Morloc.CodeGenerator.Serial
   , selectPackerInstance
   , PackerInstance (..)
   , wireSerialAstToType
+  , Unpacked
+  , unpackedAsTypeF
+  , generatedObject
+  , recordsConvertInNode
+  , isSerializableThroughNodes
+  , serialAstToTypeThroughNodes
+  , wireSerialAstToTypeThroughNodes
   , containsFunT
   , containsEffectT
   , checkReadDataType
@@ -32,6 +39,7 @@ module Morloc.CodeGenerator.Serial
   , containsFunF
   , serialAstHasString
   , serialKids
+  , serialSubtrees
   , chooseSerializationCycle
   , isSerializable
   , prettySerialOne
@@ -136,9 +144,71 @@ serialAstToTypeWith' onPack onClosure = go
     -- passthrough type, it cannot be deserialized or serialized, only passed in from a different language
     go (SerialUnknown v) = UnkF v
 
-serialAstToType :: SerialAST -> TypeF
-serialAstToType =
-  serialAstToTypeWith (\ins out -> FunF (map serialAstToType ins) (serialAstToType out))
+-- | A type at the unpacked level: the native value after its packers have
+-- run, the shape the marshaller walks. It is distinct from a native type
+-- ('TypeF'): a record at this level carries the native arguments of its
+-- use, which name no unpacked value, so it is spelled from its fields
+-- (GEN-9). 'unpackedAsTypeF' is the one way back to a 'TypeF'.
+newtype Unpacked = Unpacked TypeF
+  deriving (Show, Eq, Ord)
+
+-- | Use an unpacked type where a 'TypeF' is expected: to walk it, or to
+-- render it through a renderer that spells records from their fields.
+unpackedAsTypeF :: Unpacked -> TypeF
+unpackedAsTypeF (Unpacked t) = t
+
+serialAstToType :: SerialAST -> Unpacked
+serialAstToType = Unpacked . unpackedTypeF
+  where
+    unpackedTypeF = serialAstToTypeWith (\ins out -> FunF (map unpackedTypeF ins) (unpackedTypeF out))
+
+-- | Whether a language's generated records convert their own fields
+-- (GEN-14), so a value holding one is written as it is held.
+recordsConvertInNode :: Lang -> Bool
+recordsConvertInNode lang = langName lang `elem` ["cpp", "rust"]
+
+-- | A generated record: one whose marshalling node converts its own fields
+-- in a pool that generates its records (GEN-14).
+generatedObject :: SerialAST -> Bool
+generatedObject (SerialObject _ (FV _ (CV "struct")) _ _) = True
+generatedObject _ = False
+
+-- | 'isSerializable' in a pool whose generated records convert their own
+-- fields: such a record is written as it is held.
+isSerializableThroughNodes :: SerialAST -> Bool
+isSerializableThroughNodes s = case s of
+  _ | generatedObject s -> True
+  SerialPack _ _ -> False
+  SerialList _ _ x -> isSerializableThroughNodes x
+  SerialTuple _ xs -> all isSerializableThroughNodes xs
+  SerialObject _ _ _ rs -> all (isSerializableThroughNodes . snd) rs
+  SerialOptional _ x -> isSerializableThroughNodes x
+  SerialVariant _ _ as -> all (all isSerializableThroughNodes . snd) as
+  _ -> isSerializable s
+
+-- | 'serialAstToType' in a pool whose generated records convert their own
+-- fields: a generated record is unpacked as it is held, its native type.
+serialAstToTypeThroughNodes :: SerialAST -> Unpacked
+serialAstToTypeThroughNodes = Unpacked . throughNodes (\ins out -> FunF (map (unpackedAsTypeF . serialAstToTypeThroughNodes) ins) (unpackedAsTypeF (serialAstToTypeThroughNodes out)))
+
+-- | 'wireSerialAstToType' in a pool whose generated records convert their
+-- own fields.
+wireSerialAstToTypeThroughNodes :: TypeF -> SerialAST -> Unpacked
+wireSerialAstToTypeThroughNodes wire = Unpacked . throughNodes (\_ _ -> wire)
+
+throughNodes :: ([SerialAST] -> SerialAST -> TypeF) -> SerialAST -> TypeF
+throughNodes onClosure s
+  | generatedObject s = serialAstToNativeType s
+  | otherwise = case s of
+      SerialPack _ (_, inner) -> throughNodes onClosure inner
+      SerialList v (Just d) x -> AppF (VarF v) [KiA d, TyA (throughNodes onClosure x)]
+      SerialList v Nothing x -> AppF (VarF v) [TyA (throughNodes onClosure x)]
+      SerialTuple v xs -> AppF (VarF v) (map (TyA . throughNodes onClosure) xs)
+      SerialObject o n ps rs -> NamF o n ps (map (second (throughNodes onClosure)) rs)
+      SerialOptional _ x -> OptionalF (throughNodes onClosure x)
+      SerialVariant v ps as -> VariantF v ps [(c, map (throughNodes onClosure) fs) | (c, fs) <- as]
+      SerialClosure ins out -> onClosure ins out
+      _ -> serialAstToTypeWith onClosure s
 
 {- | The NATIVE type a wire form denotes: at a custom-packed node this is the
 type the pool actually holds, where 'serialAstToType' gives the shape the value
@@ -162,8 +232,8 @@ serialAstToNativeType =
 -- not as the native function. Each backend supplies its own concrete wire-tuple
 -- leaf (e.g. the C++ @std::tuple<...>@ or Rust @(String,i64,Vec<Vec<u8>>)@
 -- injected via the leaf's concrete name).
-wireSerialAstToType :: TypeF -> SerialAST -> TypeF
-wireSerialAstToType wire = serialAstToTypeWith (\_ _ -> wire)
+wireSerialAstToType :: TypeF -> SerialAST -> Unpacked
+wireSerialAstToType wire = Unpacked . serialAstToTypeWith (\_ _ -> wire)
 
 -- | True when a function type appears anywhere in the type (a bare function, or
 -- one nested in a list/tuple/record/optional/effect). Used both by the nexus
@@ -526,6 +596,10 @@ refersFrom path wire n = case n of
   SerialPack _ _ -> refersTo path wire n
   SerialOptional _ _ -> refersTo path wire n
   _ -> False
+
+-- | A serial AST and every subtree under it ('serialKids').
+serialSubtrees :: SerialAST -> [SerialAST]
+serialSubtrees a = a : concatMap serialSubtrees (serialKids a)
 
 -- | The immediate sub-trees of a node.
 serialKids :: SerialAST -> [SerialAST]

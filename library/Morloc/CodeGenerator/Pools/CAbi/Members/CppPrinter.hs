@@ -39,6 +39,10 @@ module Morloc.CodeGenerator.Pools.CAbi.Members.CppPrinter
   , printHandleDefs
   , WireField (..)
   , printArmMarshallers
+  , printRecordMarshallers
+  , printFieldConv
+  , printFieldNoConv
+  , FieldConv (..)
   , printTemplateHeader
   , printRecordTemplate
   ) where
@@ -585,19 +589,23 @@ printArmMarshallers rtype fields =
     param i = "schema->parameters[" <> pretty i <> "]"
     dst i = "(char*)dest + schema->offsets[" <> pretty i <> "]"
     src i = "(const char*)data + schema->offsets[" <> pretty i <> "]"
-    kept wf =
-      wfToWire wf
-        <> [ "auto mlc_w = std::make_shared<std::decay_t<decltype(" <> wfWire wf <> ")>>(" <> wfWire wf <> ");"
-           , "w.keep.push_back(mlc_w);"
-           ]
+    -- GEN-14: the field's wire form, made once per write and shared by the
+    -- size and write walks.
+    kept i wf =
+      [ "auto mlc_make = [&] {"
+      , indent 4 (vsep (wfToWire wf <> ["return " <> wfWire wf <> ";"]))
+      , "};"
+      , "const auto& mlc_w = mlc_converted<std::decay_t<decltype(mlc_make())>>(w, " <> param i <> ", &obj."
+          <> key i <> ", &mlc_field_tag<" <> rtype <> ", " <> pretty i <> ">, mlc_make);"
+      ]
     writeField :: Int -> (MDoc, Maybe WireField) -> MDoc
     writeField i (_, Nothing) = "w.child(" <> param i <> ", " <> dst i <> ", obj." <> key i <> ");"
     writeField i (_, Just wf) =
-      braces' (kept wf <> ["w.child(" <> param i <> ", " <> dst i <> ", *mlc_w);"])
+      braces' (kept i wf <> ["w.child(" <> param i <> ", " <> dst i <> ", mlc_w);"])
     sizeField :: Int -> (MDoc, Maybe WireField) -> MDoc
     sizeField i (_, Nothing) = "w.child(" <> param i <> ", obj." <> key i <> ", true);"
     sizeField i (_, Just wf) =
-      braces' (kept wf <> ["w.child(" <> param i <> ", *mlc_w, true);"])
+      braces' (kept i wf <> ["w.child(" <> param i <> ", mlc_w, true);"])
     readField :: Int -> (MDoc, Maybe WireField) -> MDoc
     readField i (_, Nothing) = "w.child(" <> param i <> ", " <> src i <> ", &out->" <> key i <> ");"
     readField i (t, Just wf) =
@@ -739,6 +747,107 @@ printDeserializerWith handle params rtype fields =
     sizeField :: Int -> MDoc -> MDoc
     sizeField idx key =
       [idoc|w.child(schema->parameters[#{pretty idx}], obj#{member}#{key}, true);|]
+
+-- | How a record's field reaches the wire (GEN-14).
+data FieldConv
+  = NoConv
+  -- ^ written as it is held
+  | AlwaysConv
+  -- ^ through its 'MlcFieldConv' specialisation
+  | ConvByInstance
+  -- ^ through its specialisation for the instance at hand, if it has one
+
+-- | The write, read and size steps of a generated record, each field
+-- converted as its mode says. A converted value is made once per write
+-- (GEN-14): the size walk makes it and the write walk reuses it.
+printRecordMarshallers :: Bool -> [MDoc] -> MDoc -> [(MDoc, FieldConv)] -> MDoc
+printRecordMarshallers handle params rtype fields =
+  vsep
+    [ step "write_step(MlcWriteWalk& w, const Schema* schema, void* dest, const" "& obj, size_t)" [] writeField
+    , step "read_step(MlcReadWalk& w, const Schema* schema, const void* data," "* out, size_t)" open readField
+    , step "size_step(MlcSizeWalk& w, const Schema* schema, const" "& obj, size_t)" ["w.total += schema->width;"] sizeField
+    ]
+  where
+    step sig post prelude fieldDoc =
+      vsep
+        [ memberHeader params <> "void MlcNode<" <> rtype <> ">::" <> sig <+> rtype <> post
+        , "{"
+        , indent 4 (vsep (prelude <> mapIndexed fieldDoc fields))
+        , "}"
+        ]
+    member = if handle then "->" else "." :: MDoc
+    open =
+      [ "auto mlc_node = mlc::make_arm<" <> rtype <> "_fields>();" | handle ]
+        <> [ "*out = " <> rtype <> "(mlc_node);" | handle ]
+    target = if handle then "mlc_node->" else "out->" :: MDoc
+    param i = "schema->parameters[" <> pretty i <> "]"
+    dst i = "(char*)dest + schema->offsets[" <> pretty i <> "]"
+    src i = "(const char*)data + schema->offsets[" <> pretty i <> "]"
+    conv i = "using mlc_c = MlcFieldConv<" <> rtype <> ", " <> pretty i <> ">;"
+    made i key = "const auto& mlc_v = mlc_converted<typename mlc_c::raw>(w, " <> param i <> ", &obj" <> member <> key <> ", &mlc_field_tag<" <> rtype <> ", " <> "mlc_c::index>, [&] { return mlc_c::to_raw(obj" <> member <> key <> "); });"
+    byMode i mode plain converted = case mode of
+      NoConv -> plain
+      AlwaysConv -> braces' (conv i : converted)
+      ConvByInstance ->
+        vsep
+          [ "if constexpr (MlcFieldConv<" <> rtype <> ", " <> pretty i <> ">::converts) {"
+          , indent 4 (vsep (conv i : converted))
+          , "} else {"
+          , indent 4 plain
+          , "}"
+          ]
+    writeField i (key, mode) =
+      byMode i mode
+        ("w.child(" <> param i <> ", " <> dst i <> ", obj" <> member <> key <> ");")
+        [made i key, "w.child(" <> param i <> ", " <> dst i <> ", mlc_v);"]
+    sizeField i (key, mode) =
+      byMode i mode
+        ("w.child(" <> param i <> ", obj" <> member <> key <> ", true);")
+        [made i key, "w.child(" <> param i <> ", mlc_v, true);"]
+    readField i (key, mode) =
+      byMode i mode
+        ("w.child(" <> param i <> ", " <> src i <> ", &" <> target <> key <> ");")
+        [ "auto mlc_raw = std::make_shared<typename mlc_c::raw>();"
+        , "w.keep.push_back(mlc_raw);"
+        , "w.after(+[](MlcReadWalk&, const Schema*, const void* mlc_d, void* mlc_o, size_t) {"
+        , "    *static_cast<typename mlc_c::native*>(mlc_o) = mlc_c::from_raw(*static_cast<const typename mlc_c::raw*>(mlc_d));"
+        , "}, schema, mlc_raw.get(), &" <> target <> key <> ");"
+        , "w.child(" <> param i <> ", " <> src i <> ", mlc_raw.get());"
+        ]
+    braces' xs = vsep ["{", indent 4 (vsep xs), "}"]
+
+-- | The conversion of one field of one record instance (GEN-14): its native
+-- type, the type it is written as, and the statements and expression each
+-- way (from @mlc_x@, the field, and from @mlc_r@, the written value).
+printFieldConv :: MDoc -> Int -> MDoc -> MDoc -> ([MDoc], MDoc) -> ([MDoc], MDoc) -> MDoc
+printFieldConv rtype i native raw (toStmts, toE) (fromStmts, fromE) =
+  vsep
+    [ "template<>"
+    , "struct MlcFieldConv<" <> rtype <> ", " <> pretty i <> "> {"
+    , indent 4 $ vsep
+        [ "static constexpr bool converts = true;"
+        , "static constexpr size_t index = " <> pretty i <> ";"
+        , "using native = " <> native <> ";"
+        , "using raw = " <> raw <> ";"
+        , "static raw to_raw(const native& mlc_x) {"
+        , indent 4 (vsep (toStmts <> ["return " <> toE <> ";"]))
+        , "}"
+        , "static native from_raw(const raw& mlc_r) {"
+        , indent 4 (vsep (fromStmts <> ["return " <> fromE <> ";"]))
+        , "}"
+        ]
+    , "};"
+    ]
+
+-- | The field of an instance that is written as it is held (GEN-14).
+printFieldNoConv :: MDoc -> Int -> MDoc
+printFieldNoConv rtype i =
+  vsep
+    [ "template<>"
+    , "struct MlcFieldConv<" <> rtype <> ", " <> pretty i <> "> {"
+    , "    static constexpr bool converts = false;"
+    , "};"
+    ]
 
 gatherFn :: Bool -> MDoc
 gatherFn True = "_mlc_gather_native"

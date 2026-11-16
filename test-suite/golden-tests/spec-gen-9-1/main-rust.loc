@@ -1,0 +1,72 @@
+-- GEN-9: a parameterized generated record is one generic struct in its
+-- module's file, `pub struct Pair<T_a>`, whatever arguments the program
+-- uses. Sources name it at their arguments. A use's arguments come from its
+-- fields: `Pair Date`, with Date packed (native MyDate, wire Str), is
+-- Pair<MyDate> in the pool and is sent as strings. The C++ twin is main-cpp.loc.
+module main (mkPair, mkOuter, swapPair, nested, mkDates, firstDate, viaPy, bigPair, pairTree)
+
+import root-rust
+import root-py
+
+newtype Date = Str
+type Rust => Date = "MyDate"
+
+instance Packable Str Date where
+  source Rust from "gen9.rs" ("packDate" as pack, "unpackDate" as unpack)
+
+record Pair a where
+  fst :: a
+  snd :: a
+
+record Outer a where
+  p :: Pair a
+  n :: Int
+
+source Rust from "gen9.rs" ("dupP", "swapP", "firstP", "dateOf", "ints", "total")
+dupP :: a -> Pair a
+swapP :: Pair a -> Pair a
+firstP :: Pair a -> a
+dateOf :: Int -> Date
+ints :: Int -> [Int]
+total :: Pair [Int] -> Int
+
+source Py from "gen9.py" ("pyid")
+pyid :: a -> a
+
+mkPair :: Int -> Pair Int
+mkPair x = {fst = x, snd = x + 1}
+
+mkOuter :: Str -> Outer Str
+mkOuter s = {p = dupP s, n = 1}
+
+swapPair :: Pair Str -> Pair Str
+swapPair = swapP
+
+nested :: Int -> Pair (Pair Int)
+nested x = {fst = dupP x, snd = swapP {fst = 0, snd = x}}
+
+mkDates :: Int -> Pair Date
+mkDates x = dupP (dateOf x)
+
+firstDate :: Pair Date -> Date
+firstDate = firstP
+
+viaPy :: Real -> Pair Real
+viaPy x = swapP (pyid {fst = x, snd = 0.5})
+
+-- A field holding a parameter has its argument's width: a large list
+-- crosses to Python and back.
+bigPair :: Int -> Int
+bigPair n = total (pyid (dupP (ints n)))
+
+record Tree where
+  lab :: Pair Int
+  kids :: [Tree]
+
+-- One Tree type holds both fields of a Pair, built to different depths.
+pairTree :: Int -> Pair Tree
+pairTree x =
+  { fst = {lab = {fst = x, snd = x}, kids = [{lab = {fst = 0, snd = 1}, kids = []}]}
+  , snd = {lab = {fst = 2, snd = 3}, kids = []}
+  }
+

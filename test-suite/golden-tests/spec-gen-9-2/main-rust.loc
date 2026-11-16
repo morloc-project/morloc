@@ -1,0 +1,25 @@
+-- GEN-9: a user-mapped parameterized record used at a packed argument is
+-- sent at its unpacked argument: `Pair Tenths` holds f64 natively and
+-- crosses as Int, so its unpacked value is PairT<i64> / a tuple of ints,
+-- never the native form filled with unpacked values. The C++ twin is
+-- main-cpp.loc.
+module main (mkTenths)
+import root-rust
+
+newtype Tenths = Int
+type Rust => Tenths = "f64"
+
+instance Packable Int Tenths where
+  source Rust from "um.rs" ("packTenths" as pack, "unpackTenths" as unpack)
+
+record Pair a where
+  fst :: a
+  snd :: a
+record Rust => Pair a = "PairT<$1>"
+
+source Rust from "um.rs" ("tenthsOf", "dupU")
+tenthsOf :: Int -> Tenths
+dupU :: a -> Pair a
+
+mkTenths :: Int -> Pair Tenths
+mkTenths x = dupU (tenthsOf x)

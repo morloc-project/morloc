@@ -2,6 +2,9 @@
 #define __CPPMORLOC_HPP__
 
 #include <vector>
+#include <map>
+#include <unordered_map>
+#include <typeinfo>
 #include <memory>
 #include <stack>
 #include <list>
@@ -1157,6 +1160,69 @@ private:
         throw;                                                                \
     }
 
+// GEN-14: the converted value of a packed field, made by the size walk and
+// written by the write walk.
+struct MlcConverted {
+    struct Key {
+        const void* field;
+        const void* which;
+        bool operator==(const Key& o) const { return field == o.field && which == o.which; }
+    };
+    struct KeyHash {
+        size_t operator()(const Key& k) const {
+            return std::hash<const void*>()(k.field) * 31 + std::hash<const void*>()(k.which);
+        }
+    };
+    struct Made {
+        std::shared_ptr<void> value;
+        const std::type_info* type;
+    };
+    std::unordered_map<Key, Made, KeyHash> made;
+    // A size walk has filled the table.
+    bool sized = false;
+};
+
+// How the field `I` of an instance `R` of a generated template converts to
+// the form it is written in. Every instance has its own specialisation, so
+// one that has none does not compile.
+template<typename R, size_t I>
+struct MlcFieldConv;
+
+// The identity of field `I` of `R` (or, with `I` unused, of a copy of an
+// `R`) in a walk's table of converted values.
+template<typename R, size_t I>
+inline constexpr char mlc_field_tag = 0;
+
+// GEN-14: the converted value of the field at `field`, identified with the
+// record type and field by `which`: the one already made when there is one,
+// else a new one.
+// GEN-14: a write walk that misses a value of variable width a size walk
+// filled the table without is a defect.
+template<typename Raw, typename W, typename F>
+const Raw& mlc_converted(W& w, const Schema* schema, const void* field, const void* which, F&& convert) {
+    MlcConverted* converted = w.converted;
+    std::vector<std::shared_ptr<void>>& keep = w.keep;
+    if (converted != nullptr) {
+        auto it = converted->made.find({field, which});
+        if (it != converted->made.end()) {
+            if (*it->second.type != typeid(Raw)) mlc_runtime_defect("a converted value was found under another type's key");
+            return *static_cast<const Raw*>(it->second.value.get());
+        }
+    }
+    if constexpr (W::writes) {
+        if (converted != nullptr && converted->sized && !resolve_recur(schema)->fixed_width) {
+            mlc_runtime_defect("a write walk met a converted value its size walk did not make");
+        }
+    }
+    auto v = std::make_shared<Raw>(convert());
+    if (converted != nullptr) {
+        converted->made.emplace(MlcConverted::Key{field, which}, MlcConverted::Made{v, &typeid(Raw)});
+    } else {
+        keep.push_back(v);
+    }
+    return *v;
+}
+
 struct MlcSizeWalk {
     using Step = void (*)(MlcSizeWalk&, const Schema*, const void*, size_t);
     struct Frame {
@@ -1172,8 +1238,13 @@ struct MlcSizeWalk {
     std::vector<std::shared_ptr<void>> keep;   // values a step made, alive until the walk ends
     int64_t total = 0;
     MlcFlatSet flats;   // which nodes a step may visit by direct call
+    MlcConverted* converted = nullptr;
 
-    explicit MlcSizeWalk(const Schema* root) : flats(root) {}
+    static constexpr bool writes = false;
+
+    explicit MlcSizeWalk(const Schema* root, MlcConverted* converted_) : flats(root), converted(converted_) {
+        if (converted != nullptr) converted->sized = true;
+    }
 
     // A child of a schema that cannot describe unbounded depth is stepped
     // by call.
@@ -1256,8 +1327,12 @@ struct MlcWriteWalk {
     bool in_step = false;
     bool deferring = false;
 
-    MlcWriteWalk(const Schema* root, void** cursor_)
-        : cursor(cursor_), flats(root) {}
+    MlcConverted* converted = nullptr;
+
+    static constexpr bool writes = true;
+
+    MlcWriteWalk(const Schema* root, void** cursor_, MlcConverted* converted_)
+        : cursor(cursor_), flats(root), converted(converted_) {}
 
     // Write the next value into a stream buffer's room.
     void place(void** cursor_, char* base_, char* origin_) {
@@ -1466,8 +1541,8 @@ inline uint8_t read_variant_tag(const void* data) {
 // ------------------------------------------------------------
 
 template<typename T>
-size_t get_shm_size(const Schema* schema, const T& data) {
-    MlcSizeWalk w(schema);
+size_t get_shm_size(const Schema* schema, const T& data, MlcConverted* converted) {
+    MlcSizeWalk w(schema, converted);
     w.child(schema, data, false);
     return static_cast<size_t>(w.run());
 }
@@ -1475,8 +1550,8 @@ size_t get_shm_size(const Schema* schema, const T& data) {
 // Write `data` into the slot at `dest`, appending variable-length parts at
 // the cursor.
 template<typename T>
-void* to_voidstar(void* dest, void** cursor, const Schema* schema, const T& data) {
-    MlcWriteWalk w(schema, cursor);
+void* to_voidstar(void* dest, void** cursor, const Schema* schema, const T& data, MlcConverted* converted) {
+    MlcWriteWalk w(schema, cursor, converted);
     w.child(schema, dest, data);
     w.run();
     return dest;
@@ -1485,11 +1560,12 @@ void* to_voidstar(void* dest, void** cursor, const Schema* schema, const T& data
 // Allocate a block for `data` in shared memory and write it there.
 template<typename T>
 void* to_voidstar(const Schema* schema, const T& data){
-    size_t total_size = get_shm_size(schema, data);
+    MlcConverted converted;
+    size_t total_size = get_shm_size(schema, data, &converted);
     void* dest = shmalloc_cpp(total_size);
     void* cursor = (void*)((char*)dest + schema->width);
     try {
-        return to_voidstar(dest, &cursor, schema, data);
+        return to_voidstar(dest, &cursor, schema, data, &converted);
     } catch (...) {
         shfree_cpp(dest);
         throw;
@@ -1669,11 +1745,10 @@ struct MlcNode {
                 }
             }
         } else if constexpr (is_non_vector_container_v<T>) {
-            // The container is walked as the vector of its elements, which
-            // the walk keeps alive for as long as its frames refer to it.
-            auto v = mlc::make_arm<decltype(to_vector(data))>(to_vector(data));
-            w.keep.push_back(v);
-            w.child(schema, *v, false);
+            // GEN-14: the container is walked as the vector of its elements,
+            // the one copy the write walk also writes from.
+            const auto& v = mlc_converted<decltype(to_vector(data))>(w, schema, &data, &mlc_field_tag<T, 0>, [&] { return to_vector(data); });
+            w.child(schema, v, false);
         } else if constexpr (is_std_tuple<T>::value) {
             mlc_tuple_size(w, schema, data, std::make_index_sequence<std::tuple_size_v<T>>{});
         } else if constexpr (is_std_pair<T>::value) {
@@ -1741,9 +1816,8 @@ struct MlcNode {
                 }
             }
         } else if constexpr (is_non_vector_container_v<T>) {
-            auto v = mlc::make_arm<decltype(to_vector(data))>(to_vector(data));
-            w.keep.push_back(v);
-            w.child(schema, dest, *v);
+            const auto& v = mlc_converted<decltype(to_vector(data))>(w, schema, &data, &mlc_field_tag<T, 0>, [&] { return to_vector(data); });
+            w.child(schema, dest, v);
         } else if constexpr (is_std_tuple<T>::value) {
             mlc_tuple_write(w, schema, dest, data, std::make_index_sequence<std::tuple_size_v<T>>{});
         } else if constexpr (is_std_pair<T>::value) {

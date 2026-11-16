@@ -1,0 +1,13 @@
+--- cpp ---
+{"p":{"x":3,"y":4},"tag":"t"}
+{"v":4}
+{"w":5}
+not written (a field names a type no generated file can import, or the type has no module): Rec, Wrap
+struct Plain
+struct Plain
+--- rust ---
+{"p":{"x":3,"y":4},"tag":"t"}
+{"v":4}
+{"w":5}
+not written (a field names a type no generated file can import, or the type has no module): Rec, Wrap
+struct Plain

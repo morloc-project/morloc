@@ -1437,7 +1437,7 @@ pub trait ToVoidstar {
         Self: Sized,
     {
         let _ = (schema, level, handle);
-        InPlace::Copy(None)
+        InPlace::Copy(None, Converted::default())
     }
     /// Add this node's own bytes to the walk and hand it the compound
     /// children. `schema` is resolved; `idx` is the element to visit for a
@@ -1573,28 +1573,90 @@ struct SizeFrame {
     env_pushed: bool,
 }
 
-pub struct SizeWalk {
+/// The converted value of each packed field the size walk made, for the
+/// write walk to write, so a field converts once per write.
+#[derive(Default)]
+pub struct Converted {
+    made: std::collections::HashMap<(usize, std::any::TypeId, usize), Box<dyn std::any::Any>>,
+    /// A size walk has filled the table.
+    sized: bool,
+}
+
+impl Converted {
+    /// The converted value of field `idx` (of type `which`) at address
+    /// `field`: the one already made, else a new one.
+    fn get_or_make<R: 'static>(&mut self, field: usize, which: std::any::TypeId, idx: usize, convert: impl FnOnce() -> R) -> *const R {
+        self.get_or_make_in(false, true, field, which, idx, convert)
+    }
+
+    /// As `get_or_make`; in a write walk (`writes`), missing a value the
+    /// size walk should have made (one not of fixed width) is a defect,
+    /// since making it again could write more than was sized.
+    fn get_or_make_in<R: 'static>(&mut self, writes: bool, fixed: bool, field: usize, which: std::any::TypeId, idx: usize, convert: impl FnOnce() -> R) -> *const R {
+        let key = (field, which, idx);
+        if let Some(b) = self.made.get(&key) {
+            match b.downcast_ref::<R>() {
+                Some(r) => return r as *const R,
+                None => morloc_infra_abort("a converted value was found under another type's key"),
+            }
+        }
+        if writes && self.sized && !fixed {
+            morloc_infra_abort("a write walk met a converted value its size walk did not make");
+        }
+        let b = Box::new(convert());
+        let r: *const R = &*b;
+        self.made.insert(key, b);
+        r
+    }
+}
+
+pub struct SizeWalk<'c> {
     stack: Vec<SizeFrame>,
     cur: SizeFrame,
     keep: Vec<Box<dyn std::any::Any>>,
     pub total: isize,
     /// The root has no back-reference: nothing needs a frame.
     pub direct: bool,
+    converted: *mut Converted,
+    table: std::marker::PhantomData<&'c mut Converted>,
 }
 
 unsafe fn size_thunk<T: ToVoidstar>(w: &mut SizeWalk, s: &Schema, obj: *const u8, idx: usize) {
     (*(obj as *const T)).size_step(w, s, idx)
 }
 
-impl SizeWalk {
-    pub fn new(root: &Schema) -> SizeWalk {
+impl<'c> SizeWalk<'c> {
+    pub fn new(root: &Schema) -> SizeWalk<'c> {
         SizeWalk {
             stack: Vec::new(),
             cur: SizeFrame { step: None, schema: std::ptr::null(), obj: std::ptr::null(), idx: 0, inline_slot: false, env_pushed: false },
             keep: Vec::new(),
             total: 0,
             direct: !schema_has_recur(root),
+            converted: std::ptr::null_mut(),
+            table: std::marker::PhantomData,
         }
+    }
+
+    /// A walk whose packed fields keep their converted values in
+    /// `converted`.
+    pub fn with_converted(root: &Schema, converted: &'c mut Converted) -> SizeWalk<'c> {
+        converted.sized = true;
+        let mut w = SizeWalk::new(root);
+        w.converted = converted;
+        w
+    }
+
+    /// A field written in converted form, converted once per write.
+    pub fn child_converted<R: ToVoidstar + 'static>(&mut self, field: usize, which: std::any::TypeId, idx: usize, convert: impl FnOnce() -> R, schema: &Schema, inline_slot: bool) {
+        let r: *const R = if self.converted.is_null() {
+            self.keep_ref(convert())
+        } else {
+            // SAFETY: `converted` is non-null only as the `&mut` `with_converted` took.
+            unsafe { (*self.converted).get_or_make(field, which, idx, convert) }
+        };
+        // SAFETY: `converted` is non-null only as the `&mut` `with_converted` took.
+        self.child(unsafe { &*r }, schema, inline_slot);
     }
 
     /// A child of a schema that cannot describe unbounded depth is stepped
@@ -1645,14 +1707,6 @@ impl SizeWalk {
         r
     }
 
-    /// A child the step itself produced (a reified closure origin): the walk
-    /// keeps it alive until it is reached.
-    pub fn child_owned<T: ToVoidstar + 'static>(&mut self, v: T, schema: &Schema, inline_slot: bool) {
-        let r = self.keep_ref(v);
-        // SAFETY: the box lives in `keep` for the rest of the walk.
-        self.child(unsafe { &*r }, schema, inline_slot);
-    }
-
     /// Visit the current node again for element `idx`.
     pub fn resume(&mut self, idx: usize) {
         let mut f = self.cur;
@@ -1679,9 +1733,16 @@ impl SizeWalk {
         a
     }
 
-    /// As `variant_payload`, for a payload the step itself produced.
-    pub fn variant_payload_owned<T: ToVoidstar + 'static>(&mut self, schema: &Schema, arm: &Schema, payload: T) {
-        let r = self.keep_ref(payload);
+    /// As `variant_payload`, for a payload made from the value at
+    /// `obj` once per write, so the write walk writes the one sized.
+    pub fn variant_payload_converted<T: ToVoidstar + 'static>(&mut self, schema: &Schema, arm: &Schema, obj: usize, idx: usize, make: impl FnOnce() -> T) {
+        let r: *const T = if self.converted.is_null() {
+            self.keep_ref(make())
+        } else {
+            // SAFETY: `converted` is non-null only as the `&mut` `with_converted` took.
+            unsafe { (*self.converted).get_or_make(obj, std::any::TypeId::of::<T>(), idx, make) }
+        };
+        // SAFETY: `converted` is non-null only as the `&mut` `with_converted` took.
         self.variant_payload(schema, arm, unsafe { &*r });
     }
 
@@ -1739,6 +1800,8 @@ pub struct WriteWalk<'a> {
     later: Vec<WriteFrame>,
     in_step: bool,
     deferring: bool,
+    converted: *mut Converted,
+    table: std::marker::PhantomData<&'a mut Converted>,
 }
 
 unsafe fn write_thunk<T: ToVoidstar>(w: &mut WriteWalk, s: &Schema, dest: *mut u8, obj: *const u8, idx: usize) {
@@ -1762,7 +1825,31 @@ impl<'a> WriteWalk<'a> {
             later: Vec::new(),
             in_step: false,
             deferring: false,
+            converted: std::ptr::null_mut(),
+            table: std::marker::PhantomData,
         }
+    }
+
+    /// A walk that writes the converted values `converted` holds.
+    pub fn with_converted(root: &Schema, cursor: &'a mut *mut u8, converted: &'a mut Converted) -> WriteWalk<'a> {
+        let mut w = WriteWalk::new(root, cursor);
+        w.converted = converted;
+        w
+    }
+
+    /// A field written in converted form: the value the size walk made, or
+    /// one made here when no size walk ran.
+    ///
+    /// # Safety
+    /// As for `child`.
+    pub unsafe fn child_converted<R: ToVoidstar + 'static>(&mut self, field: usize, which: std::any::TypeId, idx: usize, convert: impl FnOnce() -> R, dest: *mut u8, schema: &Schema) {
+        let r: *const R = if self.converted.is_null() {
+            self.keep_ref(convert())
+        } else {
+            // SAFETY: `converted` is non-null only as the `&mut` `with_converted` took.
+            (*self.converted).get_or_make_in(true, resolve_recur(schema).is_fixed_width(), field, which, idx, convert)
+        };
+        self.child(&*r, dest, schema);
     }
 
     /// Write the next value into a stream buffer's room, its cursor at
@@ -1851,16 +1938,6 @@ impl<'a> WriteWalk<'a> {
         r
     }
 
-    /// A child the step itself produced (a reified closure origin): the walk
-    /// keeps it alive until it is reached.
-    ///
-    /// # Safety
-    /// As for `child`.
-    pub unsafe fn child_owned<T: ToVoidstar + 'static>(&mut self, v: T, dest: *mut u8, schema: &Schema) {
-        let r = self.keep_ref(v);
-        self.child(&*r, dest, schema);
-    }
-
     /// Visit the current node again for element `idx`, carrying `aux`.
     pub fn resume(&mut self, idx: usize, aux: *mut u8) {
         let mut f = self.cur;
@@ -1912,12 +1989,18 @@ impl<'a> WriteWalk<'a> {
         (slot, a)
     }
 
-    /// As `variant_payload`, for a payload the step itself produced.
+    /// As `variant_payload`, for a payload made from the value at
+    /// `obj` once per write: the one the size walk made, when it ran.
     ///
     /// # Safety
     /// As for `variant_payload`.
-    pub unsafe fn variant_payload_owned<T: ToVoidstar + 'static>(&mut self, dest: *mut u8, arm: &Schema, tag: u8, payload: T) {
-        let r = self.keep_ref(payload);
+    pub unsafe fn variant_payload_converted<T: ToVoidstar + 'static>(&mut self, dest: *mut u8, arm: &Schema, tag: u8, obj: usize, idx: usize, make: impl FnOnce() -> T) {
+        let r: *const T = if self.converted.is_null() {
+            self.keep_ref(make())
+        } else {
+            // SAFETY: `converted` is non-null only as the `&mut` `with_converted` took.
+            (*self.converted).get_or_make_in(true, resolve_recur(arm).is_fixed_width(), obj, std::any::TypeId::of::<T>(), idx, make)
+        };
         self.variant_payload(dest, arm, tag, &*r);
     }
 
@@ -3344,7 +3427,8 @@ pub unsafe fn put_value_as<T: ToVoidstar>(value: &T, schema: &Schema, self_conta
             Err(err) => fail_packet_from_c(err, "arrow_to_shm failed in put_value"),
         };
     }
-    let total = value.shm_size(schema).max(1);
+    let mut converted = Converted::default();
+    let total = size_converted(value, schema, &mut converted).max(1);
     let mut err: *mut c_char = std::ptr::null_mut();
     let root = shmalloc(total, &mut err) as *mut u8;
     if root.is_null() {
@@ -3352,7 +3436,7 @@ pub unsafe fn put_value_as<T: ToVoidstar>(value: &T, schema: &Schema, self_conta
     }
     let guard = ShmGuard::new(root as *mut c_void);
     let mut cursor = root.add(schema.width);
-    value.write(root, &mut cursor, schema); // panic -> guard shfree
+    write_converted(value, root, &mut cursor, schema, &mut converted); // panic -> guard shfree
     let relptr = abs2rel(root as *mut c_void, &mut err);
     let cs = cschema_of(schema);
     let packet = if self_contained {
@@ -3725,7 +3809,7 @@ unsafe fn with_voidstar<T: ToVoidstar, R>(
     schema: &Schema,
     f: impl FnOnce(*mut c_void, *const CSchema, &mut *mut c_char) -> R,
 ) -> R {
-    with_voidstar_sized(value, schema, None, f)
+    with_voidstar_sized(value, schema, None, Converted::default(), f)
 }
 
 /// `with_voidstar` for a value whose size may already be known.
@@ -3733,10 +3817,11 @@ unsafe fn with_voidstar_sized<T: ToVoidstar, R>(
     value: &T,
     schema: &Schema,
     known: Option<usize>,
+    mut converted: Converted,
     f: impl FnOnce(*mut c_void, *const CSchema, &mut *mut c_char) -> R,
 ) -> R {
     let _recur = RecurScope::enter(schema);
-    let total = known.unwrap_or_else(|| value.shm_size(schema)).max(1);
+    let total = known.unwrap_or_else(|| size_converted(value, schema, &mut converted)).max(1);
     let mut err: *mut c_char = std::ptr::null_mut();
     let root = shmalloc(total, &mut err) as *mut u8;
     if root.is_null() {
@@ -3744,7 +3829,7 @@ unsafe fn with_voidstar_sized<T: ToVoidstar, R>(
     }
     let guard = ShmGuard::new(root as *mut c_void);
     let mut cursor = root.add(schema.width);
-    value.write(root, &mut cursor, schema); // panic -> guard shfree
+    write_converted(value, root, &mut cursor, schema, &mut converted); // panic -> guard shfree
     if cursor as usize > root as usize + total {
         morloc_infra_abort("a value was written past the size computed for it");
     }
@@ -4088,11 +4173,11 @@ pub unsafe fn stream(ifile_handle: u64) -> u64 {
 /// takes it (SLOT-37), else from a voidstar copy, which `mlc_write` copies
 /// synchronously.
 pub unsafe fn write<T: ToVoidstar>(schema: &Schema, level: i64, value: &T, handle: u64) {
-    let total = match value.write_in_place(schema, level, handle) {
+    let (total, converted) = match value.write_in_place(schema, level, handle) {
         InPlace::Done => return,
-        InPlace::Copy(total) => total,
+        InPlace::Copy(total, converted) => (total, converted),
     };
-    let rc = with_voidstar_sized(value, schema, total, |vs, _cs, err| {
+    let rc = with_voidstar_sized(value, schema, total, converted, |vs, _cs, err| {
         mlc_write(level, handle as i64, vs, err)
     });
     stream_result(rc, std::ptr::null_mut(), "@write");
@@ -4102,7 +4187,28 @@ pub unsafe fn write<T: ToVoidstar>(schema: &Schema, level: i64, value: &T, handl
 /// voidstar copy, with the copy's size when it already knows it.
 pub enum InPlace {
     Done,
-    Copy(Option<usize>),
+    /// The copy's size when known, and the converted values its sizing
+    /// made.
+    Copy(Option<usize>, Converted),
+}
+
+/// The size of `value` written at `schema`, its converted fields kept in
+/// `converted`.
+pub fn size_converted<T: ToVoidstar>(value: &T, schema: &Schema, converted: &mut Converted) -> usize {
+    let mut w = SizeWalk::with_converted(schema, converted);
+    w.child(value, schema, false);
+    w.run()
+}
+
+/// Write `value` as `ToVoidstar::write` does, writing the converted values
+/// in `converted`.
+///
+/// # Safety
+/// As for `ToVoidstar::write`.
+pub unsafe fn write_converted<T: ToVoidstar>(value: &T, dest: *mut u8, cursor: &mut *mut u8, schema: &Schema, converted: &mut Converted) {
+    let mut w = WriteWalk::with_converted(schema, cursor, converted);
+    w.child(value, dest, schema);
+    w.run();
 }
 
 /// The result of an mlc_write_* call: the pipe-closed code is its own
@@ -4145,14 +4251,15 @@ unsafe fn write_seq_in_place<T: ToVoidstar>((a, b): (&[T], &[T]), schema: &Schem
     let elem = resolve_recur(&schema.parameters[0]);
     // A table element has no voidstar size; the stream refuses it in place.
     if elem.serial_type == SerialType::Table {
-        return InPlace::Copy(None);
+        return InPlace::Copy(None, Converted::default());
     }
     let w = elem.width;
     let run = (elem.is_fixed_width() || elem.serial_type == SerialType::Int) && w > 0;
+    let mut converted = Converted::default();
     let sizes: Vec<usize> = if run {
         Vec::new()
     } else {
-        let mut sw = SizeWalk::new(elem);
+        let mut sw = SizeWalk::with_converted(elem, &mut converted);
         a.iter()
             .chain(b)
             .map(|x| {
@@ -4169,13 +4276,13 @@ unsafe fn write_seq_in_place<T: ToVoidstar>((a, b): (&[T], &[T]), schema: &Schem
         // each element's.
         let n = a.len() + b.len();
         let total = (!run).then(|| schema.width + if n > 0 { elem.array_data_alignment() - 1 } else { 0 } + sizes.iter().sum::<usize>());
-        return InPlace::Copy(total);
+        return InPlace::Copy(total, converted);
     }
     stream_result(rc, err, "@write");
     let mut txn = WriteTxn(true);
     let mut reached: *const u8 = std::ptr::null();
     let mut cursor: *mut u8 = std::ptr::null_mut();
-    let mut ww = WriteWalk::new(elem, &mut cursor);
+    let mut ww = WriteWalk::with_converted(elem, &mut cursor, &mut converted);
     if run {
         for mut part in [a, b] {
             while !part.is_empty() {

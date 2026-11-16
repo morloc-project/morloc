@@ -81,34 +81,47 @@
   selection never fixes an open class argument (Instances.hs `resolve` returns
   Undetermined first), so only Packable improvement (CLS-20) can reach the REC-4
   check. The message also shows the internal name `record_2`.
-- **Parameterized and phantom records still need a per-language line in
-  C++ and Rust.** [read, 2026-11-15] Violates GEN-1 and GEN-9. A
-  generated record with type parameters is still built per pool from its
-  uses (Grammars/Common.hs unifyRecords) and is never declared in its
-  module's file, so a recursive one (`record Container a` with
-  `sub :: ?(Container a)`) is refused in C++ and Rust, asking for a
-  `record Cpp =>` line (Cpp.hs and Rust.hs, RecF "struct"). A record with
-  a parameter no field uses gets no default form in any language
-  (Restructure.hs withDefaultKinds), as before GEN-1, so it still needs a
-  line such as `record Py => Box a = dict` (spec-cost-15-4). Without the
-  line the error misleads: spec-cost-15-4 reports that the instance
-  PatternAccessible Box "gives no cpp implementation of
-  '__extract_pattern__'" [reproduced], not that Box has no Python form.
-  Both need the declaration-driven definition GEN-9 describes.
-- **A record on a cycle through a `data` type is not unrolled canonically.**
-  [read, 2026-11-15] Violates GEN-1. Common.hs unifyRecords folds only a
-  record's own back-references and stops at another generated record, so
+- **GEN-9 does not yet cover recursive parameterized records or `data`.**
+  [read, 2026-11-16] Violates GEN-9. Every generated record a C++ or Rust
+  pool uses is defined from its declaration (GenDefs.hs), but one that has
+  native parameters and refers to itself is refused with a planning error
+  (Cpp.hs planPublicTypes, Rust.hs planRustPublic `refused`), a recursive
+  record with a packed field is refused by the frontend, and generated
+  `data` types keep per-instantiation names with a hash suffix (Infer.hs
+  instanceName). A record with a parameter no field uses gets no default
+  form in any language (Restructure.hs withDefaultKinds), so it still needs
+  a line such as `record Py => Box a = dict` (spec-cost-15-4); without it
+  the error misleads ("gives no cpp implementation of
+  '__extract_pattern__'" [reproduced]). Plan: GEN9-DESIGN.md (in
+  /work/plans/generated-native-types) stages S9.3-S9.5.
+- **A record on a cycle through a `data` type may not be canonical.**
+  [read, 2026-11-15; the use-driven path it was read on is gone, re-check]
   `record A where d :: D` with `data D = Leaf | Node B` and `record B where
-  as :: [A]` meets A unrolled to different depths; unifyField then marks the
-  field generic, A is not public, and its back-reference is refused ("the
-  record A refers to itself ..."). Self-reference alone is canonical.
-- **`morloc types` writes a Rust crate that does not build when a generated
-  type names a type it does not generate.** [read, 2026-11-15] Violates
-  GEN-13. A public Rust record may hold a field of a dependency's type
-  (`ndarray::Array2<f64>`, the table type) or of a type a sourced file
-  declares at the pool crate's root (Rust.hs planRustPublic has no field
-  check); the standalone crate declares no dependencies and no sourced
-  files, so it fails to build, and the command still succeeds. Needs GEN-7
-  (imports through package.yaml dependencies); until then such a type could
-  be left out of the standalone files with an error naming it. C++ headers
-  are header-safe already (std and generated names only).
+  as :: [A]`: each record's definition now comes from its declaration, and
+  a self-reference folds only at the declaration's own arguments; whether
+  A and B become handles and build is unreproduced.
+- **Instance names of parameterized generated `data` can collide.** [read,
+  2026-11-15] Violates GEN-1 (one definition per type). Infer.hs
+  instanceSuffix names an instantiation by a 24-bit djb2 hash of its
+  rendered arguments, so two different instantiations can share a name,
+  and nothing checks that same-named definitions agree; with fields that
+  convert implicitly (int64 vs double in C++) the wrong definition could
+  compile. GEN-9 (stage S9.5) removes the suffix; until then a collision
+  check on the rendered arguments would make it an error.
+- **A record's reference to itself has no single representation.** [read,
+  2026-11-16] Gap in GEN-1 and the TypeF model (CodeGenerator/Namespace.hs).
+  A back-reference arrives as `RecF` whose concrete-name slot is unreliable
+  (its own comment says so), as a bare `VarF` of the record's name, or as
+  an `AppF` of that name at its arguments, depending on the path that built
+  the type; GenDefs.foldSelf, GenDefs.canon (and its `selfAt` in checkUse)
+  and the renderers each handle the forms they meet. A form one of them
+  misses makes a use disagree with its definition (spec-gen-8-1 hit the
+  bare-name form). Fix in its own session: one representation of
+  recursion, carrying the arguments, built in one place.
+- **A public Rust `data` type is not checked for names it cannot import.**
+  [speculative, 2026-11-16] GEN-10. Rust.hs planRustPublic adds every
+  eligible variant and enum to the names a public record may hold, but
+  never checks a variant's own arms, so a public variant whose arm holds a
+  pool-private record is written into the type files and the standalone
+  `morloc types` crate would name a type it lacks. Reproduce with a
+  variant arm holding a record with a sourced field.

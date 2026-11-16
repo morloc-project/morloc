@@ -842,6 +842,9 @@ serializeHosted' reg heads argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
       ast <- Serial.makeSerialAST m lang (typeFof dataArg)
       case ast of
         _ | Serial.isSerializable ast -> return [dataArg]
+          -- A pool whose generated records convert their own fields writes
+          -- a value holding them as it is held (GEN-14).
+          | Serial.recordsConvertInNode lang && Serial.isSerializableThroughNodes ast -> return [dataArg]
           -- C++ marshals a sum type holding a packed field arm by arm, with
           -- the sum type's own serializer, so only its outer type is taken
           -- apart here.
@@ -849,7 +852,9 @@ serializeHosted' reg heads argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
               SerialPack _ (packer, _) ->
                 return [AppExeN (typePackerUnpacked packer) (builtSrcCall (typePackerReverse packer)) [NativeArgExpr dataArg]]
               _ -> return [dataArg]
-          | otherwise -> return [NativeToWireN (Serial.serialAstToType ast) ast dataArg]
+          | otherwise ->
+              let unpacked = if Serial.recordsConvertInNode lang then Serial.serialAstToTypeThroughNodes else Serial.serialAstToType
+               in return [NativeToWireN (Serial.unpackedAsTypeF (unpacked ast)) ast dataArg]
 
     packedVariant :: SerialAST -> Bool
     packedVariant a@(SerialVariant {}) = not (Serial.isSerializable a)

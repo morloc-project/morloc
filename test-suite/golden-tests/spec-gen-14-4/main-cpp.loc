@@ -1,0 +1,54 @@
+-- GEN-14: a generated record is marshalled wherever the pool writes it,
+-- not only where it crosses: here `Pair Int` and `Pair Date` (Date packed,
+-- so its field converts at that instance) flow only inside the pool and
+-- reach the intrinsics @show, @hash and a stream's @write, and a
+-- program built with --debug
+-- writes its arguments through the debug wrapper. Every such instance has
+-- its marshalling. The Rust twin is main-rust.loc.
+module main (showInt, showDate, hashInt, hashDate, takeDate, writePairs)
+
+import root-cpp
+
+newtype Date = Str
+type Cpp => Date = "MlcDate"
+
+instance Packable Str Date where
+  source Cpp from "gen14.hpp" ("packDate" as pack, "unpackDate" as unpack)
+
+-- Written only to a stream: its marshalling comes from the @write alone.
+record Bin a where
+  v :: a
+  n :: Int
+
+record Pair a where
+  fst :: a
+  snd :: a
+
+source Cpp from "gen14.hpp" ("dateOf", "dupP", "firstDay", "boxOf")
+dateOf :: Int -> Date
+dupP :: a -> Pair a
+firstDay :: Pair Date -> Int
+boxOf :: a -> Bin a
+
+showInt :: Int -> Str
+showInt x = @show (dupP x)
+
+showDate :: Int -> Str
+showDate x = @show (dupP (dateOf x))
+
+hashInt :: Int -> Str
+hashInt x = @show (@hash (dupP x))
+
+hashDate :: Int -> Str
+hashDate x = @show (@hash (dupP (dateOf x)))
+
+takeDate :: Pair Date -> Int
+takeDate = firstDay
+
+writePairs :: Str -> <IO> Int
+writePairs p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream (Bin Date)))
+  @write 0 o [boxOf (dateOf 7), boxOf (dateOf 8)]
+  @close o
+  firstDay (dupP (dateOf 1))
+

@@ -36,6 +36,7 @@ import Morloc.CodeGenerator.Grammars.Translator.PseudoCode (pseudocodeSerialMani
 import Morloc.CodeGenerator.Pools.Pool (Member (..))
 import Morloc.CodeGenerator.Pools.CAbi.Pool (memberFor)
 import Morloc.CodeGenerator.Pools.CAbi.Members.Rust (rustStandaloneLib)
+import Morloc.CodeGenerator.Grammars.Common (poolPrivateNoteName)
 import Morloc.CodeGenerator.Namespace (SerialManifold (..))
 import qualified Morloc.CodeGenerator.EnvSpec as ES
 import qualified Morloc.CodeGenerator.SystemConfig as MSC
@@ -812,8 +813,17 @@ cmdTypes args config buildConfig = do
     typeTrees _ = []
     -- Each language's directory is replaced whole, so no file of an earlier
     -- run is left to import.
-    writeTypes out (l, ts) = do
+    writeTypes out (l, ts0) = do
       let dir = out MS.</> l
+          isNote (MS.File n _) = n == poolPrivateNoteName
+          isNote _ = False
+          (notes, ts) = partition isNote ts0
+      sequence_
+        [ hPutStrLn stderr $
+            "Note: these generated " <> l <> " types are defined only inside the pool and are not written"
+              <> " (a field names a type no generated file can import, or the type has no module): "
+              <> intercalate ", " (map MT.unpack (MT.lines (unCode c)))
+        | MS.File _ c <- notes ]
       exists <- MS.doesDirectoryExist dir
       when exists (MS.removeDirectoryRecursive dir)
       let paths = concatMap (filesUnder []) [cs | MS.Dir "mlc" ms <- ts, MS.Dir "types" cs <- ms]

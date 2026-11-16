@@ -87,3 +87,22 @@ None is scheduled.
   fold-copy-count); Python and R mutate in place. Taking the accumulator
   by value (`Fn(A, &B) -> A`) changes the Rust type user code is written
   against. Needs an interface ruling.
+- **Every non-vector container copy is entered in the converted-value
+  table.** [read, 2026-11-16] GEN-14. cppmorloc.hpp sizes and writes a
+  set, map, list or deque through `mlc_converted`, so each one costs a hash
+  insert and lookup and a shared allocation even when nothing inside it
+  converts; Rust's `Converted` holds a boxed value per entry the same way,
+  and a batch write keeps every element's converted fields until the batch
+  is written. Only copies that can hold a converting field need a shared
+  identity: a trait marking such element types (generated per record) would
+  let the rest take the plain copy.
+- **Writing into shared memory translates every pointer.** [measured,
+  2026-11-16] The write walk calls `abs2rel` (Rust) / `abs2rel_cpp` (C++)
+  for each relative pointer it writes, which made writing into a shared
+  block 25-45% slower than the same walk into a base-relative buffer
+  (Rust W1 3.68 vs 2.72 ms, C++ W3 10.2 vs 7.0 ms; benchmark in the GEN-9
+  re-plan notes, /work/plans/generated-native-types/REPLAN-WORK.md). One
+  translation per block, then the offset within it, would remove most of
+  that. The same measurement found one write walk into a heap buffer plus
+  copy plus relocation 1.2-2.2x slower than the two walks, the relocation
+  pass costing 4-15x the copy, so the two walks stay.

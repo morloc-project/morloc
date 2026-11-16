@@ -719,6 +719,7 @@ genericLowerConfig desc srcNamer debugInfo traceInfo debugMode = cfg
         -- 'ldClosureRegisterEntry', i.e. Python and R) reifies/reflects a closure
         -- nested in ANY aggregate (record/list/tuple/optional) via the shared
         -- engine -- its dict/list records are structural, so all shapes divert.
+        , lcRecordsConvertInNode = False
         , lcDivertNestedClosure =
             \s -> not (T.null (ldClosureRegisterEntry desc)) && containsClosure s
         , lcMakeFunction = \m mname args _ priorLines body headForm _ ->

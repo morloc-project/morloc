@@ -1,0 +1,20 @@
+--- cpp ---
+{"fst":3,"snd":4}
+{"p":{"fst":"hi","snd":"hi"},"n":1}
+{"fst":"b","snd":"a"}
+{"fst":{"fst":5,"snd":5},"snd":{"fst":5,"snd":0}}
+{"fst":"40","snd":"40"}
+"7"
+{"fst":0.5,"snd":1.5}
+680003
+{"fst":{"lab":{"fst":7,"snd":7},"kids":[{"lab":{"fst":0,"snd":1},"kids":[]}]},"snd":{"lab":{"fst":2,"snd":3},"kids":[]}}
+--- rust ---
+{"fst":3,"snd":4}
+{"p":{"fst":"hi","snd":"hi"},"n":1}
+{"fst":"b","snd":"a"}
+{"fst":{"fst":5,"snd":5},"snd":{"fst":5,"snd":0}}
+{"fst":"40","snd":"40"}
+"7"
+{"fst":0.5,"snd":1.5}
+680003
+{"fst":{"lab":{"fst":7,"snd":7},"kids":[{"lab":{"fst":0,"snd":1},"kids":[]}]},"snd":{"lab":{"fst":2,"snd":3},"kids":[]}}

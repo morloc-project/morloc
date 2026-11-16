@@ -34,6 +34,7 @@ import SchemaHintTests (schemaHintTests)
 import SizeParseTests (sizeParseTests)
 import SpecTests (specTests)
 import VariantMergeTests (variantMergeTests)
+import GenDefsTests (genDefsTests)
 import ValueArgsTests (valueArgsTests, kindOfTests)
 import ManifoldNameTests (manifoldNameTests)
 import SystemConfigTests (systemConfigTests)
@@ -123,6 +124,7 @@ unitTests =
   , versionConstraintTests
   , sizeParseTests
   , variantMergeTests
+  , genDefsTests
   , valueArgsTests
   , kindOfTests
   , natDecideTests
