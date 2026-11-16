@@ -74,7 +74,7 @@ import Morloc.CodeGenerator.Namespace
 import Morloc.CodeGenerator.Ownership (LetMode (..), LetPlan (..), OwnCaps (..), PoolPlan (..), byValueIndices, changedSlots, emptyPoolPlan, letMode, letPlan, nativeLets, planPool)
 import Morloc.CodeGenerator.OwnershipCheck (checkManifold)
 import System.Environment (lookupEnv)
-import Morloc.CodeGenerator.GenDefs (Disagreement (..), GenDef (..), RecordUse, disagreements, inPoolSerialASTs, placeTypes, genDefs, nativeParam, nativeParams, recordUses, templateArgs, useArgs)
+import Morloc.CodeGenerator.GenDefs (DataDef (..), Disagreement (..), GenDef (..), dataDefs, dataNamesIn, dataUseArgs, nativeDataParams, RecordUse, disagreements, inPoolSerialASTs, placeTypes, genDefs, nativeParam, nativeParams, recordUses, templateArgs, useArgs)
 import qualified Morloc.CodeGenerator.Platform as P
 import Morloc.CodeGenerator.Serial
   ( serialAstToType
@@ -250,8 +250,21 @@ instance {-# OVERLAPPABLE #-} (HasTypeF e) => HasCppType e where
         | T.any (== '$') x = do
             let typeTs = tyArgs ps
             ts' <- mapM f typeTs
-            return . pretty $ expandMacro x (map render ts')
-        | otherwise = publicOr gv (pretty (nativeTypeName x))
+            -- A generated template in its module's header goes by its
+            -- qualified name, any other by its identifier.
+            public <- CMS.gets translatorPublic
+            ddefs <- CMS.gets translatorDataDefs
+            let (h, rest) = T.breakOn "<" x
+                x' = case Map.lookup gv public of
+                  Just q -> q <> rest
+                  Nothing | Map.member gv ddefs -> nativeTypeName h <> rest
+                  Nothing -> x
+            return . pretty $ expandMacro x' (map render ts')
+        -- A generated template's instance named by its arguments
+        -- ('Infer.instanceName') is its own type.
+        | otherwise = do
+            ddefs <- CMS.gets translatorDataDefs
+            if Map.member gv ddefs then return (pretty (nativeTypeName x)) else publicOr gv (pretty (nativeTypeName x))
 
       complainT :: Text -> CppTranslator ()
       complainT msg = CMS.modify $ \st -> st {translatorErrors = msg : translatorErrors st}
@@ -268,7 +281,11 @@ instance {-# OVERLAPPABLE #-} (HasTypeF e) => HasCppType e where
       f (EnumF (FV gv (CV x)) ps _) = dataTypeName gv x ps
       -- A variant lowers to its concrete name; the type carrying the arms
       -- is generated for this pool or supplied by `data Cpp => X = "..."`.
-      f (VariantF (FV gv (CV x)) ps _) = dataTypeName gv x ps
+      -- A generated template is spelled at the arguments its arms bind.
+      f (VariantF (FV gv (CV x)) ps as) = do
+        ddefs <- CMS.gets translatorDataDefs
+        defs <- CMS.gets translatorGenDefs
+        dataTypeName gv x (maybe ps (\dd -> dataUseArgs defs dd ps as) (Map.lookup gv ddefs))
       -- Kindless or polymorphic-row `Table` lowers to a VarF tagged with
       -- the general type variable @BT.table@. The wire schema marker is
       -- @T@ on the encoder side; here on the C++ side it must lower to
@@ -532,6 +549,10 @@ data CppTranslatorState = CppTranslatorState
   -- shared fields (GEN-1, CPP-6), with its fields.
   , translatorGenDefs :: Map.Map TVar GenDef
   -- ^ Each generated record's definition from its declaration (GEN-9).
+  , translatorDataDefs :: Map.Map TVar DataDef
+  -- ^ Each generated parameterized `data` type's definition (GEN-9).
+  , translatorDataFailures :: Map.Map TVar Text
+  -- ^ Why a generated parameterized `data` type has no definition.
   , translatorIntrinsicAsts :: [SerialAST]
   -- ^ The serial forms of the values the pool's intrinsics marshal.
   , translatorGenFailures :: Map.Map TVar Text
@@ -574,6 +595,8 @@ instance Defaultable CppTranslatorState where
       , translatorPublic = Map.empty
       , translatorHandles = Map.empty
       , translatorGenDefs = Map.empty
+      , translatorDataDefs = Map.empty
+      , translatorDataFailures = Map.empty
       , translatorIntrinsicAsts = []
       , translatorGenFailures = Map.empty
       , translatorRecordUses = []
@@ -648,8 +671,10 @@ translate srcs es = do
   stageTable <- stageTableEntries
   let -- Closures' captured and bound arguments are deserialized by their
       -- dispatch wrappers, not by any manifold, so their types are added.
-      uses = recordUses (concatMap (poolTypesWith serialAstToType) es <> map (unpackedAsTypeF . serialAstToType) (closureSerialASTs closureTable))
+      poolTypes = concatMap (poolTypesWith serialAstToType) es <> map (unpackedAsTypeF . serialAstToType) (closureSerialASTs closureTable)
+      uses = recordUses poolTypes
   (gdefs, gfails) <- genDefs cppLang (Set.fromList [g | (g, _, _, _) <- uses])
+  (ddefs, dfails) <- dataDefs cppLang (dataNamesIn poolTypes)
   intrAsts <- inPoolSerialASTs cppLang es
   let translatorState = defaultValue
         { translatorEffectLabels = effectMap
@@ -661,6 +686,8 @@ translate srcs es = do
         , translatorPool = pool
         , translatorTypeHomes = typeHomes
         , translatorGenDefs = gdefs
+        , translatorDataDefs = ddefs
+        , translatorDataFailures = dfails
         , translatorIntrinsicAsts = intrAsts
         , translatorGenFailures = gfails
         , translatorRecordUses = uses
@@ -2554,27 +2581,59 @@ generateCppVariants ::
   [SerialManifold] ->
   CppTranslator ([MDoc], [MDoc], [MDoc], [MDoc], [MDoc])
 generateCppVariants cfg closureAsts es = do
+  ddefs0 <- CMS.gets translatorDataDefs
+  -- A template some instance of which holds a function is marshalled at
+  -- each instance, whose closures are wired by name; any other once for
+  -- every instance.
+  let perInstance = Set.fromList ([gv | (FV gv _, _, arms) <- collectCppVariants es, any holdsFunF (concatMap snd arms)]
+                      <> [gv | (gv, dd) <- Map.toList ddefs0, any holdsFunF (concatMap snd (ddArms dd))])
   named <- mapM occurrence (collectCppVariants es)
   wireArms <- variantWireArms cppTypeOf closureAsts es
   -- Merged by rendered name: one declaration per name.
-  parts <- mapM (uncurry (merged wireArms)) (Map.toList (Map.fromListWith (flip (<>)) named))
-  let decls = concatMap (\(d, _, _, _, _) -> d) parts
-      bodies = concatMap (\(_, b, _, _, _) -> b) parts
-      fwds = concatMap (\(_, _, f, _, _) -> f) parts
-      serials = concatMap (\(_, _, _, x, _) -> x) parts
+  parts <- mapM (uncurry (merged perInstance wireArms)) (Map.toList (Map.fromListWith (flip (<>)) named))
+  (tdecls, tbodies, tfwds, tserials) <- templateDecls perInstance
+  let decls = tdecls <> concatMap (\(d, _, _, _, _) -> d) parts
+      bodies = tbodies <> concatMap (\(_, b, _, _, _) -> b) parts
+      fwds = tfwds <> concatMap (\(_, _, f, _, _) -> f) parts
+      serials = tserials <> concatMap (\(_, _, _, x, _) -> x) parts
       late = concatMap (\(_, _, _, _, x) -> x) parts
   -- Returned apart so the caller can interleave them with other
   -- declarations.
   return (decls, bodies, fwds, serials, late)
   where
+    -- Each generated template, declared from its definition when no header
+    -- holds it, and marshalled once for every instance: two morloc types
+    -- that are one C++ type are one instance.
+    templateDecls perInstance = do
+      ddefs <- CMS.gets translatorDataDefs
+      public <- CMS.gets translatorPublic
+      parts <- sequence
+        [ do
+            arms' <- mapM (\(c, ts) -> (,) c <$> mapM cppTypeOf ts) (ddArms dd)
+            qname <- cppTypeOf (VariantF (FV gv (CV (ddForm dd))) [TyA (VarF (FV (TV ("&" <> unTVar p)) (CV (nativeParam p)))) | p <- ddTypeParams dd] [])
+            let leaf = pretty (tvarIdentifier gv)
+                decls = if Map.member gv public then [] else [CP.printCppVariantDecl params leaf arms']
+                bodies = if Map.member gv public then [] else [CP.printCppVariantArms params leaf arms']
+                payload = filter (not . null . snd) arms'
+                fwds = CP.printMarshalDecls params qname : [CP.printMarshalDecls params (CP.armName qname c) | (c, _) <- payload]
+                armSerials = concat
+                  [ [CP.printSerializer params aname fields, CP.printDeserializer params aname fields]
+                  | (c, ts) <- payload
+                  , let aname = CP.armName qname c
+                        fields = [("f" <> pretty i, t) | (i, t) <- indexed ts] ]
+                serials = armSerials <> [CP.printCppVariantSerializers params qname arms']
+            return (decls, bodies, if Set.member gv perInstance then [] else fwds, if Set.member gv perInstance then [] else serials)
+        | (gv, dd) <- Map.toList ddefs
+        , let params = map (pretty . nativeParam) (nativeDataParams dd) ]
+      return (concatMap (\(a, _, _, _) -> a) parts, concatMap (\(_, b, _, _) -> b) parts, concatMap (\(_, _, c, _) -> c) parts, concatMap (\(_, _, _, d) -> d) parts)
     -- One occurrence under its rendered name, with each arm's field types
     -- as written and as rendered, so the merge can compare spellings.
     occurrence (v, ps, as) = do
       n <- cppTypeOf (VariantF v ps as)
       as' <- mapM (\(c, ts) -> (\rs -> (c, (ts, map render rs))) <$> mapM cppTypeOf ts) as
       return (render n, [(v, ps, as')])
-    merged wireArms name occs = case mergeVariantOccurrences name [((v, ps), as) | (v, ps, as) <- occs] of
-      Right ((v, ps), arms) -> makeOne (Map.findWithDefault [] name wireArms) (v, ps, arms)
+    merged perInstance wireArms name occs = case mergeVariantOccurrences name [((v, ps), as) | (v, ps, as) <- occs] of
+      Right ((v, ps), arms) -> makeOne perInstance (Map.findWithDefault [] name wireArms) (v, ps, arms)
       Left msg -> CMS.modify (\s -> s {translatorErrors = msg : translatorErrors s}) >> return ([], [], [], [], [])
 
     -- A field holding a closure crosses as its wire form, converted by the
@@ -2596,7 +2655,7 @@ generateCppVariants cfg closureAsts es = do
               }
       | otherwise = return Nothing
 
-    makeOne asts (FV gv (CV cvText), ps, arms) = do
+    makeOne perInstance asts (FV gv (CV cvText), ps, arms) = do
       userMapped <- variantIsUserMapped gv cvText
       arms' <- mapM (\(n, ts) -> (,) n <$> mapM cppTypeOf ts) arms
       name <- cppTypeOf (VariantF (FV gv (CV cvText)) ps arms)
@@ -2614,18 +2673,37 @@ generateCppVariants cfg closureAsts es = do
             return $ if all (isNothing . snd) wfs
               then ([CP.printSerializer [] aname fields, CP.printDeserializer [] aname fields], [])
               else ([], [CP.printArmMarshallers aname wfs])
-          serial = CP.printCppVariantSerializers name arms'
+          serial = CP.printCppVariantSerializers [] name arms'
           payloadArms = filter (not . null . snd) arms'
           fwds = CP.printMarshalDecls [] name : [CP.printMarshalDecls [] (CP.armName name c) | (c, _) <- payloadArms]
       (armSerials, armLate) <- bimap concat concat . unzip <$> mapM armSerial payloadArms
       public <- CMS.gets translatorPublic
-      return $ if userMapped || Map.member gv public
+      ddefs <- CMS.gets translatorDataDefs
+      -- A generated template is declared once, from its definition
+      -- ('templateDecls'); an instance has only its marshalling, unless it
+      -- is named by its arguments ('Infer.instanceName'), a type of its own.
+      let named = Map.member gv ddefs && not (T.any (== '$') cvText)
+      -- A generated template whose declaration has no definition: no
+      -- instance of it can be spelled.
+      dfails <- CMS.gets translatorDataFailures
+      when (not userMapped && T.any (== '$') cvText && Map.notMember gv ddefs) $
+        CMS.modify $ \s -> s {translatorErrors = ("the generated C++ type for " <> unTVar gv <> " cannot be defined from its declaration: "
+          <> Map.findWithDefault "it does not resolve in C++" gv dfails) : translatorErrors s}
+      return $ if Map.member gv ddefs && not named && Set.notMember gv perInstance
+                 then ([], [], [], [], [])
+                 else if userMapped || (Map.member gv public && not named) || (Map.member gv ddefs && not named)
                  then ([], [], fwds, armSerials <> [serial], armLate)
-                 else ( [CP.printCppVariantDecl name arms']
-                      , [CP.printCppVariantArms name arms']
+                 else ( [CP.printCppVariantDecl [] name arms']
+                      , [CP.printCppVariantArms [] name arms']
                       , fwds
                       , armSerials <> [serial]
                       , armLate )
+
+-- | Whether a type holds a function or suspension.
+holdsFunF :: TypeF -> Bool
+holdsFunF t = case t of
+  FunF _ _ -> True
+  _ -> any holdsFunF (childrenOf t)
 
 -- | True when the concrete scope holds an entry for this type whose body
 -- names @cvText@, i.e. the user wrote @data Cpp => X = "..."@ and supplies
@@ -2682,6 +2760,10 @@ planPublicTypes es = do
         | gv <- Map.keys refused ]
           <> translatorErrors s
     }
+  ddefs <- CMS.gets translatorDataDefs
+  -- A generated template may be declared in its module's header when each
+  -- of its parameters is spelled by an identifier.
+  let dataCands = Map.filterWithKey (\gv dd -> Map.member gv homes && all (isIdentifier . nativeParam) (nativeDataParams dd)) ddefs
   allVarOccs <- filterM (\(FV gv (CV cv), _, _) -> not <$> variantIsUserMapped gv cv) (collectCppVariants es)
   let varOccs = [o | o@(_, ps, _) <- allVarOccs, null ps]
   enumOccs <- filterM (\(FV gv (CV cv), _) -> not <$> variantIsUserMapped gv cv) (collectCppEnums es)
@@ -2707,6 +2789,7 @@ planPublicTypes es = do
       fieldTypes gv
         | Just gd <- Map.lookup gv recDefs = map snd (gdFields gd)
         | Just arms <- Map.lookup gv varCands = concatMap snd arms
+        | Just dd <- Map.lookup gv ddefs = concatMap snd (ddArms dd)
         | otherwise = []
       -- Every occurrence of a variant must render the same arms for the
       -- header to declare them; one that does not stays in the pool, whose
@@ -2721,6 +2804,7 @@ planPublicTypes es = do
         Map.fromList $
           [(gv, map snd (gdFields gd)) | (gv, gd) <- Map.toList recCands]
             <> [(gv, concatMap snd arms) | (gv, arms) <- Map.toList varCands, Set.notMember gv drop']
+            <> [(gv, concatMap snd (ddArms dd)) | (gv, dd) <- Map.toList dataCands]
             <> [(gv, []) | gv <- Map.keys enumCands]
       place drop' = placeTypes (headerSafe Set.empty) generated (fieldsOf drop')
   _ <- install (place Set.empty)
@@ -2751,6 +2835,7 @@ planPublicTypes es = do
     | gv <- Set.toList public
     , n <- qualified gv : [qualified gv <> "_fields" | Set.member gv recursive]
         <> [CP.armNameText (qualified gv) c | Just arms <- [Map.lookup gv varCands], (c, _) <- arms]
+        <> [CP.armNameText (qualified gv) c | Just dd <- [Map.lookup gv dataCands], (c, _) <- ddArms dd]
     ]
   let byPath = Map.fromListWith (<>) [(typeHomePath h, [gv]) | gv <- Set.toList public, Just h <- [Map.lookup gv homes]]
       pathOf = Map.fromList [(qualified gv, typeHomePath h) | gv <- Set.toList public, Just h <- [Map.lookup gv homes]]
@@ -2761,10 +2846,14 @@ planPublicTypes es = do
     header homes recCands templates varCands enumCands pathOf handles (path, gvs) = do
       let leaf gv = pretty (maybe (unTVar gv) typeHomeName (Map.lookup gv homes))
           enums = [CP.printCppEnumDecl (leaf gv) ns | gv <- gvs, Just ns <- [Map.lookup gv enumCands]]
+      ddefs <- CMS.gets translatorDataDefs
+      let variantOf gv = case Map.lookup gv varCands of
+            Just arms -> Just ([], arms)
+            Nothing -> (\dd -> (map (pretty . nativeParam) (nativeDataParams dd), ddArms dd)) <$> Map.lookup gv ddefs
       variants <- sequence
-        [ (\arms' -> (CP.printCppVariantDecl (leaf gv) arms', CP.printCppVariantArms (leaf gv) arms', concatMap snd arms'))
+        [ (\arms' -> (CP.printCppVariantDecl params (leaf gv) arms', CP.printCppVariantArms params (leaf gv) arms', concatMap snd arms'))
             <$> mapM (\(c, ts) -> (,) c <$> mapM cppTypeOf ts) arms
-        | gv <- gvs, Just arms <- [Map.lookup gv varCands] ]
+        | gv <- gvs, Just (params, arms) <- [variantOf gv] ]
       -- A record that refers to itself is a handle to its fields (CPP-6).
       let structOf gv = if Map.member gv handles then leaf gv <> "_fields" else leaf gv
       let paramsOf gv = [pretty (nativeParam p) | Just gd <- [Map.lookup gv templates], p <- nativeParams gd]

@@ -29,9 +29,11 @@ module Morloc.CodeGenerator.Infer
   , retagArg
   , groundK
   , kindArgOf
+  , heldDataParams
+  , concreteNameOf
   ) where
 
-import Morloc.Data.Zip (zipSame, zipWith3Same, zipWithSame, zipWithSameM)
+import Morloc.Data.Zip (indexedFrom, zipSame, zipWith3Same, zipWithSame, zipWithSameM)
 import qualified Control.Monad.State as CMS
 import Data.Functor.Const (Const (..))
 import Morloc.CodeGenerator.Namespace
@@ -47,7 +49,7 @@ import qualified Morloc.TypeEval as T
 import Morloc.Typecheck.Internal (typeUChildren, typeUToNatExpr)
 import qualified Morloc.Typecheck.NatSolver as NS
 import Numeric (showHex)
-import Data.Char (isDigit)
+import Data.Char (isAlphaNum, isAscii, isDigit)
 
 evalGeneralStep :: TypeU -> MorlocMonad (Maybe TypeU)
 evalGeneralStep t = T.evaluateStep <$> MM.getGeneralScope <*> pure t
@@ -334,7 +336,8 @@ inferVariantArms lang i gscope vG vC targs = do
               <+> hsep (map pretty targs) <> ":"
               <+> "its expansion does not terminate."
         arms' <- withVariantAncestor (vG, targs) (mapM (\(n, ts) -> (,) n <$> mapM resolveField ts) arms)
-        return $ VariantF (FV vG (CV (instanceName cscope vG targs))) ps arms'
+        name <- instanceName cscope vG targs
+        return $ VariantF (FV vG (CV name)) ps arms'
 
 -- | The name a pool knows one instantiation of a `data` type by.
 --
@@ -347,13 +350,77 @@ inferVariantArms lang i gscope vG vC targs = do
 -- (`data Cpp => (Box a) = "MyBox<$1>" a`), the name they chose is the
 -- contract: a template, if it takes parameters, which the backend
 -- instantiates with the resolved arguments.
-instanceName :: Scope -> TVar -> [TypeU] -> MT.Text
-instanceName cscope v targs
-  | generated && not (null targs) = name <> instanceSuffix targs
-  | otherwise = name
+instanceName :: Scope -> TVar -> [TypeU] -> MorlocMonad MT.Text
+instanceName cscope v targs = do
+  gscope <- MM.getGeneralScope
+  let name = concreteNameOf cscope v
+      held = Set.fromList (heldDataParams gscope v)
+      slots = ["$" <> MT.pack (show k) | (k, p) <- indexedFrom 1 (dataTypeParams gscope v), Set.member p held]
+      generated = name == unTVar v
+  return $ case () of
+    _ | not generated || null targs -> name
+      -- An instantiation whose arguments contain it has no finite spelling
+      -- at them; it is a type of its own, named by them as written.
+      | selfContaining gscope v targs -> name <> "_m" <> mangled (render (hsep (map pretty targs)))
+      | null slots -> name
+      | otherwise -> name <> "<" <> MT.intercalate ", " slots <> ">"
+
+-- | Whether the arguments of a `data` instantiation contain the
+-- instantiation itself, through aliases (a record or `data` type in them
+-- is named, and ties): its spelling at them would be infinite.
+selfContaining :: Scope -> TVar -> [TypeU] -> Bool
+selfContaining gscope v targs = anyThroughAliases gscope reached targs
   where
-    name = concreteNameOf cscope v
-    generated = name == unTVar v
+    reached t = case t of
+      VarU h -> h == v && null targs
+      AppU (VarU h) as -> h == v && as == targs
+      _ -> False
+
+-- | Whether some part of the types satisfies the test, looking through
+-- aliases and the arguments of applied types, not into records or the
+-- arms of `data` types.
+anyThroughAliases :: Scope -> (TypeU -> Bool) -> [TypeU] -> Bool
+anyThroughAliases gscope test = any (go Set.empty)
+  where
+    go seen t
+      | test t = True
+      | otherwise = case t of
+          NamU {} -> False
+          -- A `data` type written by its name: its arguments only.
+          _ | Just h <- headOf t, isJust (dataDeclOfName gscope h) -> any (go seen) (argsOf t)
+          -- An alias, expanded once per name.
+          _ | Just h <- headOf t, Set.notMember h seen, Just t' <- T.evaluateStep gscope t, t' /= t -> go (Set.insert h seen) t'
+          _ | Just _ <- headOf t -> any (go seen) (argsOf t)
+          _ -> any (go seen) (typeChildren gscope t)
+    headOf (VarU h) = Just h
+    headOf (AppU (VarU h) _) = Just h
+    headOf _ = Nothing
+    argsOf (AppU _ as) = as
+    argsOf _ = []
+
+-- | A text as an identifier part, distinct for distinct texts and with no
+-- two underscores in a row: letters and digits as they are, `_` as `_u`,
+-- any other character as `_x<hex>z`.
+mangled :: MT.Text -> MT.Text
+mangled = MT.concatMap esc
+  where
+    esc c
+      | isAscii c && isAlphaNum c = MT.singleton c
+      | c == '_' = "_u"
+      | otherwise = "_x" <> MT.pack (showHex (fromEnum c) "") <> "z"
+
+-- | The type parameters of a `data` declaration, in order.
+dataTypeParams :: Scope -> TVar -> [TVar]
+dataTypeParams gscope v = case [[p | Left (p, KindType) <- ps] | (ps, _, _, _, TypedefEnum) <- Map.findWithDefault [] v gscope] of
+  (ps : _) -> ps
+  [] -> []
+
+-- | The type parameters of a `data` declaration some constructor holds, in
+-- order: the parameters of a generated type's native template.
+heldDataParams :: Scope -> TVar -> [TVar]
+heldDataParams gscope v = [p | p <- dataTypeParams gscope v, Set.member p held]
+  where
+    held = Set.fromList [p | Just (_, cs) <- [dataDeclOfName gscope v], (_, ts) <- cs, t <- ts, VarU p <- Set.toList (free t)]
 
 -- | The placeholder a `data` type's own occurrence inside itself resolves
 -- to: the instantiation's name and resolved arguments, with no arms. The
@@ -370,13 +437,16 @@ argType lang i t = case typeOf t of
 backEdge :: Lang -> Int -> Scope -> TVar -> [TypeU] -> MorlocMonad TypeF
 backEdge lang i cscope v args = do
   resolving <- CMS.gets stateVariantArgsResolving
-  if Set.member (v, args) resolving
-    -- Reached while resolving this instantiation's own arguments: an
-    -- argument contains the type itself, so its native spelling would be
-    -- infinite. A generated type is named by its arguments as written and
-    -- never spells them, so it needs none here; a user template would have
-    -- to spell them, and cannot.
-    then
+  gscope <- MM.getGeneralScope
+  -- Reached while resolving this instantiation's own arguments. When they
+  -- contain the type itself other than through a record, its spelling at
+  -- them would be infinite: a generated type is then named by them
+  -- ('instanceName'); a user template would have to spell them, and
+  -- cannot. Otherwise the cycle passes through a record, which ties, or a
+  -- `data` type already being resolved, and they are resolved as any are.
+  if Set.member (v, args) resolving && selfContaining gscope v args
+    then do
+      name <- instanceName cscope v args
       if MT.any (== '$') name
         then MM.throwSourcedError i $
           "The native form of" <+> squotes (pretty v) <+> "is a template,"
@@ -386,9 +456,8 @@ backEdge lang i cscope v args = do
         else return $ VariantF (FV v (CV name)) [] []
     else do
       ps <- resolveArgs lang i (v, args)
+      name <- instanceName cscope v args
       return $ VariantF (FV v (CV name)) ps []
-  where
-    name = instanceName cscope v args
 
 -- | Resolve the applied arguments of a `data` instantiation, marking it as
 -- resolving its arguments for the duration (see 'backEdge').
@@ -397,19 +466,6 @@ resolveArgs lang i key@(_, args) = do
   gscope <- MM.getGeneralScope
   withSetMember stateVariantArgsResolving (\v st -> st {stateVariantArgsResolving = v}) key $
     argsWith gscope (fst key) (argType lang i) args
-
--- | A short, deterministic suffix distinguishing one instantiation of a
--- parameterized `data` from another in a language that declares types by
--- name. Derived from the applied arguments, so equal instantiations collide
--- on purpose and unequal ones do not.
-instanceSuffix :: [TypeU] -> MT.Text
-instanceSuffix targs =
-  "_" <> MT.pack (showHex (abs (hashText rendered) `mod` 0xFFFFFF) "")
-  where
-    rendered = MT.pack (show (map pretty targs))
-    -- djb2; any stable string hash would do. Kept local so the suffix does
-    -- not drift with a library's hashing implementation.
-    hashText = MT.foldl' (\h c -> h * 33 + fromEnum c) (5381 :: Int)
 
 -- | The structural walk's remaining cases: shapes 'weave' cannot handle on
 -- its own, and the fallback to it.

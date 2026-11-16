@@ -14,6 +14,8 @@ against the use's fields.
 module Morloc.CodeGenerator.GenDefs
   ( GenDef (..)
   , genDefs
+  , DataDef (..)
+  , dataDefs
   , inferArgs
   , instantiate
   , checkUse
@@ -31,20 +33,26 @@ module Morloc.CodeGenerator.GenDefs
   , placeholders
   , nativeParam
   , nativeParams
+  , nativeDataParams
+  , armDataParams
+  , dataUseArgs
+  , dataNamesIn
   ) where
 
 import qualified Data.Text as T
-import Morloc.CodeGenerator.Infer (getScope, inferConcreteType)
+import Morloc.CodeGenerator.Infer (concreteNameOf, getScope, heldDataParams, inferConcreteType)
 import Morloc.CodeGenerator.Namespace
 import qualified Data.Set as Set
-import Morloc.CodeGenerator.Grammars.Common (intrinsicValueTypes, poolNativeTypes, recordsInType)
+import Morloc.CodeGenerator.Grammars.Common (intrinsicValueTypes, poolNativeTypes, recordsInType, serialClosuresOf)
 import Morloc.CodeGenerator.Grammars.Macro (expandMacro)
 import Morloc.CodeGenerator.Serial (makeSerialAST)
 import qualified Morloc.Data.Map as Map
-import Morloc.Data.Zip (zipSame, zipWithSame)
+import Morloc.Data.Zip (indexed, indexedFrom, zipSame, zipWithSame)
 import qualified Morloc.Monad as MM
 import Control.Monad.Except (catchError)
 import Morloc.Data.Doc (pretty, render)
+import Data.Char (isDigit)
+import Text.Read (readMaybe)
 
 -- | A generated record as its declaration defines it in one language.
 data GenDef = GenDef
@@ -92,11 +100,6 @@ genDefs lang used = do
   return (Map.fromList [(gv, gd) | (gv, Right gd) <- results], Map.fromList [(gv, e) | (gv, Left e) <- results])
   where
     one (gv, form, ps) = do
-      st0 <- MM.get
-      let entry body = [([], body, ArgDocAlias defaultValue, True, TypedefAlias)]
-          added = Map.fromList [(placeholder p, entry (VarU (TV (nativeParam p)))) | (p, KindType) <- ps]
-          t = if null ps then VarT gv else AppT (VarT gv) (map paramArg ps)
-      MM.modify $ \st -> st {stateConcreteTypedefs = Map.adjust (Map.union added) lang (stateConcreteTypedefs st)}
       -- A declaration the language cannot resolve on its own (a form that
       -- needs arguments the declaration does not fix) has no definition,
       -- and a use of the record says why.
@@ -105,16 +108,85 @@ genDefs lang used = do
               NamF _ fv args rs -> (gv, Right (GenDef gv form ps [(k, foldSelf fv args x) | (k, x) <- rs]))
               _ -> (gv, Left "its declaration does not resolve to a record")
           )
-            <$> inferConcreteType lang (Idx 0 t)
+            <$> atPlaceholders lang gv ps
         )
           `catchRejected` (\msg -> return (gv, Left msg))
-      MM.put st0
       case r of
         (_, Right gd) | (g : _) <- untiedSelf (NamF NamRecord (FV gv (CV form)) [] (gdFields gd)) ->
           MM.throwCompilerBug ("a reference of the record " <> pretty g <> " to itself was not tied in inference")
         _ -> return r
+
+-- | A declared type applied to its parameters' placeholders, resolved in a
+-- language: its definition for any arguments. The state is as before.
+atPlaceholders :: Lang -> TVar -> [(TVar, Kind)] -> MorlocMonad TypeF
+atPlaceholders lang gv ps = do
+  st0 <- MM.get
+  let entry body = [([], body, ArgDocAlias defaultValue, True, TypedefAlias)]
+      added = Map.fromList [(placeholder p, entry (VarU (TV (nativeParam p)))) | (p, KindType) <- ps]
+      t = if null ps then VarT gv else AppT (VarT gv) (map paramArg ps)
+  MM.modify $ \st -> st {stateConcreteTypedefs = Map.adjust (Map.union added) lang (stateConcreteTypedefs st)}
+  r <- inferConcreteType lang (Idx 0 t) `catchError` (\e -> MM.put st0 >> MM.throwError e)
+  MM.put st0
+  return r
+  where
     paramArg (p, KindType) = TyA (VarT (placeholder p))
     paramArg (p, _) = KiA (KVarT p)
+
+-- | A generated parameterized `data` type as its declaration defines it in
+-- one language: its native form, a template over the parameters its arms
+-- hold ('nativeDataParams'), and its arms with each parameter as its
+-- placeholder.
+data DataDef = DataDef
+  { ddVar :: TVar
+  , ddForm :: T.Text
+  , ddTypeParams :: [TVar]
+  -- ^ its type parameters, in order: the positions of a use's arguments
+  , ddNative :: [TVar]
+  -- ^ the parameters of its native template
+  , ddArms :: [(T.Text, [TypeF])]
+  }
+  deriving (Show)
+
+-- | The parameters a `data` definition's native form takes: its type
+-- parameters some arm holds, in declaration order (Infer.heldDataParams).
+nativeDataParams :: DataDef -> [TVar]
+nativeDataParams = ddNative
+
+-- | The native parameters one arm of a definition holds, in order: the
+-- parameters of a language's per-arm type where one may not take more.
+armDataParams :: DataDef -> T.Text -> [TVar]
+armDataParams dd c = [p | p <- ddNative dd, Set.member p held]
+  where
+    held = Set.fromList (concatMap placeholders (concat [ts | (c', ts) <- ddArms dd, c' == c]))
+
+-- | The `data` types named anywhere in the types.
+dataNamesIn :: [TypeF] -> Set.Set TVar
+dataNamesIn = Set.fromList . concatMap go
+  where
+    go t = case t of
+      VariantF (FV g _) _ _ -> g : concatMap go (childrenOf t)
+      _ -> concatMap go (childrenOf t)
+
+-- | The definitions of the given generated `data` types whose native form
+-- is a template, and why each whose declaration cannot be resolved on its
+-- own has none.
+dataDefs :: Lang -> Set.Set TVar -> MorlocMonad (Map.Map TVar DataDef, Map.Map TVar T.Text)
+dataDefs lang used = do
+  gscope <- MM.getGeneralScope
+  (cscope, _) <- getScope lang
+  results <- mapM (one gscope) [gv | gv <- Set.toList used, concreteNameOf cscope gv == unTVar gv, not (null (heldDataParams gscope gv))]
+  return (Map.fromList [(gv, dd) | Just (gv, Right dd) <- results], Map.fromList [(gv, e) | Just (gv, Left e) <- results])
+  where
+    one gscope gv = case [ps | (ps0, _, _, _, TypedefEnum) <- Map.findWithDefault [] gv gscope, Just ps <- [mapM (either Just (const Nothing)) ps0]] of
+      (ps : _) ->
+        ( ( \tf -> case tf of
+              VariantF (FV _ (CV form)) _ arms | T.any (== '$') form -> Just (gv, Right (DataDef gv form [p | (p, KindType) <- ps] (heldDataParams gscope gv) arms))
+              _ -> Nothing
+          )
+            <$> atPlaceholders lang gv ps
+        )
+          `catchRejected` (\msg -> return (Just (gv, Left msg)))
+      [] -> return Nothing
 
 -- | Run an action, and on a rejection of the program return its message.
 catchRejected :: MorlocMonad a -> (T.Text -> MorlocMonad a) -> MorlocMonad a
@@ -264,7 +336,7 @@ canonIn defs env t = case t of
   -- arms are dropped, so a reference to it from inside its own arms (a
   -- back-edge, which carries none) is the same type.
   VariantF fv@(FV _ (CV form)) ps _
-    | T.any (== '$') form -> VariantF fv (map (fmap (canonIn defs env)) ps) []
+    | T.any (== '$') form -> VariantF fv [TyA (canonIn defs env t) | (k, t) <- indexedFrom 1 (tyArgs ps), k `elem` macroSlots form] []
     | otherwise -> VariantF fv [] []
   RecF (FV g cv) ps
     | Just c <- Map.lookup (g, ps) env -> c
@@ -286,8 +358,15 @@ placeholders t = case t of
     | not (T.any (== '$') form) -> placeholders h
   AppF h as -> placeholders h <> concatMap placeholders (tyArgs as)
   OptionalF x -> placeholders x
+  -- A template spells the arguments at its `$k` slots.
+  VariantF (FV _ (CV form)) ps _
+    | T.any (== '$') form -> concatMap placeholders [t | (k, t) <- indexedFrom 1 (tyArgs ps), k `elem` macroSlots form]
   VariantF _ _ as -> concatMap (concatMap placeholders . snd) as
   _ -> []
+
+-- | The positions a native form's `$k` slots name.
+macroSlots :: T.Text -> [Int]
+macroSlots form = [k | piece <- drop 1 (T.splitOn "$" form), Just k <- [readMaybe (T.unpack (T.takeWhile isDigit piece))]]
 
 -- | The parameters a record's native form takes (GEN-9): its type
 -- parameters some field holds, in order. Any other parameter is erased.
@@ -347,6 +426,19 @@ useArgs defs gv form carried rs = case Map.lookup gv defs of
     refill ts (a@(KiA _) : rest) = a : refill ts rest
     refill _ rest = rest
 
+-- | The arguments a use of a generated `data` template is spelled at: its
+-- carried arguments with each one its arms bind replaced by that binding,
+-- as a record's fields do ('useArgs'). An unpacked use carries the native
+-- arguments, which name no unpacked value. A use with no arms (a
+-- back-edge) keeps its carried arguments.
+dataUseArgs :: Map.Map TVar GenDef -> DataDef -> [ArgF] -> [(T.Text, [TypeF])] -> [ArgF]
+dataUseArgs defs dd carried arms
+  | null arms = carried
+  | otherwise = useArgs (Map.insert (ddVar dd) asRecord defs) (ddVar dd) (ddForm dd) carried (fields arms)
+  where
+    asRecord = GenDef (ddVar dd) (ddForm dd) [(p, KindType) | p <- ddTypeParams dd] (fields (ddArms dd))
+    fields as = [(Key (c <> "." <> T.pack (show i)), t) | (c, ts) <- as, (i, t) <- indexed ts]
+
 -- | A use's arguments, in the definition's parameter order.
 templateArgs :: Map.Map TVar GenDef -> GenDef -> [(Key, TypeF)] -> Either T.Text [TypeF]
 templateArgs defs gd rs = do
@@ -370,10 +462,12 @@ inPoolSerialASTs lang es = concat <$> mapM one (unique (concatMap intrinsicValue
       NamF _ (FV _ (CV "struct")) _ _ -> [t]
       _ -> concatMap outermostGenerated (childrenOf t)
     -- A type that has no serial form adds nothing; the state its attempt
-    -- left is discarded.
+    -- left is discarded. A held value holding a closure is written only
+    -- where it crosses, with the closure wired there, so it adds nothing
+    -- either.
     one t = do
       st0 <- MM.get
-      MM.recoverRejected ((: []) <$> makeSerialAST 0 lang t) (MM.put st0 >> return [])
+      MM.recoverRejected ((\a -> [a | null (serialClosuresOf a)]) <$> makeSerialAST 0 lang t) (MM.put st0 >> return [])
 
 -- | Which generated types a language's files can hold (GEN-10): of the
 -- candidates, those whose fields name only parameters, generated types the

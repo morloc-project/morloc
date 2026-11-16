@@ -43,6 +43,7 @@ module Morloc.CodeGenerator.Pools.CAbi.Members.RustPrinter
   , printVariantImpls
   , ArmWire (..)
   , armTypeName
+  , printRustGenerics
   , printRustNode
   , printRustNodeImpls
   , printUserVariantImpls
@@ -571,18 +572,44 @@ printRustEnum name ctors =
 --
 -- Deliberately NOT @Copy@ and NOT @#[repr(u8)]@, both of which the
 -- argument-free form carries.
-printRustVariant :: MDoc -> [(T.Text, [MDoc])] -> MDoc
-printRustVariant name arms =
+--
+-- A generic enum's arm types take the parameters their fields hold, so the
+-- arm's declared name and its spelling in the enum are given.
+printRustVariant :: MDoc -> (T.Text -> MDoc) -> (T.Text -> MDoc) -> [(T.Text, [MDoc])] -> MDoc
+printRustVariant name armDeclName armRef arms =
   vsep $
-    [printRustArm (armTypeName name c) ts | (c, ts@(_ : _)) <- arms]
-      <> [ "#[derive(Clone)]"
-         , "pub enum" <+> name <+> "{"
+    [printRustArm (armDeclName c) ts | (c, ts@(_ : _)) <- arms]
+      <> ["#[derive(Clone)]" | not generic]
+      <> [ "pub enum" <+> name <+> "{"
          , indent 4 (vsep [armDecl c ts | (c, ts) <- arms])
          , "}"
          ]
+      -- A derived Clone would bound every parameter by Clone; an arm is a
+      -- shared node, a copy of which is a count for any parameter.
+      <> [cloneImpl | generic]
   where
+    generic = T.any (== '<') (render name)
+    cloneImpl =
+      vsep
+        [ "impl" <> pretty (T.dropWhile (/= '<') (render name)) <+> "Clone for" <+> name <+> "{"
+        , indent 4 $ vsep
+            [ "fn clone(&self) -> Self {"
+            , indent 4 $ vsep
+                [ "match self {"
+                , indent 4 (vsep [if null ts then "Self::" <> pretty c <+> "=> Self::" <> pretty c <> "," else "Self::" <> pretty c <> "(x) => Self::" <> pretty c <> "(x.clone())," | (c, ts) <- arms])
+                , "}"
+                ]
+            , "}"
+            ]
+        , "}"
+        ]
     armDecl c [] = pretty c <> ","
-    armDecl c _ = pretty c <> parens (armTypeName name c) <> ","
+    armDecl c _ = pretty c <> parens (armRef c) <> ","
+
+-- | A generic type's parameter or argument list, empty for none.
+printRustGenerics :: [MDoc] -> MDoc
+printRustGenerics [] = ""
+printRustGenerics ts = "<" <> hcat (punctuate ", " ts) <> ">"
 
 -- | The generated type of one constructor's arm, given its enum's type:
 -- @Shape@ and @Circle@ give @Shape_Circle@.
@@ -806,8 +833,8 @@ printUserVariantImpls name arms3 = vsep [toImpl, "", fromImpl]
 
 -- | The marshalling impls of a generated payload-bearing @data@ type, whose
 -- arms are its generated arm types.
-printVariantImpls :: MDoc -> [(T.Text, [MDoc], Maybe ArmWire)] -> MDoc
-printVariantImpls name arms3 = vsep [toImpl, "", fromImpl]
+printVariantImpls :: [MDoc] -> MDoc -> (T.Text -> MDoc) -> [(T.Text, [MDoc], Maybe ArmWire)] -> MDoc
+printVariantImpls params name armRef arms3 = vsep [toImpl, "", fromImpl]
   where
     idxArms = indexed arms3
     payload = "(**mlc_b)"
@@ -821,16 +848,20 @@ printVariantImpls name arms3 = vsep [toImpl, "", fromImpl]
     -- generic instantiation the impl is written for.
     armPat c ts = "Self::" <> pretty c <> (if null ts then "" else "(mlc_b)")
     -- The payload's native type, as the enum declares it, and its constructor.
-    armTy c _ = armTypeName name c
-    armCtor c = armTypeName name c <> "::new"
+    armTy c _ = armRef c
+    armCtor c = armHead (armRef c) <> "::new"
+    -- A generic arm type's constructor is reached through its path alone.
+    armHead d = pretty (T.takeWhile (/= '<') (render d))
     -- The runtime range-checks a tag at the wire boundary, so reaching this
     -- arm means the value and its schema disagree: a bug, not bad input.
     -- Here the tag would otherwise index the arm list.
     badTag = "t => panic!(\"" <> name <> ": no constructor for tag {}\", t),"
 
+    -- A generic enum's impls hold at every instance whose arguments do.
+    bounded tr = if null params then "impl" else "impl" <> printRustGenerics [p <> ": " <> tr | p <- params]
     toImpl =
       vsep
-        [ "impl ::rustmorloc::ToVoidstar for" <+> name <+> "{"
+        [ bounded "::rustmorloc::ToVoidstar" <+> "::rustmorloc::ToVoidstar for" <+> name <+> "{"
         , indent 4 $ vsep
             [ "fn size_step(&self, w: &mut ::rustmorloc::SizeWalk, schema: &::rustmorloc::Schema, _idx: usize) {"
             , indent 4 $ vsep
@@ -870,7 +901,7 @@ printVariantImpls name arms3 = vsep [toImpl, "", fromImpl]
 
     fromImpl =
       vsep
-        [ "impl ::rustmorloc::FromVoidstar for" <+> name <+> "{"
+        [ bounded "::rustmorloc::FromVoidstar" <+> "::rustmorloc::FromVoidstar for" <+> name <+> "{"
         , indent 4 $ vsep
             [ "unsafe fn read_step(w: &mut ::rustmorloc::ReadWalk, schema: &::rustmorloc::Schema, data: *const u8, _idx: usize) {"
             , indent 4 $ vsep

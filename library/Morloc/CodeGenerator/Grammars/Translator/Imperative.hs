@@ -137,7 +137,7 @@ import Morloc.CodeGenerator.Grammars.Common
   )
 import Morloc.CodeGenerator.LogTemplate (RenderedTemplate (..))
 import Morloc.CodeGenerator.Namespace
-import Morloc.CodeGenerator.Serial (Unpacked, containsFunF, isSerializable, serialAstHasString, serialAstToMsgpackSchema, serialAstToType, unpackedAsTypeF)
+import Morloc.CodeGenerator.Serial (Unpacked, containsFunF, isSerializable, serialAstHasString, serialAstToMsgpackSchema, serialAstToNativeType, serialAstToType, unpackedAsTypeF)
 import Morloc.Data.Doc
 import Morloc.Monad (IndexState)
 
@@ -984,11 +984,13 @@ nativeToWire cfg = go
         ( [IIfNotNull v' resultType (IRawExpr (render v)) uVar unwrappedType before x]
         , IVar v'
         )
+    -- The value read is native, the value built unpacked.
     construct v var@(SerialVariant (FV _ cv) _ arms@(_ : _)) = do
       ty <- nominalTypeDoc cfg (unpackedAsTypeF (serialAstToType var)) cv
+      src <- nominalTypeDoc cfg (serialAstToNativeType var) cv
       resultType <- lcSerialAstType cfg var
-      byVariantArm cfg resultType ty v arms $ \n i ss -> do
-        results <- mapIndexedM (\j s -> go (lcCtorField cfg FieldCopy ty n i j v) s) ss
+      byVariantArm cfg resultType src ty v arms $ \n i ss -> do
+        results <- mapIndexedM (\j s -> go (lcCtorField cfg FieldCopy src n i j v) s) ss
         let (befores, exprs) = unzip results
         return (concat befores, IRawExpr (render (lcVariantLit cfg ty n i (map (lcPrintExpr cfg) exprs))))
     construct _ _ = error "Unreachable in nativeToWire"
@@ -1085,31 +1087,37 @@ wireToNative cfg = check
         ( IVar v'
         , [IIfNotNull v' resultType (IRawExpr (render v)) uVar unwrappedType before x]
         )
+    -- The value read is unpacked, the value built native.
     construct v var@(SerialVariant (FV _ cv) _ arms@(_ : _)) = do
-      ty <- nominalTypeDoc cfg (unpackedAsTypeF (serialAstToType var)) cv
+      src <- nominalTypeDoc cfg (unpackedAsTypeF (serialAstToType var)) cv
+      ty <- nominalTypeDoc cfg (serialAstToNativeType var) cv
       resultType <- lcDeserialAstType cfg var
-      swap <$> byVariantArm cfg resultType ty v arms (\n i ss -> do
-        results <- mapIndexedM (\j s -> check (lcCtorField cfg FieldCopy ty n i j v) s) ss
+      swap <$> byVariantArm cfg resultType src ty v arms (\n i ss -> do
+        results <- mapIndexedM (\j s -> check (lcCtorField cfg FieldCopy src n i j v) s) ss
         let (exprs, befores) = unzip results
         return (concat befores, IRawExpr (render (lcVariantLit cfg ty n i (map (lcPrintExpr cfg) exprs)))))
     construct _ _ = error "Unreachable in wireToNative"
 
 -- | Branch on a variant's arm and rebuild the arms whose fields need
--- conversion; the others pass through as they are.
+-- conversion; the others pass through as they are, unless the value built
+-- is of another native type than the value read (a template spelled at
+-- other arguments), when every arm is rebuilt.
 byVariantArm ::
   (Monad m) =>
   LowerConfig m ->
   Maybe IType ->
   MDoc ->
   MDoc ->
+  MDoc ->
   [(Text, [SerialAST])] ->
   (Text -> Int -> [SerialAST] -> m ([IStmt], IExpr)) ->
   m ([IStmt], IExpr)
-byVariantArm cfg resultType ty v arms rebuild = chain (indexed arms)
+byVariantArm cfg resultType src ty v arms rebuild = chain (indexed arms)
   where
     pass = return ([], IRawExpr (render v))
+    retyped = render src /= render ty
     arm (i, (n, ss))
-      | all (isMsgpackLeaf cfg) ss = pass
+      | not retyped, all (isMsgpackLeaf cfg) ss = pass
       | otherwise = rebuild n i ss
     chain [] = pass
     chain [a] = arm a
@@ -1117,7 +1125,7 @@ byVariantArm cfg resultType ty v arms rebuild = chain (indexed arms)
       (thenStmts, thenExpr) <- arm a
       (elseStmts, elseExpr) <- chain rest
       v' <- render . (helperVar cfg) <$> lcNewIndex cfg
-      let cond = IRawExpr (render (lcVariantTagTest cfg ty n i v))
+      let cond = IRawExpr (render (lcVariantTagTest cfg src n i v))
       return ([IIf v' resultType cond thenStmts thenExpr elseStmts elseExpr], IVar v')
 
 -- | What a tail loop's base leaves yield: a packet (a loop that is a pool's

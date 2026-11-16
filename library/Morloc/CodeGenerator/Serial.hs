@@ -568,6 +568,19 @@ refersFrom path wire n = case n of
   SerialOptional _ _ -> refersTo path wire n
   _ -> False
 
+-- | Two argument lists of one type, a record or `data` type by name and
+-- arguments: a reference to a record is the record ('RecF').
+sameArgs :: [ArgF] -> [ArgF] -> Bool
+sameArgs xs ys = map (fmap nominal) xs == map (fmap nominal) ys
+  where
+    nominal t = case t of
+      NamF _ (FV g _) ps _ -> RecF (FV g (CV "")) (map (fmap nominal) ps)
+      RecF (FV g _) ps -> RecF (FV g (CV "")) (map (fmap nominal) ps)
+      -- A `data` type by its name and arguments: its arms, which a
+      -- back-edge does not carry, say nothing more.
+      VariantF (FV g cv) ps _ -> VariantF (FV g cv) (map (fmap nominal) ps) []
+      _ -> mapChildren nominal t
+
 -- | A serial AST and every subtree under it ('serialKids').
 serialSubtrees :: SerialAST -> [SerialAST]
 serialSubtrees a = a : concatMap serialSubtrees (serialKids a)
@@ -1027,7 +1040,7 @@ makeSerialAST m lang t0 = do
         -- carries none ('backEdge'): it is the instantiation being built,
         -- the one of its name on the path.
         isInstantiation g qs a@(VariantF (FV g' _) qs' _) =
-          g == g' && (qs == qs' || (null qs && [a] == [b | b@(VariantF (FV g'' _) _ _) <- Set.toList anc, g'' == g]))
+          g == g' && (sameArgs qs qs' || (null qs && [a] == [b | b@(VariantF (FV g'' _) _ _) <- Set.toList anc, g'' == g]))
         isInstantiation _ _ _ = False
     -- A record's reference to an enclosing occurrence of itself, tied in
     -- inference. One met off its record's path (a field type taken out on

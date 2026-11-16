@@ -16,20 +16,21 @@ on 0.109.0 unless marked.
   /tmp/claude-1000/-work/b22ec8aa-199c-401c-8f03-0b140cbccdb1/scratchpad/n10/noinst2.loc.
   NEWT-4 asks which forms a binding can build without an instance; nothing
   records that today.
-- **C++ cannot send or receive a sum type whose arm holds a Packable.**
-  [reproduced, 2026-10-29] Violates NATIVE-9. `mk :: Int -> Try Str (Set
-  Int)` from Python into a C++ `size :: Try Str (Set Int) -> Int` does not
-  build: "the `data` type Try_7b5513 is used with two field types for its
-  constructor Ok: (std::set<int>) and (std::vector<int>)". The wire form of
-  the variant is given the native variant's name
-  (library/Morloc/CodeGenerator/Pools/CAbi/Members/Cpp.hs, `rawDoc` and
-  `collectCppVariants`), so the decoded and native forms collide. Writer
-  intrinsics avoid this by leaving such a value to the variant's own
-  marshaller, which unpacks only its outer type, so in C++ `@show`,
+- **C++ cannot write a sum type whose arm holds a Packable below the top
+  of a value.** [reproduced, 2026-11-16] Violates NATIVE-9. In C++ `@show`,
   `@hash` or `@save` of a value holding such a sum type below its top
-  (`[Try Str (Set Int)]`, a record with a `Try Str (Set Int)` field) still
-  reaches the runtime in native form and fails "no marshaller for a value of
-  this C++ type". Python and R take it apart at every level.
+  (`[Try Str (Set Int)]`, a record with a `Try Str (Set Int)` field)
+  reaches the runtime in native form and fails "no marshaller for a value
+  of this C++ type (schema type 14)": writer intrinsics leave the value to
+  the variant's own marshaller, which unpacks only its outer type. Repro:
+  `showNested n = @show (wrapList (mk n))` with Python `mk :: Int -> Try
+  Str (Set Int)` and C++ `wrapList :: a -> [a]`. A sum type at the top now
+  crosses (its native and unpacked forms are distinct template instances,
+  `Try<std::string, std::set<int>>` and `Try<std::string,
+  std::vector<int>>`), except a `data` instance holding a function, which
+  is a type of its own named by its arguments, so its native and unpacked
+  forms still share a name and collide ("used with two field types").
+  Python and R take it apart at every level.
 - **An R set of compound elements is not sorted.** [read, 2026-10-29]
   Violates COLL-6. set-r sorts a set of scalars before it is sent, but
   leaves a set of tuples or records in the order it was built, since R has

@@ -81,39 +81,28 @@
   selection never fixes an open class argument (Instances.hs `resolve` returns
   Undetermined first), so only Packable improvement (CLS-20) can reach the REC-4
   check. The message also shows the internal name `record_2`.
-- **GEN-9 does not yet cover recursive parameterized records or `data`.**
-  [read, 2026-11-16] Violates GEN-9. Every generated record a C++ or Rust
-  pool uses is defined from its declaration (GenDefs.hs), but one that has
-  native parameters and refers to itself is refused with a planning error
-  (Cpp.hs planPublicTypes, Rust.hs planRustPublic `refused`), a recursive
-  record with a packed field is refused by the frontend, and generated
-  `data` types keep per-instantiation names with a hash suffix (Infer.hs
-  instanceName). A record with a parameter no field uses gets no default
+- **GEN-9 does not yet cover recursive parameterized records.**
+  [read, 2026-11-16] Violates GEN-9. Every generated record and `data`
+  type a C++ or Rust pool uses is defined from its declaration (GenDefs.hs;
+  a parameterized `data` type is a template over the parameters its arms
+  hold), but a record that has native parameters and refers to itself is
+  refused with a planning error (Cpp.hs planPublicTypes, Rust.hs
+  planRustPublic `refused`), and a recursive record with a packed field is
+  refused by the frontend. A record with a parameter no field uses gets no default
   form in any language (Restructure.hs withDefaultKinds), so it still needs
   a line such as `record Py => Box a = dict` (spec-cost-15-4); without it
   the error misleads ("gives no cpp implementation of
   '__extract_pattern__'" [reproduced]). Plan: GEN9-DESIGN.md (in
-  /work/plans/generated-native-types) stages S9.3-S9.5.
-- **A parameterized generated record holding a parameterized generated
-  `data` type is refused in C++ and Rust.** [reproduced, 2026-11-16]
-  Violates GEN-9. `record R a where d :: Choice a` with `data Choice a =
-  Pick a | Skip`, used at `R Int` from a sourced C++ function: "the
-  generated C++ type for R cannot serve one of its uses: its field `d` is
-  `Choice_97d1f6` there but `Choice_8fa600` in the definition". The
-  definition (GenDefs.genDefs) names the field's `data` instance by a hash
-  of the placeholder argument (Infer.instanceName), a type that does not
-  exist, so the refusal also keeps a wrong template from being emitted.
-  Before the declaration-driven definitions such a record got one struct
-  per use. Fix: generated `data` as templates/generics (stage S9.5), so a
-  definition's field names `Choice<T_a>`.
-- **Instance names of parameterized generated `data` can collide.** [read,
-  2026-11-15] Violates GEN-1 (one definition per type). Infer.hs
-  instanceSuffix names an instantiation by a 24-bit djb2 hash of its
-  rendered arguments, so two different instantiations can share a name,
-  and nothing checks that same-named definitions agree; with fields that
-  convert implicitly (int64 vs double in C++) the wrong definition could
-  compile. GEN-9 (stage S9.5) removes the suffix; until then a collision
-  check on the rendered arguments would make it an error.
+  /work/plans/generated-native-types) stages S9.3-S9.4.
+- **A generated Rust `data` template can take a parameter no arm uses.**
+  [read, 2026-11-16] Violates GEN-9. A template's parameters are the type
+  parameters free in its declared arms (Infer.heldDataParams), but an arm
+  type that does not spell its arguments natively (a phantom `data Tag a =
+  Tagged Int`, a user-mapped non-template form) holds none of them in
+  Rust, so `data W a = W (Tag a)` declares `pub enum W<T_a>` with `T_a`
+  unused: rustc E0392. C++ accepts an unused template parameter. Fix with
+  the phantom-parameter stage (S9.3): count a parameter as held only where
+  the native form spells it.
 - **A public Rust `data` type is not checked for names it cannot import.**
   [speculative, 2026-11-16] GEN-10. Rust.hs planRustPublic adds every
   eligible variant and enum to the names a public record may hold, but

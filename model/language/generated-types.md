@@ -125,7 +125,7 @@ field keeps its declared type (EFF-2).
 
 ### GEN-9 A generated definition follows its declaration
 Intent: ruled 2026-11-15
-Tests: spec-gen-9-1, spec-gen-9-2, spec-gen-9-3
+Tests: spec-gen-9-1, spec-gen-9-2, spec-gen-9-3, spec-gen-9-4
 Code: deviates (issues/records.md)
 
 A generated record or `data` type has the declaration's type parameters as
@@ -140,7 +140,13 @@ fields; they are never taken from the arguments a type carries, which on
 the wire side of a packed argument are the native ones (`Pair Date` is
 `Pair<int64_t>` natively and is sent as `Pair<std::string>`'s fields). A use
 whose fields do not render as the definition does at those arguments is a
-compile error naming the record, the field and both renderings.
+compile error naming the record, the field and both renderings. A `data`
+type's arguments are read from its arms the same way, so its native and
+wire forms are distinct instances (`Choice<int64_t>` and
+`Choice<std::string>` for a packed `Choice Date`). A `data` instance whose
+arguments contain the type itself other than through a record
+(`type X = Rose ?X`) has no finite spelling at them; it is a type of its
+own in the pool, named by its arguments.
 
 A parameter no field holds natively, and a parameter of another kind
 (`Nat`, `Str`, `Rec`), is erased: `Grid2 3` and `Grid2 4` are one native

@@ -451,27 +451,36 @@ printCppEnumDecl name ctors =
     , "};"
     ]
 
-printCppVariantDecl :: MDoc -> [(Text, [MDoc])] -> MDoc
-printCppVariantDecl name arms =
+-- | A variant's wrapper and its arms' forward declarations; with template
+-- parameters, the wrapper and each arm are templates over them.
+printCppVariantDecl :: [MDoc] -> MDoc -> [(Text, [MDoc])] -> MDoc
+printCppVariantDecl params name arms =
   vsep
-    [ vsep ["struct" <+> armName name c <> ";" | (c, _) <- arms]
-    , "struct" <+> name <+> "{"
+    [ vsep [templ <> "struct" <+> armName name c <> ";" | (c, _) <- arms]
+    , templ <> "struct" <+> name <+> "{"
     , indent 4 ("std::variant<"
-                  <> hsep (punctuate "," ["std::shared_ptr<const " <> armName name c <> ">" | (c, _) <- arms])
+                  <> hsep (punctuate "," ["std::shared_ptr<const " <> armName self c <> ">" | (c, _) <- arms])
                   <> "> v;")
     , "};"
     ]
+  where
+    templ = templatePrefix params
+    self = name <> printRecordTemplate params
 
 -- | The arm bodies, emitted after every wrapper exists.
-printCppVariantArms :: MDoc -> [(Text, [MDoc])] -> MDoc
-printCppVariantArms name arms = vsep [armStruct c ts | (c, ts) <- arms]
+printCppVariantArms :: [MDoc] -> MDoc -> [(Text, [MDoc])] -> MDoc
+printCppVariantArms params name arms = vsep [armStruct c ts | (c, ts) <- arms]
   where
     armStruct c ts =
       vsep
-        [ "struct" <+> armName name c <+> "{"
+        [ templatePrefix params <> "struct" <+> armName name c <+> "{"
         , indent 4 (vsep [t <+> "f" <> pretty i <> ";" | (i, t) <- indexed ts])
         , "};"
         ]
+
+templatePrefix :: [MDoc] -> MDoc
+templatePrefix [] = ""
+templatePrefix params = printTemplateHeader params <> " "
 
 -- | The struct that holds one arm's fields: the wrapper's name with
 -- @_<Constructor>@ appended to its HEAD. For a plain name that is
@@ -491,8 +500,8 @@ armNameText n c =
 --
 -- The slot layout lives in the runtime; these only pick an arm. An arm with
 -- fields hands its struct to the walk, which the arm's own node marshals.
-printCppVariantSerializers :: MDoc -> [(Text, [MDoc])] -> MDoc
-printCppVariantSerializers name arms =
+printCppVariantSerializers :: [MDoc] -> MDoc -> [(Text, [MDoc])] -> MDoc
+printCppVariantSerializers params name arms =
   vsep [sizeFn, "", toFn, "", fromFn]
   where
     idxArms = indexed arms
@@ -501,7 +510,7 @@ printCppVariantSerializers name arms =
 
     sizeFn =
       vsep
-        [ "void MlcNode<" <> name <> ">::size_step(MlcSizeWalk& w, const Schema* schema, const"
+        [ memberHeader params <> "void MlcNode<" <> name <> ">::size_step(MlcSizeWalk& w, const Schema* schema, const"
             <+> name <> "& obj, size_t) {"
         , indent 4 $ vsep
             [ "static_assert(mlc::const_arms<decltype(obj.v)>::value,"
@@ -521,7 +530,7 @@ printCppVariantSerializers name arms =
 
     toFn =
       vsep
-        [ "void MlcNode<" <> name <> ">::write_step(MlcWriteWalk& w, const Schema* schema, void* dest, const"
+        [ memberHeader params <> "void MlcNode<" <> name <> ">::write_step(MlcWriteWalk& w, const Schema* schema, void* dest, const"
             <+> name <> "& obj, size_t) {"
         , indent 4 $ vsep
             [ "switch (obj.v.index()) {"
@@ -539,7 +548,7 @@ printCppVariantSerializers name arms =
 
     fromFn =
       vsep
-        [ "void MlcNode<" <> name <> ">::read_step(MlcReadWalk& w, const Schema* schema, const void* data,"
+        [ memberHeader params <> "void MlcNode<" <> name <> ">::read_step(MlcReadWalk& w, const Schema* schema, const void* data,"
             <+> name <> "* out, size_t) {"
         , indent 4 $ vsep
             [ "switch (read_variant_tag(data)) {"

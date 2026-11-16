@@ -33,7 +33,7 @@ module Morloc.CodeGenerator.Pools.CAbi.Members.Rust
   , rustStandaloneLib
   ) where
 
-import Morloc.Data.Zip (indexed, indexedFrom, mapIndexed, mapIndexedM, zip3Same, zip4Same, zipExact, zipSame, zipWithSame)
+import Morloc.Data.Zip (indexed, indexedFrom, mapIndexed, mapIndexedM, zip3Same, zip4Same, zipExact, zipPrefix, zipSame, zipWithSame)
 import Data.Foldable (toList)
 import Control.Monad.Identity (Identity, runIdentity)
 import Control.Monad.Reader (ReaderT, asks, local, runReaderT)
@@ -104,7 +104,7 @@ import qualified Morloc.Version as MV
 import Morloc.Quasi
 import System.Directory (findExecutable)
 import System.FilePath (takeDirectory)
-import Morloc.CodeGenerator.GenDefs (Disagreement (..), GenDef (..), RecordUse, disagreements, inPoolSerialASTs, placeTypes, checkUse, genDefs, nativeParam, nativeParams, placeholders, recordUses, templateArgs, useArgs)
+import Morloc.CodeGenerator.GenDefs (DataDef (..), Disagreement (..), GenDef (..), armDataParams, dataDefs, dataNamesIn, dataUseArgs, nativeDataParams, RecordUse, disagreements, inPoolSerialASTs, placeTypes, checkUse, genDefs, nativeParam, nativeParams, placeholders, recordUses, templateArgs, useArgs)
 
 -- | Duplicated here (as in Cpp.hs) to match data/lang/rust/lang.yaml. The
 -- second field is the source extension and must match lang.yaml's @extension@
@@ -176,6 +176,10 @@ data RustState = RustState
   , rsUserArms :: Map.Map Text [(Text, [RP.UserField])]
   -- ^ The arms of each user-written `data` type at each occurrence, by its
   -- rendered type: each constructor with morloc's types of its fields.
+  , rsDataFailures :: Map.Map TVar Text
+  -- ^ Why a generated parameterized `data` type has no definition.
+  , rsDataDefs :: Map.Map TVar DataDef
+  -- ^ Each generated parameterized `data` type's definition (GEN-9).
   , rsGenDefs :: Map.Map TVar GenDef
   -- ^ Each generated record's definition from its declaration (GEN-9).
   , rsRecords :: Map.Map TVar GenDef
@@ -226,6 +230,8 @@ instance Defaultable RustState where
       , rsNeedsNode = False
       , rsUserArms = Map.empty
       , rsGenDefs = Map.empty
+      , rsDataDefs = Map.empty
+      , rsDataFailures = Map.empty
       , rsRecords = Map.empty
       , rsRecordNames = Map.empty
       , rsGenFailures = Map.empty
@@ -326,7 +332,24 @@ rustTypeOf = f
     f (EnumF (FV gv (CV x)) ps _) = nominalTypeName x ps >>= publicOr gv
     -- A variant lowers to its concrete name; the `enum` carrying the arms
     -- is generated for this pool or supplied by a `data Rust => X = "..."`.
-    f (VariantF (FV gv (CV x)) ps _) = nominalTypeName x ps >>= publicOr gv
+    f (VariantF (FV gv (CV x)) ps as)
+      -- A generated template in its module's file goes by its path, and
+      -- is spelled at the arguments its arms bind.
+      | T.any (== '$') x = do
+          public <- CMS.gets rsPublic
+          ddefs <- CMS.gets rsDataDefs
+          defs <- CMS.gets rsGenDefs
+          let (h, rest) = T.breakOn "<" x
+              x' = case Map.lookup gv public of
+                Just q -> q <> rest
+                Nothing | Map.member gv ddefs -> privateDataName gv <> rest
+                Nothing -> x
+          nominalTypeName x' (maybe ps (\dd -> dataUseArgs defs dd ps as) (Map.lookup gv ddefs))
+      | otherwise = do
+          ddefs <- CMS.gets rsDataDefs
+          -- A generated template's instance named by its arguments is its
+          -- own type.
+          if Map.member gv ddefs then nominalTypeName x ps else nominalTypeName x ps >>= publicOr gv
     f (AppF t ts) = do
       t' <- f t
       let typeTs = tyArgs ts
@@ -1645,12 +1668,14 @@ translate srcs es0 = do
   typeHomes <- MM.gets stateTypeHomes
   -- Closures' captured and bound arguments are deserialized by their
   -- dispatch wrappers, not by any manifold, so their types are added.
-  let uses = recordUses (concatMap (poolTypesWith serialAstToType) es <> map (unpackedAsTypeF . serialAstToType) (closureSerialASTs closureAsts))
+  let poolTypes = concatMap (poolTypesWith serialAstToType) es <> map (unpackedAsTypeF . serialAstToType) (closureSerialASTs closureAsts)
+      uses = recordUses poolTypes
   (gdefs, gfails) <- genDefs rustLang (Set.fromList [g | (g, _, _, _) <- uses])
+  (ddefs, dfails) <- dataDefs rustLang (dataNamesIn poolTypes)
   intrAsts <- inPoolSerialASTs rustLang es
   let poolAsts = concatMap allSerialASTs es <> intrAsts <> closureSerialASTs closureAsts
       recordObjects = Map.map unique (Map.fromListWith (<>) [(g, [rs]) | a <- poolAsts, o@(SerialObject _ (FV g _) _ rs) <- serialSubtrees a, generatedObject o])
-  let st0 = defaultValue {rsRecordObjects = recordObjects, rsGenFailures = gfails, rsGenDefs = gdefs, rsRecordUses = uses, rsTypeHomes = typeHomes, rsDebugInfo = debugInfo, rsCScope = mergedRustScope, rsSrcTypeVarMask = srcTypeVarMask, rsSrcMakers = srcMakers, rsLogTemplates = logTemplates, rsStageTable = stageTable, rsPool = pool, rsBuilds = lastBuilds Map.empty Set.empty (rustSeeds pool es0) es0}
+  let st0 = defaultValue {rsRecordObjects = recordObjects, rsGenFailures = gfails, rsGenDefs = gdefs, rsDataDefs = ddefs, rsDataFailures = dfails, rsRecordUses = uses, rsTypeHomes = typeHomes, rsDebugInfo = debugInfo, rsCScope = mergedRustScope, rsSrcTypeVarMask = srcTypeVarMask, rsSrcMakers = srcMakers, rsLogTemplates = logTemplates, rsStageTable = stageTable, rsPool = pool, rsBuilds = lastBuilds Map.empty Set.empty (rustSeeds pool es0) es0}
       pool = planPool (rustCaps mergedRustScope) es
       ((code, typeFiles), stEnd) = CMS.runState (runReaderT (makeRustCode includeDocs closureAsts closureTable es) emptyOwnEnv) st0
   mapM_ (MM.throwRejected . ("Rust pool:" <+>) . pretty) (rsErrors stEnd)
@@ -2069,11 +2094,39 @@ collectRustVariants = concatMap (runIdentity . foldWithSerialManifoldM fm)
 -- sourced Rust and gets only the impls.
 generateRustVariants :: Map.Map Int ([SerialAST], [SerialAST], SerialAST) -> [SerialManifold] -> RustM [MDoc]
 generateRustVariants closureAsts es = do
+  ddefs0 <- CMS.gets rsDataDefs
+  -- A template some instance of which holds a function is marshalled at
+  -- each instance, whose closures are wired by name; any other once for
+  -- every instance.
+  let perInstance = Set.fromList ([gv | (FV gv _, _, arms) <- collectRustVariants es, any holdsFunR (concatMap snd arms)]
+                      <> [gv | (gv, dd) <- Map.toList ddefs0, any holdsFunR (concatMap snd (ddArms dd))])
   named <- mapM occurrence (collectRustVariants es)
   wireArms <- variantWireArms rustTypeOf closureAsts es
   -- Merged by rendered name: one declaration per name.
-  concat <$> mapM (uncurry (merged wireArms)) (Map.toList (Map.fromListWith (flip (<>)) named))
+  instances <- concat <$> mapM (uncurry (merged perInstance wireArms)) (Map.toList (Map.fromListWith (flip (<>)) named))
+  templates <- templateDecls perInstance
+  return (templates <> instances)
   where
+    -- Each generated template, declared once from its definition; an
+    -- arm's type takes the parameters its fields hold.
+    templateDecls perInstance = do
+      ddefs <- CMS.gets rsDataDefs
+      concat <$> sequence
+        [ do
+            arms' <- mapM (\(c, ts) -> (,) c <$> mapM rustFieldType ts) (ddArms dd)
+            CMS.modify $ \s -> s {rsNeedsNode = rsNeedsNode s || any (not . null . snd) arms'}
+            let params = map (pretty . nativeParam) (nativeDataParams dd)
+                generics ps = RP.printRustGenerics (map (pretty . nativeParam) ps)
+                armDecl n c = pretty (render n <> "_" <> c) <> generics (armDataParams dd c)
+                decl n = RP.printRustVariant (n <> generics (nativeDataParams dd)) (armDecl n) (armDecl n) arms'
+            decls <- declareOrKeep (Just [c | (c, _ : _) <- arms']) gv decl (pretty (privateDataName gv))
+            -- Marshalled once for every instance: two morloc types that are
+            -- one Rust type are one instance.
+            qname <- rustTypeOf (VariantF (FV gv (CV (ddForm dd))) [TyA (VarF (FV (TV ("&" <> unTVar p)) (CV (nativeParam p)))) | p <- ddTypeParams dd] [])
+            let qhead = T.takeWhile (/= '<') (render qname)
+                impls = [RP.printVariantImpls params qname (\c -> pretty (qhead <> "_" <> c) <> generics (armDataParams dd c)) [(c, ts, Nothing) | (c, ts) <- arms'] | Set.notMember gv perInstance]
+            return (decls <> impls)
+        | (gv, dd) <- Map.toList ddefs ]
 
     -- One occurrence under its rendered name, with each arm's field types
     -- as written and as rendered, so the merge can compare spellings.
@@ -2081,13 +2134,13 @@ generateRustVariants closureAsts es = do
       n <- rustTypeOf (VariantF v ps as)
       as' <- mapM (\(c, ts) -> (\rs -> (c, (ts, map render rs))) <$> mapM rustFieldType ts) as
       return (render n, [(v, ps, as')])
-    merged wireArms name occs = case mergeVariantOccurrences name [((v, ps), as) | (v, ps, as) <- occs] of
-      Right ((v, ps), arms) -> makeOne (Map.lookup name wireArms) (v, ps, arms)
+    merged perInstance wireArms name occs = case mergeVariantOccurrences name [((v, ps), as) | (v, ps, as) <- occs] of
+      Right ((v, ps), arms) -> makeOne perInstance (Map.lookup name wireArms) (v, ps, arms)
       Left msg -> CMS.modify (\s -> s {rsErrors = msg : rsErrors s}) >> return []
 
     -- A type holding a function gets impls only where it crosses: then each
     -- arm holding a closure crosses as its wire tuple.
-    makeOne wireArms (FV gv (CV cvText), ps, arms) = do
+    makeOne perInstance wireArms (FV gv (CV cvText), ps, arms) = do
       userMapped <- rustUserMapsVariant gv cvText
       arms' <- mapM (\(n, ts) -> (,) n <$> mapM rustFieldType ts) arms
       name <- rustTypeOf (VariantF (FV gv (CV cvText)) ps arms)
@@ -2095,7 +2148,23 @@ generateRustVariants closureAsts es = do
       wired <- case wireArms of
         Just was | hasFun -> mapM (\(c, ts) -> (,,) c ts <$> armWire ts (lookup c was)) arms'
         _ -> return [(c, ts, Nothing) | (c, ts) <- arms']
-      let impls = [RP.printVariantImpls name wired | not hasFun || isJust wireArms]
+      ddefs <- CMS.gets rsDataDefs
+      -- A generated template whose declaration has no definition: no
+      -- instance of it can be spelled.
+      dfails <- CMS.gets rsDataFailures
+      when (not userMapped && T.any (== '$') cvText && Map.notMember gv ddefs) $
+        CMS.modify $ \s -> s {rsErrors = ("the generated Rust type for " <> unTVar gv <> " cannot be defined from its declaration: "
+          <> Map.findWithDefault "it does not resolve in Rust" gv dfails) : rsErrors s}
+      defs <- CMS.gets rsGenDefs
+      -- An instance of a template names its arms at the arguments each
+      -- arm's type takes, those its arms bind.
+      armRef <- case Map.lookup gv ddefs of
+        Just dd | not userMapped, T.any (== '$') cvText -> do
+          args <- mapM (\(p, t) -> (,) p <$> rustFieldType t) (zipPrefix (ddTypeParams dd) (tyArgs (dataUseArgs defs dd ps arms)))
+          let headName = T.takeWhile (/= '<') (render name)
+          return $ \c -> pretty (headName <> "_" <> c) <> RP.printRustGenerics [d | p <- armDataParams dd c, Just d <- [lookup p args]]
+        _ -> return (RP.armTypeName name)
+      let impls = [RP.printVariantImpls [] name armRef wired | not hasFun || isJust wireArms]
       if userMapped
         then do
           -- A user-written arm is a tuple variant, one field per morloc
@@ -2104,9 +2173,17 @@ generateRustVariants closureAsts es = do
           CMS.modify $ \s -> s {rsUserArms = Map.insert (render name) fields (rsUserArms s)}
           let userWired = [(c, fs, mw) | ((c, fs), (_, _, mw)) <- zipSame fields wired]
           return [RP.printUserVariantImpls name userWired | not hasFun || isJust wireArms]
-        else do
-          CMS.modify $ \s -> s {rsNeedsNode = rsNeedsNode s || any (not . null . snd) arms'}
-          (<> impls) <$> declareOrKeep (Just [c | (c, _ : _) <- arms']) gv (\n -> RP.printRustVariant n arms') name
+        else if Map.member gv ddefs && T.any (== '$') cvText
+          -- A template is marshalled once for every instance
+          -- ('templateDecls') unless some instance holds a function.
+          then return (if Set.member gv perInstance then impls else [])
+          else do
+            CMS.modify $ \s -> s {rsNeedsNode = rsNeedsNode s || any (not . null . snd) arms'}
+            let decl n = RP.printRustVariant n (RP.armTypeName n) (RP.armTypeName n) arms'
+            -- An instance named by its arguments is the pool's own.
+            if Map.member gv ddefs
+              then return (decl name : impls)
+              else (<> impls) <$> declareOrKeep (Just [c | (c, _ : _) <- arms']) gv decl name
 
     userField (OptionalF x) = (\t -> (t, True)) <$> rustFieldType x
     userField t = (\t' -> (t', False)) <$> rustFieldType t
@@ -2131,6 +2208,17 @@ generateRustVariants closureAsts es = do
                   [maybe (slot t j) ($ slot t j) f | (j, f) <- indexed reflects] <+> "}"
               }
     armWire _ _ = return Nothing
+
+-- | Whether a type holds a function or suspension.
+holdsFunR :: TypeF -> Bool
+holdsFunR t = case t of
+  FunF _ _ -> True
+  _ -> any holdsFunR (childrenOf t)
+
+-- | The name a generated template no module file holds goes by in the
+-- pool: its identifier, prefixed where it would hide a prelude type.
+privateDataName :: TVar -> Text
+privateDataName gv = let n = tvarIdentifier gv in if Set.member n rustPreludeTypes then "Mlc" <> n else n
 
 -- | Whether the user maps this @data@ type to a Rust type of their own, whose
 -- arms are tuple variants (RUST-4).
@@ -2345,6 +2433,7 @@ recordImpls handle gd name params = do
 planRustPublic :: [SerialManifold] -> RustM ()
 planRustPublic es = do
   homes <- CMS.gets rsTypeHomes
+  ddefs <- CMS.gets rsDataDefs
   cscope <- CMS.gets rsCScope
   defs <- CMS.gets rsGenDefs
   let unparameterized gv = case Map.lookup gv cscope of
@@ -2390,6 +2479,7 @@ planRustPublic es = do
           [(gv, map snd (gdFields gd)) | (gv, gd) <- Map.toList candidates]
             <> [(gv, concatMap snd arms) | (FV gv _, _, arms) <- vars]
             <> [(gv, []) | (FV gv _, _, _) <- enums]
+            <> [(gv, concatMap snd (ddArms dd)) | (gv, dd) <- Map.toList ddefs, nameOk gv, all (isIdentifier . nativeParam) (nativeDataParams dd)]
       recPublic = Set.intersection placed (Map.keysSet candidates)
   CMS.modify $ \s -> s {rsRecords = recDefs, rsRecordNames = nameAll recPublic}
   unnamed <- filterM (fmap not . usesParams) (Map.elems recDefs)
@@ -2432,7 +2522,7 @@ planRustPublic es = do
           <> [ "the generated Rust name " <> n <> " would name both " <> T.intercalate " and " (map unTVar gvs)
              | (n, gvs) <- Map.toList (Map.fromListWith (flip (<>)) ([(n, [gv]) | (gv, n) <- Map.toList names] <> [(n <> "Fields", [gv]) | (gv, n) <- Map.toList names, Set.member gv handles]
                    <> [ (n <> "_" <> c, [gv])
-                      | (gv, arms) <- Map.toList (Map.fromList [(gv, arms) | (FV gv _, _, arms) <- vars])
+                      | (gv, arms) <- Map.toList (Map.fromList ([(gv, arms) | (FV gv _, _, arms) <- vars] <> [(gv, ddArms dd) | (gv, dd) <- Map.toList ddefs]))
                       , Just n <- [Map.lookup gv names]
                       , (c, _ : _) <- arms
                       ]))
@@ -2483,7 +2573,13 @@ rustModIdent c
 
 -- | Types of the Rust prelude, which no generated type may be named.
 rustPreludeTypes :: Set.Set Text
-rustPreludeTypes = Set.fromList ["Vec", "String", "Option", "Result", "Box", "Some", "None", "Ok", "Err"]
+rustPreludeTypes =
+  Set.fromList
+    [ "Vec", "String", "Option", "Result", "Box", "Some", "None", "Ok", "Err", "ToString", "ToOwned"
+    , "Fn", "FnMut", "FnOnce", "Send", "Sync", "Sized", "Unpin", "Clone", "Copy", "Drop", "Default"
+    , "Eq", "PartialEq", "Ord", "PartialOrd", "Iterator", "IntoIterator", "DoubleEndedIterator"
+    , "ExactSizeIterator", "Extend", "FromIterator", "From", "Into", "TryFrom", "TryInto", "AsRef", "AsMut"
+    ]
 
 -- | Module path components Rust cannot spell even as raw identifiers.
 rustUnspellable :: Set.Set Text
