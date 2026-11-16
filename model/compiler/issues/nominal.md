@@ -83,3 +83,10 @@ Plan: /work/plans/nominal-types/PLAN.md, phase A stages P1-P4.
   not equal to the same instance spelled directly, so it unrolls one level
   more before being cut. These go away when declared types are referred to
   by key (phase B).
+- **Nexus value validation resolves back-references by name only.**
+  [read, 2026-11-16] Deviates from NOM-6. Nexus.hs validateValueAgainstAST
+  keeps a name-keyed environment of the records on the path (RecEnv) and
+  resolves a back-reference by name, ignoring arguments and `#k`, so an
+  @unroll or default value can be checked against the wrong instance where
+  a back-reference means an outer instance of the same name. Same class as
+  the resolveWireName fallback above.

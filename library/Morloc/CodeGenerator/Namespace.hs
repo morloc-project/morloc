@@ -27,6 +27,9 @@ module Morloc.CodeGenerator.Namespace
     -- ** Types used in final translations
   , TypeM (..)
   , TypeF (..)
+  , declaredKey
+  , typeFKey
+  , argFKey
   , mapChildren
   , childrenOf
   , KArgF (.., NatVoidK)
@@ -165,6 +168,7 @@ module Morloc.CodeGenerator.Namespace
   , renderSrcLocForDebug
   ) where
 
+import Morloc.CodeGenerator.Nominal
 import Data.Foldable (toList)
 import Control.Monad.Identity (runIdentity)
 import qualified Data.Char as Char
@@ -211,6 +215,44 @@ data TypeF
   | VariantF FVar [ArgF] [(T.Text, [TypeF])]
   | OptionalF TypeF
   deriving (Show, Ord, Eq)
+
+-- | The key of an expanded or tied occurrence of a declared type (NOM-1):
+-- its name and the arguments it carries. Every key is at the native level:
+-- an occurrence on the unpacked side carries its native arguments, so it
+-- has its native type's key. An anonymous record is not a declared type,
+-- and a declared type referred to by name alone (an opaque 'VarF' or
+-- 'AppF') is not read as one.
+declaredKey :: TypeF -> Maybe NomKey
+declaredKey t = case typeFKey t of
+  KNom k -> Just k
+  _ -> Nothing
+
+-- | A type as a key argument: morloc names, every expanded or tied
+-- declared type its key, an anonymous record its fields.
+typeFKey :: TypeF -> KeyType
+typeFKey t = case t of
+  UnkF (FV v _) -> KUnk v
+  VarF (FV v _) -> KVar v
+  FunF as r -> KFun (map typeFKey as) (typeFKey r)
+  AppF h as -> KApp (typeFKey h) (map argFKey as)
+  OptionalF x -> KOpt (typeFKey x)
+  NamF o (FV v _) ps rs
+    | v == anonRecordVar -> KAnon o [(k, typeFKey x) | (k, x) <- rs]
+    | otherwise -> key v ps
+  RecF (FV v _) ps -> key v ps
+  EnumF (FV v _) ps _ -> key v ps
+  VariantF (FV v _) ps _ -> key v ps
+  where
+    key v ps = KNom (NomKey v (map argFKey ps) NativeLevel)
+
+-- | An argument as a key argument.
+argFKey :: ArgF -> KeyArg
+argFKey (TyA t) = KTy (typeFKey t)
+argFKey (KiA k) = KKind $ case k of
+  NatLitK n -> KNat n
+  StrLitK x -> KStr x
+  VoidK x -> KVoid x
+  RowK cols -> KRow [(c, typeFKey x) | (c, x) <- cols]
 
 -- | A woven argument that is not a type: a Nat or Str value, or an erased
 -- placeholder of its kind.
