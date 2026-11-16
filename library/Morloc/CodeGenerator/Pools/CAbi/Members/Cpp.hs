@@ -74,7 +74,7 @@ import Morloc.CodeGenerator.Namespace
 import Morloc.CodeGenerator.Ownership (LetMode (..), LetPlan (..), OwnCaps (..), PoolPlan (..), byValueIndices, changedSlots, emptyPoolPlan, letMode, letPlan, nativeLets, planPool)
 import Morloc.CodeGenerator.OwnershipCheck (checkManifold)
 import System.Environment (lookupEnv)
-import Morloc.CodeGenerator.GenDefs (DataDef (..), Disagreement (..), GenDef (..), dataDefs, dataNamesIn, dataUseArgs, nativeDataParams, RecordUse, disagreements, inPoolSerialASTs, placeTypes, genDefs, nativeParam, nativeParams, recordUses, templateArgs, useArgs)
+import Morloc.CodeGenerator.GenDefs (DataDef (..), Disagreement (..), GenDef (..), carriedTemplateArgs, nestedSelfUses, dataDefs, dataNamesIn, dataUseArgs, nativeDataParams, RecordUse, disagreements, inPoolSerialASTs, placeTypes, genDefs, nativeParam, nativeParams, recordUses, templateArgs, useArgs)
 import qualified Morloc.CodeGenerator.Platform as P
 import Morloc.CodeGenerator.Serial
   ( serialAstToType
@@ -370,21 +370,24 @@ instance {-# OVERLAPPABLE #-} (HasTypeF e) => HasCppType e where
         -- bind, never at the native ones an unpacked use carries (GEN-9).
         ps' <- mapM f (tyArgs (useArgs defs gv s ps rs))
         return $ renderTemplatedType s ps'
-      -- A back-reference to a generated record names its definition; one
-      -- that has none (it has parameters) needs a C++ struct of the user's
-      -- own.
-      f (RecF (FV gv (CV "struct")) _) = do
+      -- A back-reference to a generated record names its definition at
+      -- its arguments.
+      f (RecF (FV gv (CV "struct")) ps) = do
         names <- CMS.gets translatorRecordNames
+        records <- CMS.gets translatorRecords
         case Map.lookup gv names of
-          Just name -> return (pretty name)
+          Just name -> case Map.lookup gv records of
+            Just gd | not (null (nativeParams gd)) -> case carriedTemplateArgs gd ps of
+              Just args -> (pretty name <>) . CP.printRecordTemplate <$> mapM f args
+              Nothing -> do
+                CMS.modify $ \s -> s {translatorErrors = ("a reference to the record " <> unTVar gv <> " carries no arguments to spell it at") : translatorErrors s}
+                return (pretty name)
+            _ -> return (pretty name)
           Nothing -> do
-            CMS.modify $ \s -> s {translatorErrors = recursiveMsg : translatorErrors s}
+            fails <- CMS.gets translatorGenFailures
+            CMS.modify $ \s -> s {translatorErrors = ("the record " <> unTVar gv <> " has no C++ definition: "
+              <> Map.findWithDefault "its declaration could not be resolved in C++" gv fails) : translatorErrors s}
             return (pretty (tvarIdentifier gv))
-        where
-          recursiveMsg =
-            "the record " <> unTVar gv <> " refers to itself, and its C++ definition cannot be"
-              <> " generated in its module's header; give it a C++ form, `record Cpp => "
-              <> unTVar gv <> " = \"<struct-name>\"`, naming a struct you write"
       -- A reference resolved through the concrete scope: a user-mapped
       -- record is its form at the reference's arguments, as an occurrence
       -- of it is spelled. A record or alias with no C++ mapping is
@@ -2429,7 +2432,7 @@ cppField handles t d k = case t >>= recordNameOf of
 -- | A handle built in pool code, its node from the pool's allocator
 -- (CPP-6, STATE-8).
 cppHandleOf :: MDoc -> [MDoc] -> MDoc
-cppHandleOf t fields = t <> "(mlc::make_arm<" <> t <> "_fields>(" <> t <> "_fields" <> encloseSep "{" "}" ", " fields <> "))"
+cppHandleOf t fields = t <> "(mlc::make_arm<" <> CP.handleFields t <> ">(" <> CP.handleFields t <> encloseSep "{" "}" ", " fields <> "))"
 
 
 -- | Every native type reachable in this pool that names no type variable,
@@ -2493,7 +2496,7 @@ cppValueChecks es = do
           valueOf x what = "static_assert(mlc::is_value_type_v<" <> x <> ">, \"CPP-3: " <> what <> " is a value type\");"
           -- A handle's fields live in its fields struct.
           holder = case t of
-            NamF _ (FV g _) _ _ | Map.member g handles -> ty <> "_fields"
+            NamF _ (FV g _) _ _ | Map.member g handles -> CP.handleFields ty
             _ -> ty
       fields <- case t of
         NamF NamRecord _ _ rs -> return
@@ -2734,18 +2737,25 @@ planPublicTypes :: [SerialManifold] -> CppTranslator [([Text], Text)]
 planPublicTypes es = do
   homes <- CMS.gets translatorTypeHomes
   cscope <- CMS.gets translatorCScope
-  defs <- CMS.gets translatorGenDefs
+  defs0 <- CMS.gets translatorGenDefs
+  uses0 <- CMS.gets translatorRecordUses
+  -- A recursive parameterized record used at an argument holding itself
+  -- has no definition yet; its uses say why.
+  let generated0 = Map.filter ((== "struct") . gdForm) defs0
+      nested = Set.fromList (map fst (nestedSelfUses generated0 (Map.keysSet (Map.filter (\gd -> recursiveRecord (gdVar gd) (gdFields gd)) generated0)) uses0))
+      defs = Map.withoutKeys defs0 nested
+  CMS.modify $ \s -> s
+    { translatorGenDefs = defs
+    , translatorGenFailures = Map.union (Map.fromSet (\gv -> "it refers to itself and is used at an argument holding " <> unTVar gv <> ", which is not generated yet") nested) (translatorGenFailures s)
+    }
   let unparameterized gv = case Map.lookup gv cscope of
         Just ((ps, _, _, _, _) : _) -> null ps
         _ -> False
       eligible gv = unparameterized gv && Map.member gv homes
       -- Every generated record the pool uses has one definition, from its
-      -- declaration (GEN-9). One that refers to itself and has parameters
-      -- cannot be generated yet.
+      -- declaration (GEN-9); one that refers to itself is a handle.
       selfRef gd = recursiveRecord (gdVar gd) (gdFields gd)
-      recDefs0 = Map.filter ((== "struct") . gdForm) defs
-      refused = Map.filter (\gd -> selfRef gd && not (null (nativeParams gd))) recDefs0
-      recDefs = Map.difference recDefs0 refused
+      recDefs = Map.filter ((== "struct") . gdForm) defs
       recursive = Map.keysSet (Map.filter selfRef recDefs)
       -- A record may be declared in its module's header when it has a
       -- module and each of its parameters is spelled by an identifier.
@@ -2753,13 +2763,6 @@ planPublicTypes es = do
         Map.filterWithKey
           (\gv gd -> Map.member gv homes && all (isIdentifier . nativeParam) (nativeParams gd))
           recDefs
-  CMS.modify $ \s -> s
-    { translatorErrors =
-        [ "the record " <> unTVar gv <> " refers to itself and has parameters, and its C++ definition cannot be"
-            <> " generated; give it a C++ form, `record Cpp => " <> unTVar gv <> " = \"<struct-name>\"`, naming a struct you write"
-        | gv <- Map.keys refused ]
-          <> translatorErrors s
-    }
   ddefs <- CMS.gets translatorDataDefs
   -- A generated template may be declared in its module's header when each
   -- of its parameters is spelled by an identifier.
@@ -2799,7 +2802,7 @@ planPublicTypes es = do
         Nothing -> return True
       -- Which types the header holds follows from the declarations alone
       -- (GEN-10).
-      generated = Set.unions [Map.keysSet recDefs0, Set.fromList [gv | (FV gv _, _, _) <- allVarOccs], Set.fromList [gv | (FV gv _, _) <- enumOccs]]
+      generated = Set.unions [Map.keysSet recDefs, Set.fromList [gv | (FV gv _, _, _) <- allVarOccs], Set.fromList [gv | (FV gv _, _) <- enumOccs]]
       fieldsOf drop' =
         Map.fromList $
           [(gv, map snd (gdFields gd)) | (gv, gd) <- Map.toList recCands]
@@ -2876,9 +2879,9 @@ planPublicTypes es = do
             [ vsep enums
             , vsep [w | (w, _, _) <- variants]
             , vsep [hsep (filter (not . T.null . render) [CP.printTemplateHeader (paramsOf gv), "struct" <+> structOf gv <> ";"]) | (gv, _, _) <- records]
-            , vsep [CP.printHandleDecl (leaf gv) | gv <- handleGvs]
+            , vsep [CP.printHandleDecl (paramsOf gv) (leaf gv) | gv <- handleGvs]
             , vsep ordered
-            , vsep [CP.printHandleDefs (leaf gv) | gv <- handleGvs]
+            , vsep [CP.printHandleDefs [] (leaf gv) | gv <- handleGvs, null (paramsOf gv)]
             , vsep [a | (_, a, _) <- variants]
             ]
           -- Only the standard headers that declare a name the definitions use.
@@ -2981,7 +2984,8 @@ cppStdHeaderOf =
         , ("utility", ["pair", "move", "forward"])
         , ("optional", ["optional"])
         , ("variant", ["variant", "monostate"])
-        , ("memory", ["shared_ptr", "unique_ptr"])
+        , ("memory", ["shared_ptr", "unique_ptr", "make_shared"])
+        , ("type_traits", ["is_same_v"])
         , ("functional", ["function"])
         , ("cstddef", ["size_t", "ptrdiff_t", "nullptr_t", "byte"])
         , ("cstdint", fixedWidth)
@@ -3123,9 +3127,9 @@ generateRecords cfg asts = do
               | (gd, decl, ts) <- decls ]
       return $
         [inNs gd (hsep (filter (not . T.null . render) [CP.printTemplateHeader (params gd), "struct" <+> structOf gd <> ";"])) | gd <- gds]
-          <> [inNs gd (CP.printHandleDecl (leafOf gd)) | gd <- gds, handle gd]
+          <> [inNs gd (CP.printHandleDecl (params gd) (leafOf gd)) | gd <- gds, handle gd]
           <> ordered
-          <> [inNs gd (CP.printHandleDefs (leafOf gd)) | gd <- gds, handle gd]
+          <> [inNs gd (CP.printHandleDefs [] (leafOf gd)) | gd <- gds, handle gd, null (params gd)]
 
 generateSourcedSerializers ::
   Map.Map Lang Scope ->

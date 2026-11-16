@@ -1,0 +1,15 @@
+-- A recursive parameterized record referring to itself at other arguments
+-- is refused with a message naming it.
+module main (trip)
+
+import root-rust
+
+record T a b where
+  val :: a
+  sub :: ?(T b a)
+
+source Rust from "c.rs" ("same")
+same :: a -> a
+
+trip :: T Int Str -> T Int Str
+trip x = same x

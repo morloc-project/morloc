@@ -81,19 +81,48 @@
   selection never fixes an open class argument (Instances.hs `resolve` returns
   Undetermined first), so only Packable improvement (CLS-20) can reach the REC-4
   check. The message also shows the internal name `record_2`.
-- **GEN-9 does not yet cover recursive parameterized records.**
-  [read, 2026-11-16] Violates GEN-9. Every generated record and `data`
-  type a C++ or Rust pool uses is defined from its declaration (GenDefs.hs;
-  a parameterized `data` type is a template over the parameters its arms
-  hold), but a record that has native parameters and refers to itself is
-  refused with a planning error (Cpp.hs planPublicTypes, Rust.hs
-  planRustPublic `refused`), and a recursive record with a packed field is
-  refused by the frontend. A record with a parameter no field uses gets no default
+- **GEN-9 does not yet cover recursive types holding packed values or
+  phantom parameters.** [read, 2026-11-16] Violates GEN-9. Every generated
+  record and `data` type a C++ or Rust pool uses is defined from its
+  declaration (GenDefs.hs; a parameterized `data` type is a template over
+  the parameters its arms hold, a recursive parameterized record a generic
+  handle), but a recursive type holding a packed value is refused by the
+  frontend. A record with a parameter no field uses gets no default
   form in any language (Restructure.hs withDefaultKinds), so it still needs
   a line such as `record Py => Box a = dict` (spec-cost-15-4); without it
   the error misleads ("gives no cpp implementation of
   '__extract_pattern__'" [reproduced]). Plan: GEN9-DESIGN.md (in
-  /work/plans/generated-native-types) stages S9.3-S9.4.
+  /work/plans/generated-native-types) stage S9.3.
+- **A recursive parameterized record used at an argument holding itself
+  is refused.** [reproduced, 2026-11-16] Violates GEN-9. `record Container
+  a where val :: a; sub :: ?(Container a)` used at `Container (Container
+  Int)`: the inner use's form is not resolved as a generated record's (it
+  arrives with the record's own name as its form, where pairEval protected
+  the recursive alias), so it would be spelled `Container<Container>`.
+  GenDefs.nestedSelfUses refuses such a use with a message in both
+  languages (spec-gen-9-5). Fix: resolve a record's arguments from its
+  general arguments alone, as a `data` type's are (Infer.resolveArgs).
+- **A recursive parameterized record referring to itself at other
+  arguments is refused.** [reproduced, 2026-11-16] Violates GEN-9.
+  `record T a b where val :: a; sub :: ?(T b a)`: the reference `T b a`
+  is another instance of T, which a template could name (`T<T_b, T_a>`),
+  but it reaches the definition unexpanded and is refused at planning
+  (GenDefs.genDefs, spec-gen-9-5).
+- **A user-mapped recursive template record used at an argument holding
+  itself does not build.** [reproduced, 2026-11-16] Violates NATIVE-3.
+  `record Rust => Container a = "MyC<$1>"` used at `Container (Container
+  Int)` reaches rustc as `impl ToVoidstar for MyC<Container>` (E0425); in
+  C++ it is refused with "Recursive type alias `Container` has no concrete
+  C++ mapping", though it has one. Same cause as the generated case above
+  (the inner use keeps the record's name as its form).
+- **A C++ template handle cannot be built from a braced list.** [read,
+  2026-11-16] Deviates from CPP-6 (lang-cpp.md), which gives `R{{...}}` as
+  a handle's construction form. A template handle takes its fields only
+  through `template <class F> requires std::is_same_v<F, R_fields<T>>`:
+  a non-template constructor from `R_fields<T>` makes deciding whether `R<T>`
+  can be moved instantiate `R_fields<T>`, which holds `std::optional<R<T>>`,
+  a cycle g++ rejects. So `R<int>{{...}}` does not compile and a source
+  writes `R<int>(R_fields<int>{...})`. Non-template handles take both.
 - **A generated Rust `data` template can take a parameter no arm uses.**
   [read, 2026-11-16] Violates GEN-9. A template's parameters are the type
   parameters free in its declared arms (Infer.heldDataParams), but an arm

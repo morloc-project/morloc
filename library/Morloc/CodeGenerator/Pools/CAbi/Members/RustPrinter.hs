@@ -43,7 +43,7 @@ module Morloc.CodeGenerator.Pools.CAbi.Members.RustPrinter
   , printVariantImpls
   , ArmWire (..)
   , armTypeName
-  , printRustGenerics
+  , paramList
   , printRustNode
   , printRustNodeImpls
   , printUserVariantImpls
@@ -504,26 +504,29 @@ printRustStruct name params fields =
 
 -- | A record that refers to itself, declared as a handle to its fields
 -- (GEN-1), read through Deref and released through the crate's release
--- function (STATE-8).
-printRustHandle :: MDoc -> [(MDoc, MDoc)] -> MDoc
-printRustHandle name fields =
+-- function (STATE-8); with parameters, generic over them. A copy is a count
+-- of the shared node, so cloning bounds no parameter.
+printRustHandle :: MDoc -> [MDoc] -> [(MDoc, MDoc)] -> MDoc
+printRustHandle name params fields =
   vsep
-    [ "#[derive(Clone)]"
-    , "pub struct" <+> name <> "(pub ::std::mem::ManuallyDrop<::std::sync::Arc<" <> fieldsName <> ">>);"
-    , printRustStruct fieldsName [] fields
-    , "impl ::std::ops::Deref for" <+> name <+> "{"
-    , "    type Target =" <+> fieldsName <> ";"
-    , "    fn deref(&self) -> &" <> fieldsName <+> "{ &self.0 }"
+    [ "pub struct" <+> self <> "(pub ::std::mem::ManuallyDrop<::std::sync::Arc<" <> fieldsSelf <> ">>);"
+    , printRustStruct fieldsName params fields
+    , "impl" <> gens <+> "Clone for" <+> self <+> "{"
+    , "    fn clone(&self) -> Self { Self(::std::mem::ManuallyDrop::new(::std::sync::Arc::clone(&self.0))) }"
     , "}"
-    , "impl" <+> name <+> "{"
-    , "    pub fn new(f: " <> fieldsName <> ") -> Self { Self(::std::mem::ManuallyDrop::new(::std::sync::Arc::new(f))) }"
-    , "    pub fn into_parts(self) -> ::std::result::Result<" <> fieldsName <> ", ::std::sync::Arc<" <> fieldsName <> ">> {"
+    , "impl" <> gens <+> "::std::ops::Deref for" <+> self <+> "{"
+    , "    type Target =" <+> fieldsSelf <> ";"
+    , "    fn deref(&self) -> &" <> fieldsSelf <+> "{ &self.0 }"
+    , "}"
+    , "impl" <> gens <+> self <+> "{"
+    , "    pub fn new(f: " <> fieldsSelf <> ") -> Self { Self(::std::mem::ManuallyDrop::new(::std::sync::Arc::new(f))) }"
+    , "    pub fn into_parts(self) -> ::std::result::Result<" <> fieldsSelf <> ", ::std::sync::Arc<" <> fieldsSelf <> ">> {"
     , "        let mut me = ::std::mem::ManuallyDrop::new(self);"
     , "        // SAFETY: `me` is never dropped, so its node is taken exactly once."
     , "        ::std::sync::Arc::try_unwrap(unsafe { ::std::mem::ManuallyDrop::take(&mut me.0) })"
     , "    }"
     , "}"
-    , "impl Drop for" <+> name <+> "{"
+    , "impl" <> gens <+> "Drop for" <+> self <+> "{"
     , "    fn drop(&mut self) {"
     , "        // SAFETY: the field is taken exactly once, here."
     , "        crate::mlc::rec_release(unsafe { ::std::mem::ManuallyDrop::take(&mut self.0) });"
@@ -531,7 +534,10 @@ printRustHandle name fields =
     , "}"
     ]
   where
+    gens = paramList params
+    self = name <> gens
     fieldsName = name <> "Fields"
+    fieldsSelf = fieldsName <> gens
 
 -- | A record value from its fields: a struct literal, or a handle around one.
 rustRecordValue :: Bool -> MDoc -> [(Key, MDoc)] -> MDoc
@@ -605,11 +611,6 @@ printRustVariant name armDeclName armRef arms =
         ]
     armDecl c [] = pretty c <> ","
     armDecl c _ = pretty c <> parens (armRef c) <> ","
-
--- | A generic type's parameter or argument list, empty for none.
-printRustGenerics :: [MDoc] -> MDoc
-printRustGenerics [] = ""
-printRustGenerics ts = "<" <> hcat (punctuate ", " ts) <> ">"
 
 -- | The generated type of one constructor's arm, given its enum's type:
 -- @Shape@ and @Circle@ give @Shape_Circle@.
@@ -858,7 +859,7 @@ printVariantImpls params name armRef arms3 = vsep [toImpl, "", fromImpl]
     badTag = "t => panic!(\"" <> name <> ": no constructor for tag {}\", t),"
 
     -- A generic enum's impls hold at every instance whose arguments do.
-    bounded tr = if null params then "impl" else "impl" <> printRustGenerics [p <> ": " <> tr | p <- params]
+    bounded tr = if null params then "impl" else "impl" <> paramList [p <> ": " <> tr | p <- params]
     toImpl =
       vsep
         [ bounded "::rustmorloc::ToVoidstar" <+> "::rustmorloc::ToVoidstar for" <+> name <+> "{"

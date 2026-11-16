@@ -28,6 +28,8 @@ module Morloc.CodeGenerator.GenDefs
   , inPoolSerialASTs
   , placeTypes
   , templateArgs
+  , carriedTemplateArgs
+  , nestedSelfUses
   , recordArgs
   , useArgs
   , placeholders
@@ -47,7 +49,7 @@ import Morloc.CodeGenerator.Grammars.Common (intrinsicValueTypes, poolNativeType
 import Morloc.CodeGenerator.Grammars.Macro (expandMacro)
 import Morloc.CodeGenerator.Serial (makeSerialAST)
 import qualified Morloc.Data.Map as Map
-import Morloc.Data.Zip (indexed, indexedFrom, zipSame, zipWithSame)
+import Morloc.Data.Zip (indexed, indexedFrom, zipExact, zipPrefix, zipSame, zipWithSame)
 import qualified Morloc.Monad as MM
 import Control.Monad.Except (catchError)
 import Morloc.Data.Doc (pretty, render)
@@ -105,16 +107,22 @@ genDefs lang used = do
       -- and a use of the record says why.
       r <-
         ( ( \tf -> case tf of
-              NamF _ fv args rs -> (gv, Right (GenDef gv form ps [(k, foldSelf fv args x) | (k, x) <- rs]))
+              NamF o fv args rs -> (gv, Right (NamF o fv args [(k, foldSelf fv args x) | (k, x) <- rs]))
               _ -> (gv, Left "its declaration does not resolve to a record")
           )
             <$> atPlaceholders lang gv ps
         )
           `catchRejected` (\msg -> return (gv, Left msg))
       case r of
-        (_, Right gd) | (g : _) <- untiedSelf (NamF NamRecord (FV gv (CV form)) [] (gdFields gd)) ->
-          MM.throwCompilerBug ("a reference of the record " <> pretty g <> " to itself was not tied in inference")
-        _ -> return r
+        (_, Right t@(NamF _ _ _ rs)) -> case untiedSelf t of
+          ((g, True) : _) -> MM.throwCompilerBug ("a reference of the record " <> pretty g <> " to itself was not tied in inference")
+          -- A reference to the record at other arguments is another
+          -- instance of it, which is not generated yet.
+          ((g, False) : _) ->
+            return (gv, Left ("it refers to " <> unTVar g <> " at other arguments than its own, which is not generated yet"))
+          [] -> return (gv, Right (GenDef gv form ps rs))
+        (_, Right _) -> return (gv, Left "its declaration does not resolve to a record")
+        (_, Left e) -> return (gv, Left e)
 
 -- | A declared type applied to its parameters' placeholders, resolved in a
 -- language: its definition for any arguments. The state is as before.
@@ -204,15 +212,17 @@ foldSelf fv@(FV self _) ps0 t = case t of
   _ -> mapChildren (foldSelf fv ps0) t
 
 -- | The generated records referred to by name inside an occurrence of
--- themselves: references inference should have tied ('RecF'). A record
--- mapped to a native form is named through it, at any arguments.
-untiedSelf :: TypeF -> [TVar]
-untiedSelf = go Set.empty
+-- themselves, each with whether the reference is at the occurrence's own
+-- arguments: such a reference inference should have tied ('RecF'); one at
+-- other arguments names another instance. A record mapped to a native
+-- form is named through it, at any arguments.
+untiedSelf :: TypeF -> [(TVar, Bool)]
+untiedSelf = go Map.empty
   where
     go anc t = case t of
-      NamF _ (FV g (CV "struct")) _ rs -> concatMap (go (Set.insert g anc) . snd) rs
-      VarF (FV g _) | Set.member g anc -> [g]
-      AppF (VarF (FV g _)) _ | Set.member g anc -> [g]
+      NamF _ (FV g (CV "struct")) ps rs -> concatMap (go (Map.insert g ps anc) . snd) rs
+      VarF (FV g _) | Just ps <- Map.lookup g anc -> [(g, null ps)]
+      AppF (VarF (FV g _)) as | Just ps <- Map.lookup g anc -> [(g, as == ps)]
       _ -> concatMap (go anc) (childrenOf t)
 
 -- | The arguments of a use, by parameter: each placeholder in the
@@ -438,6 +448,35 @@ dataUseArgs defs dd carried arms
   where
     asRecord = GenDef (ddVar dd) (ddForm dd) [(p, KindType) | p <- ddTypeParams dd] (fields (ddArms dd))
     fields as = [(Key (c <> "." <> T.pack (show i)), t) | (c, ts) <- as, (i, t) <- indexed ts]
+
+-- | A reference's arguments at its record's native parameters: those it
+-- carries, which on the native side are its own ('RecF' has no fields to
+-- bind them).
+carriedTemplateArgs :: GenDef -> [ArgF] -> Maybe [TypeF]
+carriedTemplateArgs gd ps = do
+  pairs <- zipExact [p | (p, KindType) <- gdParams gd] (tyArgs ps)
+  return [t | (p, t) <- pairs, p `elem` nativeParams gd]
+
+-- | The recursive parameterized records used at an argument that holds the
+-- record itself (`Container (Container Int)`), which are not generated:
+-- the inner use's form is not resolved as a generated record's.
+nestedSelfUses :: Map.Map TVar GenDef -> Set.Set TVar -> [RecordUse] -> [(TVar, [ArgF])]
+nestedSelfUses defs recursive uses =
+  unique
+    [ (gv, ps)
+    | (gv, _, ps, _) <- uses
+    , Set.member gv recursive
+    , Just gd <- [Map.lookup gv defs]
+    , not (null (nativeParams gd))
+    , any (mentions gv) (tyArgs ps)
+    ]
+  where
+    mentions g t = case t of
+      NamF _ (FV g' _) _ _ | g' == g -> True
+      RecF (FV g' _) _ | g' == g -> True
+      VarF (FV g' _) | g' == g -> True
+      AppF (VarF (FV g' _)) _ | g' == g -> True
+      _ -> any (mentions g) (childrenOf t)
 
 -- | A use's arguments, in the definition's parameter order.
 templateArgs :: Map.Map TVar GenDef -> GenDef -> [(Key, TypeF)] -> Either T.Text [TypeF]

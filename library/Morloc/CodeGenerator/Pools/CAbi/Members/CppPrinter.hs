@@ -37,6 +37,7 @@ module Morloc.CodeGenerator.Pools.CAbi.Members.CppPrinter
   , printDeserializerWith
   , printHandleDecl
   , printHandleDefs
+  , handleFields
   , WireField (..)
   , printArmMarshallers
   , printRecordMarshallers
@@ -646,16 +647,23 @@ printStructTypedef params rname fields = vsep [template, struct]
         (vsep [t <+> k <> ";" | (k, t) <- fields])
         <> ";"
 
+-- | The struct holding a handle's fields: @R_fields@ for @R@, and for a
+-- template instance the suffix goes before the arguments (@R_fields<int>@).
+handleFields :: MDoc -> MDoc
+handleFields n = armName n "fields"
+
 -- | A record that refers to itself, declared as a handle to its fields
--- (CPP-6).
-printHandleDecl :: MDoc -> MDoc
-printHandleDecl name =
+-- (CPP-6). A template over parameters defines its constructors in the
+-- class, and takes its fields only as exactly its fields type: deciding
+-- whether the handle can be moved must not instantiate the fields struct,
+-- which holds the handle.
+printHandleDecl :: [MDoc] -> MDoc -> MDoc
+printHandleDecl params name =
   vsep
-    [ "struct" <+> name
+    [ templatePrefix params <> "struct" <+> name
     , "{"
     , "    std::shared_ptr<const " <> fields <> "> p;"
-    , "    " <> name <> "();"
-    , "    explicit " <> name <> "(" <> fields <> " f);"
+    , indent 4 (vsep ctors)
     , "    explicit " <> name <> "(std::shared_ptr<const " <> fields <> "> q) : p(std::move(q)) {}"
     , "    " <> name <> "(const " <> name <> "&) = default;"
     , "    " <> name <> "(" <> name <> "&&) noexcept = default;"
@@ -666,11 +674,27 @@ printHandleDecl name =
     , "};"
     ]
   where
-    fields = name <> "_fields"
+    fields = handleFields (name <> printRecordTemplate params)
+    ctors
+      | null params = [name <> "();", "explicit " <> name <> "(" <> fields <> " f);"]
+      | otherwise =
+          [ name <> "() {"
+          , "    static const auto mlc_empty = std::shared_ptr<const " <> fields <> ">(std::make_shared<" <> fields <> ">());"
+          , "    p = mlc_empty;"
+          , "}"
+          , "template <class F> requires std::is_same_v<F, " <> fields <> ">"
+          , "#ifdef MLC_REC_HPP"
+          , "explicit " <> name <> "(F f) : p(mlc::make_arm<" <> fields <> ">(std::move(f))) {}"
+          , "#else"
+          , "explicit " <> name <> "(F f) : p(std::make_shared<" <> fields <> ">(std::move(f))) {}"
+          , "#endif"
+          ]
 
--- | The definitions of a handle's constructors, after its fields struct.
-printHandleDefs :: MDoc -> MDoc
-printHandleDefs name =
+-- | The definitions of a handle's constructors, after its fields struct; a
+-- template's are in its class.
+printHandleDefs :: [MDoc] -> MDoc -> MDoc
+printHandleDefs (_ : _) _ = ""
+printHandleDefs [] name =
   vsep
     [ "inline " <> name <> "::" <> name <> "() {"
     , "    static const auto mlc_empty = std::shared_ptr<const " <> fields <> ">(std::make_shared<" <> fields <> ">());"
@@ -683,7 +707,7 @@ printHandleDefs name =
     , "#endif"
     ]
   where
-    fields = name <> "_fields"
+    fields = handleFields name
 
 -- | Render the write step of a struct: each field into its slot.
 printSerializer ::
@@ -744,7 +768,7 @@ printDeserializerWith handle params rtype fields =
 |]
   where
     open =
-      [ "auto mlc_node = mlc::make_arm<" <> rtype <> "_fields>();" | handle ]
+      [ "auto mlc_node = mlc::make_arm<" <> handleFields rtype <> ">();" | handle ]
         <> [ "*out = " <> rtype <> "(mlc_node);" | handle ]
     target = if handle then "mlc_node->" else "out->" :: MDoc
     readField :: Int -> MDoc -> MDoc
@@ -786,7 +810,7 @@ printRecordMarshallers handle params rtype fields =
         ]
     member = if handle then "->" else "." :: MDoc
     open =
-      [ "auto mlc_node = mlc::make_arm<" <> rtype <> "_fields>();" | handle ]
+      [ "auto mlc_node = mlc::make_arm<" <> handleFields rtype <> ">();" | handle ]
         <> [ "*out = " <> rtype <> "(mlc_node);" | handle ]
     target = if handle then "mlc_node->" else "out->" :: MDoc
     param i = "schema->parameters[" <> pretty i <> "]"

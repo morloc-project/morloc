@@ -104,7 +104,7 @@ import qualified Morloc.Version as MV
 import Morloc.Quasi
 import System.Directory (findExecutable)
 import System.FilePath (takeDirectory)
-import Morloc.CodeGenerator.GenDefs (DataDef (..), Disagreement (..), GenDef (..), armDataParams, dataDefs, dataNamesIn, dataUseArgs, nativeDataParams, RecordUse, disagreements, inPoolSerialASTs, placeTypes, checkUse, genDefs, nativeParam, nativeParams, placeholders, recordUses, templateArgs, useArgs)
+import Morloc.CodeGenerator.GenDefs (DataDef (..), Disagreement (..), GenDef (..), carriedTemplateArgs, nestedSelfUses, armDataParams, dataDefs, dataNamesIn, dataUseArgs, nativeDataParams, RecordUse, disagreements, inPoolSerialASTs, placeTypes, checkUse, genDefs, nativeParam, nativeParams, placeholders, recordUses, templateArgs, useArgs)
 
 -- | Duplicated here (as in Cpp.hs) to match data/lang/rust/lang.yaml. The
 -- second field is the source extension and must match lang.yaml's @extension@
@@ -412,19 +412,24 @@ rustTypeOf = f
     f (NamF _ (FV gv (CV s)) ps rs) = do
       defs <- CMS.gets rsGenDefs
       nominalTypeName s (useArgs defs gv s ps rs)
-    -- A reference to a record: a generated one names its definition; one
-    -- that has none (it has parameters) needs a Rust struct of the user's
-    -- own.
-    f (RecF (FV gv (CV "struct")) _) = do
+    -- A reference to a record: a generated one names its definition at
+    -- its arguments.
+    f (RecF (FV gv (CV "struct")) ps) = do
       names <- CMS.gets rsRecordNames
+      records <- CMS.gets rsRecords
       case Map.lookup gv names of
-        Just name -> return (pretty name)
+        Just name -> case Map.lookup gv records of
+          Just gd | not (null (nativeParams gd)) -> case carriedTemplateArgs gd ps of
+            Just args -> (pretty name <>) . RP.paramList <$> mapM rustFieldType args
+            Nothing -> do
+              CMS.modify $ \s -> s {rsErrors = ("a reference to the record " <> unTVar gv <> " carries no arguments to spell it at") : rsErrors s}
+              return (pretty name)
+          _ -> return (pretty name)
         Nothing -> do
+          fails <- CMS.gets rsGenFailures
           CMS.modify $ \s -> s
-            { rsErrors =
-                ( "the record " <> unTVar gv <> " refers to itself, and its Rust definition cannot be"
-                    <> " generated in its module's file; give it a Rust form, `record Rust => "
-                    <> unTVar gv <> " = \"<struct-name>\"`, naming a struct you write" ) : rsErrors s }
+            { rsErrors = ("the record " <> unTVar gv <> " has no Rust definition: "
+                <> Map.findWithDefault "its declaration could not be resolved in Rust" gv fails) : rsErrors s }
           return (pretty (tvarIdentifier gv))
     -- A user-mapped record is spelled from its form at the reference's
     -- arguments, as an occurrence of it is.
@@ -2116,7 +2121,7 @@ generateRustVariants closureAsts es = do
             arms' <- mapM (\(c, ts) -> (,) c <$> mapM rustFieldType ts) (ddArms dd)
             CMS.modify $ \s -> s {rsNeedsNode = rsNeedsNode s || any (not . null . snd) arms'}
             let params = map (pretty . nativeParam) (nativeDataParams dd)
-                generics ps = RP.printRustGenerics (map (pretty . nativeParam) ps)
+                generics ps = RP.paramList (map (pretty . nativeParam) ps)
                 armDecl n c = pretty (render n <> "_" <> c) <> generics (armDataParams dd c)
                 decl n = RP.printRustVariant (n <> generics (nativeDataParams dd)) (armDecl n) (armDecl n) arms'
             decls <- declareOrKeep (Just [c | (c, _ : _) <- arms']) gv decl (pretty (privateDataName gv))
@@ -2162,7 +2167,7 @@ generateRustVariants closureAsts es = do
         Just dd | not userMapped, T.any (== '$') cvText -> do
           args <- mapM (\(p, t) -> (,) p <$> rustFieldType t) (zipPrefix (ddTypeParams dd) (tyArgs (dataUseArgs defs dd ps arms)))
           let headName = T.takeWhile (/= '<') (render name)
-          return $ \c -> pretty (headName <> "_" <> c) <> RP.printRustGenerics [d | p <- armDataParams dd c, Just d <- [lookup p args]]
+          return $ \c -> pretty (headName <> "_" <> c) <> RP.paramList [d | p <- armDataParams dd c, Just d <- [lookup p args]]
         _ -> return (RP.armTypeName name)
       let impls = [RP.printVariantImpls [] name armRef wired | not hasFun || isJust wireArms]
       if userMapped
@@ -2445,12 +2450,9 @@ planRustPublic es = do
       nameOk gv = maybe False (not . (`Set.member` rustPreludeTypes) . typeHomeName) (Map.lookup gv homes)
       eligible gv = unparameterized gv && nameOk gv
       -- Every generated record the pool uses has one definition, from its
-      -- declaration (GEN-9). One that refers to itself and has parameters
-      -- cannot be generated yet.
+      -- declaration (GEN-9); one that refers to itself is a handle.
       selfRef gd = recursiveRecord (gdVar gd) (gdFields gd)
-      recDefs0 = Map.filter ((== "struct") . gdForm) defs
-      refused = Map.filter (\gd -> selfRef gd && not (null (nativeParams gd))) recDefs0
-      recDefs = Map.difference recDefs0 refused
+      recDefs = Map.filter ((== "struct") . gdForm) defs
       -- Rust refuses a generic parameter no field's type names (E0392); a
       -- parameter held only inside a record the pool keeps to itself is
       -- not named.
@@ -2473,7 +2475,7 @@ planRustPublic es = do
   -- files hold.
   let candidates = Map.filterWithKey (\gv gd -> nameOk gv && all (isIdentifier . nativeParam) (nativeParams gd)) recDefs
       nameAll pub = Map.mapWithKey (\gv _ -> if Set.member gv pub then maybe (privateName gv) qualifiedRustName (Map.lookup gv homes) else privateName gv) recDefs
-      generated = Set.unions [Map.keysSet recDefs0, Set.fromList [gv | (FV gv _, _, _) <- allVars], Set.fromList [gv | (FV gv _, _, _) <- allEnums]]
+      generated = Set.unions [Map.keysSet recDefs, Set.fromList [gv | (FV gv _, _, _) <- allVars], Set.fromList [gv | (FV gv _, _, _) <- allEnums]]
       placed =
         placeTypes (rustImportable Set.empty Set.empty) generated . Map.fromList $
           [(gv, map snd (gdFields gd)) | (gv, gd) <- Map.toList candidates]
@@ -2494,6 +2496,9 @@ planRustPublic es = do
   -- Every use of a generated record is an instance of its definition
   -- (GEN-9).
   uses <- CMS.gets rsRecordUses
+  forM_ (nestedSelfUses recDefs handles uses) $ \(gv, _) ->
+    CMS.modify $ \s -> s {rsErrors = ("the record " <> unTVar gv <> " refers to itself and is used at an argument holding " <> unTVar gv
+      <> ", which is not generated yet") : rsErrors s}
   forM_ (disagreements recDefs uses) $ \(gv, d) -> do
     msg <- case d of
       FieldDiffers k decl use -> do
@@ -2513,9 +2518,6 @@ planRustPublic es = do
             <> " holds is spelled by none of its fields' Rust forms; give it a Rust form, `record Rust => "
             <> unTVar (gdVar gd) <> " = \"...\"`"
         | gd <- unnamed ]
-          <> [ "the record " <> unTVar gv <> " refers to itself and has parameters, and its Rust definition cannot be"
-            <> " generated; give it a Rust form, `record Rust => " <> unTVar gv <> " = \"<struct-name>\"`, naming a struct you write"
-        | gv <- Map.keys refused ]
           <> [ "the generated Rust type for " <> unTVar gv <> " cannot be written: its module path would hold `" <> c
             <> "`, which Rust cannot spell as a module name"
              | (gv, c) <- badWords ]
@@ -2767,7 +2769,7 @@ generateRustStructs closureAsts es = do
             -- which may vary.
             fields <- mapM (\(k, t) -> (\ty -> (RP.rustFieldIdent k, ty, isVarWidthF t || not (null (placeholders t)))) <$> rustFieldType t) (gdFields gd)
             let printDecl n
-                  | handle = RP.printRustHandle n [(fld, ty) | (fld, ty, _) <- fields]
+                  | handle = RP.printRustHandle n params [(fld, ty) | (fld, ty, _) <- fields]
                   | otherwise = RP.printRustStruct n params [(fld, ty) | (fld, ty, _) <- fields]
             decl <- declareRecord gv printDecl
             impls <- recordImpls handle gd name params

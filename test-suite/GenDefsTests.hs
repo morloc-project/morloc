@@ -114,7 +114,7 @@ genDefsTests =
     , testCase "a recursive use whose field refers to the use agrees" $
         assertBool "agrees" (isNothing (checkUse defs treeDef [] [(Key "lab", pairOf [int64] int64), (Key "kids", listOf (RecF (FV (TV "Tree") (CV "struct")) []))]))
     , testCase "an untied reference of a record to itself is found" $
-        untiedSelf (NamF NamRecord (FV (TV "Tree") (CV "struct")) [] [(Key "kids", listOf (var (TV "Tree") (CV "Tree")))]) @?= [TV "Tree"]
+        untiedSelf (NamF NamRecord (FV (TV "Tree") (CV "struct")) [] [(Key "kids", listOf (var (TV "Tree") (CV "Tree")))]) @?= [(TV "Tree", True)]
     , testCase "a tied reference and a reference to another record are not untied" $
         untiedSelf (NamF NamRecord (FV (TV "Tree") (CV "struct")) [] [(Key "kids", listOf (RecF (FV (TV "Tree") (CV "struct")) [])), (Key "o", var (TV "Other") (CV "Other"))]) @?= []
     , testCase "Pair (Pair Int) keeps its inner Pair distinct" $
