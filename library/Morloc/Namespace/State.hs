@@ -21,6 +21,7 @@ module Morloc.Namespace.State
   ( -- * Morloc monad
     MorlocMonadGen
   , MorlocMonad
+  , MorlocM
   , MorlocReturn
   , MorlocState (..)
   , TypeHome (..)
@@ -116,7 +117,10 @@ type MorlocMonadGen c e l s a =
 type MorlocReturn a = ((Either MorlocError a, [Text]), MorlocState)
 
 -- | The concrete compiler monad used throughout the pipeline
-type MorlocMonad a = MorlocMonadGen Config MorlocError [Text] MorlocState a
+type MorlocMonad a = MorlocM a
+
+-- | 'MorlocMonad' as a type constructor.
+type MorlocM = ReaderT Config (ExceptT MorlocError (WriterT [Text] (StateT MorlocState IO)))
 
 ---- State
 
@@ -426,6 +430,10 @@ data MorlocState = MorlocState
   -- ^ Module-level description lines (from docstrings before module declaration)
   , stateModuleEpilogues :: [[Text]]
   -- ^ Epilogue blocks for the top-level help output
+  , stateRecordAncestors :: Set.Set (TVar, [TypeU])
+  -- ^ The records, by name and general arguments, whose fields are being
+  -- resolved to a target language: a reference to one of them is tied to
+  -- it (CodeGenerator.Infer 'Knot').
   , stateVariantAncestors :: Set.Set (TVar, [TypeU])
   -- ^ `data` type INSTANTIATIONS whose arms are currently being resolved
   -- to a target language: the type's name paired with its applied type
@@ -1214,6 +1222,7 @@ instance Defaultable MorlocState where
       , stateDebugTrace = False
       , stateModuleDoc = []
       , stateModuleEpilogues = []
+      , stateRecordAncestors = Set.empty
       , stateVariantAncestors = Set.empty
       , stateVariantArgsResolving = Set.empty
       }

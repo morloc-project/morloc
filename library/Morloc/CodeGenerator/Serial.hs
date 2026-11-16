@@ -27,10 +27,6 @@ module Morloc.CodeGenerator.Serial
   , Unpacked
   , unpackedAsTypeF
   , generatedObject
-  , recordsConvertInNode
-  , isSerializableThroughNodes
-  , serialAstToTypeThroughNodes
-  , wireSerialAstToTypeThroughNodes
   , containsFunT
   , containsEffectT
   , checkReadDataType
@@ -117,7 +113,7 @@ serialAstToTypeWith' onPack onClosure = go
     go (SerialList v Nothing s) = AppF (VarF v) [TyA (go s)]
     go (SerialTuple v ss) = AppF (VarF v) (map (TyA . go) ss)
     go (SerialObject o n ps rs) = NamF o n ps (map (second go) rs)
-    go (SerialRec v _) = RecF v
+    go (SerialRec v ps) = RecF v ps
     go (SerialEnum v ps ns) = EnumF v ps ns
     go (SerialVariant v ps as) = VariantF v ps [(n, map go fs) | (n, fs) <- as]
     go (SerialReal x) = VarF x
@@ -157,44 +153,19 @@ newtype Unpacked = Unpacked TypeF
 unpackedAsTypeF :: Unpacked -> TypeF
 unpackedAsTypeF (Unpacked t) = t
 
+-- | The unpacked type of a serial form. A generated record converts its
+-- own fields (GEN-14), so it is unpacked as it is held: its native type.
 serialAstToType :: SerialAST -> Unpacked
 serialAstToType = Unpacked . unpackedTypeF
   where
-    unpackedTypeF = serialAstToTypeWith (\ins out -> FunF (map unpackedTypeF ins) (unpackedTypeF out))
+    unpackedTypeF = throughNodes (\ins out -> FunF (map unpackedTypeF ins) (unpackedTypeF out))
 
--- | Whether a language's generated records convert their own fields
--- (GEN-14), so a value holding one is written as it is held.
-recordsConvertInNode :: Lang -> Bool
-recordsConvertInNode lang = langName lang `elem` ["cpp", "rust"]
-
--- | A generated record: one whose marshalling node converts its own fields
--- in a pool that generates its records (GEN-14).
+-- | A generated record, whose marshalling node converts its own fields
+-- (GEN-14). Only C++ and Rust pools have such nodes; 'makeSerialAST'
+-- refuses the form in any other language.
 generatedObject :: SerialAST -> Bool
 generatedObject (SerialObject _ (FV _ (CV "struct")) _ _) = True
 generatedObject _ = False
-
--- | 'isSerializable' in a pool whose generated records convert their own
--- fields: such a record is written as it is held.
-isSerializableThroughNodes :: SerialAST -> Bool
-isSerializableThroughNodes s = case s of
-  _ | generatedObject s -> True
-  SerialPack _ _ -> False
-  SerialList _ _ x -> isSerializableThroughNodes x
-  SerialTuple _ xs -> all isSerializableThroughNodes xs
-  SerialObject _ _ _ rs -> all (isSerializableThroughNodes . snd) rs
-  SerialOptional _ x -> isSerializableThroughNodes x
-  SerialVariant _ _ as -> all (all isSerializableThroughNodes . snd) as
-  _ -> isSerializable s
-
--- | 'serialAstToType' in a pool whose generated records convert their own
--- fields: a generated record is unpacked as it is held, its native type.
-serialAstToTypeThroughNodes :: SerialAST -> Unpacked
-serialAstToTypeThroughNodes = Unpacked . throughNodes (\ins out -> FunF (map (unpackedAsTypeF . serialAstToTypeThroughNodes) ins) (unpackedAsTypeF (serialAstToTypeThroughNodes out)))
-
--- | 'wireSerialAstToType' in a pool whose generated records convert their
--- own fields.
-wireSerialAstToTypeThroughNodes :: TypeF -> SerialAST -> Unpacked
-wireSerialAstToTypeThroughNodes wire = Unpacked . throughNodes (\_ _ -> wire)
 
 throughNodes :: ([SerialAST] -> SerialAST -> TypeF) -> SerialAST -> TypeF
 throughNodes onClosure s
@@ -233,7 +204,7 @@ serialAstToNativeType =
 -- leaf (e.g. the C++ @std::tuple<...>@ or Rust @(String,i64,Vec<Vec<u8>>)@
 -- injected via the leaf's concrete name).
 wireSerialAstToType :: TypeF -> SerialAST -> Unpacked
-wireSerialAstToType wire = Unpacked . serialAstToTypeWith (\_ _ -> wire)
+wireSerialAstToType wire = Unpacked . throughNodes (\_ _ -> wire)
 
 -- | True when a function type appears anywhere in the type (a bare function, or
 -- one nested in a list/tuple/record/optional/effect). Used both by the nexus
@@ -713,14 +684,8 @@ shallowType (SerialIStream x _) = VarF x
 shallowType (SerialClosure ins out) = FunF (map shallowType ins) (shallowType out)
 shallowType (SerialNull x) = VarF x
 shallowType (SerialOptional _ s) = OptionalF (shallowType s)
--- A back-reference re-uses the ancestor's NamF identity; downstream
--- consumers resolve it structurally via the FVar's general TVar.
--- The FVar's CVar slot is unreliable -- it carries whatever bnd-
--- protected text @weave@ produced for the position. Consumers that
--- need the language-side name look it up in cscope (e.g. C++ does
--- this in 'CppTranslator.hs' to distinguish legitimate user mappings
--- from pairEval bnd-protect leaks).
-shallowType (SerialRec v _) = RecF v
+-- A back-reference is a reference to its record at its arguments.
+shallowType (SerialRec v ps) = RecF v ps
 shallowType (SerialEnum v ps ns) = EnumF v ps ns
 shallowType (SerialVariant v ps as) = VariantF v ps [(n, map shallowType fs) | (n, fs) <- as]
 shallowType (SerialUnknown v) = UnkF v
@@ -1002,6 +967,8 @@ makeSerialAST m lang t0 = do
 
   ast <- makeSerialAST' gscope typepackers Set.empty t0
   checkNested m lang ast
+  when (langName lang `notElem` ["cpp", "rust"] && any generatedObject (serialSubtrees ast)) $
+    MM.throwCompilerBug ("a" <+> pretty lang <+> "record has the form of a record a compiled pool marshals itself")
   return ast
   where
     -- The @Set TypeF@ is the types on the path above this one, and it is
@@ -1056,13 +1023,27 @@ makeSerialAST m lang t0 = do
           as' <- mapM (\(n, fs) -> (,) n <$> mapM (makeSerialAST' gscope typepackers anc') fs) as
           return $ SerialVariant v ps as'
       where
-        isInstantiation g qs (VariantF (FV g' _) qs' _) = g == g' && qs == qs'
+        -- A back-edge reached while the type's own arguments were resolved
+        -- carries none ('backEdge'): it is the instantiation being built,
+        -- the one of its name on the path.
+        isInstantiation g qs a@(VariantF (FV g' _) qs' _) =
+          g == g' && (qs == qs' || (null qs && [a] == [b | b@(VariantF (FV g'' _) _ _) <- Set.toList anc, g'' == g]))
         isInstantiation _ _ _ = False
+    -- A record's reference to an enclosing occurrence of itself, tied in
+    -- inference. One met off its record's path (a field type taken out on
+    -- its own) is the record unfolded: its type inferred again.
+    makeSerialAST' gscope typepackers anc r@(RecF v@(FV gv _) ps)
+      | any occurrence (Set.toList anc) = return $ SerialRec v ps
+      | otherwise = do
+          unfolded <- inferConcreteType lang (Idx m (typeOf (fst (unweaveTypeF r))))
+          makeSerialAST' gscope typepackers anc unfolded
+      where
+        occurrence (NamF _ (FV g _) qs _) = g == gv && qs == ps
+        occurrence _ = False
     -- Cycle detection: a bare reference to a type currently being lowered is
-    -- a guarded self-recursive back-edge (TypeEval leaves these as
-    -- VarU/VarF, and a `data` type's own arms cannot be resolved against
-    -- themselves either). This is the one occurrence that carries a name
-    -- rather than a type, so it is matched by name against whatever
+    -- a guarded self-recursive back-edge of a recursive alias or `data`
+    -- type (a record's arrives tied, as 'RecF'). It carries a name rather
+    -- than a type, so it is matched by name against whatever
     -- instantiation is on the path above it.
     makeSerialAST' gscope typepackers anc ft@(VarF v@(FV gv cv))
       | any ((== Just gv) . typeFHead) (Set.toList anc) = return $ SerialRec v []
@@ -1541,10 +1522,10 @@ makeSerialAST m lang t0 = do
 
     -- Cycle detection at the NamF entry. If we are already lowering this
     -- record on the path above us, emit a back-ref; otherwise add it to the
-    -- ancestor set and recurse on the fields. A record's genuine
-    -- self-reference arrives as a bare name and is caught by the VarF
-    -- branch; what arrives here as a whole record is a distinct type even
-    -- when it shares a name, as the inner @P Int@ of a @P (P Int)@ does.
+    -- ancestor set and recurse on the fields. A record's reference to
+    -- itself arrives tied ('RecF'); what arrives here as a whole record is
+    -- a distinct type even when it shares a name, as the inner @P Int@ of
+    -- a @P (P Int)@ does.
     makeSerialAST' gscope typepackers anc t@(NamF o n ps rs)
       | Set.member t anc = return $ SerialRec n ps
       | otherwise = do
@@ -1603,7 +1584,7 @@ typeFHead (AppF (VarF (FV gv _)) _) = Just gv
 typeFHead (NamF _ (FV gv _) _ _) = Just gv
 typeFHead (VariantF (FV gv _) _ _) = Just gv
 typeFHead (EnumF (FV gv _) _ _) = Just gv
-typeFHead (RecF (FV gv _)) = Just gv
+typeFHead (RecF (FV gv _) _) = Just gv
 typeFHead _ = Nothing
 
 -- | The pack/unpack pair a language implements an instance with.
@@ -1743,7 +1724,7 @@ resolvePacker lang m0 resolvedType@(AppF _ _) pin = do
                   return . Left $
                     "its general form" <+> pretty u <+> "does not cover" <+> pretty ga <> ":" <+> typeErr
                 (Right g2) ->
-                  case weave gscope (apply g2 (existential gc)) unpackedConcreteType of
+                  case weave gscope Set.empty (apply g2 (existential gc)) unpackedConcreteType of
                     Right t -> return (Right t)
                     Left e ->
                       MM.throwSourcedError m0 $
@@ -1778,10 +1759,11 @@ unweaveTypeF (OptionalF t) =
   let (gt, ct) = unweaveTypeF t
    in (OptionalU gt, OptionalU ct)
 
--- A back-reference unweaves into a bare VarU for each side; the
--- referenced NamF appears elsewhere in the surrounding TypeU/TypeF
--- and supplies the structural identity.
-unweaveTypeF (RecF (FV gv cv)) = (VarU gv, VarU (cv2tv cv))
+-- A reference to a record unweaves to the record named at its arguments.
+unweaveTypeF (RecF (FV gv cv) []) = (VarU gv, VarU (cv2tv cv))
+unweaveTypeF (RecF (FV gv cv) ps) =
+  let (gs, cs) = unzip (map unweaveArg ps)
+   in (AppU (VarU gv) gs, AppU (VarU (cv2tv cv)) cs)
 unweaveTypeF (EnumF (FV gv cv) _ _) = (VarU gv, VarU (cv2tv cv))
 unweaveTypeF (VariantF (FV gv cv) _ _) = (VarU gv, VarU (cv2tv cv))
 
@@ -1807,6 +1789,7 @@ chooseSerializationCycle (x : _) = Just x
 will need to be further reduced.
 -}
 isSerializable :: SerialAST -> Bool
+isSerializable s | generatedObject s = True
 isSerializable (SerialPack _ _) = False
 isSerializable (SerialList _ _ x) = isSerializable x
 isSerializable (SerialTuple _ xs) = all isSerializable xs

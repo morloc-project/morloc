@@ -1383,7 +1383,15 @@ recordForm pos l (TV record) name isString = do
               <> "`; write `= " <> k <> "` instead"
           ]
         return (LR.ksForm spec)
-      [] -> return name
+      -- `struct` is the form of a record the compiler generates and
+      -- marshals itself (GEN-14), so no written type may take it.
+      []
+        | name == "struct" ->
+            dfail pos . T.unpack $
+              "\"struct\" is not a " <> langName l <> " type: it is the form of a record a compiled language"
+                <> " generates; give " <> record <> " one of " <> langName l <> "'s record kinds ("
+                <> kindList <> ") or a string naming a " <> langName l <> " type"
+        | otherwise -> return name
     else case lookup name known of
       Just spec -> return (LR.ksForm spec)
       Nothing
@@ -3655,7 +3663,9 @@ desugarTypeDef sp (CstNamTypeLegacy maybeLangTok nt (v, vs) (conName, isTerminal
     Nothing -> return (Nothing, conName)
     Just tok -> do
       l <- parseLang tok
-      form <- if nt == NamObject && isTerminal
+      -- An object's string names its class; `struct` is the one string
+      -- that is a form, so it is read as a record's is.
+      form <- if nt == NamObject && isTerminal && conName /= "struct"
         then return conName
         else recordForm (startPos sp) l v conName isTerminal
       return (Just (l, True), form)

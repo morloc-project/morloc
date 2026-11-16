@@ -1091,7 +1091,7 @@ renderConcreteForm gscope (AppF (VarF (FV _ cv)) args) =
   let typeArgs = tyArgs args
   in Macro.expandMacro (unCVar cv) (map (renderConcreteForm gscope) typeArgs)
 renderConcreteForm _ (NamF _ (FV _ cv) _ _) = unCVar cv
-renderConcreteForm _ (RecF (FV _ cv)) = unCVar cv
+renderConcreteForm gscope (RecF (FV _ cv) args) = Macro.expandMacro (unCVar cv) (map (renderConcreteForm gscope) (tyArgs args))
 renderConcreteForm _ (EnumF (FV _ cv) _ _) = unCVar cv
 renderConcreteForm _ (VariantF (FV _ cv) _ _) = unCVar cv
 renderConcreteForm gscope (OptionalF t) = "?" <> renderConcreteForm gscope t

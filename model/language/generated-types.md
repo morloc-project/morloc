@@ -125,7 +125,7 @@ field keeps its declared type (EFF-2).
 
 ### GEN-9 A generated definition follows its declaration
 Intent: ruled 2026-11-15
-Tests: spec-gen-9-1, spec-gen-9-2
+Tests: spec-gen-9-1, spec-gen-9-2, spec-gen-9-3
 Code: deviates (issues/records.md)
 
 A generated record or `data` type has the declaration's type parameters as
@@ -205,7 +205,7 @@ without the pool's bounded-stack drain (STATE-8).
 
 ### GEN-14 A generated record converts its own fields, once per write
 Intent: ruled 2026-11-15
-Tests: spec-gen-14-1, spec-gen-14-2, spec-gen-14-3, spec-gen-14-4
+Tests: spec-gen-14-1, spec-gen-14-2, spec-gen-14-3, spec-gen-14-4, spec-gen-14-5, spec-gen-14-6, spec-gen-14-7, spec-gen-14-8
 Code: conforms 2026-11-16
 
 In C++ and Rust a generated record is marshalled as it is held: its node
@@ -217,7 +217,11 @@ cannot overrun the space sized for them. Where a field's conversion
 depends on the record's arguments, each instance converts as its use says;
 two morloc types that are one native type and convert a field differently
 are a compile error naming the type. A packer that fails during a write
-fails the write as any packer failure does.
+fails the write as any packer failure does. A value holding a generated
+record is written as it is held wherever the pool writes it: a call, a
+stream, a gather or fold, @save and @load. The form `struct` names a
+record the compiler generates; a language with no such kind takes no
+written type of that name.
 
 Why: converting in the node copies nothing the field does not need, and
 converting once is what makes the size of a write the size written.

@@ -88,7 +88,16 @@ inferConcreteType lang (Idx i t0) = do
     _ -> do
       concreteType <- inferConcreteTypeU lang (Idx i generalType)
       (_, gscope) <- getScope lang
-      inferConcreteTypeStructural lang i gscope generalType concreteType
+      inferConcreteTypeStructural lang i gscope generalType concreteType >>= checkTied
+
+-- | At the outermost walk, every reference to a record on the walk's path
+-- has been tied ('tieSelf').
+checkTied :: TypeF -> MorlocMonad TypeF
+checkTied tf = do
+  outermost <- Set.null <$> CMS.gets stateRecordAncestors
+  when (outermost && holdsSelfMark tf) $
+    MM.throwCompilerBug ("a record reference was not tied in" <+> pretty tf)
+  return tf
 
 -- | POLY-6: a variable nothing determined has no native form. The arguments
 -- of a `data` type are exempt here: one its fields use is checked when the
@@ -215,9 +224,15 @@ undeterminedError i0 vs = do
 -- 'weave' via 'inferConcreteTypeWeave'.
 inferConcreteTypeStructural
   :: Lang -> Int -> Scope -> TypeU -> TypeU -> MorlocMonad TypeF
-inferConcreteTypeStructural lang i gscope g c
-  | Just r <- structuralCompound gscope (inferConcreteTypeStructural lang i gscope) g c = hostConvention lang r
-  | otherwise = case (g, c) of
+inferConcreteTypeStructural lang i gscope g c = do
+  knot <- stateKnot
+  case structuralCompound gscope knot (inferConcreteTypeStructural lang i gscope) g c of
+    Just r -> hostConvention lang r
+    Nothing -> inferConcreteTypeStructural' lang i gscope g c
+
+inferConcreteTypeStructural'
+  :: Lang -> Int -> Scope -> TypeU -> TypeU -> MorlocMonad TypeF
+inferConcreteTypeStructural' lang i gscope g c = case (g, c) of
   -- A payload-bearing `data`. Its arms' field types have to be resolved to
   -- the target language here rather than in 'weave', which is pure and so
   -- cannot reach the per-language scope: weaving a field against itself
@@ -278,10 +293,7 @@ inferVariantArms lang i gscope vG vC targs = do
   -- The type is an ancestor while its arguments are resolved, so an
   -- argument that contains the type itself (@type X = Rose ?X@, whose
   -- argument is @?X@) ends at a back-edge rather than expanding forever.
-  anc0 <- CMS.gets stateVariantAncestors
-  CMS.modify (\st -> st { stateVariantAncestors = Set.insert (vG, targs) anc0 })
-  ps <- resolveArgs lang i (vG, targs)
-  CMS.modify (\st -> st { stateVariantAncestors = anc0 })
+  ps <- withVariantAncestor (vG, targs) (resolveArgs lang i (vG, targs))
   if all (null . snd) arms
     then return $ EnumF (FV vG (CV vC)) ps (map fst arms)
     else do
@@ -321,9 +333,7 @@ inferVariantArms lang i gscope vG vC targs = do
             "Cannot resolve" <+> squotes (pretty vG) <+> "applied to"
               <+> hsep (map pretty targs) <> ":"
               <+> "its expansion does not terminate."
-        CMS.modify (\st -> st { stateVariantAncestors = Set.insert (vG, targs) anc })
-        arms' <- mapM (\(n, ts) -> (,) n <$> mapM resolveField ts) arms
-        CMS.modify (\st -> st { stateVariantAncestors = anc })
+        arms' <- withVariantAncestor (vG, targs) (mapM (\(n, ts) -> (,) n <$> mapM resolveField ts) arms)
         return $ VariantF (FV vG (CV (instanceName cscope vG targs))) ps arms'
 
 -- | The name a pool knows one instantiation of a `data` type by.
@@ -384,12 +394,9 @@ backEdge lang i cscope v args = do
 -- resolving its arguments for the duration (see 'backEdge').
 resolveArgs :: Lang -> Int -> (TVar, [TypeU]) -> MorlocMonad [ArgF]
 resolveArgs lang i key@(_, args) = do
-  resolving <- CMS.gets stateVariantArgsResolving
-  CMS.modify (\st -> st { stateVariantArgsResolving = Set.insert key resolving })
   gscope <- MM.getGeneralScope
-  ps <- argsWith gscope (fst key) (argType lang i) args
-  CMS.modify (\st -> st { stateVariantArgsResolving = resolving })
-  return ps
+  withSetMember stateVariantArgsResolving (\v st -> st {stateVariantArgsResolving = v}) key $
+    argsWith gscope (fst key) (argType lang i) args
 
 -- | A short, deterministic suffix distinguishing one instantiation of a
 -- parameterized `data` from another in a language that declares types by
@@ -453,8 +460,9 @@ inferConcreteTypeStructuralRest lang i gscope g c = case (g, c) of
 
 inferConcreteTypeWeave
   :: Lang -> Int -> Scope -> TypeU -> TypeU -> MorlocMonad TypeF
-inferConcreteTypeWeave lang i gscope generalType concreteType =
-  case weave gscope generalType concreteType of
+inferConcreteTypeWeave lang i gscope generalType concreteType = do
+  anc <- CMS.gets stateRecordAncestors
+  case weave gscope anc generalType concreteType of
     (Right tf) -> return tf
     (Left _) ->
       -- Weaving fails for a parameterized definition such as
@@ -482,7 +490,7 @@ inferConcreteTypeUniversal :: Lang -> Int -> Type -> MorlocMonad TypeF
 inferConcreteTypeUniversal lang i t@(type2typeu -> generalType) = do
   gscopeUni <- CMS.gets stateGeneralTypedefs
   concreteType <- inferConcreteTypeUUniversal lang generalType
-  inferConcreteTypeUniversalStructural lang i gscopeUni t generalType concreteType
+  inferConcreteTypeUniversalStructural lang i gscopeUni t generalType concreteType >>= checkTied
 
 -- | Structural walk over (general, concrete) in universal scope. Mirrors
 -- 'inferConcreteTypeStructural' but recurses via 'inferConcreteTypeUniversal'
@@ -494,9 +502,15 @@ inferConcreteTypeUniversal lang i t@(type2typeu -> generalType) = do
 -- newtype as opaque.
 inferConcreteTypeUniversalStructural
   :: Lang -> Int -> Scope -> Type -> TypeU -> TypeU -> MorlocMonad TypeF
-inferConcreteTypeUniversalStructural lang i gscopeUni t g c
-  | Just r <- structuralCompound gscopeUni (inferConcreteTypeUniversalStructural lang i gscopeUni t) g c = hostConvention lang r
-  | otherwise = case (g, c) of
+inferConcreteTypeUniversalStructural lang i gscopeUni t g c = do
+  knot <- stateKnot
+  case structuralCompound gscopeUni knot (inferConcreteTypeUniversalStructural lang i gscopeUni t) g c of
+    Just r -> hostConvention lang r
+    Nothing -> inferConcreteTypeUniversalStructural' lang i gscopeUni t g c
+
+inferConcreteTypeUniversalStructural'
+  :: Lang -> Int -> Scope -> Type -> TypeU -> TypeU -> MorlocMonad TypeF
+inferConcreteTypeUniversalStructural' lang i gscopeUni t g c = case (g, c) of
   -- A `data` type resolves to its arms here exactly as it does in the
   -- module-scoped walk. Without this, the wire form of a parameterized
   -- `data` is asked for as though it were an ordinary applied type, and
@@ -527,8 +541,9 @@ inferConcreteTypeUniversalStructural lang i gscopeUni t g c
         return $ AppF (VarF (FV vG (CV vC))) argTfs
   _ | Just g' <- stepTowardCompound gscopeUni g c ->
         inferConcreteTypeUniversalStructural lang i gscopeUni t g' c
-  _ ->
-    case weave gscopeUni g c of
+  _ -> do
+    anc <- CMS.gets stateRecordAncestors
+    case weave gscopeUni anc g c of
       (Right tf) -> return tf
       (Left _) -> case T.evaluateStep gscopeUni g of
         (Just reducedGType)
@@ -596,9 +611,14 @@ hostConvention lang built = do
 structuralCompound
   :: Applicative f
   => Scope
+  -> Knot f
   -> (TypeU -> TypeU -> f TypeF)
   -> TypeU -> TypeU -> Maybe (f TypeF)
-structuralCompound scope walk g c = case (g, c) of
+structuralCompound scope knot walk g c = case (g, c) of
+  -- A reference to a record whose fields are being walked: marked here,
+  -- tied by 'tieSelf' once the record is built.
+  _ | Just key <- recordKey g, Set.member key (knotAncestors knot) ->
+        Just (pure (VarF (FV (selfMark key) (CV ""))))
   -- A suspension is a closure of no arguments in every pool.
   (EffectU _ g', EffectU _ c') -> Just $ FunF [] <$> walk g' c'
   (OptionalU g', OptionalU c') -> Just $ OptionalF <$> walk g' c'
@@ -607,10 +627,82 @@ structuralCompound scope walk g c = case (g, c) of
         Just $ FunF <$> zipWithSameM walk gs cs <*> walk gr cr
   (NamU o1 v1 ts1 rs1, NamU o2 v2 ts2 rs2)
     | o1 == o2 && length ts1 == length ts2 && length rs1 == length rs2 ->
-        Just $ NamF o1 (FV v1 (CV (unTVar v2)))
+        Just $ fmap (tieSelf (v1, ts1)) $ NamF o1 (FV v1 (CV (unTVar v2)))
           <$> argsWith2 scope v1 walk ts1 ts2
-          <*> zipWithSameM (\(_, g') (k, c') -> (,) k <$> walk g' c') rs1 rs2
+          <*> knotEnter knot (v1, ts1) walk (\walk' -> zipWithSameM (\(_, g') (k, c') -> (,) k <$> walk' g' c') rs1 rs2)
   _ -> Nothing
+
+-- | The mark of a reference to the record occurrence with this key: its
+-- name and its general arguments, so a reference inside another
+-- instantiation of the record is tied to the one it names.
+selfMark :: (TVar, [TypeU]) -> TVar
+selfMark key = TV ("#self:" <> MT.pack (show key))
+
+-- | Whether a type holds a mark 'tieSelf' did not replace.
+holdsSelfMark :: TypeF -> Bool
+holdsSelfMark (VarF (FV (TV n) _)) = "#self:" `MT.isPrefixOf` n
+holdsSelfMark t = any holdsSelfMark (childrenOf t)
+
+-- | The records whose fields a walk is inside, by name and general
+-- arguments, and how a walk enters one: given the walk the fields are to
+-- be walked with. A reference to one of them at its own arguments is a
+-- reference to that occurrence (GEN-1).
+data Knot f = Knot
+  { knotAncestors :: Set.Set (TVar, [TypeU])
+  , knotEnter
+      :: (TVar, [TypeU])
+      -> (TypeU -> TypeU -> f TypeF)
+      -> ((TypeU -> TypeU -> f TypeF) -> f [(Key, TypeF)])
+      -> f [(Key, TypeF)]
+  }
+
+-- | The name and arguments a type refers to a record by.
+recordKey :: TypeU -> Maybe (TVar, [TypeU])
+recordKey (VarU v) = Just (v, [])
+recordKey (AppU (VarU v) ts) = Just (v, ts)
+recordKey (LabeledU _ t) = recordKey t
+recordKey _ = Nothing
+
+-- | The knot of a monadic walk: the records in compiler state, so a walk
+-- re-entered from the top ('inferConcreteType', as a `data` type's arms
+-- are) still sees them.
+stateKnot :: MorlocMonad (Knot MorlocM)
+stateKnot = do
+  anc <- CMS.gets stateRecordAncestors
+  return (Knot anc enter)
+  where
+    enter key walk k = withSetMember stateRecordAncestors (\v st -> st {stateRecordAncestors = v}) key (k walk)
+
+-- | Run an action with a `data` instantiation among the ancestors.
+withVariantAncestor :: (TVar, [TypeU]) -> MorlocMonad a -> MorlocMonad a
+withVariantAncestor = withSetMember stateVariantAncestors (\v st -> st {stateVariantAncestors = v})
+
+-- | Run an action with a key added to a set in compiler state; the set is
+-- as it was afterwards, whether the action returns or throws.
+withSetMember
+  :: Ord k
+  => (MorlocState -> Set.Set k)
+  -> (Set.Set k -> MorlocState -> MorlocState)
+  -> k
+  -> MorlocMonad a
+  -> MorlocMonad a
+withSetMember get set key act = do
+  old <- CMS.gets get
+  CMS.modify (set (Set.insert key old))
+  r <- act `MM.catchError` (\e -> CMS.modify (set old) >> MM.throwError e)
+  CMS.modify (set old)
+  return r
+
+-- | Replace a built record's marked references to itself by references to
+-- it at its own resolved arguments.
+tieSelf :: (TVar, [TypeU]) -> TypeF -> TypeF
+tieSelf key (NamF o fv ps rs) = NamF o fv ps [(k, go x) | (k, x) <- rs]
+  where
+    mark = selfMark key
+    go t = case t of
+      VarF (FV m _) | m == mark -> RecF fv ps
+      _ -> mapChildren go t
+tieSelf _ t = t
 
 -- | Expand the general side one step when the expansion's shape
 -- corresponds to the concrete side's, as when a record, a tuple or an alias
@@ -627,7 +719,7 @@ stepTowardCompound scope g c = case T.evaluateStep scope g of
   _ -> Nothing
   where
     corresponds g' = isJust (dataHeadOf scope g')
-      || isJust (structuralCompound scope (\_ _ -> Const ()) g' c)
+      || isJust (structuralCompound scope (Knot Set.empty (\_ w k -> k w)) (\_ _ -> Const ()) g' c)
       || case (g', c) of
            (AppU (VarU _) ts1, AppU (VarU _) ts2) ->
              snd (partitionKindArgs kindOfU ts1) == 0 && appArgsCorrespond ts1 ts2
@@ -674,25 +766,18 @@ inferConcreteTypeUUniversal lang generalType = do
 -- 'CppTranslator.hs', where every @VarF@/@AppF@/@RecF@ rule consults
 -- cscope to distinguish legitimate user mappings from pairEval bnd-
 -- protect leaks.
-weave :: Scope -> TypeU -> TypeU -> Either MDoc TypeF
-weave gscope = w Set.empty
+weave :: Scope -> Set.Set (TVar, [TypeU]) -> TypeU -> TypeU -> Either MDoc TypeF
+weave gscope = w
   where
-    w anc t1 t2 | Just r <- structuralCompound gscope (w anc) t1 t2 = r
+    -- @anc@: the records whose fields the walk is inside ('Knot').
+    w anc t1 t2 | Just r <- structuralCompound gscope (knotOf anc) (w anc) t1 t2 = r
     -- A `data` type weaves to 'EnumF' rather than a plain 'VarF' so the
     -- constructor names reach codegen. Making this the canonical TypeF for
     -- an enum is what lets every backend recognize one structurally --
     -- otherwise only serialized positions (which come through SerialEnum)
     -- would see it, and a native-position enum would look like an opaque
     -- VarF with an unhelpful name.
-    w anc (VarU v1) (VarU (TV v2)) = return $ case T.dataHead gscope (T.whnf gscope (VarU v1)) of
-      -- A type already being expanded stays an opaque name. Expansion
-      -- reaches a constructor's field types, so a field naming an enclosing
-      -- `data` would otherwise re-enter it forever -- and branch, once more
-      -- than one field does so. Leaving it opaque is how a record's
-      -- self-reference already survives this walk: the back-edge is cut
-      -- once, later, where the wire form is built and a name is available
-      -- to tie the knot.
-      _ | Set.member v1 anc -> VarF (FV v1 (CV v2))
+    w _ (VarU v1) (VarU (TV v2)) = return $ case T.dataHead gscope (T.whnf gscope (VarU v1)) of
       Just (n, _, ctors)
         -- Every constructor argument-free: the one-byte form.
         | all (null . snd) ctors -> EnumF (FV n (CV v2)) [] (map fst ctors)
@@ -719,6 +804,8 @@ weave gscope = w Set.empty
     w _ (ForallU v (VarU v')) _ | v == v' = return $ UnkF (FV v (CV (unTVar v)))
     w anc t1 t2 = wStep anc t1 t2
 
+    knotOf anc = Knot anc (\key _ k -> k (w (Set.insert key anc)))
+
     -- Step the general type one level via @evaluateStep@ and retry.
     wStep anc t1 t2 = case T.evaluateStep gscope t1 of
       Nothing -> Left $ "failed to weave:" <+> "\n  t1:" <+> pretty t1 <> "\n  t2:" <> pretty t2
@@ -733,7 +820,7 @@ weave gscope = w Set.empty
     slotsOf (VarU v) n = argKinds gscope v n
     slotsOf _ n = replicate n (Nothing, False)
 
-    weaveArgs :: Set.Set TVar -> [(Maybe Kind, Bool)] -> [TypeU] -> [TypeU] -> Either MDoc [ArgF]
+    weaveArgs :: Set.Set (TVar, [TypeU]) -> [(Maybe Kind, Bool)] -> [TypeU] -> [TypeU] -> Either MDoc [ArgF]
     weaveArgs _ _ [] [] = Right []
     weaveArgs _ _ [] cs
       | all (isJust . kindOfU) cs = Right []  -- trailing kind args in concrete only

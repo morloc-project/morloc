@@ -8,7 +8,7 @@ module GenDefsTests (genDefsTests) where
 import qualified Data.Map as Map
 import qualified Data.Set as Set
 import qualified Data.Text as T
-import Morloc.CodeGenerator.GenDefs (GenDef (..), canon, checkUse, inferArgs, instantiate, nativeParams, placeTypes, recordArgs, useArgs)
+import Morloc.CodeGenerator.GenDefs (GenDef (..), canon, checkUse, inferArgs, instantiate, nativeParams, placeTypes, recordArgs, untiedSelf, useArgs)
 import Morloc.CodeGenerator.Namespace
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit
@@ -48,7 +48,7 @@ defs = Map.fromList [(gdVar d, d) | d <- [pairDef, outerDef, treeDef]]
 
 -- record Tree where lab :: Pair Int; kids :: [Tree]
 treeDef :: GenDef
-treeDef = GenDef (TV "Tree") "struct" [] [(Key "lab", pairOf [int64] int64), (Key "kids", listOf (RecF (FV (TV "Tree") (CV "struct"))))]
+treeDef = GenDef (TV "Tree") "struct" [] [(Key "lab", pairOf [int64] int64), (Key "kids", listOf (RecF (FV (TV "Tree") (CV "struct")) []))]
 
 listOf :: TypeF -> TypeF
 listOf t = AppF (var (TV "List") (CV "std::vector<$1>")) [TyA t]
@@ -56,7 +56,7 @@ listOf t = AppF (var (TV "List") (CV "std::vector<$1>")) [TyA t]
 -- A Tree with no children, and one with a leaf child: one type unrolled
 -- to two depths.
 leafTree, deepTree :: TypeF
-leafTree = NamF NamRecord (FV (TV "Tree") (CV "struct")) [] [(Key "lab", pairOf [int64] int64), (Key "kids", listOf (RecF (FV (TV "Tree") (CV "struct"))))]
+leafTree = NamF NamRecord (FV (TV "Tree") (CV "struct")) [] [(Key "lab", pairOf [int64] int64), (Key "kids", listOf (RecF (FV (TV "Tree") (CV "struct")) []))]
 deepTree = NamF NamRecord (FV (TV "Tree") (CV "struct")) [] [(Key "lab", pairOf [int64] int64), (Key "kids", listOf leafTree)]
 
 genDefsTests :: TestTree
@@ -109,6 +109,14 @@ genDefsTests =
         fmap Map.keys (inferArgs defs pairDef [(Key "fst", deepTree), (Key "snd", leafTree)]) @?= Right [TV "a"]
     , testCase "the canonical forms of two unrollings are equal" $
         canon defs deepTree @?= canon defs leafTree
+    , testCase "references to a record at different arguments differ" $
+        assertBool "distinct" (canon defs (RecF (FV (TV "Pair") (CV "struct")) [TyA int64]) /= canon defs (RecF (FV (TV "Pair") (CV "struct")) [TyA str]))
+    , testCase "a recursive use whose field refers to the use agrees" $
+        assertBool "agrees" (isNothing (checkUse defs treeDef [] [(Key "lab", pairOf [int64] int64), (Key "kids", listOf (RecF (FV (TV "Tree") (CV "struct")) []))]))
+    , testCase "an untied reference of a record to itself is found" $
+        untiedSelf (NamF NamRecord (FV (TV "Tree") (CV "struct")) [] [(Key "kids", listOf (var (TV "Tree") (CV "Tree")))]) @?= [TV "Tree"]
+    , testCase "a tied reference and a reference to another record are not untied" $
+        untiedSelf (NamF NamRecord (FV (TV "Tree") (CV "struct")) [] [(Key "kids", listOf (RecF (FV (TV "Tree") (CV "struct")) [])), (Key "o", var (TV "Other") (CV "Other"))]) @?= []
     , testCase "Pair (Pair Int) keeps its inner Pair distinct" $
         assertBool "distinct" (canon defs (pairOf [pairOf [int64] int64] (pairOf [int64] int64)) /= canon defs (pairOf [int64] int64))
     , testCase "a use that agrees with its definition passes" $

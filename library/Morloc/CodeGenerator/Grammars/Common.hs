@@ -43,6 +43,7 @@ module Morloc.CodeGenerator.Grammars.Common
   , encodeModulePath
   , poolPrivateNoteName
   , poolTypesWith
+  , poolNativeTypes
   , intrinsicValueTypes
   , collectRecordsWhere
   , recursiveRecord
@@ -101,7 +102,7 @@ import qualified Data.Sequence as Seq
 import Data.List.NonEmpty (NonEmpty)
 import GHC.Generics (Generic)
 import Morloc.CodeGenerator.Namespace
-import Morloc.CodeGenerator.Serial (Unpacked, containsFunF, generatedObject, isSerializableThroughNodes, serialAstToNativeType, serialAstToType, makeSerialAST, serialAstToMsgpackSchema, unpackedAsTypeF)
+import Morloc.CodeGenerator.Serial (Unpacked, containsFunF, generatedObject, isSerializable, serialAstToNativeType, serialAstToType, makeSerialAST, serialAstToMsgpackSchema, unpackedAsTypeF)
 import Morloc.Data.Doc
 import Morloc.Data.Text (Text)
 import qualified Morloc.Data.Text as MT
@@ -969,12 +970,20 @@ intrinsicValueTypes = unique . runIdentity . foldWithSerialManifoldM fm
 -- | 'poolTypes', with a serialized value's type taken by the given
 -- projection.
 poolTypesWith :: (SerialAST -> Unpacked) -> SerialManifold -> [TypeF]
-poolTypesWith unpacked = unique . runIdentity . foldWithSerialManifoldM fm
+poolTypesWith unpacked = poolTypesBy (\s -> [unpackedAsTypeF (unpacked s)])
+
+-- | The native types of a manifold's expressions: 'poolTypesWith' without
+-- the serialized forms.
+poolNativeTypes :: SerialManifold -> [TypeF]
+poolNativeTypes = poolTypesBy (const [])
+
+poolTypesBy :: (SerialAST -> [TypeF]) -> SerialManifold -> [TypeF]
+poolTypesBy serialTypes = unique . runIdentity . foldWithSerialManifoldM fm
   where
     fm = defaultValue {opFoldWithNativeExprM = nativeExpr, opFoldWithSerialExprM = serialExpr}
-    nativeExpr _ (DeserializeN_ t s xs) = return $ t : unpackedAsTypeF (unpacked s) : xs
+    nativeExpr _ (DeserializeN_ t s xs) = return $ t : serialTypes s <> xs
     nativeExpr efull e = return $ foldlNE (<>) [typeFof efull] e
-    serialExpr _ (SerializeS_ s xs) = return $ unpackedAsTypeF (unpacked s) : xs
+    serialExpr _ (SerializeS_ s xs) = return $ serialTypes s <> xs
     serialExpr _ e = return $ foldlSE (<>) [] e
 
 -- | Every occurrence of a record whose concrete name passes the test, with
@@ -1012,7 +1021,7 @@ collectRecordsWhere wanted e0@(SerialManifold i0 _ _ _ _) =
     seekRecs m (OptionalF t) = seekRecs m t
     -- A back-reference contributes nothing new: the record it names
     -- is already visited at the NamF site that introduced the cycle.
-    seekRecs _ (RecF _) = []
+    seekRecs _ (RecF _ _) = []
     -- An enum is a leaf: no fields, so no records beneath it.
     seekRecs _ (EnumF _ _ _) = []
     -- A variant's arms can hold records, so they are walked.
@@ -1024,7 +1033,7 @@ collectRecordsWhere wanted e0@(SerialManifold i0 _ _ _ _) =
 recordNameOf :: TypeF -> Maybe TVar
 recordNameOf t = case t of
   NamF _ (FV g _) _ _ -> Just g
-  RecF (FV g _) -> Just g
+  RecF (FV g _) _ -> Just g
   VarF (FV g _) -> Just g
   _ -> Nothing
 
@@ -1243,7 +1252,7 @@ serialClosuresOutsideVariants = closuresWithin False
 -- holds a packed value or a closure outside any record that converts itself
 -- (GEN-14).
 fieldConverts :: SerialAST -> Bool
-fieldConverts fa = not (isSerializableThroughNodes fa) || not (null (serialClosuresOutsideNodes fa))
+fieldConverts fa = not (isSerializable fa) || not (null (serialClosuresOutsideNodes fa))
 
 -- | The serial forms a pool's closures carry: captured, bound and result.
 closureSerialASTs :: Map.Map k ([SerialAST], [SerialAST], SerialAST) -> [SerialAST]

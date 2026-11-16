@@ -46,6 +46,7 @@ specTests =
     , localOption (mkTimeout 2000000) dim7Tests
     , localOption (mkTimeout 2000000) cls5Tests
     , localOption (mkTimeout 2000000) cls16Tests
+    , gen14Tests
     , localOption (mkTimeout 2000000) cls17Tests
     , localOption (mkTimeout 2000000) cls18Tests
     , localOption (mkTimeout 5000000) cls2OwnInstanceTests
@@ -4722,6 +4723,36 @@ dim7Tests =
   where
     n = TV "n"
     m = TV "m"
+
+gen14Tests :: TestTree
+gen14Tests =
+  testGroup
+    "GEN-14"
+    [ reject "spec-gen-14-5" [r|
+        module main (P)
+        record P where
+          x :: Int
+        record Py => P = "struct"
+        |]
+    , accept "spec-gen-14-6" [r|
+        module main (P)
+        record P where
+          x :: Int
+        record Py => P = "OrderedDict"
+        |]
+    , reject "spec-gen-14-7" [r|
+        module main (O)
+        object O where
+          x :: Int
+        object Py => O = "struct"
+        |]
+    , accept "spec-gen-14-8" [r|
+        module main (O)
+        object O where
+          x :: Int
+        object Py => O = "Obj"
+        |]
+    ]
 
 cls16Tests :: TestTree
 cls16Tests =

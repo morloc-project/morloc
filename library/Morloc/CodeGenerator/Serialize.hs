@@ -842,9 +842,6 @@ serializeHosted' reg heads argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
       ast <- Serial.makeSerialAST m lang (typeFof dataArg)
       case ast of
         _ | Serial.isSerializable ast -> return [dataArg]
-          -- A pool whose generated records convert their own fields writes
-          -- a value holding them as it is held (GEN-14).
-          | Serial.recordsConvertInNode lang && Serial.isSerializableThroughNodes ast -> return [dataArg]
           -- C++ marshals a sum type holding a packed field arm by arm, with
           -- the sum type's own serializer, so only its outer type is taken
           -- apart here.
@@ -852,9 +849,7 @@ serializeHosted' reg heads argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
               SerialPack _ (packer, _) ->
                 return [AppExeN (typePackerUnpacked packer) (builtSrcCall (typePackerReverse packer)) [NativeArgExpr dataArg]]
               _ -> return [dataArg]
-          | otherwise ->
-              let unpacked = if Serial.recordsConvertInNode lang then Serial.serialAstToTypeThroughNodes else Serial.serialAstToType
-               in return [NativeToWireN (Serial.unpackedAsTypeF (unpacked ast)) ast dataArg]
+          | otherwise -> return [NativeToWireN (Serial.unpackedAsTypeF (Serial.serialAstToType ast)) ast dataArg]
 
     packedVariant :: SerialAST -> Bool
     packedVariant a@(SerialVariant {}) = not (Serial.isSerializable a)
@@ -1072,7 +1067,8 @@ serializeHosted' reg heads argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
         go (UnkF (FV t _)) = UnkT t
         go (VarF (FV t _)) = VarT t
         go (NamF o (FV t _) params rs) = NamT o t (map arg params) [(k, go v) | (k, v) <- rs]
-        go (RecF (FV t _)) = VarT t
+        go (RecF (FV t _) []) = VarT t
+        go (RecF (FV t _) params) = AppT (VarT t) (map arg params)
         go (EnumF (FV t _) [] _) = VarT t
         go (EnumF (FV t _) params _) = AppT (VarT t) (map arg params)
         go (VariantF (FV t _) [] _) = VarT t

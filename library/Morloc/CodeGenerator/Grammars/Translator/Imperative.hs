@@ -137,7 +137,7 @@ import Morloc.CodeGenerator.Grammars.Common
   )
 import Morloc.CodeGenerator.LogTemplate (RenderedTemplate (..))
 import Morloc.CodeGenerator.Namespace
-import Morloc.CodeGenerator.Serial (Unpacked, containsFunF, isSerializable, isSerializableThroughNodes, serialAstHasString, serialAstToMsgpackSchema, serialAstToType, serialAstToTypeThroughNodes, unpackedAsTypeF)
+import Morloc.CodeGenerator.Serial (Unpacked, containsFunF, isSerializable, serialAstHasString, serialAstToMsgpackSchema, serialAstToType, unpackedAsTypeF)
 import Morloc.Data.Doc
 import Morloc.Monad (IndexState)
 
@@ -843,9 +843,6 @@ data LowerConfig m = LowerConfig
   -- expression is the parsed @(home_language, manifold_id, captured_packets)@
   -- tuple, not a raw packet. Build the callable directly from it (no second
   -- @get_value@). Called at the deserialize boundary for a nested 'SerialClosure'.
-  , lcRecordsConvertInNode :: Bool
-  -- ^ Whether a generated record's marshalling converts its own fields
-  -- (GEN-14), so a value holding one is written as it is held.
   , lcDivertNestedClosure :: SerialAST -> Bool
   -- ^ Whether this backend routes THIS aggregate node through 'construct' so a
   -- closure inside it is reified/reflected in place, rather than the whole-value
@@ -906,20 +903,10 @@ data LowerConfig m = LowerConfig
 containsClosure :: SerialAST -> Bool
 containsClosure = not . null . serialClosuresOf
 
--- | The unpacked type of a serial form in the pool the config lowers for.
-unpackedIn :: LowerConfig m -> SerialAST -> Unpacked
-unpackedIn cfg
-  | lcRecordsConvertInNode cfg = serialAstToTypeThroughNodes
-  | otherwise = serialAstToType
-
 -- | A node that serializes as an opaque msgpack leaf: serializable AND not
 -- diverted for in-place nested-closure handling by this backend.
 isMsgpackLeaf :: LowerConfig m -> SerialAST -> Bool
-isMsgpackLeaf cfg s = serializable s && not (lcDivertNestedClosure cfg s)
-  where
-    serializable
-      | lcRecordsConvertInNode cfg = isSerializableThroughNodes
-      | otherwise = isSerializable
+isMsgpackLeaf cfg s = isSerializable s && not (lcDivertNestedClosure cfg s)
 
 {- | Expand serialization into IR statements.
 Returns (final expression representing the serialized value, prior statements).
@@ -998,7 +985,7 @@ nativeToWire cfg = go
         , IVar v'
         )
     construct v var@(SerialVariant (FV _ cv) _ arms@(_ : _)) = do
-      ty <- nominalTypeDoc cfg (unpackedAsTypeF (unpackedIn cfg var)) cv
+      ty <- nominalTypeDoc cfg (unpackedAsTypeF (serialAstToType var)) cv
       resultType <- lcSerialAstType cfg var
       byVariantArm cfg resultType ty v arms $ \n i ss -> do
         results <- mapIndexedM (\j s -> go (lcCtorField cfg FieldCopy ty n i j v) s) ss
@@ -1099,7 +1086,7 @@ wireToNative cfg = check
         , [IIfNotNull v' resultType (IRawExpr (render v)) uVar unwrappedType before x]
         )
     construct v var@(SerialVariant (FV _ cv) _ arms@(_ : _)) = do
-      ty <- nominalTypeDoc cfg (unpackedAsTypeF (unpackedIn cfg var)) cv
+      ty <- nominalTypeDoc cfg (unpackedAsTypeF (serialAstToType var)) cv
       resultType <- lcDeserialAstType cfg var
       swap <$> byVariantArm cfg resultType ty v arms (\n i ss -> do
         results <- mapIndexedM (\j s -> check (lcCtorField cfg FieldCopy ty n i j v) s) ss

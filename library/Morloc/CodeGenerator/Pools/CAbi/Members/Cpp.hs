@@ -74,17 +74,16 @@ import Morloc.CodeGenerator.Namespace
 import Morloc.CodeGenerator.Ownership (LetMode (..), LetPlan (..), OwnCaps (..), PoolPlan (..), byValueIndices, changedSlots, emptyPoolPlan, letMode, letPlan, nativeLets, planPool)
 import Morloc.CodeGenerator.OwnershipCheck (checkManifold)
 import System.Environment (lookupEnv)
-import Morloc.CodeGenerator.GenDefs (Disagreement (..), GenDef (..), RecordUse, disagreements, intrinsicSerialASTs, placeTypes, genDefs, nativeParam, nativeParams, recordUses, templateArgs, useArgs)
+import Morloc.CodeGenerator.GenDefs (Disagreement (..), GenDef (..), RecordUse, disagreements, inPoolSerialASTs, placeTypes, genDefs, nativeParam, nativeParams, recordUses, templateArgs, useArgs)
 import qualified Morloc.CodeGenerator.Platform as P
 import Morloc.CodeGenerator.Serial
-  ( serialAstToTypeThroughNodes
+  ( serialAstToType
   , serialAstToNativeType
-  , isSerializableThroughNodes
-  , recordsConvertInNode
+  , isSerializable
   , generatedObject
   , serialSubtrees
   , unpackedAsTypeF
-  , wireSerialAstToTypeThroughNodes
+  , wireSerialAstToType
   , containsFunT
   , containsEffectT
   , serialAstToMsgpackSchema
@@ -346,7 +345,7 @@ instance {-# OVERLAPPABLE #-} (HasTypeF e) => HasCppType e where
               complainT ("the record " <> unTVar gc <> " has no C++ definition: "
                 <> Map.findWithDefault "its declaration could not be resolved in C++" gc fails)
             return q
-      -- A table's wire shape ('serialAstToTypeThroughNodes' of its serial form).
+      -- A table's wire shape ('serialAstToType' of its serial form).
       f (NamF NamTable _ _ _) = return "mlc::ArrowTable"
       f (NamF _ (FV gv (CV s)) ps rs) = do
         defs <- CMS.gets translatorGenDefs
@@ -357,7 +356,7 @@ instance {-# OVERLAPPABLE #-} (HasTypeF e) => HasCppType e where
       -- A back-reference to a generated record names its definition; one
       -- that has none (it has parameters) needs a C++ struct of the user's
       -- own.
-      f (RecF (FV gv (CV "struct"))) = do
+      f (RecF (FV gv (CV "struct")) _) = do
         names <- CMS.gets translatorRecordNames
         case Map.lookup gv names of
           Just name -> return (pretty name)
@@ -369,20 +368,19 @@ instance {-# OVERLAPPABLE #-} (HasTypeF e) => HasCppType e where
             "the record " <> unTVar gv <> " refers to itself, and its C++ definition cannot be"
               <> " generated in its module's header; give it a C++ form, `record Cpp => "
               <> unTVar gv <> " = \"<struct-name>\"`, naming a struct you write"
-      -- Back-reference to a recursive alias or record. The FVar's CVar
-      -- slot is unreliable (often the leaked morloc TVar text from
-      -- weave's bnd-protect path), so resolve the concrete name via
-      -- cscope -- the same source pairEval uses. If cscope holds an
-      -- entry, render its body's outer name. Otherwise the alias has
-      -- no concrete C++ mapping and we raise 'leakError'.
-      f (RecF (FV gv@(TV gvName) _)) = do
+      -- A reference resolved through the concrete scope: a user-mapped
+      -- record is its form at the reference's arguments, as an occurrence
+      -- of it is spelled. A record or alias with no C++ mapping is
+      -- 'leakError'.
+      f (RecF (FV gv@(TV gvName) _) ps) = do
         cscope <- CMS.gets translatorCScope
         variantNames <- CMS.gets translatorVariantNames
         case Map.lookup gv cscope of
           -- A generated record's entry names no type ("struct"); its
           -- back-reference is the refusal above.
-          Just ((_, body, _, _, _) : _) | Just "struct" <- bodyCV body -> f (RecF (FV gv (CV "struct")))
-          Just ((_, body, _, _, _) : _) | Just cv <- bodyCV body -> return (pretty cv)
+          Just ((_, body, _, _, _) : _) | Just "struct" <- bodyCV body -> f (RecF (FV gv (CV "struct")) ps)
+          Just ((_, body, _, _, _) : _) | Just cv <- bodyCV body ->
+            if null ps then return (pretty cv) else renderTemplatedType cv <$> mapM f (tyArgs ps)
           -- A back-reference to a `data` type names a type this pool
           -- GENERATES, so it is already declared and needs no user mapping.
           -- The leak diagnostic below is for recursive ALIASES, which have
@@ -402,7 +400,7 @@ instance {-# OVERLAPPABLE #-} (HasTypeF e) => HasCppType e where
       -- single-relptr Optional encoding directly.
       -- A non-recursive `?T` keeps `std::optional<T>` -- sizeof(T) is
       -- known and inline storage is leaner.
-      f (OptionalF t@(RecF (FV gv _))) = do
+      f (OptionalF t@(RecF (FV gv _) _)) = do
         t' <- f t
         handles <- CMS.gets translatorHandles
         -- A handle is complete, so its optional is the ordinary one.
@@ -650,9 +648,9 @@ translate srcs es = do
   stageTable <- stageTableEntries
   let -- Closures' captured and bound arguments are deserialized by their
       -- dispatch wrappers, not by any manifold, so their types are added.
-      uses = recordUses (concatMap (poolTypesWith serialAstToTypeThroughNodes) es <> map (unpackedAsTypeF . serialAstToTypeThroughNodes) (closureSerialASTs closureTable))
+      uses = recordUses (concatMap (poolTypesWith serialAstToType) es <> map (unpackedAsTypeF . serialAstToType) (closureSerialASTs closureTable))
   (gdefs, gfails) <- genDefs cppLang (Set.fromList [g | (g, _, _, _) <- uses])
-  intrAsts <- intrinsicSerialASTs cppLang es
+  intrAsts <- inPoolSerialASTs cppLang es
   let translatorState = defaultValue
         { translatorEffectLabels = effectMap
         , translatorLogTemplates = templates
@@ -864,12 +862,12 @@ collectNamedRecordTVars e0 =
       }
 
     nativeExpr _ (DeserializeN_ t s xs) =
-      return $ Set.unions [xs, seekNamedRecs t, seekNamedRecs (unpackedAsTypeF (serialAstToTypeThroughNodes s))]
+      return $ Set.unions [xs, seekNamedRecs t, seekNamedRecs (unpackedAsTypeF (serialAstToType s))]
     nativeExpr efull e =
       return $ foldlNE Set.union (seekNamedRecs (typeFof efull)) e
 
     serialExpr _ (SerializeS_ s xs) =
-      return $ Set.union (seekNamedRecs (unpackedAsTypeF (serialAstToTypeThroughNodes s))) xs
+      return $ Set.union (seekNamedRecs (unpackedAsTypeF (serialAstToType s))) xs
     serialExpr _ e = return $ foldlSE Set.union Set.empty e
 
     seekNamedRecs :: TypeF -> Set.Set TVar
@@ -1277,7 +1275,7 @@ cppLowerConfig (ClosureGen reifyThunks stageTable papplyHeads) =
             -- enclosing record's name.
             isSelfRef self (VarF v) = v == self
             isSelfRef self (NamF _ v _ _) = v == self
-            isSelfRef self (RecF v) = v == self
+            isSelfRef self (RecF v _) = v == self
             isSelfRef _ _ = False
             needsWrap (OptionalF inner) = case selfName of
               Just s -> isSelfRef s inner
@@ -1524,7 +1522,6 @@ PROPAGATE_ERROR(errmsg)|]
           SerialClosure ins out -> cppClosureProxyLambda tup ins out
           _ -> error "lcReflectClosureParsed: expected SerialClosure"
     -- A variant's generated marshaller converts its own closures.
-    , lcRecordsConvertInNode = recordsConvertInNode cppLang
     , lcDivertNestedClosure = cppDivertsClosure
     , lcMakeFunction = \callIndex mname args manifoldType priorLines body headForm isClosure -> do
         state <- CMS.get
@@ -1729,7 +1726,7 @@ PROPAGATE_ERROR(errmsg)|]
     rawTypeOf s = Just . toIType <$> rawDoc s
 
     rawDoc :: SerialAST -> CppTranslator MDoc
-    rawDoc s | cppIsLeaf s = cppTypeOf (unpackedAsTypeF (wireSerialAstToTypeThroughNodes cppClosureWireLeaf s))
+    rawDoc s | cppIsLeaf s = cppTypeOf (unpackedAsTypeF (wireSerialAstToType cppClosureWireLeaf s))
     rawDoc (SerialObject _ _ _ rs) = do
       ds <- mapM (rawDoc . snd) rs
       return $ "std::tuple" <> encloseSep "<" ">" "," ds
@@ -1743,11 +1740,11 @@ PROPAGATE_ERROR(errmsg)|]
     rawDoc (SerialOptional _ e) = do
       inner <- rawDoc e
       cppTypeOf (OptionalF (rendered inner))
-    rawDoc s = cppTypeOf (unpackedAsTypeF (wireSerialAstToTypeThroughNodes cppClosureWireLeaf s))
+    rawDoc s = cppTypeOf (unpackedAsTypeF (wireSerialAstToType cppClosureWireLeaf s))
 
     -- Decoded straight into its type, as wireToNative leaves it.
     cppIsLeaf :: SerialAST -> Bool
-    cppIsLeaf s = isSerializableThroughNodes s && not (cppDivertsClosure s)
+    cppIsLeaf s = isSerializable s && not (cppDivertsClosure s)
 
     cppDivertsClosure :: SerialAST -> Bool
     cppDivertsClosure = not . null . serialClosuresOutsideNodes
@@ -2142,9 +2139,9 @@ cppClosureWireLeaf = VarF (FV (TV "Closure") (CV cppClosureWireTupleName))
 -- packets, and RPCs back to the home pool via foreign_call on the manifold id.
 cppClosureProxyLambda :: MDoc -> [SerialAST] -> SerialAST -> CppTranslator MDoc
 cppClosureProxyLambda cloInit ins out = do
-  argTypes <- mapM (cppTypeOf . unpackedAsTypeF . serialAstToTypeThroughNodes) ins
-  resType <- cppTypeOf (unpackedAsTypeF (serialAstToTypeThroughNodes out))
-  sig <- closureCppSig (map (unpackedAsTypeF . serialAstToTypeThroughNodes) ins) (unpackedAsTypeF (serialAstToTypeThroughNodes out))
+  argTypes <- mapM (cppTypeOf . unpackedAsTypeF . serialAstToType) ins
+  resType <- cppTypeOf (unpackedAsTypeF (serialAstToType out))
+  sig <- closureCppSig (map (unpackedAsTypeF . serialAstToType) ins) (unpackedAsTypeF (serialAstToType out))
   -- The argument packets and the result packet belong to this application
   -- alone, so each is held by an mlc::Packet and released once the result
   -- has been read, or when a throw unwinds past it. The captured packets
@@ -2181,9 +2178,9 @@ cppClosureProxyLambda cloInit ins out = do
   apply1 <- case ins of
     [] -> return []
     (a0 : rest) -> do
-      a0Type <- cppTypeOf (unpackedAsTypeF (serialAstToTypeThroughNodes a0))
+      a0Type <- cppTypeOf (unpackedAsTypeF (serialAstToType a0))
       a0Sid <- cppRegisterSchema (render (serialAstToMsgpackSchema a0))
-      restSig <- closureCppSig (map (unpackedAsTypeF . serialAstToTypeThroughNodes) rest) (unpackedAsTypeF (serialAstToTypeThroughNodes out))
+      restSig <- closureCppSig (map (unpackedAsTypeF . serialAstToType) rest) (unpackedAsTypeF (serialAstToType out))
       restSid <- cppRegisterSchema (render (serialAstToMsgpackSchema (SerialClosure rest out)))
       restProxy <- cppClosureProxyLambda "__o" rest out
       return
@@ -2490,9 +2487,9 @@ collectCppEnums =
   concatMap (runIdentity . foldWithSerialManifoldM fm)
   where
     fm = defaultValue {opFoldWithNativeExprM = ne, opFoldWithSerialExprM = se}
-    ne _ (DeserializeN_ t s xs) = return $ xs <> seek t <> seek (unpackedAsTypeF (serialAstToTypeThroughNodes s))
+    ne _ (DeserializeN_ t s xs) = return $ xs <> seek t <> seek (unpackedAsTypeF (serialAstToType s))
     ne efull e = return $ foldlNE (<>) (seek (typeFof efull)) e
-    se _ (SerializeS_ s xs) = return $ seek (unpackedAsTypeF (serialAstToTypeThroughNodes s)) <> xs
+    se _ (SerializeS_ s xs) = return $ seek (unpackedAsTypeF (serialAstToType s)) <> xs
     se _ e = return $ foldlSE (<>) [] e
 
     seek :: TypeF -> [(FVar, [Text])]
@@ -2536,9 +2533,9 @@ collectCppVariants :: [SerialManifold] -> [(FVar, [ArgF], [(Text, [TypeF])])]
 collectCppVariants = concatMap (runIdentity . foldWithSerialManifoldM fm)
   where
     fm = defaultValue {opFoldWithNativeExprM = ne, opFoldWithSerialExprM = se}
-    ne _ (DeserializeN_ t s xs) = return $ xs <> seek t <> seek (unpackedAsTypeF (serialAstToTypeThroughNodes s))
+    ne _ (DeserializeN_ t s xs) = return $ xs <> seek t <> seek (unpackedAsTypeF (serialAstToType s))
     ne efull e = return $ foldlNE (<>) (seek (typeFof efull)) e
-    se _ (SerializeS_ s xs) = return $ seek (unpackedAsTypeF (serialAstToTypeThroughNodes s)) <> xs
+    se _ (SerializeS_ s xs) = return $ seek (unpackedAsTypeF (serialAstToType s)) <> xs
     se _ e = return $ foldlSE (<>) [] e
 
     seek :: TypeF -> [(FVar, [ArgF], [(Text, [TypeF])])]
@@ -2586,7 +2583,7 @@ generateCppVariants cfg closureAsts es = do
     wireField i ast
       | containsClosure ast = do
           (toStmts, toE) <- nativeToWire cfg ("obj.f" <> pretty i) ast
-          rawT <- maybe (cppTypeOf (unpackedAsTypeF (wireSerialAstToTypeThroughNodes cppClosureWireLeaf ast))) (return . renderIType)
+          rawT <- maybe (cppTypeOf (unpackedAsTypeF (wireSerialAstToType cppClosureWireLeaf ast))) (return . renderIType)
                     =<< lcRawDeserialAstType cfg ast
           (fromE, fromStmts) <- wireToNative cfg "mlc_r" ast
           return . Just $
@@ -3006,7 +3003,7 @@ generateRecords cfg asts = do
       | otherwise = do
           (toStmts, toE) <- nativeToWire cfg "mlc_x" fa
           (fromE, fromStmts) <- wireToNative cfg "mlc_r" fa
-          raw <- maybe (cppTypeOf (unpackedAsTypeF (wireSerialAstToTypeThroughNodes cppClosureWireLeaf fa))) (return . renderIType)
+          raw <- maybe (cppTypeOf (unpackedAsTypeF (wireSerialAstToType cppClosureWireLeaf fa))) (return . renderIType)
                    =<< lcRawDeserialAstType cfg fa
           native <- cppTypeOf (serialAstToNativeType fa)
           return . Just $

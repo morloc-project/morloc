@@ -90,7 +90,7 @@ import Morloc.Build.CargoLock (mergeCargoLocks)
 import qualified Morloc.Build.Params as BP
 import qualified Morloc.Data.PoolHash as PH
 import qualified Morloc.CodeGenerator.Pools.CAbi.Members.RustPrinter as RP
-import Morloc.CodeGenerator.Serial (containsFunF, generatedObject, isSerializableThroughNodes, recordsConvertInNode, serialAstToMsgpackSchema, serialAstToNativeType, serialAstToTypeThroughNodes, serialSubtrees, shallowType, unpackedAsTypeF, wireSerialAstToTypeThroughNodes)
+import Morloc.CodeGenerator.Serial (containsFunF, generatedObject, isSerializable, serialAstToMsgpackSchema, serialAstToNativeType, serialAstToType, serialSubtrees, shallowType, unpackedAsTypeF, wireSerialAstToType)
 import qualified Morloc.Frontend.Instances as FI
 import Morloc.Typecheck.Internal (unqualify)
 import Morloc.CodeGenerator.EffectBoundary (declaredFun, expandT)
@@ -104,7 +104,7 @@ import qualified Morloc.Version as MV
 import Morloc.Quasi
 import System.Directory (findExecutable)
 import System.FilePath (takeDirectory)
-import Morloc.CodeGenerator.GenDefs (Disagreement (..), GenDef (..), RecordUse, disagreements, intrinsicSerialASTs, placeTypes, checkUse, genDefs, nativeParam, nativeParams, placeholders, recordUses, templateArgs, useArgs)
+import Morloc.CodeGenerator.GenDefs (Disagreement (..), GenDef (..), RecordUse, disagreements, inPoolSerialASTs, placeTypes, checkUse, genDefs, nativeParam, nativeParams, placeholders, recordUses, templateArgs, useArgs)
 
 -- | Duplicated here (as in Cpp.hs) to match data/lang/rust/lang.yaml. The
 -- second field is the source extension and must match lang.yaml's @extension@
@@ -338,7 +338,7 @@ rustTypeOf = f
     -- A recursive optional (?T where T points back to a containing record)
     -- must break the cycle with Box (an Option<T> of an infinite-size T won't
     -- compile). None == absent matches the voidstar single-relptr Optional.
-    f (OptionalF t@(RecF (FV gv _))) = do
+    f (OptionalF t@(RecF (FV gv _) _)) = do
       t' <- f t
       handles <- CMS.gets rsHandles
       -- A handle has a size of its own, so its optional needs no box.
@@ -389,13 +389,10 @@ rustTypeOf = f
     f (NamF _ (FV gv (CV s)) ps rs) = do
       defs <- CMS.gets rsGenDefs
       nominalTypeName s (useArgs defs gv s ps rs)
-    -- Back-reference to a recursive record: resolve the concrete struct name
-    -- via the concrete scope (the CVar slot is unreliable after weave).
-    -- A record the compiler would generate cannot refer to itself: its
-    -- fields would name a struct that does not exist yet, and the cycle
-    -- needs a box the user's own struct must place. Users must map such a
-    -- record to a Rust struct of their own.
-    f (RecF (FV gv (CV "struct"))) = do
+    -- A reference to a record: a generated one names its definition; one
+    -- that has none (it has parameters) needs a Rust struct of the user's
+    -- own.
+    f (RecF (FV gv (CV "struct")) _) = do
       names <- CMS.gets rsRecordNames
       case Map.lookup gv names of
         Just name -> return (pretty name)
@@ -406,17 +403,24 @@ rustTypeOf = f
                     <> " generated in its module's file; give it a Rust form, `record Rust => "
                     <> unTVar gv <> " = \"<struct-name>\"`, naming a struct you write" ) : rsErrors s }
           return (pretty (tvarIdentifier gv))
-    f (RecF (FV gv@(TV gvText) (CV cv))) = do
+    -- A user-mapped record is spelled from its form at the reference's
+    -- arguments, as an occurrence of it is.
+    f (RecF (FV gv@(TV gvText) (CV cv)) ps) = do
       public <- CMS.gets rsPublic
       case Map.lookup gv public of
         Just name -> return (pretty name)
         Nothing
+          | cv /= gvText, not (null ps) -> nominalTypeName cv ps
           | cv /= gvText -> return (pretty (nativeTypeName cv))
           | otherwise -> do
               cscope <- CMS.gets rsCScope
               case Map.lookup gv cscope of
                 Just ((_, body, _, _, _) : _) | Just name <- bodyName body, name /= "struct" -> return (pretty name)
-                _ -> error $ "Rust: recursive record `" <> T.unpack gvText <> "` has no concrete mapping"
+                _ -> do
+                  CMS.modify $ \s -> s
+                    { rsErrors = ("the recursive type " <> gvText <> " has no Rust form; give it one, `record Rust => "
+                        <> gvText <> " = \"<struct-name>\"`") : rsErrors s }
+                  return (pretty (tvarIdentifier gv))
 
 
 -- | The bare struct name for a record-literal constructor: 'rustTypeOf' with any
@@ -1319,7 +1323,7 @@ closureArgPush i ast sid = do
 closureResultRead :: SerialAST -> MDoc -> Int -> RustM MDoc
 closureResultRead out call sid = do
   fromWire <- reflectInPlace out
-  wireT <- rustTypeOf (unpackedAsTypeF (wireSerialAstToTypeThroughNodes rustClosureWireLeaf out))
+  wireT <- rustTypeOf (unpackedAsTypeF (wireSerialAstToType rustClosureWireLeaf out))
   let got = "::rustmorloc::get_value::<" <> wireT <> ">(" <> call <> ", " <> RP.schemaRef sid <> ")"
   return $ maybe got ($ got) fromWire
 
@@ -1641,9 +1645,9 @@ translate srcs es0 = do
   typeHomes <- MM.gets stateTypeHomes
   -- Closures' captured and bound arguments are deserialized by their
   -- dispatch wrappers, not by any manifold, so their types are added.
-  let uses = recordUses (concatMap (poolTypesWith serialAstToTypeThroughNodes) es <> map (unpackedAsTypeF . serialAstToTypeThroughNodes) (closureSerialASTs closureAsts))
+  let uses = recordUses (concatMap (poolTypesWith serialAstToType) es <> map (unpackedAsTypeF . serialAstToType) (closureSerialASTs closureAsts))
   (gdefs, gfails) <- genDefs rustLang (Set.fromList [g | (g, _, _, _) <- uses])
-  intrAsts <- intrinsicSerialASTs rustLang es
+  intrAsts <- inPoolSerialASTs rustLang es
   let poolAsts = concatMap allSerialASTs es <> intrAsts <> closureSerialASTs closureAsts
       recordObjects = Map.map unique (Map.fromListWith (<>) [(g, [rs]) | a <- poolAsts, o@(SerialObject _ (FV g _) _ rs) <- serialSubtrees a, generatedObject o])
   let st0 = defaultValue {rsRecordObjects = recordObjects, rsGenFailures = gfails, rsGenDefs = gdefs, rsRecordUses = uses, rsTypeHomes = typeHomes, rsDebugInfo = debugInfo, rsCScope = mergedRustScope, rsSrcTypeVarMask = srcTypeVarMask, rsSrcMakers = srcMakers, rsLogTemplates = logTemplates, rsStageTable = stageTable, rsPool = pool, rsBuilds = lastBuilds Map.empty Set.empty (rustSeeds pool es0) es0}
@@ -1924,7 +1928,7 @@ makeClosureDispatch closureAsts closureTable es = do
       argReflects <- mapM reflectInPlace (capAsts <> bndAsts)
       argTs <- sequence
         [ if isJust refl
-            then rustTypeOf (unpackedAsTypeF (wireSerialAstToTypeThroughNodes rustClosureWireLeaf ast))
+            then rustTypeOf (unpackedAsTypeF (wireSerialAstToType rustClosureWireLeaf ast))
             else rustTypeOf t
         | (t, ast, refl) <- zip3Same (ctxTs <> bndTs) (capAsts <> bndAsts) argReflects
         ]
@@ -1996,9 +2000,9 @@ collectRustRecords =
     . concatMap (runIdentity . foldWithSerialManifoldM fm)
   where
     fm = defaultValue {opFoldWithNativeExprM = ne, opFoldWithSerialExprM = se}
-    ne _ (DeserializeN_ t s xs) = return $ xs <> seek t <> seek (unpackedAsTypeF (serialAstToTypeThroughNodes s))
+    ne _ (DeserializeN_ t s xs) = return $ xs <> seek t <> seek (unpackedAsTypeF (serialAstToType s))
     ne efull e = return $ foldlNE (<>) (seek (typeFof efull)) e
-    se _ (SerializeS_ s xs) = return $ seek (unpackedAsTypeF (serialAstToTypeThroughNodes s)) <> xs
+    se _ (SerializeS_ s xs) = return $ seek (unpackedAsTypeF (serialAstToType s)) <> xs
     se _ e = return $ foldlSE (<>) [] e
 
     seek :: TypeF -> [(FVar, [ArgF], [(Key, TypeF)])]
@@ -2027,9 +2031,9 @@ collectRustEnums :: [SerialManifold] -> [(FVar, [ArgF], [Text])]
 collectRustEnums = concatMap (runIdentity . foldWithSerialManifoldM fm)
   where
     fm = defaultValue {opFoldWithNativeExprM = ne, opFoldWithSerialExprM = se}
-    ne _ (DeserializeN_ t s xs) = return $ xs <> seek t <> seek (unpackedAsTypeF (serialAstToTypeThroughNodes s))
+    ne _ (DeserializeN_ t s xs) = return $ xs <> seek t <> seek (unpackedAsTypeF (serialAstToType s))
     ne efull e = return $ foldlNE (<>) (seek (typeFof efull)) e
-    se _ (SerializeS_ s xs) = return $ seek (unpackedAsTypeF (serialAstToTypeThroughNodes s)) <> xs
+    se _ (SerializeS_ s xs) = return $ seek (unpackedAsTypeF (serialAstToType s)) <> xs
     se _ e = return $ foldlSE (<>) [] e
 
     seek :: TypeF -> [(FVar, [ArgF], [Text])]
@@ -2046,9 +2050,9 @@ collectRustVariants :: [SerialManifold] -> [(FVar, [ArgF], [(Text, [TypeF])])]
 collectRustVariants = concatMap (runIdentity . foldWithSerialManifoldM fm)
   where
     fm = defaultValue {opFoldWithNativeExprM = ne, opFoldWithSerialExprM = se}
-    ne _ (DeserializeN_ t s xs) = return $ xs <> seek t <> seek (unpackedAsTypeF (serialAstToTypeThroughNodes s))
+    ne _ (DeserializeN_ t s xs) = return $ xs <> seek t <> seek (unpackedAsTypeF (serialAstToType s))
     ne efull e = return $ foldlNE (<>) (seek (typeFof efull)) e
-    se _ (SerializeS_ s xs) = return $ seek (unpackedAsTypeF (serialAstToTypeThroughNodes s)) <> xs
+    se _ (SerializeS_ s xs) = return $ seek (unpackedAsTypeF (serialAstToType s)) <> xs
     se _ e = return $ foldlSE (<>) [] e
 
     seek :: TypeF -> [(FVar, [ArgF], [(Text, [TypeF])])]
@@ -2114,7 +2118,7 @@ generateRustVariants closureAsts es = do
       , any (maybe False pathHasClosure) paths = do
           reifies <- mapM (traverse renderReify) paths
           reflects <- mapM (traverse renderReflect) paths
-          wireTs <- mapM (\(t, (s, p)) -> maybe (return t) (const (rustTypeOf (unpackedAsTypeF (wireSerialAstToTypeThroughNodes rustClosureWireLeaf s)))) p) fields
+          wireTs <- mapM (\(t, (s, p)) -> maybe (return t) (const (rustTypeOf (unpackedAsTypeF (wireSerialAstToType rustClosureWireLeaf s)))) p) fields
           u <- getCounter
           let slot v j = v <> "." <> pretty j
               t = "__morloc_arm" <> pretty u
@@ -2235,7 +2239,7 @@ recordImpls handle gd name params = do
       objects = Map.findWithDefault [] gv objectsOf
       converts fa = case fa of
         SerialClosure _ _ -> True
-        _ -> not (isSerializableThroughNodes fa) || not (null (serialClosuresOutsideNodes fa))
+        _ -> not (isSerializable fa) || not (null (serialClosuresOutsideNodes fa))
       -- Names derived from the record are global to the crate, so they
       -- carry its module path.
       leaf = Map.findWithDefault (tvarIdentifier gv) gv homeKeys
@@ -2311,7 +2315,7 @@ recordImpls handle gd name params = do
         ty <- rustFieldType (serialAstToNativeType fa)
         (toStmts, toE) <- nativeToWire cfg "(*mlc_x)" fa
         (fromE, fromStmts) <- wireToNative cfg "mlc_r" fa
-        raw <- rustTypeOf (unpackedAsTypeF (wireSerialAstToTypeThroughNodes rustClosureWireLeaf fa))
+        raw <- rustTypeOf (unpackedAsTypeF (wireSerialAstToType rustClosureWireLeaf fa))
         let base = "mlc_conv_" <> leaf <> "_" <> pretty (i :: Int) <> "_" <> pretty (j :: Int)
             to = base <> "_to"
             from = base <> "_from"
@@ -2680,7 +2684,7 @@ generateRustStructs closureAsts es = do
         -- The struct's name at this instantiation: a template the user
         -- wrote takes this occurrence's arguments.
         name <- rustTypeOf (NamF NamRecord v ps rs)
-        typed <- mapM (\r -> (,) r <$> oneField gv name (fmap Right r)) rs
+        typed <- mapM (\r -> (,) r <$> oneField gv name r) rs
         marshalled <- mapM (\((k, ty), (fld, ty', w)) -> (,) ty . (,,,) fld ty' w <$> fieldMarshal gv k ty) typed
         let fields4 = map snd marshalled
             -- Emit the impl only when EVERY function field has a harvested marshal
@@ -2688,19 +2692,10 @@ generateRustStructs closureAsts es = do
             emitImpl = and [not (isFunF ty) || isJust m | (ty, (_, _, _, m)) <- marshalled]
         return [(Just (name, gv, map snd typed), RP.printRecordImpls RP.StructFieldTypes name [] fields4) | emitImpl]
 
-    -- Number the generic (native/=wire) fields `T1, T2, ...`; concrete fields
-    -- keep their unified type.
-    assignGenerics :: Int -> [(Key, Maybe TypeF)] -> [(Key, Either MDoc TypeF)]
-    assignGenerics _ [] = []
-    assignGenerics n ((k, Nothing) : fs) = (k, Left ("T" <> pretty n)) : assignGenerics (n + 1) fs
-    assignGenerics n ((k, Just t) : fs) = (k, Right t) : assignGenerics n fs
-
-    -- Render one field's (name, type, is-variable-width). A generic field is a
-    -- bare parameter (variable width, unknown until instantiated); a concrete
-    -- field Box'es a self-optional (?self) so the recursive cycle is Sized.
-    oneField :: TVar -> MDoc -> (Key, Either MDoc TypeF) -> RustM (MDoc, MDoc, Bool)
-    oneField _ _ (k, Left param) = return (RP.rustFieldIdent k, param, True)
-    oneField selfGv selfName (k, Right ty) = do
+    -- Render one field's (name, type, is-variable-width). A self-optional
+    -- (?self) is boxed so the recursive cycle is Sized.
+    oneField :: TVar -> MDoc -> (Key, TypeF) -> RustM (MDoc, MDoc, Bool)
+    oneField selfGv selfName (k, ty) = do
       handles <- CMS.gets rsHandles
       ty' <- case ty of
         OptionalF inner | refersTo selfGv inner, not (Set.member selfGv handles) -> return $ "::std::option::Option<::std::boxed::Box<" <> selfName <> ">>"
@@ -3096,9 +3091,9 @@ rustLowerConfig mask makers consumed userArms =
     -- in an aggregate travels as its reified `ClosureOrigin` tuple, so the closure
     -- slot is typed as that tuple ('rustClosureWireLeaf'), not the native
     -- `impl Fn`/`Arc<dyn Fn>`. Mirrors the C++ 'cppClosureWireLeaf'.
-    , lcSerialAstType = \s -> Just . toIType <$> rustTypeOf (unpackedAsTypeF (wireSerialAstToTypeThroughNodes rustClosureWireLeaf s))
+    , lcSerialAstType = \s -> Just . toIType <$> rustTypeOf (unpackedAsTypeF (wireSerialAstToType rustClosureWireLeaf s))
     , lcDeserialAstType = \s -> Just . toIType <$> rustTypeOf (shallowType s)
-    , lcRawDeserialAstType = \s -> Just . toIType <$> rustTypeOf (unpackedAsTypeF (wireSerialAstToTypeThroughNodes rustClosureWireLeaf s))
+    , lcRawDeserialAstType = \s -> Just . toIType <$> rustTypeOf (unpackedAsTypeF (wireSerialAstToType rustClosureWireLeaf s))
     , lcTypeMOf = \_ -> return Nothing
     , lcPackerName = \src -> pretty (srcName src)
     , lcUnpackerName = \src -> pretty (srcName src)
@@ -3242,7 +3237,6 @@ rustLowerConfig mask makers consumed userArms =
     -- so a record node -- and a list/optional OF records ([R]/?R) -- is NOT
     -- diverted (it falls through to Vec/Option + the record impl). See
     -- 'rustDivertsClosure'.
-    , lcRecordsConvertInNode = recordsConvertInNode rustLang
     , lcDivertNestedClosure = rustDivertsClosure
     , lcMakeFunction = rustMakeFunction
     -- A bare function passed to a HOF is a closure over all its params with no

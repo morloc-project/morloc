@@ -1,19 +1,26 @@
 -- GEN-14: a generated record is marshalled wherever the pool writes it,
 -- not only where it crosses: here `Pair Int` and `Pair Date` (Date packed,
 -- so its field converts at that instance) flow only inside the pool and
--- reach the intrinsics @show, @hash and a stream's @write, and a
--- program built with --debug
+-- reach the intrinsics @show, @hash, a stream's @write, @save/@load and
+-- @collect (gathered, folded, and gathered into Python), and a program
+-- built with --debug
 -- writes its arguments through the debug wrapper. Every such instance has
 -- its marshalling. The Rust twin is main-rust.loc.
-module main (showInt, showDate, hashInt, hashDate, takeDate, writePairs)
+module main (showInt, showDate, hashInt, hashDate, takeDate, writePairs, saveLoad, collectPairs, foldPairs, crossPairs)
 
 import root-cpp
+import root-py
 
 newtype Date = Str
 type Cpp => Date = "MlcDate"
 
 instance Packable Str Date where
   source Cpp from "gen14.hpp" ("packDate" as pack, "unpackDate" as unpack)
+
+type Py => Date = "int"
+
+instance Packable Str Date where
+  source Py from "gen14.py" ("packDate" as pack, "unpackDate" as unpack)
 
 -- Written only to a stream: its marshalling comes from the @write alone.
 record Bin a where
@@ -24,11 +31,24 @@ record Pair a where
   fst :: a
   snd :: a
 
-source Cpp from "gen14.hpp" ("dateOf", "dupP", "firstDay", "boxOf")
+source Cpp from "gen14.hpp" ("dateOf", "dupP", "firstDay", "boxOf", "sumDays", "producePairs", "addPairs", "mergeSums", "showSum")
 dateOf :: Int -> Date
 dupP :: a -> Pair a
 firstDay :: Pair Date -> Int
 boxOf :: a -> Bin a
+sumDays :: [Pair Date] -> Int
+producePairs :: ([Pair Date] -> <IO> ()) -> <IO> ()
+addPairs :: Int -> [Pair Date] -> Int
+mergeSums :: Int -> Int -> Int
+--' The sum of the first days
+showSum :: Int -> Str
+
+source Py from "gen14.py" ("showPairs")
+--' The pairs, shown by Python
+showPairs :: [Pair Date] -> Str
+
+zeroSum :: Int
+zeroSum = 0
 
 showInt :: Int -> Str
 showInt x = @show (dupP x)
@@ -52,3 +72,23 @@ writePairs p = do
   @close o
   firstDay (dupP (dateOf 1))
 
+
+saveLoad :: Str -> <IO> Int
+saveLoad p = do
+  @save 0 p [dupP (dateOf 3), dupP (dateOf 4)]
+  Ok xs <- @load p
+  sumDays xs
+
+--' Batches of pairs, gathered
+collectPairs :: <IO> ()
+collectPairs = @collect producePairs
+
+--' Batches of pairs, folded
+--' @render --n=showSum @fold=addPairs @init=zeroSum @combine=mergeSums
+foldPairs :: <IO> ()
+foldPairs = @collect producePairs
+
+--' Batches of pairs, gathered into Python
+--' @render --py=showPairs
+crossPairs :: <IO> ()
+crossPairs = @collect producePairs

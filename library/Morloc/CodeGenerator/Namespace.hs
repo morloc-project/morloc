@@ -27,6 +27,8 @@ module Morloc.CodeGenerator.Namespace
     -- ** Types used in final translations
   , TypeM (..)
   , TypeF (..)
+  , mapChildren
+  , childrenOf
   , KArgF (.., NatVoidK)
   , ArgF
   , kargType
@@ -188,19 +190,11 @@ data TypeF
   | FunF [TypeF] TypeF
   | AppF TypeF [ArgF]
   | NamF NamType FVar [ArgF] [(Key, TypeF)]
-  -- | Back-reference to a record whose definition appears as a NamF
-  -- somewhere on the enclosing TypeF path. Introduced by guarded
-  -- self-recursive records (e.g. @record Tree where children :: [Tree]@):
-  -- when @makeSerialAST'@ descends into the @[Tree]@ field, it would
-  -- otherwise re-expand the @Tree@ record forever. RecF cuts the cycle.
-  -- The FVar's TVar is always the morloc-side identity of the alias
-  -- being back-referenced. The FVar's CVar slot is unreliable -- it
-  -- carries whatever bnd-protected text @weave@ produced (often the
-  -- morloc TVar text itself, since pairEval leaves bnd-bound positions
-  -- untouched). Consumers that need the language-side concrete name
-  -- (e.g. C++ rendering) must look it up in cscope using the TVar,
-  -- not read the CVar directly.
-  | RecF FVar
+  -- | A reference to a record, not expanded, at the given arguments.
+  -- Inference ties a record's reference to an enclosing occurrence of
+  -- itself to this form, with that occurrence's name and resolved
+  -- arguments; a serial back-reference projects to it.
+  | RecF FVar [ArgF]
   -- | A `data` type whose constructors take no arguments: the type's
   -- name, the type arguments it is applied to, and its constructor names
   -- in declaration order. Position in that list is the wire tag, so the
@@ -1841,7 +1835,8 @@ instance Pretty TypeF where
   pretty (NamF _ v _ rs) =
     pretty v
       <+> encloseSep "{" "}" ", " [pretty k <+> "::" <+> pretty t | (k, t) <- rs]
-  pretty (RecF v) = "^" <> pretty v
+  pretty (RecF v []) = "^" <> pretty v
+  pretty (RecF v ps) = "^" <> pretty v <> angles (hsep (map pretty ps))
   pretty (EnumF v ps ns) =
     pretty v <+> hsep (map pretty ps) <+> encloseSep "{" "}" " | " (map pretty ns)
   pretty (VariantF v ps as) =
@@ -2158,3 +2153,27 @@ renderSrcLocForDebug :: SrcLoc -> Maybe Text
 renderSrcLocForDebug (SrcLoc mpath ln col _ _) = case mpath of
   Nothing -> Nothing
   Just p -> Just (T.pack p <> ":" <> T.pack (show ln) <> ":" <> T.pack (show col))
+
+-- | A type with each of its immediate component types mapped.
+mapChildren :: (TypeF -> TypeF) -> TypeF -> TypeF
+mapChildren go t = case t of
+  NamF o v ps rs -> NamF o v (map (fmap go) ps) [(k, go x) | (k, x) <- rs]
+  FunF as r -> FunF (map go as) (go r)
+  AppF h as -> AppF (go h) (map (fmap go) as)
+  OptionalF x -> OptionalF (go x)
+  VariantF v ps as -> VariantF v (map (fmap go) ps) [(c, map go ts) | (c, ts) <- as]
+  EnumF v ps cs -> EnumF v (map (fmap go) ps) cs
+  RecF v ps -> RecF v (map (fmap go) ps)
+  _ -> t
+
+-- | A type's immediate component types, as 'mapChildren' maps them.
+childrenOf :: TypeF -> [TypeF]
+childrenOf t = case t of
+  NamF _ _ ps rs -> tyArgs ps <> map snd rs
+  FunF as r -> as <> [r]
+  AppF h as -> h : tyArgs as
+  OptionalF x -> [x]
+  VariantF _ ps as -> tyArgs ps <> concatMap snd as
+  EnumF _ ps _ -> tyArgs ps
+  RecF _ ps -> tyArgs ps
+  _ -> []

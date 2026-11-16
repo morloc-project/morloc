@@ -94,12 +94,18 @@
   the error misleads ("gives no cpp implementation of
   '__extract_pattern__'" [reproduced]). Plan: GEN9-DESIGN.md (in
   /work/plans/generated-native-types) stages S9.3-S9.5.
-- **A record on a cycle through a `data` type may not be canonical.**
-  [read, 2026-11-15; the use-driven path it was read on is gone, re-check]
-  `record A where d :: D` with `data D = Leaf | Node B` and `record B where
-  as :: [A]`: each record's definition now comes from its declaration, and
-  a self-reference folds only at the declaration's own arguments; whether
-  A and B become handles and build is unreproduced.
+- **A parameterized generated record holding a parameterized generated
+  `data` type is refused in C++ and Rust.** [reproduced, 2026-11-16]
+  Violates GEN-9. `record R a where d :: Choice a` with `data Choice a =
+  Pick a | Skip`, used at `R Int` from a sourced C++ function: "the
+  generated C++ type for R cannot serve one of its uses: its field `d` is
+  `Choice_97d1f6` there but `Choice_8fa600` in the definition". The
+  definition (GenDefs.genDefs) names the field's `data` instance by a hash
+  of the placeholder argument (Infer.instanceName), a type that does not
+  exist, so the refusal also keeps a wrong template from being emitted.
+  Before the declaration-driven definitions such a record got one struct
+  per use. Fix: generated `data` as templates/generics (stage S9.5), so a
+  definition's field names `Choice<T_a>`.
 - **Instance names of parameterized generated `data` can collide.** [read,
   2026-11-15] Violates GEN-1 (one definition per type). Infer.hs
   instanceSuffix names an instantiation by a 24-bit djb2 hash of its
@@ -108,16 +114,6 @@
   convert implicitly (int64 vs double in C++) the wrong definition could
   compile. GEN-9 (stage S9.5) removes the suffix; until then a collision
   check on the rendered arguments would make it an error.
-- **A record's reference to itself has no single representation.** [read,
-  2026-11-16] Gap in GEN-1 and the TypeF model (CodeGenerator/Namespace.hs).
-  A back-reference arrives as `RecF` whose concrete-name slot is unreliable
-  (its own comment says so), as a bare `VarF` of the record's name, or as
-  an `AppF` of that name at its arguments, depending on the path that built
-  the type; GenDefs.foldSelf, GenDefs.canon (and its `selfAt` in checkUse)
-  and the renderers each handle the forms they meet. A form one of them
-  misses makes a use disagree with its definition (spec-gen-8-1 hit the
-  bare-name form). Fix in its own session: one representation of
-  recursion, carrying the arguments, built in one place.
 - **A public Rust `data` type is not checked for names it cannot import.**
   [speculative, 2026-11-16] GEN-10. Rust.hs planRustPublic adds every
   eligible variant and enum to the names a public record may hold, but

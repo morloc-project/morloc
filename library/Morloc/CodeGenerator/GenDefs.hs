@@ -19,10 +19,11 @@ module Morloc.CodeGenerator.GenDefs
   , checkUse
   , Disagreement (..)
   , canon
+  , untiedSelf
   , RecordUse
   , recordUses
   , disagreements
-  , intrinsicSerialASTs
+  , inPoolSerialASTs
   , placeTypes
   , templateArgs
   , recordArgs
@@ -36,14 +37,14 @@ import qualified Data.Text as T
 import Morloc.CodeGenerator.Infer (getScope, inferConcreteType)
 import Morloc.CodeGenerator.Namespace
 import qualified Data.Set as Set
-import Morloc.CodeGenerator.Grammars.Common (intrinsicValueTypes, recordsInType)
+import Morloc.CodeGenerator.Grammars.Common (intrinsicValueTypes, poolNativeTypes, recordsInType)
 import Morloc.CodeGenerator.Grammars.Macro (expandMacro)
 import Morloc.CodeGenerator.Serial (makeSerialAST)
 import qualified Morloc.Data.Map as Map
 import Morloc.Data.Zip (zipSame, zipWithSame)
 import qualified Morloc.Monad as MM
 import Control.Monad.Except (catchError)
-import Morloc.Data.Doc (render)
+import Morloc.Data.Doc (pretty, render)
 
 -- | A generated record as its declaration defines it in one language.
 data GenDef = GenDef
@@ -101,14 +102,17 @@ genDefs lang used = do
       -- and a use of the record says why.
       r <-
         ( ( \tf -> case tf of
-              NamF _ _ args rs -> (gv, Right (GenDef gv form ps [(k, foldSelf gv args x) | (k, x) <- rs]))
+              NamF _ fv args rs -> (gv, Right (GenDef gv form ps [(k, foldSelf fv args x) | (k, x) <- rs]))
               _ -> (gv, Left "its declaration does not resolve to a record")
           )
             <$> inferConcreteType lang (Idx 0 t)
         )
           `catchRejected` (\msg -> return (gv, Left msg))
       MM.put st0
-      return r
+      case r of
+        (_, Right gd) | (g : _) <- untiedSelf (NamF NamRecord (FV gv (CV form)) [] (gdFields gd)) ->
+          MM.throwCompilerBug ("a reference of the record " <> pretty g <> " to itself was not tied in inference")
+        _ -> return r
     paramArg (p, KindType) = TyA (VarT (placeholder p))
     paramArg (p, _) = KiA (KVarT p)
 
@@ -119,29 +123,25 @@ catchRejected act h =
     Rejected _ d -> h (render d)
     _ -> MM.throwError e
 
--- | Fold the record's own occurrences into back-references: those at the
--- arguments of the enclosing occurrence. One at other arguments (the inner
--- `Pair Int` of a `Pair (Pair Int)`) is another type.
-foldSelf :: TVar -> [ArgF] -> TypeF -> TypeF
-foldSelf self ps0 t = case t of
-  NamF _ (FV g _) ps _ | g == self -> if ps == ps0 then back else t
-  RecF (FV g _) | g == self -> back
-  VarF (FV g _) | g == self -> back
-  AppF (VarF (FV g _)) ps | g == self -> if ps == ps0 then back else t
-  _ -> mapChildren (foldSelf self ps0) t
-  where
-    back = RecF (FV self (CV "struct"))
+-- | Fold an unrolled copy of the record, an occurrence at the arguments of
+-- the enclosing one, into a reference to it. One at other arguments (the
+-- inner `Pair Int` of a `Pair (Pair Int)`) is another type.
+foldSelf :: FVar -> [ArgF] -> TypeF -> TypeF
+foldSelf fv@(FV self _) ps0 t = case t of
+  NamF _ (FV g _) ps _ | g == self, ps == ps0 -> RecF fv ps0
+  _ -> mapChildren (foldSelf fv ps0) t
 
--- | A type with each of its immediate component types mapped.
-mapChildren :: (TypeF -> TypeF) -> TypeF -> TypeF
-mapChildren go t = case t of
-  NamF o v ps rs -> NamF o v (map (fmap go) ps) [(k, go x) | (k, x) <- rs]
-  FunF as r -> FunF (map go as) (go r)
-  AppF h as -> AppF (go h) (map (fmap go) as)
-  OptionalF x -> OptionalF (go x)
-  VariantF v ps as -> VariantF v (map (fmap go) ps) [(c, map go ts) | (c, ts) <- as]
-  EnumF v ps cs -> EnumF v (map (fmap go) ps) cs
-  _ -> t
+-- | The generated records referred to by name inside an occurrence of
+-- themselves: references inference should have tied ('RecF'). A record
+-- mapped to a native form is named through it, at any arguments.
+untiedSelf :: TypeF -> [TVar]
+untiedSelf = go Set.empty
+  where
+    go anc t = case t of
+      NamF _ (FV g (CV "struct")) _ rs -> concatMap (go (Set.insert g anc) . snd) rs
+      VarF (FV g _) | Set.member g anc -> [g]
+      AppF (VarF (FV g _)) _ | Set.member g anc -> [g]
+      _ -> concatMap (go anc) (childrenOf t)
 
 -- | The arguments of a use, by parameter: each placeholder in the
 -- definition's fields is bound to the use's type at the same position. A
@@ -219,16 +219,15 @@ checkUse defs gd carried rs = case inferArgsPartial defs gd rs of
   Left e -> Just (Unmatched e)
   Right args ->
     firstJust id
-      [ if canon defs (selfAt d') == canon defs u then Nothing else Just (FieldDiffers k d' u)
+      [ if canonAt d' == canonAt u then Nothing else Just (FieldDiffers k d' u)
       | (k, d) <- gdFields gd
       , let d' = instantiate args d
       , Just u <- [lookup k rs]
       ]
   where
     self = NamF NamRecord (FV (gdVar gd) (CV (gdForm gd))) carried rs
-    selfAt t = case t of
-      RecF (FV g _) | g == gdVar gd -> self
-      _ -> mapChildren selfAt t
+    -- Inside the use, a reference to its record is the use itself.
+    canonAt = canonIn defs (Map.singleton (gdVar gd, carried) (canon defs self))
 
 -- | Why a use is not an instance of its record's definition.
 data Disagreement
@@ -245,20 +244,33 @@ data Disagreement
 -- one form, and a back-reference is the record at no arguments. A record
 -- with no definition keeps its fields.
 canon :: Map.Map TVar GenDef -> TypeF -> TypeF
-canon defs t = case t of
+canon defs = canonIn defs Map.empty
+
+-- | 'canon', with the canonical forms of the record occurrences that
+-- enclose the type, by name and arguments: a reference to one of them is
+-- that occurrence.
+canonIn :: Map.Map TVar GenDef -> Map.Map (TVar, [ArgF]) TypeF -> TypeF -> TypeF
+canonIn defs env t = case t of
   NamF _ (FV g cv) ps rs
     | Just gd <- Map.lookup g defs
     , Right as <- recordArgs defs gd ps rs ->
-        NamF NamRecord (FV g cv) (map (TyA . canon defs) as) []
-    | otherwise -> NamF NamRecord (FV g cv) (map (fmap (canon defs)) ps) [(k, canon defs x) | (k, x) <- rs]
-  RecF (FV g _)
-    | Just gd <- Map.lookup g defs -> NamF NamRecord (FV g (CV (gdForm gd))) [] []
-  -- A reference to a record by its name alone is the record.
-  VarF (FV g _)
-    | Just gd <- Map.lookup g defs -> NamF NamRecord (FV g (CV (gdForm gd))) [] []
-  AppF (VarF (FV g _)) as
-    | Just gd <- Map.lookup g defs -> NamF NamRecord (FV g (CV (gdForm gd))) (map (fmap (canon defs)) as) []
-  _ -> mapChildren (canon defs) t
+        NamF NamRecord (FV g cv) (map (TyA . canonIn defs env) as) []
+    | otherwise ->
+        let ps' = map (fmap (canonIn defs env)) ps
+            env' = Map.insert (g, ps) (NamF NamRecord (FV g cv) ps' []) env
+         in NamF NamRecord (FV g cv) ps' [(k, canonIn defs env' x) | (k, x) <- rs]
+  -- A `data` type is its instance: its name, which a generated type
+  -- derives from its arguments, and the arguments a template spells. Its
+  -- arms are dropped, so a reference to it from inside its own arms (a
+  -- back-edge, which carries none) is the same type.
+  VariantF fv@(FV _ (CV form)) ps _
+    | T.any (== '$') form -> VariantF fv (map (fmap (canonIn defs env)) ps) []
+    | otherwise -> VariantF fv [] []
+  RecF (FV g cv) ps
+    | Just c <- Map.lookup (g, ps) env -> c
+    | Just gd <- Map.lookup g defs -> NamF NamRecord (FV g (CV (gdForm gd))) (map (fmap (canonIn defs env)) ps) []
+    | otherwise -> NamF NamRecord (FV g cv) (map (fmap (canonIn defs env)) ps) []
+  _ -> mapChildren (canonIn defs env) t
 
 -- | The parameters a type holds in a field, the ones its uses can bind:
 -- the arguments a nested record or `data` type carries are not counted,
@@ -342,12 +354,26 @@ templateArgs defs gd rs = do
   mapM (\p -> maybe (Left ("the parameter " <> unTVar p <> " is not determined")) Right (Map.lookup p args)) (nativeParams gd)
 
 
--- | The serial forms of the values a pool's intrinsics marshal, so that
--- every instance the pool writes is known (GEN-14). A value with no serial
--- form is one no intrinsic can marshal either, and the intrinsic reports it.
-intrinsicSerialASTs :: Lang -> [SerialManifold] -> MorlocMonad [SerialAST]
-intrinsicSerialASTs lang es =
-  concat <$> mapM (\t -> MM.recoverRejected ((: []) <$> makeSerialAST 0 lang t) (return [])) (unique (concatMap intrinsicValueTypes es))
+-- | The serial forms of the values a pool marshals that no manifold's
+-- arguments or result give: those its intrinsics marshal and the generated
+-- records it holds, so that every instance the pool writes is known
+-- (GEN-14). A value with no serial form is one no intrinsic can marshal
+-- either, and the intrinsic reports it.
+inPoolSerialASTs :: Lang -> [SerialManifold] -> MorlocMonad [SerialAST]
+inPoolSerialASTs lang es = concat <$> mapM one (unique (concatMap intrinsicValueTypes es <> held))
+  where
+    -- A generated record the pool holds is marshalled wherever a value
+    -- holding it is, the arms of a `data` type it is on a cycle with
+    -- included, whether or not a value of it is written on its own.
+    held = concatMap outermostGenerated (concatMap poolNativeTypes es)
+    outermostGenerated t = case t of
+      NamF _ (FV _ (CV "struct")) _ _ -> [t]
+      _ -> concatMap outermostGenerated (childrenOf t)
+    -- A type that has no serial form adds nothing; the state its attempt
+    -- left is discarded.
+    one t = do
+      st0 <- MM.get
+      MM.recoverRejected ((: []) <$> makeSerialAST 0 lang t) (MM.put st0 >> return [])
 
 -- | Which generated types a language's files can hold (GEN-10): of the
 -- candidates, those whose fields name only parameters, generated types the
@@ -380,7 +406,7 @@ placeTypes leafOk generated fieldsOf = go (Map.keysSet fieldsOf)
       NamF NamTable _ _ _ -> False
       NamF _ (FV g (CV "struct")) _ _ -> Set.member g pub
       NamF _ (FV g (CV f)) ps _ -> nominal pub g f ps
-      RecF (FV g _) -> Set.member g pub
+      RecF (FV g _) ps -> Set.member g pub && all (safe pub) (tyArgs ps)
       VariantF (FV g (CV f)) ps _ -> nominal pub g f ps
       EnumF (FV g (CV f)) ps _ -> nominal pub g f ps
       VarF (FV g (CV f)) -> nominal pub g f []
