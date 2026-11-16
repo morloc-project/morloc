@@ -114,7 +114,7 @@ whose `import` the file then imports.
 ### GEN-8 A generated record in a compiled language holds host values
 Intent: ruled 2026-11-14
 Tests: spec-gen-8-1, spec-gen-8-2
-Code: conforms 2026-11-15
+Code: deviates (issues/records.md)
 
 In C++ and Rust a field of a generated record is in the host's convention,
 as a field of a user-written struct is: a function field whose result is an
@@ -124,8 +124,8 @@ reads such a field adapts the function where it does so, so in morloc the
 field keeps its declared type (EFF-2).
 
 ### GEN-9 A generated definition follows its declaration
-Intent: ruled 2026-11-15
-Tests: spec-gen-9-1, spec-gen-9-2, spec-gen-9-3, spec-gen-9-4, spec-gen-9-5
+Intent: ruled 2026-11-16
+Tests: spec-gen-9-1, spec-gen-9-2, spec-gen-9-3, spec-gen-9-4, spec-gen-9-5, spec-gen-9-6
 Code: deviates (issues/records.md)
 
 A generated record or `data` type has the declaration's type parameters as
@@ -135,15 +135,15 @@ program uses `Pair Int`, `Pair Str` or both, `Pair a` has one definition,
 `template <class T_a> struct Pair` / `pub struct Pair<T_a>`, which sources
 name at their arguments (`Pair<int64_t>`).
 
-A use's arguments are read from its fields, matched against the declared
-fields; they are never taken from the arguments a type carries, which on
-the wire side of a packed argument are the native ones (`Pair Date` is
-`Pair<int64_t>` natively and is sent as `Pair<std::string>`'s fields). A use
-whose fields do not render as the definition does at those arguments is a
-compile error naming the record, the field and both renderings. A `data`
-type's arguments are read from its arms the same way, so its native and
-wire forms are distinct instances (`Choice<int64_t>` and
-`Choice<std::string>` for a packed `Choice Date`). A `data` instance whose
+A use's arguments are its general arguments in their native forms on the
+native side, and in their unpacked forms on the wire side of a packed
+argument (`Pair Date` is `Pair<int64_t>` natively and is sent as
+`Pair<std::string>`). Its fields are the definition's at those arguments;
+a use whose fields do not render as the definition does at those arguments
+is a compile error naming the record, the field and both renderings. A
+`data` type's arguments are found the same way, so its native and wire
+forms are distinct instances (`Choice<int64_t>` and `Choice<std::string>`
+for a packed `Choice Date`). A `data` instance whose
 arguments contain the type itself other than through a record
 (`type X = Rose ?X`) has no finite spelling at them; it is a type of its
 own in the pool, named by its arguments.

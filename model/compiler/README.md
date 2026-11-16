@@ -29,5 +29,6 @@ never repairs the input or guesses.
 | codegen/serialize.md | SER | every crossing has a wire form |
 | codegen/ownership.md | OWN | each read of a value is a borrow, a copy or a move |
 | codegen/emit.md | EMIT | generated pools and the manifest |
+| codegen/nominal.md | NOM | declared types identified by key |
 
-Only `frontend/typecheck.md`, `codegen/effect-boundaries.md`, `codegen/ownership.md` and `codegen/emit.md` are started.
+Only `frontend/typecheck.md`, `codegen/effect-boundaries.md`, `codegen/ownership.md`, `codegen/emit.md` and `codegen/nominal.md` are started.

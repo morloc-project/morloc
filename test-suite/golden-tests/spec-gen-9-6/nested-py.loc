@@ -1,0 +1,16 @@
+-- GEN-9: a recursive parameterized record used at an argument holding
+-- itself, in Python.
+module main (nest, innerVal)
+
+import root-py
+
+record Container a where
+  val :: a
+  sub :: ?(Container a)
+
+source Py from "nested.py" ("same", "innerVal")
+same :: a -> a
+innerVal :: Container (Container Int) -> Int
+
+nest :: Container (Container Int) -> Container (Container Int)
+nest x = same x

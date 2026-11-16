@@ -1,0 +1,15 @@
+-- GEN-9: a record nested in itself more deeply than code generation
+-- expands is still marshalled exactly in Python.
+module main (trip)
+
+import root-py
+
+record Container a where
+  val :: a
+  sub :: ?(Container a)
+
+source Py from "nested.py" ("same")
+same :: a -> a
+
+trip :: Container (Container (Container (Container (Container (Container (Container (Int))))))) -> Container (Container (Container (Container (Container (Container (Container (Int)))))))
+trip x = same x

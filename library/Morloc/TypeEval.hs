@@ -17,6 +17,7 @@ module Morloc.TypeEval
   , transformType
   , evaluateStep
   , pairEval
+  , recordNestingLimit
   , declaresFormAt
   , reduceType
   , aliasChain
@@ -66,11 +67,25 @@ pairEval ::
   Either MorlocError TypeU
 pairEval cscope gscope =
   -- transform the concrete type until an unresolvable node is reached
-  generalTransformTypeWith (expandAliases gscope) Set.empty id resolveGen cscope
+  generalTransformTypeWith prot (expandAliases gscope) emptyBound id resolveGen cscope
   where
+    -- A declared record is protected while it is expanded by its instance,
+    -- so a nested use at other arguments (the inner `Container Int` of
+    -- `Container (Container Int)`) is expanded too (NOM-3). A recursive
+    -- alias, in either scope, is not a declared type and keeps the name
+    -- cut, as does a non-regular record. Any other type cannot meet itself
+    -- at other arguments, so its instance alone is protected.
+    prot = ByInstance cut
+    cut v
+      | nonRegular gscope v = CutByName
+      | declaresRecord gscope v && refersToItself gscope v = CutRecursive
+      | declaresRecord gscope v = CutInstance
+      | refersToItself gscope v || refersToItself cscope v = CutByName
+      | otherwise = CutInstance
+
     -- resolve by attempting to evaluate one step as in the general scope
     resolveGen f bnd t =
-      case generalTransformType bnd (\_ _ -> return) resolveFail gscope t of
+      case generalTransformTypeWith prot id bnd (\_ _ -> return) resolveFail gscope t of
         (Right t') ->
           if t' /= t
             -- If general resolution succeeds, continue evaluation with
@@ -86,7 +101,7 @@ pairEval cscope gscope =
             then f (bumpBnd t bnd) t'
             -- if it fails, return to the concrete scope to handle failure without
             -- general resolution option
-            else generalTransformType Set.empty id resolveFail cscope t
+            else generalTransformType emptyBound id resolveFail cscope t
         -- gscope's general walk failed (typically because the head is
         -- a non-NamU newtype, which 'generalTransformType' treats as
         -- nominally opaque). For per-language form derivation, a
@@ -107,7 +122,7 @@ pairEval cscope gscope =
               -- parent type -- so this must be answered here rather than by
               -- 'expandNewtypeBodyOneStep'.
               | isDataType gscope t -> return t
-              | otherwise -> generalTransformType Set.empty id resolveFail cscope t
+              | otherwise -> generalTransformType emptyBound id resolveFail cscope t
 
     isDataType :: Scope -> TypeU -> Bool
     isDataType scope = isJust . dataHead scope . whnf scope
@@ -132,14 +147,133 @@ pairEval cscope gscope =
       _ -> Nothing
     expandNewtypeBodyOneStep _ _ = Nothing
 
-    bumpBnd :: TypeU -> Set.Set TVar -> Set.Set TVar
-    bumpBnd (AppU (VarU v) _) bnd = Set.insert v bnd
-    bumpBnd (VarU v) bnd = Set.insert v bnd
+    bumpBnd :: TypeU -> Bound -> Bound
+    bumpBnd (AppU (VarU v) ts) bnd = protect prot v ts bnd
+    bumpBnd (VarU v) bnd = protect prot v [] bnd
     bumpBnd _ bnd = bnd
+
+-- | The types an expansion is inside of, which are not expanded again
+-- inside it: type variables and types protected by name, and types
+-- protected by instance (name and arguments as written).
+data Bound = Bound
+  { boundNames :: Set.Set TVar
+  , boundInsts :: Map.Map TVar (Set.Set [TypeU])
+  , boundRecursive :: Int
+  -- ^ instances of recursive records among 'boundInsts'
+  , boundTotal :: Int
+  -- ^ instances in 'boundInsts'
+  }
+
+emptyBound :: Bound
+emptyBound = Bound Set.empty Map.empty 0 0
+
+bindName :: TVar -> Bound -> Bound
+bindName v b = b {boundNames = Set.insert v (boundNames b)}
+
+-- | How an expansion protects the type it expands: by name, or as each
+-- name says.
+data Protection = ByName | ByInstance (TVar -> Cut)
+
+-- | How a name is protected: by name; by instance, as a recursive record,
+-- of which at most 'recordNestingLimit' instances are nested in each other;
+-- or by instance.
+data Cut = CutByName | CutRecursive | CutInstance
+
+-- | How many instances of recursive records are nested in each other before
+-- the next is cut by name: each nesting is expanded inline in every field
+-- that holds it, so the size of an expansion grows exponentially with it.
+recordNestingLimit :: Int
+recordNestingLimit = 5
+
+-- | Protect a type while its expansion is walked. However the names are
+-- protected, 256 nested instances in all fall back to the name cut, so a
+-- walk always ends.
+protect :: Protection -> TVar -> [TypeU] -> Bound -> Bound
+protect ByName v _ b = bindName v b
+protect (ByInstance cut) v ts b
+  | Set.member ts insts = b
+  | boundTotal b >= 256 = bindName v b
+  | otherwise = case cut v of
+      CutByName -> bindName v b
+      CutRecursive
+        | boundRecursive b >= recordNestingLimit -> bindName v b
+        | otherwise -> (insert b) {boundRecursive = boundRecursive b + 1}
+      CutInstance -> insert b
+  where
+    insts = Map.findWithDefault Set.empty v (boundInsts b)
+    insert b' = b' {boundInsts = Map.insert v (Set.insert ts insts) (boundInsts b'), boundTotal = boundTotal b' + 1}
+
+-- | Whether a type is protected by its name.
+protectedByName :: Bound -> TVar -> Bool
+protectedByName b v = Set.member v (boundNames b)
+
+-- | Whether a type is protected by its instance.
+protectedByInstance :: Bound -> TVar -> [TypeU] -> Bool
+protectedByInstance b v ts = maybe False (Set.member ts) (Map.lookup v (boundInsts b))
+
+-- | Whether a name is declared as a record, object or table.
+declaresRecord :: Scope -> TVar -> Bool
+declaresRecord scope v = case Map.lookup v scope of
+  Just entries -> or [True | (_, NamU {}, _, _, _) <- entries]
+  Nothing -> False
+
+-- | Whether a declaration refers to itself, in its own body, at arguments
+-- that are not its parameters but mention one (@record Nest a where sub ::
+-- ?(Nest [a])@). Each nesting of such a type is a new instance, so its
+-- expansion is cut by name.
+nonRegular :: Scope -> TVar -> Bool
+nonRegular scope v = or [irregular ps body | (ps, body, _, _, _) <- Map.findWithDefault [] v scope]
+  where
+    irregular ps body =
+      let params = [p | Left (p, _) <- ps]
+          own as = length as == length params && and (zipWith (\a p -> varOf a == Just p) as params)
+       in any (\as -> not (own as) && any (mentions params) as) (selfRefs v body)
+    mentions params t = maybe False (`elem` params) (varOf t) || any (mentions params) (typeUParts t)
+
+-- | Whether a declaration refers to itself in its own body.
+refersToItself :: Scope -> TVar -> Bool
+refersToItself scope v = or [mentionsName body | (_, body, _, _, _) <- Map.findWithDefault [] v scope]
+  where
+    mentionsName t = varOf t == Just v || any mentionsName (typeUParts t)
+
+-- | The argument lists of a declaration's references to itself in a body.
+selfRefs :: TVar -> TypeU -> [[TypeU]]
+selfRefs v t = case t of
+  AppU (VarU v') as | v' == v -> as : concatMap (selfRefs v) as
+  _ -> concatMap (selfRefs v) (typeUParts t)
+
+-- | The variable a type is, in any of its kinds.
+varOf :: TypeU -> Maybe TVar
+varOf t = case t of
+  VarU p -> Just p
+  NatVarU p -> Just p
+  StrVarU p -> Just p
+  RecVarU p -> Just p
+  ListVarU p -> Just p
+  SetVarU p -> Just p
+  KVarU (p, _) -> Just p
+  _ -> Nothing
+
+-- | The immediate parts of a type.
+typeUParts :: TypeU -> [TypeU]
+typeUParts t = case t of
+  AppU h as -> h : as
+  NamU _ _ ps rs -> ps <> map snd rs
+  FunU as r -> r : as
+  ForallU _ x -> [x]
+  EffectU _ x -> [x]
+  OptionalU x -> [x]
+  LabeledU _ x -> [x]
+  OpU _ as -> as
+  ExistU _ (ps, _) (rs, _) -> ps <> map snd rs
+  LitU (LRec fs) -> map snd fs
+  LitU (LList es) -> es
+  LitU (LSet es) -> es
+  _ -> []
 
 evaluateStep :: Scope -> TypeU -> Maybe TypeU
 evaluateStep scope t0 =
-  case generalTransformType Set.empty (\_ _ -> return) resolveFail scope t0 of
+  case generalTransformType emptyBound (\_ _ -> return) resolveFail scope t0 of
     (Left _) -> Nothing
     (Right t) -> Just t
 
@@ -224,15 +358,15 @@ reduceTypeLeaves scope t0 =
 
 -- evaluate a type until terminal functions called, fail if termini are not reached
 transformType :: Scope -> TypeU -> Either MorlocError TypeU
-transformType = generalTransformType Set.empty id resolveFail
+transformType = generalTransformType emptyBound id resolveFail
 
 -- evaluate a type as far as possible given the type functions in scope
 evaluateType :: Scope -> TypeU -> Either MorlocError TypeU
-evaluateType = generalTransformType Set.empty id resolveIgnore
+evaluateType = generalTransformType emptyBound id resolveIgnore
 
 resolveIgnore ::
-  (Set.Set TVar -> TypeU -> Either MorlocError TypeU) ->
-  Set.Set TVar ->
+  (Bound -> TypeU -> Either MorlocError TypeU) ->
+  Bound ->
   TypeU ->
   Either MorlocError TypeU
 resolveIgnore f bnd (AppU (VarU v) ts) = AppU (VarU v) <$> mapM (f bnd) ts
@@ -240,8 +374,8 @@ resolveIgnore _ _ t@(VarU _) = return t
 resolveIgnore _ _ _ = MM.throwCompilerBug "resolveIgnore reached an unexpected branch"
 
 resolveFail ::
-  (Set.Set TVar -> TypeU -> Either MorlocError TypeU) ->
-  Set.Set TVar ->
+  (Bound -> TypeU -> Either MorlocError TypeU) ->
+  Bound ->
   TypeU ->
   Either MorlocError TypeU
 resolveFail _ _ (AppU (VarU v) _) =
@@ -255,46 +389,47 @@ resolveFail _ _ (VarU v) =
 resolveFail _ _ _ = MM.throwCompilerBug "resolveFail reached an unexpected branch"
 
 generalTransformType ::
-  Set.Set TVar ->
-  ( (Set.Set TVar -> TypeU -> Either MorlocError TypeU) ->
-    Set.Set TVar ->
+  Bound ->
+  ( (Bound -> TypeU -> Either MorlocError TypeU) ->
+    Bound ->
     TypeU ->
     Either MorlocError TypeU
   ) ->
-  ( (Set.Set TVar -> TypeU -> Either MorlocError TypeU) ->
-    Set.Set TVar ->
+  ( (Bound -> TypeU -> Either MorlocError TypeU) ->
+    Bound ->
     TypeU ->
     Either MorlocError TypeU
   ) ->
   Scope -> -- may be general or concrete scope
   TypeU ->
   Either MorlocError TypeU
-generalTransformType = generalTransformTypeWith id
+generalTransformType = generalTransformTypeWith ByName id
 
 -- | 'generalTransformType', comparing a type's arguments with a form's
 -- parameters through @norm@.
 generalTransformTypeWith ::
+  Protection ->
   (TypeU -> TypeU) ->
-  Set.Set TVar ->
-  ( (Set.Set TVar -> TypeU -> Either MorlocError TypeU) ->
-    Set.Set TVar ->
+  Bound ->
+  ( (Bound -> TypeU -> Either MorlocError TypeU) ->
+    Bound ->
     TypeU ->
     Either MorlocError TypeU
   ) ->
-  ( (Set.Set TVar -> TypeU -> Either MorlocError TypeU) ->
-    Set.Set TVar ->
+  ( (Bound -> TypeU -> Either MorlocError TypeU) ->
+    Bound ->
     TypeU ->
     Either MorlocError TypeU
   ) ->
   Scope ->
   TypeU ->
   Either MorlocError TypeU
-generalTransformTypeWith norm bnd0 recurse' resolve' scope = f bnd0
+generalTransformTypeWith prot norm bnd0 recurse' resolve' scope = f bnd0
   where
     recurse = recurse' f
     resolve = resolve' recurse
 
-    f :: Set.Set TVar -> TypeU -> Either MorlocError TypeU
+    f :: Bound -> TypeU -> Either MorlocError TypeU
     f bnd (ExistU v (ps, pc) (rs, rc)) = do
       ps' <- mapM (recurse bnd) ps
       rs' <- mapM (\(k, v') -> (,) k <$> recurse bnd v') rs
@@ -306,17 +441,12 @@ generalTransformTypeWith norm bnd0 recurse' resolve' scope = f bnd0
         (Just [(_, NamU o'' n'' _ _, _, _, _)]) -> return (n'', o'')
         -- Otherwise, keep the record name and form and recurse only into children
         _ -> return (n, o)
-      -- Bind BOTH the original and the substituted name inside the
-      -- record body so a recursive field referencing either form is
-      -- left alone. A field like @VarU n@ (original) or @VarU n'@
-      -- (concrete alias) would otherwise be looked up in scope and
-      -- re-expanded into the same NamU forever. Add both: when @n@ and
-      -- @n'@ differ (e.g. @record Tree where children :: [Tree]@ with a
-      -- concrete @record Py => Tree = "dict"@ mapping), the children
-      -- field still mentions the original @Tree@ name even though the
-      -- outer NamU is now named @dict@. See
-      -- plans/in-morloc-recursive-fields-* for context.
-      let bnd' = Set.insert n' (Set.insert n bnd)
+      -- Protect the record inside its own body, so a field referring to
+      -- it is left alone rather than expanded into the same NamU forever;
+      -- under instance protection only a reference at the same arguments
+      -- is. The substituted name (@record Py => Tree = "dict"@) is a form,
+      -- which no field names, and is protected by name.
+      let bnd' = (if n' /= n then bindName n' else id) (protect prot n ps bnd)
       rs' <- mapM (traverse (recurse bnd')) rs
       -- A structural record form holds in its fields every parameter its
       -- representation uses, so a parameter with no form here is phantom and
@@ -344,7 +474,11 @@ generalTransformTypeWith norm bnd0 recurse' resolve' scope = f bnd0
       --   f :: Foo Int -> B
       --   -----------------
       --   f :: (Int, A) -> B
-      | Set.member v bnd = AppU (VarU v) <$> mapM (recurse bnd) ts
+      | protectedByName bnd v = AppU (VarU v) <$> mapM (recurse bnd) ts
+      -- A reference to an instance being expanded: the walk that consumes
+      -- this form ties it to that instance, so its arguments are left as
+      -- written rather than expanded again at every level.
+      | protectedByInstance bnd v ts = return t0
       -- Handle specialization, e.g.
       --   type Py => List Int64 = "np.ndarray" "int64"
       | otherwise =
@@ -352,18 +486,13 @@ generalTransformTypeWith norm bnd0 recurse' resolve' scope = f bnd0
             (Just ts') -> do
               mergedAliases <- fmap (renameTypedefs bnd) <$> lookupForm (map norm ts) t0 ts'
               case mergedAliases of
-                -- @v@ is added to bnd only when the substituted body is
-                -- a record (NamU): records are the one alias shape that
-                -- can be self-recursive via fields, and the bnd guard
-                -- short-circuits those self-references during the
-                -- walk. Non-record aliases (e.g. @type List a =
-                -- "vector<$1>" a@) must NOT add @v@ to bnd, otherwise a
-                -- nested use of the same alias in an argument position
-                -- (@List (List Real)@) hits the bnd guard at the inner
-                -- level and is left unevaluated, leaking the morloc
-                -- general name into generated code.
+                -- @v@ is protected only when its substituted body refers
+                -- to it: a non-recursive alias (@type List a =
+                -- "vector<$1>" a@) protected by name would leave a nested
+                -- use of itself (@List (List Real)@) unevaluated, leaking
+                -- the morloc name into generated code.
                 (Just (vs, newType, _, isTerminal, kind)) ->
-                  let bnd' = if isSelfRecursive v newType then Set.insert v bnd else bnd
+                  let bnd' = if isSelfRecursive v newType then protect prot v ts bnd else bnd
                       substituted = parsubAll [(v', t') | (Just v', t') <- zipSame vs ts] newType
                   in case (kind, isTerminal) of
                        -- Newtype and primitive are nominal for typeclass
@@ -397,7 +526,7 @@ generalTransformTypeWith norm bnd0 recurse' resolve' scope = f bnd0
     -- -----------------
     -- f :: A -> B
     f bnd t0@(VarU v)
-      | Set.member v bnd = return t0
+      | protectedByName bnd v || protectedByInstance bnd v [] = return t0
       | otherwise = case Map.lookup v scope of
           (Just []) -> return t0
           (Just ts1) -> do
@@ -419,7 +548,7 @@ generalTransformTypeWith norm bnd0 recurse' resolve' scope = f bnd0
               -- @Foo@ in bnd. See `isSelfRecursive` for the structural
               -- check.
               (Just (_, t2, _, isTerminal, kind)) ->
-                let bnd' = if isSelfRecursive v t2 then Set.insert v bnd else bnd
+                let bnd' = if isSelfRecursive v t2 then protect prot v [] bnd else bnd
                 in case kind of
                      -- Newtype: opaque for instance lookup, but a record
                      -- newtype (NamU body) is transparent for per-language
@@ -439,7 +568,7 @@ generalTransformTypeWith norm bnd0 recurse' resolve' scope = f bnd0
                     <> "\n  Available aliases have"
                     <+> pretty (length ts1) <+> "entries, none match"
           Nothing -> resolve bnd t0
-    f bnd (ForallU v t) = ForallU v <$> recurse (Set.insert v bnd) t
+    f bnd (ForallU v t) = ForallU v <$> recurse (bindName v bnd) t
     f bnd (EffectU effs t) = EffectU effs <$> recurse bnd t
     f bnd (OptionalU t) = OptionalU <$> recurse bnd t
     f _ t@(NatVarU _) = return t  -- nat vars are not type aliases
@@ -467,13 +596,13 @@ generalTransformTypeWith norm bnd0 recurse' resolve' scope = f bnd0
     f bnd (LitU (LSet es)) = LitU . LSet <$> mapM (recurse bnd) es
     f bnd (LabeledU n t) = LabeledU n <$> recurse bnd t
 
-    terminate :: Set.Set TVar -> TypeU -> Either MorlocError TypeU
+    terminate :: Bound -> TypeU -> Either MorlocError TypeU
     terminate bnd (ExistU v (ts, tc) (rs, rc)) = do
       ts' <- mapM (recurse bnd) ts
       rs' <- mapM (secondM (recurse bnd)) rs
       return $ ExistU v (ts', tc) (rs', rc)
     terminate bnd (FunU ts t) = FunU <$> mapM (recurse bnd) ts <*> recurse bnd t
-    terminate bnd (ForallU v t) = ForallU v <$> recurse (Set.insert v bnd) t
+    terminate bnd (ForallU v t) = ForallU v <$> recurse (bindName v bnd) t
     terminate bnd (AppU t ts) = AppU t <$> mapM (recurse bnd) ts
     terminate bnd (NamU o v ts rs) =
       -- Same bnd-extension as in @f@ above. We only have the local name
@@ -482,7 +611,7 @@ generalTransformTypeWith norm bnd0 recurse' resolve' scope = f bnd0
       -- aliases. @terminate@ is reached only after a full evaluation,
       -- by which point the recursive references inside @rs@ already
       -- reference whichever name @v@ holds.
-      let bnd' = Set.insert v bnd
+      let bnd' = protect prot v ts bnd
       in NamU o v <$> mapM (recurse bnd') ts <*> mapM (secondM (recurse bnd')) rs
     terminate _ (VarU v) = return (VarU v)
     terminate _ t@(NatVarU _) = return t
@@ -513,14 +642,14 @@ generalTransformTypeWith norm bnd0 recurse' resolve' scope = f bnd0
     -- A parameter list with one slot per parameter, Nothing for a
     -- specialized one, so the slots stay aligned with the arguments.
     renameTypedefs ::
-      Set.Set TVar -> ([Either (TVar, Kind) TypeU], TypeU, ArgDoc, Bool, TypedefKind) -> ([Maybe TVar], TypeU, ArgDoc, Bool, TypedefKind)
+      Bound -> ([Either (TVar, Kind) TypeU], TypeU, ArgDoc, Bool, TypedefKind) -> ([Maybe TVar], TypeU, ArgDoc, Bool, TypedefKind)
     renameTypedefs _ ([], t, d, isTerminal, kind) = ([], t, d, isTerminal, kind)
     renameTypedefs bnd (Left (v@(TV x), _) : vs, t, d, isTerminal, kind)
-      | Set.member v bnd =
+      | Set.member v (boundNames bnd) =
           let (vs', t', d', isTerminal', kind') = renameTypedefs bnd (vs, t, d, isTerminal, kind)
               v' =
                 head
-                  [ x' | x' <- [TV (MT.show' i <> x) | i <- [(0 :: Int) ..]], not (Set.member x' bnd), Just x' `notElem` vs'
+                  [ x' | x' <- [TV (MT.show' i <> x) | i <- [(0 :: Int) ..]], not (Set.member x' (boundNames bnd)), Just x' `notElem` vs'
                   ]
               t'' = substituteTVar v (VarU v') t'
            in (Just v' : vs', t'', d', isTerminal', kind')

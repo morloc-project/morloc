@@ -30,6 +30,7 @@ module Morloc.CodeGenerator.GenDefs
   , templateArgs
   , carriedTemplateArgs
   , nestedSelfUses
+  , nestedSelfUseReason
   , recordArgs
   , useArgs
   , placeholders
@@ -48,6 +49,7 @@ import qualified Data.Set as Set
 import Morloc.CodeGenerator.Grammars.Common (intrinsicValueTypes, poolNativeTypes, recordsInType, serialClosuresOf)
 import Morloc.CodeGenerator.Grammars.Macro (expandMacro)
 import Morloc.CodeGenerator.Serial (makeSerialAST)
+import Morloc.TypeEval (recordNestingLimit)
 import qualified Morloc.Data.Map as Map
 import Morloc.Data.Zip (indexed, indexedFrom, zipExact, zipPrefix, zipSame, zipWithSame)
 import qualified Morloc.Monad as MM
@@ -457,9 +459,11 @@ carriedTemplateArgs gd ps = do
   pairs <- zipExact [p | (p, KindType) <- gdParams gd] (tyArgs ps)
   return [t | (p, t) <- pairs, p `elem` nativeParams gd]
 
--- | The recursive parameterized records used at an argument that holds the
--- record itself (`Container (Container Int)`), which are not generated:
--- the inner use's form is not resolved as a generated record's.
+-- | The recursive parameterized records used at an argument that refers to
+-- the record by name only, which are not generated: concrete inference cuts
+-- a record's expansion by name where it is nested in recursive records more
+-- deeply than 'recordNestingLimit' allows, or where it is non-regular (`Nest [a]` in `Nest
+-- a`), so the inner use's form is not resolved as a generated record's.
 nestedSelfUses :: Map.Map TVar GenDef -> Set.Set TVar -> [RecordUse] -> [(TVar, [ArgF])]
 nestedSelfUses defs recursive uses =
   unique
@@ -472,11 +476,17 @@ nestedSelfUses defs recursive uses =
     ]
   where
     mentions g t = case t of
-      NamF _ (FV g' _) _ _ | g' == g -> True
-      RecF (FV g' _) _ | g' == g -> True
       VarF (FV g' _) | g' == g -> True
       AppF (VarF (FV g' _)) _ | g' == g -> True
       _ -> any (mentions g) (childrenOf t)
+
+-- | Why a use 'nestedSelfUses' finds is not generated, after the record's
+-- name.
+nestedSelfUseReason :: T.Text
+nestedSelfUseReason =
+  "refers to itself and is used where its expansion is cut by name: nested in recursive records more than "
+    <> T.pack (show (recordNestingLimit + 1)) <> " levels deep, or at arguments that change with each nesting;"
+    <> " this is not generated yet"
 
 -- | A use's arguments, in the definition's parameter order.
 templateArgs :: Map.Map TVar GenDef -> GenDef -> [(Key, TypeF)] -> Either T.Text [TypeF]

@@ -1,0 +1,12 @@
+-- A user-mapped recursive template record nested past the expansion limit
+-- is refused as a generated record is.
+module main (trip)
+import root-cpp
+record L a where
+  val :: a
+  next :: ?(L a)
+record Cpp => (L a) = "list_t<$1>" a
+source Cpp from "u.hpp" ("same")
+same :: a -> a
+trip :: L (L (L (L (L (L (L (Int))))))) -> L (L (L (L (L (L (L (Int)))))))
+trip x = same x

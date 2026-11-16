@@ -93,28 +93,15 @@
   the error misleads ("gives no cpp implementation of
   '__extract_pattern__'" [reproduced]). Plan: GEN9-DESIGN.md (in
   /work/plans/generated-native-types) stage S9.3.
-- **A recursive parameterized record used at an argument holding itself
-  is refused.** [reproduced, 2026-11-16] Violates GEN-9. `record Container
-  a where val :: a; sub :: ?(Container a)` used at `Container (Container
-  Int)`: the inner use's form is not resolved as a generated record's (it
-  arrives with the record's own name as its form, where pairEval protected
-  the recursive alias), so it would be spelled `Container<Container>`.
-  GenDefs.nestedSelfUses refuses such a use with a message in both
-  languages (spec-gen-9-5). Fix: resolve a record's arguments from its
-  general arguments alone, as a `data` type's are (Infer.resolveArgs).
 - **A recursive parameterized record referring to itself at other
   arguments is refused.** [reproduced, 2026-11-16] Violates GEN-9.
   `record T a b where val :: a; sub :: ?(T b a)`: the reference `T b a`
   is another instance of T, which a template could name (`T<T_b, T_a>`),
-  but it reaches the definition unexpanded and is refused at planning
-  (GenDefs.genDefs, spec-gen-9-5).
-- **A user-mapped recursive template record used at an argument holding
-  itself does not build.** [reproduced, 2026-11-16] Violates NATIVE-3.
-  `record Rust => Container a = "MyC<$1>"` used at `Container (Container
-  Int)` reaches rustc as `impl ToVoidstar for MyC<Container>` (E0425); in
-  C++ it is refused with "Recursive type alias `Container` has no concrete
-  C++ mapping", though it has one. Same cause as the generated case above
-  (the inner use keeps the record's name as its form).
+  but concrete inference cuts T by name (it is non-regular: it refers to
+  itself at arguments other than its parameters), so the definition holds
+  it unexpanded and is refused at planning (GenDefs.genDefs untiedSelf,
+  spec-gen-9-5). Fix: nominal-types P3, a reference to another key is that
+  key's type (NOM-6).
 - **A C++ template handle cannot be built from a braced list.** [read,
   2026-11-16] Deviates from CPP-6 (lang-cpp.md), which gives `R{{...}}` as
   a handle's construction form. A template handle takes its fields only
@@ -139,3 +126,46 @@
   pool-private record is written into the type files and the standalone
   `morloc types` crate would name a type it lacks. Reproduce with a
   variant arm holding a record with a sourced field.
+- **A record woven without the monadic walk skips the host convention.**
+  [read, 2026-11-16] Possible deviation from GEN-8. Only the two monadic
+  walks of concrete inference apply the host convention to a built record
+  (CodeGenerator/Infer.hs, `hostConvention` at its two call sites). A
+  record built by the pure weave keeps suspension-typed fields as written,
+  so a C++ or Rust record reached only through weave would hold a
+  suspension where the convention gives a value. Reachable, by reading,
+  through a phantom-Nat alias over a record (the weave steps the alias to
+  its expansion) and through a Packable whose unpacked form is a record
+  (Serial.hs resolvePacker). Not reproduced. Resolved by stage P2 of
+  /work/plans/nominal-types, which makes weave monadic.
+- **A self-containing `data` instance is named from its spelling.**
+  [speculative, 2026-11-16] Possible deviation from GEN-9. `Rose ?X` with
+  `type X = Rose ?X`, the same with `type Y = Rose ?Y`, and
+  `Rose ?(Rose ?X)` may be one morloc type, but they get different native
+  names (Infer.hs instanceName and selfContaining, mangled from the written
+  arguments). Needs a probe to check whether the typechecker unifies them.
+- **A record whose arguments hold the record itself does not build in C++
+  or Rust.** [reproduced, 2026-11-16] Violates GEN-1. Gap in GEN-9, which
+  rules a self-containing instance a type of its own, named by its
+  arguments, for `data` only. With `record Box a where v :: Int; w :: a` and `type X
+  = Box ?X`, `trip :: X -> X` builds and round-trips in Python. C++ refuses
+  it with "Recursive type alias `X` has no concrete C++ mapping", which
+  is misleading: Box is a generated record. Rust reaches rustc as E0425.
+  Fix in /work/plans/nominal-types: key the instance with a self-argument
+  (NOM-1) and name it as a self-containing `data` instance is named.
+- **A use's arguments are read from its fields, not from its general
+  arguments.** [read, 2026-11-16] Deviates from GEN-9 (amended
+  2026-11-16). Code generation pairs a record's arguments with the
+  concrete side (CodeGenerator/Infer.hs structuralCompound), and on the
+  unpacked side a use carries its native arguments, so the arguments it
+  is spelled at are read back by matching its fields against the
+  definition's (GenDefs.hs recordArgs, useArgs, templateArgs, canon).
+  Fixed by /work/plans/nominal-types stages P2-P4.
+- **A generated record with a `Nat` parameter used at a literal does not
+  build in C++ or Rust.** [reproduced, 2026-11-16, also at 63042ce29]
+  Violates GEN-9 (a `Nat` parameter is erased) and GEN-1. With `record V
+  (n :: Nat) a where xs :: [a]` and `trip :: V 3 Int -> V 3 Int` (source
+  `same`), C++ reaches g++ as "'V' was not declared in this scope" and
+  Rust reaches rustc as E0425 "cannot find type `V`". Nested at
+  `V 3 (V 2 Int)`, Rust instead refuses it ("the Rust struct V is the form
+  of a record used at instantiations whose field types differ"). Python
+  builds and round-trips both.

@@ -1,0 +1,20 @@
+-- GEN-9: a user-mapped recursive template record used at an argument
+-- holding itself is spelled at that argument.
+module main (nest, innerVal)
+
+import root-cpp
+
+record L a where
+  val :: a
+  next :: ?(L a)
+record Cpp => (L a) = "list_t<$1>" a
+
+source Cpp from "user.hpp" ("same", "innerL")
+same :: a -> a
+innerL :: L (L Int) -> Int
+
+nest :: L (L Int) -> L (L Int)
+nest x = same x
+
+innerVal :: L (L Int) -> Int
+innerVal x = innerL x
