@@ -85,6 +85,7 @@ import Morloc.CodeGenerator.Grammars.Translator.Imperative
   , wireToNative
   )
 import Morloc.CodeGenerator.Namespace
+import Morloc.CodeGenerator.Infer (declaredDataNames)
 import Morloc.CodeGenerator.Ownership
 import Morloc.Build.CargoLock (mergeCargoLocks)
 import qualified Morloc.Build.Params as BP
@@ -180,6 +181,8 @@ data RustState = RustState
   -- ^ Why a generated parameterized `data` type has no definition.
   , rsDataDefs :: Map.Map TVar DataDef
   -- ^ Each generated parameterized `data` type's definition (GEN-9).
+  , rsDataNames :: Set.Set TVar
+  -- ^ The `data` types the program declares.
   , rsGenDefs :: Map.Map TVar GenDef
   -- ^ Each generated record's definition from its declaration (GEN-9).
   , rsRecords :: Map.Map TVar GenDef
@@ -231,6 +234,7 @@ instance Defaultable RustState where
       , rsUserArms = Map.empty
       , rsGenDefs = Map.empty
       , rsDataDefs = Map.empty
+      , rsDataNames = Set.empty
       , rsDataFailures = Map.empty
       , rsRecords = Map.empty
       , rsRecordNames = Map.empty
@@ -323,6 +327,22 @@ rustTypeOf = f
     publicOr :: TVar -> MDoc -> RustM MDoc
     publicOr gv d = maybe d pretty . Map.lookup gv <$> CMS.gets rsPublic
 
+    -- A `data` type's name: a generated template in its module's file
+    -- goes by its path, spelled at the given arguments; a generated
+    -- template's instance named by its arguments is its own type.
+    dataName gv x ps
+      | T.any (== '$') x = do
+          public <- CMS.gets rsPublic
+          ddefs <- CMS.gets rsDataDefs
+          let rest = snd (T.breakOn "<" x)
+              x' = case Map.lookup gv public of
+                Just q -> q <> rest
+                Nothing | Map.member gv ddefs -> privateDataName gv <> rest
+                Nothing -> x
+          nominalTypeName x' ps
+      | otherwise = do
+          ddefs <- CMS.gets rsDataDefs
+          if Map.member gv ddefs then nominalTypeName x ps else nominalTypeName x ps >>= publicOr gv
     f :: TypeF -> RustM MDoc
     f (UnkF (FV _ x)) = return (pretty (nativeTypeName (unCVar x)))
     f (VarF (FV gv x)) = publicOr gv (pretty (nativeTypeName (unCVar x)))
@@ -332,24 +352,10 @@ rustTypeOf = f
     f (EnumF (FV gv (CV x)) ps _) = nominalTypeName x ps >>= publicOr gv
     -- A variant lowers to its concrete name; the `enum` carrying the arms
     -- is generated for this pool or supplied by a `data Rust => X = "..."`.
-    f (VariantF (FV gv (CV x)) ps as)
-      -- A generated template in its module's file goes by its path, and
-      -- is spelled at the arguments its arms bind.
-      | T.any (== '$') x = do
-          public <- CMS.gets rsPublic
-          ddefs <- CMS.gets rsDataDefs
-          defs <- CMS.gets rsGenDefs
-          let (h, rest) = T.breakOn "<" x
-              x' = case Map.lookup gv public of
-                Just q -> q <> rest
-                Nothing | Map.member gv ddefs -> privateDataName gv <> rest
-                Nothing -> x
-          nominalTypeName x' (maybe ps (\dd -> dataUseArgs defs dd ps as) (Map.lookup gv ddefs))
-      | otherwise = do
-          ddefs <- CMS.gets rsDataDefs
-          -- A generated template's instance named by its arguments is its
-          -- own type.
-          if Map.member gv ddefs then nominalTypeName x ps else nominalTypeName x ps >>= publicOr gv
+    f (VariantF (FV gv (CV x)) ps as) = do
+      ddefs <- CMS.gets rsDataDefs
+      defs <- CMS.gets rsGenDefs
+      dataName gv x (maybe ps (\dd -> dataUseArgs defs dd ps as) (Map.lookup gv ddefs))
     f (AppF t ts) = do
       t' <- f t
       let typeTs = tyArgs ts
@@ -364,8 +370,10 @@ rustTypeOf = f
     f (OptionalF t@(RecF (FV gv _) _)) = do
       t' <- f t
       handles <- CMS.gets rsHandles
-      -- A handle has a size of its own, so its optional needs no box.
-      return $ if Set.member gv handles
+      dataNames <- CMS.gets rsDataNames
+      -- A handle has a size of its own, so its optional needs no box; so
+      -- does a `data` type, which is boxed at its arms.
+      return $ if Set.member gv handles || Set.member gv dataNames
         then "::std::option::Option<" <> t' <> ">"
         else "::std::option::Option<::std::boxed::Box<" <> t' <> ">>"
     f (OptionalF t) = do
@@ -435,7 +443,8 @@ rustTypeOf = f
     -- arguments, as an occurrence of it is.
     f (RecF (FV gv@(TV gvText) (CV cv)) ps) = do
       public <- CMS.gets rsPublic
-      case Map.lookup gv public of
+      dataNames <- CMS.gets rsDataNames
+      if Set.member gv dataNames then dataName gv cv ps else case Map.lookup gv public of
         Just name -> return (pretty name)
         Nothing
           | cv /= gvText, not (null ps) -> nominalTypeName cv ps
@@ -1680,7 +1689,7 @@ translate srcs es0 = do
   intrAsts <- inPoolSerialASTs rustLang es
   let poolAsts = concatMap allSerialASTs es <> intrAsts <> closureSerialASTs closureAsts
       recordObjects = Map.map unique (Map.fromListWith (<>) [(g, [rs]) | a <- poolAsts, o@(SerialObject _ (FV g _) _ rs) <- serialSubtrees a, generatedObject o])
-  let st0 = defaultValue {rsRecordObjects = recordObjects, rsGenFailures = gfails, rsGenDefs = gdefs, rsDataDefs = ddefs, rsDataFailures = dfails, rsRecordUses = uses, rsTypeHomes = typeHomes, rsDebugInfo = debugInfo, rsCScope = mergedRustScope, rsSrcTypeVarMask = srcTypeVarMask, rsSrcMakers = srcMakers, rsLogTemplates = logTemplates, rsStageTable = stageTable, rsPool = pool, rsBuilds = lastBuilds Map.empty Set.empty (rustSeeds pool es0) es0}
+  let st0 = defaultValue {rsRecordObjects = recordObjects, rsGenFailures = gfails, rsGenDefs = gdefs, rsDataDefs = ddefs, rsDataNames = declaredDataNames generalScope, rsDataFailures = dfails, rsRecordUses = uses, rsTypeHomes = typeHomes, rsDebugInfo = debugInfo, rsCScope = mergedRustScope, rsSrcTypeVarMask = srcTypeVarMask, rsSrcMakers = srcMakers, rsLogTemplates = logTemplates, rsStageTable = stageTable, rsPool = pool, rsBuilds = lastBuilds Map.empty Set.empty (rustSeeds pool es0) es0}
       pool = planPool (rustCaps mergedRustScope) es
       ((code, typeFiles), stEnd) = CMS.runState (runReaderT (makeRustCode includeDocs closureAsts closureTable es) emptyOwnEnv) st0
   mapM_ (MM.throwRejected . ("Rust pool:" <+>) . pretty) (rsErrors stEnd)
@@ -2127,7 +2136,7 @@ generateRustVariants closureAsts es = do
             decls <- declareOrKeep (Just [c | (c, _ : _) <- arms']) gv decl (pretty (privateDataName gv))
             -- Marshalled once for every instance: two morloc types that are
             -- one Rust type are one instance.
-            qname <- rustTypeOf (VariantF (FV gv (CV (ddForm dd))) [TyA (VarF (FV (TV ("&" <> unTVar p)) (CV (nativeParam p)))) | p <- ddTypeParams dd] [])
+            qname <- rustTypeOf (RecF (FV gv (CV (ddForm dd))) [TyA (VarF (FV (TV ("&" <> unTVar p)) (CV (nativeParam p)))) | p <- ddTypeParams dd])
             let qhead = T.takeWhile (/= '<') (render qname)
                 impls = [RP.printVariantImpls params qname (\c -> pretty (qhead <> "_" <> c) <> generics (armDataParams dd c)) [(c, ts, Nothing) | (c, ts) <- arms'] | Set.notMember gv perInstance]
             return (decls <> impls)
@@ -2353,7 +2362,7 @@ recordImpls handle gd name params = do
     -- and the helpers and trait items it needs.
     field cfg converts leaf complain objects i (k, declT) = do
       let fas = unique [fa | rs <- objects, Just fa <- [lookup k rs]]
-          held = not (null (placeholders declT))
+          held = not (null (placeholders (const False) declT))
           fld = RP.rustFieldIdent k
       ty <- rustFieldType declT
       let plainWheres = if held then Just (ty <> ": ::rustmorloc::ToVoidstar", ty <> ": ::rustmorloc::FromVoidstar") else Nothing
@@ -2769,7 +2778,7 @@ generateRustStructs closureAsts es = do
                 params = map (pretty . nativeParam) (nativeParams gd)
             -- A field holding a parameter has the width of its argument,
             -- which may vary.
-            fields <- mapM (\(k, t) -> (\ty -> (RP.rustFieldIdent k, ty, isVarWidthF t || not (null (placeholders t)))) <$> rustFieldType t) (gdFields gd)
+            fields <- mapM (\(k, t) -> (\ty -> (RP.rustFieldIdent k, ty, isVarWidthF t || not (null (placeholders (const False) t)))) <$> rustFieldType t) (gdFields gd)
             let printDecl n
                   | handle = RP.printRustHandle n params [(fld, ty) | (fld, ty, _) <- fields]
                   | otherwise = RP.printRustStruct n params [(fld, ty) | (fld, ty, _) <- fields]

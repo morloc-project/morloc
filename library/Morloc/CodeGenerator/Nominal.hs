@@ -5,8 +5,6 @@ Description : Keys identifying declared types in code generation (NOM-1)
 The key of a declared record, object, table or `data` type: its name, its
 arguments and its level (NOM-1). A key's arguments are types in which every
 declared type is itself a key, so a key is finite and compared by value.
-'KSelf' is the argument form for an instance whose arguments hold the
-instance itself.
 -}
 module Morloc.CodeGenerator.Nominal
   ( Level (..)
@@ -45,8 +43,6 @@ data KeyType
   | KNom NomKey
   | KAnon NamType [(Key, KeyType)]
   -- ^ an anonymous record, compared structurally
-  | KSelf Int
-  -- ^ the key enclosing this one, counted outwards from 0
   deriving (Show, Eq, Ord)
 
 data KeyArg = KTy KeyType | KKind KeyKind

@@ -1673,8 +1673,7 @@ validateGroup loc r ast = case peelGroupAst ast of
 
 -- | Recursive-type env: each entry binds a TVar (a declared type's name)
 -- to the SerialAST that declared it, so back-references can resolve.
--- Bound at every named node on entry; consulted at SerialRec and at a
--- variant back-reference.
+-- Bound at every named node on entry; consulted at SerialRec.
 type RecEnv = Map.Map TVar SerialAST
 
 -- | The "JSON path" within the default value at which validation is
@@ -1730,9 +1729,6 @@ validateValueAgainstAST loc env0 path ast value = case (ast, value) of
   -- whose value lists the arm's fields; an arm taking no arguments is
   -- still spelled bare. An unlisted name falls through to the mismatch
   -- reporter, which names the whole legal set.
-  -- A variant with no arms is a back-reference to the enclosing
-  -- declaration of its name.
-  (SerialVariant (FV v _) _ [], _) -> backRef v
   (SerialEnum _ _ ctors, Aeson.String name)
     | name `elem` ctors -> return ()
   (SerialVariant _ _ arms, Aeson.String name)

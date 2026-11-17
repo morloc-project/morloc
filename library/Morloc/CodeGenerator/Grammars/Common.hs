@@ -1081,17 +1081,16 @@ isIdentifier t = case MT.uncons t of
 -- | Merge every occurrence of one `data` type in a pool into the one
 -- declaration to emit. Each occurrence lists the type's arms in declaration
 -- order (an arm's position is its wire tag), with each arm's field types as
--- written and as the backend renders them; a recursive type's reference to
--- itself lists no arms. Occurrences that list arms must list the same ones in
--- the same order and render each arm's fields alike, or the one declaration
--- could not serve both sites. The result carries the payload of the first
--- occurrence that lists arms.
+-- written and as the backend renders them. Occurrences must list the same
+-- arms in the same order and render each arm's fields alike, or the one
+-- declaration could not serve both sites. The result carries the payload of
+-- the first occurrence.
 mergeVariantOccurrences ::
   Text ->
   [(b, [(Text, ([a], [Text]))])] ->
   Either Text (b, [(Text, [a])])
-mergeVariantOccurrences name occs = case filter (not . null . snd) occs of
-  [] -> Left $ "the `data` type " <> name <> " occurs only as a reference to itself"
+mergeVariantOccurrences name occs = case occs of
+  [] -> Left $ "the `data` type " <> name <> " has no occurrence"
   ((b, o) : os) -> (,) b . map (\(c, (w, _)) -> (c, w)) <$> foldM mergeOccurrence o (map snd os)
   where
     mergeOccurrence as bs

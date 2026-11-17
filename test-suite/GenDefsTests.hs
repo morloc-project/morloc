@@ -124,6 +124,13 @@ genDefsTests =
               untiedSelf (NamF NamRecord pairS [TyA str] [(Key "x", atInt), (Key "y", atOwn)]) @?= Just (TV "Pair", True)
     , testCase "a tied reference and a reference to another record are not untied" $
         untiedSelf (NamF NamRecord (FV (TV "Tree") (CV "struct")) [] [(Key "kids", listOf (RecF (FV (TV "Tree") (CV "struct")) [])), (Key "o", var (TV "Other") (CV "Other"))]) @?= Nothing
+    , testCase "a user-mapped record's reference is one type inside and outside its occurrence" $
+        let u = FV (TV "U") (CV "MyU<$1>")
+            ref = RecF u [TyA int64]
+            occ = NamF NamRecord u [TyA int64] [(Key "next", OptionalF ref)]
+         in case canon defs occ of
+              NamF _ _ _ [(_, OptionalF inner)] -> inner @?= canon defs ref
+              other -> assertFailure ("unexpected canonical form: " <> show other)
     , testCase "Pair (Pair Int) keeps its inner Pair distinct" $
         assertBool "distinct" (canon defs (pairOf [pairOf [int64] int64] (pairOf [int64] int64)) /= canon defs (pairOf [int64] int64))
     , testCase "a use that agrees with its definition passes" $

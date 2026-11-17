@@ -30,6 +30,8 @@ module Morloc.CodeGenerator.Infer
   , groundK
   , kindArgOf
   , heldDataParams
+  , declaredDataNames
+  , dataTypeParams
   , concreteNameOf
   ) where
 
@@ -406,17 +408,16 @@ dataTypeParams gscope v = case [[p | Left (p, KindType) <- ps] | (ps, _, _, _, T
   (ps : _) -> ps
   [] -> []
 
+-- | The names the program declares as `data` types.
+declaredDataNames :: Scope -> Set.Set TVar
+declaredDataNames gscope = Map.keysSet (Map.filter (any (\(_, _, _, _, k) -> k == TypedefEnum)) gscope)
+
 -- | The type parameters of a `data` declaration some constructor holds, in
 -- order: the parameters of a generated type's native template.
 heldDataParams :: Scope -> TVar -> [TVar]
 heldDataParams gscope v = [p | p <- dataTypeParams gscope v, Set.member p held]
   where
     held = Set.fromList [p | Just (_, cs) <- [dataDeclOfName gscope v], (_, ts) <- cs, t <- ts, VarU p <- Set.toList (free t)]
-
--- | The placeholder a `data` type's own occurrence inside itself resolves
--- to: the instantiation's name and resolved arguments, with no arms. The
--- wire-form builder recognises the armless shape as the back-edge and ties
--- the knot there; every renderer spells it as it would the full type.
 
 -- | Resolve one applied argument of a `data` type, keeping an unsolved one
 -- unsolved. See the note at its use in 'inferVariantArms'.
@@ -444,11 +445,11 @@ backEdge lang i cscope v args = do
             <+> "but its argument" <+> hsep (map pretty args)
             <+> "contains the type itself, so the template has no finite"
             <+> "instance."
-        else return $ VariantF (FV v (CV name)) [] []
+        else return $ RecF (FV v (CV name)) []
     else do
       ps <- resolveArgs lang i (v, args)
       name <- instanceName cscope v args
-      return $ VariantF (FV v (CV name)) ps []
+      return $ RecF (FV v (CV name)) ps
 
 -- | Resolve the applied arguments of a `data` instantiation, marking it as
 -- resolving its arguments for the duration (see 'backEdge').

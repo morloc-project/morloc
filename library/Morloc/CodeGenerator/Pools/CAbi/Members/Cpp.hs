@@ -71,6 +71,7 @@ import qualified Morloc.Build.Params as BP
 import qualified Morloc.DataFiles as DF
 import qualified Morloc.LangRegistry as LR
 import Morloc.CodeGenerator.Namespace
+import Morloc.CodeGenerator.Infer (declaredDataNames)
 import Morloc.CodeGenerator.Ownership (LetMode (..), LetPlan (..), OwnCaps (..), PoolPlan (..), byValueIndices, changedSlots, emptyPoolPlan, letMode, letPlan, nativeLets, planPool)
 import Morloc.CodeGenerator.OwnershipCheck (checkManifold)
 import System.Environment (lookupEnv)
@@ -392,21 +393,17 @@ instance {-# OVERLAPPABLE #-} (HasTypeF e) => HasCppType e where
       -- record is its form at the reference's arguments, as an occurrence
       -- of it is spelled. A record or alias with no C++ mapping is
       -- 'leakError'.
-      f (RecF (FV gv@(TV gvName) _) ps) = do
+      f (RecF (FV gv (CV x)) ps) = do
         cscope <- CMS.gets translatorCScope
-        variantNames <- CMS.gets translatorVariantNames
-        case Map.lookup gv cscope of
+        dataNames <- CMS.gets translatorDataNames
+        if Set.member gv dataNames then dataTypeName gv x ps else case Map.lookup gv cscope of
           -- A generated record's entry names no type ("struct"); its
           -- back-reference is the refusal above.
           Just ((_, body, _, _, _) : _) | Just "struct" <- bodyCV body -> f (RecF (FV gv (CV "struct")) ps)
           Just ((_, body, _, _, _) : _) | Just cv <- bodyCV body ->
             if null ps then return (pretty cv) else renderTemplatedType cv <$> mapM f (tyArgs ps)
-          -- A back-reference to a `data` type names a type this pool
-          -- GENERATES, so it is already declared and needs no user mapping.
-          -- The leak diagnostic below is for recursive ALIASES, which have
-          -- no generated form and would otherwise reach the pool as a bare
-          -- morloc identifier.
-          _ | Set.member gv variantNames -> publicOr gv (pretty (nativeTypeName gvName))
+          -- A recursive alias has no generated form and would otherwise
+          -- reach the pool as a bare morloc identifier.
           _ -> leakError (unTVar gv)
       -- Recursive optional (?T where T points back to a containing record)
       -- collapses to a single `std::shared_ptr<const T>` with `nullptr ==
@@ -423,8 +420,10 @@ instance {-# OVERLAPPABLE #-} (HasTypeF e) => HasCppType e where
       f (OptionalF t@(RecF (FV gv _) _)) = do
         t' <- f t
         handles <- CMS.gets translatorHandles
-        -- A handle is complete, so its optional is the ordinary one.
-        return $ if Map.member gv handles
+        dataNames <- CMS.gets translatorDataNames
+        -- A handle is complete, so its optional is the ordinary one; so is
+        -- a `data` type's, which is a tagged pointer.
+        return $ if Map.member gv handles || Set.member gv dataNames
           then "std::optional<" <> t' <> ">"
           else "std::shared_ptr<const " <> t' <> ">"
       f (OptionalF t) = do
@@ -497,6 +496,8 @@ data CppTranslatorState = CppTranslatorState
   -- ^ Per-labeled-midx pre-rendered log templates (see 'LogTemplate').
   -- The IIFE wrap is injected at the definition site so manifolds
   -- referenced by symbol (e.g. @std::bind(m1043, _1)@) also log.
+  , translatorDataNames :: Set.Set TVar
+  -- ^ The `data` types the program declares.
   , translatorVariantNames :: Set.Set TVar
   -- ^ The payload-bearing `data` types this pool DECLARES. A `RecF`
   -- back-reference naming one of these is legitimate and renders as that
@@ -583,6 +584,7 @@ instance Defaultable CppTranslatorState where
       , translatorEffectLabels = Map.empty
       , translatorLogTemplates = Map.empty
       , translatorVariantNames = Set.empty
+      , translatorDataNames = Set.empty
       , translatorSchemas = Map.empty
       , translatorCScope = Map.empty
       , translatorDebugInfo = \_ -> ("", "")
@@ -682,8 +684,10 @@ translate srcs es = do
   (gdefs, gfails) <- genDefs cppLang (Set.fromList [g | (g, _, _, _) <- uses])
   (ddefs, dfails) <- dataDefs cppLang (dataNamesIn poolTypes)
   intrAsts <- inPoolSerialASTs cppLang es
+  gscope <- MM.getGeneralScope
   let translatorState = defaultValue
         { translatorEffectLabels = effectMap
+        , translatorDataNames = declaredDataNames gscope
         , translatorLogTemplates = templates
         , translatorCScope = mergedCppScope
         , translatorDebugInfo = debugInfo
@@ -2440,8 +2444,8 @@ cppHandleOf t fields = t <> "(mlc::make_arm<" <> CP.handleFields t <> ">(" <> CP
 
 -- | Every native type reachable in this pool that names no type variable,
 -- with each part of it.
-collectCppTypes :: (TVar -> Text -> Bool) -> [SerialManifold] -> [TypeF]
-collectCppTypes mapped =
+collectCppTypes :: (TVar -> Text -> Bool) -> (TVar -> Bool) -> [SerialManifold] -> [TypeF]
+collectCppTypes mapped isData =
   unique
     . filter concrete
     . concatMap parts
@@ -2468,6 +2472,7 @@ collectCppTypes mapped =
       NamF _ (FV (TV v) _) ps _ -> typeName v && all concrete (tyArgs ps)
       OptionalF x -> concrete x
       VariantF _ ps _ -> all concrete (tyArgs ps)
+      RecF (FV g _) ps | isData g -> all concrete (tyArgs ps)
       EnumF {} -> True
       _ -> False
     typeName v = case T.uncons (T.takeWhileEnd (/= '.') v) of
@@ -2488,7 +2493,8 @@ cppValueChecks es = do
         AppU (VarU (TV n)) _ -> Just n
         NamU _ (TV n) _ _ -> Just n
         _ -> Nothing
-  docs <- mapM check (collectCppTypes mapped es)
+  dataNames <- CMS.gets translatorDataNames
+  docs <- mapM check (collectCppTypes mapped (`Set.member` dataNames) es)
   return (map pretty (unique (map render (concat docs))))
   where
     check t = do
@@ -2616,7 +2622,7 @@ generateCppVariants cfg closureAsts es = do
       parts <- sequence
         [ do
             arms' <- mapM (\(c, ts) -> (,) c <$> mapM cppTypeOf ts) (ddArms dd)
-            qname <- cppTypeOf (VariantF (FV gv (CV (ddForm dd))) [TyA (VarF (FV (TV ("&" <> unTVar p)) (CV (nativeParam p)))) | p <- ddTypeParams dd] [])
+            qname <- cppTypeOf (RecF (FV gv (CV (ddForm dd))) [TyA (VarF (FV (TV ("&" <> unTVar p)) (CV (nativeParam p)))) | p <- ddTypeParams dd])
             let leaf = pretty (tvarIdentifier gv)
                 decls = if Map.member gv public then [] else [CP.printCppVariantDecl params leaf arms']
                 bodies = if Map.member gv public then [] else [CP.printCppVariantArms params leaf arms']
@@ -2779,8 +2785,8 @@ planPublicTypes es = do
   allVarOccs <- filterM (\(FV gv (CV cv), _, _) -> not <$> variantIsUserMapped gv cv) (collectCppVariants es)
   let varOccs = [o | o@(_, ps, _) <- allVarOccs, null ps]
   enumOccs <- filterM (\(FV gv (CV cv), _) -> not <$> variantIsUserMapped gv cv) (collectCppEnums es)
-  let varCands = Map.fromList [(gv, arms) | (FV gv _, _, arms) <- varOccs, eligible gv, not (null arms)]
-      varAllArms = Map.fromListWith (<>) [(gv, [arms]) | (FV gv _, _, arms) <- varOccs, not (null arms)]
+  let varCands = Map.fromList [(gv, arms) | (FV gv _, _, arms) <- varOccs, eligible gv]
+      varAllArms = Map.fromListWith (<>) [(gv, [arms]) | (FV gv _, _, arms) <- varOccs]
       enumCands = Map.fromList [(gv, ns) | (FV gv _, ns) <- enumOccs, eligible gv]
       qualified gv = maybe (unTVar gv) (\h -> qualifiedCppName h) (Map.lookup gv homes)
       -- A record not in its module's header is defined in the pool, after

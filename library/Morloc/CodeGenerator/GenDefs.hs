@@ -160,7 +160,7 @@ nativeDataParams = ddNative
 armDataParams :: DataDef -> T.Text -> [TVar]
 armDataParams dd c = [p | p <- ddNative dd, Set.member p held]
   where
-    held = Set.fromList (concatMap placeholders (concat [ts | (c', ts) <- ddArms dd, c' == c]))
+    held = Set.fromList (concatMap (placeholders (== ddVar dd)) (concat [ts | (c', ts) <- ddArms dd, c' == c]))
 
 -- | The `data` types named anywhere in the types.
 dataNamesIn :: [TypeF] -> Set.Set TVar
@@ -168,6 +168,7 @@ dataNamesIn = Set.fromList . concatMap go
   where
     go t = case t of
       VariantF (FV g _) _ _ -> g : concatMap go (childrenOf t)
+      RecF (FV g _) _ -> g : concatMap go (childrenOf t)
       _ -> concatMap go (childrenOf t)
 
 -- | The definitions of the given generated `data` types whose native form
@@ -326,40 +327,47 @@ canonIn defs env t = case t of
         NamF NamRecord (FV g cv) (map (TyA . canonIn defs env) as) []
     | otherwise ->
         let ps' = map (fmap (canonIn defs env)) ps
-            env' = Map.insert (g, ps) (NamF NamRecord (FV g cv) ps' []) env
+            env' = Map.insert (g, ps) (canonIn defs env (RecF (FV g cv) ps)) env
          in NamF NamRecord (FV g cv) ps' [(k, canonIn defs env' x) | (k, x) <- rs]
-  -- A `data` type is its instance: its name, which a generated type
-  -- derives from its arguments, and the arguments a template spells. Its
-  -- arms are dropped, so a reference to it from inside its own arms (a
-  -- back-edge, which carries none) is the same type.
-  VariantF fv@(FV _ (CV form)) ps _
-    | T.any (== '$') form -> VariantF fv [TyA (canonIn defs env t) | (k, t) <- indexedFrom 1 (tyArgs ps), k `elem` macroSlots form] []
-    | otherwise -> VariantF fv [] []
-  RecF (FV g cv) ps
+  VariantF fv ps _ -> instanceOf fv ps
+  RecF fv@(FV g _) ps
     | Just c <- Map.lookup (g, ps) env -> c
     | Just gd <- Map.lookup g defs -> NamF NamRecord (FV g (CV (gdForm gd))) (map (fmap (canonIn defs env)) ps) []
-    | otherwise -> NamF NamRecord (FV g cv) (map (fmap (canonIn defs env)) ps) []
+    | otherwise -> instanceOf fv ps
   _ -> mapChildren (canonIn defs env) t
+  where
+    -- A declared type that is not a generated record is its instance: its
+    -- name, which a generated type derives from its arguments, and the
+    -- arguments its form spells. A `data` type's arms are dropped, so its
+    -- reference to itself from inside them is the same type.
+    instanceOf fv@(FV _ (CV form)) ps
+      | T.any (== '$') form = VariantF fv [TyA (canonIn defs env x) | (k, x) <- indexedFrom 1 (tyArgs ps), k `elem` macroSlots form] []
+      | otherwise = VariantF fv [] []
 
 -- | The parameters a type holds in a field, the ones its uses can bind:
 -- the arguments a nested record or `data` type carries are not counted,
 -- since its fields say what it holds.
-placeholders :: TypeF -> [TVar]
-placeholders t
+placeholders :: (TVar -> Bool) -> TypeF -> [TVar]
+placeholders _ t
   | Just p <- paramOf t = [p]
-placeholders t = case t of
-  NamF _ _ _ rs -> concatMap (placeholders . snd) rs
-  FunF as r -> concatMap placeholders (r : as)
+placeholders isData t = case t of
+  NamF _ _ _ rs -> concatMap (placeholders isData . snd) rs
+  FunF as r -> concatMap (placeholders isData) (r : as)
   -- A native form that does not spell its arguments holds none of them.
   AppF h@(VarF (FV _ (CV form))) _
-    | not (T.any (== '$') form) -> placeholders h
-  AppF h as -> placeholders h <> concatMap placeholders (tyArgs as)
-  OptionalF x -> placeholders x
-  -- A template spells the arguments at its `$k` slots.
-  VariantF (FV _ (CV form)) ps _
-    | T.any (== '$') form -> concatMap placeholders [t | (k, t) <- indexedFrom 1 (tyArgs ps), k `elem` macroSlots form]
-  VariantF _ _ as -> concatMap (concatMap placeholders . snd) as
+    | not (T.any (== '$') form) -> placeholders isData h
+  AppF h as -> placeholders isData h <> concatMap (placeholders isData) (tyArgs as)
+  OptionalF x -> placeholders isData x
+  -- A `data` template spells the arguments at its `$k` slots, in an
+  -- occurrence and in a reference alike.
+  VariantF fv ps _ | Just xs <- spelled fv ps -> xs
+  RecF fv@(FV g _) ps | isData g, Just xs <- spelled fv ps -> xs
+  VariantF _ _ as -> concatMap (concatMap (placeholders isData) . snd) as
   _ -> []
+  where
+    spelled (FV _ (CV form)) ps
+      | T.any (== '$') form = Just (concatMap (placeholders isData) [x | (k, x) <- indexedFrom 1 (tyArgs ps), k `elem` macroSlots form])
+      | otherwise = Nothing
 
 -- | The positions a native form's `$k` slots name.
 macroSlots :: T.Text -> [Int]
@@ -370,7 +378,7 @@ macroSlots form = [k | piece <- drop 1 (T.splitOn "$" form), Just k <- [readMayb
 nativeParams :: GenDef -> [TVar]
 nativeParams gd = [p | (p, KindType) <- gdParams gd, Set.member p held]
   where
-    held = Set.fromList (concatMap (placeholders . snd) (gdFields gd))
+    held = Set.fromList (concatMap (placeholders (const False) . snd) (gdFields gd))
 
 -- | The native name of a parameter (D14).
 nativeParam :: TVar -> T.Text
@@ -426,12 +434,9 @@ useArgs defs gv form carried rs = case Map.lookup gv defs of
 -- | The arguments a use of a generated `data` template is spelled at: its
 -- carried arguments with each one its arms bind replaced by that binding,
 -- as a record's fields do ('useArgs'). An unpacked use carries the native
--- arguments, which name no unpacked value. A use with no arms (a
--- back-edge) keeps its carried arguments.
+-- arguments, which name no unpacked value.
 dataUseArgs :: Map.Map TVar GenDef -> DataDef -> [ArgF] -> [(T.Text, [TypeF])] -> [ArgF]
-dataUseArgs defs dd carried arms
-  | null arms = carried
-  | otherwise = useArgs (Map.insert (ddVar dd) asRecord defs) (ddVar dd) (ddForm dd) carried (fields arms)
+dataUseArgs defs dd carried arms = useArgs (Map.insert (ddVar dd) asRecord defs) (ddVar dd) (ddForm dd) carried (fields arms)
   where
     asRecord = GenDef (ddVar dd) (ddForm dd) [(p, KindType) | p <- ddTypeParams dd] (fields (ddArms dd))
     fields as = [(Key (c <> "." <> T.pack (show i)), t) | (c, ts) <- as, (i, t) <- indexed ts]
@@ -534,7 +539,7 @@ placeTypes leafOk generated fieldsOf = go (Map.keysSet fieldsOf)
       NamF NamTable _ _ _ -> False
       NamF _ (FV g (CV "struct")) _ _ -> Set.member g pub
       NamF _ (FV g (CV f)) ps _ -> nominal pub g f ps
-      RecF (FV g _) ps -> Set.member g pub && all (safe pub) (tyArgs ps)
+      RecF (FV g (CV f)) ps -> nominal pub g f ps
       VariantF (FV g (CV f)) ps _ -> nominal pub g f ps
       EnumF (FV g (CV f)) ps _ -> nominal pub g f ps
       VarF (FV g (CV f)) -> nominal pub g f []

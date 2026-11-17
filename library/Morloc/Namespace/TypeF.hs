@@ -33,10 +33,10 @@ data TypeF
   | FunF [TypeF] TypeF
   | AppF TypeF [ArgF]
   | NamF NamType FVar [ArgF] [(Key, TypeF)]
-  -- | A reference to a record, not expanded, at the given arguments.
-  -- Inference ties a record's reference to an enclosing occurrence of
-  -- itself to this form, with that occurrence's name and resolved
-  -- arguments; a serial back-reference projects to it.
+  -- | A reference to a record or `data` type, not expanded, at the given
+  -- arguments. Inference ties a type's reference to an enclosing
+  -- occurrence of itself to this form, with that occurrence's name and
+  -- resolved arguments; a serial back-reference projects to it.
   | RecF FVar [ArgF]
   -- | A `data` type whose constructors take no arguments: the type's
   -- name, the type arguments it is applied to, and its constructor names

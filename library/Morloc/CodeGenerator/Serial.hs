@@ -393,9 +393,6 @@ serialAstToSchemaWith renderHint ast = emit [] ast
         renderHint v <> "m" <> encode64D (length rs)
           <> foldl (<>) "" (map (keypair p) rs)
     emit path (SerialRec (FV name _) ps) = "^" <> encodeKey (resolveWireName path name ps)
-    -- A `data` type's occurrence inside itself: a back-reference like the
-    -- record form above, carrying its arguments for the renderers' sake.
-    emit path (SerialVariant (FV name _) ps []) = "^" <> encodeKey (resolveWireName path name ps)
     -- `e <count> ( <klen><CtorName> )*`, with the type's own name carried
     -- by the concrete-type hint exactly as a record's is -- `m` does not
     -- spell out the record name either. Counts and key lengths use the
@@ -542,7 +539,7 @@ declWireName [] = ""
 -- keeps its bare name; the runtime rejects it as undeclared.
 resolveWireName :: DeclPath -> TVar -> [ArgF] -> DT.Text
 resolveWireName path name ps =
-  case [w | (n, qs, w) <- path, n == name, qs == ps] of
+  case [w | (n, qs, w) <- path, n == name, map argFKey qs == map argFKey ps] of
     (w : _) -> w
     [] -> case [w | (n, _, w) <- path, n == name] of
       (w : _) -> w
@@ -559,7 +556,6 @@ refersTo path wire node = any (refersFrom path wire) (serialKids node)
 refersFrom :: DeclPath -> DT.Text -> SerialAST -> Bool
 refersFrom path wire n = case n of
   SerialRec (FV name _) ps -> resolveWireName path name ps == wire
-  SerialVariant (FV name _) ps [] -> resolveWireName path name ps == wire
   SerialList (FV name _) _ _ -> refersTo (pushDecl path name []) wire n
   SerialTuple (FV name _) _ -> refersTo (pushDecl path name []) wire n
   SerialObject NamTable _ _ _ -> refersTo path wire n
@@ -568,19 +564,6 @@ refersFrom path wire n = case n of
   SerialPack _ _ -> refersTo path wire n
   SerialOptional _ _ -> refersTo path wire n
   _ -> False
-
--- | Two argument lists of one type, a record or `data` type by name and
--- arguments: a reference to a record is the record ('RecF').
-sameArgs :: [ArgF] -> [ArgF] -> Bool
-sameArgs xs ys = map (fmap nominal) xs == map (fmap nominal) ys
-  where
-    nominal t = case t of
-      NamF _ (FV g _) ps _ -> RecF (FV g (CV "")) (map (fmap nominal) ps)
-      RecF (FV g _) ps -> RecF (FV g (CV "")) (map (fmap nominal) ps)
-      -- A `data` type by its name and arguments: its arms, which a
-      -- back-edge does not carry, say nothing more.
-      VariantF (FV g cv) ps _ -> VariantF (FV g cv) (map (fmap nominal) ps) []
-      _ -> mapChildren nominal t
 
 -- | A serial AST and every subtree under it ('serialKids').
 serialSubtrees :: SerialAST -> [SerialAST]
@@ -638,7 +621,6 @@ serialOuterName (SerialList (FV v _) _ _) = Just v
 serialOuterName (SerialTuple (FV v _) _) = Just v
 serialOuterName (SerialObject _ (FV v _) _ _) = Just v
 serialOuterName (SerialOptional (FV v _) _) = Just v
-serialOuterName (SerialVariant _ _ []) = Nothing
 serialOuterName (SerialVariant (FV v _) _ _) = Just v
 serialOuterName _ = Nothing
 
@@ -944,7 +926,6 @@ makeWireSerialAST m lang t = do
 -- | The declaration a back-reference names.
 backRefName :: SerialAST -> Maybe TVar
 backRefName (SerialRec (FV v _) _) = Just v
-backRefName (SerialVariant (FV v _) _ []) = Just v
 backRefName _ = Nothing
 
 noWireForm :: Int -> Lang -> TVar -> MorlocMonad a
@@ -1015,47 +996,30 @@ makeSerialAST m lang t0 = do
     -- and it is representable precisely because the payload sits behind a
     -- pointer: the slot's width does not depend on the arms, so the width
     -- equation has a finite fixed point.
-    -- An occurrence with NO arms is the placeholder inference leaves at a
-    -- type's occurrence inside itself (a `data` has at least one
-    -- constructor, so nothing else has that shape). It names an
-    -- instantiation on the path above, and that is where the knot is tied.
-    -- The back-edge keeps the instantiation's arguments and drops its arms,
-    -- the shape inference gave it: a renderer that declares the type by name
-    -- spells the element of a `[Tree a]` arm from those arguments, and a
-    -- back-reference without them has nothing to instantiate a template
-    -- with.
-    makeSerialAST' gscope typepackers anc t@(VariantF v@(FV gv _) ps as)
-      | cutCheck (if null as then "variant-back-edge" else "variant-cut") t anc (Set.member t anc || null as && backEdge) = return $ SerialVariant v ps []
-      | null as =
-          MM.throwSourcedError m $
-              "Reference to a `data` instantiation that is not being built:"
-                <+> pretty t
+    makeSerialAST' gscope typepackers anc t@(VariantF v ps as)
+      | cutCheck "variant-cut" t anc (Set.member t anc) = return $ SerialRec v ps
       | otherwise = do
           anc' <- descend t anc
           as' <- mapM (\(n, fs) -> (,) n <$> mapM (makeSerialAST' gscope typepackers anc') fs) as
           return $ SerialVariant v ps as'
-      where
-        -- A back-edge reached while the type's own arguments were resolved
-        -- carries none ('backEdge'): it is the instantiation being built,
-        -- the one of its name on the path.
-        isInstantiation g qs a@(VariantF (FV g' _) qs' _) =
-          g == g' && (sameArgs qs qs' || (null qs && [a] == [b | b@(VariantF (FV g'' _) _ _) <- Set.toList anc, g'' == g]))
-        isInstantiation _ _ _ = False
-        backEdge = any (isInstantiation gv ps) (Set.toList anc)
-    -- A record's reference to an enclosing occurrence of itself, tied in
-    -- inference. One met off its record's path (a field type taken out on
-    -- its own) is the record unfolded: its type inferred again.
+    -- A reference of a record or `data` type to an enclosing occurrence of
+    -- itself, tied in inference. A self-containing `data` instance's
+    -- reference carries no arguments (its own would be infinite) and names
+    -- the one instantiation of its name on the path. One met off its type's
+    -- path (a field type taken out on its own) is the type unfolded: its
+    -- type inferred again.
     makeSerialAST' gscope typepackers anc r@(RecF v@(FV gv _) ps)
-      | cutCheck "record-back-reference" r anc (any occurrence (Set.toList anc)) = return $ SerialRec v ps
+      | selfContaining || cutCheck "back-reference" r anc (any ((== declaredKey r) . declaredKey) (Set.toList anc)) = return $ SerialRec v ps
+      | null ps && not (null (dataTypeParams gscope gv)) =
+          MM.throwSourcedError m $ "Reference to a `data` instantiation that is not being built:" <+> pretty r
       | otherwise = do
           unfolded <- inferConcreteType lang (Idx m (typeOf (fst (unweaveTypeF r))))
           makeSerialAST' gscope typepackers anc unfolded
       where
-        occurrence (NamF _ (FV g _) qs _) = g == gv && qs == ps
-        occurrence _ = False
+        selfContaining = null ps && length [() | VariantF (FV g _) _ _ <- Set.toList anc, g == gv] == 1
     -- Cycle detection: a bare reference to a type currently being lowered is
     -- a guarded self-recursive back-edge of a recursive alias or `data`
-    -- type (a record's arrives tied, as 'RecF'). It carries a name rather
+    -- type (a record's or a `data` type's arrives tied, as 'RecF'). It carries a name rather
     -- than a type, so it is matched by name against whatever
     -- instantiation is on the path above it.
     makeSerialAST' gscope typepackers anc ft@(VarF v@(FV gv cv))
@@ -1591,7 +1555,6 @@ handleStorage i anc v a = do
     danglingRefs :: [TVar] -> SerialAST -> [TVar]
     danglingRefs declared node = case node of
       SerialRec (FV n _) _ -> [n | n `notElem` declared]
-      SerialVariant (FV n _) _ [] -> [n | n `notElem` declared]
       _ -> concatMap (danglingRefs (maybe declared (: declared) (serialOuterName node))) (serialKids node)
 
 -- | The general name at a type's head, when it has one. Used to match the
