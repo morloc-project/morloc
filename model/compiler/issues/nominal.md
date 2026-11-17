@@ -170,3 +170,10 @@ Plan: /work/plans/nominal-types/PLAN.md, phase A stages P1-P4.
   `record P a`: "its field `other` is `int` there but `T_a` in the
   definition" -- at placeholders `Id &a` is not resolved to `&a` before the
   agreement check. /work/plans/nominal-types/tests/alias-knot/flat.loc.
+
+- **A user-mapped `data` template is compared by its unexpanded form when
+  deciding a Packable wrap.** [read, 2026-11-17] Deviates from NOM-1.
+  Express.hs renderConcreteForm renders a VariantF by its raw form
+  (`MyTree<$1>`), so a native and a wire type that are different
+  instantiations of one template render alike, and maybePackableWrap may
+  skip a wrap it needs.
