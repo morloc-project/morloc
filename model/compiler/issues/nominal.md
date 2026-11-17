@@ -19,15 +19,6 @@ Plan: /work/plans/nominal-types/PLAN.md, phase A stages P1-P4.
   Deviates from NOM-5. Merging `data` occurrences, grouping GEN-14
   conversions and deduplicating C++ records all compare rendered native
   text.
-- **A wire back-reference whose arguments match no declaration binds to
-  the nearest one of the same name.** [read, 2026-11-17] Deviates from
-  NOM-6. Serial.hs resolveWireName, and the nexus value check, fall back to
-  the nearest enclosing declaration of the reference's name when none on
-  the path has its arguments. A declaration that carries no arguments (a
-  recursive list or tuple alias) and a newtype head renamed over its parent
-  rely on it; for a declared type spelled at other arguments it would name
-  the wrong nested declaration. Probably unreachable. A reference with no
-  declaration of its name on the path is now a compiler error.
 - **A `data` instance built by the universal walk resolves its fields by
   the module walk.** [read, 2026-11-16] Speculative. The two walks read
   the same scope tables, but inferVariantArms, reached from the universal

@@ -51,7 +51,6 @@ import Morloc.CodeGenerator.Docstrings (underOptional)
 import qualified Morloc.CodeGenerator.Infer as Infer
 import Morloc.CodeGenerator.LogTemplate (RenderedRunLog (..), renderRunLogTemplate)
 import Morloc.CodeGenerator.Namespace
-import Morloc.CodeGenerator.Nominal (KeyArg)
 import Morloc.CodeGenerator.Express (recursiveTargetOf)
 import qualified Morloc.CodeGenerator.EnvSpec as ES
 import qualified Morloc.CodeGenerator.IFile as IFile
@@ -1673,10 +1672,9 @@ validateGroup loc r ast = case peelGroupAst ast of
 -- ----------------------------------------------------------------------
 
 -- | Recursive-type env: the named nodes enclosing the value, innermost
--- first, with the argument keys each was built at, so a back-reference
--- resolves as the wire schema's does (Serial.resolveWireName): to the
--- nearest node of its name and arguments, else the nearest of its name.
-type RecEnv = [(TVar, [KeyArg], SerialAST)]
+-- first, with the arguments each was built at, so a back-reference
+-- resolves as the wire schema's does (Serial.backRefMatches).
+type RecEnv = [((TVar, [ArgF]), SerialAST)]
 
 -- | The "JSON path" within the default value at which validation is
 -- currently happening, used to anchor mismatch diagnostics. Local to
@@ -1806,14 +1804,9 @@ validateValueAgainstAST loc env0 path ast value = case (ast, value) of
   where
     -- Every named node binds its name for the values beneath it, whatever
     -- kind of declaration it is.
-    env = maybe env0 (\v -> (v, outerKeys ast, ast) : env0) (Serial.serialOuterName ast)
-    outerKeys node = case node of
-      SerialPack _ (_, inner) -> outerKeys inner
-      SerialObject _ _ ps _ -> map argFKey ps
-      SerialVariant _ ps _ _ -> map argFKey ps
-      _ -> []
+    env = maybe env0 (\k -> (k, ast) : env0) (Serial.serialOuterKey ast)
 
-    backRef v ps = case [b | (n, ks, b) <- env, n == v, ks == map argFKey ps] <> [b | (n, _, b) <- env, n == v] of
+    backRef v ps = case [b | (d, b) <- env, Serial.backRefMatches d v ps] of
       (bound : _) -> validateValueAgainstAST loc env path bound value
       [] -> MM.throwCompilerBug $
         loc <> ": unbound back-reference `" <> pretty (unTVar v)

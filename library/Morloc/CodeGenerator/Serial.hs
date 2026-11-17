@@ -45,6 +45,8 @@ module Morloc.CodeGenerator.Serial
   , serialAstToMsgpackSchema
   , rerootUnder
   , serialOuterName
+  , serialOuterKey
+  , backRefMatches
   , serialAstToGeneralSchema
   , encode64
   , closureWireSchema
@@ -539,17 +541,21 @@ declWireName ((_, _, wire) : _) = wire
 declWireName [] = ""
 
 -- | The wire name a back-reference resolves to: the nearest enclosing
--- node of that name built with the same arguments, else the nearest of
--- that name (a node that carries no arguments, such as a list-shaped
--- alias, is matched by name alone). A reference with no enclosing node
--- keeps its bare name; the runtime rejects it as undeclared.
+-- node it matches ('backRefMatches'). One that matches none keeps its bare
+-- name; 'makeSerialAST' refuses such a schema.
 resolveWireName :: DeclPath -> TVar -> [ArgF] -> DT.Text
 resolveWireName path name ps =
-  case [w | (n, qs, w) <- path, n == name, map argFKey qs == map argFKey ps] of
+  case [w | (n, qs, w) <- path, backRefMatches (n, qs) name ps] of
     (w : _) -> w
-    [] -> case [w | (n, _, w) <- path, n == name] of
-      (w : _) -> w
-      [] -> unTVar name
+    [] -> unTVar name
+
+-- | Whether a back-reference names an enclosing node, given the node's
+-- name and arguments: one carrying arguments names the node of its name at
+-- those arguments; one carrying none (a reference cut by name, or the
+-- self-containing instance of a `data` type) names the nearest node of its
+-- name.
+backRefMatches :: (TVar, [ArgF]) -> TVar -> [ArgF] -> Bool
+backRefMatches (n, qs) name ps = n == name && (null ps || map argFKey qs == map argFKey ps)
 
 -- | Whether a back-reference somewhere under @node@ resolves to the wire
 -- name @wire@, given that @node@'s own declaration is already the head of
@@ -622,13 +628,17 @@ rerootUnder parent child = case serialOuterName parent of
 -- | The name a serial AST's outermost node would declare, if it were the
 -- target of a back-reference.
 serialOuterName :: SerialAST -> Maybe TVar
-serialOuterName (SerialPack _ (_, s)) = serialOuterName s
-serialOuterName (SerialList (FV v _) _ _) = Just v
-serialOuterName (SerialTuple (FV v _) _) = Just v
-serialOuterName (SerialObject _ (FV v _) _ _) = Just v
-serialOuterName (SerialOptional (FV v _) _) = Just v
-serialOuterName (SerialVariant (FV v _) _ _ _) = Just v
-serialOuterName _ = Nothing
+serialOuterName = fmap fst . serialOuterKey
+
+-- | 'serialOuterName', with the arguments the node declares it at.
+serialOuterKey :: SerialAST -> Maybe (TVar, [ArgF])
+serialOuterKey (SerialPack _ (_, s)) = serialOuterKey s
+serialOuterKey (SerialList (FV v _) _ _) = Just (v, [])
+serialOuterKey (SerialTuple (FV v _) _) = Just (v, [])
+serialOuterKey (SerialObject _ (FV v _) ps _) = Just (v, ps)
+serialOuterKey (SerialOptional (FV v _) _) = Just (v, [])
+serialOuterKey (SerialVariant (FV v _) ps _ _) = Just (v, ps)
+serialOuterKey _ = Nothing
 
 -- | Emit a schema hint for a newtype boundary. For a default primitive
 -- (gv is one of the built-in base types like Int, Real, Str, etc.) the
@@ -1589,12 +1599,12 @@ handleStorage i anc v a = do
         <+> "refers back to the enclosing type" <+> squotes (pretty n)
         <> "; a stream handle cannot hold the type that holds it"
 
--- | The names of back-references with no enclosing node of that name: in a
--- schema, a reference to nothing.
-danglingRefs :: [TVar] -> SerialAST -> [TVar]
+-- | The names of back-references that match no enclosing node
+-- ('backRefMatches'): in a schema, a reference to nothing.
+danglingRefs :: [(TVar, [ArgF])] -> SerialAST -> [TVar]
 danglingRefs declared node = case node of
-  SerialRec (FV n _) _ -> [n | n `notElem` declared]
-  _ -> concatMap (danglingRefs (maybe declared (: declared) (serialOuterName node))) (serialKids node)
+  SerialRec (FV n _) ps -> [n | not (any (\d -> backRefMatches d n ps) declared)]
+  _ -> concatMap (danglingRefs (maybe declared (: declared) (serialOuterKey node))) (serialKids node)
 
 -- | The general name at a type's head, when it has one. Used to match the
 -- one occurrence of a recursive type that carries a name rather than a
