@@ -15,7 +15,7 @@ instance Packable Int Tenths where
 record Pair a where
   fst :: a
   snd :: a
-record Rust => Pair a = "PairT<$1>"
+record Rust => Pair a = "PairT<$1>" a
 
 source Rust from "um.rs" ("tenthsOf", "dupU")
 tenthsOf :: Int -> Tenths

@@ -11,7 +11,7 @@ instance Packable Int Tenths where
 record Pair a where
   fst :: a
   snd :: a
-record Cpp => Pair a = "pair_t<$1>"
+record Cpp => Pair a = "pair_t<$1>" a
 
 source Cpp from "um.hpp" ("tenthsOf", "dupU")
 tenthsOf :: Int -> Tenths

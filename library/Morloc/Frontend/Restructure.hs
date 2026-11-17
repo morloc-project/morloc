@@ -1273,9 +1273,7 @@ formListProblem ps (AppU (VarU (TV tmpl)) items)
   | otherwise = Nothing
   where
     named = [item | item <- items, isJust (position item)]
-    typeItems = [item | item <- items, maybe True (isTypeParam . (ps !!)) (position item)]
-    isTypeParam (Left (_, k)) = k == KindType
-    isTypeParam (Right _) = True
+    typeItems = filter (isTypeItem ps) items
     positions = mapMaybe position items
     -- the declaration position an item names: a parameter's variable, or a
     -- specialized parameter's type
@@ -1284,7 +1282,26 @@ formListProblem ps (AppU (VarU (TV tmpl)) items)
     names (Right t) x = t == x
     names _ _ = False
     increasing xs = and (zipWithPrefix (<) xs (drop 1 xs))
+formListProblem ps (NamU _ (TV form) items _)
+  | Just n <- find (\k -> k < 1 || k > toInteger (length typeItems)) (macroIndices form) =
+      Just $
+        "its form names $" <> pretty n <> ", but its list has" <+> pretty (length typeItems)
+          <+> "type item(s); $N names a type parameter, never a Nat, Str or Rec one"
+  | otherwise = Nothing
+  where
+    typeItems = filter (isTypeItem ps) items
 formListProblem _ _ = Nothing
+
+-- | Whether an item of a form's list is a type: a parameter of kind Type,
+-- or a type that is not a kind literal.
+isTypeItem :: [Either (TVar, Kind) TypeU] -> TypeU -> Bool
+isTypeItem ps item = case find (`names` item) ps of
+  Just (Left (_, k)) -> k == KindType
+  _ -> isNothing (kindOfU item)
+  where
+    names (Left (v, _)) (VarU v') = v == v'
+    names (Right t) x = t == x
+    names _ _ = False
 
 -- | The indices of the `$N` macros of a template.
 macroIndices :: Text -> [Integer]

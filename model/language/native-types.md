@@ -4,23 +4,27 @@ Per-language type mappings (`type Py => X = ...`, `record Cpp => R`) and their a
 
 ### NATIVE-1 A native form is a template over the type's parameters
 Intent: proposed
-Tests: spec-native-1-1, spec-native-1-2, spec-native-1-3, spec-native-1-4, spec-native-1-5, spec-native-1-6, spec-native-1-7, spec-native-1-8
-Code: unaudited
+Tests: spec-native-1-1, spec-native-1-2, spec-native-1-3, spec-native-1-4, spec-native-1-5, spec-native-1-6, spec-native-1-7, spec-native-1-8, spec-native-1-9, spec-native-1-10, spec-native-1-11, spec-native-1-12, spec-native-1-13, spec-native-1-14
+Code: deviates (../compiler/issues/native-forms.md)
 
-`type L => C x1 ... xn = "s" x1 ... xn` gives `[[C U1 ... Un]]_L` as the
-text `s` with each `$i` replaced by `[[Ui]]_L`. The text is opaque to morloc
-and is checked only by language `L`. The list names the parameters in the
-order the type declares them, a specialized parameter by its type
-(`type Cpp => (P Int b) = "std::pair<$1,$2>" Int b`): a list that names
-them in another order, or one twice, is a compile error, and so is a `$i`
-past the list. `$i` counts the list's type items only: a Nat, Str or Rec
-item is never rendered, so `$i` cannot name one. Open: may `$i` render a
-literal kind argument (`"std::array<int,$1>" n` at `n = 3`)? Each variable of a specialized form takes the argument in
-its own position. A specialized form is the type's form only at arguments
-it matches; at other arguments the type has no form of its own in `L`
-(NATIVE-2). Open: which form applies when two specializations both
-match (today the one specialized furthest left)? Open: may a
-list reorder its parameters (`"std::tuple<$2,$1>" b a`)?
+`type L => C x1 ... xn = "s" y1 ... ym` gives `[[C U1 ... Un]]_L` as the
+text `s` with each `$i` replaced by the i-th type item of `y1 ... ym`, at
+the use's arguments. The text is opaque to morloc and is checked only by
+language `L`. The declared parameters are like a function's: the list after
+the form may name any of them, in any order, a specialized parameter by its
+type. A form with no
+`$i` is its text as written, and its list may be absent. `$i` counts the
+list's type items only: a Nat, Str or Rec item is never rendered, so `$i`
+cannot name one. A `$i` that names no type item of the list, or a `$i`
+with no list, is a compile error. The code deviates (see the issue file):
+a type form's list must name the parameters in declaration order, and
+later passes pair a list with the parameters by position. Open: may `$i` render a
+literal kind argument (`"std::array<int,$1>" n` at `n = 3`)? Each variable
+of a specialized form takes the argument in its own position. A
+specialized form is the type's form only at arguments it matches; at other
+arguments the type has no form of its own in `L` (NATIVE-2). Open: which
+form applies when two specializations both match (today the one
+specialized furthest left)?
 
 ### NATIVE-2 A type without its own form in a language uses its expansion's
 Intent: proposed

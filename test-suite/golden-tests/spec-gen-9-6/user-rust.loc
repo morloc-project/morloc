@@ -7,7 +7,7 @@ import root-rust
 record L a where
   val :: a
   next :: ?(L a)
-record Rust => L a = "MyL<$1>"
+record Rust => L a = "MyL<$1>" a
 
 source Rust from "user.rs" ("same", "innerL")
 same :: a -> a

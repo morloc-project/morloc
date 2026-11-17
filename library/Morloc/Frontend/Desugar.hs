@@ -33,6 +33,7 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Char (isAlpha, isAsciiLower, isAsciiUpper, isSpace)
 import qualified Morloc.BaseTypes as BT
+import qualified Morloc.Data.Doc as Doc
 import Morloc.Frontend.CST
 import Morloc.Frontend.Token hiding (startPos)
 import Morloc.Namespace.Expr
@@ -1363,6 +1364,20 @@ promoteRecVars = promoteVars RecVarU
 
 promoteStrVars :: Set.Set TVar -> TypeU -> TypeU
 promoteStrVars = promoteVars StrVarU
+
+-- | Why a record's form names a `$i` with no list after it (NATIVE-1). A
+-- list's bounds are checked with the type forms' (Restructure).
+formSlotProblem :: Lang -> TVar -> [Either (TVar, Kind) TypeU] -> [TypeU] -> Text -> Maybe Text
+formSlotProblem l (TV v) vs items form
+  | null items && hasSlot =
+      Just $
+        "the " <> langName l <> " form of " <> v <> " names a $i, but lists nothing after the form for it to name; "
+          <> if null vs
+            then v <> " takes no parameters, so its form names no $i"
+            else "list after the form the parameters its $i name, in that order"
+  | otherwise = Nothing
+  where
+    hasSlot = any (\(c, d) -> c == '$' && isDigitChar d) (T.zip form (T.drop 1 form))
 
 -- | The form a per-language record line gives its record. A bare word is a
 -- kind the language defines (GEN-2) and becomes that kind's form; a string
@@ -3668,6 +3683,7 @@ desugarTypeDef sp (CstNamTypeLegacy maybeLangTok nt (v, vs) (conName, isTerminal
       form <- if nt == NamObject && isTerminal && conName /= "struct"
         then return conName
         else recordForm (startPos sp) l v conName isTerminal
+      maybe (return ()) (dfail (startPos sp) . T.unpack) (formSlotProblem l v vs conArgs form)
       return (Just (l, True), form)
   doc <- namTypeDocs (startPos sp) locEntries
   let entries = [(k, ty) | (_, k, ty) <- locEntries]

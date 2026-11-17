@@ -2662,6 +2662,60 @@ newtTests =
         type Cpp => (P a b) = "std::tuple<$0,$2>" a b
         f :: P Int Real -> Real
         |]
+    , reject
+        "spec-native-1-9"
+        [r|
+        module main (f)
+        record P a where
+          x :: a
+        record Py => P a = "PObj<$1>"
+        f :: P Int -> P Int
+        |]
+    , accept
+        "spec-native-1-10"
+        [r|
+        module main (f)
+        record P a where
+          x :: a
+        record Py => P a = "PObj<$1>" a
+        f :: P Int -> P Int
+        |]
+    , reject
+        "spec-native-1-11"
+        [r|
+        module main (f)
+        record P (n :: Nat) a where
+          x :: a
+        record Py => P (n :: Nat) a = "PObj<$2>" n a
+        f :: P 3 Int -> P 3 Int
+        |]
+    , accept
+        "spec-native-1-12"
+        [r|
+        module main (f)
+        record P (n :: Nat) a where
+          x :: a
+        record Py => P (n :: Nat) a = "PObj<$1>" n a
+        f :: P 3 Int -> P 3 Int
+        |]
+    , reject
+        "spec-native-1-13"
+        [r|
+        module main (f)
+        record P a where
+          x :: a
+        record Py => P a = "PObj<$0>" a
+        f :: P Int -> P Int
+        |]
+    , accept
+        "spec-native-1-14"
+        [r|
+        module main (f)
+        record P a where
+          x :: a
+        record Py => P a = "PObj" a
+        f :: P Int -> P Int
+        |]
     , rejectSaying
         "spec-native-1-7"
         "never a Nat"
