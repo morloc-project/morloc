@@ -72,7 +72,6 @@ import qualified Morloc.TypeEval as TE
 import qualified Morloc.Frontend.Instances as FI
 import Morloc.Typecheck.Internal (apply, emptyGamma, prettyConstraint, qualify, substitute, subtype, unqualify)
 import Morloc.Frontend.TypeNames (isReservedTypeName)
-import Morloc.CodeGenerator.NominalCheck (shadow)
 
 -- | Classification of how an aliased outer type maps onto the wire form.
 -- Computed by 'makeSerialAST'' from the gscope alias body's outer head.
@@ -997,7 +996,7 @@ makeSerialAST m lang t0 = do
     -- pointer: the slot's width does not depend on the arms, so the width
     -- equation has a finite fixed point.
     makeSerialAST' gscope typepackers anc t@(VariantF v ps as)
-      | cutCheck "variant-cut" t anc (Set.member t anc) = return $ SerialRec v ps
+      | Set.member t anc = return $ SerialRec v ps
       | otherwise = do
           anc' <- descend t anc
           as' <- mapM (\(n, fs) -> (,) n <$> mapM (makeSerialAST' gscope typepackers anc') fs) as
@@ -1009,7 +1008,7 @@ makeSerialAST m lang t0 = do
     -- path (a field type taken out on its own) is the type unfolded: its
     -- type inferred again.
     makeSerialAST' gscope typepackers anc r@(RecF v@(FV gv _) ps)
-      | selfContaining || cutCheck "back-reference" r anc (any ((== declaredKey r) . declaredKey) (Set.toList anc)) = return $ SerialRec v ps
+      | selfContaining || any ((== declaredKey r) . declaredKey) (Set.toList anc) = return $ SerialRec v ps
       | null ps && not (null (dataTypeParams gscope gv)) =
           MM.throwSourcedError m $ "Reference to a `data` instantiation that is not being built:" <+> pretty r
       | otherwise = do
@@ -1504,7 +1503,7 @@ makeSerialAST m lang t0 = do
     -- a distinct type even when it shares a name, as the inner @P Int@ of
     -- a @P (P Int)@ does.
     makeSerialAST' gscope typepackers anc t@(NamF o n ps rs)
-      | cutCheck "record-cut" t anc (Set.member t anc) = return $ SerialRec n ps
+      | Set.member t anc = return $ SerialRec n ps
       | otherwise = do
           anc' <- descend t anc
           entries <- mapM (traverse (makeSerialAST' gscope typepackers anc')) rs
@@ -1518,13 +1517,6 @@ makeSerialAST m lang t0 = do
                 _ -> FV (TV "Optional") (CV "optional")
       return $ SerialOptional v inner
     makeSerialAST' _ _ _ t = MM.throwSourcedError m $ "makeSerialAST' error on type:" <+> pretty t
-
-    -- A cut decided by the shape, compared with whether the type's key is on
-    -- the path (NOM-1).
-    cutCheck :: DT.Text -> TypeF -> Set.Set TypeF -> Bool -> Bool
-    cutCheck site t anc old = case declaredKey t of
-      Just k -> shadow site (render (pretty t) <> "\t" <> DT.pack (show k)) old (any ((== Just k) . declaredKey) (Set.toList anc))
-      Nothing -> old
 
     -- Step into a type, with a bound on how deep the walk may go. A type
     -- whose expansion does not converge -- non-regular recursion, whose

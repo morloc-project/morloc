@@ -2,13 +2,13 @@
 Module      : Morloc.CodeGenerator.Nominal
 Description : Keys identifying declared types in code generation (NOM-1)
 
-The key of a declared record, object, table or `data` type: its name, its
-arguments and its level (NOM-1). A key's arguments are types in which every
-declared type is itself a key, so a key is finite and compared by value.
+The key of a declared record, object, table or `data` type: its name and its
+arguments (NOM-1, which it deviates from; see issues/nominal.md). A key's
+arguments are types in which every declared type is itself a key, so a key
+is finite and compared by value.
 -}
 module Morloc.CodeGenerator.Nominal
-  ( Level (..)
-  , NomKey (..)
+  ( NomKey (..)
   , KeyType (..)
   , KeyArg (..)
   , KeyKind (..)
@@ -18,16 +18,10 @@ import qualified Data.Text as T
 import Morloc.Namespace.Prim (Key, Kind, TVar)
 import Morloc.Namespace.Type (NamType)
 
--- | Whether a key names the type a pool holds (native) or the type it is
--- written as on the wire side of a packed argument (unpacked, NOM-4).
-data Level = NativeLevel | UnpackedLevel
-  deriving (Show, Eq, Ord)
-
--- | A declared type at arguments, at a level.
+-- | A declared type at arguments.
 data NomKey = NomKey
   { nkCon :: TVar
   , nkArgs :: [KeyArg]
-  , nkLevel :: Level
   }
   deriving (Show, Eq, Ord)
 

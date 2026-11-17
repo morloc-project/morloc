@@ -208,7 +208,7 @@ typeFKey t = case t of
   EnumF (FV v _) ps _ -> key v ps
   VariantF (FV v _) ps _ -> key v ps
   where
-    key v ps = KNom (NomKey v (map argFKey ps) NativeLevel)
+    key v ps = KNom (NomKey v (map argFKey ps))
 
 -- | An argument as a key argument.
 argFKey :: ArgF -> KeyArg

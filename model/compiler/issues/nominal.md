@@ -95,7 +95,7 @@ Plan: /work/plans/nominal-types/PLAN.md, phase A stages P1-P4.
   (spec-gen-9-6), the use of a tied back-reference to the outer instance
   carries its argument as `AppF Container [i64]`, the record named by its
   morloc name, where the definition at those arguments has the expanded
-  record (seen by the field-agreement shadow, MORLOC_NOMINAL_LOG). Output
+  record. Output
   is correct today, since C++ and Rust spell an instance from its fields,
   but the two have different keys. Probably the instance-protected
   back-reference whose arguments pairEval leaves as written, reaching a
@@ -177,3 +177,11 @@ Plan: /work/plans/nominal-types/PLAN.md, phase A stages P1-P4.
   (`MyTree<$1>`), so a native and a wire type that are different
   instantiations of one template render alike, and maybePackableWrap may
   skip a wrap it needs.
+
+- **Keys carry no level and no self-argument.** [read, 2026-11-17]
+  Deviates from NOM-1. Code-generation keys are a declaration's name and
+  argument keys only: every key is at the native level (the unpacked side
+  is identified through native-level carried arguments), and a
+  self-containing instance's reference carries no arguments, matched to the
+  one instantiation of its name on the path (Serial.hs, the back-reference
+  cut).

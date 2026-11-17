@@ -21,14 +21,14 @@ nominalTests =
   testGroup
     "NOM keys"
     [ testCase "a record's key is its name and arguments" $
-        declaredKey (container "struct" int) @?= Just (NomKey (TV "Container") [KTy (KVar (TV "Int"))] NativeLevel)
+        declaredKey (container "struct" int) @?= Just (NomKey (TV "Container") [KTy (KVar (TV "Int"))])
     , testCase "the native form takes no part in a key" $
         declaredKey (container "struct" int) @?= declaredKey (container "dict" int)
     , testCase "other arguments are another key" $
         assertBool "keys equal" (declaredKey (container "struct" int) /= declaredKey (container "struct" str))
     , testCase "a nested declared type is its key" $
         declaredKey (container "struct" (container "struct" int))
-          @?= Just (NomKey (TV "Container") [KTy (KNom (NomKey (TV "Container") [KTy (KVar (TV "Int"))] NativeLevel))] NativeLevel)
+          @?= Just (NomKey (TV "Container") [KTy (KNom (NomKey (TV "Container") [KTy (KVar (TV "Int"))]))])
     , testCase "a tied back-reference has its record's key" $
         declaredKey (RecF (FV (TV "Container") (CV "struct")) [TyA int]) @?= declaredKey (container "struct" int)
     , testCase "a data back-edge without arms has its instance's key" $
