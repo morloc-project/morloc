@@ -13,6 +13,8 @@ all:
 	./cpp optBox '{"Some":[{"x":{"x":1,"y":2},"y":{"x":3,"y":4}}]}' >> obs.txt 2>> obs.err
 	./cpp optBox '"None"' >> obs.txt 2>> obs.err
 	./cpp tagBox '{"n":5}' >> obs.txt 2>> obs.err
+	./cpp holder '{"t":{"n":1},"k":2}' >> obs.txt 2>> obs.err
+	./cpp holderBox '{"t":{"n":3},"k":4}' >> obs.txt 2>> obs.err
 	morloc make -o rust rust.loc 2> build-rust.err
 	./rust box3 '{"x":{"x":{"x":1,"y":2},"y":{"x":3,"y":4}},"y":{"x":{"x":5,"y":6},"y":{"x":7,"y":8}}}' >> obs.txt 2>> obs.err
 	./rust boxList '{"x":[{"x":1,"y":2}],"y":[]}' >> obs.txt 2>> obs.err

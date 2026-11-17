@@ -14,7 +14,8 @@ all:
 	./swapped-cpp trip '{"val":1,"sub":{"val":"a","sub":{"val":2,"sub":null}}}' >> obs.txt 2>> obs.err
 	morloc make -o swapped-rust swapped-rust.loc 2> build-swapped-rust.err
 	./swapped-rust trip '{"val":1,"sub":{"val":"a","sub":{"val":2,"sub":null}}}' >> obs.txt 2>> obs.err
-	if timeout 120 morloc make -o nest-cpp nest-cpp.loc 2> build-nest-cpp.err; then echo UNEXPECTED >> obs.txt; elif grep -q 'does not terminate' build-nest-cpp.err; then echo REFUSED >> obs.txt; else echo UNEXPECTED >> obs.txt; fi
+	if morloc make -o swapped-fn-rust swapped-fn-rust.loc 2> build-swapped-fn-rust.err; then echo UNEXPECTED >> obs.txt; elif grep -q 'other arguments' build-swapped-fn-rust.err; then echo REFUSED >> obs.txt; else echo UNEXPECTED >> obs.txt; fi
+	if timeout 120 morloc make -o nest-cpp nest-cpp.loc 2> build-nest-cpp.err; then echo UNEXPECTED >> obs.txt; elif grep -q 'no finite wire form' build-nest-cpp.err; then echo REFUSED >> obs.txt; else echo UNEXPECTED >> obs.txt; fi
 	morloc make -o deep-cpp deep-cpp.loc 2> build-deep-cpp.err
 	./deep-cpp trip '{"val":{"val":{"val":{"val":{"val":{"val":{"val":1,"sub":{"val":2,"sub":null}},"sub":null},"sub":null},"sub":null},"sub":null},"sub":null},"sub":null}' >> obs.txt 2>> obs.err
 	morloc make -o deep-rust deep-rust.loc 2> build-deep-rust.err
@@ -25,4 +26,4 @@ all:
 	./deep-user-rust trip '{"val":{"val":{"val":{"val":{"val":{"val":{"val":1,"next":{"val":2,"next":null}},"next":null},"next":null},"next":null},"next":null},"next":null},"next":null}' >> obs.txt 2>> obs.err
 
 clean:
-	rm -rf nexus-cpp nexus-rust swapped-cpp swapped-rust nest-cpp deep-cpp deep-rust deep-user-cpp deep-user-rust pools *err *-build *build.tmp*
+	rm -rf nexus-cpp nexus-rust swapped-cpp swapped-rust swapped-fn-rust __pycache__ nest-cpp deep-cpp deep-rust deep-user-cpp deep-user-rust pools *err *-build *build.tmp*

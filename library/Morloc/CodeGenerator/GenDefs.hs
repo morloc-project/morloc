@@ -25,6 +25,7 @@ module Morloc.CodeGenerator.GenDefs
   , placeTypes
   , carriedTemplateArgs
   , placeholders
+  , paramOf
   , nativeParam
   , nativeParams
   , nativeDataParams
@@ -146,7 +147,7 @@ nativeDataParams = ddNative
 armDataParams :: DataDef -> T.Text -> [TVar]
 armDataParams dd c = [p | p <- ddNative dd, Set.member p held]
   where
-    held = Set.fromList (concatMap (placeholders (== ddVar dd)) (concat [ts | (c', ts) <- ddArms dd, c' == c]))
+    held = Set.fromList (concatMap placeholders (concat [ts | (c', ts) <- ddArms dd, c' == c]))
 
 -- | The `data` types named anywhere in the types, and the records named by
 -- a reference ('RecF').
@@ -237,28 +238,31 @@ data Disagreement
   deriving (Show, Eq)
 
 -- | The parameters a type holds in a field, the ones its uses can bind:
--- the arguments a nested record or `data` type carries are not counted,
--- since its fields say what it holds.
-placeholders :: (TVar -> Bool) -> TypeF -> [TVar]
-placeholders _ t
-  | Just p <- paramOf t = [p]
-placeholders isData t = case t of
-  NamF _ _ _ rs -> concatMap (placeholders isData . snd) rs
-  FunF as r -> concatMap (placeholders isData) (r : as)
-  -- A native form that does not spell its arguments holds none of them.
-  AppF h@(VarF (FV _ (CV form))) _
-    | not (T.any (== '$') form) -> placeholders isData h
-  AppF h as -> placeholders isData h <> concatMap (placeholders isData) (tyArgs as)
-  OptionalF x -> placeholders isData x
-  -- A `data` template spells the arguments at its `$k` slots, in an
-  -- occurrence and in a reference alike.
-  VariantF fv ps _ | Just xs <- spelled fv ps -> xs
-  RecF fv@(FV g _) ps | isData g, Just xs <- spelled fv ps -> xs
-  VariantF _ _ as -> concatMap (concatMap (placeholders isData) . snd) as
-  _ -> []
+-- the arguments a nested generated record or `data` type carries are not
+-- counted, since its fields say what it holds; a native form spells the
+-- arguments at its `$k` slots, in an occurrence and in a reference alike,
+-- and a reference spelled there spells its own arguments.
+placeholders :: TypeF -> [TVar]
+placeholders = go False
   where
+    go _ t | Just p <- paramOf t = [p]
+    go slot t = case t of
+      NamF _ fv ps _ | Just xs <- spelled fv ps -> xs
+      NamF _ _ _ rs -> concatMap (go slot . snd) rs
+      FunF as r -> concatMap (go slot) (r : as)
+      -- A native form that does not spell its arguments holds none of them.
+      AppF h@(VarF (FV _ (CV form))) _
+        | not (T.any (== '$') form) -> go slot h
+      AppF h as -> go slot h <> concatMap (go slot) (tyArgs as)
+      OptionalF x -> go slot x
+      VariantF fv ps _ | Just xs <- spelled fv ps -> xs
+      RecF fv ps
+        | Just xs <- spelled fv ps -> xs
+        | slot -> concatMap (go slot) (tyArgs ps)
+      VariantF _ _ as -> concatMap (concatMap (go slot) . snd) as
+      _ -> []
     spelled (FV _ (CV form)) ps
-      | T.any (== '$') form = Just (concatMap (placeholders isData) [x | (k, x) <- indexedFrom 1 (tyArgs ps), k `elem` macroSlots form])
+      | T.any (== '$') form = Just (concatMap (go True) [x | (k, x) <- indexedFrom 1 (tyArgs ps), k `elem` macroSlots form])
       | otherwise = Nothing
 
 -- | The positions a native form's `$k` slots name.
@@ -270,7 +274,7 @@ macroSlots form = [k | piece <- drop 1 (T.splitOn "$" form), Just k <- [readMayb
 nativeParams :: GenDef -> [TVar]
 nativeParams gd = [p | (p, KindType) <- gdParams gd, Set.member p held]
   where
-    held = Set.fromList (concatMap (placeholders (const False) . snd) (gdFields gd))
+    held = Set.fromList (concatMap (placeholders . snd) (gdFields gd))
 
 -- | The native name of a parameter (D14).
 nativeParam :: TVar -> T.Text

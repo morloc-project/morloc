@@ -19,6 +19,7 @@ module Morloc.TypeEval
   , pairEval
   , declaresFormAt
   , declaresRecord
+  , growingInstance
   , reduceType
   , aliasChain
   , reduceTypeLeaves
@@ -71,14 +72,13 @@ pairEval cscope gscope =
   where
     -- A declared record is protected while it is expanded by its instance,
     -- so a nested use at other arguments (the inner `Container Int` of
-    -- `Container (Container Int)`) is expanded too (NOM-3). A non-regular
-    -- record meets a larger instance of itself at every nesting, and a
-    -- recursive alias, in either scope, is not a declared type: both keep
-    -- the name cut. Any other type cannot meet itself at other arguments,
-    -- so its instance alone is protected.
+    -- `Container (Container Int)`) is expanded too (NOM-3); a record that
+    -- would meet larger instances of itself is refused before this
+    -- ('growingRefs'). A recursive alias, in either scope, is not a
+    -- declared type and keeps the name cut. Any other type cannot meet
+    -- itself at other arguments, so its instance alone is protected.
     prot = ByInstance cut
     cut v
-      | nonRegular gscope v = CutByName
       | declaresRecord gscope v = CutInstance
       | refersToItself gscope v || refersToItself cscope v = CutByName
       | otherwise = CutInstance
@@ -203,20 +203,44 @@ declaresRecord scope v = case Map.lookup v scope of
   Just entries -> or [True | (_, NamU {}, _, _, _) <- entries]
   Nothing -> False
 
--- | Whether a declaration refers to itself, in its own body, at an argument
--- that is a type built over one of its parameters (@record Nest a where sub
--- :: ?(Nest [a])@), so that each nesting is a larger instance. A reference
--- at its parameters in another order (@T b a@ in @T a b@) is regular.
-nonRegular :: Scope -> TVar -> Bool
-nonRegular scope v = or [any (any (grows ps)) (selfRefs body) | (ps, body, _, _, _) <- Map.findWithDefault [] v scope]
+-- | Among declarations that refer to each other (each a name, its
+-- parameters and its body), the instance reached from one, at its own
+-- parameters, by following their references with aliases expanded, when
+-- those instances keep growing (@Nest [a]@ from @record Nest a@): such a type
+-- has no finite expansion. Nothing when they close (@T b a@ in @T a b@,
+-- @N Int [a]@ in @N a b@).
+growingInstance :: Map.Map TVar ([TVar], TypeU) -> Map.Map TVar ([TVar], TypeU) -> TVar -> Maybe TypeU
+growingInstance members aliases v0 = do
+  (ps0, _) <- Map.lookup v0 members
+  go Set.empty [(v0, map VarU ps0)]
   where
-    grows ps a = case varOf a of
-      Just _ -> False
-      Nothing -> mentions [p | Left (p, _) <- ps] a
-    mentions params t = maybe False (`elem` params) (varOf t) || any (mentions params) (typeUParts t)
-    selfRefs t = case t of
-      AppU (VarU v') as | v' == v -> as : concatMap selfRefs as
-      _ -> concatMap selfRefs (typeUParts t)
+    go _ [] = Nothing
+    go seen ((w, as) : rest)
+      | Set.member (w, as) seen = go seen rest
+      | Set.size seen >= 256 || sum (map size as) > 256 = Just (AppU (VarU w) as)
+      | otherwise =
+          let next = case Map.lookup w members of
+                Just (ps, body) | length ps == length as -> refs (expand 64 (parsubAll (zipSame ps as) body))
+                _ -> []
+           in go (Set.insert (w, as) seen) (rest <> next)
+    refs t = case t of
+      AppU (VarU w) as | Map.member w members -> (w, as) : concatMap refs as
+      VarU w | Map.member w members -> [(w, [])]
+      _ -> concatMap refs (typeUParts t)
+    size t = 1 + sum (map size (typeUParts t)) :: Int
+    expand :: Int -> TypeU -> TypeU
+    expand 0 t = t
+    expand n t = case t of
+      AppU (VarU a) as | Just (ps, b) <- Map.lookup a aliases, length ps == length as -> expand (n - 1) (parsubAll (zipSame ps (map (expand n) as)) b)
+      VarU a | Just ([], b) <- Map.lookup a aliases -> expand (n - 1) b
+      AppU h as -> AppU (expand n h) (map (expand n) as)
+      FunU as r -> FunU (map (expand n) as) (expand n r)
+      OptionalU x -> OptionalU (expand n x)
+      EffectU e x -> EffectU e (expand n x)
+      LabeledU l x -> LabeledU l (expand n x)
+      NamU o v ps rs -> NamU o v (map (expand n) ps) [(k, expand n x) | (k, x) <- rs]
+      LitU (LList xs) -> LitU (LList (map (expand n) xs))
+      _ -> t
 
 -- | Whether a declaration refers to itself in its own body.
 refersToItself :: Scope -> TVar -> Bool

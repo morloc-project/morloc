@@ -492,8 +492,33 @@ checkMutualRecursion d = do
         ]
       sccs = Graph.stronglyConnComp nodes
   mapM_ (rejectCyclic nodes) sccs
+  let defs = Map.fromList [(i, ([p | Left (p, _) <- vs], t)) | (i, Nothing, _, vs, t, _) <- allTypedefs, all isLeft vs]
+      aliases = Map.fromList [(v, ([p | Left (p, _) <- vs], t)) | (_, Nothing, v, vs, t, TypedefAlias) <- allTypedefs, all isLeft vs, notRecord t]
+      notRecord t = case t of
+        NamU {} -> False
+        _ -> True
+  mapM_ (rejectGrowing defs aliases) sccs
   return d
   where
+    -- A cycle of type definitions whose instances keep growing as they are
+    -- followed (`Nest [a]` in `record Nest a`) has no finite expansion, and
+    -- its values no finite wire form.
+    rejectGrowing ::
+      Map Int ([TVar], TypeU) ->
+      Map TVar ([TVar], TypeU) ->
+      Graph.SCC (Int, Maybe Lang, TVar, TypedefKind) ->
+      MorlocMonad ()
+    rejectGrowing defs aliases (Graph.CyclicSCC xs) =
+      let general = [(i, v) | (i, Nothing, v, _) <- xs]
+          members = Map.fromList [(v, d) | (i, v) <- general, Just d <- [Map.lookup i defs]]
+       in case [(i, v, t) | (i, v) <- take 1 general, Just t <- [TE.growingInstance members (Map.withoutKeys aliases (Map.keysSet members)) v]] of
+            (i, v, t) : _ ->
+              MM.throwSourcedError i $
+                "The type" <+> squotes (pretty v) <+> "reaches" <+> squotes (pretty t)
+                  <> ", a larger instance at every nesting, so its values have no finite wire form."
+            [] -> return ()
+    rejectGrowing _ _ _ = return ()
+
     rejectCyclic ::
       [((Int, Maybe Lang, TVar, TypedefKind), (Maybe Lang, TVar), [(Maybe Lang, TVar)])] ->
       Graph.SCC (Int, Maybe Lang, TVar, TypedefKind) ->

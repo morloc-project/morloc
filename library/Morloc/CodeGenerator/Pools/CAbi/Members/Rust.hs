@@ -105,7 +105,7 @@ import qualified Morloc.Version as MV
 import Morloc.Quasi
 import System.Directory (findExecutable)
 import System.FilePath (takeDirectory)
-import Morloc.CodeGenerator.GenDefs (DataDef (..), Disagreement (..), GenDef (..), carriedTemplateArgs, armDataParams, dataDefs, dataNamesIn, nativeDataParams, RecordUse, disagreements, inPoolSerialASTs, placeTypes, genDefs, nativeParam, nativeParams, placeholders, recordUses)
+import Morloc.CodeGenerator.GenDefs (DataDef (..), Disagreement (..), GenDef (..), carriedTemplateArgs, armDataParams, dataDefs, dataNamesIn, nativeDataParams, RecordUse, disagreements, inPoolSerialASTs, placeTypes, genDefs, nativeParam, nativeParams, paramOf, placeholders, recordUses)
 
 -- | Duplicated here (as in Cpp.hs) to match data/lang/rust/lang.yaml. The
 -- second field is the source extension and must match lang.yaml's @extension@
@@ -2420,10 +2420,20 @@ recordImpls handle gd name params = do
       homeKeys = Map.map (\h -> encodeModulePath (typeHomePath h <> [typeHomeName h])) homesOf
       complain :: Text -> RustM ()
       complain msg = CMS.modify $ \st -> st {rsErrors = msg : rsErrors st}
+      -- The parameters whose position a reference of the record to itself
+      -- holds another type at.
+      own = [p | (p, KindType) <- gdParams gd]
+      swappedParams =
+        unique [ p | (_, f) <- gdFields gd, (g, ps) <- selfRefs f, g == gv
+                   , (p, a) <- zipPrefix own (tyArgs ps), paramOf a /= Just p ]
+      selfRefs t = case t of
+        RecF (FV g _) ps -> [(g, ps)]
+        NamF _ (FV g _) ps _ -> (g, ps) : concatMap selfRefs (childrenOf t)
+        _ -> concatMap selfRefs (childrenOf t)
   if null objects
     then return []
     else do
-      planned <- mapIndexedM (field cfg converts leaf complain objects) (gdFields gd)
+      planned <- mapIndexedM (field cfg converts leaf complain objects swappedParams) (gdFields gd)
       let fields4 = [f | (f, _, _) <- planned]
           wheres = ([w | (_, Just (w, _), _) <- planned], [w | (_, Just (_, w), _) <- planned])
           extras = concat [d | (_, _, d) <- planned]
@@ -2432,9 +2442,9 @@ recordImpls handle gd name params = do
   where
     -- One field: its marshalling, its where clauses (writing, reading),
     -- and the helpers and trait items it needs.
-    field cfg converts leaf complain objects i (k, declT) = do
+    field cfg converts leaf complain objects swappedParams i (k, declT) = do
       let fas = unique [fa | rs <- objects, Just fa <- [lookup k rs]]
-          held = not (null (placeholders (const False) declT))
+          held = not (null (placeholders declT))
           fld = RP.rustFieldIdent k
       ty <- rustFieldType declT
       -- A field that refers to the record itself is bounded through the
@@ -2457,6 +2467,10 @@ recordImpls handle gd name params = do
               m <- marshal cfg (pretty leaf) i 0 c
               return ((fld, ty, True, Just m), Nothing, [])
           | otherwise -> do
+              when (any (`elem` swappedParams) (placeholders declT)) $
+                complain ("the generated Rust type for " <> unTVar (gdVar gd) <> " cannot convert its field `" <> unKey k
+                            <> "`: the record refers to itself at other arguments, where the field holds another type; give "
+                            <> unTVar (gdVar gd) <> " a Rust form, `record Rust => " <> unTVar (gdVar gd) <> " = \"...\"`")
               let tr = "MlcConv_" <> pretty leaf <> "_" <> pretty i
               byType <- mapM (\fa -> (\t -> (render t, fa)) <$> rustFieldType (serialAstToNativeType fa)) fas
               let groups = Map.fromListWith (flip (<>)) [(t, [fa]) | (t, fa) <- byType]
@@ -2855,7 +2869,7 @@ generateRustStructs closureAsts es = do
                 params = map (pretty . nativeParam) (nativeParams gd)
             -- A field holding a parameter has the width of its argument,
             -- which may vary.
-            fields <- mapM (\(k, t) -> (\ty -> (RP.rustFieldIdent k, ty, isVarWidthF t || not (null (placeholders (const False) t)))) <$> rustFieldType t) (gdFields gd)
+            fields <- mapM (\(k, t) -> (\ty -> (RP.rustFieldIdent k, ty, isVarWidthF t || not (null (placeholders t)))) <$> rustFieldType t) (gdFields gd)
             let printDecl n
                   | handle = RP.printRustHandle n params [(fld, ty) | (fld, ty, _) <- fields]
                   | otherwise = RP.printRustStruct n params [(fld, ty) | (fld, ty, _) <- fields]

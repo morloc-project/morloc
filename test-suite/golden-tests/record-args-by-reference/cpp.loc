@@ -1,7 +1,7 @@
 -- A record's arguments that are themselves records, at every shape they
 -- take: nested directly, inside a list or an optional, and as the
 -- argument of a `data` type.
-module main (box3, boxList, boxOpt, optBox, tagBox)
+module main (box3, boxList, boxOpt, optBox, tagBox, holder, holderBox)
 
 import root-cpp
 
@@ -15,6 +15,16 @@ data Opt a = None | Some a
 record Tag a where
   n :: Int
 record Cpp => Tag a = "tag_t<$1>" a
+
+-- A generated record holding the phantom form at its own parameter.
+record Holder a where
+  t :: Tag a
+  k :: Int
+
+-- The phantom form at a generated record over the parameter.
+record HolderBox a where
+  t :: Tag (Box a)
+  k :: Int
 
 source Cpp from "same.hpp" ("same")
 same :: a -> a
@@ -33,3 +43,9 @@ optBox v = same v
 
 tagBox :: Tag (Box Int) -> Tag (Box Int)
 tagBox v = same v
+
+holder :: Holder Str -> Holder Str
+holder v = same v
+
+holderBox :: HolderBox Str -> HolderBox Str
+holderBox v = same v
