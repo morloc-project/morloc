@@ -145,3 +145,28 @@ Plan: /work/plans/nominal-types/PLAN.md, phase A stages P1-P4.
   `packedVariant` branch, about 845-851) peels only an outermost SerialPack;
   when the packed sum type sits inside another type, @show/@save/@hash hand
   the native value to a marshaller that does not pack it.
+
+- **A `data` back-reference reaching code generation as a record reference
+  is spelled wrongly.** [read, 2026-11-17; unreachable in the goldens,
+  stdlib and biolib by census: no `data` RecF reaches the renderers] Deviates
+  from NOM-1. Serial cuts (the VarF and AppF cuts, and the general-side
+  builder) give a `data` type's back-reference as SerialRec, projected to
+  RecF, alongside the armless VariantF form. In C++ the RecF renderer's data
+  branch (Cpp.hs about 410) spells a template data type by its bare name,
+  with no arguments; Rust's RecF renderer (Rust.hs about 437-452) has no data
+  case and reports "no Rust form"; and the shared_ptr/Box rule for an
+  optional back-reference (Cpp.hs about 424, Rust.hs about 365) boxes a data
+  RecF where the armless VariantF spelling of the same value gives
+  optional/Option -- one type, two native spellings.
+
+- **A record's self-reference through a type alias is not tied.**
+  [reproduced, 2026-11-17] Violates GEN-1. The knot key is the record name
+  with its general arguments compared as written, so `sub :: ?(P (Id a))`
+  in `record P a` (with `type Id a = a`) is a new instance, unrolled until
+  the walk stops by name: `morloc make` fails with "No Packable instance
+  for type 'Id (Id Int)'". /work/plans/nominal-types/tests/alias-knot/main.loc.
+- **A generated record field written through an alias of its parameter is
+  refused.** [reproduced, 2026-11-17] Violates GEN-9. `other :: Id a` in
+  `record P a`: "its field `other` is `int` there but `T_a` in the
+  definition" -- at placeholders `Id &a` is not resolved to `&a` before the
+  agreement check. /work/plans/nominal-types/tests/alias-knot/flat.loc.
