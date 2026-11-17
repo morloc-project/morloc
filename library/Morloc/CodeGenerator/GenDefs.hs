@@ -107,24 +107,17 @@ genDefs lang used = do
       -- A declaration the language cannot resolve on its own (a form that
       -- needs arguments the declaration does not fix) has no definition,
       -- and a use of the record says why.
-      r <-
-        ( ( \tf -> case tf of
-              NamF o fv args rs -> (gv, Right (NamF o fv args [(k, foldSelf fv args x) | (k, x) <- rs]))
-              _ -> (gv, Left "its declaration does not resolve to a record")
-          )
-            <$> atPlaceholders lang gv ps
-        )
-          `catchRejected` (\msg -> return (gv, Left msg))
+      r <- (Right <$> atPlaceholders lang gv ps) `catchRejected` (return . Left)
       case r of
-        (_, Right t@(NamF _ _ _ rs)) -> case untiedSelf t of
-          ((g, True) : _) -> MM.throwCompilerBug ("a reference of the record " <> pretty g <> " to itself was not tied in inference")
+        Right t@(NamF _ _ _ rs) -> case untiedSelf t of
+          Just (g, True) -> MM.throwCompilerBug ("a reference of the record " <> pretty g <> " to itself was not tied in inference")
           -- A reference to the record at other arguments is another
           -- instance of it, which is not generated yet.
-          ((g, False) : _) ->
+          Just (g, False) ->
             return (gv, Left ("it refers to " <> unTVar g <> " at other arguments than its own, which is not generated yet"))
-          [] -> return (gv, Right (GenDef gv form ps rs))
-        (_, Right _) -> return (gv, Left "its declaration does not resolve to a record")
-        (_, Left e) -> return (gv, Left e)
+          Nothing -> return (gv, Right (GenDef gv form ps rs))
+        Right _ -> return (gv, Left "its declaration does not resolve to a record")
+        Left e -> return (gv, Left e)
 
 -- | A declared type applied to its parameters' placeholders, resolved in a
 -- language: its definition for any arguments. The state is as before.
@@ -205,21 +198,13 @@ catchRejected act h =
     Rejected _ d -> h (render d)
     _ -> MM.throwError e
 
--- | Fold an unrolled copy of the record, an occurrence at the arguments of
--- the enclosing one, into a reference to it. One at other arguments (the
--- inner `Pair Int` of a `Pair (Pair Int)`) is another type.
-foldSelf :: FVar -> [ArgF] -> TypeF -> TypeF
-foldSelf fv@(FV self _) ps0 t = case t of
-  NamF _ (FV g _) ps _ | g == self, ps == ps0 -> RecF fv ps0
-  _ -> mapChildren (foldSelf fv ps0) t
-
--- | The generated records referred to by name inside an occurrence of
--- themselves, each with whether the reference is at the occurrence's own
--- arguments: such a reference inference should have tied ('RecF'); one at
--- other arguments names another instance. A record mapped to a native
--- form is named through it, at any arguments.
-untiedSelf :: TypeF -> [(TVar, Bool)]
-untiedSelf = go Map.empty
+-- | A generated record referred to by name inside an occurrence of itself,
+-- with whether the reference is at the occurrence's own arguments: one
+-- there inference should have tied ('RecF'); one at other arguments names
+-- another instance. A record mapped to a native form is named through it,
+-- at any arguments.
+untiedSelf :: TypeF -> Maybe (TVar, Bool)
+untiedSelf t0 = let hits = go Map.empty t0 in find snd hits <|> listToMaybe hits
   where
     go anc t = case t of
       NamF _ (FV g (CV "struct")) ps rs -> concatMap (go (Map.insert g ps anc) . snd) rs

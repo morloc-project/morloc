@@ -96,6 +96,7 @@ import qualified Data.IntMap.Strict as IntMap
 import qualified Data.Map as Map
 import Data.Map.Strict (Map)
 import qualified Data.Set as Set
+import Morloc.Namespace.TypeF (TypeF)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Morloc.Data.Doc
@@ -430,7 +431,7 @@ data MorlocState = MorlocState
   -- ^ Module-level description lines (from docstrings before module declaration)
   , stateModuleEpilogues :: [[Text]]
   -- ^ Epilogue blocks for the top-level help output
-  , stateRecordAncestors :: Set.Set (TVar, [TypeU])
+  , stateRecordAncestors :: Map.Map (TVar, [TypeU]) TypeF
   -- ^ The records, by name and general arguments, whose fields are being
   -- resolved to a target language: a reference to one of them is tied to
   -- it (CodeGenerator.Infer 'Knot').
@@ -1222,7 +1223,7 @@ instance Defaultable MorlocState where
       , stateDebugTrace = False
       , stateModuleDoc = []
       , stateModuleEpilogues = []
-      , stateRecordAncestors = Set.empty
+      , stateRecordAncestors = Map.empty
       , stateVariantAncestors = Set.empty
       , stateVariantArgsResolving = Set.empty
       }
