@@ -20,7 +20,7 @@
 
 - **A generic Rust struct cannot carry a phantom parameter.** [read] Gap in
   NATIVE-3. A record whose parameter no field uses, mapped to a generic
-  struct (`record Rust => Loc k = "Loc<$1>"`), needs the struct to use `k`,
+  struct (`record Rust => Loc k = "Loc<$1>" k`), needs the struct to use `k`,
   which Rust allows only through a field such as `PhantomData<K>`; the
   generated reader (CodeGenerator/Pools/CAbi/Members/RustPrinter.hs
   `printRecordImpls`, `Self { .. }` from the schema's fields) has no value
@@ -169,3 +169,22 @@
   `V 3 (V 2 Int)`, Rust instead refuses it ("the Rust struct V is the form
   of a record used at instantiations whose field types differ"). Python
   builds and round-trips both.
+- **Rust types the wire form of a user-mapped record received at a packed
+  argument as the user's type, which may not hold it.** [reproduced,
+  2026-11-16, also at 63042ce29] Violates GEN-14 and GEN-1. The pool reads
+  the wire value into the user's type at the unpacked arguments, which works
+  for a template whose parameter takes the unpacked type (`PairT<i64>` for
+  `Pair Tenths`, spec-gen-9-7) but not where no such instance exists: a
+  type with a fixed form over a record (`newtype Point = Pair Tenths`,
+  `type Rust => Point = "PointT"`: rustc E0308, `PointT` holds f64), or a
+  template holding a generated record (below). C++ builds both.
+- **A Rust user-mapped template record holding a generated record at a
+  packed argument does not build.** [reproduced, 2026-11-16] Violates
+  GEN-14 and GEN-1. With `record U a where x :: a; y :: G2 a`, `record Rust
+  => U a = "UT<$1>" a`, a generated `record G2 a where z :: a` and a packed
+  `Tenths`, a function taking `U Tenths` reaches rustc as E0308: the pool
+  types the wire value as `UT<f64>`, but its own field `x` is unpacked
+  (`i64`) while the generated record inside converts its own field and stays
+  `G2<f64>`, so no `UT<A>` holds it. The parameter is bound at two levels in
+  one use (see ../../compiler/issues/nominal.md). C++ builds and round-trips
+  it. Reproduction: /work/plans/nominal-types/tests/adv1 (main-rust.loc).

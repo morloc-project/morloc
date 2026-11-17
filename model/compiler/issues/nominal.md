@@ -90,3 +90,58 @@ Plan: /work/plans/nominal-types/PLAN.md, phase A stages P1-P4.
   @unroll or default value can be checked against the wrong instance where
   a back-reference means an outer instance of the same name. Same class as
   the resolveWireName fallback above.
+- **A back-reference can carry its argument by name.** [read, 2026-11-16]
+  Deviates from NOM-3. In the Rust uses of `Container (Container Int)`
+  (spec-gen-9-6), the use of a tied back-reference to the outer instance
+  carries its argument as `AppF Container [i64]`, the record named by its
+  morloc name, where the definition at those arguments has the expanded
+  record (seen by the field-agreement shadow, MORLOC_NOMINAL_LOG). Output
+  is correct today, since C++ and Rust spell an instance from its fields,
+  but the two have different keys. Probably the instance-protected
+  back-reference whose arguments pairEval leaves as written, reaching a
+  walk that pairs them instead of tying the reference.
+- **A wire back-reference is cut by one relation and named by another.**
+  [read, 2026-11-16] Deviates from NOM-6. Where the wire-form builder ties
+  a back-reference or a `data` back-edge, the declaration it names is
+  chosen by resolveWireName, which matches arguments structurally and falls
+  back to the nearest declaration of the same name. Any change that ties by
+  key must choose the name by key in the same step, or a reference tied to
+  one instance can name another (`Rose#1` for an outer `Rose`).
+- **A parameter can be bound at two levels in one use.** [read,
+  2026-11-16] Deviates from NOM-4. The unpacked view of a type keeps a
+  generated record at its native type (Serial.hs throughNodes), so an
+  unpacked user-mapped record holding a generated record binds a parameter
+  both unpacked (in its own fields) and native (inside the generated
+  record). GenDefs inferArgsPartial reconciles them through canon, which
+  refuses the pair; the arguments are read from fields at all only because
+  unpacked arguments are not yet computed from the native key.
+
+- **A native-to-wire node hands its unpacked type out as native.**
+  [reproduced, 2026-11-17] Deviates from NOM-4. Serialize.hs (the NativeToWireN
+  built from `unpackedAsTypeF (serialAstToType ast)`) stores the unpacked
+  type as a plain TypeF, and Namespace.typeFof returns it unmarked, so every
+  fold over NativeExprs (Common.poolTypesBy, GenDefs.inPoolSerialASTs `held`,
+  the C++/Rust record and variant collectors) sees an unpacked type as a
+  native one. Generated records stay native inside unpacked types, so
+  serializers are unaffected, but the collectors merge the two levels:
+  `data Shape = Circle Date | Box Int` (Date packed to Str) is refused for
+  an identity function in C++ and Rust ("the `data` type Shape is used with
+  two field types for its constructor Circle: (date_t) and (std::string)",
+  /work/plans/nominal-types/scouts/adversarial/c6-data-packed-arm/ctl/min-cpp.loc, min-rust.loc), and in Rust a
+  user-mapped record holding `Shape Date` is refused as two instantiations
+  (/work/plans/nominal-types/scouts/adversarial/c6-data-packed-arm/ctl/holder-rust.loc). Fix: the node carries `Unpacked` and typeFof unwraps it
+  with its level.
+
+- **Intrinsic schemas are derived from the unpacked type of a packed
+  argument.** [read, 2026-11-17] Deviates from NOM-4. Serialize.hs
+  intrinsicSchema (about 935-1013) runs after packDataArg, so @save, @savej,
+  @show, @hash, @eq, @le and @write call makeSerialAST on `typeFof` of a
+  NativeToWireN, an unpacked type, instead of the node's stored serial form.
+  Output is the same today only because re-deriving from the unpacked type
+  gives the same schema.
+
+- **C++ intrinsic writers pass a nested packed variant unpacked.** [read,
+  2026-11-17] Deviates from NOM-4. Serialize.hs packDataArg (the C++
+  `packedVariant` branch, about 845-851) peels only an outermost SerialPack;
+  when the packed sum type sits inside another type, @show/@save/@hash hand
+  the native value to a marshaller that does not pack it.
