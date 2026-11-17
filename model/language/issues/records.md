@@ -152,14 +152,6 @@
   is misleading: Box is a generated record. Rust reaches rustc as E0425.
   Fix in /work/plans/nominal-types: key the instance with a self-argument
   (NOM-1) and name it as a self-containing `data` instance is named.
-- **A use's arguments are read from its fields, not from its general
-  arguments.** [read, 2026-11-16] Deviates from GEN-9 (amended
-  2026-11-16). Code generation pairs a record's arguments with the
-  concrete side (CodeGenerator/Infer.hs structuralCompound), and on the
-  unpacked side a use carries its native arguments, so the arguments it
-  is spelled at are read back by matching its fields against the
-  definition's (GenDefs.hs recordArgs, useArgs, templateArgs, canon).
-  Fixed by /work/plans/nominal-types stages P2-P4.
 - **A generated record with a `Nat` parameter used at a literal does not
   build in C++ or Rust.** [reproduced, 2026-11-16, also at 63042ce29]
   Violates GEN-9 (a `Nat` parameter is erased) and GEN-1. With `record V
@@ -174,17 +166,6 @@
   2026-11-16, also at 63042ce29] Violates GEN-14 and GEN-1. The pool reads
   the wire value into the user's type at the unpacked arguments, which works
   for a template whose parameter takes the unpacked type (`PairT<i64>` for
-  `Pair Tenths`, spec-gen-9-7) but not where no such instance exists: a
-  type with a fixed form over a record (`newtype Point = Pair Tenths`,
-  `type Rust => Point = "PointT"`: rustc E0308, `PointT` holds f64), or a
-  template holding a generated record (below). C++ builds both.
-- **A Rust user-mapped template record holding a generated record at a
-  packed argument does not build.** [reproduced, 2026-11-16] Violates
-  GEN-14 and GEN-1. With `record U a where x :: a; y :: G2 a`, `record Rust
-  => U a = "UT<$1>" a`, a generated `record G2 a where z :: a` and a packed
-  `Tenths`, a function taking `U Tenths` reaches rustc as E0308: the pool
-  types the wire value as `UT<f64>`, but its own field `x` is unpacked
-  (`i64`) while the generated record inside converts its own field and stays
-  `G2<f64>`, so no `UT<A>` holds it. The parameter is bound at two levels in
-  one use (see ../../compiler/issues/nominal.md). C++ builds and round-trips
-  it. Reproduction: /work/plans/nominal-types/tests/adv1 (main-rust.loc).
+  `Pair Tenths`, spec-gen-9-2) but not for a type with a fixed form over a
+  record (`newtype Point = Pair Tenths`, `type Rust => Point = "PointT"`:
+  rustc E0308, `PointT` holds f64). C++ builds it (spec-native-1-15).

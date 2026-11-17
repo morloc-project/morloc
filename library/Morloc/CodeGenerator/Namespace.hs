@@ -110,6 +110,8 @@ module Morloc.CodeGenerator.Namespace
 
     -- ** Serialization AST
   , SerialAST (..)
+  , UnpackedArgs
+  , UnpackedArg (..)
   , TypePacker (..)
 
     -- ** Simple fold over expressions
@@ -182,10 +184,10 @@ import Morloc.Namespace.Type
 import Morloc.Namespace.TypeF
 
 -- | The key of an expanded or tied occurrence of a declared type (NOM-1):
--- its name and the arguments it carries. Every key is at the native level:
--- an occurrence on the unpacked side carries its native arguments, so it
--- has its native type's key. An anonymous record is not a declared type,
--- and a declared type referred to by name alone (an opaque 'VarF' or
+-- its name and the arguments it carries. An occurrence on the unpacked side
+-- carries its unpacked arguments where its form spells them, and its native
+-- ones otherwise ('UnpackedArgs'). An anonymous record is not a declared
+-- type, and a declared type referred to by name alone (an opaque 'VarF' or
 -- 'AppF') is not read as one.
 declaredKey :: TypeF -> Maybe NomKey
 declaredKey t = case typeFKey t of
@@ -267,7 +269,7 @@ data SerialAST
     --   2) FVar - telling the name of the object (e.g., "Person")
     --   3) [ArgF] - the arguments (used as parameters in C++ templates, e.g., map<int, map<int,string>>)
     --   4) [(FVar, SerialAST)] - entries with keys for concrete and general cases
-    SerialObject NamType FVar [ArgF] [(Key, SerialAST)]
+    SerialObject NamType FVar [ArgF] UnpackedArgs [(Key, SerialAST)]
   | SerialReal FVar
   | SerialFloat32 FVar
   | SerialFloat64 FVar
@@ -308,7 +310,7 @@ data SerialAST
     -- meant when several nest on the path (an @L Int@ inside an @L Str@
     -- may refer back to either); they are the arguments the ancestor was
     -- built with, and a bare name carries none.
-    SerialRec FVar [ArgF]
+    SerialRec FVar [ArgF] UnpackedArgs
   | -- | A `data` type with argument-free constructors: one byte on the
     -- wire, tagged by the constructor's position in this list. The names
     -- travel in the schema so JSON renders the constructor rather than
@@ -319,11 +321,28 @@ data SerialAST
     -- as the tuple the pointer leads to. The type arguments ride along
     -- as they do on 'SerialObject', so the native type this lowers to
     -- can instantiate a user's template.
-    SerialVariant FVar [ArgF] [(T.Text, [SerialAST])]
+    SerialVariant FVar [ArgF] UnpackedArgs [(T.Text, [SerialAST])]
   | -- | depending on the language, this may or may not raise an error down the
     -- line, the parameter contains the variable name, which is useful only for
     -- source code comments.
     SerialUnknown FVar
+  deriving (Ord, Eq, Show)
+
+-- | The arguments of a declared type's node at the unpacked level, where its
+-- native form spells them (a `$i` in the form): each type argument's serial
+-- form, so the unpacked view spells it as it spells the fields. Nothing
+-- where the form spells no argument; the unpacked view then carries the
+-- native ones, which no spelling reads.
+type UnpackedArgs = Maybe [UnpackedArg]
+
+data UnpackedArg
+  = ArgSerial SerialAST
+  -- | A type argument with no serial form. A value holding it would have
+  -- none either, so it is held by no value and its type is the same at
+  -- both levels; the agreement of an unpacked use with its definition
+  -- checks this (GEN-9).
+  | ArgNative TypeF
+  | ArgKind KArgF
   deriving (Ord, Eq, Show)
 
 instance Pretty SerialAST where
@@ -334,7 +353,7 @@ instance Pretty SerialAST where
         <+> braces (vsep [pretty packer, pretty s])
   pretty (SerialList _ dim ef) = parens $ "SerialList" <+> maybe "-" pretty dim <+> pretty ef
   pretty (SerialTuple _ efs) = parens $ "SerialTuple" <+> tupled (map pretty efs)
-  pretty (SerialObject o _ vs rs) =
+  pretty (SerialObject o _ vs _ rs) =
     parens $
       "SerialObject"
         <+> pretty o
@@ -361,9 +380,9 @@ instance Pretty SerialAST where
   pretty (SerialClosure ins out) = parens ("SerialClosure" <+> list (map pretty ins) <+> pretty out)
   pretty (SerialNull v) = parens ("SerialNull" <+> pretty v)
   pretty (SerialOptional v s) = parens ("SerialOptional" <+> pretty v <+> pretty s)
-  pretty (SerialRec v _) = parens ("SerialRec" <+> pretty v)
+  pretty (SerialRec v _ _) = parens ("SerialRec" <+> pretty v)
   pretty (SerialEnum v _ ns) = parens ("SerialEnum" <+> pretty v <+> list (map pretty ns))
-  pretty (SerialVariant v _ as) =
+  pretty (SerialVariant v _ _ as) =
     parens ("SerialVariant" <+> pretty v <+> list [pretty n | (n, _) <- as])
   pretty (SerialUnknown v) = parens ("SerialUnknown" <+> pretty v)
 

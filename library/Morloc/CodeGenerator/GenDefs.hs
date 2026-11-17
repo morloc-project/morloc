@@ -8,19 +8,16 @@ A generated record is defined once per language from its declaration, not
 from its uses. The definition is the record applied to its own parameters,
 each parameter standing for itself: a placeholder type whose native form
 is the parameter's native name. A use is then an instance of the
-definition, and its arguments are found by matching the definition's fields
-against the use's fields.
+definition at the arguments it carries.
 -}
 module Morloc.CodeGenerator.GenDefs
   ( GenDef (..)
   , genDefs
   , DataDef (..)
   , dataDefs
-  , inferArgs
   , instantiate
   , checkUse
   , Disagreement (..)
-  , canon
   , untiedSelf
   , RecordUse
   , recordUses
@@ -30,14 +27,11 @@ module Morloc.CodeGenerator.GenDefs
   , carriedTemplateArgs
   , nestedSelfUses
   , nestedSelfUseReason
-  , recordArgs
-  , useArgs
   , placeholders
   , nativeParam
   , nativeParams
   , nativeDataParams
   , armDataParams
-  , dataUseArgs
   , dataNamesIn
   ) where
 
@@ -50,7 +44,7 @@ import Morloc.CodeGenerator.Grammars.Macro (expandMacro)
 import Morloc.CodeGenerator.Serial (makeSerialAST)
 import Morloc.TypeEval (recordNestingLimit)
 import qualified Morloc.Data.Map as Map
-import Morloc.Data.Zip (indexed, indexedFrom, zipExact, zipSame, zipWithSame)
+import Morloc.Data.Zip (indexedFrom, zipExact, zipSame)
 import qualified Morloc.Monad as MM
 import Control.Monad.Except (catchError)
 import Morloc.Data.Doc (pretty, render)
@@ -212,136 +206,36 @@ untiedSelf t0 = let hits = go Map.empty t0 in find snd hits <|> listToMaybe hits
       AppF (VarF (FV g _)) as | Just ps <- Map.lookup g anc -> [(g, as == ps)]
       _ -> concatMap (go anc) (childrenOf t)
 
--- | The arguments of a use, by parameter: each placeholder in the
--- definition's fields is bound to the use's type at the same position. A
--- nested generated record is matched through its fields, never through
--- the arguments it carries, which on the wire side are still the native
--- ones. Positions whose shapes differ bind nothing; the agreement check
--- reports them.
-inferArgs :: Map.Map TVar GenDef -> GenDef -> [(Key, TypeF)] -> Either T.Text (Map.Map TVar TypeF)
-inferArgs defs gd use = do
-  args <- inferArgsPartial defs gd use
-  case [p | (p, KindType) <- gdParams gd, Map.notMember p args] of
-    [] -> Right args
-    (p : _) -> Left ("the parameter " <> unTVar p <> " is not determined by the fields of this use")
-
--- | The arguments a use's fields bind; a parameter they do not bind is
--- absent.
-inferArgsPartial :: Map.Map TVar GenDef -> GenDef -> [(Key, TypeF)] -> Either T.Text (Map.Map TVar TypeF)
-inferArgsPartial defs gd use = do
-  unless inOrder (Left "its fields are in another order than the declaration's")
-  binds <- concat <$> mapM field (gdFields gd)
-  let grouped = Map.fromListWith (flip (<>)) [(p, [t]) | (p, t) <- binds]
-  Map.traverseWithKey one grouped
-  where
-    field (k, d) = case lookup k use of
-      Just u -> Right (match d u)
-      Nothing -> Left ("the field " <> unKey k <> " is missing from a use")
-    -- The definition's marshalling node writes field i to slot i of the
-    -- use's schema, so the fields must come in the same order.
-    inOrder = map fst use == map fst (gdFields gd)
-    -- Two bindings agree when they are one type: a recursive record
-    -- unrolled to different depths is still one record.
-    one p (t : ts)
-      | all (== t) ts = Right t
-      | let c = canon defs t, all ((== c) . canon defs) ts = Right t
-      | otherwise = Left ("the parameter " <> unTVar p <> " is bound to different types")
-    one p [] = Left ("the parameter " <> unTVar p <> " is unbound")
-
-    match :: TypeF -> TypeF -> [(TVar, TypeF)]
-    match d u
-      | Just p <- paramOf d = [(p, u)]
-    -- The arguments a nested record carries are never read: on the wire
-    -- side they are the native ones. A parameter reached only through them
-    -- is undetermined, and the use is refused.
-    match (NamF _ (FV g _) _ drs) (NamF _ (FV g' _) _ urs)
-      | g == g' = concat [match dt ut | (k, dt) <- drs, Just ut <- [lookup k urs]]
-    match (AppF dh@(VarF (FV g _)) das) (AppF uh@(VarF (FV g' _)) uas)
-      | g == g' = match dh uh <> matchArgs das uas
-    match (FunF das dr) (FunF uas ur)
-      | length das == length uas = concat (zipWithSame match das uas) <> match dr ur
-    match (OptionalF d) (OptionalF u) = match d u
-    -- A `data` type is matched through its arms only: its arguments, like
-    -- a record's, are the native ones on the wire side, and an argument no
-    -- arm holds has no native form.
-    match (VariantF (FV g _) _ das) (VariantF (FV g' _) _ uas)
-      | g == g' =
-          concat [concat (zipWithSame match dts uts) | length das == length uas, ((c, dts), (c', uts)) <- zipSame das uas, c == c', length dts == length uts]
-    match _ _ = []
-
-    matchArgs ds us
-      | length ds == length us = concat [match d u | (TyA d, TyA u) <- zipSame ds us]
-      | otherwise = []
-
 -- | Replace each placeholder by its argument.
 instantiate :: Map.Map TVar TypeF -> TypeF -> TypeF
 instantiate args t
   | Just p <- paramOf t = Map.findWithDefault t p args
   | otherwise = mapChildren (instantiate args) t
 
--- | Whether a use agrees with its record's definition: Nothing, or the
--- first disagreement.
--- A reference of the definition to its record is the record at this
--- use's own arguments.
-checkUse :: Map.Map TVar GenDef -> GenDef -> [ArgF] -> [(Key, TypeF)] -> Maybe Disagreement
-checkUse defs gd carried rs = case inferArgsPartial defs gd rs of
-  Left e -> Just (Unmatched e)
-  Right args ->
-    firstJust id
-      [ if canonAt d' == canonAt u then Nothing else Just (FieldDiffers k d' u)
-      | (k, d) <- gdFields gd
-      , let d' = instantiate args d
-      , Just u <- [lookup k rs]
-      ]
-  where
-    self = NamF NamRecord (FV (gdVar gd) (CV (gdForm gd))) carried rs
-    -- Inside the use, a reference to its record is the use itself.
-    canonAt = canonIn defs (Map.singleton (gdVar gd, carried) (canon defs self))
+-- | Whether a use is an instance of its record's definition at the
+-- arguments it carries: Nothing, or the first disagreement. Field types are
+-- compared by key, which names a declared type by its arguments without its
+-- fields, so a recursive record unrolled to any depth, or tied, is one type.
+checkUse :: GenDef -> [ArgF] -> [(Key, TypeF)] -> Maybe Disagreement
+checkUse gd carried rs = case zipExact [p | (p, KindType) <- gdParams gd] (tyArgs carried) of
+  Nothing -> Just (Unmatched "it carries another number of type arguments than the record has parameters")
+  Just args
+    | map fst rs /= map fst (gdFields gd) -> Just (Unmatched "its fields are not the declaration's, in the declaration's order")
+    | otherwise ->
+        firstJust id
+          [ if typeFKey d' == typeFKey u then Nothing else Just (FieldDiffers k d' u)
+          | ((k, d), (_, u)) <- zipSame (gdFields gd) rs
+          , let d' = instantiate (Map.fromList args) d
+          ]
 
 -- | Why a use is not an instance of its record's definition.
 data Disagreement
   = Unmatched T.Text
-  -- ^ its fields bind no consistent arguments
+  -- ^ its arguments or fields are not the declaration's
   | FieldDiffers Key TypeF TypeF
   -- ^ a field, as the definition has it at the use's arguments, and as
   -- the use has it
-  deriving (Show)
-
--- | The canonical nominal form two types are compared in (GEN-9): a record
--- is its name applied to the arguments its fields bind ('recordArgs'),
--- with its fields dropped, so a recursive record unrolled to any depth is
--- one form, and a back-reference is the record at no arguments. A record
--- with no definition keeps its fields.
-canon :: Map.Map TVar GenDef -> TypeF -> TypeF
-canon defs = canonIn defs Map.empty
-
--- | 'canon', with the canonical forms of the record occurrences that
--- enclose the type, by name and arguments: a reference to one of them is
--- that occurrence.
-canonIn :: Map.Map TVar GenDef -> Map.Map (TVar, [ArgF]) TypeF -> TypeF -> TypeF
-canonIn defs env t = case t of
-  NamF _ (FV g cv) ps rs
-    | Just gd <- Map.lookup g defs
-    , Right as <- recordArgs defs gd ps rs ->
-        NamF NamRecord (FV g cv) (map (TyA . canonIn defs env) as) []
-    | otherwise ->
-        let ps' = map (fmap (canonIn defs env)) ps
-            env' = Map.insert (g, ps) (canonIn defs env (RecF (FV g cv) ps)) env
-         in NamF NamRecord (FV g cv) ps' [(k, canonIn defs env' x) | (k, x) <- rs]
-  VariantF fv ps _ -> instanceOf fv ps
-  RecF fv@(FV g _) ps
-    | Just c <- Map.lookup (g, ps) env -> c
-    | Just gd <- Map.lookup g defs -> NamF NamRecord (FV g (CV (gdForm gd))) (map (fmap (canonIn defs env)) ps) []
-    | otherwise -> instanceOf fv ps
-  _ -> mapChildren (canonIn defs env) t
-  where
-    -- A declared type that is not a generated record is its instance: its
-    -- name, which a generated type derives from its arguments, and the
-    -- arguments its form spells. A `data` type's arms are dropped, so its
-    -- reference to itself from inside them is the same type.
-    instanceOf fv@(FV _ (CV form)) ps
-      | T.any (== '$') form = VariantF fv [TyA (canonIn defs env x) | (k, x) <- indexedFrom 1 (tyArgs ps), k `elem` macroSlots form] []
-      | otherwise = VariantF fv [] []
+  deriving (Show, Eq)
 
 -- | The parameters a type holds in a field, the ones its uses can bind:
 -- the arguments a nested record or `data` type carries are not counted,
@@ -391,54 +285,16 @@ type RecordUse = (TVar, T.Text, [ArgF], [(Key, TypeF)])
 recordUses :: [TypeF] -> [RecordUse]
 recordUses ts = unique [(gv, cv, ps, rs) | (FV gv (CV cv), ps, rs) <- concatMap recordsInType ts]
 
--- | Each use of a generated record that is not an instance of its
--- definition (GEN-9), with why.
+-- | Each use of one of the given records, at its definition's form, that
+-- is not an instance of its definition (GEN-9), with why.
 disagreements :: Map.Map TVar GenDef -> [RecordUse] -> [(TVar, Disagreement)]
 disagreements defs uses =
   [ (gv, d)
   | (gv, cv, ps, rs) <- uses
-  , cv == "struct"
   , Just gd <- [Map.lookup gv defs]
-  , Just d <- [checkUse defs gd ps rs]
+  , gdForm gd == cv
+  , Just d <- [checkUse gd ps rs]
   ]
-
--- | The type arguments a record use is spelled at, in order (GEN-9): a
--- parameter its fields bind takes that binding; one no field binds takes
--- the argument the use carries, since no value depends on it. The carried
--- arguments are otherwise never read: on the unpacked side of a packed
--- argument they are the native ones.
-recordArgs :: Map.Map TVar GenDef -> GenDef -> [ArgF] -> [(Key, TypeF)] -> Either T.Text [TypeF]
-recordArgs defs gd carried rs = do
-  bound <- inferArgsPartial defs gd rs
-  let typeParams = [p | (p, KindType) <- gdParams gd]
-      given = tyArgs carried
-  if length given /= length typeParams
-    then Left ("it carries " <> T.pack (show (length given)) <> " type arguments for " <> T.pack (show (length typeParams)) <> " parameters")
-    else Right [Map.findWithDefault c p bound | (p, c) <- zipSame typeParams given]
-
--- | The arguments a use of a user-mapped record is spelled at: its carried
--- arguments with each type argument its fields bind replaced by that
--- binding ('recordArgs'). A use at a specialised form (a form other than
--- the definition's) keeps its carried arguments, as does one whose fields
--- do not determine a binding.
-useArgs :: Map.Map TVar GenDef -> TVar -> T.Text -> [ArgF] -> [(Key, TypeF)] -> [ArgF]
-useArgs defs gv form carried rs = case Map.lookup gv defs of
-  Just gd | gdForm gd == form, Right ts <- recordArgs defs gd carried rs -> refill ts carried
-  _ -> carried
-  where
-    refill ts (TyA _ : rest) | (t : ts') <- ts = TyA t : refill ts' rest
-    refill ts (a@(KiA _) : rest) = a : refill ts rest
-    refill _ rest = rest
-
--- | The arguments a use of a generated `data` template is spelled at: its
--- carried arguments with each one its arms bind replaced by that binding,
--- as a record's fields do ('useArgs'). An unpacked use carries the native
--- arguments, which name no unpacked value.
-dataUseArgs :: Map.Map TVar GenDef -> DataDef -> [ArgF] -> [(T.Text, [TypeF])] -> [ArgF]
-dataUseArgs defs dd carried arms = useArgs (Map.insert (ddVar dd) asRecord defs) (ddVar dd) (ddForm dd) carried (fields arms)
-  where
-    asRecord = GenDef (ddVar dd) (ddForm dd) [(p, KindType) | p <- ddTypeParams dd] (fields (ddArms dd))
-    fields as = [(Key (c <> "." <> T.pack (show i)), t) | (c, ts) <- as, (i, t) <- indexed ts]
 
 -- | A reference's arguments at its record's native parameters: those it
 -- carries, which on the native side are its own ('RecF' has no fields to

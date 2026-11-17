@@ -75,7 +75,7 @@ import Morloc.CodeGenerator.Infer (declaredDataNames)
 import Morloc.CodeGenerator.Ownership (LetMode (..), LetPlan (..), OwnCaps (..), PoolPlan (..), byValueIndices, changedSlots, emptyPoolPlan, letMode, letPlan, nativeLets, planPool)
 import Morloc.CodeGenerator.OwnershipCheck (checkManifold)
 import System.Environment (lookupEnv)
-import Morloc.CodeGenerator.GenDefs (DataDef (..), Disagreement (..), GenDef (..), carriedTemplateArgs, nestedSelfUses, nestedSelfUseReason, dataDefs, dataNamesIn, dataUseArgs, nativeDataParams, RecordUse, disagreements, inPoolSerialASTs, placeTypes, genDefs, nativeParam, nativeParams, recordUses, useArgs)
+import Morloc.CodeGenerator.GenDefs (DataDef (..), Disagreement (..), GenDef (..), carriedTemplateArgs, nestedSelfUses, nestedSelfUseReason, dataDefs, dataNamesIn, nativeDataParams, RecordUse, disagreements, inPoolSerialASTs, placeTypes, genDefs, nativeParam, nativeParams, recordUses)
 import qualified Morloc.CodeGenerator.Platform as P
 import Morloc.CodeGenerator.Serial
   ( serialAstToType
@@ -282,11 +282,7 @@ instance {-# OVERLAPPABLE #-} (HasTypeF e) => HasCppType e where
       f (EnumF (FV gv (CV x)) ps _) = dataTypeName gv x ps
       -- A variant lowers to its concrete name; the type carrying the arms
       -- is generated for this pool or supplied by `data Cpp => X = "..."`.
-      -- A generated template is spelled at the arguments its arms bind.
-      f (VariantF (FV gv (CV x)) ps as) = do
-        ddefs <- CMS.gets translatorDataDefs
-        defs <- CMS.gets translatorGenDefs
-        dataTypeName gv x (maybe ps (\dd -> dataUseArgs defs dd ps as) (Map.lookup gv ddefs))
+      f (VariantF (FV gv (CV x)) ps _) = dataTypeName gv x ps
       -- Kindless or polymorphic-row `Table` lowers to a VarF tagged with
       -- the general type variable @BT.table@. The wire schema marker is
       -- @T@ on the encoder side; here on the C++ side it must lower to
@@ -365,12 +361,7 @@ instance {-# OVERLAPPABLE #-} (HasTypeF e) => HasCppType e where
             return q
       -- A table's wire shape ('serialAstToType' of its serial form).
       f (NamF NamTable _ _ _) = return "mlc::ArrowTable"
-      f (NamF _ (FV gv (CV s)) ps rs) = do
-        defs <- CMS.gets translatorGenDefs
-        -- A user-mapped record is spelled at the arguments its fields
-        -- bind, never at the native ones an unpacked use carries (GEN-9).
-        ps' <- mapM f (tyArgs (useArgs defs gv s ps rs))
-        return $ renderTemplatedType s ps'
+      f (NamF _ (FV _ (CV s)) ps _) = renderTemplatedType s <$> mapM f (tyArgs ps)
       -- A back-reference to a generated record names its definition at
       -- its arguments.
       f (RecF (FV gv (CV "struct")) ps) = do
@@ -1764,7 +1755,7 @@ PROPAGATE_ERROR(errmsg)|]
 
     rawDoc :: SerialAST -> CppTranslator MDoc
     rawDoc s | cppIsLeaf s = cppTypeOf (unpackedAsTypeF (wireSerialAstToType cppClosureWireLeaf s))
-    rawDoc (SerialObject _ _ _ rs) = do
+    rawDoc (SerialObject _ _ _ _ rs) = do
       ds <- mapM (rawDoc . snd) rs
       return $ "std::tuple" <> encloseSep "<" ">" "," ds
     rawDoc (SerialPack _ (_, s)) = rawDoc s
@@ -2838,7 +2829,8 @@ planPublicTypes es = do
   mapM_ (checkComponents homes) (Set.toList (Set.union public (Map.keysSet recDefs)))
   mapM_ checkFields (Map.elems recDefs)
   -- Every use of a generated record is an instance of its definition
-  -- (GEN-9).
+  -- (GEN-9). A user-mapped record's unpacked use is a tuple in C++, never
+  -- its form.
   uses <- CMS.gets translatorRecordUses
   forM_ (disagreements recDefs uses) $ \(gv, d) -> case d of
     FieldDiffers k decl use -> do
@@ -3101,7 +3093,7 @@ generateRecords cfg asts = do
     -- The conversion of each field of one instance that is not written as
     -- it is held: a packed value or a closure outside any nested
     -- generated record, which converts itself.
-    objectConvs obj@(SerialObject _ (FV gv _) _ rs) = do
+    objectConvs obj@(SerialObject _ (FV gv _) _ _ rs) = do
       rt <- cppTypeOf (serialAstToNativeType obj)
       mapIndexedM (\i (k, fa) -> (\d -> (gv, rt, i, k, fa, d)) <$> fieldConv rt i fa) rs
     objectConvs _ = return []

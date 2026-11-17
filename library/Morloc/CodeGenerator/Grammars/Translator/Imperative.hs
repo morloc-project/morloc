@@ -955,7 +955,7 @@ nativeToWire cfg = go
       typeM <- lcSerialAstType cfg tup
       let v' = render $ (helperVar cfg) idx
       return (concat befores ++ [IAssign v' typeM (ITupleLit exprs)], IVar v')
-    construct v obj@(SerialObject namType fv _ rs) = do
+    construct v obj@(SerialObject namType fv _ _ rs) = do
       results <- mapM (\(key, s) -> lcRecordAccessor cfg namType fv v (pretty key) >>= (`go` s)) rs
       let (befores, exprs) = unzip results
       idx <- lcNewIndex cfg
@@ -985,7 +985,7 @@ nativeToWire cfg = go
         , IVar v'
         )
     -- The value read is native, the value built unpacked.
-    construct v var@(SerialVariant (FV _ cv) _ arms@(_ : _)) = do
+    construct v var@(SerialVariant (FV _ cv) _ _ arms@(_ : _)) = do
       ty <- nominalTypeDoc cfg (unpackedAsTypeF (serialAstToType var)) cv
       src <- nominalTypeDoc cfg (serialAstToNativeType var) cv
       resultType <- lcSerialAstType cfg var
@@ -999,7 +999,7 @@ nativeToWire cfg = go
 -- @Table@ to some other library type and the language has a converter,
 -- wrap the deserialized value in it, naming the mapped type.
 tableImport :: LowerConfig m -> SerialAST -> IExpr -> IExpr
-tableImport cfg (SerialObject NamTable (FV _ (CV cv)) _ _) e
+tableImport cfg (SerialObject NamTable (FV _ (CV cv)) _ _ _) e
   | Just fn <- lcTableImportFn cfg
   , not (T.null cv) =
       ICall fn Nothing [[e, IRawExpr (render (dquotes (pretty cv)))]]
@@ -1066,7 +1066,7 @@ wireToNative cfg = check
       typeM <- lcDeserialAstType cfg tup
       v' <- (render . (helperVar cfg)) <$> lcNewIndex cfg
       return (IVar v', concat befores ++ [IAssign v' typeM (ITupleLit exprs)])
-    construct v obj@(SerialObject namType fv _ rs) = do
+    construct v obj@(SerialObject namType fv _ _ rs) = do
       let accessor = lcDeserialRecordAccessor cfg
       results <- mapIndexedM (\i (k, s) -> check (accessor i k v) s) rs
       let (exprs, befores) = unzip results
@@ -1088,7 +1088,7 @@ wireToNative cfg = check
         , [IIfNotNull v' resultType (IRawExpr (render v)) uVar unwrappedType before x]
         )
     -- The value read is unpacked, the value built native.
-    construct v var@(SerialVariant (FV _ cv) _ arms@(_ : _)) = do
+    construct v var@(SerialVariant (FV _ cv) _ _ arms@(_ : _)) = do
       src <- nominalTypeDoc cfg (unpackedAsTypeF (serialAstToType var)) cv
       ty <- nominalTypeDoc cfg (serialAstToNativeType var) cv
       resultType <- lcDeserialAstType cfg var

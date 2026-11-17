@@ -10,22 +10,17 @@ Plan: /work/plans/nominal-types/PLAN.md, phase A stages P1-P4.
   A `data` type is an expanded instance, an armless back-edge, or an
   args-less back-edge. About a dozen functions decide identity, each over
   its own subset of these shapes.
-- **A record's arguments are paired with the concrete side.** [read,
-  2026-11-16] Deviates from NOM-3. A record occurrence's arguments are
-  walked against the pairEval side, and a `data` type's against the general
-  side only. Uses on the unpacked side carry the native arguments, so
-  identity is read back from fields (GEN-9 deviation entry in
-  ../../language/issues/records.md).
 - **An occurrence's fields can disagree with its definition.** [read,
   2026-11-16] Deviates from NOM-2. Every occurrence carries its own inline
   fields or arms, built where it is met, and agreement with the definition
   is checked afterwards (GenDefs checkUse) rather than holding by
   construction.
-- **An unpacked occurrence carries its native arguments.** [read,
-  2026-11-16] Deviates from NOM-4. The unpacked projection of a serial
-  form keeps the native-level arguments on a record or `data` node whose
-  fields are unpacked (Serial.hs serialAstToType), so neither its
-  native-level key nor its unpacked arguments can be read from it.
+- **An unpacked occurrence of a type whose form spells no argument carries
+  its native arguments.** [read, 2026-11-17] Deviates from NOM-4. A record or
+  `data` node at the unpacked level carries its unpacked arguments only where
+  its native form spells them (a `$i`, Namespace.hs UnpackedArgs); a
+  generated record is native at both levels, and any other node keeps the
+  native arguments, so its key is its native type's.
 - **Native identity is decided by rendered text.** [read, 2026-11-16]
   Deviates from NOM-5. Merging `data` occurrences, grouping GEN-14
   conversions and deduplicating C++ records all compare rendered native
@@ -107,15 +102,6 @@ Plan: /work/plans/nominal-types/PLAN.md, phase A stages P1-P4.
   back to the nearest declaration of the same name. Any change that ties by
   key must choose the name by key in the same step, or a reference tied to
   one instance can name another (`Rose#1` for an outer `Rose`).
-- **A parameter can be bound at two levels in one use.** [read,
-  2026-11-16] Deviates from NOM-4. The unpacked view of a type keeps a
-  generated record at its native type (Serial.hs throughNodes), so an
-  unpacked user-mapped record holding a generated record binds a parameter
-  both unpacked (in its own fields) and native (inside the generated
-  record). GenDefs inferArgsPartial reconciles them through canon, which
-  refuses the pair; the arguments are read from fields at all only because
-  unpacked arguments are not yet computed from the native key.
-
 - **A native-to-wire node hands its unpacked type out as native.**
   [reproduced, 2026-11-17] Deviates from NOM-4. Serialize.hs (the NativeToWireN
   built from `unpackedAsTypeF (serialAstToType ast)`) stores the unpacked
@@ -180,8 +166,19 @@ Plan: /work/plans/nominal-types/PLAN.md, phase A stages P1-P4.
 
 - **Keys carry no level and no self-argument.** [read, 2026-11-17]
   Deviates from NOM-1. Code-generation keys are a declaration's name and
-  argument keys only: every key is at the native level (the unpacked side
-  is identified through native-level carried arguments), and a
+  argument keys only. An unpacked occurrence whose form spells its
+  arguments has its unpacked arguments' key; any other has its native
+  type's (`data Shape = Circle Date` is one key at both levels, which the
+  `data` merge refuses as two field types for one constructor). A
   self-containing instance's reference carries no arguments, matched to the
   one instantiation of its name on the path (Serial.hs, the back-reference
   cut).
+
+- **The agreement of a use with its definition does not instantiate kind
+  parameters.** [speculative, 2026-11-17] Deviates from GEN-9. GenDefs.hs
+  checkUse instantiates only type parameters, so a field spelling a `Nat`
+  parameter (`xs :: Vector n a` in `record V (n :: Nat) a`) keeps the
+  definition's placeholder kind argument and differs by key from every use
+  (`Vector 3 Int`). Rust checks user-mapped records too, so such a record
+  mapped to a Rust form would be refused. Not reproduced: root-rust has no
+  `Vector` form.

@@ -105,7 +105,7 @@ import qualified Morloc.Version as MV
 import Morloc.Quasi
 import System.Directory (findExecutable)
 import System.FilePath (takeDirectory)
-import Morloc.CodeGenerator.GenDefs (DataDef (..), Disagreement (..), GenDef (..), carriedTemplateArgs, nestedSelfUses, nestedSelfUseReason, armDataParams, dataDefs, dataNamesIn, dataUseArgs, nativeDataParams, RecordUse, disagreements, inPoolSerialASTs, placeTypes, checkUse, genDefs, nativeParam, nativeParams, placeholders, recordUses, useArgs)
+import Morloc.CodeGenerator.GenDefs (DataDef (..), Disagreement (..), GenDef (..), carriedTemplateArgs, nestedSelfUses, nestedSelfUseReason, armDataParams, dataDefs, dataNamesIn, nativeDataParams, RecordUse, disagreements, inPoolSerialASTs, placeTypes, genDefs, nativeParam, nativeParams, placeholders, recordUses)
 
 -- | Duplicated here (as in Cpp.hs) to match data/lang/rust/lang.yaml. The
 -- second field is the source extension and must match lang.yaml's @extension@
@@ -352,10 +352,7 @@ rustTypeOf = f
     f (EnumF (FV gv (CV x)) ps _) = nominalTypeName x ps >>= publicOr gv
     -- A variant lowers to its concrete name; the `enum` carrying the arms
     -- is generated for this pool or supplied by a `data Rust => X = "..."`.
-    f (VariantF (FV gv (CV x)) ps as) = do
-      ddefs <- CMS.gets rsDataDefs
-      defs <- CMS.gets rsGenDefs
-      dataName gv x (maybe ps (\dd -> dataUseArgs defs dd ps as) (Map.lookup gv ddefs))
+    f (VariantF (FV gv (CV x)) ps _) = dataName gv x ps
     f (AppF t ts) = do
       t' <- f t
       let typeTs = tyArgs ts
@@ -415,11 +412,7 @@ rustTypeOf = f
           return q
     -- User-mapped record: the concrete struct name is the CVar text, or the
     -- template it holds instantiated with this occurrence's arguments.
-    -- A user-mapped record is spelled at the arguments its fields bind,
-    -- never at the native ones an unpacked use carries (GEN-9).
-    f (NamF _ (FV gv (CV s)) ps rs) = do
-      defs <- CMS.gets rsGenDefs
-      nominalTypeName s (useArgs defs gv s ps rs)
+    f (NamF _ (FV _ (CV s)) ps _) = nominalTypeName s ps
     -- A reference to a record: a generated one names its definition at
     -- its arguments.
     f (RecF (FV gv (CV "struct")) ps) = do
@@ -1688,7 +1681,7 @@ translate srcs es0 = do
   (ddefs, dfails) <- dataDefs rustLang (dataNamesIn poolTypes)
   intrAsts <- inPoolSerialASTs rustLang es
   let poolAsts = concatMap allSerialASTs es <> intrAsts <> closureSerialASTs closureAsts
-      recordObjects = Map.map unique (Map.fromListWith (<>) [(g, [rs]) | a <- poolAsts, o@(SerialObject _ (FV g _) _ rs) <- serialSubtrees a, generatedObject o])
+      recordObjects = Map.map unique (Map.fromListWith (<>) [(g, [rs]) | a <- poolAsts, o@(SerialObject _ (FV g _) _ _ rs) <- serialSubtrees a, generatedObject o])
   let st0 = defaultValue {rsRecordObjects = recordObjects, rsGenFailures = gfails, rsGenDefs = gdefs, rsDataDefs = ddefs, rsDataNames = declaredDataNames generalScope, rsDataFailures = dfails, rsRecordUses = uses, rsTypeHomes = typeHomes, rsDebugInfo = debugInfo, rsCScope = mergedRustScope, rsSrcTypeVarMask = srcTypeVarMask, rsSrcMakers = srcMakers, rsLogTemplates = logTemplates, rsStageTable = stageTable, rsPool = pool, rsBuilds = lastBuilds Map.empty Set.empty (rustSeeds pool es0) es0}
       pool = planPool (rustCaps mergedRustScope) es
       ((code, typeFiles), stEnd) = CMS.runState (runReaderT (makeRustCode includeDocs closureAsts closureTable es) emptyOwnEnv) st0
@@ -2169,12 +2162,11 @@ generateRustVariants closureAsts es = do
       when (not userMapped && T.any (== '$') cvText && Map.notMember gv ddefs) $
         CMS.modify $ \s -> s {rsErrors = ("the generated Rust type for " <> unTVar gv <> " cannot be defined from its declaration: "
           <> Map.findWithDefault "it does not resolve in Rust" gv dfails) : rsErrors s}
-      defs <- CMS.gets rsGenDefs
       -- An instance of a template names its arms at the arguments each
-      -- arm's type takes, those its arms bind.
+      -- arm's type takes.
       armRef <- case Map.lookup gv ddefs of
         Just dd | not userMapped, T.any (== '$') cvText -> do
-          args <- mapM (\(p, t) -> (,) p <$> rustFieldType t) (zipPrefix (ddTypeParams dd) (tyArgs (dataUseArgs defs dd ps arms)))
+          args <- mapM (\(p, t) -> (,) p <$> rustFieldType t) (zipPrefix (ddTypeParams dd) (tyArgs ps))
           let headName = T.takeWhile (/= '<') (render name)
           return $ \c -> pretty (headName <> "_" <> c) <> RP.paramList [d | p <- armDataParams dd c, Just d <- [lookup p args]]
         _ -> return (RP.armTypeName name)
@@ -2502,23 +2494,31 @@ planRustPublic es = do
         | gv <- Set.toList (Set.union public (Map.keysSet recDefs)), Just h <- [Map.lookup gv homes]
         , c <- typeHomePath h, Set.member c rustUnspellable || not (isIdentifier c)
         ]
-  -- Every use of a generated record is an instance of its definition
-  -- (GEN-9).
+  -- Every use of a record is an instance of its definition (GEN-9): a
+  -- user-mapped record's unpacked use is spelled by its form too, so a
+  -- use whose fields its form cannot hold has no Rust type.
   uses <- CMS.gets rsRecordUses
   -- A user-mapped template is cut by name as a generated record is.
   let templates = Map.filter (\gd -> gdForm gd /= "struct" && T.any (== '$') (gdForm gd)) defs
       templateSelfRefs = Map.keysSet (Map.filter selfRef templates)
-  forM_ (nestedSelfUses recDefs handles uses <> nestedSelfUses templates templateSelfRefs uses) $ \(gv, _) ->
+  let nested = nestedSelfUses recDefs handles uses <> nestedSelfUses templates templateSelfRefs uses
+  forM_ nested $ \(gv, _) ->
     CMS.modify $ \s -> s {rsErrors = ("the record " <> unTVar gv <> " " <> nestedSelfUseReason) : rsErrors s}
-  forM_ (disagreements recDefs uses) $ \(gv, d) -> do
+  -- A use refused as nested too deeply is cut by name, and its fields
+  -- are not the definition's there.
+  forM_ [x | x@(gv, _) <- disagreements defs uses, gv `notElem` map fst nested] $ \(gv, d) -> do
+    let generated = Map.member gv recDefs
+        subject
+          | generated = "the generated Rust type for " <> unTVar gv
+          | otherwise = "the Rust form of " <> unTVar gv
     msg <- case d of
       FieldDiffers k decl use -> do
         dr <- render <$> rustTypeOf decl
         ur <- render <$> rustTypeOf use
-        return ("the generated Rust type for " <> unTVar gv <> " cannot serve one of its uses: its field `" <> unKey k
-                 <> "` is `" <> ur <> "` there but `" <> dr <> "` in the definition; give " <> unTVar gv
-                 <> " a Rust form, `record Rust => " <> unTVar gv <> " = \"...\"`")
-      Unmatched e -> return ("the generated Rust type for " <> unTVar gv <> " cannot serve one of its uses: " <> e)
+        return (subject <> " cannot serve one of its uses: its field `" <> unKey k
+                 <> "` is `" <> ur <> "` there but `" <> dr <> "` at the use's arguments"
+                 <> if generated then "; give " <> unTVar gv <> " a Rust form, `record Rust => " <> unTVar gv <> " = \"...\"`" else "")
+      Unmatched e -> return (subject <> " cannot serve one of its uses: " <> e)
     CMS.modify $ \s -> s {rsErrors = msg : rsErrors s}
 
   CMS.modify $ \s -> s
@@ -2693,13 +2693,7 @@ rustReservedWords =
 generateRustStructs :: Map.Map Int ([SerialAST], [SerialAST], SerialAST) -> [SerialManifold] -> RustM [MDoc]
 generateRustStructs closureAsts es = do
   defs <- CMS.gets rsGenDefs
-  -- A user-mapped record's occurrence that is not an instance of its
-  -- definition (its unpacked form, where the struct is not generic) names
-  -- no struct of its own.
-  let instanceOf (FV gv (CV cv), ps, rs) = case Map.lookup gv defs of
-        Just gd | cv /= "struct", gdForm gd == cv -> isNothing (checkUse defs gd ps rs)
-        _ -> True
-  keyed <- concat <$> mapM makeOne (filter instanceOf (collectRustRecords es))
+  keyed <- concat <$> mapM makeOne (collectRustRecords es)
   -- A Rust struct gets one impl. Instantiations of a user-mapped record that
   -- render the same struct must agree on its fields (they differ only in
   -- parameters no field uses); otherwise one struct cannot hold both.

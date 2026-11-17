@@ -1,0 +1,29 @@
+-- GEN-9: a user-mapped record holding a generated record holding a packed
+-- parameter. C++ builds the unpacked value as a tuple, so it crosses in both
+-- directions; Rust spells it by the user's form, which cannot hold the
+-- generated record native inside it, so main-rust.loc is refused.
+module main (mkU, readU, tripU, bumpU)
+import root-cpp
+
+newtype Tenths = Int
+type Cpp => Tenths = "double"
+
+instance Packable Int Tenths where
+  source Cpp from "u.hpp" ("packTenths" as pack, "unpackTenths" as unpack)
+
+record G2 a where
+  z :: a
+
+record U a where
+  x :: a
+  y :: G2 a
+record Cpp => U a = "u_t<$1>" a
+
+source Cpp from "u.hpp" ("mkU", "readU", "same", "bumpU")
+mkU :: Int -> U Tenths
+readU :: U Tenths -> Int
+same :: a -> a
+bumpU :: U Tenths -> U Tenths
+
+tripU :: U Tenths -> U Tenths
+tripU u = same u

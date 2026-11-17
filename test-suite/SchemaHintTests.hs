@@ -39,8 +39,8 @@ general = render . serialAstToGeneralSchema
 
 tree :: T.Text -> SerialAST
 tree name =
-  SerialObject NamRecord (fv name) []
-    [ (Key "kids", SerialList (fv "List") Nothing (SerialRec (fv name) []))
+  SerialObject NamRecord (fv name) [] Nothing
+    [ (Key "kids", SerialList (fv "List") Nothing (SerialRec (fv name) [] Nothing))
     , (Key "v", SerialInt (fv "Int")) ]
 
 wireShapeTests :: TestTree
@@ -56,7 +56,7 @@ wireShapeTests = testGroup "wireShape"
   , testCase "an enum" $
       wireShape (SerialEnum (fv "Ton") [] ["Hell", "Dunkel"]) @?= WEnum
   , testCase "a table" $
-      wireShape (SerialObject NamTable (fv "Table") [] [(Key "x", SerialInt (fv "Int"))]) @?= WTable
+      wireShape (SerialObject NamTable (fv "Table") [] Nothing [(Key "x", SerialInt (fv "Int"))]) @?= WTable
   , testCase "fixed width excludes Int and Null" $
       map isFixedWidthShape [WScalar WBool, WScalar (WUInt 1), WScalar WBigInt, WScalar WNull, WStr]
         @?= [True, True, False, False, False]
@@ -65,7 +65,7 @@ wireShapeTests = testGroup "wireShape"
 keyTests :: TestTree
 keyTests = testGroup "keys"
   [ testCase "a key's length prefix counts UTF-8 bytes" $
-      general (SerialObject NamRecord (fv "U") [] [(Key "gr\252n", SerialInt (fv "Int"))])
+      general (SerialObject NamRecord (fv "U") [] Nothing [(Key "gr\252n", SerialInt (fv "Int"))])
         @?= "m15gr\252nj"
   , testCase "the closure tuple" $
       closureWireSchema @?= "t3sjaau1"
@@ -100,20 +100,20 @@ handWritten =
   , SerialList (fv "List") (Just (NatLitK 0)) (SerialInt8 (fv "I8"))
   , SerialList (fv "List") (Just NatVoidK) (SerialUInt8 (fv "U8"))
   , SerialEnum (fv "Ton") [] ["Hell", "Mittelgro\223", "\26085\26412"]
-  , SerialVariant (fv "Shape") []
+  , SerialVariant (fv "Shape") [] Nothing
       [ ("Circle", [SerialReal (fv "Real")])
       , ("Rect\937", [SerialReal (fv "Real"), SerialReal (fv "Real")])
       , ("Empty", []) ]
-  , SerialObject NamTable (fv "Table") [] []
-  , SerialObject NamTable (fv "Table") [] [(Key "gr\252n", SerialInt (fv "Int")), (Key "b", SerialString (fv "Str"))]
+  , SerialObject NamTable (fv "Table") [] Nothing []
+  , SerialObject NamTable (fv "Table") [] Nothing [(Key "gr\252n", SerialInt (fv "Int")), (Key "b", SerialString (fv "Str"))]
   , SerialTuple (fv "Tuple3")
       [ SerialIFile (fv "IFile") (SerialList (fv "List") Nothing (SerialReal (fv "Real")))
       , SerialOStream (fv "OStream") (SerialList (fv "List") Nothing (SerialInt (fv "Int")))
       , SerialIStream (fv "IStream") (SerialList (fv "List") Nothing (tree "Tree")) ]
   , SerialIFile (fv "IFile") (SerialList (fv "List") Nothing
-      (SerialIFile (fv "IFile") (SerialObject NamRecord (fv "Gr\252n") [] [(Key "\26085", SerialString (fv "Str"))])))
-  , SerialObject NamRecord (fv "Wide") [] [(Key (T.pack ("k" <> show i)), SerialBool (fv "Bool")) | i <- [1 .. 70 :: Int]]
-  , SerialObject NamRecord (fv "Long") [] [(Key (T.replicate 100 "\252"), SerialNull (fv "Unit"))]
+      (SerialIFile (fv "IFile") (SerialObject NamRecord (fv "Gr\252n") [] Nothing [(Key "\26085", SerialString (fv "Str"))])))
+  , SerialObject NamRecord (fv "Wide") [] Nothing [(Key (T.pack ("k" <> show i)), SerialBool (fv "Bool")) | i <- [1 .. 70 :: Int]]
+  , SerialObject NamRecord (fv "Long") [] Nothing [(Key (T.replicate 100 "\252"), SerialNull (fv "Unit"))]
   ]
 
 -- A fixed pseudo-random stream of trees, so the corpus file is stable.
@@ -161,11 +161,11 @@ gen depth s0 =
           in (SerialTuple (fv "Tuple") es, s3)
     14 -> let (n, s2) = pick (length keys) s1
               (es, s3) = gens (n + 1) s2
-          in (SerialObject NamRecord (fv "R") [] (zip (map Key keys) es), s3)
+          in (SerialObject NamRecord (fv "R") [] Nothing (zip (map Key keys) es), s3)
     15 -> let (e, s2) = gen (depth - 1) s1 in (SerialOptional (fv "?") e, s2)
     16 -> let (n, s2) = pick 3 s1
               (es, s3) = gens n s2
-          in (SerialVariant (fv "V") [] [("A", es), ("Ctor\252", [])], s3)
+          in (SerialVariant (fv "V") [] Nothing [("A", es), ("Ctor\252", [])], s3)
     _ -> let (h, s2) = pick (length hints) s1 in (SerialFloat64 (hints !! h), s2)
   where
     gens 0 s = ([], s)

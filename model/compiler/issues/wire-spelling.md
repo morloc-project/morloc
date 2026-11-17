@@ -19,15 +19,3 @@ form (nominal-types stage B2b).
   bare-name branch, which matches back-references by name only, so nested
   instances at different `Nat` arguments can be conflated.
 
-- **Rust writes an unpacked user record at its native argument.**
-  [reproduced, 2026-11-17] Deviates from NOM-4. A user-mapped `UT a` holding a
-  generated `G2 a` at a packed `a`, returned to the wire: the helper is
-  `let __mm_helper0: UT<f64> = UT { x: unpackTenths(..), y: __mm_n.y }`
-  (unpacked value, native spelling) and the nested `G2` is copied without
-  unpacking its field; rustc refuses. C++ is correct.
-  /work/plans/nominal-types/scouts/adversarial/c1-user-gen-packed/out-rust.loc.
-- **Rust spells an unpacked user record with no parameters as its native
-  struct.** [reproduced, 2026-11-17] Deviates from NOM-4. A user-mapped `H2`
-  (no parameters) holding a packed `Date`: the unpacked value is spelled
-  `H2T`, so the pack/unpack calls are type errors, and `DateT` lacks the
-  serialization traits. C++ is correct. /work/plans/nominal-types/scouts/adversarial/c6-data-packed-arm/ctl/h2-rust.loc.

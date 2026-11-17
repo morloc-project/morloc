@@ -1267,7 +1267,7 @@ serialClosuresOutsideNodes = go
     go (SerialPack _ (_, s)) = go s
     go (SerialList _ _ s) = go s
     go (SerialTuple _ ss) = concatMap go ss
-    go (SerialObject _ _ _ rs) = concatMap (go . snd) rs
+    go (SerialObject _ _ _ _ rs) = concatMap (go . snd) rs
     go (SerialOptional _ s) = go s
     go _ = []
 
@@ -1278,9 +1278,9 @@ closuresWithin intoVariants = go
     go (SerialPack _ (_, s)) = go s
     go (SerialList _ _ s) = go s
     go (SerialTuple _ ss) = concatMap go ss
-    go (SerialObject _ _ _ rs) = concatMap (go . snd) rs
+    go (SerialObject _ _ _ _ rs) = concatMap (go . snd) rs
     go (SerialOptional _ s) = go s
-    go (SerialVariant _ _ as) | intoVariants = concatMap (concatMap go . snd) as
+    go (SerialVariant _ _ _ as) | intoVariants = concatMap (concatMap go . snd) as
     go _ = []
 
 -- | Every 'SerialObject' (record) reachable at a (de)serialization site in the
@@ -1305,13 +1305,13 @@ variantWireArms renderType closureAsts es =
   Map.fromListWith (const id) <$> mapM keyed variants
   where
     asts = concatMap allSerialASTs es <> concat [cs <> bs <> [r] | (cs, bs, r) <- Map.elems closureAsts]
-    variants = [(sv, as) | sv@(SerialVariant _ _ as@(_ : _)) <- concatMap serialVariantsOfAST asts]
+    variants = [(sv, as) | sv@(SerialVariant _ _ _ as@(_ : _)) <- concatMap serialVariantsOfAST asts]
     keyed (sv, as) = (\n -> (render n, as)) <$> renderType (unpackedAsTypeF (serialAstToType sv))
 
 serialVariantsOfAST :: SerialAST -> [SerialAST]
-serialVariantsOfAST v@(SerialVariant _ _ as@(_ : _)) = v : concatMap (concatMap serialVariantsOfAST . snd) as
+serialVariantsOfAST v@(SerialVariant _ _ _ as@(_ : _)) = v : concatMap (concatMap serialVariantsOfAST . snd) as
 serialVariantsOfAST (SerialClosure ins out) = concatMap serialVariantsOfAST (ins <> [out])
-serialVariantsOfAST (SerialObject _ _ _ rs) = concatMap (serialVariantsOfAST . snd) rs
+serialVariantsOfAST (SerialObject _ _ _ _ rs) = concatMap (serialVariantsOfAST . snd) rs
 serialVariantsOfAST (SerialList _ _ s) = serialVariantsOfAST s
 serialVariantsOfAST (SerialTuple _ ss) = concatMap serialVariantsOfAST ss
 serialVariantsOfAST (SerialOptional _ s) = serialVariantsOfAST s
@@ -1467,13 +1467,13 @@ collectPapplySites = runIdentity . surroundFoldSerialManifoldM defaultValue fw
 serialObjectsOfAST :: SerialAST -> [(FVar, [(Key, SerialAST)])]
 serialObjectsOfAST = go
       where
-        go (SerialObject _ v _ rs) = (v, rs) : concatMap (go . snd) rs
+        go (SerialObject _ v _ _ rs) = (v, rs) : concatMap (go . snd) rs
         go (SerialClosure ins out) = concatMap go ins <> go out
         go (SerialList _ _ s) = go s
         go (SerialTuple _ ss) = concatMap go ss
         go (SerialOptional _ s) = go s
         go (SerialPack _ (_, s)) = go s
-        go (SerialVariant _ _ as) = concatMap (concatMap go . snd) as
+        go (SerialVariant _ _ _ as) = concatMap (concatMap go . snd) as
         go _ = []
 
 -- | For each nested closure in the given manifolds, compute its serial wire

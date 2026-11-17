@@ -1,0 +1,27 @@
+-- GEN-9: the Rust twin of main-cpp.loc, refused: `UT<i64>` would hold the
+-- generated `G2<f64>` the unpacked value carries.
+module main (mkU, readU, tripU, bumpU)
+import root-rust
+
+newtype Tenths = Int
+type Rust => Tenths = "f64"
+
+instance Packable Int Tenths where
+  source Rust from "u.rs" ("packTenths" as pack, "unpackTenths" as unpack)
+
+record G2 a where
+  z :: a
+
+record U a where
+  x :: a
+  y :: G2 a
+record Rust => U a = "UT<$1>" a
+
+source Rust from "u.rs" ("mkU", "readU", "same", "bumpU")
+mkU :: Int -> U Tenths
+readU :: U Tenths -> Int
+same :: a -> a
+bumpU :: U Tenths -> U Tenths
+
+tripU :: U Tenths -> U Tenths
+tripU u = same u
