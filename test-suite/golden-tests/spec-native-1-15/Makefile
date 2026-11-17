@@ -15,6 +15,8 @@ all:
 	./nexus-rust readOpt null >> obs.txt 2>> obs.err
 	./nexus-rust readW '{"fst":[12,3],"snd":[4,5]}' >> obs.txt 2>> obs.err
 	if morloc make -o nexus-wide wide-rust.loc 2> build-wide.err; then echo UNEXPECTED >> obs.txt; elif grep -q "at most 8 fields" build-wide.err; then echo REFUSED >> obs.txt; else echo UNEXPECTED >> obs.txt; fi
+	morloc make -o nexus-forest forest.loc 2> build-forest.err
+	./nexus-forest forestId '{"val":1,"kids":[{"val":2,"kids":[]}]}' >> obs.txt 2>> obs.err
 
 clean:
-	rm -rf nexus nexus-rust nexus-wide pools __pycache__ *err *-build *build.tmp*
+	rm -rf nexus nexus-rust nexus-wide nexus-forest pools __pycache__ *err *-build *build.tmp*

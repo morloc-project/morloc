@@ -484,6 +484,9 @@ data CppTranslatorState = CppTranslatorState
   , translatorRemoteManifoldSet :: Set.Set Int
   , translatorEffectLabels :: Map.Map Int (Set.Set Text)
   , translatorLogTemplates :: Map.Map Int RenderedTemplate
+  , translatorNewtypeRecords :: Scope
+  -- ^ a record-shaped entry for each newtype whose form names a struct over
+  -- a record, for its marshaller
   -- ^ Per-labeled-midx pre-rendered log templates (see 'LogTemplate').
   -- The IIFE wrap is injected at the definition site so manifolds
   -- referenced by symbol (e.g. @std::bind(m1043, _1)@) also log.
@@ -574,6 +577,7 @@ instance Defaultable CppTranslatorState where
       , translatorRemoteManifoldSet = Set.empty
       , translatorEffectLabels = Map.empty
       , translatorLogTemplates = Map.empty
+      , translatorNewtypeRecords = Map.empty
       , translatorVariantNames = Set.empty
       , translatorDataNames = Set.empty
       , translatorSchemas = Map.empty
@@ -680,6 +684,7 @@ translate srcs es = do
         { translatorEffectLabels = effectMap
         , translatorDataNames = declaredDataNames gscope
         , translatorLogTemplates = templates
+        , translatorNewtypeRecords = newtypeRecords gscope cppScope
         , translatorCScope = mergedCppScope
         , translatorDebugInfo = debugInfo
         , translatorTraceInfo = traceInfo
@@ -3139,6 +3144,18 @@ generateRecords cfg asts = do
           <> ordered
           <> [inNs gd (CP.printHandleDefs [] (leafOf gd)) | gd <- gds, handle gd, null (params gd)]
 
+-- | A newtype with no parameters whose C++ form is a struct's name, over a
+-- record with no parameters, holds the record's fields under its own form:
+-- the entry its marshaller is made from. (`newtype Forest = Tree` with
+-- `type Cpp => Forest = "forest_t"`.)
+newtypeRecords :: Scope -> Scope -> Scope
+newtypeRecords gscope cscope = Map.fromList
+  [ (v, [([], NamU o (TV form) [] rs, doc, b, kind)])
+  | (v, [([], VarU (TV form), doc, b, kind)]) <- Map.toList cscope
+  , ([], VarU r, _, _, TypedefNewtype) : _ <- [Map.findWithDefault [] v gscope]
+  , ([], NamU o _ [] rs, _, _, _) : _ <- [Map.findWithDefault [] r cscope]
+  ]
+
 generateSourcedSerializers ::
   Map.Map Lang Scope ->
   [SerialManifold] -> -- all segments that can be called in this pool
@@ -3156,8 +3173,10 @@ generateSourcedSerializers univeralScopeMap es0 = do
   -- named records referenced in its manifolds, closed under the records
   -- their fields name. A marshaller for a record no manifold references
   -- would name a struct whose header no source pulls in.
-  let keep = closeRecordDeps scope (Set.unions (map (collectNamedRecordTVars) es0))
-      typedef = Map.filterWithKey (\k entries -> Set.member k keep && not (null entries)) scope
+  newtypes <- CMS.gets translatorNewtypeRecords
+  let scope' = Map.union newtypes scope
+      keep = closeRecordDeps scope' (Set.unions (map (collectNamedRecordTVars) es0))
+      typedef = Map.filterWithKey (\k entries -> Set.member k keep && not (null entries)) scope'
 
   foldl groupTriple ([], [], []) . concat . Map.elems <$> Map.mapWithKeyM (makeSerials scope) typedef
   where

@@ -1,0 +1,19 @@
+-- NATIVE-1: a newtype with a C++ form of its own over a recursive record
+-- crosses as itself, through a marshaller for its own form.
+module main (forestId)
+
+import root-cpp
+
+record Tree where
+  val :: Int
+  kids :: [Tree]
+record Cpp => Tree = "tree_t"
+
+newtype Forest = Tree
+type Cpp => Forest = "forest_t"
+
+source Cpp from "f.hpp" ("same")
+same :: a -> a
+
+forestId :: Forest -> Forest
+forestId x = same x
