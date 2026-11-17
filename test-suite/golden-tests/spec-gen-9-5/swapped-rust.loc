@@ -1,5 +1,5 @@
 -- A recursive parameterized record referring to itself at other arguments
--- is refused with a message naming it.
+-- (`T b a` in `T a b`) is generated and round trips.
 module main (trip)
 
 import root-rust
@@ -8,7 +8,7 @@ record T a b where
   val :: a
   sub :: ?(T b a)
 
-source Rust from "c.rs" ("same")
+source Rust from "s.rs" ("same")
 same :: a -> a
 
 trip :: T Int Str -> T Int Str

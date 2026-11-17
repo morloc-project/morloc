@@ -6,10 +6,10 @@
 1000000
 {"val":1,"sub":{"val":2,"sub":null}}
 {"val":"a","sub":{"val":"b","sub":null}}
+{"val":1,"sub":{"val":"a","sub":{"val":2,"sub":null}}}
+{"val":1,"sub":{"val":"a","sub":{"val":2,"sub":null}}}
 REFUSED
-REFUSED
-REFUSED
-REFUSED
-REFUSED
-REFUSED
-REFUSED
+{"val":{"val":{"val":{"val":{"val":{"val":{"val":1,"sub":{"val":2,"sub":null}},"sub":null},"sub":null},"sub":null},"sub":null},"sub":null},"sub":null}
+{"val":{"val":{"val":{"val":{"val":{"val":{"val":1,"sub":{"val":2,"sub":null}},"sub":null},"sub":null},"sub":null},"sub":null},"sub":null},"sub":null}
+{"val":{"val":{"val":{"val":{"val":{"val":{"val":1,"next":{"val":2,"next":null}},"next":null},"next":null},"next":null},"next":null},"next":null},"next":null}
+{"val":{"val":{"val":{"val":{"val":{"val":{"val":1,"next":{"val":2,"next":null}},"next":null},"next":null},"next":null},"next":null},"next":null},"next":null}

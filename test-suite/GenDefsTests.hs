@@ -8,7 +8,7 @@ module GenDefsTests (genDefsTests) where
 import qualified Data.Map as Map
 import qualified Data.Set as Set
 import qualified Data.Text as T
-import Morloc.CodeGenerator.GenDefs (Disagreement (..), GenDef (..), checkUse, instantiate, nativeParams, placeTypes, untiedSelf)
+import Morloc.CodeGenerator.GenDefs (Disagreement (..), GenDef (..), checkUse, instantiate, nativeParams, placeTypes)
 import Morloc.CodeGenerator.Namespace
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit
@@ -90,17 +90,6 @@ genDefsTests =
         -- A user-mapped record holding a generated one, unpacked: its own
         -- field is unpacked, the generated record's stays native.
         assertDiffers (checkUse holderDef [TyA str] [(Key "x", str), (Key "g", pairOf [dateNative] dateNative)])
-    , testCase "a reference of a record to itself by name is found" $
-        untiedSelf (NamF NamRecord (FV (TV "Tree") (CV "struct")) [] [(Key "kids", listOf (var (TV "Tree") (CV "Tree")))]) @?= Just (TV "Tree", True)
-    , testCase "a reference of a record to itself at other arguments is found, after a missed tie" $
-        let pairS = FV (TV "Pair") (CV "struct")
-            atInt = AppF (var (TV "Pair") (CV "Pair")) [TyA int64]
-            atOwn = AppF (var (TV "Pair") (CV "Pair")) [TyA str]
-         in do
-              untiedSelf (NamF NamRecord pairS [TyA str] [(Key "x", atInt)]) @?= Just (TV "Pair", False)
-              untiedSelf (NamF NamRecord pairS [TyA str] [(Key "x", atInt), (Key "y", atOwn)]) @?= Just (TV "Pair", True)
-    , testCase "a tied reference and a reference to another record are not untied" $
-        untiedSelf (NamF NamRecord (FV (TV "Tree") (CV "struct")) [] [(Key "kids", listOf (RecF (FV (TV "Tree") (CV "struct")) [])), (Key "o", var (TV "Other") (CV "Other"))]) @?= Nothing
     , testCase "a parameter only a nested record's arguments carry is not native" $
         nativeParams
           (GenDef (TV "Holder") "struct" [(TV "a", KindType)]

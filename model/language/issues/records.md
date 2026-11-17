@@ -93,15 +93,6 @@
   the error misleads ("gives no cpp implementation of
   '__extract_pattern__'" [reproduced]). Plan: GEN9-DESIGN.md (in
   /work/plans/generated-native-types) stage S9.3.
-- **A recursive parameterized record referring to itself at other
-  arguments is refused.** [reproduced, 2026-11-16] Violates GEN-9.
-  `record T a b where val :: a; sub :: ?(T b a)`: the reference `T b a`
-  is another instance of T, which a template could name (`T<T_b, T_a>`),
-  but concrete inference cuts T by name (it is non-regular: it refers to
-  itself at arguments other than its parameters), so the definition holds
-  it unexpanded and is refused at planning (GenDefs.genDefs untiedSelf,
-  spec-gen-9-5). Fix: nominal-types P3, a reference to another key is that
-  key's type (NOM-6).
 - **A C++ template handle cannot be built from a braced list.** [read,
   2026-11-16] Deviates from CPP-6 (lang-cpp.md), which gives `R{{...}}` as
   a handle's construction form. A template handle takes its fields only

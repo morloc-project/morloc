@@ -49,31 +49,14 @@ Plan: /work/plans/nominal-types/PLAN.md, phase A stages P1-P4.
   64 distinct instantiations on one path is refused as non-terminating.
 - **A record nested in itself is expanded inline at every nesting.**
   [reproduced, 2026-11-16] Deviates from NOM-2's intent (one definition,
-  expanded on demand). Since instance protection (pairEval), `C (C (C
-  Int))` expands each inner instance in every field that holds it, so the
-  size grows as (fields holding it)^(depth): with two such fields, depth 10
-  compiled in 8.7 s and 982 MiB where the name cut took 0.4 s. Instances of
-  recursive records nested more than 6 deep in each other (counted along
-  the path, across declarations) fall back to the name cut, which C++ and
-  Rust refuse and Python and R marshal as before (a depth-7 value round
-  trips exactly). Alternating recursive records `A (B (A ...))` with three
-  fields each, 10 deep, take 8.9 s and 770 MiB (the name cut: 5.5 s and
-  408 MiB). A key spelled through an alias (`C I` with `type I = Int`) is
-  not equal to the same instance spelled directly, so it unrolls one level
-  more before being cut. These go away when declared types are referred to
-  by key (phase B).
-- **A record's type arguments are expanded beside the fields that hold
-  them.** [reproduced, 2026-11-17] Deviates from NOM-2's intent. A resolved
-  record carries its arguments fully expanded next to the fields holding the
-  same type, and every walk over both (inference, Infer.hs NamU case;
-  GenDefs recordUses comparing whole trees; Serial.hs unpackedArgsOf;
-  throughNodes) multiplies: a non-recursive `Box a` (two fields) nested 12
-  deep takes about 28 s and 42.8 GB allocated, growing 3x per level, where a
-  parameterless record of the same 4096-leaf shape takes 3.5 s and 3.7 GB.
-  Generated code is the same size either way. A heap profile also shows
-  hundreds of thousands of retained compiler states (314 MB of a 566 MB peak
-  at depth 11), probably lazy state restores (Infer.hs withModified,
-  hostConvention). /work/plans/nominal-types/scouts/bugs/5-cost.md.
+  expanded on demand). Each instance is expanded in every field that holds
+  it, so the size grows as (fields holding it)^(depth); a record's own
+  arguments are references (898a2f4a0), but an argument wrapped in a list,
+  optional or function (`Box [Box Int]`) and a `data` type's arguments are
+  still expanded beside the fields. `Box` (two fields) nested 11 deep takes
+  4.5 s and 3.1 GB allocated. A key spelled through an alias (`C I` with
+  `type I = Int`) is not equal to the same instance spelled directly, so it
+  unrolls one level more.
 - **A back-reference can carry its argument by name.** [read, 2026-11-16]
   Deviates from NOM-3. In the Rust uses of `Container (Container Int)`
   (spec-gen-9-6), the use of a tied back-reference to the outer instance
@@ -119,3 +102,22 @@ Plan: /work/plans/nominal-types/PLAN.md, phase A stages P1-P4.
   (phantom) adds no parameter: the enclosing generated record's
   nativeParams may omit `a` while its field spells `tag_t<T_a>`.
   Not reproduced.
+- **A record nested in itself at a doubling argument exhausts memory.**
+  [reproduced, 2026-11-17] Gap in NOM-3 (no bound on expansion size).
+  `record Nest a where val :: a; sub :: ?(Nest (a, a))` used at `Nest Int`
+  is cut by name before inference (TypeEval.nonRegular), but the wire form
+  is then built ply by ply up to the 100-ancestor bound (Serial.hs
+  descend) while the argument doubles each ply: `morloc make` passed 2 GiB
+  in seconds. `Nest [a]` grows linearly and is refused. A non-regular
+  record has no finite schema at any use, so it could be refused at its
+  first use instead of when the bound is reached.
+- **Mutual non-regular recursion is not detected.** [read, 2026-11-17]
+  TypeEval.nonRegular looks only at a declaration's references to itself;
+  `A a` holding `B [a]` holding `A a` is expanded by instance up to the
+  256-instance backstop, and with a doubling argument runs out of memory
+  as above.
+- **A converting field of a Rust record nested at other arguments is
+  bounded by its own type.** [speculative, 2026-11-17] Rust.hs recordImpls
+  bounds a self-referring plain field through the record's parameters, but
+  a field that converts (its own conversion trait) is still bounded by its
+  type, which for `T b a` in `T a b` would not close (E0275).

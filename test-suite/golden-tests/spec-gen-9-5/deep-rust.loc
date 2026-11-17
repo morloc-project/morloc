@@ -1,5 +1,5 @@
--- A record nested in itself more deeply than code generation expands is
--- refused in Rust with a message saying so.
+-- A recursive record nested in itself seven deep is generated and round
+-- trips.
 module main (trip)
 
 import root-rust

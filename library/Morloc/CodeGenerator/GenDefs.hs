@@ -18,15 +18,12 @@ module Morloc.CodeGenerator.GenDefs
   , instantiate
   , checkUse
   , Disagreement (..)
-  , untiedSelf
   , RecordUse
   , recordUses
   , disagreements
   , inPoolSerialASTs
   , placeTypes
   , carriedTemplateArgs
-  , nestedSelfUses
-  , nestedSelfUseReason
   , placeholders
   , nativeParam
   , nativeParams
@@ -43,12 +40,11 @@ import qualified Data.Set as Set
 import Morloc.CodeGenerator.Grammars.Common (intrinsicValueTypes, poolNativeTypes, recordsInType, serialClosuresOf)
 import Morloc.CodeGenerator.Grammars.Macro (expandMacro)
 import Morloc.CodeGenerator.Serial (makeSerialAST)
-import Morloc.TypeEval (recordNestingLimit)
 import qualified Morloc.Data.Map as Map
 import Morloc.Data.Zip (indexedFrom, zipExact, zipSame)
 import qualified Morloc.Monad as MM
 import Control.Monad.Except (catchError)
-import Morloc.Data.Doc (pretty, render)
+import Morloc.Data.Doc (render)
 import Data.Char (isDigit)
 import Text.Read (readMaybe)
 
@@ -103,13 +99,7 @@ genDefs lang used = do
       -- and a use of the record says why.
       r <- (Right <$> atPlaceholders lang gv ps) `catchRejected` (return . Left)
       case r of
-        Right t@(NamF _ _ _ rs) -> case untiedSelf t of
-          Just (g, True) -> MM.throwCompilerBug ("a reference of the record " <> pretty g <> " to itself was not tied in inference")
-          -- A reference to the record at other arguments is another
-          -- instance of it, which is not generated yet.
-          Just (g, False) ->
-            return (gv, Left ("it refers to " <> unTVar g <> " at other arguments than its own, which is not generated yet"))
-          Nothing -> return (gv, Right (GenDef gv form ps rs))
+        Right (NamF _ _ _ rs) -> return (gv, Right (GenDef gv form ps rs))
         Right _ -> return (gv, Left "its declaration does not resolve to a record")
         Left e -> return (gv, Left e)
 
@@ -195,20 +185,6 @@ catchRejected act h =
   act `catchError` \e -> case e of
     Rejected _ d -> h (render d)
     _ -> MM.throwError e
-
--- | A generated record referred to by name inside an occurrence of itself,
--- with whether the reference is at the occurrence's own arguments: one
--- there inference should have tied ('RecF'); one at other arguments names
--- another instance. A record mapped to a native form is named through it,
--- at any arguments.
-untiedSelf :: TypeF -> Maybe (TVar, Bool)
-untiedSelf t0 = let hits = go Map.empty t0 in find snd hits <|> listToMaybe hits
-  where
-    go anc t = case t of
-      NamF _ (FV g (CV "struct")) ps rs -> concatMap (go (Map.insert g ps anc) . snd) rs
-      VarF (FV g _) | Just ps <- Map.lookup g anc -> [(g, null ps)]
-      AppF (VarF (FV g _)) as | Just ps <- Map.lookup g anc -> [(g, as == ps)]
-      _ -> concatMap (go anc) (childrenOf t)
 
 -- | Replace each placeholder by its argument.
 instantiate :: Map.Map TVar TypeF -> TypeF -> TypeF
@@ -326,35 +302,6 @@ carriedTemplateArgs :: GenDef -> [ArgF] -> Maybe [TypeF]
 carriedTemplateArgs gd ps = do
   pairs <- zipExact [p | (p, KindType) <- gdParams gd] (tyArgs ps)
   return [t | (p, t) <- pairs, p `elem` nativeParams gd]
-
--- | The recursive parameterized records used at an argument that refers to
--- the record by name only, which are not generated: concrete inference cuts
--- a record's expansion by name where it is nested in recursive records more
--- deeply than 'recordNestingLimit' allows, or where it is non-regular (`Nest [a]` in `Nest
--- a`), so the inner use's form is not resolved as a generated record's.
-nestedSelfUses :: Map.Map TVar GenDef -> Set.Set TVar -> [RecordUse] -> [(TVar, [ArgF])]
-nestedSelfUses defs recursive uses =
-  unique
-    [ (gv, ps)
-    | (gv, _, ps, _) <- uses
-    , Set.member gv recursive
-    , Just gd <- [Map.lookup gv defs]
-    , not (null (nativeParams gd))
-    , any (mentions gv) (tyArgs ps)
-    ]
-  where
-    mentions g t = case t of
-      VarF (FV g' _) | g' == g -> True
-      AppF (VarF (FV g' _)) _ | g' == g -> True
-      _ -> any (mentions g) (childrenOf t)
-
--- | Why a use 'nestedSelfUses' finds is not generated, after the record's
--- name.
-nestedSelfUseReason :: T.Text
-nestedSelfUseReason =
-  "refers to itself and is used where its expansion is cut by name: nested in recursive records more than "
-    <> T.pack (show (recordNestingLimit + 1)) <> " levels deep, or at arguments that change with each nesting;"
-    <> " this is not generated yet"
 
 -- | The serial forms of the values a pool marshals that no manifold's
 -- arguments or result give: those its intrinsics marshal and the generated

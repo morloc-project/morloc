@@ -75,7 +75,7 @@ import Morloc.CodeGenerator.Infer (declaredDataNames)
 import Morloc.CodeGenerator.Ownership (LetMode (..), LetPlan (..), OwnCaps (..), PoolPlan (..), byValueIndices, changedSlots, emptyPoolPlan, letMode, letPlan, nativeLets, planPool)
 import Morloc.CodeGenerator.OwnershipCheck (checkManifold)
 import System.Environment (lookupEnv)
-import Morloc.CodeGenerator.GenDefs (DataDef (..), Disagreement (..), GenDef (..), carriedTemplateArgs, nestedSelfUses, nestedSelfUseReason, dataDefs, dataNamesIn, nativeDataParams, RecordUse, disagreements, inPoolSerialASTs, placeTypes, genDefs, nativeParam, nativeParams, recordUses)
+import Morloc.CodeGenerator.GenDefs (DataDef (..), Disagreement (..), GenDef (..), carriedTemplateArgs, dataDefs, dataNamesIn, nativeDataParams, RecordUse, disagreements, inPoolSerialASTs, placeTypes, genDefs, nativeParam, nativeParams, recordUses)
 import qualified Morloc.CodeGenerator.Platform as P
 import Morloc.CodeGenerator.Serial
   ( serialAstToType
@@ -455,11 +455,7 @@ instance {-# OVERLAPPABLE #-} (HasTypeF e) => HasCppType e where
         cscope <- CMS.gets translatorCScope
         let entries = Map.findWithDefault [] (TV gv) cscope
             generated = any (\(_, body, _, _, _) -> bodyCV body == Just "struct") entries
-            -- A record with a form of its own reaches here only where its
-            -- expansion was cut by name.
-            userRecord = or [True | (_, NamU {}, _, _, _) <- entries]
             msg
-              | userRecord && not generated = "the record " <> gv <> " " <> nestedSelfUseReason
               | generated =
                   "the record " <> gv <> " refers to itself, and its C++ definition cannot be"
                     <> " generated in its module's header; give it a C++ form, `record Cpp => "
@@ -2753,23 +2749,7 @@ planPublicTypes :: [SerialManifold] -> CppTranslator [([Text], Text)]
 planPublicTypes es = do
   homes <- CMS.gets translatorTypeHomes
   cscope <- CMS.gets translatorCScope
-  defs0 <- CMS.gets translatorGenDefs
-  uses0 <- CMS.gets translatorRecordUses
-  -- A recursive parameterized record used at an argument holding itself
-  -- has no definition yet; its uses say why.
-  let generated0 = Map.filter ((== "struct") . gdForm) defs0
-      nested = Set.fromList (map fst (nestedSelfUses generated0 (Map.keysSet (Map.filter (\gd -> recursiveRecord (gdVar gd) (gdFields gd)) generated0)) uses0))
-      defs = Map.withoutKeys defs0 nested
-  let nestedReason = "it " <> nestedSelfUseReason
-      -- A user-mapped template is cut by name as a generated record is.
-      templates = Map.filter (\gd -> gdForm gd /= "struct" && T.any (== '$') (gdForm gd)) defs0
-      templateSelfRefs = Map.keysSet (Map.filter (\gd -> recursiveRecord (gdVar gd) (gdFields gd)) templates)
-      nestedTemplates = unique (map fst (nestedSelfUses templates templateSelfRefs uses0))
-  CMS.modify $ \s -> s
-    { translatorGenDefs = defs
-    , translatorGenFailures = Map.union (translatorGenFailures s) (Map.fromSet (const nestedReason) nested)
-    , translatorErrors = ["the record " <> unTVar gv <> " " <> nestedSelfUseReason | gv <- nestedTemplates] <> translatorErrors s
-    }
+  defs <- CMS.gets translatorGenDefs
   let unparameterized gv = case Map.lookup gv cscope of
         Just ((ps, _, _, _, _) : _) -> null ps
         _ -> False

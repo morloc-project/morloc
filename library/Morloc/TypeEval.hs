@@ -17,7 +17,6 @@ module Morloc.TypeEval
   , transformType
   , evaluateStep
   , pairEval
-  , recordNestingLimit
   , declaresFormAt
   , declaresRecord
   , reduceType
@@ -72,14 +71,14 @@ pairEval cscope gscope =
   where
     -- A declared record is protected while it is expanded by its instance,
     -- so a nested use at other arguments (the inner `Container Int` of
-    -- `Container (Container Int)`) is expanded too (NOM-3). A recursive
-    -- alias, in either scope, is not a declared type and keeps the name
-    -- cut, as does a non-regular record. Any other type cannot meet itself
-    -- at other arguments, so its instance alone is protected.
+    -- `Container (Container Int)`) is expanded too (NOM-3). A non-regular
+    -- record meets a larger instance of itself at every nesting, and a
+    -- recursive alias, in either scope, is not a declared type: both keep
+    -- the name cut. Any other type cannot meet itself at other arguments,
+    -- so its instance alone is protected.
     prot = ByInstance cut
     cut v
       | nonRegular gscope v = CutByName
-      | declaresRecord gscope v && refersToItself gscope v = CutRecursive
       | declaresRecord gscope v = CutInstance
       | refersToItself gscope v || refersToItself cscope v = CutByName
       | otherwise = CutInstance
@@ -159,14 +158,12 @@ pairEval cscope gscope =
 data Bound = Bound
   { boundNames :: Set.Set TVar
   , boundInsts :: Map.Map TVar (Set.Set [TypeU])
-  , boundRecursive :: Int
-  -- ^ instances of recursive records among 'boundInsts'
   , boundTotal :: Int
   -- ^ instances in 'boundInsts'
   }
 
 emptyBound :: Bound
-emptyBound = Bound Set.empty Map.empty 0 0
+emptyBound = Bound Set.empty Map.empty 0
 
 bindName :: TVar -> Bound -> Bound
 bindName v b = b {boundNames = Set.insert v (boundNames b)}
@@ -175,16 +172,8 @@ bindName v b = b {boundNames = Set.insert v (boundNames b)}
 -- name says.
 data Protection = ByName | ByInstance (TVar -> Cut)
 
--- | How a name is protected: by name; by instance, as a recursive record,
--- of which at most 'recordNestingLimit' instances are nested in each other;
--- or by instance.
-data Cut = CutByName | CutRecursive | CutInstance
-
--- | How many instances of recursive records are nested in each other before
--- the next is cut by name: each nesting is expanded inline in every field
--- that holds it, so the size of an expansion grows exponentially with it.
-recordNestingLimit :: Int
-recordNestingLimit = 5
+-- | How a name is protected: by name or by instance.
+data Cut = CutByName | CutInstance
 
 -- | Protect a type while its expansion is walked. However the names are
 -- protected, 256 nested instances in all fall back to the name cut, so a
@@ -196,13 +185,9 @@ protect (ByInstance cut) v ts b
   | boundTotal b >= 256 = bindName v b
   | otherwise = case cut v of
       CutByName -> bindName v b
-      CutRecursive
-        | boundRecursive b >= recordNestingLimit -> bindName v b
-        | otherwise -> (insert b) {boundRecursive = boundRecursive b + 1}
-      CutInstance -> insert b
+      CutInstance -> b {boundInsts = Map.insert v (Set.insert ts insts) (boundInsts b), boundTotal = boundTotal b + 1}
   where
     insts = Map.findWithDefault Set.empty v (boundInsts b)
-    insert b' = b' {boundInsts = Map.insert v (Set.insert ts insts) (boundInsts b'), boundTotal = boundTotal b' + 1}
 
 -- | Whether a type is protected by its name.
 protectedByName :: Bound -> TVar -> Bool
@@ -218,30 +203,26 @@ declaresRecord scope v = case Map.lookup v scope of
   Just entries -> or [True | (_, NamU {}, _, _, _) <- entries]
   Nothing -> False
 
--- | Whether a declaration refers to itself, in its own body, at arguments
--- that are not its parameters but mention one (@record Nest a where sub ::
--- ?(Nest [a])@). Each nesting of such a type is a new instance, so its
--- expansion is cut by name.
+-- | Whether a declaration refers to itself, in its own body, at an argument
+-- that is a type built over one of its parameters (@record Nest a where sub
+-- :: ?(Nest [a])@), so that each nesting is a larger instance. A reference
+-- at its parameters in another order (@T b a@ in @T a b@) is regular.
 nonRegular :: Scope -> TVar -> Bool
-nonRegular scope v = or [irregular ps body | (ps, body, _, _, _) <- Map.findWithDefault [] v scope]
+nonRegular scope v = or [any (any (grows ps)) (selfRefs body) | (ps, body, _, _, _) <- Map.findWithDefault [] v scope]
   where
-    irregular ps body =
-      let params = [p | Left (p, _) <- ps]
-          own as = length as == length params && and (zipWith (\a p -> varOf a == Just p) as params)
-       in any (\as -> not (own as) && any (mentions params) as) (selfRefs v body)
+    grows ps a = case varOf a of
+      Just _ -> False
+      Nothing -> mentions [p | Left (p, _) <- ps] a
     mentions params t = maybe False (`elem` params) (varOf t) || any (mentions params) (typeUParts t)
+    selfRefs t = case t of
+      AppU (VarU v') as | v' == v -> as : concatMap selfRefs as
+      _ -> concatMap selfRefs (typeUParts t)
 
 -- | Whether a declaration refers to itself in its own body.
 refersToItself :: Scope -> TVar -> Bool
 refersToItself scope v = or [mentionsName body | (_, body, _, _, _) <- Map.findWithDefault [] v scope]
   where
     mentionsName t = varOf t == Just v || any mentionsName (typeUParts t)
-
--- | The argument lists of a declaration's references to itself in a body.
-selfRefs :: TVar -> TypeU -> [[TypeU]]
-selfRefs v t = case t of
-  AppU (VarU v') as | v' == v -> as : concatMap (selfRefs v) as
-  _ -> concatMap (selfRefs v) (typeUParts t)
 
 -- | The variable a type is, in any of its kinds.
 varOf :: TypeU -> Maybe TVar

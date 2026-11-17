@@ -105,7 +105,7 @@ import qualified Morloc.Version as MV
 import Morloc.Quasi
 import System.Directory (findExecutable)
 import System.FilePath (takeDirectory)
-import Morloc.CodeGenerator.GenDefs (DataDef (..), Disagreement (..), GenDef (..), carriedTemplateArgs, nestedSelfUses, nestedSelfUseReason, armDataParams, dataDefs, dataNamesIn, nativeDataParams, RecordUse, disagreements, inPoolSerialASTs, placeTypes, genDefs, nativeParam, nativeParams, placeholders, recordUses)
+import Morloc.CodeGenerator.GenDefs (DataDef (..), Disagreement (..), GenDef (..), carriedTemplateArgs, armDataParams, dataDefs, dataNamesIn, nativeDataParams, RecordUse, disagreements, inPoolSerialASTs, placeTypes, genDefs, nativeParam, nativeParams, placeholders, recordUses)
 
 -- | Duplicated here (as in Cpp.hs) to match data/lang/rust/lang.yaml. The
 -- second field is the source extension and must match lang.yaml's @extension@
@@ -2437,7 +2437,15 @@ recordImpls handle gd name params = do
           held = not (null (placeholders (const False) declT))
           fld = RP.rustFieldIdent k
       ty <- rustFieldType declT
-      let plainWheres = if held then Just (ty <> ": ::rustmorloc::ToVoidstar", ty <> ": ::rustmorloc::FromVoidstar") else Nothing
+      -- A field that refers to the record itself is bounded through the
+      -- record's parameters: bounding its own type would require the
+      -- record's impl at the field's arguments, which for a record nested
+      -- at other arguments (`T b a` in `T a b`) never closes.
+      let bounded tr
+            | recursiveRecord (gdVar gd) [(k, declT)] =
+                hcat (punctuate ", " [pretty (nativeParam p) <> ": " <> tr | p <- nativeParams gd])
+            | otherwise = ty <> ": " <> tr
+          plainWheres = if held then Just (bounded "::rustmorloc::ToVoidstar", bounded "::rustmorloc::FromVoidstar") else Nothing
           width = isVarWidthF declT || held
       case filter converts fas of
         [] -> return ((fld, ty, width, Nothing), plainWheres, [])
@@ -2585,15 +2593,7 @@ planRustPublic es = do
   -- Every use of a generated record is an instance of its definition
   -- (GEN-9). A user-mapped record's unpacked use is a tuple, never its form.
   uses <- CMS.gets rsRecordUses
-  -- A user-mapped template is cut by name as a generated record is.
-  let templates = Map.filter (\gd -> gdForm gd /= "struct" && T.any (== '$') (gdForm gd)) defs
-      templateSelfRefs = Map.keysSet (Map.filter selfRef templates)
-  let nested = nestedSelfUses recDefs handles uses <> nestedSelfUses templates templateSelfRefs uses
-  forM_ nested $ \(gv, _) ->
-    CMS.modify $ \s -> s {rsErrors = ("the record " <> unTVar gv <> " " <> nestedSelfUseReason) : rsErrors s}
-  -- A use refused as nested too deeply is cut by name, and its fields
-  -- are not the definition's there.
-  forM_ [x | x@(gv, _) <- disagreements recDefs uses, gv `notElem` map fst nested] $ \(gv, d) -> do
+  forM_ (disagreements recDefs uses) $ \(gv, d) -> do
     msg <- case d of
       FieldDiffers k decl use -> do
         dr <- render <$> rustTypeOf decl

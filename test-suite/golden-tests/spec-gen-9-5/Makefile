@@ -10,10 +10,19 @@ all:
 	timeout 60s ./nexus-rust deep 1000000 >> obs.txt 2>> obs.err
 	./nexus-rust trip '{"val":1,"sub":{"val":2,"sub":null}}' >> obs.txt 2>> obs.err
 	./nexus-rust strTrip '{"val":"a","sub":{"val":"b","sub":null}}' >> obs.txt 2>> obs.err
-	for l in cpp rust; do if morloc make -o swapped-$$l swapped-$$l.loc 2> build-swapped-$$l.err; then echo UNEXPECTED >> obs.txt; elif grep -q 'at other arguments than its own' build-swapped-$$l.err; then echo REFUSED >> obs.txt; else echo UNEXPECTED >> obs.txt; fi; done
+	morloc make -o swapped-cpp swapped-cpp.loc 2> build-swapped-cpp.err
+	./swapped-cpp trip '{"val":1,"sub":{"val":"a","sub":{"val":2,"sub":null}}}' >> obs.txt 2>> obs.err
+	morloc make -o swapped-rust swapped-rust.loc 2> build-swapped-rust.err
+	./swapped-rust trip '{"val":1,"sub":{"val":"a","sub":{"val":2,"sub":null}}}' >> obs.txt 2>> obs.err
 	if timeout 120 morloc make -o nest-cpp nest-cpp.loc 2> build-nest-cpp.err; then echo UNEXPECTED >> obs.txt; elif grep -q 'does not terminate' build-nest-cpp.err; then echo REFUSED >> obs.txt; else echo UNEXPECTED >> obs.txt; fi
-	for l in cpp rust; do if morloc make -o deep-$$l deep-$$l.loc 2> build-deep-$$l.err; then echo UNEXPECTED >> obs.txt; elif grep -q 'levels deep' build-deep-$$l.err; then echo REFUSED >> obs.txt; else echo UNEXPECTED >> obs.txt; fi; done
-	for l in cpp rust; do if morloc make -o deep-user-$$l deep-user-$$l.loc 2> build-deep-user-$$l.err; then echo UNEXPECTED >> obs.txt; elif grep -q 'levels deep' build-deep-user-$$l.err; then echo REFUSED >> obs.txt; else echo UNEXPECTED >> obs.txt; fi; done
+	morloc make -o deep-cpp deep-cpp.loc 2> build-deep-cpp.err
+	./deep-cpp trip '{"val":{"val":{"val":{"val":{"val":{"val":{"val":1,"sub":{"val":2,"sub":null}},"sub":null},"sub":null},"sub":null},"sub":null},"sub":null},"sub":null}' >> obs.txt 2>> obs.err
+	morloc make -o deep-rust deep-rust.loc 2> build-deep-rust.err
+	./deep-rust trip '{"val":{"val":{"val":{"val":{"val":{"val":{"val":1,"sub":{"val":2,"sub":null}},"sub":null},"sub":null},"sub":null},"sub":null},"sub":null},"sub":null}' >> obs.txt 2>> obs.err
+	morloc make -o deep-user-cpp deep-user-cpp.loc 2> build-deep-user-cpp.err
+	./deep-user-cpp trip '{"val":{"val":{"val":{"val":{"val":{"val":{"val":1,"next":{"val":2,"next":null}},"next":null},"next":null},"next":null},"next":null},"next":null},"next":null}' >> obs.txt 2>> obs.err
+	morloc make -o deep-user-rust deep-user-rust.loc 2> build-deep-user-rust.err
+	./deep-user-rust trip '{"val":{"val":{"val":{"val":{"val":{"val":{"val":1,"next":{"val":2,"next":null}},"next":null},"next":null},"next":null},"next":null},"next":null},"next":null}' >> obs.txt 2>> obs.err
 
 clean:
 	rm -rf nexus-cpp nexus-rust swapped-cpp swapped-rust nest-cpp deep-cpp deep-rust deep-user-cpp deep-user-rust pools *err *-build *build.tmp*
