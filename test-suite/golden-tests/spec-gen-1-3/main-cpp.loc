@@ -1,0 +1,18 @@
+-- GEN-1: a record's reference to itself through an alias of its argument
+-- (`P (Id a)` inside `P a`) is the same instance, tied rather than unrolled.
+-- The Rust twin is main-rust.loc.
+module main (trip)
+
+import root-cpp
+
+type Id a = a
+
+record P a where
+  val :: a
+  sub :: ?(P (Id a))
+
+source Cpp from "c.hpp" ("same")
+same :: a -> a
+
+trip :: P Int -> P Int
+trip x = same x

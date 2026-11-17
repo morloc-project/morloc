@@ -48,7 +48,7 @@ import qualified Morloc.Monad as MM
 import qualified Morloc.LangRegistry as LR
 import qualified Morloc.Language as ML
 import qualified Morloc.TypeEval as T
-import Morloc.Typecheck.Internal (typeUChildren, typeUToNatExpr)
+import Morloc.Typecheck.Internal (expandTransparentAliases, typeUChildren, typeUToNatExpr)
 import qualified Morloc.Typecheck.NatSolver as NS
 import Numeric (showHex)
 import Data.Char (isAlphaNum, isAscii, isDigit)
@@ -665,7 +665,7 @@ structuralCompound
 structuralCompound scope knot walk g c = case (g, c) of
   -- A reference to a record whose fields are being walked, at its own
   -- arguments, is a reference to that occurrence.
-  _ | Just key <- recordKey g, Just back <- Map.lookup key (knotAncestors knot) -> Just (pure back)
+  _ | Just key <- recordKey scope g, Just back <- Map.lookup key (knotAncestors knot) -> Just (pure back)
   -- A suspension is a closure of no arguments in every pool.
   (EffectU _ g', EffectU _ c') -> Just $ FunF [] <$> walk g' c'
   (OptionalU g', OptionalU c') -> Just $ OptionalF <$> walk g' c'
@@ -677,7 +677,7 @@ structuralCompound scope knot walk g c = case (g, c) of
         Just $ do
           let fv = FV v1 (CV (unTVar v2))
           ps <- argsWith2 scope v1 walk ts1 ts2
-          rs <- knotEnter knot (v1, ts1) (RecF fv ps) walk (\walk' -> zipWithSameM (\(_, g') (k, c') -> (,) k <$> walk' g' c') rs1 rs2)
+          rs <- knotEnter knot (v1, map (expandTransparentAliases scope) ts1) (RecF fv ps) walk (\walk' -> zipWithSameM (\(_, g') (k, c') -> (,) k <$> walk' g' c') rs1 rs2)
           return (NamF o1 fv ps rs)
   _ -> Nothing
 
@@ -696,12 +696,16 @@ data Knot f = Knot
       -> f [(Key, TypeF)]
   }
 
--- | The name and arguments a type refers to a record by.
-recordKey :: TypeU -> Maybe (TVar, [TypeU])
-recordKey (VarU v) = Just (v, [])
-recordKey (AppU (VarU v) ts) = Just (v, ts)
-recordKey (LabeledU _ t) = recordKey t
-recordKey _ = Nothing
+-- | The name and arguments a type refers to a record by, with its aliases
+-- expanded, so a reference through an alias (`P (Id a)` for `P a`, `Self`
+-- for `R`) is the same record.
+recordKey :: Scope -> TypeU -> Maybe (TVar, [TypeU])
+recordKey scope = key . expandTransparentAliases scope
+  where
+    key (VarU v) = Just (v, [])
+    key (AppU (VarU v) ts) = Just (v, ts)
+    key (LabeledU _ t) = key t
+    key _ = Nothing
 
 -- | The knot of a monadic walk: the records in compiler state, so a walk
 -- re-entered from the top ('inferConcreteType', as a `data` type's arms

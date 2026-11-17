@@ -1,0 +1,16 @@
+-- GEN-1: the Rust twin of main-cpp.loc.
+module main (trip)
+
+import root-rust
+
+type Id a = a
+
+record P a where
+  val :: a
+  sub :: ?(P (Id a))
+
+source Rust from "c.rs" ("same")
+same :: a -> a
+
+trip :: P Int -> P Int
+trip x = same x

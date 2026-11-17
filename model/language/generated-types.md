@@ -6,7 +6,7 @@ Prefix: GEN. Plan: /work/plans/generated-native-types/PLAN.md.
 
 ### GEN-1 Every record and `data` type has a native form in every language
 Intent: ruled 2026-11-14
-Tests: spec-gen-1-1, spec-gen-1-2
+Tests: spec-gen-1-1, spec-gen-1-2, spec-gen-1-3
 Code: unaudited
 
 A type's form in language `L` is the one its program declares

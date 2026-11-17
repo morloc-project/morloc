@@ -100,12 +100,12 @@ Plan: /work/plans/nominal-types/PLAN.md, phase A stages P1-P4.
   Output is the same today only because re-deriving from the unpacked type
   gives the same schema.
 
-- **A record's self-reference through a type alias is not tied.**
-  [reproduced, 2026-11-17] Violates GEN-1. The knot key is the record name
-  with its general arguments compared as written, so `sub :: ?(P (Id a))`
-  in `record P a` (with `type Id a = a`) is a new instance, unrolled until
-  the walk stops by name: `morloc make` fails with "No Packable instance
-  for type 'Id (Id Int)'". /work/plans/nominal-types/tests/alias-knot/main.loc.
+- **A record's self-reference through an alias of the record itself is
+  refused.** [reproduced, 2026-11-17] Gap in ALIAS-1. With `type Self = R`
+  and `kids :: [Self]` in `record R`, the frontend refuses "Mutual recursion
+  between type definitions is not supported unless a `data` type cuts the
+  cycle. Cycle: R, Self": the alias counts as a definition of the cycle.
+  /work/plans/nominal-types/tests/alias-knot/selfalias.loc.
 - **A generated record field written through an alias of its parameter is
   refused.** [reproduced, 2026-11-17] Violates GEN-9. `other :: Id a` in
   `record P a`: "its field `other` is `int` there but `T_a` in the
