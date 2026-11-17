@@ -1,6 +1,6 @@
 -- GEN-9: a user-mapped Rust record with no parameters holding a packed field
 -- crosses as a tuple of its unpacked fields; its form holds the native ones.
-module main (h2)
+module main (h2, showH2)
 import root-rust
 
 newtype Date = Str
@@ -18,3 +18,6 @@ same :: a -> a
 
 h2 :: H2 -> H2
 h2 x = same x
+
+showH2 :: H2 -> Str
+showH2 x = @show (same x)

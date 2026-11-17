@@ -84,14 +84,6 @@ Plan: /work/plans/nominal-types/PLAN.md, phase A stages P1-P4.
   but the two have different keys. Probably the instance-protected
   back-reference whose arguments pairEval leaves as written, reaching a
   walk that pairs them instead of tying the reference.
-- **A native-to-wire node hands its unpacked type out as native.** [read,
-  2026-11-17] Deviates from NOM-4. Serialize.hs builds an intrinsic's
-  NativeToWireN with the unpacked projection as a plain TypeF, and
-  Namespace.typeFof returns it unmarked. A generated record and a `data` type
-  unpack as their native types, so this matters only for a user-mapped
-  record rebuilt field by field, which C++'s record collectors then see
-  with its unpacked fields under its native key.
-
 - **Intrinsic schemas are derived from the unpacked type of a packed
   argument.** [read, 2026-11-17] Deviates from NOM-4. Serialize.hs
   intrinsicSchema (about 935-1013) runs after packDataArg, so @save, @savej,
@@ -111,13 +103,6 @@ Plan: /work/plans/nominal-types/PLAN.md, phase A stages P1-P4.
   `record P a`: "its field `other` is `int` there but `T_a` in the
   definition" -- at placeholders `Id &a` is not resolved to `&a` before the
   agreement check. /work/plans/nominal-types/tests/alias-knot/flat.loc.
-
-- **A user-mapped `data` template is compared by its unexpanded form when
-  deciding a Packable wrap.** [read, 2026-11-17] Deviates from NOM-1.
-  Express.hs renderConcreteForm renders a VariantF by its raw form
-  (`MyTree<$1>`), so a native and a wire type that are different
-  instantiations of one template render alike, and maybePackableWrap may
-  skip a wrap it needs.
 
 - **Keys carry no self-argument.** [read, 2026-11-17] Deviates from NOM-1.
   A self-containing instance's reference carries no arguments and is

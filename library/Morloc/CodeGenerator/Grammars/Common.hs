@@ -963,9 +963,14 @@ intrinsicValueTypes :: SerialManifold -> [TypeF]
 intrinsicValueTypes = unique . runIdentity . foldWithSerialManifoldM fm
   where
     fm = defaultValue {opFoldWithNativeExprM = nativeExpr, opFoldWithSerialExprM = \_ e -> return (foldlSE (<>) [] e)}
+    -- An argument converted to its wire form carries its serial form,
+    -- which the pool's serial forms already include ('allSerialASTs'); its
+    -- type is the unpacked view, which is not a native type.
     nativeExpr (IntrinsicN t intr _ args) e
-      | marshals intr = return $ foldlNE (<>) (t : map typeFof args) e
+      | marshals intr = return $ foldlNE (<>) (t : [typeFof a | a <- args, not (convertedToWire a)]) e
     nativeExpr _ e = return $ foldlNE (<>) [] e
+    convertedToWire (NativeToWireN {}) = True
+    convertedToWire _ = False
     marshals intr = intr `notElem` [IntrVersion, IntrCompiled, IntrLang, IntrDatafile]
 
 -- | 'poolTypes', with a serialized value's type taken by the given
