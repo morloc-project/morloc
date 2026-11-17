@@ -34,6 +34,7 @@ module Morloc.TypeEval
   , flattenApp
   , headName
   , isTransparentAlias
+  , refersToItself
   , whnf
   , dataHead
   , dataCtors

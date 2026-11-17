@@ -463,7 +463,15 @@ resolveArgs lang i key@(_, args) = do
 -- its own, and the fallback to it.
 inferConcreteTypeStructuralRest
   :: Lang -> Int -> Scope -> TypeU -> TypeU -> MorlocMonad TypeF
-inferConcreteTypeStructuralRest lang i gscope g c = case (g, c) of
+inferConcreteTypeStructuralRest lang i gscope g c = do
+  (cscope, _) <- getScope lang
+  case transparentStep cscope gscope g of
+    Just g' -> inferConcreteTypeStructural lang i gscope g' c
+    Nothing -> structuralRestCases lang i gscope g c
+
+structuralRestCases
+  :: Lang -> Int -> Scope -> TypeU -> TypeU -> MorlocMonad TypeF
+structuralRestCases lang i gscope g c = case (g, c) of
   -- AppU general / VarU concrete: the per-language form takes no arguments
   -- while the general type has some.
   --
@@ -558,7 +566,15 @@ inferConcreteTypeUniversalStructural lang i gscopeUni t g c = do
 
 inferConcreteTypeUniversalStructural'
   :: Lang -> Int -> Scope -> Type -> TypeU -> TypeU -> MorlocMonad TypeF
-inferConcreteTypeUniversalStructural' lang i gscopeUni t g c = case (g, c) of
+inferConcreteTypeUniversalStructural' lang i gscopeUni t g c = do
+  cscopeUni <- MM.getConcreteScope lang
+  case transparentStep cscopeUni gscopeUni g of
+    Just g' -> inferConcreteTypeUniversalStructural lang i gscopeUni t g' c
+    Nothing -> universalStructuralCases lang i gscopeUni t g c
+
+universalStructuralCases
+  :: Lang -> Int -> Scope -> Type -> TypeU -> TypeU -> MorlocMonad TypeF
+universalStructuralCases lang i gscopeUni t g c = case (g, c) of
   -- A `data` type resolves to its arms here exactly as it does in the
   -- module-scoped walk. Without this, the wire form of a parameterized
   -- `data` is asked for as though it were an ordinary applied type, and
@@ -605,6 +621,20 @@ inferConcreteTypeUniversalStructural' lang i gscopeUni t g c = case (g, c) of
               MM.throwRejected $
                 "Failed to infer concrete type for" <+> pretty t
                   <> ": Could not reduce type in broadest scope"
+
+-- | One step of a transparent alias that has no form of its own in the
+-- language and does not refer to itself: such an alias is its body on the
+-- general side, as it already is on the concrete one, so its arguments are
+-- never paired with those of its body's form.
+transparentStep :: Scope -> Scope -> TypeU -> Maybe TypeU
+transparentStep cscope gscope g = case g of
+  AppU (VarU v) _
+    | T.isTransparentAlias gscope v
+    , not (T.refersToItself gscope v)
+    , not (T.declaresFormAt cscope gscope g)
+    , Just g' <- T.evaluateStep gscope g
+    , g' /= g -> Just g'
+  _ -> Nothing
 
 -- | The wire parent of a newtype that has no form in this language. Such a
 -- newtype takes its parent's native form (manual: "When a newtype needs a

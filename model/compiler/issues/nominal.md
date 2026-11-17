@@ -81,12 +81,6 @@ Plan: /work/plans/nominal-types/PLAN.md, phase A stages P1-P4.
   between type definitions is not supported unless a `data` type cuts the
   cycle. Cycle: R, Self": the alias counts as a definition of the cycle.
   /work/plans/nominal-types/tests/alias-knot/selfalias.loc.
-- **A generated record field written through an alias of its parameter is
-  refused.** [reproduced, 2026-11-17] Violates GEN-9. `other :: Id a` in
-  `record P a`: "its field `other` is `int` there but `T_a` in the
-  definition" -- at placeholders `Id &a` is not resolved to `&a` before the
-  agreement check. /work/plans/nominal-types/tests/alias-knot/flat.loc.
-
 - **Keys carry no self-argument.** [read, 2026-11-17] Deviates from NOM-1.
   A self-containing instance's reference carries no arguments and is
   matched to the one instantiation of its name on the path (Serial.hs, the

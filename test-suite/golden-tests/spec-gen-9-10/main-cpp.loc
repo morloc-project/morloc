@@ -1,0 +1,27 @@
+-- GEN-9: a field written through an alias of a parameter (`Id a`, `Id [a]`)
+-- is what the alias stands for, in the definition as at a use, in a record that refers to
+-- itself and in one that does not. The Rust twin is main-rust.loc.
+module main (tripP, tripQ)
+
+import root-cpp
+
+type Id a = a
+
+record P a where
+  val :: a
+  sub :: ?(P a)
+  other :: Id a
+
+record Q a where
+  x :: Id a
+  ys :: [Id a]
+  zs :: Id [a]
+
+source Cpp from "f.hpp" ("same")
+same :: a -> a
+
+tripP :: P Int -> P Int
+tripP v = same v
+
+tripQ :: Q Str -> Q Str
+tripQ v = same v
