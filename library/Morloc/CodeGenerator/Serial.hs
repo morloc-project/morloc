@@ -553,9 +553,10 @@ resolveWireName path name ps =
 -- name and arguments: one carrying arguments names the node of its name at
 -- those arguments; one carrying none (a reference cut by name, or the
 -- self-containing instance of a `data` type) names the nearest node of its
--- name.
+-- name, as does any reference to a node that carries none (a list- or
+-- tuple-shaped recursive alias).
 backRefMatches :: (TVar, [ArgF]) -> TVar -> [ArgF] -> Bool
-backRefMatches (n, qs) name ps = n == name && (null ps || map argFKey qs == map argFKey ps)
+backRefMatches (n, qs) name ps = n == name && (null ps || null qs || map argFKey qs == map argFKey ps)
 
 -- | Whether a back-reference somewhere under @node@ resolves to the wire
 -- name @wire@, given that @node@'s own declaration is already the head of
