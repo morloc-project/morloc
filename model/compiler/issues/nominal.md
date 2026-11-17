@@ -20,15 +20,14 @@ Plan: /work/plans/nominal-types/PLAN.md, phase A stages P1-P4.
   conversions and deduplicating C++ records all compare rendered native
   text.
 - **A wire back-reference whose arguments match no declaration binds to
-  the nearest one of the same name, or to none.** [read, 2026-11-16]
-  Deviates from NOM-6. Serial.hs resolveWireName falls back to the name
-  when no declaration on the path has the reference's arguments. That is
-  right for a declaration that carries no arguments (a recursive list or
-  tuple alias), but for a declared type spelled at other arguments it
-  silently names the wrong nested declaration. With no declaration of that
-  name on the path at all, it emits a dangling `^name`. Those two cases
-  should be compiler errors. Probably reachable only through the refused
-  leak cases.
+  the nearest one of the same name.** [read, 2026-11-17] Deviates from
+  NOM-6. Serial.hs resolveWireName, and the nexus value check, fall back to
+  the nearest enclosing declaration of the reference's name when none on
+  the path has its arguments. A declaration that carries no arguments (a
+  recursive list or tuple alias) and a newtype head renamed over its parent
+  rely on it; for a declared type spelled at other arguments it would name
+  the wrong nested declaration. Probably unreachable. A reference with no
+  declaration of its name on the path is now a compiler error.
 - **A `data` instance built by the universal walk resolves its fields by
   the module walk.** [read, 2026-11-16] Speculative. The two walks read
   the same scope tables, but inferVariantArms, reached from the universal
@@ -84,13 +83,6 @@ Plan: /work/plans/nominal-types/PLAN.md, phase A stages P1-P4.
   hundreds of thousands of retained compiler states (314 MB of a 566 MB peak
   at depth 11), probably lazy state restores (Infer.hs withModified,
   hostConvention). /work/plans/nominal-types/scouts/bugs/5-cost.md.
-- **Nexus value validation resolves back-references by name only.**
-  [read, 2026-11-16] Deviates from NOM-6. Nexus.hs validateValueAgainstAST
-  keeps a name-keyed environment of the records on the path (RecEnv) and
-  resolves a back-reference by name, ignoring arguments and `#k`, so an
-  @unroll or default value can be checked against the wrong instance where
-  a back-reference means an outer instance of the same name. Same class as
-  the resolveWireName fallback above.
 - **A back-reference can carry its argument by name.** [read, 2026-11-16]
   Deviates from NOM-3. In the Rust uses of `Container (Container Int)`
   (spec-gen-9-6), the use of a tied back-reference to the outer instance
@@ -101,13 +93,6 @@ Plan: /work/plans/nominal-types/PLAN.md, phase A stages P1-P4.
   but the two have different keys. Probably the instance-protected
   back-reference whose arguments pairEval leaves as written, reaching a
   walk that pairs them instead of tying the reference.
-- **A wire back-reference is cut by one relation and named by another.**
-  [read, 2026-11-16] Deviates from NOM-6. Where the wire-form builder ties
-  a back-reference or a `data` back-edge, the declaration it names is
-  chosen by resolveWireName, which matches arguments structurally and falls
-  back to the nearest declaration of the same name. Any change that ties by
-  key must choose the name by key in the same step, or a reference tied to
-  one instance can name another (`Rose#1` for an outer `Rose`).
 - **A native-to-wire node hands its unpacked type out as native.** [read,
   2026-11-17] Deviates from NOM-4. Serialize.hs builds an intrinsic's
   NativeToWireN with the unpacked projection as a plain TypeF, and

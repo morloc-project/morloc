@@ -2060,9 +2060,10 @@ collectRustRecords =
   -- covers every instantiation with generic parameters, so it is one entry
   -- per general name. A user-mapped struct may be a template the user
   -- wrote, whose instantiations each need their own marshalling, so those are
-  -- one entry per (name, arguments, fields). 'generateRustStructs' keeps one
+  -- one entry per (name, form, arguments, fields): a newtype's form over a
+  -- record keeps the record's name. 'generateRustStructs' keeps one
   -- impl for instantiations that render the same struct.
-  nubBy ((==) `on` \(FV gv cv, ps, rs) -> (gv, if cv == CV "struct" then ([], []) else (ps, rs)))
+  nubBy ((==) `on` \(FV gv cv, ps, rs) -> (gv, cv, if cv == CV "struct" then ([], []) else (ps, rs)))
     . concatMap (runIdentity . foldWithSerialManifoldM fm)
   where
     fm = defaultValue {opFoldWithNativeExprM = ne, opFoldWithSerialExprM = se}

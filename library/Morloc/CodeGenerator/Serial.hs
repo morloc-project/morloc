@@ -814,20 +814,22 @@ findPackerInstances = do
 -- will be done through subtyping.
 -- | Put a name, with its arguments, on the head of a serializer.
 --
--- The wire form is unchanged -- only which name the schema reports it under.
--- A newtype that declares a per-language form of its own is not simply its
--- wire parent natively, so the serializer built from the parent has to carry
--- the newtype's name for the concrete-type hint to reach the pool, and the
--- newtype's arguments for its form to be spelled at them.
+-- The wire form is unchanged. A newtype that declares a per-language form
+-- of its own is not simply its wire parent natively, so the serializer built
+-- from the parent carries the newtype's name, for the concrete-type hint to
+-- reach the pool, and the newtype's arguments, for its form to be spelled
+-- at them. The back-references inside a renamed record or `data` node that
+-- meant it are renamed with it, so they still name their declaration
+-- (NOM-6); a back-reference keeps the name of the node it was cut at.
 setSerialHead :: FVar -> [ArgF] -> SerialAST -> SerialAST
 setSerialHead v ps s = case s of
   SerialPack _ x -> SerialPack v x
   SerialList _ d x -> SerialList v d x
   SerialTuple _ xs -> SerialTuple v xs
-  SerialObject o _ _ rs -> SerialObject o v ps rs
+  SerialObject o (FV g _) qs rs -> renameRefs g qs (SerialObject o v ps rs)
   SerialEnum _ _ ns -> SerialEnum v ps ns
-  SerialVariant _ _ c as -> SerialVariant v ps c as
-  SerialRec _ _ -> SerialRec v ps
+  SerialVariant (FV g _) qs c as -> renameRefs g qs (SerialVariant v ps c as)
+  SerialRec _ _ -> s
   SerialReal _ -> SerialReal v
   SerialFloat32 _ -> SerialFloat32 v
   SerialFloat64 _ -> SerialFloat64 v
@@ -852,6 +854,27 @@ setSerialHead v ps s = case s of
   -- A closure carries no name of its own; its wire form is signature
   -- independent, so there is no head to rename.
   SerialClosure _ _ -> s
+  where
+    -- References to the old head, by its name and arguments or by name
+    -- alone, under the renamed node and outside any nested node that
+    -- redeclares it.
+    renameRefs g qs node = case node of
+      SerialObject o w ws rs -> SerialObject o w ws [(k, go x) | (k, x) <- rs]
+      SerialVariant w ws c as -> SerialVariant w ws c [(n, map go xs) | (n, xs) <- as]
+      _ -> node
+      where
+        keys = map argFKey qs
+        go x = case x of
+          SerialRec (FV g' _) rs | g' == g, null rs || map argFKey rs == keys -> SerialRec v ps
+          SerialObject _ (FV g' _) ws _ | g' == g, map argFKey ws == keys -> x
+          SerialVariant (FV g' _) ws _ _ | g' == g, map argFKey ws == keys -> x
+          SerialObject o w ws rs -> SerialObject o w ws [(k, go y) | (k, y) <- rs]
+          SerialVariant w ws c as -> SerialVariant w ws c [(n, map go ys) | (n, ys) <- as]
+          SerialPack w (p, y) -> SerialPack w (p, go y)
+          SerialList w d y -> SerialList w d (go y)
+          SerialTuple w ys -> SerialTuple w (map go ys)
+          SerialOptional w y -> SerialOptional w (go y)
+          _ -> x
 
 -- | A declared column is checked against the block's Arrow type at every
 -- crossing, and only the flat primitives have an Arrow form the runtime
@@ -969,6 +992,9 @@ makeSerialAST m lang t0 = do
 
   ast <- makeSerialAST' gscope typepackers Set.empty t0
   checkNested m lang ast
+  case danglingRefs [] ast of
+    [] -> return ()
+    (n : _) -> MM.throwCompilerBug ("a wire schema refers back to" <+> squotes (pretty n) <+> "outside any declaration of it:" <+> pretty t0)
   when (langName lang `notElem` ["cpp", "rust"] && any generatedObject (serialSubtrees ast)) $
     MM.throwCompilerBug ("a" <+> pretty lang <+> "record has the form of a record a compiled pool marshals itself")
   return ast
@@ -976,6 +1002,12 @@ makeSerialAST m lang t0 = do
     -- A compiled pool marshals a `data` value in its own node, which
     -- converts the arms' fields (GEN-14).
     convertsOwn = langName lang `elem` ["cpp", "rust"]
+    -- A declared type is on the path when an instance with its key is, so
+    -- one instance reached through two spellings is declared once (NOM-6).
+    -- A type that is not declared is matched as written.
+    onPath t anc = case declaredKey t of
+      Just k -> any ((== Just k) . declaredKey) (Set.toList anc)
+      Nothing -> Set.member t anc
     -- The @Set TypeF@ is the types on the path above this one, and it is
     -- what a self-reference is recognised against. The whole type is the
     -- key, not its name: two instantiations of one parameterized type are
@@ -1007,7 +1039,7 @@ makeSerialAST m lang t0 = do
     -- pointer: the slot's width does not depend on the arms, so the width
     -- equation has a finite fixed point.
     makeSerialAST' gscope typepackers anc t@(VariantF v ps as)
-      | Set.member t anc = return (SerialRec v ps)
+      | onPath t anc = return (SerialRec v ps)
       | otherwise = do
           anc' <- descend t anc
           as' <- mapM (\(n, fs) -> (,) n <$> mapM (makeSerialAST' gscope typepackers anc') fs) as
@@ -1516,7 +1548,7 @@ makeSerialAST m lang t0 = do
     -- a distinct type even when it shares a name, as the inner @P Int@ of
     -- a @P (P Int)@ does.
     makeSerialAST' gscope typepackers anc t@(NamF o n ps rs)
-      | Set.member t anc = return (SerialRec n ps)
+      | onPath t anc = return (SerialRec n ps)
       | otherwise = do
           anc' <- descend t anc
           entries <- mapM (traverse (makeSerialAST' gscope typepackers anc')) rs
@@ -1556,11 +1588,13 @@ handleStorage i anc v a = do
       "The element type of" <+> pretty (AppT (VarT v) [TyA a])
         <+> "refers back to the enclosing type" <+> squotes (pretty n)
         <> "; a stream handle cannot hold the type that holds it"
-  where
-    danglingRefs :: [TVar] -> SerialAST -> [TVar]
-    danglingRefs declared node = case node of
-      SerialRec (FV n _) _ -> [n | n `notElem` declared]
-      _ -> concatMap (danglingRefs (maybe declared (: declared) (serialOuterName node))) (serialKids node)
+
+-- | The names of back-references with no enclosing node of that name: in a
+-- schema, a reference to nothing.
+danglingRefs :: [TVar] -> SerialAST -> [TVar]
+danglingRefs declared node = case node of
+  SerialRec (FV n _) _ -> [n | n `notElem` declared]
+  _ -> concatMap (danglingRefs (maybe declared (: declared) (serialOuterName node))) (serialKids node)
 
 -- | The general name at a type's head, when it has one. Used to match the
 -- one occurrence of a recursive type that carries a name rather than a

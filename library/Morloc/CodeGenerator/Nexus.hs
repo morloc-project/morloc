@@ -51,6 +51,7 @@ import Morloc.CodeGenerator.Docstrings (underOptional)
 import qualified Morloc.CodeGenerator.Infer as Infer
 import Morloc.CodeGenerator.LogTemplate (RenderedRunLog (..), renderRunLogTemplate)
 import Morloc.CodeGenerator.Namespace
+import Morloc.CodeGenerator.Nominal (KeyArg)
 import Morloc.CodeGenerator.Express (recursiveTargetOf)
 import qualified Morloc.CodeGenerator.EnvSpec as ES
 import qualified Morloc.CodeGenerator.IFile as IFile
@@ -1597,7 +1598,7 @@ checkDefault loc ast defaultText =
       , "Default text:"
       , pretty (truncateForMsg defaultText)
       ]
-    Right value -> validateValueAgainstAST loc Map.empty rootPath ast value
+    Right value -> validateValueAgainstAST loc [] rootPath ast value
 
 -- Recurse into the entries of an unrolled record group, matching them
 -- against the SerialObject's per-field parameters.
@@ -1671,10 +1672,11 @@ validateGroup loc r ast = case peelGroupAst ast of
 -- Default-value validation
 -- ----------------------------------------------------------------------
 
--- | Recursive-type env: each entry binds a TVar (a declared type's name)
--- to the SerialAST that declared it, so back-references can resolve.
--- Bound at every named node on entry; consulted at SerialRec.
-type RecEnv = Map.Map TVar SerialAST
+-- | Recursive-type env: the named nodes enclosing the value, innermost
+-- first, with the argument keys each was built at, so a back-reference
+-- resolves as the wire schema's does (Serial.resolveWireName): to the
+-- nearest node of its name and arguments, else the nearest of its name.
+type RecEnv = [(TVar, [KeyArg], SerialAST)]
 
 -- | The "JSON path" within the default value at which validation is
 -- currently happening, used to anchor mismatch diagnostics. Local to
@@ -1794,7 +1796,7 @@ validateValueAgainstAST loc env0 path ast value = case (ast, value) of
         ]
 
   -- Recursive back-reference: look up the binding, recurse.
-  (SerialRec (FV v _) _, _) -> backRef v
+  (SerialRec (FV v _) ps, _) -> backRef v ps
 
   -- SerialUnknown: opaque type, cannot validate; allow anything.
   (SerialUnknown _, _) -> return ()
@@ -1804,11 +1806,16 @@ validateValueAgainstAST loc env0 path ast value = case (ast, value) of
   where
     -- Every named node binds its name for the values beneath it, whatever
     -- kind of declaration it is.
-    env = maybe env0 (\v -> Map.insert v ast env0) (Serial.serialOuterName ast)
+    env = maybe env0 (\v -> (v, outerKeys ast, ast) : env0) (Serial.serialOuterName ast)
+    outerKeys node = case node of
+      SerialPack _ (_, inner) -> outerKeys inner
+      SerialObject _ _ ps _ -> map argFKey ps
+      SerialVariant _ ps _ _ -> map argFKey ps
+      _ -> []
 
-    backRef v = case Map.lookup v env of
-      Just bound -> validateValueAgainstAST loc env path bound value
-      Nothing -> MM.throwCompilerBug $
+    backRef v ps = case [b | (n, ks, b) <- env, n == v, ks == map argFKey ps] <> [b | (n, _, b) <- env, n == v] of
+      (bound : _) -> validateValueAgainstAST loc env path bound value
+      [] -> MM.throwCompilerBug $
         loc <> ": unbound back-reference `" <> pretty (unTVar v)
           <> "` reached default-value validator" <> pathAt path
 

@@ -75,13 +75,16 @@ back-reference that carries its key. It has no other back-reference shape.
 A reference to the same declaration at another key is that other key's
 type. It is expanded, and cut where its own key is on the path.
 
-### NOM-7 Schema text does not change
-Intent: proposed
-Code: conforms 2026-11-16
+### NOM-7 A declared instance is declared once on a path in schema text
+Intent: ruled 2026-11-17
+Tests: spec-nom-7-1
+Code: conforms 2026-11-17
 
-The wire schema a pool writes for a type is byte-identical to the schema
-written before keys were introduced. That covers declaration names,
-`#k` suffixes and back-reference names. Stored files carry their schema,
-and the runtime compares declaration names when it reopens, loads,
-appends to or concatenates them, so a change of text is a compatibility
-break.
+In the wire schema of a type, an instance of a declared type is declared
+at its outermost occurrence on each path, and every later occurrence of
+the same key under it is a back-reference to that declaration, whatever
+spelling reached it. A back-reference names a declaration that encloses
+it. Schema text is not stable across compiler versions: the runtime
+compares the text when it reopens, loads, appends to or concatenates a
+stored file, so a file written by an older build whose schema text
+differs is refused, not read.
