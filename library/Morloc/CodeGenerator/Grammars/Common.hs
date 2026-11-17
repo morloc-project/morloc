@@ -70,6 +70,7 @@ module Morloc.CodeGenerator.Grammars.Common
   , serialClosuresOf
   , serialClosuresOutsideVariants
   , serialClosuresOutsideNodes
+  , convertingVariants
   , fieldConverts
   , closureSerialASTs
   , allSerialASTs
@@ -1267,7 +1268,7 @@ serialClosuresOutsideNodes = go
     go (SerialPack _ (_, s)) = go s
     go (SerialList _ _ s) = go s
     go (SerialTuple _ ss) = concatMap go ss
-    go (SerialObject _ _ _ _ rs) = concatMap (go . snd) rs
+    go (SerialObject _ _ _ rs) = concatMap (go . snd) rs
     go (SerialOptional _ s) = go s
     go _ = []
 
@@ -1278,7 +1279,7 @@ closuresWithin intoVariants = go
     go (SerialPack _ (_, s)) = go s
     go (SerialList _ _ s) = go s
     go (SerialTuple _ ss) = concatMap go ss
-    go (SerialObject _ _ _ _ rs) = concatMap (go . snd) rs
+    go (SerialObject _ _ _ rs) = concatMap (go . snd) rs
     go (SerialOptional _ s) = go s
     go (SerialVariant _ _ _ as) | intoVariants = concatMap (concatMap go . snd) as
     go _ = []
@@ -1304,14 +1305,23 @@ variantWireArms ::
 variantWireArms renderType closureAsts es =
   Map.fromListWith (const id) <$> mapM keyed variants
   where
-    asts = concatMap allSerialASTs es <> concat [cs <> bs <> [r] | (cs, bs, r) <- Map.elems closureAsts]
-    variants = [(sv, as) | sv@(SerialVariant _ _ _ as@(_ : _)) <- concatMap serialVariantsOfAST asts]
+    variants = [(sv, as) | sv@(SerialVariant _ _ _ as@(_ : _)) <- concatMap serialVariantsOfAST (wireASTs closureAsts es)]
     keyed (sv, as) = (\n -> (render n, as)) <$> renderType (unpackedAsTypeF (serialAstToType sv))
+
+-- | The `data` types an occurrence of which has an arm field that does not
+-- write as it is held: a template of one is marshalled at each instance.
+convertingVariants :: Map.Map Int ([SerialAST], [SerialAST], SerialAST) -> [SerialManifold] -> Set.Set TVar
+convertingVariants closureAsts es =
+  Set.fromList [gv | SerialVariant (FV gv _) _ _ as <- concatMap serialVariantsOfAST (wireASTs closureAsts es), any (any fieldConverts . snd) as]
+
+-- | Every serial form a pool writes or reads, its closures' included.
+wireASTs :: Map.Map Int ([SerialAST], [SerialAST], SerialAST) -> [SerialManifold] -> [SerialAST]
+wireASTs closureAsts es = concatMap allSerialASTs es <> concat [cs <> bs <> [r] | (cs, bs, r) <- Map.elems closureAsts]
 
 serialVariantsOfAST :: SerialAST -> [SerialAST]
 serialVariantsOfAST v@(SerialVariant _ _ _ as@(_ : _)) = v : concatMap (concatMap serialVariantsOfAST . snd) as
 serialVariantsOfAST (SerialClosure ins out) = concatMap serialVariantsOfAST (ins <> [out])
-serialVariantsOfAST (SerialObject _ _ _ _ rs) = concatMap (serialVariantsOfAST . snd) rs
+serialVariantsOfAST (SerialObject _ _ _ rs) = concatMap (serialVariantsOfAST . snd) rs
 serialVariantsOfAST (SerialList _ _ s) = serialVariantsOfAST s
 serialVariantsOfAST (SerialTuple _ ss) = concatMap serialVariantsOfAST ss
 serialVariantsOfAST (SerialOptional _ s) = serialVariantsOfAST s
@@ -1467,7 +1477,7 @@ collectPapplySites = runIdentity . surroundFoldSerialManifoldM defaultValue fw
 serialObjectsOfAST :: SerialAST -> [(FVar, [(Key, SerialAST)])]
 serialObjectsOfAST = go
       where
-        go (SerialObject _ v _ _ rs) = (v, rs) : concatMap (go . snd) rs
+        go (SerialObject _ v _ rs) = (v, rs) : concatMap (go . snd) rs
         go (SerialClosure ins out) = concatMap go ins <> go out
         go (SerialList _ _ s) = go s
         go (SerialTuple _ ss) = concatMap go ss

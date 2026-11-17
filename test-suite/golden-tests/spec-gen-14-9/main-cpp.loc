@@ -1,0 +1,50 @@
+-- GEN-14: a `data` type converts its own arms' fields where it is
+-- marshalled, so it is one type on both sides of a crossing: a type with no
+-- parameters whose arm holds a packed `Date`, a template at a packed and at
+-- a plain argument in one pool, an arm holding a user record with a packed
+-- field, and @show of a value that only flows inside the pool. The Rust twin
+-- is main-rust.loc.
+module main (idShape, idOpt, idOptStr, showShape, idDot)
+
+import root-cpp
+
+newtype Date = Str
+type Cpp => Date = "date_t"
+
+instance Packable Str Date where
+  source Cpp from "d.hpp" ("packDate" as pack, "unpackDate" as unpack)
+
+newtype Tenths = Int
+type Cpp => Tenths = "double"
+
+instance Packable Int Tenths where
+  source Cpp from "d.hpp" ("packTenths" as pack, "unpackTenths" as unpack)
+
+record Pair a where
+  fst :: a
+  snd :: a
+record Cpp => Pair a = "pair_t<$1>" a
+
+data Shape = Circle Date | Box Int
+
+data Opt a = Some a | None
+
+data Dot = Dot (Pair Tenths) | Nada
+
+source Cpp from "d.hpp" ("same")
+same :: a -> a
+
+idShape :: Shape -> Shape
+idShape x = same x
+
+idOpt :: Opt Date -> Opt Date
+idOpt x = same x
+
+idOptStr :: Opt Str -> Opt Str
+idOptStr x = same x
+
+showShape :: Shape -> Str
+showShape x = @show (same x)
+
+idDot :: Dot -> Dot
+idDot x = same x

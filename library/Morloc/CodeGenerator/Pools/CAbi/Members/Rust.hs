@@ -1358,7 +1358,7 @@ rustIsLeaf s = isSerializable s && not (rustDivertsClosure s)
 rustRawType :: SerialAST -> RustM MDoc
 rustRawType s
   | rustIsLeaf s = rustTypeOf (unpackedAsTypeF (wireSerialAstToType rustClosureWireLeaf s))
-rustRawType (SerialObject _ (FV gv _) _ _ rs) = do
+rustRawType (SerialObject _ (FV gv _) _ rs) = do
   when (length rs > 8) $
     CMS.modify $ \st -> st {rsErrors = ("the record " <> unTVar gv <> " is rebuilt field by field where it crosses in Rust, which takes at most 8 fields; it has "
       <> T.pack (show (length rs))) : rsErrors st}
@@ -1716,7 +1716,7 @@ translate srcs es0 = do
   (ddefs, dfails) <- dataDefs rustLang (dataNamesIn poolTypes)
   intrAsts <- inPoolSerialASTs rustLang es
   let poolAsts = concatMap allSerialASTs es <> intrAsts <> closureSerialASTs closureAsts
-      recordObjects = Map.map unique (Map.fromListWith (<>) [(g, [rs]) | a <- poolAsts, o@(SerialObject _ (FV g _) _ _ rs) <- serialSubtrees a, generatedObject o])
+      recordObjects = Map.map unique (Map.fromListWith (<>) [(g, [rs]) | a <- poolAsts, o@(SerialObject _ (FV g _) _ rs) <- serialSubtrees a, generatedObject o])
   let st0 = defaultValue {rsRecordObjects = recordObjects, rsGenFailures = gfails, rsGenDefs = gdefs, rsDataDefs = ddefs, rsDataNames = declaredDataNames generalScope, rsDataFailures = dfails, rsRecordUses = uses, rsTypeHomes = typeHomes, rsDebugInfo = debugInfo, rsCScope = mergedRustScope, rsSrcTypeVarMask = srcTypeVarMask, rsSrcMakers = srcMakers, rsLogTemplates = logTemplates, rsStageTable = stageTable, rsPool = pool, rsBuilds = lastBuilds Map.empty Set.empty (rustSeeds pool es0) es0}
       pool = planPool (rustCaps mergedRustScope) es
       ((code, typeFiles), stEnd) = CMS.runState (runReaderT (makeRustCode includeDocs closureAsts closureTable es) emptyOwnEnv) st0
@@ -1925,10 +1925,11 @@ makeRustCode :: [MDoc] -> Map.Map Int ([SerialAST], [SerialAST], SerialAST) -> M
 makeRustCode includeDocs0 closureAsts closureTable0 es = do
   planRustPublic es
   structDocs <- generateRustStructs closureAsts es
-  convHelpers <- CMS.gets rsConvHelpers
-  privateDocs <- (convHelpers <>) <$> privateModuleTree
   enumDocs <- generateRustEnums es
   variantDocs <- generateRustVariants closureAsts es
+  -- Records' and `data` arms' conversion helpers, once both are planned.
+  convHelpers <- CMS.gets rsConvHelpers
+  privateDocs <- (convHelpers <>) <$> privateModuleTree
   stageTable <- CMS.gets rsStageTable
   heads <- papplyHeadSigs (\ins out -> render <$> rustStoredType (typeMof (FunF ins out))) es
   mask <- CMS.gets rsSrcTypeVarMask
@@ -2148,11 +2149,12 @@ collectRustVariants = concatMap (runIdentity . foldWithSerialManifoldM fm)
 generateRustVariants :: Map.Map Int ([SerialAST], [SerialAST], SerialAST) -> [SerialManifold] -> RustM [MDoc]
 generateRustVariants closureAsts es = do
   ddefs0 <- CMS.gets rsDataDefs
-  -- A template some instance of which holds a function is marshalled at
-  -- each instance, whose closures are wired by name; any other once for
-  -- every instance.
+  -- A template some instance of which holds a function, or converts an
+  -- arm's field, is marshalled at each instance, whose conversions are
+  -- wired by name; any other once for every instance.
   let perInstance = Set.fromList ([gv | (FV gv _, _, arms) <- collectRustVariants es, any holdsFunR (concatMap snd arms)]
                       <> [gv | (gv, dd) <- Map.toList ddefs0, any holdsFunR (concatMap snd (ddArms dd))])
+                      <> convertingVariants closureAsts es
   named <- mapM occurrence (collectRustVariants es)
   wireArms <- variantWireArms rustTypeOf closureAsts es
   -- Merged by rendered name: one declaration per name.
@@ -2192,14 +2194,18 @@ generateRustVariants closureAsts es = do
       Left msg -> CMS.modify (\s -> s {rsErrors = msg : rsErrors s}) >> return []
 
     -- A type holding a function gets impls only where it crosses: then each
-    -- arm holding a closure crosses as its wire tuple.
+    -- arm field that does not write as it is held (a closure, a packed
+    -- value) crosses as its wire form, converted in the arm's marshalling
+    -- (GEN-14).
     makeOne perInstance wireArms (FV gv (CV cvText), ps, arms) = do
       userMapped <- rustUserMapsVariant gv cvText
       arms' <- mapM (\(n, ts) -> (,) n <$> mapM rustFieldType ts) arms
       name <- rustTypeOf (VariantF (FV gv (CV cvText)) ps arms)
       let hasFun = any (any containsFunF . snd) arms
+          converting = maybe False (any (any fieldConverts . snd)) wireArms
+          leaf = T.filter (\c -> isAlphaNum c || c == '_') (render name)
       wired <- case wireArms of
-        Just was | hasFun -> mapM (\(c, ts) -> (,,) c ts <$> armWire ts (lookup c was)) arms'
+        Just was | hasFun || converting -> mapM (\(c, ts) -> (,,) c ts <$> armWire ("mlc_arm_" <> pretty leaf <> "_" <> pretty c) ts (lookup c was)) arms'
         _ -> return [(c, ts, Nothing) | (c, ts) <- arms']
       ddefs <- CMS.gets rsDataDefs
       -- A generated template whose declaration has no definition: no
@@ -2240,26 +2246,51 @@ generateRustVariants closureAsts es = do
     userField (OptionalF x) = (\t -> (t, True)) <$> rustFieldType x
     userField t = (\t' -> (t', False)) <$> rustFieldType t
 
-    armWire :: [MDoc] -> Maybe [SerialAST] -> RustM (Maybe RP.ArmWire)
-    armWire ts (Just ss)
-      | Just fields <- zipExact ts [(s, wirePath s) | s <- ss]
-      , paths <- map (snd . snd) fields
-      , any (maybe False pathHasClosure) paths = do
-          reifies <- mapM (traverse renderReify) paths
-          reflects <- mapM (traverse renderReflect) paths
-          wireTs <- mapM (\(t, (s, p)) -> maybe (return t) (const (rustRawType s)) p) fields
-          u <- getCounter
-          let slot v j = v <> "." <> pretty j
-              t = "__morloc_arm" <> pretty u
-          return . Just $
-            RP.ArmWire
-              { RP.awType = RP.tupled1 wireTs
-              , RP.awReify = \v -> RP.tupled1
-                  [maybe (parens (slot v j) <> ".clone()") ($ slot v j) f | (j, f) <- indexed reifies]
-              , RP.awReflect = \v -> "{ let" <+> t <+> "=" <+> v <> ";" <+> RP.tupled1
-                  [maybe (slot t j) ($ slot t j) f | (j, f) <- indexed reflects] <+> "}"
-              }
-    armWire _ _ = return Nothing
+    -- An arm whose fields include one that converts crosses as the tuple of
+    -- its fields' wire forms. A field reached through closures, packers,
+    -- lists, optionals and tuples alone converts in place; one that is not
+    -- written as it is held otherwise converts through a helper pair built
+    -- by the shared engine; a record holding closures converts them in its
+    -- own marshalling.
+    armWire :: MDoc -> [MDoc] -> Maybe [SerialAST] -> RustM (Maybe RP.ArmWire)
+    armWire base ts (Just ss)
+      | Just fields <- zipExact ts ss = do
+          cfg <- loweringConfig
+          convs <- mapIndexedM (conv cfg) fields
+          if all isNothing convs
+            then return Nothing
+            else do
+              u <- getCounter
+              let slot v j = v <> "." <> pretty j
+                  t = "__morloc_arm" <> pretty u
+                  plain ty = (ty, \v -> parens v <> ".clone()", id)
+                  convs' = [maybe (plain ty) id c | ((ty, _), c) <- zipSame fields convs]
+              return . Just $
+                RP.ArmWire
+                  { RP.awType = RP.tupled1 [w | (w, _, _) <- convs']
+                  , RP.awReify = \v -> RP.tupled1 [r (slot v j) | (j, (_, r, _)) <- indexed convs']
+                  , RP.awReflect = \v -> "{ let" <+> t <+> "=" <+> v <> ";" <+> RP.tupled1
+                      [f (slot t j) | (j, (_, _, f)) <- indexed convs'] <+> "}"
+                  }
+      where
+        conv cfg j (_, s)
+          | Just p <- wirePath s = do
+              r <- renderReify p
+              f <- renderReflect p
+              w <- rustRawType s
+              return (Just (w, r, f))
+          | isSerializable s = return Nothing
+          | otherwise = do
+              (w, to, from) <- conversionHelpers cfg (base <> "_" <> pretty (j :: Int)) s
+              return (Just (w, \v -> to <> "(&" <> parens v <> ")", \v -> from <> parens v))
+    armWire _ _ _ = return Nothing
+
+    loweringConfig = do
+      mask <- CMS.gets rsSrcTypeVarMask
+      makers <- CMS.gets rsSrcMakers
+      consumed <- CMS.gets (ppByValue . rsPool)
+      userArms <- CMS.gets rsUserArms
+      return (rustLowerConfig mask makers consumed userArms)
 
 -- | Whether a type holds a function or suspension.
 holdsFunR :: TypeF -> Bool
@@ -2452,29 +2483,37 @@ recordImpls handle gd name params = do
         assembler <- rustReflectClosureAssembler fa
         return (RP.ClosureMarshal {RP.cmReflect = assembler})
       _ -> do
-        ty <- rustFieldType (serialAstToNativeType fa)
-        (toStmts, toE) <- nativeToWire cfg "(*mlc_x)" fa
-        (fromE, fromStmts) <- wireToNative cfg "mlc_r" fa
-        raw <- rustRawType fa
-        let base = "mlc_conv_" <> leaf <> "_" <> pretty (i :: Int) <> "_" <> pretty (j :: Int)
-            to = base <> "_to"
-            from = base <> "_from"
-        CMS.modify $ \st -> st
-          { rsConvHelpers =
-              rsConvHelpers st
-                <> [ vsep
-                       [ "#[allow(non_snake_case, unused_variables)]"
-                       , "fn" <+> to <> "(mlc_x: &" <> ty <> ") ->" <+> raw <+> "{"
-                       , indent 4 (vsep (map RP.printStmt toStmts <> [RP.printExpr toE]))
-                       , "}"
-                       , "#[allow(non_snake_case, unused_variables)]"
-                       , "fn" <+> from <> "(mlc_r:" <+> raw <> ") ->" <+> ty <+> "{"
-                       , indent 4 (vsep (map RP.printStmt fromStmts <> [RP.printExpr fromE]))
-                       , "}"
-                       ]
-                   ]
-          }
+        (raw, to, from) <- conversionHelpers cfg ("mlc_conv_" <> leaf <> "_" <> pretty (i :: Int) <> "_" <> pretty (j :: Int)) fa
         return (RP.PackMarshal raw to from)
+
+-- | A pool helper pair converting a value between its native type and the
+-- form it crosses as, through the shared engine: the crossing type and the
+-- names of the two functions, which take the native value by reference
+-- and the crossing value by value.
+conversionHelpers :: LowerConfig RustM -> MDoc -> SerialAST -> RustM (MDoc, MDoc, MDoc)
+conversionHelpers cfg base fa = do
+  ty <- rustFieldType (serialAstToNativeType fa)
+  (toStmts, toE) <- nativeToWire cfg "(*mlc_x)" fa
+  (fromE, fromStmts) <- wireToNative cfg "mlc_r" fa
+  raw <- rustRawType fa
+  let to = base <> "_to"
+      from = base <> "_from"
+  CMS.modify $ \st -> st
+    { rsConvHelpers =
+        rsConvHelpers st
+          <> [ vsep
+                 [ "#[allow(non_snake_case, unused_variables)]"
+                 , "fn" <+> to <> "(mlc_x: &" <> ty <> ") ->" <+> raw <+> "{"
+                 , indent 4 (vsep (map RP.printStmt toStmts <> [RP.printExpr toE]))
+                 , "}"
+                 , "#[allow(non_snake_case, unused_variables)]"
+                 , "fn" <+> from <> "(mlc_r:" <+> raw <> ") ->" <+> ty <+> "{"
+                 , indent 4 (vsep (map RP.printStmt fromStmts <> [RP.printExpr fromE]))
+                 , "}"
+                 ]
+             ]
+    }
+  return (raw, to, from)
 
 -- | Choose the generated types this pool declares in a file of their own,
 -- one per declaring module (GEN-6), and give them their paths from the crate

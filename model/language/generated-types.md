@@ -209,14 +209,16 @@ language the program generates types in gets its directory, replaced whole;
 Outside a pool a recursive value is released as the language releases it,
 without the pool's bounded-stack drain (STATE-8).
 
-### GEN-14 A generated record converts its own fields, once per write
-Intent: ruled 2026-11-15
-Tests: spec-gen-14-1, spec-gen-14-2, spec-gen-14-3, spec-gen-14-4, spec-gen-14-5, spec-gen-14-6, spec-gen-14-7, spec-gen-14-8
-Code: conforms 2026-11-16
+### GEN-14 A generated record or a `data` type converts its own fields, once per write
+Intent: ruled 2026-11-17
+Tests: spec-gen-14-1, spec-gen-14-2, spec-gen-14-3, spec-gen-14-4, spec-gen-14-5, spec-gen-14-6, spec-gen-14-7, spec-gen-14-8, spec-gen-14-9
+Code: conforms 2026-11-17
 
-In C++ and Rust a generated record is marshalled as it is held: its node
-converts each field that is not written as it is held (a packed value, a
-closure) outside any record it holds, which converts its own. The value
+In C++ and Rust a generated record, and every `data` type, generated or
+user-mapped, is marshalled as it is held: its node converts each field
+(of a record) or arm field (of a `data` type) that is not written as it
+is held (a packed value, a closure) outside any record it holds, which
+converts its own. The value
 that sizing a write converts is the value written, so a packer runs once
 per field per write, and a packer that returns values of different sizes
 cannot overrun the space sized for them. Where a field's conversion

@@ -1755,7 +1755,7 @@ PROPAGATE_ERROR(errmsg)|]
 
     rawDoc :: SerialAST -> CppTranslator MDoc
     rawDoc s | cppIsLeaf s = cppTypeOf (unpackedAsTypeF (wireSerialAstToType cppClosureWireLeaf s))
-    rawDoc (SerialObject _ _ _ _ rs) = do
+    rawDoc (SerialObject _ _ _ rs) = do
       ds <- mapM (rawDoc . snd) rs
       return $ "std::tuple" <> encloseSep "<" ">" "," ds
     rawDoc (SerialPack _ (_, s)) = rawDoc s
@@ -2585,11 +2585,12 @@ generateCppVariants ::
   CppTranslator ([MDoc], [MDoc], [MDoc], [MDoc], [MDoc])
 generateCppVariants cfg closureAsts es = do
   ddefs0 <- CMS.gets translatorDataDefs
-  -- A template some instance of which holds a function is marshalled at
-  -- each instance, whose closures are wired by name; any other once for
-  -- every instance.
+  -- A template some instance of which holds a function, or converts an
+  -- arm's field, is marshalled at each instance, whose conversions are
+  -- wired by name; any other once for every instance.
   let perInstance = Set.fromList ([gv | (FV gv _, _, arms) <- collectCppVariants es, any holdsFunF (concatMap snd arms)]
                       <> [gv | (gv, dd) <- Map.toList ddefs0, any holdsFunF (concatMap snd (ddArms dd))])
+                      <> convertingVariants closureAsts es
   named <- mapM occurrence (collectCppVariants es)
   wireArms <- variantWireArms cppTypeOf closureAsts es
   -- Merged by rendered name: one declaration per name.
@@ -2639,11 +2640,11 @@ generateCppVariants cfg closureAsts es = do
       Right ((v, ps), arms) -> makeOne perInstance (Map.findWithDefault [] name wireArms) (v, ps, arms)
       Left msg -> CMS.modify (\s -> s {translatorErrors = msg : translatorErrors s}) >> return ([], [], [], [], [])
 
-    -- A field holding a closure crosses as its wire form, converted by the
-    -- shared engine.
+    -- A field that does not write as it is held (a closure, a packed value)
+    -- crosses as its wire form, converted by the shared engine (GEN-14).
     wireField :: Int -> SerialAST -> CppTranslator (Maybe CP.WireField)
     wireField i ast
-      | containsClosure ast = do
+      | fieldConverts ast = do
           (toStmts, toE) <- nativeToWire cfg ("obj.f" <> pretty i) ast
           rawT <- maybe (cppTypeOf (unpackedAsTypeF (wireSerialAstToType cppClosureWireLeaf ast))) (return . renderIType)
                     =<< lcRawDeserialAstType cfg ast
@@ -3093,7 +3094,7 @@ generateRecords cfg asts = do
     -- The conversion of each field of one instance that is not written as
     -- it is held: a packed value or a closure outside any nested
     -- generated record, which converts itself.
-    objectConvs obj@(SerialObject _ (FV gv _) _ _ rs) = do
+    objectConvs obj@(SerialObject _ (FV gv _) _ rs) = do
       rt <- cppTypeOf (serialAstToNativeType obj)
       mapIndexedM (\i (k, fa) -> (\d -> (gv, rt, i, k, fa, d)) <$> fieldConv rt i fa) rs
     objectConvs _ = return []

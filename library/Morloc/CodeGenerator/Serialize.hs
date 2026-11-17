@@ -842,18 +842,7 @@ serializeHosted' reg heads argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
       ast <- Serial.makeSerialAST m lang (typeFof dataArg)
       case ast of
         _ | Serial.isSerializable ast -> return [dataArg]
-          -- C++ marshals a sum type holding a packed field arm by arm, with
-          -- the sum type's own serializer, so only its outer type is taken
-          -- apart here.
-          | langName lang == "cpp" && packedVariant ast -> case ast of
-              SerialPack _ (packer, _) ->
-                return [AppExeN (typePackerUnpacked packer) (builtSrcCall (typePackerReverse packer)) [NativeArgExpr dataArg]]
-              _ -> return [dataArg]
           | otherwise -> return [NativeToWireN (Serial.unpackedAsTypeF (Serial.serialAstToType ast)) ast dataArg]
-
-    packedVariant :: SerialAST -> Bool
-    packedVariant a@(SerialVariant {}) = not (Serial.isSerializable a)
-    packedVariant a = any packedVariant (Serial.serialKids a)
 
     -- @load, @read and @unpack return their value in its wire
     -- form, as the runtime decodes it. Where a packer builds the native form

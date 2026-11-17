@@ -1284,7 +1284,7 @@ formListHint elemSchema mLSrc mLForm lcks =
 -- | The wire shape of each field of an unrolled record, keyed by field name.
 groupEntryShapes :: SerialAST -> [(Key, WireShape)]
 groupEntryShapes ast0 = case peelPack ast0 of
-    SerialObject _ _ _ _ kids -> [(k, wireShape child) | (k, child) <- kids]
+    SerialObject _ _ _ kids -> [(k, wireShape child) | (k, child) <- kids]
     _ -> []
   where
     peelPack (SerialPack _ (_, inner)) = peelPack inner
@@ -1533,8 +1533,8 @@ validateArgSpecs i cmdargs asts schemas = do
 -- table cells. An enum is a cell of a record list but not of a table.
 tableFormProblem :: SerialAST -> Maybe Text
 tableFormProblem ast = case ast of
-  SerialObject NamTable _ _ _ cols -> firstBad False cols
-  SerialList _ _ (SerialObject o _ _ _ fields) | o /= NamTable -> firstBad True fields
+  SerialObject NamTable _ _ cols -> firstBad False cols
+  SerialList _ _ (SerialObject o _ _ fields) | o /= NamTable -> firstBad True fields
   SerialList _ _ _ ->
     Just "`@form table` reads a list of records; this list's elements are not records"
   _ -> Just "`@form table` reads a `Table` or a list of records"
@@ -1642,7 +1642,7 @@ altArmFieldSchemas ast0 = case peelPack ast0 of
 
 validateGroup :: MDoc -> RecDocSet -> SerialAST -> MorlocMonad ()
 validateGroup loc r ast = case peelGroupAst ast of
-  Just (SerialObject _ _ _ _ pairs) -> do
+  Just (SerialObject _ _ _ pairs) -> do
     let asts = [(k, sub) | (k, sub) <- pairs]
         entries = recDocEntries r
     CM.forM_ entries $ \(k, entry) -> do
@@ -1773,7 +1773,7 @@ validateValueAgainstAST loc env0 path ast value = case (ast, value) of
   -- front so the diagnostic lists all of them at once (for a large
   -- record, a one-by-one report would force the user through many
   -- recompiles to discover the full set).
-  (SerialObject _ _ _ _ fields, Aeson.Object obj) -> do
+  (SerialObject _ _ _ fields, Aeson.Object obj) -> do
     let missing = [k | (k, _) <- fields
                      , not (KM.member (AesonKey.fromText (unKey k)) obj)]
     case missing of
@@ -1794,7 +1794,7 @@ validateValueAgainstAST loc env0 path ast value = case (ast, value) of
         ]
 
   -- Recursive back-reference: look up the binding, recurse.
-  (SerialRec (FV v _) _ _, _) -> backRef v
+  (SerialRec (FV v _) _, _) -> backRef v
 
   -- SerialUnknown: opaque type, cannot validate; allow anything.
   (SerialUnknown _, _) -> return ()
@@ -1918,9 +1918,9 @@ expectedJsonShape = go
     go (SerialList _ _ s)            = "[" <> go s <> "]"
     go (SerialTuple _ ss)            =
       "(" <> MT.intercalate ", " (map go ss) <> ")"
-    go (SerialObject _ _ _ _ fields)   =
+    go (SerialObject _ _ _ fields)   =
       "{ " <> MT.intercalate ", " [unKey k <> ": " <> go v | (k, v) <- fields] <> " }"
-    go (SerialRec (FV (TV name) _) _ _) = name <> " (recursive)"
+    go (SerialRec (FV (TV name) _) _) = name <> " (recursive)"
     go (SerialUnknown _)             = "Unknown"
 
 -- | Numeric range description, used ONLY by 'rangeMismatch' to spell
@@ -2187,7 +2187,7 @@ packedConstructors = Set.fromList . concatMap go
       SerialPack v (_, x) -> generalName v : go x
       SerialList _ _ x -> go x
       SerialTuple _ xs -> concatMap go xs
-      SerialObject _ _ _ _ entries -> concatMap (go . snd) entries
+      SerialObject _ _ _ entries -> concatMap (go . snd) entries
       SerialClosure xs x -> concatMap go xs <> go x
       SerialOptional _ x -> go x
       _ -> []

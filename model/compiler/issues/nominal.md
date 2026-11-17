@@ -15,12 +15,6 @@ Plan: /work/plans/nominal-types/PLAN.md, phase A stages P1-P4.
   fields or arms, built where it is met, and agreement with the definition
   is checked afterwards (GenDefs checkUse) rather than holding by
   construction.
-- **An unpacked occurrence of a type whose form spells no argument carries
-  its native arguments.** [read, 2026-11-17] Deviates from NOM-4. A record or
-  `data` node at the unpacked level carries its unpacked arguments only where
-  its native form spells them (a `$i`, Namespace.hs UnpackedArgs); a
-  generated record is native at both levels, and any other node keeps the
-  native arguments, so its key is its native type's.
 - **Native identity is decided by rendered text.** [read, 2026-11-16]
   Deviates from NOM-5. Merging `data` occurrences, grouping GEN-14
   conversions and deduplicating C++ records all compare rendered native
@@ -114,21 +108,13 @@ Plan: /work/plans/nominal-types/PLAN.md, phase A stages P1-P4.
   back to the nearest declaration of the same name. Any change that ties by
   key must choose the name by key in the same step, or a reference tied to
   one instance can name another (`Rose#1` for an outer `Rose`).
-- **A native-to-wire node hands its unpacked type out as native.**
-  [reproduced, 2026-11-17] Deviates from NOM-4. Serialize.hs (the NativeToWireN
-  built from `unpackedAsTypeF (serialAstToType ast)`) stores the unpacked
-  type as a plain TypeF, and Namespace.typeFof returns it unmarked, so every
-  fold over NativeExprs (Common.poolTypesBy, GenDefs.inPoolSerialASTs `held`,
-  the C++/Rust record and variant collectors) sees an unpacked type as a
-  native one. Generated records stay native inside unpacked types, so
-  serializers are unaffected, but the collectors merge the two levels:
-  `data Shape = Circle Date | Box Int` (Date packed to Str) is refused for
-  an identity function in C++ and Rust ("the `data` type Shape is used with
-  two field types for its constructor Circle: (date_t) and (std::string)",
-  /work/plans/nominal-types/scouts/adversarial/c6-data-packed-arm/ctl/min-cpp.loc, min-rust.loc), and in Rust a
-  user-mapped record holding `Shape Date` is refused as two instantiations
-  (/work/plans/nominal-types/scouts/adversarial/c6-data-packed-arm/ctl/holder-rust.loc). Fix: the node carries `Unpacked` and typeFof unwraps it
-  with its level.
+- **A native-to-wire node hands its unpacked type out as native.** [read,
+  2026-11-17] Deviates from NOM-4. Serialize.hs builds an intrinsic's
+  NativeToWireN with the unpacked projection as a plain TypeF, and
+  Namespace.typeFof returns it unmarked. A generated record and a `data` type
+  unpack as their native types, so this matters only for a user-mapped
+  record rebuilt field by field, which C++'s record collectors then see
+  with its unpacked fields under its native key.
 
 - **Intrinsic schemas are derived from the unpacked type of a packed
   argument.** [read, 2026-11-17] Deviates from NOM-4. Serialize.hs
@@ -137,25 +123,6 @@ Plan: /work/plans/nominal-types/PLAN.md, phase A stages P1-P4.
   NativeToWireN, an unpacked type, instead of the node's stored serial form.
   Output is the same today only because re-deriving from the unpacked type
   gives the same schema.
-
-- **C++ intrinsic writers pass a nested packed variant unpacked.** [read,
-  2026-11-17] Deviates from NOM-4. Serialize.hs packDataArg (the C++
-  `packedVariant` branch, about 845-851) peels only an outermost SerialPack;
-  when the packed sum type sits inside another type, @show/@save/@hash hand
-  the native value to a marshaller that does not pack it.
-
-- **A `data` back-reference reaching code generation as a record reference
-  is spelled wrongly.** [read, 2026-11-17; unreachable in the goldens,
-  stdlib and biolib by census: no `data` RecF reaches the renderers] Deviates
-  from NOM-1. Serial cuts (the VarF and AppF cuts, and the general-side
-  builder) give a `data` type's back-reference as SerialRec, projected to
-  RecF, alongside the armless VariantF form. In C++ the RecF renderer's data
-  branch (Cpp.hs about 410) spells a template data type by its bare name,
-  with no arguments; Rust's RecF renderer (Rust.hs about 437-452) has no data
-  case and reports "no Rust form"; and the shared_ptr/Box rule for an
-  optional back-reference (Cpp.hs about 424, Rust.hs about 365) boxes a data
-  RecF where the armless VariantF spelling of the same value gives
-  optional/Option -- one type, two native spellings.
 
 - **A record's self-reference through a type alias is not tied.**
   [reproduced, 2026-11-17] Violates GEN-1. The knot key is the record name
@@ -176,18 +143,10 @@ Plan: /work/plans/nominal-types/PLAN.md, phase A stages P1-P4.
   instantiations of one template render alike, and maybePackableWrap may
   skip a wrap it needs.
 
-- **Keys carry no level and no self-argument.** [read, 2026-11-17]
-  Deviates from NOM-1. Code-generation keys are a declaration's name and
-  argument keys only. An unpacked occurrence whose form spells its
-  arguments has its unpacked arguments' key; any other has its native
-  type's (`data Shape = Circle Date` is one key at both levels, which the
-  `data` merge refuses as two field types for one constructor; so is
-  `data Shape = Dot (Pair Tenths) | Nada` in Rust, `PairT<f64>` against
-  `PairT<i64>`, reproduced 2026-11-17). A
-  self-containing instance's reference carries no arguments, matched to the
-  one instantiation of its name on the path (Serial.hs, the back-reference
-  cut).
-
+- **Keys carry no self-argument.** [read, 2026-11-17] Deviates from NOM-1.
+  A self-containing instance's reference carries no arguments and is
+  matched to the one instantiation of its name on the path (Serial.hs, the
+  back-reference cut).
 - **C++ spells a record with a definition but no struct by its bare name.**
   [read, 2026-11-17] Pools/CAbi/Members/Cpp.hs (the generated-record case of
   the type renderer, about 356) returns the record's morloc name with no
