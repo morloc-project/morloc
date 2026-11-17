@@ -676,10 +676,22 @@ structuralCompound scope knot walk g c = case (g, c) of
     | o1 == o2 && length ts1 == length ts2 && length rs1 == length rs2 ->
         Just $ do
           let fv = FV v1 (CV (unTVar v2))
-          ps <- argsWith2 scope v1 walk ts1 ts2
+          ps <- argsWith2 scope v1 argRef ts1 ts2
           rs <- knotEnter knot (v1, map (expandTransparentAliases scope) ts1) (RecF fv ps) walk (\walk' -> zipWithSameM (\(_, g') (k, c') -> (,) k <$> walk' g' c') rs1 rs2)
           return (NamF o1 fv ps rs)
   _ -> Nothing
+  where
+    -- An argument that is a declared record is a reference to it by name
+    -- and arguments.
+    argRef g' c' = case (g', c') of
+      _ | Just key <- recordKey scope g', Just back <- Map.lookup key (knotAncestors knot) -> pure back
+      (_, NamU NamRecord v2 ts2 _)
+        | Just (v1, ts1) <- declaredRecord g', length ts1 == length ts2 ->
+            RecF (FV v1 (CV (unTVar v2))) <$> argsWith2 scope v1 argRef ts1 ts2
+      _ -> walk g' c'
+    declaredRecord t = case expandTransparentAliases scope t of
+      NamU NamRecord v ts _ | v /= anonRecordVar -> Just (v, ts)
+      _ -> recordKey scope t >>= \(v, ts) -> if T.declaresRecord scope v then Just (v, ts) else Nothing
 
 -- | The records whose fields a walk is inside, by name and general
 -- arguments, each with the reference to it, and how a walk enters one:

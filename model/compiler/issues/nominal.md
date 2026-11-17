@@ -112,3 +112,10 @@ Plan: /work/plans/nominal-types/PLAN.md, phase A stages P1-P4.
   [read, 2026-11-17] Pools/CAbi/Members/Cpp.hs (the generated-record case of
   the type renderer, about 356) returns the record's morloc name with no
   error when the record has a definition but no generated struct.
+- **A field's user-mapped template record hides its parameters from the
+  definition.** [read, 2026-11-17] Possibly violates GEN-9.
+  GenDefs.placeholders (NamF case) descends only into fields, so a field
+  `Tag a` of a user-mapped `$1` form whose `a` no field of Tag holds
+  (phantom) adds no parameter: the enclosing generated record's
+  nativeParams may omit `a` while its field spells `tag_t<T_a>`.
+  Not reproduced.

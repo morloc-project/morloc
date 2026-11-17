@@ -1715,8 +1715,9 @@ translate srcs es0 = do
   -- dispatch wrappers, not by any manifold, so their types are added.
   let poolTypes = concatMap (poolTypesWith serialAstToType) es <> map (unpackedAsTypeF . serialAstToType) (closureSerialASTs closureAsts)
       uses = recordUses poolTypes
-  (gdefs, gfails) <- genDefs rustLang (Set.fromList [g | (g, _, _, _) <- uses])
-  (ddefs, dfails) <- dataDefs rustLang (dataNamesIn poolTypes)
+      named = dataNamesIn poolTypes
+  (gdefs, gfails) <- genDefs rustLang (Set.fromList [g | (g, _, _, _) <- uses] <> named)
+  (ddefs, dfails) <- dataDefs rustLang named
   intrAsts <- inPoolSerialASTs rustLang es
   let poolAsts = concatMap allSerialASTs es <> intrAsts <> closureSerialASTs closureAsts
       recordObjects = Map.map unique (Map.fromListWith (<>) [(g, [rs]) | a <- poolAsts, o@(SerialObject _ (FV g _) _ rs) <- serialSubtrees a, generatedObject o])

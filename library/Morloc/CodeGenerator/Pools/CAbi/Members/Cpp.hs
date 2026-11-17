@@ -676,8 +676,9 @@ translate srcs es = do
       -- dispatch wrappers, not by any manifold, so their types are added.
       poolTypes = concatMap (poolTypesWith serialAstToType) es <> map (unpackedAsTypeF . serialAstToType) (closureSerialASTs closureTable)
       uses = recordUses poolTypes
-  (gdefs, gfails) <- genDefs cppLang (Set.fromList [g | (g, _, _, _) <- uses])
-  (ddefs, dfails) <- dataDefs cppLang (dataNamesIn poolTypes)
+      named = dataNamesIn poolTypes
+  (gdefs, gfails) <- genDefs cppLang (Set.fromList [g | (g, _, _, _) <- uses] <> named)
+  (ddefs, dfails) <- dataDefs cppLang named
   intrAsts <- inPoolSerialASTs cppLang es
   gscope <- MM.getGeneralScope
   let translatorState = defaultValue
@@ -2443,8 +2444,9 @@ cppHandleOf t fields = t <> "(mlc::make_arm<" <> CP.handleFields t <> ">(" <> CP
 collectCppTypes :: (TVar -> Text -> Bool) -> (TVar -> Bool) -> [SerialManifold] -> [TypeF]
 collectCppTypes mapped isData =
   unique
-    . filter concrete
-    . concatMap parts
+    . map snd
+    . filter (uncurry concrete)
+    . concatMap (parts [])
     . concatMap (runIdentity . foldWithSerialManifoldM fm)
   where
     fm = defaultValue {opFoldWithNativeExprM = ne, opFoldWithSerialExprM = se}
@@ -2454,23 +2456,31 @@ collectCppTypes mapped isData =
 
     -- A record's or a variant's type parameters are not descended into:
     -- one may be phantom, naming a type no value carries.
-    parts t = t : case t of
-      AppF _ ts -> concatMap parts (tyArgs ts)
-      NamF _ _ _ rs -> concatMap (parts . snd) rs
-      OptionalF x -> parts x
-      VariantF _ _ as -> concatMap (concatMap parts . snd) as
-      FunF ts r -> concatMap parts (r : ts)
+    -- Each part is paired with the records it is inside of, by name and
+    -- arguments, which a reference back to one of them names.
+    parts anc t = (anc, t) : case t of
+      AppF _ ts -> concatMap (parts anc) (tyArgs ts)
+      NamF _ (FV g _) ps rs -> concatMap (parts ((g, ps) : anc) . snd) rs
+      OptionalF x -> parts anc x
+      VariantF _ _ as -> concatMap (concatMap (parts anc) . snd) as
+      FunF ts r -> concatMap (parts anc) (r : ts)
       _ -> []
 
-    concrete t = case t of
+    concrete anc t = case t of
       VarF (FV (TV v) (CV c)) -> typeName v && (v /= c || mapped (TV v) c)
-      AppF h ts -> concrete h && all concrete (tyArgs ts)
-      NamF _ (FV (TV v) _) ps _ -> typeName v && all concrete (tyArgs ps)
-      OptionalF x -> concrete x
-      VariantF _ ps _ -> all concrete (tyArgs ps)
-      RecF (FV g _) ps | isData g -> all concrete (tyArgs ps)
+      AppF h ts -> concrete anc h && all (concrete anc) (tyArgs ts)
+      NamF _ (FV (TV v) _) ps _ -> typeName v && all (concreteArg anc) (tyArgs ps)
+      OptionalF x -> concrete anc x
+      VariantF _ ps _ -> all (concrete anc) (tyArgs ps)
+      RecF (FV g _) ps | isData g -> all (concrete anc) (tyArgs ps)
       EnumF {} -> True
       _ -> False
+    -- A record argument that is not a reference back to an enclosing
+    -- record is the record at its arguments.
+    concreteArg anc t = case t of
+      RecF (FV g@(TV v) _) ps
+        | not (isData g) && (g, ps) `notElem` anc -> typeName v && all (concreteArg anc) (tyArgs ps)
+      _ -> concrete anc t
     typeName v = case T.uncons (T.takeWhileEnd (/= '.') v) of
       Just (c, _) -> isUpper c
       Nothing -> False

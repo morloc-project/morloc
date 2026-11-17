@@ -19,6 +19,7 @@ module Morloc.TypeEval
   , pairEval
   , recordNestingLimit
   , declaresFormAt
+  , declaresRecord
   , reduceType
   , aliasChain
   , reduceTypeLeaves

@@ -1,0 +1,35 @@
+-- A record's arguments that are themselves records, at every shape they
+-- take: nested directly, inside a list or an optional, and as the
+-- argument of a `data` type.
+module main (box3, boxList, boxOpt, optBox, tagBox)
+
+import root-cpp
+
+record Box a where
+  x :: a
+  y :: a
+
+data Opt a = None | Some a
+
+-- A phantom parameter: Box is spelled in the form but held by no field.
+record Tag a where
+  n :: Int
+record Cpp => Tag a = "tag_t<$1>" a
+
+source Cpp from "same.hpp" ("same")
+same :: a -> a
+
+box3 :: Box (Box (Box Int)) -> Box (Box (Box Int))
+box3 v = same v
+
+boxList :: Box [Box Int] -> Box [Box Int]
+boxList v = same v
+
+boxOpt :: Box ?(Box Int) -> Box ?(Box Int)
+boxOpt v = same v
+
+optBox :: Opt (Box (Box Int)) -> Opt (Box (Box Int))
+optBox v = same v
+
+tagBox :: Tag (Box Int) -> Tag (Box Int)
+tagBox v = same v

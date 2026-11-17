@@ -1,0 +1,27 @@
+-- A record's arguments that are themselves records, at every shape they
+-- take: nested directly, inside a list or an optional, and as the
+-- argument of a `data` type.
+module main (box3, boxList, boxOpt, optBox)
+
+import root-py
+
+record Box a where
+  x :: a
+  y :: a
+
+data Opt a = None | Some a
+
+source Py from "same.py" ("same")
+same :: a -> a
+
+box3 :: Box (Box (Box Int)) -> Box (Box (Box Int))
+box3 v = same v
+
+boxList :: Box [Box Int] -> Box [Box Int]
+boxList v = same v
+
+boxOpt :: Box ?(Box Int) -> Box ?(Box Int)
+boxOpt v = same v
+
+optBox :: Opt (Box (Box Int)) -> Opt (Box (Box Int))
+optBox v = same v

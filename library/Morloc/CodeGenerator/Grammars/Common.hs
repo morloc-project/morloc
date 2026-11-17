@@ -1058,6 +1058,7 @@ recursiveRecord self fields = any (mentions . snd) fields
       AppF h as -> mentions h || any mentions (tyArgs as)
       OptionalF x -> mentions x
       VariantF _ ps as -> any mentions (tyArgs ps) || any (any mentions . snd) as
+      RecF _ ps -> any mentions (tyArgs ps)
       _ -> False
 
 -- | The files of generated type definitions (GEN-6) as a directory tree

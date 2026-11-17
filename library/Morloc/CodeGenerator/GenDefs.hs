@@ -158,7 +158,8 @@ armDataParams dd c = [p | p <- ddNative dd, Set.member p held]
   where
     held = Set.fromList (concatMap (placeholders (== ddVar dd)) (concat [ts | (c', ts) <- ddArms dd, c' == c]))
 
--- | The `data` types named anywhere in the types.
+-- | The `data` types named anywhere in the types, and the records named by
+-- a reference ('RecF').
 dataNamesIn :: [TypeF] -> Set.Set TVar
 dataNamesIn = Set.fromList . concatMap go
   where
