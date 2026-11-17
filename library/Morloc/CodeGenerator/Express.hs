@@ -1092,8 +1092,8 @@ renderConcreteForm gscope (AppF (VarF (FV _ cv)) args) =
   in Macro.expandMacro (unCVar cv) (map (renderConcreteForm gscope) typeArgs)
 renderConcreteForm _ (NamF _ (FV _ cv) _ _) = unCVar cv
 renderConcreteForm gscope (RecF (FV _ cv) args) = Macro.expandMacro (unCVar cv) (map (renderConcreteForm gscope) (tyArgs args))
-renderConcreteForm _ (EnumF (FV _ cv) _ _) = unCVar cv
-renderConcreteForm _ (VariantF (FV _ cv) _ _) = unCVar cv
+renderConcreteForm gscope (EnumF (FV _ cv) args _) = Macro.expandMacro (unCVar cv) (map (renderConcreteForm gscope) (tyArgs args))
+renderConcreteForm gscope (VariantF (FV _ cv) args _) = Macro.expandMacro (unCVar cv) (map (renderConcreteForm gscope) (tyArgs args))
 renderConcreteForm gscope (OptionalF t) = "?" <> renderConcreteForm gscope t
 renderConcreteForm gscope (FunF ts t) =
   "(" <> T.intercalate "," (map (renderConcreteForm gscope) ts) <> ")->" <> renderConcreteForm gscope t
