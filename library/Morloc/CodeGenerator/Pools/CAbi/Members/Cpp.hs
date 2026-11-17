@@ -2585,12 +2585,11 @@ generateCppVariants ::
   CppTranslator ([MDoc], [MDoc], [MDoc], [MDoc], [MDoc])
 generateCppVariants cfg closureAsts es = do
   ddefs0 <- CMS.gets translatorDataDefs
-  -- A template some instance of which holds a function, or converts an
-  -- arm's field, is marshalled at each instance, whose conversions are
-  -- wired by name; any other once for every instance.
+  -- A template some instance of which holds a function is marshalled at
+  -- each instance, whose closures are wired by name; any other once for
+  -- every instance, with an instance whose arm fields convert specialised.
   let perInstance = Set.fromList ([gv | (FV gv _, _, arms) <- collectCppVariants es, any holdsFunF (concatMap snd arms)]
                       <> [gv | (gv, dd) <- Map.toList ddefs0, any holdsFunF (concatMap snd (ddArms dd))])
-                      <> convertingVariants closureAsts es
   named <- mapM occurrence (collectCppVariants es)
   wireArms <- variantWireArms cppTypeOf closureAsts es
   -- Merged by rendered name: one declaration per name.
@@ -2681,6 +2680,7 @@ generateCppVariants cfg closureAsts es = do
           payloadArms = filter (not . null . snd) arms'
           fwds = CP.printMarshalDecls [] name : [CP.printMarshalDecls [] (CP.armName name c) | (c, _) <- payloadArms]
       (armSerials, armLate) <- bimap concat concat . unzip <$> mapM armSerial payloadArms
+      let converts = any (any fieldConverts . snd) asts
       public <- CMS.gets translatorPublic
       ddefs <- CMS.gets translatorDataDefs
       -- A generated template is declared once, from its definition
@@ -2693,7 +2693,7 @@ generateCppVariants cfg closureAsts es = do
       when (not userMapped && T.any (== '$') cvText && Map.notMember gv ddefs) $
         CMS.modify $ \s -> s {translatorErrors = ("the generated C++ type for " <> unTVar gv <> " cannot be defined from its declaration: "
           <> Map.findWithDefault "it does not resolve in C++" gv dfails) : translatorErrors s}
-      return $ if Map.member gv ddefs && not named && Set.notMember gv perInstance
+      return $ if Map.member gv ddefs && not named && Set.notMember gv perInstance && not converts
                  then ([], [], [], [], [])
                  else if userMapped || (Map.member gv public && not named) || (Map.member gv ddefs && not named)
                  then ([], [], fwds, armSerials <> [serial], armLate)
