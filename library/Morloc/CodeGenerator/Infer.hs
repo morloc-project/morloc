@@ -634,7 +634,7 @@ hostConvention :: Lang -> MorlocMonad TypeF -> MorlocMonad TypeF
 hostConvention lang built = do
   t <- built
   reg <- CMS.gets stateLangRegistry
-  return $ case t of
+  return $! case t of
     NamF o v ps rs
       | LR.registryIsCompiled reg (ML.langName lang) ->
           NamF o v ps [(k, eager f) | (k, f) <- rs]
@@ -726,10 +726,12 @@ withModified
   -> MorlocMonad a
   -> MorlocMonad a
 withModified get set f act = do
+  -- Forced, so that neither the saved value nor the restored state holds
+  -- on to the state it was read from.
   old <- CMS.gets get
-  CMS.modify (set (f old))
-  r <- act `MM.catchError` (\e -> CMS.modify (set old) >> MM.throwError e)
-  CMS.modify (set old)
+  old `seq` CMS.modify' (set (f old))
+  r <- act `MM.catchError` (\e -> CMS.modify' (set old) >> MM.throwError e)
+  CMS.modify' (set old)
   return r
 
 -- | Expand the general side one step when the expansion's shape
