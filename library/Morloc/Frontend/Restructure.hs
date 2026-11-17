@@ -1843,14 +1843,17 @@ withDefaultKinds reg general declared = foldr addLang declared langs
       , Just spec <- [Map.lookup def (LR.tkRecordKinds kinds)]
       , let form = LR.ksForm spec
       ]
-    -- A record with a parameter no field uses keeps having no form: the
-    -- form's argument list would then ask every language for a form of
-    -- each phantom argument (issues/records.md).
+    -- A record with a type parameter no field uses keeps having no form:
+    -- the form's argument list would then ask every language for a form of
+    -- each phantom argument (issues/records.md). A parameter of another kind
+    -- has no native form (GEN-9), so it is neither counted nor listed.
     records =
       [ (v, (ps, o, d))
       | (v, (ps, NamU o@NamRecord _ _ rs, d, _, TypedefNewtype) : _) <- Map.toList general
-      , and [any (usesVar p . snd) rs | Left (p, _) <- ps]
+      , and [any (usesVar p . snd) rs | Left (p, KindType) <- ps]
       ]
+    typeParam (Left (_, k)) = k == KindType
+    typeParam (Right _) = True
     usesVar p t = case t of
       VarU p' | p' == p -> True
       _ -> any (usesVar p) (typeUChildren t)
@@ -1858,7 +1861,7 @@ withDefaultKinds reg general declared = foldr addLang declared langs
       let have = Map.findWithDefault Map.empty lang m
           synthesized =
             Map.fromList
-              [ (v, [(ps, NamU o (TV form) (map (either (VarU . fst) id) ps) [], d, True, TypedefAlias)])
+              [ (v, [(ps, NamU o (TV form) [either (VarU . fst) id x | x <- ps, typeParam x] [], d, True, TypedefAlias)])
               | (v, (ps, o, d)) <- records
               , not (Map.member v have)
               ]

@@ -188,16 +188,6 @@ Plan: /work/plans/nominal-types/PLAN.md, phase A stages P1-P4.
   one instantiation of its name on the path (Serial.hs, the back-reference
   cut).
 
-- **A record with a kind parameter gets no definition, and a user-mapped
-  one is then not checked.** [reproduced, 2026-11-17] Deviates from GEN-9.
-  GenDefs.hs atPlaceholders passes a kind parameter as `KiA (KVarT p)`, which
-  weaves to a plain variable with no kind; the declaration fails to resolve,
-  and the failure goes to the generation failures, which nothing reports for
-  a user-mapped record, so its uses pass the agreement check unchecked
-  (`record V (n :: Nat) a` mapped to Rust builds even with a field the check
-  would refuse). Probable fix: pass `KiA (VoidT k)`, the erased value GEN-9
-  describes, and report a failed definition wherever uses are checked.
-  /work/plans/nominal-types/scouts/bugs/2-kind-params.md.
 - **C++ spells a record with a definition but no struct by its bare name.**
   [read, 2026-11-17] Pools/CAbi/Members/Cpp.hs (the generated-record case of
   the type renderer, about 356) returns the record's morloc name with no

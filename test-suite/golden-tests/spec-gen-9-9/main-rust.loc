@@ -1,0 +1,27 @@
+-- GEN-9: the Rust twin of main-cpp.loc.
+module main (trip, tripAny, tripArr)
+
+import root-rust
+
+newtype Arr (n :: Nat) a = List a
+type Rust => (Arr (n :: Nat) a) = "Vec<$1>" n a
+
+record V (n :: Nat) a where
+  xs :: [a]
+  tag :: a
+
+record A (n :: Nat) a where
+  xs :: Arr n a
+  tag :: a
+
+source Rust from "x.rs" ("same")
+same :: a -> a
+
+trip :: V 3 Int -> V 3 Int
+trip = same
+
+tripAny :: V n Int -> V n Int
+tripAny = same
+
+tripArr :: A 2 Int -> A 2 Int
+tripArr = same

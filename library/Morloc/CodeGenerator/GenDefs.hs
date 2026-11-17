@@ -127,7 +127,9 @@ atPlaceholders lang gv ps = do
   return r
   where
     paramArg (p, KindType) = TyA (VarT (placeholder p))
-    paramArg (p, _) = KiA (KVarT p)
+    -- A parameter of another kind has no native form (GEN-9): its erased
+    -- value.
+    paramArg (_, k) = KiA (VoidT k)
 
 -- | A generated parameterized `data` type as its declaration defines it in
 -- one language: its native form, a template over the parameters its arms
