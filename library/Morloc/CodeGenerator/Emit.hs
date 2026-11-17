@@ -15,8 +15,9 @@ module Morloc.CodeGenerator.Emit
   , TranslateFn
   ) where
 
-import Morloc.CodeGenerator.Grammars.Common (invertSerialManifold)
-import Morloc.CodeGenerator.Serial (serialKids)
+import Morloc.CodeGenerator.GenDefs (inPoolSerialASTs)
+import Morloc.CodeGenerator.Grammars.Common (closureSerialASTs, computeClosureSchemas, invertSerialManifold)
+import Morloc.CodeGenerator.Serial (serialAstSources)
 import Morloc.CodeGenerator.Namespace
 import qualified Morloc.Data.Map as Map
 import qualified Morloc.LangRegistry as LR
@@ -72,7 +73,13 @@ emit ::
   [SerialManifold] ->
   MorlocMonad Script
 emit translateFn lang xs = do
-  srcs' <- findSources xs
+  manifoldSrcs <- findSources xs
+  -- The values a pool marshals outside its manifolds' serial forms, a
+  -- closure's captured, bound and result values and those its intrinsics
+  -- and generated records marshal, call packers too.
+  closureAsts <- closureSerialASTs <$> computeClosureSchemas lang xs
+  inPoolAsts <- inPoolSerialASTs lang xs
+  let srcs' = unique (manifoldSrcs <> concatMap serialAstSources (closureAsts <> inPoolAsts))
   xs' <- mapM invert xs
   checkDistinctParameters xs'
   translateFn lang srcs' xs'
@@ -123,19 +130,13 @@ findSources ms = unique <$> concatMapM (foldSerialManifoldM fm) ms
 
     nativeExprSrcs (AppExeN_ _ (SrcCallP _ src) xss) = return (src : concat xss)
     nativeExprSrcs (ExeN_ _ (SrcCallP _ src)) = return [src]
-    nativeExprSrcs (DeserializeN_ _ s xs) = return $ serialASTsources s <> xs
-    nativeExprSrcs (WireToNativeN_ _ s _ _ xss) = return $ serialASTsources s <> concat xss
-    nativeExprSrcs (NativeToWireN_ _ s xs) = return $ serialASTsources s <> xs
+    nativeExprSrcs (DeserializeN_ _ s xs) = return $ serialAstSources s <> xs
+    nativeExprSrcs (WireToNativeN_ _ s _ _ xss) = return $ serialAstSources s <> concat xss
+    nativeExprSrcs (NativeToWireN_ _ s xs) = return $ serialAstSources s <> xs
     nativeExprSrcs e = return $ foldlNE (<>) [] e
 
-    serialExprSrcs (SerializeS_ s xs) = return $ serialASTsources s <> xs
+    serialExprSrcs (SerializeS_ s xs) = return $ serialAstSources s <> xs
     serialExprSrcs e = return $ foldlSE (<>) [] e
-
-    serialASTsources :: SerialAST -> [Source]
-    serialASTsources s = here s <> concatMap serialASTsources (serialKids s)
-      where
-        here (SerialPack _ (p, _)) = [val (typePackerForward p), val (typePackerReverse p)]
-        here _ = []
 
     nativeManifoldSrcs (NativeManifold_ m lang _ e) = (<>) e <$> lookupConstructors lang m
     nativeSerialSrcs (SerialManifold_ m lang _ _ e) = (<>) e <$> lookupConstructors lang m

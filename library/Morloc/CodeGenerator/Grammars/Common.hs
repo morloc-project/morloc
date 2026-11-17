@@ -103,7 +103,7 @@ import qualified Data.Sequence as Seq
 import Data.List.NonEmpty (NonEmpty)
 import GHC.Generics (Generic)
 import Morloc.CodeGenerator.Namespace
-import Morloc.CodeGenerator.Serial (Unpacked, containsFunF, generatedObject, isSerializable, serialAstToNativeType, serialAstToType, makeSerialAST, serialAstToMsgpackSchema, unpackedAsTypeF)
+import Morloc.CodeGenerator.Serial (Unpacked, containsFunF, generatedObject, isSerializable, serialAstToNativeType, serialAstToType, makeSerialAST, makeWireSerialAST, serialAstToMsgpackSchema, unpackedAsTypeF)
 import Morloc.Data.Doc
 import Morloc.Data.Text (Text)
 import qualified Morloc.Data.Text as MT
@@ -1527,9 +1527,9 @@ computeClosureSchemas lang sms =
           resT = case typeFof nm of
             FunF _ out -> out
             other -> other
-      capAsts <- mapM (makeSerialAST i lang) ctxTs
-      bndAsts <- mapM (makeSerialAST i lang) bndTs
-      resAst <- makeSerialAST i lang resT
+      capAsts <- mapM (makeWireSerialAST i lang) ctxTs
+      bndAsts <- mapM (makeWireSerialAST i lang) bndTs
+      resAst <- makeWireSerialAST i lang resT
       return (i, (capAsts, bndAsts, resAst))
 
 -- | A closure table entry rendered as plain wire schemas: captured, bound,

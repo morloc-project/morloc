@@ -43,11 +43,6 @@ on 0.109.0 unless marked.
   tag) cannot be ordered without the element schema. Options: give
   Packable functions the element schema, unpack inner-first, or refuse
   these element types in R sets at compile time.
-- **A recursive record with a Packable field is rebuilt at its top level
-  only.** [read, 2026-10-28] Violates NATIVE-9. A back-reference
-  (`SerialRec`) counts as serializable, so `record Tree where tags :: Set
-  Int; kids :: [Tree]` received or read is rebuilt at its top level and its
-  `kids` are decoded straight into their type, with no packer for `tags`.
 - **A Python Vector built by library code has numpy's default dtype.**
   [read, 2026-10-28] Violates NATIVE-7, which makes a `Vector n U8` uint8
   however the program builds it. vector-py's `map`

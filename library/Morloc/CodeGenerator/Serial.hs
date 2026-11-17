@@ -36,6 +36,7 @@ module Morloc.CodeGenerator.Serial
   , serialAstHasString
   , serialKids
   , serialSubtrees
+  , serialAstSources
   , chooseSerializationCycle
   , isSerializable
   , prettySerialOne
@@ -582,6 +583,10 @@ refersFrom path wire n = case n of
 serialSubtrees :: SerialAST -> [SerialAST]
 serialSubtrees a = a : concatMap serialSubtrees (serialKids a)
 
+-- | The sources of the packers a serial form calls.
+serialAstSources :: SerialAST -> [Source]
+serialAstSources s = concat [[val (typePackerForward p), val (typePackerReverse p)] | SerialPack _ (p, _) <- serialSubtrees s]
+
 -- | The immediate sub-trees of a node.
 serialKids :: SerialAST -> [SerialAST]
 serialKids (SerialPack _ (_, s)) = [s]
@@ -946,21 +951,35 @@ checkNested m lang ast = case concatMap nested (serialKids (unpack ast)) of
     nested s = concatMap nested (serialKids s)
 
 -- | The serial form of a value a pool writes to, or reads from, another
--- process. A recursive value is written by one walk of its type, and a
--- packer below the root of its cycle would have to run at every level the
--- walk re-enters through a back-reference; no pool has such a recursive
--- packer, so the type is refused rather than written unpacked.
+-- process.
 makeWireSerialAST :: Int -> Lang -> TypeF -> MorlocMonad SerialAST
 makeWireSerialAST m lang t = do
   ast <- makeSerialAST m lang t
-  case [v | s <- universe ast, Just v <- [serialOuterName s], any ((== Just v) . backRefName) (universe s), any isPack (concatMap universe (serialKids s))] of
-    (v : _) | any (isJust . backRefName) (universe ast) -> MM.throwSourcedError m $
+  checkLevelPacking m lang ast
+  return ast
+
+-- | A recursive value is marshalled by one walk of its type, re-entering
+-- its cycle through a back-reference, so a packer inside the cycle runs at
+-- every level only if a node that converts itself (GEN-14) holds it there.
+-- Any other packer would run at the top level only, so such a type is
+-- refused rather than marshalled unpacked.
+checkLevelPacking :: Int -> Lang -> SerialAST -> MorlocMonad ()
+checkLevelPacking m lang ast
+  | not (any (isJust . backRefName) (serialSubtrees ast)) = return ()
+  | otherwise =
+  case [v | s <- serialSubtrees ast, not (isPack s), Just v <- [serialOuterName s], any ((== Just v) . backRefName) (serialSubtrees s), any isPack (inCycle s)] of
+    (v : _) -> MM.throwSourcedError m $
       "The recursive type" <+> squotes (pretty v) <+> "holds a value that needs packing in" <+> pretty lang
         <+> "(a Packable instance) inside its cycle, and a recursive value cannot yet be packed"
-        <+> "level by level, so it cannot be passed to or from another process."
-    _ -> return ast
+        <+> "level by level here, so it cannot be passed between processes, saved, loaded or shown."
+    [] -> return ()
   where
-    universe x = x : concatMap universe (serialKids x)
+    inCycle s
+      | convertsItself s = []
+      | otherwise = concatMap unconverted (serialKids s)
+    unconverted x
+      | convertsItself x = []
+      | otherwise = x : concatMap unconverted (serialKids x)
     isPack (SerialPack _ _) = True
     isPack _ = False
 
@@ -980,7 +999,7 @@ noWireForm m lang v = MM.throwSourcedError m $
 schemaOfHeld :: Int -> Lang -> SerialAST -> MorlocMonad DT.Text
 schemaOfHeld m lang ast = case unpack ast of
   SerialUnknown (FV v _) -> noWireForm m lang v
-  _ -> return (render (serialAstToMsgpackSchema ast))
+  _ -> checkLevelPacking m lang ast >> return (render (serialAstToMsgpackSchema ast))
   where
     unpack (SerialPack _ (_, s)) = unpack s
     unpack s = s

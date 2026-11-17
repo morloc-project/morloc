@@ -1,0 +1,25 @@
+-- main-cpp.loc with a user-mapped record: refused.
+module main (trip)
+
+import root-cpp
+
+newtype Tenths = Int
+type Cpp => Tenths = "double"
+
+instance Packable Int Tenths where
+  source Cpp from "pk.hpp" ("packTenths" as pack, "unpackTenths" as unpack)
+
+record Tree where
+  t :: Tenths
+  kids :: [Tree]
+record Cpp => Tree = "tree_t"
+
+source Cpp from "u.hpp" ("mk", "tens")
+mk :: Int -> Tree
+tens :: Tree -> [Int]
+
+trip :: Str -> Int -> <IO> [Int]
+trip p n = do
+  _ <- @save 0 p (mk n)
+  r <- @load p :: <IO> (Try Str Tree)
+  match r | (Ok x) = tens x | (Err e) = []

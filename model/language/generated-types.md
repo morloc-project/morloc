@@ -211,7 +211,7 @@ without the pool's bounded-stack drain (STATE-8).
 
 ### GEN-14 A generated record or a `data` type converts its own fields, once per write
 Intent: ruled 2026-11-17
-Tests: spec-gen-14-1, spec-gen-14-2, spec-gen-14-3, spec-gen-14-4, spec-gen-14-5, spec-gen-14-6, spec-gen-14-7, spec-gen-14-8, spec-gen-14-9
+Tests: spec-gen-14-1, spec-gen-14-2, spec-gen-14-3, spec-gen-14-4, spec-gen-14-5, spec-gen-14-6, spec-gen-14-7, spec-gen-14-8, spec-gen-14-9, spec-gen-14-10, spec-gen-14-11
 Code: conforms 2026-11-17
 
 In C++ and Rust a generated record, and every `data` type, generated or
@@ -227,7 +227,12 @@ two morloc types that are one native type and convert a field differently
 are a compile error naming the type. A packer that fails during a write
 fails the write as any packer failure does. A value holding a generated
 record is written as it is held wherever the pool writes it: a call, a
-stream, a gather or fold, @save and @load. The form `struct` names a
+stream, a gather or fold, @save and @load, and so is one the pool only
+holds. A recursive value is marshalled by one walk that re-enters its
+cycle, so a packed value inside the cycle is converted at every level only
+where such a node holds it; a recursive type with any other packed value in
+its cycle (in Python or R, or in a user-mapped record) is refused wherever a
+value of it would be marshalled. The form `struct` names a
 record the compiler generates; a language with no such kind takes no
 written type of that name.
 

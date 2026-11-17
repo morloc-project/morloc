@@ -1,0 +1,21 @@
+-- A packer at the root of a recursive type, outside its cycle, runs once:
+-- the type is marshalled like any other.
+module main (tripR)
+
+import root-py
+
+record Tree where
+  v :: Int
+  kids :: [Tree]
+
+newtype Rose = Tree
+type Py => Rose = "tuple"
+
+instance Packable Tree Rose where
+  source Py from "root.py" ("packRose" as pack, "unpackRose" as unpack)
+
+source Py from "root.py" ("same")
+same :: a -> a
+
+tripR :: Rose -> Rose
+tripR x = same x

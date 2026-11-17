@@ -81,13 +81,8 @@
   selection never fixes an open class argument (Instances.hs `resolve` returns
   Undetermined first), so only Packable improvement (CLS-20) can reach the REC-4
   check. The message also shows the internal name `record_2`.
-- **GEN-9 does not yet cover recursive types holding packed values or
-  phantom parameters.** [read, 2026-11-16] Violates GEN-9. Every generated
-  record and `data` type a C++ or Rust pool uses is defined from its
-  declaration (GenDefs.hs; a parameterized `data` type is a template over
-  the parameters its arms hold, a recursive parameterized record a generic
-  handle), but a recursive type holding a packed value is refused by the
-  frontend. A record with a parameter no field uses gets no default
+- **GEN-9 does not yet cover phantom parameters.** [read, 2026-11-16]
+  Violates GEN-9. A record with a parameter no field uses gets no default
   form in any language (Restructure.hs withDefaultKinds), so it still needs
   a line such as `record Py => Box a = dict` (spec-cost-15-4); without it
   the error misleads ("gives no cpp implementation of
