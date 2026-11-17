@@ -38,6 +38,7 @@ module Morloc.CodeGenerator.GenDefs
 import qualified Data.Text as T
 import Morloc.CodeGenerator.Infer (concreteNameOf, getScope, heldDataParams, inferConcreteType)
 import Morloc.CodeGenerator.Namespace
+import Morloc.CodeGenerator.Nominal (KeyArg (..), KeyKind (..), KeyType (..), NomKey (..))
 import qualified Data.Set as Set
 import Morloc.CodeGenerator.Grammars.Common (intrinsicValueTypes, poolNativeTypes, recordsInType, serialClosuresOf)
 import Morloc.CodeGenerator.Grammars.Macro (expandMacro)
@@ -214,8 +215,9 @@ instantiate args t
 
 -- | Whether a use is an instance of its record's definition at the
 -- arguments it carries: Nothing, or the first disagreement. Field types are
--- compared by key, which names a declared type by its arguments without its
--- fields, so a recursive record unrolled to any depth, or tied, is one type.
+-- compared by key ('fieldKey'), which names a declared type by its
+-- arguments without its fields, so a recursive record unrolled to any
+-- depth, or tied, is one type.
 checkUse :: GenDef -> [ArgF] -> [(Key, TypeF)] -> Maybe Disagreement
 checkUse gd carried rs = case zipExact [p | (p, KindType) <- gdParams gd] (tyArgs carried) of
   Nothing -> Just (Unmatched "it carries another number of type arguments than the record has parameters")
@@ -223,10 +225,28 @@ checkUse gd carried rs = case zipExact [p | (p, KindType) <- gdParams gd] (tyArg
     | map fst rs /= map fst (gdFields gd) -> Just (Unmatched "its fields are not the declaration's, in the declaration's order")
     | otherwise ->
         firstJust id
-          [ if typeFKey d' == typeFKey u then Nothing else Just (FieldDiffers k d' u)
+          [ if fieldKey d' == fieldKey u then Nothing else Just (FieldDiffers k d' u)
           | ((k, d), (_, u)) <- zipSame (gdFields gd) rs
           , let d' = instantiate (Map.fromList args) d
           ]
+
+-- | A field type's key without its `Nat`, `Str` and erased kind arguments,
+-- which have no native form (GEN-9) and which a use's field, read back from
+-- its serial form, does not keep. A row stays: a table's form keeps it.
+fieldKey :: TypeF -> KeyType
+fieldKey = go . typeFKey
+  where
+    go k = case k of
+      KFun as r -> KFun (map go as) (go r)
+      KApp h as -> KApp (go h) (args as)
+      KOpt x -> KOpt (go x)
+      KNom (NomKey c as) -> KNom (NomKey c (args as))
+      KAnon o rs -> KAnon o [(f, go x) | (f, x) <- rs]
+      _ -> k
+    args as = [a' | Just a' <- map arg as]
+    arg (KTy t) = Just (KTy (go t))
+    arg (KKind (KRow cols)) = Just (KKind (KRow [(c, go t) | (c, t) <- cols]))
+    arg (KKind _) = Nothing
 
 -- | Why a use is not an instance of its record's definition.
 data Disagreement

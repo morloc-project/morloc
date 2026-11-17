@@ -1,0 +1,19 @@
+-- GEN-9: a Nat argument in a field type is erased natively, so a use agrees
+-- with its definition whatever the Nat. A generated record holding
+-- `Arr 3 a`; the Rust twin, a user-mapped record, is main-rust.loc.
+module main (trip)
+
+import root-cpp
+
+newtype Arr (n :: Nat) a = List a
+type Cpp => (Arr (n :: Nat) a) = "std::vector<$1>" n a
+
+record W a where
+  xs :: Arr 3 a
+  tag :: a
+
+source Cpp from "x.hpp" ("same")
+same :: a -> a
+
+trip :: W Int -> W Int
+trip = same

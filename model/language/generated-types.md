@@ -125,7 +125,7 @@ field keeps its declared type (EFF-2).
 
 ### GEN-9 A generated definition follows its declaration
 Intent: ruled 2026-11-16
-Tests: spec-gen-9-1, spec-gen-9-2, spec-gen-9-3, spec-gen-9-4, spec-gen-9-5, spec-gen-9-6, spec-gen-9-7
+Tests: spec-gen-9-1, spec-gen-9-2, spec-gen-9-3, spec-gen-9-4, spec-gen-9-5, spec-gen-9-6, spec-gen-9-7, spec-gen-9-8
 Code: deviates (issues/records.md)
 
 A generated record or `data` type has the declaration's type parameters as

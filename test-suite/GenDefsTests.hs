@@ -47,11 +47,9 @@ treeDef = GenDef (TV "Tree") "struct" [] [(Key "lab", pairOf [int64] int64), (Ke
 listOf :: TypeF -> TypeF
 listOf t = AppF (var (TV "List") (CV "std::vector<$1>")) [TyA t]
 
--- A Tree with no children, and one with a leaf child: one type unrolled
--- to two depths.
-leafTree, deepTree :: TypeF
+-- A Tree occurrence, expanded where the definition refers back to Tree.
+leafTree :: TypeF
 leafTree = NamF NamRecord (FV (TV "Tree") (CV "struct")) [] [(Key "lab", pairOf [int64] int64), (Key "kids", listOf (RecF (FV (TV "Tree") (CV "struct")) []))]
-deepTree = NamF NamRecord (FV (TV "Tree") (CV "struct")) [] [(Key "lab", pairOf [int64] int64), (Key "kids", listOf leafTree)]
 
 -- record Cpp => UPair a = "upair_t<$1>"
 userPairDef :: GenDef
@@ -82,6 +80,10 @@ genDefsTests =
     , testCase "a nested record is compared at its arguments, not its fields" $ do
         checkUse outerDef [TyA str] [(Key "p", pairOf [str] str), (Key "n", int64)] @?= Nothing
         assertDiffers (checkUse outerDef [TyA str] [(Key "p", pairOf [int64] int64), (Key "n", int64)])
+    , testCase "a field's Nat argument is not compared" $
+        let arr k t = AppF (var (TV "Arr") (CV "std::vector<$1>")) [KiA k, TyA t]
+            def = GenDef (TV "W") "struct" [(TV "a", KindType)] [(Key "xs", arr (NatLitK 3) pa)]
+         in checkUse def [TyA int64] [(Key "xs", AppF (var (TV "Arr") (CV "std::vector<$1>")) [TyA int64])] @?= Nothing
     , testCase "an unpacked user-mapped use agrees at its unpacked arguments" $
         checkUse userPairDef [TyA str] [(Key "fst", str), (Key "snd", str)] @?= Nothing
     , testCase "a parameter held at two levels is reported" $

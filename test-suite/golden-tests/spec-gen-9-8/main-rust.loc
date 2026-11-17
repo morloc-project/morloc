@@ -1,0 +1,19 @@
+-- GEN-9: the Rust twin of main-cpp.loc, with the record mapped to a
+-- user's generic struct.
+module main (trip)
+
+import root-rust
+
+newtype Arr (n :: Nat) a = List a
+type Rust => (Arr (n :: Nat) a) = "Vec<$1>" n a
+
+record V a where
+  xs :: Arr 3 a
+  tag :: a
+record Rust => V a = "VT<$1>" a
+
+source Rust from "x.rs" ("same")
+same :: a -> a
+
+trip :: V Int -> V Int
+trip = same
