@@ -196,6 +196,8 @@ data RustState = RustState
   , rsRecordUses :: [RecordUse]
   -- ^ Every occurrence of a generated record in the pool.
   , rsRecordObjects :: Map.Map TVar [[(Key, SerialAST)]]
+  , rsPoolAsts :: [SerialAST]
+  -- ^ every serial form the pool writes or reads, its intrinsics' included
   -- ^ The fields of each generated record at each instance the pool
   -- marshals.
   , rsConvHelpers :: [MDoc]
@@ -241,6 +243,7 @@ instance Defaultable RustState where
       , rsGenFailures = Map.empty
       , rsRecordUses = []
       , rsRecordObjects = Map.empty
+      , rsPoolAsts = []
       , rsConvHelpers = []
       , rsPrivateDecls = []
       }
@@ -1717,7 +1720,7 @@ translate srcs es0 = do
   intrAsts <- inPoolSerialASTs rustLang es
   let poolAsts = concatMap allSerialASTs es <> intrAsts <> closureSerialASTs closureAsts
       recordObjects = Map.map unique (Map.fromListWith (<>) [(g, [rs]) | a <- poolAsts, o@(SerialObject _ (FV g _) _ rs) <- serialSubtrees a, generatedObject o])
-  let st0 = defaultValue {rsRecordObjects = recordObjects, rsGenFailures = gfails, rsGenDefs = gdefs, rsDataDefs = ddefs, rsDataNames = declaredDataNames generalScope, rsDataFailures = dfails, rsRecordUses = uses, rsTypeHomes = typeHomes, rsDebugInfo = debugInfo, rsCScope = mergedRustScope, rsSrcTypeVarMask = srcTypeVarMask, rsSrcMakers = srcMakers, rsLogTemplates = logTemplates, rsStageTable = stageTable, rsPool = pool, rsBuilds = lastBuilds Map.empty Set.empty (rustSeeds pool es0) es0}
+  let st0 = defaultValue {rsRecordObjects = recordObjects, rsPoolAsts = poolAsts, rsGenFailures = gfails, rsGenDefs = gdefs, rsDataDefs = ddefs, rsDataNames = declaredDataNames generalScope, rsDataFailures = dfails, rsRecordUses = uses, rsTypeHomes = typeHomes, rsDebugInfo = debugInfo, rsCScope = mergedRustScope, rsSrcTypeVarMask = srcTypeVarMask, rsSrcMakers = srcMakers, rsLogTemplates = logTemplates, rsStageTable = stageTable, rsPool = pool, rsBuilds = lastBuilds Map.empty Set.empty (rustSeeds pool es0) es0}
       pool = planPool (rustCaps mergedRustScope) es
       ((code, typeFiles), stEnd) = CMS.runState (runReaderT (makeRustCode includeDocs closureAsts closureTable es) emptyOwnEnv) st0
   mapM_ (MM.throwRejected . ("Rust pool:" <+>) . pretty) (rsErrors stEnd)
@@ -2054,8 +2057,8 @@ stageLookupDoc tbl =
 -- one representative field list (from a use site). Unlike the shared recmap
 -- (which only collects @= "struct"@ records), this also collects user-mapped
 -- records (@record Rust => X = "Name"@) so their marshalling impls are emitted.
-collectRustRecords :: [SerialManifold] -> [(FVar, [ArgF], [(Key, TypeF)])]
-collectRustRecords =
+collectRustRecords :: [SerialAST] -> [SerialManifold] -> [(FVar, [ArgF], [(Key, TypeF)])]
+collectRustRecords poolAsts es =
   -- One entry per record; keep the first field list. A generated struct
   -- covers every instantiation with generic parameters, so it is one entry
   -- per general name. A user-mapped struct may be a template the user
@@ -2064,13 +2067,11 @@ collectRustRecords =
   -- record keeps the record's name. 'generateRustStructs' keeps one
   -- impl for instantiations that render the same struct.
   nubBy ((==) `on` \(FV gv cv, ps, rs) -> (gv, cv, if cv == CV "struct" then ([], []) else (ps, rs)))
-    . concatMap (runIdentity . foldWithSerialManifoldM fm)
+    $ concatMap (runIdentity . foldWithSerialManifoldM fm) es <> concatMap crossing poolAsts
   where
     fm = defaultValue {opFoldWithNativeExprM = ne, opFoldWithSerialExprM = se}
-    ne _ (DeserializeN_ t s xs) = return $ xs <> generated (seek t) <> crossing s
-    ne _ (NativeToWireN_ _ s xs) = return $ crossing s <> xs
+    ne _ (DeserializeN_ t _ xs) = return $ xs <> generated (seek t)
     ne efull e = return $ foldlNE (<>) (generated (seek (typeFof efull))) e
-    se _ (SerializeS_ s xs) = return $ crossing s <> xs
     se _ e = return $ foldlSE (<>) [] e
 
     -- A generated record converts its own fields, so any value of it a
@@ -2773,7 +2774,8 @@ rustReservedWords =
 -- emitted for them.
 generateRustStructs :: Map.Map Int ([SerialAST], [SerialAST], SerialAST) -> [SerialManifold] -> RustM [MDoc]
 generateRustStructs closureAsts es = do
-  keyed <- concat <$> mapM makeOne (collectRustRecords es)
+  poolAsts <- CMS.gets rsPoolAsts
+  keyed <- concat <$> mapM makeOne (collectRustRecords poolAsts es)
   -- A Rust struct gets one impl. Instantiations of a user-mapped record that
   -- render the same struct must agree on its fields (they differ only in
   -- parameters no field uses); otherwise one struct cannot hold both.
