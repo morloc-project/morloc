@@ -78,6 +78,18 @@ Plan: /work/plans/nominal-types/PLAN.md, phase A stages P1-P4.
   not equal to the same instance spelled directly, so it unrolls one level
   more before being cut. These go away when declared types are referred to
   by key (phase B).
+- **A record's type arguments are expanded beside the fields that hold
+  them.** [reproduced, 2026-11-17] Deviates from NOM-2's intent. A resolved
+  record carries its arguments fully expanded next to the fields holding the
+  same type, and every walk over both (inference, Infer.hs NamU case;
+  GenDefs recordUses comparing whole trees; Serial.hs unpackedArgsOf;
+  throughNodes) multiplies: a non-recursive `Box a` (two fields) nested 12
+  deep takes about 28 s and 42.8 GB allocated, growing 3x per level, where a
+  parameterless record of the same 4096-leaf shape takes 3.5 s and 3.7 GB.
+  Generated code is the same size either way. A heap profile also shows
+  hundreds of thousands of retained compiler states (314 MB of a 566 MB peak
+  at depth 11), probably lazy state restores (Infer.hs withModified,
+  hostConvention). /work/plans/nominal-types/scouts/bugs/5-cost.md.
 - **Nexus value validation resolves back-references by name only.**
   [read, 2026-11-16] Deviates from NOM-6. Nexus.hs validateValueAgainstAST
   keeps a name-keyed environment of the records on the path (RecEnv) and
@@ -169,16 +181,24 @@ Plan: /work/plans/nominal-types/PLAN.md, phase A stages P1-P4.
   argument keys only. An unpacked occurrence whose form spells its
   arguments has its unpacked arguments' key; any other has its native
   type's (`data Shape = Circle Date` is one key at both levels, which the
-  `data` merge refuses as two field types for one constructor). A
+  `data` merge refuses as two field types for one constructor; so is
+  `data Shape = Dot (Pair Tenths) | Nada` in Rust, `PairT<f64>` against
+  `PairT<i64>`, reproduced 2026-11-17). A
   self-containing instance's reference carries no arguments, matched to the
   one instantiation of its name on the path (Serial.hs, the back-reference
   cut).
 
-- **The agreement of a use with its definition does not instantiate kind
-  parameters.** [speculative, 2026-11-17] Deviates from GEN-9. GenDefs.hs
-  checkUse instantiates only type parameters, so a field spelling a `Nat`
-  parameter (`xs :: Vector n a` in `record V (n :: Nat) a`) keeps the
-  definition's placeholder kind argument and differs by key from every use
-  (`Vector 3 Int`). Rust checks user-mapped records too, so such a record
-  mapped to a Rust form would be refused. Not reproduced: root-rust has no
-  `Vector` form.
+- **A record with a kind parameter gets no definition, and a user-mapped
+  one is then not checked.** [reproduced, 2026-11-17] Deviates from GEN-9.
+  GenDefs.hs atPlaceholders passes a kind parameter as `KiA (KVarT p)`, which
+  weaves to a plain variable with no kind; the declaration fails to resolve,
+  and the failure goes to the generation failures, which nothing reports for
+  a user-mapped record, so its uses pass the agreement check unchecked
+  (`record V (n :: Nat) a` mapped to Rust builds even with a field the check
+  would refuse). Probable fix: pass `KiA (VoidT k)`, the erased value GEN-9
+  describes, and report a failed definition wherever uses are checked.
+  /work/plans/nominal-types/scouts/bugs/2-kind-params.md.
+- **C++ spells a record with a definition but no struct by its bare name.**
+  [read, 2026-11-17] Pools/CAbi/Members/Cpp.hs (the generated-record case of
+  the type renderer, about 356) returns the record's morloc name with no
+  error when the record has a definition but no generated struct.

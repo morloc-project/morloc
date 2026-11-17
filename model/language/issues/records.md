@@ -160,7 +160,12 @@
   Rust reaches rustc as E0425 "cannot find type `V`". Nested at
   `V 3 (V 2 Int)`, Rust instead refuses it ("the Rust struct V is the form
   of a record used at instantiations whose field types differ"). Python
-  builds and round-trips both.
+  builds and round-trips both. Cause [read, 2026-11-17]: Restructure.hs
+  withDefaultKinds counts kind parameters when deciding whether every
+  parameter is used, but its test matches only type variables, and a
+  refined `n` is a Nat variable, so such a record never gets the default
+  `struct` form; even with it, its definition does not resolve (nominal.md,
+  a record with a kind parameter gets no definition).
 - **Rust types the wire form of a user-mapped record received at a packed
   argument as the user's type, which may not hold it.** [reproduced,
   2026-11-16, also at 63042ce29] Violates GEN-14 and GEN-1. The pool reads
