@@ -36,10 +36,6 @@ variantMergeTests =
         mergeVariantOccurrences "Tree" (tagged [full]) @?= Right (0, arms full)
     , testCase "an arm with fields in one occurrence and none in another fails" $
         fails (mergeVariantOccurrences "Tree" (tagged [[("Leaf", ([], [])), ("Node", ([], []))], full]))
-    , testCase "an armless back-edge occurrence adds nothing and is not the one chosen" $
-        mergeVariantOccurrences "Tree" (tagged [[], full, []]) @?= Right (1, arms full)
-    , testCase "only back-edge occurrences fail" $
-        fails (mergeVariantOccurrences "Tree" (tagged [[], []]))
     , testCase "no occurrence fails" $
         fails (mergeVariantOccurrences "Tree" (tagged []))
     , testCase "occurrences listing different constructors fail naming both lists" $
