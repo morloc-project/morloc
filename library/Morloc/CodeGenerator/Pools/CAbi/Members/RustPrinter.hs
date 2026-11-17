@@ -345,15 +345,22 @@ rustFieldIdent k
 
 printStmt :: IStmt -> MDoc
 -- A record reconstructed field-by-field (a custom-packer field crossing a
--- boundary) arrives as `IAssign v (Just t) (IRecordLit _ _ entries)`. Rust
--- needs a NAMED struct literal, unlike C++'s positional aggregate init: the
--- struct name is the assignment's already-resolved type `t` (the recmap lookup
--- happened at lowering) and the field names are the entry keys. This mirrors
--- the in-pool `lcRecordConstructor` output. Nested non-serializable records are
+-- boundary) arrives as `IAssign v (Just t) (IRecordLit _ _ entries)`. Built
+-- for the wire, its type is a tuple and the literal is positional, in schema
+-- order; built native, it is the record's struct, which takes a NAMED struct
+-- literal: the struct name is the assignment's already-resolved type `t` and
+-- the field names are the entry keys. Nested non-serializable records are
 -- each hoisted to their own IAssign, so an IRecordLit's field values are never
 -- themselves bare record literals.
-printStmt (IAssign v (Just t) (IRecordLit _ _ entries)) =
-  "let" <+> pretty v <> ":" <+> rustType t <+> "=" <+> ctorName t <+> recordLit entries <> ";"
+printStmt (IAssign v (Just t) (IRecordLit _ _ entries))
+  | isTupleType t = "let" <+> pretty v <> ":" <+> rustType t <+> "=" <+> tupleLit [printExpr e | (_, e) <- entries] <> ";"
+  | otherwise = "let" <+> pretty v <> ":" <+> rustType t <+> "=" <+> ctorName t <+> recordLit entries <> ";"
+  where
+    isTupleType (ITyNamed name _) = "(" `T.isPrefixOf` name
+    isTupleType (ITyTuple _) = True
+    isTupleType _ = False
+    tupleLit [x] = "(" <> x <> ",)"
+    tupleLit xs = tupled xs
 printStmt (IAssign v Nothing e) = "let" <+> pretty v <+> "=" <+> printExpr e <> ";"
 printStmt (IAssign v (Just t) e) = "let" <+> pretty v <> ":" <+> rustType t <+> "=" <+> printExpr e <> ";"
 printStmt (IMapList resultVar resultType iterVar collection bodyStmts yieldExpr) =

@@ -152,11 +152,3 @@
   is misleading: Box is a generated record. Rust reaches rustc as E0425.
   Fix in /work/plans/nominal-types: key the instance with a self-argument
   (NOM-1) and name it as a self-containing `data` instance is named.
-- **Rust types the wire form of a user-mapped record received at a packed
-  argument as the user's type, which may not hold it.** [reproduced,
-  2026-11-16, also at 63042ce29] Violates GEN-14 and GEN-1. The pool reads
-  the wire value into the user's type at the unpacked arguments, which works
-  for a template whose parameter takes the unpacked type (`PairT<i64>` for
-  `Pair Tenths`, spec-gen-9-2) but not for a type with a fixed form over a
-  record (`newtype Point = Pair Tenths`, `type Rust => Point = "PointT"`:
-  rustc E0308, `PointT` holds f64). C++ builds it (spec-native-1-15).

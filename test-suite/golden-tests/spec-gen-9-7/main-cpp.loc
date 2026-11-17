@@ -1,7 +1,7 @@
 -- GEN-9: a user-mapped record holding a generated record holding a packed
--- parameter. C++ builds the unpacked value as a tuple, so it crosses in both
--- directions; Rust spells it by the user's form, which cannot hold the
--- generated record native inside it, so main-rust.loc is refused.
+-- parameter crosses in both directions: its unpacked value is a tuple, so
+-- its own field is unpacked while the generated record inside stays native.
+-- The Rust twin is main-rust.loc.
 module main (mkU, readU, tripU, bumpU)
 import root-cpp
 

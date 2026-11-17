@@ -1347,13 +1347,48 @@ closureArgPush i ast sid = do
   return $ "let __morloc_own" <> pretty i <> " = ::rustmorloc::Packet::new(" <> RP.putValueFn <> "(" <> v <> ", " <> RP.schemaRef sid <> "));"
     <+> "__morloc_pkts.push(__morloc_own" <> pretty i <> ".as_ptr());"
 
+-- | Decoded straight into its native type, as the shared engine leaves it.
+rustIsLeaf :: SerialAST -> Bool
+rustIsLeaf s = isSerializable s && not (rustDivertsClosure s)
+
+-- | The Rust type of a value as it crosses. What is decoded straight into
+-- its type is that type; a record rebuilt field by field is a tuple of its
+-- fields' crossing types, since the record's own form names its native
+-- fields (as in C++). The runtime's tuple codec takes at most 8 slots.
+rustRawType :: SerialAST -> RustM MDoc
+rustRawType s
+  | rustIsLeaf s = rustTypeOf (unpackedAsTypeF (wireSerialAstToType rustClosureWireLeaf s))
+rustRawType (SerialObject _ (FV gv _) _ _ rs) = do
+  when (length rs > 8) $
+    CMS.modify $ \st -> st {rsErrors = ("the record " <> unTVar gv <> " is rebuilt field by field where it crosses in Rust, which takes at most 8 fields; it has "
+      <> T.pack (show (length rs))) : rsErrors st}
+  ds <- mapM (rustRawType . snd) rs
+  return $ case ds of
+    [d] -> "(" <> d <> ",)"
+    _ -> tupled ds
+rustRawType (SerialPack _ (_, s)) = rustRawType s
+rustRawType (SerialList v d e) = do
+  inner <- rustRawType e
+  rustTypeOf (AppF (VarF v) (maybe [] (pure . KiA) d ++ [TyA (rawTypeF inner)]))
+rustRawType (SerialTuple v es) = do
+  inners <- mapM rustRawType es
+  rustTypeOf (AppF (VarF v) (map (TyA . rawTypeF) inners))
+rustRawType (SerialOptional _ e) = do
+  inner <- rustRawType e
+  return $ "::std::option::Option<" <> inner <> ">"
+rustRawType s = rustTypeOf (unpackedAsTypeF (wireSerialAstToType rustClosureWireLeaf s))
+
+-- | An already rendered Rust type, as a type to render inside another.
+rawTypeF :: MDoc -> TypeF
+rawTypeF d = VarF (FV (TV "raw") (CV (render d)))
+
 -- | How a proxy reads the result of its call off the wire: a value is got
 -- as it is; a closure arrives as its origin tuple and is reflected into a
 -- proxy of its own, so a closure may return a closure across pools.
 closureResultRead :: SerialAST -> MDoc -> Int -> RustM MDoc
 closureResultRead out call sid = do
   fromWire <- reflectInPlace out
-  wireT <- rustTypeOf (unpackedAsTypeF (wireSerialAstToType rustClosureWireLeaf out))
+  wireT <- rustRawType out
   let got = "::rustmorloc::get_value::<" <> wireT <> ">(" <> call <> ", " <> RP.schemaRef sid <> ")"
   return $ maybe got ($ got) fromWire
 
@@ -1960,7 +1995,7 @@ makeClosureDispatch closureAsts closureTable es = do
       argReflects <- mapM reflectInPlace (capAsts <> bndAsts)
       argTs <- sequence
         [ if isJust refl
-            then rustTypeOf (unpackedAsTypeF (wireSerialAstToType rustClosureWireLeaf ast))
+            then rustRawType ast
             else rustTypeOf t
         | (t, ast, refl) <- zip3Same (ctxTs <> bndTs) (capAsts <> bndAsts) argReflects
         ]
@@ -2024,18 +2059,29 @@ collectRustRecords =
   -- covers every instantiation with generic parameters, so it is one entry
   -- per general name. A user-mapped struct may be a template the user
   -- wrote, whose instantiations each need their own marshalling, so those are
-  -- one entry per (name, arguments, fields): a native use and an unpacked
-  -- one carry the same arguments but are spelled at different ones
-  -- (GEN-9). 'generateRustStructs' keeps one impl for instantiations that
-  -- render the same struct.
+  -- one entry per (name, arguments, fields). 'generateRustStructs' keeps one
+  -- impl for instantiations that render the same struct.
   nubBy ((==) `on` \(FV gv cv, ps, rs) -> (gv, if cv == CV "struct" then ([], []) else (ps, rs)))
     . concatMap (runIdentity . foldWithSerialManifoldM fm)
   where
     fm = defaultValue {opFoldWithNativeExprM = ne, opFoldWithSerialExprM = se}
-    ne _ (DeserializeN_ t s xs) = return $ xs <> seek t <> seek (unpackedAsTypeF (serialAstToType s))
-    ne efull e = return $ foldlNE (<>) (seek (typeFof efull)) e
-    se _ (SerializeS_ s xs) = return $ seek (unpackedAsTypeF (serialAstToType s)) <> xs
+    ne _ (DeserializeN_ t s xs) = return $ xs <> generated (seek t) <> crossing s
+    ne _ (NativeToWireN_ _ s xs) = return $ crossing s <> xs
+    ne efull e = return $ foldlNE (<>) (generated (seek (typeFof efull))) e
+    se _ (SerializeS_ s xs) = return $ crossing s <> xs
     se _ e = return $ foldlSE (<>) [] e
+
+    -- A generated record converts its own fields, so any value of it a
+    -- pool holds may be marshalled as itself (GEN-14).
+    generated = filter (\(FV _ cv, _, _) -> cv == CV "struct")
+
+    -- The records a crossing value is marshalled through: those in the
+    -- parts decoded straight into their native types, and in closure
+    -- signatures. A user-mapped record rebuilt field by field crosses as a
+    -- tuple, so it has no marshaller of its own there.
+    crossing s = concat [seek (serialAstToNativeType x) | x <- serialSubtrees s, rustIsLeaf x || isClosure x]
+    isClosure (SerialClosure _ _) = True
+    isClosure _ = False
 
     seek :: TypeF -> [(FVar, [ArgF], [(Key, TypeF)])]
     -- A table is an Arrow record batch with its own marshalling in
@@ -2201,7 +2247,7 @@ generateRustVariants closureAsts es = do
       , any (maybe False pathHasClosure) paths = do
           reifies <- mapM (traverse renderReify) paths
           reflects <- mapM (traverse renderReflect) paths
-          wireTs <- mapM (\(t, (s, p)) -> maybe (return t) (const (rustTypeOf (unpackedAsTypeF (wireSerialAstToType rustClosureWireLeaf s)))) p) fields
+          wireTs <- mapM (\(t, (s, p)) -> maybe (return t) (const (rustRawType s)) p) fields
           u <- getCounter
           let slot v j = v <> "." <> pretty j
               t = "__morloc_arm" <> pretty u
@@ -2409,7 +2455,7 @@ recordImpls handle gd name params = do
         ty <- rustFieldType (serialAstToNativeType fa)
         (toStmts, toE) <- nativeToWire cfg "(*mlc_x)" fa
         (fromE, fromStmts) <- wireToNative cfg "mlc_r" fa
-        raw <- rustTypeOf (unpackedAsTypeF (wireSerialAstToType rustClosureWireLeaf fa))
+        raw <- rustRawType fa
         let base = "mlc_conv_" <> leaf <> "_" <> pretty (i :: Int) <> "_" <> pretty (j :: Int)
             to = base <> "_to"
             from = base <> "_from"
@@ -2494,9 +2540,8 @@ planRustPublic es = do
         | gv <- Set.toList (Set.union public (Map.keysSet recDefs)), Just h <- [Map.lookup gv homes]
         , c <- typeHomePath h, Set.member c rustUnspellable || not (isIdentifier c)
         ]
-  -- Every use of a record is an instance of its definition (GEN-9): a
-  -- user-mapped record's unpacked use is spelled by its form too, so a
-  -- use whose fields its form cannot hold has no Rust type.
+  -- Every use of a generated record is an instance of its definition
+  -- (GEN-9). A user-mapped record's unpacked use is a tuple, never its form.
   uses <- CMS.gets rsRecordUses
   -- A user-mapped template is cut by name as a generated record is.
   let templates = Map.filter (\gd -> gdForm gd /= "struct" && T.any (== '$') (gdForm gd)) defs
@@ -2506,19 +2551,15 @@ planRustPublic es = do
     CMS.modify $ \s -> s {rsErrors = ("the record " <> unTVar gv <> " " <> nestedSelfUseReason) : rsErrors s}
   -- A use refused as nested too deeply is cut by name, and its fields
   -- are not the definition's there.
-  forM_ [x | x@(gv, _) <- disagreements defs uses, gv `notElem` map fst nested] $ \(gv, d) -> do
-    let generated = Map.member gv recDefs
-        subject
-          | generated = "the generated Rust type for " <> unTVar gv
-          | otherwise = "the Rust form of " <> unTVar gv
+  forM_ [x | x@(gv, _) <- disagreements recDefs uses, gv `notElem` map fst nested] $ \(gv, d) -> do
     msg <- case d of
       FieldDiffers k decl use -> do
         dr <- render <$> rustTypeOf decl
         ur <- render <$> rustTypeOf use
-        return (subject <> " cannot serve one of its uses: its field `" <> unKey k
-                 <> "` is `" <> ur <> "` there but `" <> dr <> "` at the use's arguments"
-                 <> if generated then "; give " <> unTVar gv <> " a Rust form, `record Rust => " <> unTVar gv <> " = \"...\"`" else "")
-      Unmatched e -> return (subject <> " cannot serve one of its uses: " <> e)
+        return ("the generated Rust type for " <> unTVar gv <> " cannot serve one of its uses: its field `" <> unKey k
+                 <> "` is `" <> ur <> "` there but `" <> dr <> "` in the definition; give " <> unTVar gv
+                 <> " a Rust form, `record Rust => " <> unTVar gv <> " = \"...\"`")
+      Unmatched e -> return ("the generated Rust type for " <> unTVar gv <> " cannot serve one of its uses: " <> e)
     CMS.modify $ \s -> s {rsErrors = msg : rsErrors s}
 
   CMS.modify $ \s -> s
@@ -2692,7 +2733,6 @@ rustReservedWords =
 -- emitted for them.
 generateRustStructs :: Map.Map Int ([SerialAST], [SerialAST], SerialAST) -> [SerialManifold] -> RustM [MDoc]
 generateRustStructs closureAsts es = do
-  defs <- CMS.gets rsGenDefs
   keyed <- concat <$> mapM makeOne (collectRustRecords es)
   -- A Rust struct gets one impl. Instantiations of a user-mapped record that
   -- render the same struct must agree on its fields (they differ only in
@@ -3194,9 +3234,9 @@ rustLowerConfig mask makers consumed userArms =
     -- in an aggregate travels as its reified `ClosureOrigin` tuple, so the closure
     -- slot is typed as that tuple ('rustClosureWireLeaf'), not the native
     -- `impl Fn`/`Arc<dyn Fn>`. Mirrors the C++ 'cppClosureWireLeaf'.
-    , lcSerialAstType = \s -> Just . toIType <$> rustTypeOf (unpackedAsTypeF (wireSerialAstToType rustClosureWireLeaf s))
+    , lcSerialAstType = \s -> Just . toIType <$> rustRawType s
     , lcDeserialAstType = \s -> Just . toIType <$> rustTypeOf (shallowType s)
-    , lcRawDeserialAstType = \s -> Just . toIType <$> rustTypeOf (unpackedAsTypeF (wireSerialAstToType rustClosureWireLeaf s))
+    , lcRawDeserialAstType = \s -> Just . toIType <$> rustRawType s
     , lcTypeMOf = \_ -> return Nothing
     , lcPackerName = \src -> pretty (srcName src)
     , lcUnpackerName = \src -> pretty (srcName src)
@@ -3204,7 +3244,7 @@ rustLowerConfig mask makers consumed userArms =
     -- `&T` parameter (a Copy arg is passed by value).
     , lcBorrowPackArg = \t -> not (rustIsCopy t)
     , lcRecordAccessor = \_ _ record field -> return (record <> "." <> field)
-    , lcDeserialRecordAccessor = \_ k v -> v <> "." <> pretty k
+    , lcDeserialRecordAccessor = \i _ v -> v <> "." <> pretty i
     , lcTupleAccessor = \i v -> v <> "." <> pretty i
     , lcNewIndex = getCounter
     , lcPrintExpr = RP.printExpr

@@ -1,0 +1,27 @@
+-- NATIVE-1: a Rust record rebuilt field by field crosses as a tuple, which
+-- the runtime takes up to 8 slots, so a 9-field record with a packed field is
+-- refused naming the record.
+module main (readWide)
+
+import root-rust
+
+newtype Tenths = Int
+type Rust => Tenths = "f64"
+
+instance Packable Int Tenths where
+  source Rust from "p.rs" ("packTenths" as pack, "unpackTenths" as unpack)
+
+record Wide where
+  a :: Tenths
+  b :: Int
+  c :: Int
+  d :: Int
+  e :: Int
+  f :: Int
+  g :: Int
+  h :: Int
+  i :: Int
+record Rust => Wide = "WideT"
+
+source Rust from "p.rs" ("readWide")
+readWide :: Wide -> Int

@@ -1,5 +1,4 @@
--- GEN-9: the Rust twin of main-cpp.loc, refused: `UT<i64>` would hold the
--- generated `G2<f64>` the unpacked value carries.
+-- GEN-9: the Rust twin of main-cpp.loc.
 module main (mkU, readU, tripU, bumpU)
 import root-rust
 

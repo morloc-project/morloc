@@ -1,7 +1,7 @@
 -- The same record at instantiations whose fields differ cannot share one
--- non-generic Rust struct; the build is rejected with a message, not a cargo
--- error.
-module main (run)
+-- non-generic Rust struct where both cross the pool boundary; the build is
+-- rejected with a message, not a cargo error.
+module main (run, pair)
 import root-rust
 
 record Box a where
@@ -17,3 +17,6 @@ both :: Box Int -> Box Real -> Int
 
 run :: Int -> Int
 run x = both (mki x) (mks x)
+
+pair :: Int -> (Box Int, Box Real)
+pair x = (mki x, mks x)

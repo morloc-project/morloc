@@ -1,6 +1,5 @@
 -- GEN-9: a user-mapped Rust record with no parameters holding a packed field
--- is refused: its form names the native field, and no Rust type holds the
--- unpacked value.
+-- crosses as a tuple of its unpacked fields; its form holds the native ones.
 module main (h2)
 import root-rust
 
