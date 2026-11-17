@@ -805,21 +805,22 @@ findPackerInstances = do
 -- morloc general type system and many other languages. So the map contains a
 -- list of possible packers. Matching the concrete type name to the right packer
 -- will be done through subtyping.
--- | Put a name on the head of a serializer.
+-- | Put a name, with its arguments, on the head of a serializer.
 --
 -- The wire form is unchanged -- only which name the schema reports it under.
 -- A newtype that declares a per-language form of its own is not simply its
 -- wire parent natively, so the serializer built from the parent has to carry
--- the newtype's name for the concrete-type hint to reach the pool.
-setSerialHead :: FVar -> SerialAST -> SerialAST
-setSerialHead v s = case s of
+-- the newtype's name for the concrete-type hint to reach the pool, and the
+-- newtype's arguments for its form to be spelled at them.
+setSerialHead :: FVar -> [ArgF] -> SerialAST -> SerialAST
+setSerialHead v ps s = case s of
   SerialPack _ x -> SerialPack v x
   SerialList _ d x -> SerialList v d x
   SerialTuple _ xs -> SerialTuple v xs
-  SerialObject o _ ps rs -> SerialObject o v ps rs
-  SerialEnum _ ps ns -> SerialEnum v ps ns
-  SerialVariant _ ps as -> SerialVariant v ps as
-  SerialRec _ ps -> SerialRec v ps
+  SerialObject o _ _ rs -> SerialObject o v ps rs
+  SerialEnum _ _ ns -> SerialEnum v ps ns
+  SerialVariant _ _ as -> SerialVariant v ps as
+  SerialRec _ _ -> SerialRec v ps
   SerialReal _ -> SerialReal v
   SerialFloat32 _ -> SerialFloat32 v
   SerialFloat64 _ -> SerialFloat64 v
@@ -1106,7 +1107,7 @@ makeSerialAST m lang t0 = do
                 AliasIsOther expanded -> do
                   expandedTf <- inferConcreteType lang (Idx m (typeOf expanded))
                   ast <- withAncestorVar anc (\anc' -> makeSerialAST' gscope typepackers anc' expandedTf)
-                  return $ if Map.member gv cscope then setSerialHead v ast else ast
+                  return $ if Map.member gv cscope then setSerialHead v [] ast else ast
                 -- No alias expansion available; fall back to Packable
                 -- lookup the same way this branch did before.
                 AliasIsNone -> case Map.lookup gv typepackers of
@@ -1298,7 +1299,7 @@ makeSerialAST m lang t0 = do
                 -- parent's own name is the right one to report.
                 (cscope, _) <- getScope lang
                 let ast' = if Map.member generalTypeName cscope
-                             then setSerialHead fv ast
+                             then setSerialHead fv ts0 ast
                              else ast
                 return $ applyDimsToList dim ast'
 

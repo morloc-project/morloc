@@ -1066,11 +1066,11 @@ wireToNative cfg = check
       typeM <- lcDeserialAstType cfg tup
       v' <- (render . (helperVar cfg)) <$> lcNewIndex cfg
       return (IVar v', concat befores ++ [IAssign v' typeM (ITupleLit exprs)])
-    construct v (SerialObject namType fv@(FV _ _) _ rs) = do
+    construct v obj@(SerialObject namType fv _ rs) = do
       let accessor = lcDeserialRecordAccessor cfg
       results <- mapIndexedM (\i (k, s) -> check (accessor i k v) s) rs
       let (exprs, befores) = unzip results
-      typeM <- lcDeserialAstType cfg (SerialObject namType fv [] rs)
+      typeM <- lcDeserialAstType cfg obj
       idx <- lcNewIndex cfg
       let v' = render $ (helperVar cfg) idx
       let lit = IRecordLit namType fv (zipSame (map fst rs) exprs)

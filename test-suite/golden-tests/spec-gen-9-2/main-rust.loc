@@ -1,9 +1,10 @@
 -- GEN-9: a user-mapped parameterized record used at a packed argument is
 -- sent at its unpacked argument: `Pair Tenths` holds f64 natively and
 -- crosses as Int, so its unpacked value is PairT<i64> / a tuple of ints,
--- never the native form filled with unpacked values. The C++ twin is
+-- never the native form filled with unpacked values; read from the wire,
+-- it is built from PairT<i64>. The C++ twin is
 -- main-cpp.loc.
-module main (mkTenths)
+module main (mkTenths, sumP)
 import root-rust
 
 newtype Tenths = Int
@@ -17,9 +18,10 @@ record Pair a where
   snd :: a
 record Rust => Pair a = "PairT<$1>" a
 
-source Rust from "um.rs" ("tenthsOf", "dupU")
+source Rust from "um.rs" ("tenthsOf", "dupU", "sumP")
 tenthsOf :: Int -> Tenths
 dupU :: a -> Pair a
+sumP :: Pair Tenths -> Int
 
 mkTenths :: Int -> Pair Tenths
 mkTenths x = dupU (tenthsOf x)

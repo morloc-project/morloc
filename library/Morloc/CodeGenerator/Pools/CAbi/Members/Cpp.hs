@@ -75,7 +75,7 @@ import Morloc.CodeGenerator.Infer (declaredDataNames)
 import Morloc.CodeGenerator.Ownership (LetMode (..), LetPlan (..), OwnCaps (..), PoolPlan (..), byValueIndices, changedSlots, emptyPoolPlan, letMode, letPlan, nativeLets, planPool)
 import Morloc.CodeGenerator.OwnershipCheck (checkManifold)
 import System.Environment (lookupEnv)
-import Morloc.CodeGenerator.GenDefs (DataDef (..), Disagreement (..), GenDef (..), carriedTemplateArgs, nestedSelfUses, nestedSelfUseReason, dataDefs, dataNamesIn, dataUseArgs, nativeDataParams, RecordUse, disagreements, inPoolSerialASTs, placeTypes, genDefs, nativeParam, nativeParams, recordUses, templateArgs, useArgs)
+import Morloc.CodeGenerator.GenDefs (DataDef (..), Disagreement (..), GenDef (..), carriedTemplateArgs, nestedSelfUses, nestedSelfUseReason, dataDefs, dataNamesIn, dataUseArgs, nativeDataParams, RecordUse, disagreements, inPoolSerialASTs, placeTypes, genDefs, nativeParam, nativeParams, recordUses, useArgs)
 import qualified Morloc.CodeGenerator.Platform as P
 import Morloc.CodeGenerator.Serial
   ( serialAstToType
@@ -340,10 +340,10 @@ instance {-# OVERLAPPABLE #-} (HasTypeF e) => HasCppType e where
         let typeTs = tyArgs ts
         ts' <- mapM f typeTs
         return . pretty $ expandMacro (render t') (map render ts')
-      -- A generated record is its definition at the arguments its fields
-      -- bind, never at the ones it carries, which on the unpacked side are
-      -- the native ones (GEN-9).
-      f (NamF _ (FV gc (CV "struct")) _ rs) = do
+      -- A generated record is its definition at the arguments it carries,
+      -- which are native at both levels: the unpacked view keeps a
+      -- generated record native (GEN-14).
+      f (NamF _ (FV gc (CV "struct")) ps _) = do
         records <- CMS.gets translatorRecords
         names <- CMS.gets translatorRecordNames
         defs <- CMS.gets translatorGenDefs
@@ -351,10 +351,10 @@ instance {-# OVERLAPPABLE #-} (HasTypeF e) => HasCppType e where
         case Map.lookup gc records of
           Just gd
             | null (nativeParams gd) -> return q
-            | otherwise -> case templateArgs defs gd rs of
-                Right args -> (q <>) . CP.printRecordTemplate <$> mapM f args
-                Left e -> do
-                  complainT ("the generated C++ type for " <> unTVar gc <> " cannot serve a use: " <> e)
+            | otherwise -> case carriedTemplateArgs gd ps of
+                Just args -> (q <>) . CP.printRecordTemplate <$> mapM f args
+                Nothing -> do
+                  complainT ("a use of the record " <> unTVar gc <> " carries no arguments to spell it at")
                   return q
           Nothing -> do
             -- A record refused in planning has said why.

@@ -27,7 +27,6 @@ module Morloc.CodeGenerator.GenDefs
   , disagreements
   , inPoolSerialASTs
   , placeTypes
-  , templateArgs
   , carriedTemplateArgs
   , nestedSelfUses
   , nestedSelfUseReason
@@ -51,7 +50,7 @@ import Morloc.CodeGenerator.Grammars.Macro (expandMacro)
 import Morloc.CodeGenerator.Serial (makeSerialAST)
 import Morloc.TypeEval (recordNestingLimit)
 import qualified Morloc.Data.Map as Map
-import Morloc.Data.Zip (indexed, indexedFrom, zipExact, zipPrefix, zipSame, zipWithSame)
+import Morloc.Data.Zip (indexed, indexedFrom, zipExact, zipSame, zipWithSame)
 import qualified Morloc.Monad as MM
 import Control.Monad.Except (catchError)
 import Morloc.Data.Doc (pretty, render)
@@ -477,13 +476,6 @@ nestedSelfUseReason =
   "refers to itself and is used where its expansion is cut by name: nested in recursive records more than "
     <> T.pack (show (recordNestingLimit + 1)) <> " levels deep, or at arguments that change with each nesting;"
     <> " this is not generated yet"
-
--- | A use's arguments, in the definition's parameter order.
-templateArgs :: Map.Map TVar GenDef -> GenDef -> [(Key, TypeF)] -> Either T.Text [TypeF]
-templateArgs defs gd rs = do
-  args <- inferArgsPartial defs gd rs
-  mapM (\p -> maybe (Left ("the parameter " <> unTVar p <> " is not determined")) Right (Map.lookup p args)) (nativeParams gd)
-
 
 -- | The serial forms of the values a pool marshals that no manifold's
 -- arguments or result give: those its intrinsics marshal and the generated

@@ -8,24 +8,12 @@ case below fails at build time; reproductions are in
 Fix: spell a native type from its key (NOM-1, NOM-3), never from a serial
 form (nominal-types stage B2b).
 
-- **A user-mapped template record built from the wire drops its arguments.**
-  [reproduced, 2026-11-16, also at 63042ce29] Violates GEN-9. With `record
-  Cpp => Pair a = "pair_t<$1>" a` and a packed `Tenths`, `readP :: Pair Tenths
-  -> Int` emits `pair_t<$1>` (C++ g++ error, Rust parse error): the record
-  is typed from its serial form with an empty argument list
-  (Grammars/Translator/Imperative.hs wireToNative). Passing the carried
-  arguments instead breaks the cases below.
-- **A renamed serial head keeps its parent's arguments, and can leave
-  back-references dangling.** [read, 2026-11-16] Deviates from NOM-6. Where
-  a type with a form of its own over another is serialized (`newtype Point
-  = Pair Tenths`, `type Cpp => Point = "point_t"`), Serial.hs setSerialHead
-  renames the head and keeps the parent's arguments, so containers of it
-  are spelled `point_t<double>` (`[Point]`, `?Point`: g++ "'point_t' is not
-  a template"), and a newtype with a template form of its own is spelled at
-  its parent's arguments (`newtype W a = Pair (a, a)`, `"w_t<$1>" a`:
-  `w_t<std::tuple<double,double>>`). A back-reference inside a renamed head
-  (`^Rose` under a `Forest` head) or a renamed back-reference (`^Tree2` for
-  `newtype Tree2 = Tree`) names no enclosing declaration.
+- **A back-reference under a renamed serial head names no enclosing
+  declaration.** [read, 2026-11-16] Deviates from NOM-6. Where a type with a
+  form of its own over another is serialized (`newtype Tree2 = Tree`),
+  Serial.hs setSerialHead renames the head, so a back-reference inside it
+  (`^Rose` under a `Forest` head) or a renamed back-reference (`^Tree2`)
+  names no enclosing declaration.
 - **An applied alias whose arguments are all kinds is serialized as a bare
   name.** [read, 2026-11-16] Serial.hs makeSerialAST' sends it to the
   bare-name branch, which matches back-references by name only, so nested

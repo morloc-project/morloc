@@ -1,5 +1,5 @@
 -- GEN-9: the C++ twin of main-rust.loc.
-module main (mkTenths)
+module main (mkTenths, sumP)
 import root-cpp
 
 newtype Tenths = Int
@@ -13,9 +13,10 @@ record Pair a where
   snd :: a
 record Cpp => Pair a = "pair_t<$1>" a
 
-source Cpp from "um.hpp" ("tenthsOf", "dupU")
+source Cpp from "um.hpp" ("tenthsOf", "dupU", "sumP")
 tenthsOf :: Int -> Tenths
 dupU :: a -> Pair a
+sumP :: Pair Tenths -> Int
 
 mkTenths :: Int -> Pair Tenths
 mkTenths x = dupU (tenthsOf x)
