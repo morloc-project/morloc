@@ -44,6 +44,7 @@ module Morloc.Namespace.State
   , PackageMeta (..)
   , defaultCppVersion
   , DepSpec (..)
+  , DepImport (..)
   , RegDep (..)
   , LocalDep (..)
   , DepSource (..)
@@ -91,11 +92,13 @@ import Control.Monad.State.Strict (StateT)
 import Control.Monad.Writer.CPS (WriterT)
 import Data.Aeson (FromJSON (..), (.!=), (.:), (.:?))
 import qualified Data.Aeson as Aeson
+import qualified Data.Aeson.Types as AesonTypes
 import Data.Int (Int64)
 import qualified Data.IntMap.Strict as IntMap
 import qualified Data.Map as Map
 import Data.Map.Strict (Map)
 import qualified Data.Set as Set
+import Data.Char (isAlpha, isAlphaNum)
 import Morloc.Namespace.TypeF (TypeF)
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -906,6 +909,19 @@ data PackageMeta
   -- | Per-language lists of paths (relative to module root, glob patterns
   -- allowed) to copy on install.
   , packageExpose :: !ExposeSet
+  -- | The namespaces of the module's dependencies, by language name and
+  -- dependency name (GEN-7): a generated file naming a type under one
+  -- imports what it lists.
+  , packageDepImports :: Map Text (Map Text DepImport)
+  }
+  deriving (Show, Ord, Eq)
+
+-- | A dependency's namespace root (@Eigen@, @numpy@, @ndarray@) and what a
+-- file naming a type under it imports (headers in C++, modules in Python,
+-- nothing in Rust, whose crates are dependencies of the crate).
+data DepImport = DepImport
+  { diNamespace :: !Text
+  , diImports :: ![Text]
   }
   deriving (Show, Ord, Eq)
 
@@ -1257,6 +1273,7 @@ instance Defaultable PackageMeta where
       , packageMorlocDependencies = []
       , packageSetup = Nothing
       , packageExpose = defaultValue
+      , packageDepImports = Map.empty
       }
 
 instance Defaultable ExposeSet where
@@ -1317,7 +1334,40 @@ instance FromJSON PackageMeta where
       <*> parseMorlocDeps o
       <*> o .:? "setup"
       <*> o .:? "expose" .!= defaultValue
+      <*> parseDepImports o
     where
+      -- A dependency's `namespace` and `import` (GEN-7). A C++ dependency
+      -- declares both or neither; a Rust crate's namespace defaults to its
+      -- name with `-` as `_`, and it imports nothing (the crate is a
+      -- dependency of the crate).
+      parseDepImports o' =
+        Map.fromList
+          <$> mapM
+            (\(lang, key) -> (,) lang . Map.mapMaybe id <$> (traverse (uncurry (depImport lang)) . Map.mapWithKey (,) =<< (o' .:? key .!= Map.empty)))
+            [("cpp", "cpp-deps"), ("rust", "rust-deps")]
+      depImport :: Text -> Text -> Aeson.Value -> AesonTypes.Parser (Maybe DepImport)
+      depImport lang name v = do
+        (ns, imp) <- case v of
+          Aeson.Object d -> (,) <$> d .:? "namespace" <*> (d .:? "import" >>= traverse importList)
+          _ -> return (Nothing, Nothing)
+        let checked d
+              | not (isRoot (diNamespace d)) =
+                  fail ("the " <> T.unpack lang <> "-deps entry " <> T.unpack name <> " has namespace " <> show (diNamespace d) <> ", which is not one identifier")
+              | Set.member (diNamespace d) reservedRoots =
+                  fail ("the " <> T.unpack lang <> "-deps entry " <> T.unpack name <> " claims the namespace " <> T.unpack (diNamespace d) <> ", which the language or morloc owns")
+              | otherwise = return (Just d)
+        case lang of
+          "cpp" -> case (ns, imp) of
+            (Just n, Just is@(_ : _)) -> checked (DepImport n is)
+            (Nothing, Nothing) -> return Nothing
+            _ -> fail ("the cpp-deps entry " <> T.unpack name <> " must declare both namespace and import (at least one header), or neither")
+          _ -> checked (DepImport (fromMaybe (T.replace "-" "_" name) ns) [])
+      isRoot n = case T.uncons n of
+        Just (c, _) -> (isAlpha c || c == '_') && T.all (\x -> isAlphaNum x || x == '_') n
+        Nothing -> False
+      reservedRoots = Set.fromList ["std", "core", "alloc", "crate", "self", "super", "mlc", "rustmorloc"]
+      importList (Aeson.String i) = return [i]
+      importList x = Aeson.parseJSON x
       parseMorlocDep = Aeson.withObject "morloc-dependency" $ \od ->
         (,) <$> od Aeson..: "name" <*> (od Aeson..: "git-hash" >>= parseGitHash)
       -- A git-hash must be a quoted string. An unquoted, all-numeric hash is

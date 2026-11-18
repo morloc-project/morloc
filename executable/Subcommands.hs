@@ -36,7 +36,7 @@ import Morloc.CodeGenerator.Grammars.Translator.PseudoCode (pseudocodeSerialMani
 import Morloc.CodeGenerator.Pools.Pool (Member (..))
 import Morloc.CodeGenerator.Pools.CAbi.Pool (memberFor)
 import Morloc.CodeGenerator.Pools.CAbi.Members.Rust (rustStandaloneLib)
-import Morloc.CodeGenerator.Grammars.Common (poolPrivateNoteName)
+import Morloc.CodeGenerator.Grammars.Common (poolPrivateNoteName, typesDependenciesName)
 import Morloc.CodeGenerator.Namespace (SerialManifold (..))
 import qualified Morloc.CodeGenerator.EnvSpec as ES
 import qualified Morloc.CodeGenerator.SystemConfig as MSC
@@ -817,7 +817,11 @@ cmdTypes args config buildConfig = do
       let dir = out MS.</> l
           isNote (MS.File n _) = n == poolPrivateNoteName
           isNote _ = False
-          (notes, ts) = partition isNote ts0
+          isDeps (MS.File n _) = n == typesDependenciesName
+          isDeps _ = False
+          (notes, ts1) = partition isNote ts0
+          (depFiles, ts) = partition isDeps ts1
+          depLines = concat [MT.lines (unCode c) | MS.File _ c <- depFiles]
       sequence_
         [ hPutStrLn stderr $
             "Note: these generated " <> l <> " types are defined only inside the pool and are not written"
@@ -828,7 +832,7 @@ cmdTypes args config buildConfig = do
       when exists (MS.removeDirectoryRecursive dir)
       let paths = concatMap (filesUnder []) [cs | MS.Dir "mlc" ms <- ts, MS.Dir "types" cs <- ms]
           crate =
-            [ MS.File "Cargo.toml" (Code cargoToml)
+            [ MS.File "Cargo.toml" (Code (cargoToml <> (if null depLines then "" else MT.unlines ("" : "[dependencies]" : depLines))))
             , MS.Dir "src" [MS.File "lib.rs" (Code (rustStandaloneLib paths))]
             ]
       (_ MS.:/ tree) <- MS.writeDirectoryWith (\f c -> MT.writeFile f (unCode c)) (out MS.:/ MS.Dir l (ts <> (if l == "rust" then crate else [])))

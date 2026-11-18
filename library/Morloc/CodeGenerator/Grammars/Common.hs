@@ -42,6 +42,7 @@ module Morloc.CodeGenerator.Grammars.Common
   , poolPrivateNote
   , encodeModulePath
   , poolPrivateNoteName
+  , typesDependenciesName
   , poolTypesWith
   , poolNativeTypes
   , intrinsicValueTypes
@@ -940,6 +941,11 @@ poolPrivateNote names = [File poolPrivateNoteName (Code (MT.unlines names))]
 
 poolPrivateNoteName :: String
 poolPrivateNoteName = "pool-private.txt"
+
+-- | The file, beside a language's generated types, listing the
+-- dependencies (TOML lines) a build of them outside the pool needs.
+typesDependenciesName :: String
+typesDependenciesName = "dependencies.toml"
 
 -- | Every occurrence of a record, generated or user-mapped, anywhere in a
 -- type, the arguments a type carries included: its name, those arguments

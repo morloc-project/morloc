@@ -1,0 +1,17 @@
+-- GEN-7: a cpp-deps entry declares both namespace and import, or neither.
+module main (keys)
+
+import root-cpp
+
+newtype Json = Str
+type Cpp => Json = "nlohmann::json"
+
+instance Packable Str Json where
+  source Cpp from "pk.hpp" ("parseJson" as pack, "dumpJson" as unpack)
+
+record Doc where
+  body :: Json
+  tag :: Str
+
+source Cpp from "f.hpp" ("keys")
+keys :: Doc -> Int

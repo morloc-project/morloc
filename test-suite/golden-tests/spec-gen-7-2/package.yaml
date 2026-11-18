@@ -1,0 +1,8 @@
+name: main
+version: 0.0.0
+cpp-deps:
+  nlohmann_json:
+    version: "*"
+    source: conda
+    namespace: nlohmann
+    import: nlohmann/json.hpp

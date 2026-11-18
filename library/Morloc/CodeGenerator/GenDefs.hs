@@ -22,6 +22,8 @@ module Morloc.CodeGenerator.GenDefs
   , recordUses
   , disagreements
   , inPoolSerialASTs
+  , depNamespaces
+  , nameRoot
   , placeTypes
   , carriedTemplateArgs
   , placeholders
@@ -332,6 +334,34 @@ inPoolSerialASTs lang es = concat <$> mapM one (unique (concatMap intrinsicValue
     one t = do
       st0 <- MM.get
       MM.recoverRejected ((\a -> [a | null (serialClosuresOf a)]) <$> makeSerialAST 0 lang t) (MM.put st0 >> return [])
+
+-- | The dependency namespaces a language's generated files may name
+-- (GEN-7), from every module's `package.yaml`: each root with its
+-- dependency's name and what a file naming it imports.
+depNamespaces :: T.Text -> MorlocMonad (Map.Map T.Text (T.Text, [T.Text]))
+depNamespaces lang = do
+  metas <- MM.gets statePackageMeta
+  let claims =
+        Map.fromListWith
+          (<>)
+          [ (diNamespace d, [(name, diImports d)])
+          | meta <- metas
+          , (name, d) <- Map.toList (Map.findWithDefault Map.empty lang (packageDepImports meta))
+          ]
+  Map.traverseWithKey
+    ( \ns cs -> case unique (map fst cs) of
+        [name] -> return (name, unique (concatMap snd cs))
+        names ->
+          MM.throwRejected $
+            "The" <+> pretty lang <+> "dependencies" <+> pretty (T.intercalate ", " names)
+              <+> "all claim the namespace" <+> pretty ns <> ", so a type under it names none of them"
+    )
+    claims
+
+-- | The root of a qualified native name: what precedes its first @::@, a
+-- leading one dropped.
+nameRoot :: T.Text -> T.Text
+nameRoot t = fst (T.breakOn "::" (fromMaybe t (T.stripPrefix "::" t)))
 
 -- | Which generated types a language's files can hold (GEN-10): of the
 -- candidates, those whose fields name only parameters, generated types the

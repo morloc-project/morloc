@@ -75,7 +75,7 @@ import Morloc.CodeGenerator.Infer (declaredDataNames)
 import Morloc.CodeGenerator.Ownership (LetMode (..), LetPlan (..), OwnCaps (..), PoolPlan (..), byValueIndices, changedSlots, emptyPoolPlan, letMode, letPlan, nativeLets, planPool)
 import Morloc.CodeGenerator.OwnershipCheck (checkManifold)
 import System.Environment (lookupEnv)
-import Morloc.CodeGenerator.GenDefs (DataDef (..), Disagreement (..), GenDef (..), carriedTemplateArgs, dataDefs, dataNamesIn, nativeDataParams, RecordUse, disagreements, inPoolSerialASTs, placeTypes, genDefs, nativeParam, nativeParams, recordUses)
+import Morloc.CodeGenerator.GenDefs (DataDef (..), Disagreement (..), GenDef (..), carriedTemplateArgs, dataDefs, dataNamesIn, nativeDataParams, RecordUse, disagreements, inPoolSerialASTs, placeTypes, genDefs, nativeParam, nativeParams, recordUses, depNamespaces, nameRoot)
 import qualified Morloc.CodeGenerator.Platform as P
 import Morloc.CodeGenerator.Serial
   ( serialAstToType
@@ -552,6 +552,8 @@ data CppTranslatorState = CppTranslatorState
   -- ^ Why a generated parameterized `data` type has no definition.
   , translatorIntrinsicAsts :: [SerialAST]
   -- ^ The serial forms of the values the pool's intrinsics marshal.
+  , translatorDepNamespaces :: Map.Map Text (Text, [Text])
+  -- ^ Dependency namespace roots and the headers naming one includes (GEN-7).
   , translatorGenFailures :: Map.Map TVar Text
   -- ^ Why a used record has no definition, for each that has none.
   , translatorRecordUses :: [RecordUse]
@@ -597,6 +599,7 @@ instance Defaultable CppTranslatorState where
       , translatorDataDefs = Map.empty
       , translatorDataFailures = Map.empty
       , translatorIntrinsicAsts = []
+      , translatorDepNamespaces = Map.empty
       , translatorGenFailures = Map.empty
       , translatorRecordUses = []
       , translatorRecords = Map.empty
@@ -676,6 +679,7 @@ translate srcs es = do
   (gdefs, gfails) <- genDefs cppLang (Set.fromList [g | (g, _, _, _) <- uses] <> named)
   (ddefs, dfails) <- dataDefs cppLang named
   intrAsts <- inPoolSerialASTs cppLang es
+  depRoots <- depNamespaces "cpp"
   gscope <- MM.getGeneralScope
   let translatorState = defaultValue
         { translatorEffectLabels = effectMap
@@ -692,6 +696,7 @@ translate srcs es = do
         , translatorDataDefs = ddefs
         , translatorDataFailures = dfails
         , translatorIntrinsicAsts = intrAsts
+        , translatorDepNamespaces = depRoots
         , translatorGenFailures = gfails
         , translatorRecordUses = uses
         }
@@ -2748,6 +2753,7 @@ variantIsUserMapped gv cvText = do
 planPublicTypes :: [SerialManifold] -> CppTranslator [([Text], Text)]
 planPublicTypes es = do
   homes <- CMS.gets translatorTypeHomes
+  depRoots <- CMS.gets translatorDepNamespaces
   cscope <- CMS.gets translatorCScope
   defs <- CMS.gets translatorGenDefs
   let unparameterized gv = case Map.lookup gv cscope of
@@ -2811,7 +2817,7 @@ planPublicTypes es = do
             <> [(gv, concatMap snd arms) | (gv, arms) <- Map.toList varCands, Set.notMember gv drop']
             <> [(gv, concatMap snd (ddArms dd)) | (gv, dd) <- Map.toList dataCands]
             <> [(gv, []) | gv <- Map.keys enumCands]
-      place drop' = placeTypes (headerSafe Set.empty) generated (fieldsOf drop')
+      place drop' = placeTypes (headerSafe (Map.keysSet depRoots) Set.empty) generated (fieldsOf drop')
   _ <- install (place Set.empty)
   -- Every occurrence of a variant must render the same arms for the header
   -- to declare them; one that does not stays in the pool, whose merge
@@ -2850,6 +2856,7 @@ planPublicTypes es = do
   mapM (header homes recCands templates varCands enumCands pathOf handles) (Map.toList byPath)
   where
     header homes recCands templates varCands enumCands pathOf handles (path, gvs) = do
+      depRoots <- CMS.gets translatorDepNamespaces
       let leaf gv = pretty (maybe (unTVar gv) typeHomeName (Map.lookup gv homes))
           enums = [CP.printCppEnumDecl (leaf gv) ns | gv <- gvs, Just ns <- [Map.lookup gv enumCands]]
       ddefs <- CMS.gets translatorDataDefs
@@ -2888,11 +2895,21 @@ planPublicTypes es = do
             , vsep [a | (_, a, _) <- variants]
             ]
           -- Only the standard headers that declare a name the definitions use.
+          declTokens = cppTokens (render (vsep decls))
           stdHeaders =
             Set.toList . Set.fromList $
               [ h
-              | tok <- cppTokens (render (vsep decls))
+              | tok <- declTokens
               , Just h <- [Map.lookup (fromMaybe tok (T.stripPrefix "::" tok)) cppStdHeaderOf]
+              ]
+          -- The headers of the dependencies whose names the definitions use.
+          depHeaders =
+            unique
+              [ i
+              | tok <- declTokens
+              , T.isInfixOf "::" tok
+              , Just (_, is) <- [Map.lookup (nameRoot tok) depRoots]
+              , i <- is
               ]
           body =
             vsep $
@@ -2900,6 +2917,7 @@ planPublicTypes es = do
               , "#pragma once"
               ]
                 <> ["#include <" <> pretty h <> ">" | h <- stdHeaders]
+                <> ["#include <" <> pretty h <> ">" | h <- depHeaders]
                 -- A handle's node comes from the pool's allocator where one is
                 -- available (STATE-8).
                 <> (if null handleGvs then [] else ["#if __has_include(<mlc_rec.hpp>)", "#include <mlc_rec.hpp>", "#endif"])
@@ -2942,13 +2960,15 @@ cppTokens = filter (not . T.null) . T.split (\c -> not (DC.isAlphaNum c || c == 
 
 -- | Whether a rendered field type can be written in a header that comes
 -- before every sourced file: each name in it is a builtin, from the
--- standard library, or one of the given names (generated types and the
--- definition's own parameters).
-headerSafe :: Set.Set Text -> Text -> Bool
-headerSafe known = all ok . cppTokens
+-- standard library, under one of the given dependency namespaces (GEN-7),
+-- or one of the given names (generated types and the definition's own
+-- parameters).
+headerSafe :: Set.Set Text -> Set.Set Text -> Text -> Bool
+headerSafe roots known = all ok . cppTokens
   where
     ok t
       | Set.member t known = True
+      | T.isInfixOf "::" t && Set.member (nameRoot t) roots = True
       | "::mlc::types::" `T.isPrefixOf` t = False
       | "std::" `T.isPrefixOf` t = Set.member t cppStdTypeNames
       | T.all DC.isDigit t = True

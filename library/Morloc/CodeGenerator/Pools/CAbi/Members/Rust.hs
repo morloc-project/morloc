@@ -105,7 +105,7 @@ import qualified Morloc.Version as MV
 import Morloc.Quasi
 import System.Directory (findExecutable)
 import System.FilePath (takeDirectory)
-import Morloc.CodeGenerator.GenDefs (DataDef (..), Disagreement (..), GenDef (..), carriedTemplateArgs, armDataParams, dataDefs, dataNamesIn, nativeDataParams, RecordUse, disagreements, inPoolSerialASTs, placeTypes, genDefs, nativeParam, nativeParams, paramOf, placeholders, recordUses)
+import Morloc.CodeGenerator.GenDefs (DataDef (..), Disagreement (..), GenDef (..), carriedTemplateArgs, armDataParams, dataDefs, dataNamesIn, nativeDataParams, RecordUse, disagreements, inPoolSerialASTs, placeTypes, genDefs, nativeParam, nativeParams, paramOf, placeholders, recordUses, depNamespaces, nameRoot)
 
 -- | Duplicated here (as in Cpp.hs) to match data/lang/rust/lang.yaml. The
 -- second field is the source extension and must match lang.yaml's @extension@
@@ -196,10 +196,12 @@ data RustState = RustState
   , rsRecordUses :: [RecordUse]
   -- ^ Every occurrence of a generated record in the pool.
   , rsRecordObjects :: Map.Map TVar [[(Key, SerialAST)]]
-  , rsPoolAsts :: [SerialAST]
-  -- ^ every serial form the pool writes or reads, its intrinsics' included
   -- ^ The fields of each generated record at each instance the pool
   -- marshals.
+  , rsPoolAsts :: [SerialAST]
+  -- ^ every serial form the pool writes or reads, its intrinsics' included
+  , rsDepNamespaces :: Map.Map Text (Text, [Text])
+  -- ^ Dependency namespace roots, each with its crate (GEN-7).
   , rsConvHelpers :: [MDoc]
   -- ^ The functions converting packed fields of generated records to the
   -- form they are written in and back (GEN-14).
@@ -244,6 +246,7 @@ instance Defaultable RustState where
       , rsRecordUses = []
       , rsRecordObjects = Map.empty
       , rsPoolAsts = []
+      , rsDepNamespaces = Map.empty
       , rsConvHelpers = []
       , rsPrivateDecls = []
       }
@@ -1719,9 +1722,10 @@ translate srcs es0 = do
   (gdefs, gfails) <- genDefs rustLang (Set.fromList [g | (g, _, _, _) <- uses] <> named)
   (ddefs, dfails) <- dataDefs rustLang named
   intrAsts <- inPoolSerialASTs rustLang es
+  depRoots <- depNamespaces "rust"
   let poolAsts = concatMap allSerialASTs es <> intrAsts <> closureSerialASTs closureAsts
       recordObjects = Map.map unique (Map.fromListWith (<>) [(g, [rs]) | a <- poolAsts, o@(SerialObject _ (FV g _) _ rs) <- serialSubtrees a, generatedObject o])
-  let st0 = defaultValue {rsRecordObjects = recordObjects, rsPoolAsts = poolAsts, rsGenFailures = gfails, rsGenDefs = gdefs, rsDataDefs = ddefs, rsDataNames = declaredDataNames generalScope, rsDataFailures = dfails, rsRecordUses = uses, rsTypeHomes = typeHomes, rsDebugInfo = debugInfo, rsCScope = mergedRustScope, rsSrcTypeVarMask = srcTypeVarMask, rsSrcMakers = srcMakers, rsLogTemplates = logTemplates, rsStageTable = stageTable, rsPool = pool, rsBuilds = lastBuilds Map.empty Set.empty (rustSeeds pool es0) es0}
+  let st0 = defaultValue {rsRecordObjects = recordObjects, rsPoolAsts = poolAsts, rsDepNamespaces = depRoots, rsGenFailures = gfails, rsGenDefs = gdefs, rsDataDefs = ddefs, rsDataNames = declaredDataNames generalScope, rsDataFailures = dfails, rsRecordUses = uses, rsTypeHomes = typeHomes, rsDebugInfo = debugInfo, rsCScope = mergedRustScope, rsSrcTypeVarMask = srcTypeVarMask, rsSrcMakers = srcMakers, rsLogTemplates = logTemplates, rsStageTable = stageTable, rsPool = pool, rsBuilds = lastBuilds Map.empty Set.empty (rustSeeds pool es0) es0}
       pool = planPool (rustCaps mergedRustScope) es
       ((code, typeFiles), stEnd) = CMS.runState (runReaderT (makeRustCode includeDocs closureAsts closureTable es) emptyOwnEnv) st0
   mapM_ (MM.throwRejected . ("Rust pool:" <+>) . pretty) (rsErrors stEnd)
@@ -1730,6 +1734,27 @@ translate srcs es0 = do
   home <- MM.asks configHome
   deps <- rustDepsUnion
   localCrates <- rustLocalDeps
+  -- The crates the generated type files name, for a crate built from them
+  -- outside the pool (GEN-7, GEN-13).
+  let typeCrates =
+        unique
+          [ crate
+          | (_, txt) <- typeFiles
+          , line <- T.lines txt
+          , not ("//" `T.isPrefixOf` T.stripStart line)
+          , p <- rustPaths line
+          , T.isInfixOf "::" p
+          , Just (crate, _) <- [Map.lookup (nameRoot p) depRoots]
+          ]
+      -- A local crate is a path dependency, as in the pool's own manifest.
+      depLine crate = case (Map.lookup crate localCrates, Map.lookup crate deps) of
+        (Just path, _) -> [render (pretty crate <> " = { path = " <> dquotes (pretty path) <> " }")]
+        (_, Just v) -> [render (pretty crate <> " = " <> dquotes (pretty v))]
+        _ -> []
+      depsNote =
+        [ File typesDependenciesName (Code (T.unlines (concatMap depLine typeCrates)))
+        | not (null typeCrates)
+        ]
   installDir <- MM.gets stateInstallDir
   profile <- MM.gets stateLangParams >>= either (MM.throwRejected . pretty) return . resolveRustProfile
   -- The pool crate/bin name is derived from the build LOCATION (unique per
@@ -1773,7 +1798,7 @@ translate srcs es0 = do
                 , File "build.rs" (Code (render buildRs))
                 , Dir "src" [File "main.rs" (Code poolSrc), File "__morloc_user_ops.rs" (Code rustUserOps)]
                 ]
-            ] <> [Dir "types" [Dir "rust" (typeFileTree ".rs" typeFiles <> privateNote)] | not (null typeFiles && null privateNote)]
+            ] <> [Dir "types" [Dir "rust" (typeFileTree ".rs" typeFiles <> privateNote <> depsNote)] | not (null typeFiles && null privateNote)]
             )
       , scriptMake = maker
       }
@@ -2548,6 +2573,7 @@ conversionHelpers cfg base fa = do
 -- the crate root under its pool-local name (GEN-10).
 planRustPublic :: [SerialManifold] -> RustM ()
 planRustPublic es = do
+  depRoots <- CMS.gets rsDepNamespaces
   homes <- CMS.gets rsTypeHomes
   ddefs <- CMS.gets rsDataDefs
   cscope <- CMS.gets rsCScope
@@ -2588,7 +2614,7 @@ planRustPublic es = do
       nameAll pub = Map.mapWithKey (\gv _ -> if Set.member gv pub then maybe (privateName gv) qualifiedRustName (Map.lookup gv homes) else privateName gv) recDefs
       generated = Set.unions [Map.keysSet recDefs, Set.fromList [gv | (FV gv _, _, _) <- allVars], Set.fromList [gv | (FV gv _, _, _) <- allEnums]]
       placed =
-        placeTypes (rustImportable Set.empty Set.empty) generated . Map.fromList $
+        placeTypes (rustImportable (Map.keysSet depRoots) Set.empty Set.empty) generated . Map.fromList $
           [(gv, map snd (gdFields gd)) | (gv, gd) <- Map.toList candidates]
             <> [(gv, concatMap snd arms) | (FV gv _, _, arms) <- vars]
             <> [(gv, []) | (FV gv _, _, _) <- enums]
@@ -2642,12 +2668,14 @@ planRustPublic es = do
 
 -- | Whether a rendered Rust type names only what a crate of generated
 -- types can import (GEN-10): the standard library, the language's own and
--- prelude types, the given generated types, and the given parameters.
-rustImportable :: Set.Set Text -> Set.Set Text -> Text -> Bool
-rustImportable known params = all ok . rustPaths
+-- prelude types, paths under the given dependency namespaces (GEN-7), the
+-- given generated types, and the given parameters.
+rustImportable :: Set.Set Text -> Set.Set Text -> Set.Set Text -> Text -> Bool
+rustImportable roots known params = all ok . rustPaths
   where
     ok p
       | Set.member p known = True
+      | T.isInfixOf "::" p && Set.member (nameRoot p) roots = True
       | Set.member p params = True
       | Set.member p rustOwnTypes = True
       | any (`T.isPrefixOf` p) ["::std::", "std::", "::core::", "core::"] = True
@@ -2658,14 +2686,16 @@ rustImportable known params = all ok . rustPaths
         [ "i8", "i16", "i32", "i64", "i128", "isize", "u8", "u16", "u32", "u64", "u128", "usize"
         , "f32", "f64", "bool", "char", "str", "String", "Vec", "Option", "Box", "dyn", "Fn", "Send", "Sync", "static"
         ]
-    -- The paths a type names, each with its separators: `a::b::C`.
-    rustPaths t = case T.uncons t of
-      Nothing -> []
-      Just (c, _)
-        | isAlphaNum c || c == '_' || c == ':' ->
-            let (p, rest) = T.span (\x -> isAlphaNum x || x == '_' || x == ':') t
-             in [T.dropWhileEnd (== ':') p | T.any (\x -> isAlphaNum x || x == '_') p] <> rustPaths rest
-        | otherwise -> rustPaths (T.drop 1 t)
+
+-- | The paths a Rust text names, each with its separators: `a::b::C`.
+rustPaths :: Text -> [Text]
+rustPaths t = case T.uncons t of
+  Nothing -> []
+  Just (c, _)
+    | isAlphaNum c || c == '_' || c == ':' ->
+        let (p, rest) = T.span (\x -> isAlphaNum x || x == '_' || x == ':') t
+         in [T.dropWhileEnd (== ':') p | T.any (\x -> isAlphaNum x || x == '_') p] <> rustPaths rest
+    | otherwise -> rustPaths (T.drop 1 t)
 
 -- | A generated type's path from the crate root (GEN-4).
 qualifiedRustName :: TypeHome -> Text

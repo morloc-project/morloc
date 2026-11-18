@@ -24,6 +24,7 @@ import Morloc.Namespace.Prim (Defaultable (..))
 import Morloc.Namespace.State
   ( PackageMeta (..)
   , DepSpec (..)
+  , DepImport (..)
   , RegDep (..)
   , LocalDep (..)
   , DepSource (..)
@@ -102,6 +103,29 @@ envSpecTests =
   testGroup
     "EnvSpec (envspec.json) foundation"
     [ testGroup
+        "GEN-7 dependency namespaces"
+        [ testCase "a cpp-deps entry with namespace and import parses" $
+            case decodeMeta "{\"cpp-deps\":{\"nlohmann_json\":{\"namespace\":\"nlohmann\",\"import\":\"nlohmann/json.hpp\"}}}" of
+              Right m -> Map.lookup "cpp" (packageDepImports m) @?= Just (Map.fromList [("nlohmann_json", DepImport "nlohmann" ["nlohmann/json.hpp"])])
+              Left e -> assertFailure e
+        , testCase "a cpp-deps entry with neither key has no namespace" $
+            case decodeMeta "{\"cpp-deps\":{\"zlib\":\"*\"}}" of
+              Right m -> Map.lookup "cpp" (packageDepImports m) @?= Just Map.empty
+              Left e -> assertFailure e
+        , testCase "a cpp-deps entry with a namespace and no import is refused" $
+            assertBool "namespace alone" (isLeft (decodeMeta "{\"cpp-deps\":{\"x\":{\"namespace\":\"x\"}}}"))
+        , testCase "a cpp-deps entry with an empty import list is refused" $
+            assertBool "empty import" (isLeft (decodeMeta "{\"cpp-deps\":{\"x\":{\"namespace\":\"x\",\"import\":[]}}}"))
+        , testCase "a qualified namespace is refused" $
+            assertBool "qualified" (isLeft (decodeMeta "{\"cpp-deps\":{\"b\":{\"namespace\":\"boost::asio\",\"import\":\"boost/asio.hpp\"}}}"))
+        , testCase "a namespace the language or morloc owns is refused" $
+            assertBool "std" (isLeft (decodeMeta "{\"cpp-deps\":{\"s\":{\"namespace\":\"std\",\"import\":\"vector\"}}}"))
+        , testCase "a rust crate's namespace defaults to its name with - as _" $
+            case decodeMeta "{\"rust-deps\":{\"serde-json\":\"1\"}}" of
+              Right m -> Map.lookup "rust" (packageDepImports m) @?= Just (Map.fromList [("serde-json", DepImport "serde_json" [])])
+              Left e -> assertFailure e
+        ]
+    , testGroup
         "FromJSON DepSpec (illegal states rejected at parse)"
         [ testCase "a bare version string parses with source defaulted" $
             case decodeDep "\">=2\"" of

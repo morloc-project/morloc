@@ -1,0 +1,20 @@
+-- GEN-7: a generated record whose field names a dependency's type
+-- (`ndarray::Array1<f64>`, the rust-deps crate ndarray) is written to the
+-- public type file, which a source names, and `morloc types` lists the crate
+-- among its crate's dependencies.
+module main (total)
+
+import root-rust
+
+newtype Vec1 = [Real]
+type Rust => Vec1 = "ndarray::Array1<f64>"
+
+instance Packable [Real] Vec1 where
+  source Rust from "pk.rs" ("packVec" as pack, "unpackVec" as unpack)
+
+record Sample where
+  v :: Vec1
+  n :: Int
+
+source Rust from "f.rs" ("total")
+total :: Sample -> Real
