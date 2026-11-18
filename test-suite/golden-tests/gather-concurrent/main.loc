@@ -48,28 +48,28 @@ countR :: [I64] -> Str
 
 --' Stream from C++ threads
 --' @render --tally=tallyC
-threadsCpp :: I64 -> I64 -> <IO> ()
+threadsCpp :: I64 -> I64 -> <IO> (Collect I64)
 threadsCpp t b = @collect (produceThreadsC t b)
 
 --' Stream from Rust threads
 --' @render --tally=tallyRs
-threadsRust :: I64 -> I64 -> <IO> ()
+threadsRust :: I64 -> I64 -> <IO> (Collect I64)
 threadsRust t b = @collect (produceThreadsRs t b)
 
 --' Stream from C++ forked children
 --' @render --sorted=sortedC
 --' @render --count=countC
-forksCpp :: I64 -> I64 -> <IO> ()
+forksCpp :: I64 -> I64 -> <IO> (Collect I64)
 forksCpp n big = @collect (produceForksC n big)
 
 --' Stream from Python forked children
 --' @render --sorted=sortedP
 --' @render --count=countP
-forksPy :: I64 -> I64 -> <IO> ()
+forksPy :: I64 -> I64 -> <IO> (Collect I64)
 forksPy n big = @collect (produceForksP n big)
 
 --' Stream from R forked children
 --' @render --sorted=sortedR
 --' @render --count=countR
-forksR :: I64 -> I64 -> <IO> ()
+forksR :: I64 -> I64 -> <IO> (Collect I64)
 forksR n big = @collect (produceForksR n big)

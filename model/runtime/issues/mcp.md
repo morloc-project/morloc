@@ -7,14 +7,11 @@ test-suite/golden-tests/multi-output-stream (streaming commands). Paths are
 under data/rust/.
 
 - **A call that streams its output is refused off the CLI.** Violates
-  IFACE-6 and IFACE-8 (the output must reach the caller), and IFACE-21
-  where the refusal comes partway through the run; refused before it
-  runs when the manifest shows it (a streaming command's own value, a
-  stream-kind action: daemon_ffi.rs `resolve_render_target`), and by
-  DAEMON-15 at the `@stdout` open otherwise (`<IO> ()` producers such as
-  stdio-filter `producer`, value commands that stream along the way such
-  as multi-output-value `noisy`). Replay-only actions (no `entry`) are
-  refused the same way. Needs per-call stdout capture (plan step 7,
+  IFACE-6 and IFACE-8 (the output must reach the caller). It is refused
+  before it runs: every streaming command returns `Collect` (STRM-7), so
+  the manifest shows it (a streaming command's own value, a stream-kind
+  action: daemon_ffi.rs `resolve_render_target`). Replay-only actions (no
+  `entry`) are refused the same way. Needs per-call stdout capture (plan step 7,
   /work/plans/interface-consistency-plan.md).
 - **The MCP server's stdio server runs in one-shot mode.** [read]
   morloc-nexus/src/cli.rs:911 `mcp_args_to_config` leaves `daemon_flag`

@@ -47,6 +47,7 @@ void produce_stash(F sink) {
     stash_slot() = [sink](const std::vector<int64_t>& xs) { sink(xs); };
 }
 
-inline void fire_late() {
+inline std::string show_late(const std::vector<int64_t>& xs) {
     if (stash_slot()) stash_slot()(std::vector<int64_t>{3});
+    return show_ints(xs);
 }

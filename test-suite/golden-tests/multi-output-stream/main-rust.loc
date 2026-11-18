@@ -5,13 +5,14 @@
 -- The producer writes [1,2], an empty batch, [3,4,5] and a batch larger
 -- than the write buffer (the Makefile sets its size), so an action that saw
 -- merged, split or dropped batches reports different sizes. `twoSites`
--- streams from two `@collect`s and `branch` from those in a guard: an
--- action there sees the whole output (issues #115, #116). Each command
--- appends to a log per run, so a combined run is seen to run it once.
+-- streams two producers through one `@collect` sink and `branch` from a
+-- `@collect` in each arm of a guard: an action there sees the whole output
+-- (issues #115, #116). Each command appends to a log per run, so a combined
+-- run is seen to run it once.
 --
 -- `--marks` is a per-batch action whose handler is morloc code. Its replay
 -- entry is given a pool, so it runs on the saved output too, on `stream`
--- (with a path) and on `twoSites` (which has no fresh-run entry).
+-- (with a path).
 
 module mainr (stream, twoSites, branch)
 
@@ -56,19 +57,19 @@ countStaged f = do
 --' @render -b/--batches=showBatch @stream
 --' @render -f/--folded=showAcc @fold=addBatch @init=zero @combine=merge
 --' @render -k/--marks=markBatch @stream
-stream :: Str -> <IO> ()
+stream :: Str -> <IO> (Collect Int)
 stream log = @collect (produce log)
 
 --' Stream from two sites
 --' @render -a/--all=joinAll
 --' @render -b/--batches=showBatch @stream
 --' @render -k/--marks=markBatch @stream
-twoSites :: Str -> <IO> ()
-twoSites log = do
-  @collect (produce log)
-  @collect produceTail
+twoSites :: Str -> <IO> (Collect Int)
+twoSites log = @collect (\k -> do
+  _ <- produce log k
+  produceTail k)
 
 --' Stream from the arms of a guard
 --' @render -a/--all=joinAll
-branch :: Str -> Bool -> <IO> ()
+branch :: Str -> Bool -> <IO> (Collect Int)
 branch log b = ? b = @collect (produce log) : @collect produceTail

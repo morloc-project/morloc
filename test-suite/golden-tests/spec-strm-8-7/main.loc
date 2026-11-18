@@ -1,0 +1,44 @@
+-- STRM-8: `@stdout` hands its body the stdout stream and returns
+-- `Collect a`. The body writes at compression level 3 and flushes
+-- (`levels`), or passes the handle to a morloc helper (`viaHelper`). An
+-- action on a bracket command runs on its saved output. A helper that
+-- closes the bracket's handle makes the run fail, not crash.
+
+module main (levels, viaHelper, closes, total)
+
+import root-py
+
+source Py from "impl.py" ("total", "join_all" as joinAll)
+
+--' Sum a list of integers
+total :: [Int] -> Int
+
+--' Every element, comma separated
+joinAll :: [Int] -> Str
+
+drain :: OStream Int -> <IO> ()
+drain o = do
+  _ <- @write 0 o [10, 20]
+  _ <- @write 0 o [30]
+  ()
+
+drainAndClose :: OStream Int -> <IO> ()
+drainAndClose o = do
+  _ <- @write 0 o [1]
+  @close o
+
+--' Write two batches with a flush between
+--' @render -a/--all=joinAll
+levels :: <IO> (Collect Int)
+levels = @stdout (\o -> do
+  _ <- @write 3 o [1, 2]
+  _ <- @flush o
+  @write 3 o [3])
+
+--' Write through a helper
+viaHelper :: <IO> (Collect Int)
+viaHelper = @stdout drain
+
+--' Close the handle in a helper
+closes :: <IO> (Collect Int)
+closes = @stdout drainAndClose

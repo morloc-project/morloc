@@ -157,3 +157,11 @@ C++ consumer, against a plain Rust reader.
 - None for 1 and 2: read pairs are still stored as morloc stream files, and
   the benchmarks in lib/biolib/{bio,biotrim,bioseqqc}/bench record the cost
   (bench/history.tsv) so a fix shows up as a measured change.
+- **A Rust replay of a packed element copies each frame twice.** [read,
+  2026-11-18] Performance gap. `rustmorloc::replay` lends the decoded
+  frame (`f.invoke(&frame)`) and drops it after; the packed-element
+  callback (Members/Rust.hs `lcMakeCallback`) clones it before unpacking,
+  because the unpacking walk takes an owned wire value. Passing the frame
+  by value, or unpacking from the borrow, removes the copy. The C++
+  callback takes `const T&` and has no extra copy beyond the unpacking
+  itself.

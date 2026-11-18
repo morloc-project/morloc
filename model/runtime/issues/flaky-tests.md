@@ -104,3 +104,7 @@
   whether a failure on a user thread should end the pool (PANIC-5 says a
   failure to reach the callee ends the pool). Four concurrent shell loops
   of 15 runs each reproduce it in about a minute.
+  Also seen 2026-11-18 with a Python callee: golden fold-native
+  `threadsPy` (C++ threads folding through Python) failed once in a `-j 6`
+  golden subset with "the py pool ended during the call (Recv error)" and
+  the same C++ SIGABRT; it passed when rerun alone.

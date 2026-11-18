@@ -16,6 +16,7 @@ module Morloc.TypeEval
   ( evaluateType
   , transformType
   , evaluateStep
+  , typeUParts
   , pairEval
   , declaresFormAt
   , declaresRecord

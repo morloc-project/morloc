@@ -19,5 +19,5 @@ produce sink = sink [1,2,3]
 
 -- Modifiers are split on whitespace, so spaces around `=` break the token.
 --' @render -t/--total=showAcc @fold = step @init=zero @combine=merge
-run :: <IO> ()
+run :: <IO> (Collect Int)
 run = @collect produce

@@ -35,13 +35,51 @@ record `R` opens as `IFile R`. The file's stored schema must match `a`
 
 ## Collect
 
-### STRM-4 A `@collect` command's output is every batch its sink receives, in order
-Intent: proposed
-Code: deviates (../runtime/issues/cli-directives.md)
+### STRM-4 A streaming command has one stdout source on each path
+Intent: ruled 2026-11-15
+Tests: spec-strm-4-1, spec-strm-4-2, spec-strm-4-3, spec-strm-4-4, spec-strm-4-5, spec-strm-4-6, spec-strm-4-7, spec-strm-4-8, spec-strm-4-9, spec-strm-4-10, spec-strm-4-11, spec-strm-4-12, spec-strm-4-13, spec-strm-4-14
+Code: conforms 2026-11-18
 
-The producer is handed a sink and calls it once per batch. An action applies
-to everything the command streams, whatever the shape of its body: several
-`@collect`s, or one in a branch, give the action the whole output in order.
+A stdout source is `@collect` or `@stdout`. Each path through a
+`Collect`-returning command's body ends in exactly one, in tail position:
+the last statement of a `do` block, an arm of `?` or `match`, the body of a
+`let`, or the body of a leading or applied lambda; never a `where` binding.
+A path that ends in `@throw`, or in a throw the compiler adds, needs none. A
+source anywhere else is a build error. Its output is every batch its sink
+receives, or every `@write` to its handle, in order.
+
+Why: stdout is one typed stream per run, and `-f`, `-z`, `-o` and the
+output actions each configure that one output.
+
+### STRM-7 `Collect a` is the output a streaming command writes
+Intent: ruled 2026-11-15
+Tests: spec-strm-7-1, spec-strm-7-2, spec-strm-7-3, spec-strm-7-4, spec-strm-7-5, spec-strm-7-6, spec-strm-7-7, spec-strm-7-8, spec-strm-7-9, spec-strm-7-10, spec-strm-7-11
+Code: conforms 2026-11-18
+
+`@collect :: (([a] -> <IO,e> ()) -> <IO,e> ()) -> <IO,e> (Collect a)`.
+`Collect a` stands for the `[a]` of every batch, in order, before any
+output action: a whole-list handler receives that `[a]`, a fold step its
+batches, and with no action it is what stdout gets. Only `@collect` and
+`@stdout` produce one; the typechecker gives `Collect` no rule of its own,
+so the arms of a streaming body agree through unification and an arm of
+type `()` is a type error. A function whose signature returns `Collect` is
+a command: morloc code never names it, and its signature names a concrete
+`a`. `Collect` appears in no source, instance, class or local signature, no
+type declaration names it, no instance method uses `@collect` or
+`@stdout`, and no output-action handler returns it. Outside morloc code a streaming
+command's output has type `[a]`: help, `--json-help` and the API show
+that.
+
+### STRM-8 `@stdout` hands a body the stdout stream
+Intent: ruled 2026-11-15
+Tests: spec-strm-8-1, spec-strm-8-2, spec-strm-8-3, spec-strm-8-4, spec-strm-8-5, spec-strm-8-6, spec-strm-8-7
+Code: conforms 2026-11-18
+
+`@stdout :: (OStream a -> <IO,e> b) -> <IO,e> (Collect a)` opens stdout,
+runs the body on its handle and closes it. `@collect p` is
+`@stdout (\o -> p (\xs -> @write 0 o xs))`. The body may pass the handle
+on. `@close` applied to the bracket's parameter is a build error; a handle
+closed any other way (through a helper or another name) fails the run.
 
 ### STRM-6 A batch handed to a sink is not changed afterwards
 Intent: proposed

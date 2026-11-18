@@ -46,7 +46,7 @@ controlMapP :: I64 -> I64 -> I64 -> Str
 
 --' Count elements with a scalar fold, in C++
 --' @render --n=showNC @fold=addLenC @init=zeroNC @combine=plusC
-foldNCpp :: I64 -> I64 -> I64 -> <IO> ()
+foldNCpp :: I64 -> I64 -> I64 -> <IO> (Collect I64)
 foldNCpp k s b = @collect (produceC k s b)
 
 --' Scalar control, in C++
@@ -55,7 +55,7 @@ controlNCpp k s b = controlNC k s b
 
 --' Count keys with a map fold, in C++
 --' @render --n=showMapC @fold=addMapC @init=zeroMapC @combine=plusMapC
-foldMapCpp :: I64 -> I64 -> I64 -> <IO> ()
+foldMapCpp :: I64 -> I64 -> I64 -> <IO> (Collect I64)
 foldMapCpp k s b = @collect (produceC k s b)
 
 --' Map control, in C++
@@ -64,7 +64,7 @@ controlMapCpp k s b = controlMapC k s b
 
 --' Count keys with a map fold, in Python
 --' @render --n=showMapP @fold=addMapP @init=zeroMapP @combine=plusMapP
-foldMapPy :: I64 -> I64 -> I64 -> <IO> ()
+foldMapPy :: I64 -> I64 -> I64 -> <IO> (Collect I64)
 foldMapPy k s b = @collect (produceP k s b)
 
 --' Map control, in Python

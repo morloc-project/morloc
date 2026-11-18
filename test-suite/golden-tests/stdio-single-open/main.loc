@@ -1,7 +1,8 @@
 -- Uniqueness (CAS-per-kind) and refusal guards on stdio.
 --
---   * `twoStdin`, `twoStdout`, `twoStderr` -- second open of the same
---     stdio kind hits the SHM claim CAS and errors.
+--   * `twoStdin`, `twoStderr` -- second open of the same stdio kind hits
+--     the SHM claim CAS and errors. Two `@stdout` sources on one path are
+--     a build error (STRM-4), so stdout has no runtime case here.
 --   * `reopenAfterClose` -- @close releases the claim, so a subsequent
 --     open of the same kind succeeds.
 --   * `allThreeAtOnce` -- the three claim slots are independent.
@@ -15,7 +16,6 @@
 
 module main
   ( twoStdin
-  , twoStdout
   , twoStderr
   , reopenAfterClose
   , allThreeAtOnce
@@ -32,11 +32,6 @@ twoStdin = do
   Ok _tailv79 <- @stdin :: <IO> (Try Str (IStream Int))
   _tailv79
 
-twoStdout :: <IO> (OStream Int)
-twoStdout = do
-  @stdout :: <IO> OStream Int
-  @stdout :: <IO> OStream Int
-
 twoStderr :: <IO> (OStream Int)
 twoStderr = do
   @stderr :: <IO> OStream Int
@@ -49,14 +44,12 @@ reopenAfterClose = do
   Ok s2 <- @stdin :: <IO> (Try Str (IStream Int))
   @close s2
 
-allThreeAtOnce :: <IO> ()
-allThreeAtOnce = do
+allThreeAtOnce :: <IO> (Collect Int)
+allThreeAtOnce = @stdout (\o -> do
   Ok i <- @stdin :: <IO> (Try Str (IStream Int))
-  o <- @stdout :: <IO> OStream Int
   e <- @stderr :: <IO> OStream Int
   @close i
-  @close o
-  @close e
+  @close e)
 
 openDevStdin :: <IO> (IStream Int)
 openDevStdin = do

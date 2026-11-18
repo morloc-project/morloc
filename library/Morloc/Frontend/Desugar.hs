@@ -40,6 +40,7 @@ import Morloc.Namespace.Expr
 import Morloc.Namespace.Prim
 import Morloc.Namespace.Type
 import Morloc.Typecheck.Internal (headerLabels, labelsIn, unlabelU)
+import Morloc.TypeEval (typeUParts)
 import System.FilePath (combine, dropExtension, makeRelative, splitDirectories, takeDirectory)
 
 --------------------------------------------------------------------
@@ -2991,24 +2992,31 @@ etaExpandIntrinsic sp intr args = case intrinsicArity intr of
         intrExpr <- freshExprSpan sp (IntrinsicE intr (args ++ varExprs))
         mkLam sp vars intrExpr
 
--- | Late pass (after terminal-action synthesis): expand every @collect node
--- to the default stdout-sink producer pattern:
+-- | Late pass (after terminal-action synthesis): expand every @collect and
+-- @stdout node into a block that owns the stdout stream (STRM-7, STRM-8):
 --
--- >  do
--- >    o <- @stdout
--- >    body (@write 0 o)
--- >    @close o
+-- >  @collect body            @stdout f
+-- >  do                       do
+-- >    o <- open stdout         o <- open stdout
+-- >    body (@write 0 o)        f o
+-- >    @closeCollect o          @closeCollect o
 --
 -- Runs AFTER 'injectTerminalActionsWithSigs' so the synthesis can rewrite the
 -- @collect argument (the producer) per `--' @with` flag before it is
 -- expanded. Fully recursive over 'Expr' so a @collect nested inside a
--- guarded do-block (the mosm idiom) is still reached. The @stdout element
--- type is left to inference (fixed by the body's sink parameter type).
+-- guarded do-block (the mosm idiom) is still reached. The stdout element
+-- type is the command's: @closeCollect gives the block its @Collect a@.
 expandCollectE :: ExprI -> D ExprI
 expandCollectE self@(ExprI i e) = case e of
   IntrinsicE IntrCollect [body] -> do
     body' <- expandCollectE body
-    expandCollectBody self body'
+    expandStdoutBlock self $ \oRef -> do
+      zeroE <- freshExprFrom self (IntE 0)
+      sinkE <- mkWriteSink False self zeroE oRef
+      freshExprFrom self (AppE body' [sinkE])
+  IntrinsicE IntrStdoutBracket [f] -> do
+    f' <- expandCollectE f
+    expandStdoutBlock self $ \oRef -> freshExprFrom self (AppE f' [oRef])
   ModE v xs -> ExprI i . ModE v <$> mapM expandCollectE xs
   AssE v b ws -> (\b' ws' -> ExprI i (AssE v b' ws')) <$> expandCollectE b <*> mapM expandCollectE ws
   IstE o cn ctx ts b -> ExprI i . IstE o cn ctx ts <$> mapM expandCollectE b
@@ -3029,28 +3037,21 @@ expandCollectE self@(ExprI i e) = case e of
   BopE l p v r -> (\l' r' -> ExprI i (BopE l' p v r')) <$> expandCollectE l <*> expandCollectE r
   _ -> return self
 
--- | Build the @collect do-block, inheriting source positions from @ref@ (the
--- original @collect node). @body@ is the (already-expanded) producer.
-expandCollectBody :: ExprI -> ExprI -> D ExprI
-expandCollectBody ref body = do
+-- | Build the stdout block, inheriting source positions from @ref@ (the
+-- original @collect or @stdout node). @use@ builds the statement that
+-- writes to the handle it is given.
+expandStdoutBlock :: ExprI -> (ExprI -> D ExprI) -> D ExprI
+expandStdoutBlock ref use = do
   idx <- freshIdPos (Pos 0 0 "")
   let oVar = EV ("_collect_o_" <> T.pack (show idx))
       dVar = EV ("_do_collect_" <> T.pack (show idx))
-  -- o <- @stdout
   stdoutE <- freshExprFrom ref (IntrinsicE IntrStdout [])
   bindStdout <- freshExprFrom ref (EvalE stdoutE)
-  -- the sink: @write 0 o  (eta-expanded to \v -> @write 0 o v :: [a] -> <IO> ())
   oRef1 <- freshExprFrom ref (VarE defaultValue oVar)
-  zeroE <- freshExprFrom ref (IntE 0)
-  sinkE <- mkWriteSink False ref zeroE oRef1
-  -- body (@write 0 o)  -- bare statement, forced
-  bodyApp <- freshExprFrom ref (AppE body [sinkE])
-  forceBody <- freshExprFrom ref (EvalE bodyApp)
-  -- @close o  -- final statement / value
+  forceUse <- use oRef1 >>= freshExprFrom ref . EvalE
   oRef2 <- freshExprFrom ref (VarE defaultValue oVar)
-  closeE <- freshExprFrom ref (IntrinsicE IntrClose [oRef2])
-  -- assemble: DoBlockE (LetE o=@stdout (LetE _=body(sink) (@close o)))
-  inner2 <- freshExprFrom ref (LetE [(dVar, forceBody)] closeE)
+  closeE <- freshExprFrom ref (IntrinsicE IntrCloseCollect [oRef2])
+  inner2 <- freshExprFrom ref (LetE [(dVar, forceUse)] closeE)
   inner1 <- freshExprFrom ref (LetE [(oVar, bindStdout)] inner2)
   freshExprFrom ref (DoBlockE inner1)
 
@@ -3809,10 +3810,140 @@ desugarProgram isImplicitMain cstNodes = do
 injectTerminalActionsWithSigs :: Map.Map EVar TypeU -> ExprI -> D ExprI
 injectTerminalActionsWithSigs visibleSigs (ExprI i (ModE mv body)) = do
   rejectReservedMlcpPrefix body
+  validateStreamCommands visibleSigs body
   recordStreamElems visibleSigs body
   body' <- expandWithBindings visibleSigs body >>= expandParseEntries visibleSigs
   return (ExprI i (ModE mv body'))
 injectTerminalActionsWithSigs _ e = return e
+
+-- | The stdout-source rules (STRM-4, STRM-7, STRM-8), checked on the
+-- user's own code before any synthesis, with every visible signature.
+validateStreamCommands :: Map.Map EVar TypeU -> [ExprI] -> D ()
+validateStreamCommands visibleSigs body = do
+  mapM_ checkNames body
+  mapM_ checkBracketClose body
+  mapM_ checkTypeDecl body
+  mapM_ checkTopSig [ (e, v, etype et) | e@(ExprI _ (SigE (Signature v _ et))) <- body ]
+  mapM_ checkDefinition [ e | e@(ExprI _ (AssE _ _ _)) <- body ]
+  mapM_ checkNestedSigs body
+  mapM_ checkHandlers (collectWithSpecs body)
+  where
+    commands = Map.keysSet (Map.filter returnsCollect visibleSigs)
+    sourced = Set.fromList [ srcAlias src | ExprI _ (SrcE src) <- body ]
+
+    failAt e msg = do
+      sp <- posOfExprI e
+      dfail (startPos sp) msg
+
+    checkTopSig (e, v, t)
+      | returnsCollect t = do
+          let (args, _) = uncurryU t
+          when (any mentionsCollect args) $
+            failAt e ("`" <> T.unpack (unEVar v) <> "` takes a `Collect` argument; `Collect` is only a command's result")
+          case collectElem t of
+            Just a | not (isConcreteType a) ->
+              failAt e ("`" <> T.unpack (unEVar v) <> "` streams a generic element type; give `Collect` a concrete type")
+            _ -> return ()
+          when (Set.member v sourced) $ failAt e
+            ("`" <> T.unpack (unEVar v) <> "` is sourced but returns `Collect`;"
+             <> " only a morloc command whose body ends in `@collect` or `@stdout` returns `Collect`")
+      | mentionsCollect t =
+          failAt e ("`" <> T.unpack (unEVar v) <> "` mentions `Collect` other than as its result")
+      | otherwise = return ()
+
+    checkDefinition e@(ExprI _ (AssE v _ _))
+      | Set.member v commands = unless (directSource e) (failAt e (oneSourceMsg v))
+      | containsSource e = failAt e $ case Map.lookup v visibleSigs of
+          Nothing -> "`" <> T.unpack (unEVar v) <> "` uses `@collect` or `@stdout` but has no signature;"
+                     <> " declare it to return `<IO> (Collect T)`"
+          Just _ -> "`@collect` and `@stdout` may only end the body of a command whose signature returns `Collect`;"
+                    <> " `" <> T.unpack (unEVar v) <> "` does not. Pass the producer or the handle to a helper instead."
+                    <> " `@stdout` takes the function that writes to it: `@stdout (\\o -> ...)`"
+      | otherwise = return ()
+    checkDefinition _ = return ()
+
+    oneSourceMsg v =
+      "every path through `" <> T.unpack (unEVar v) <> "` must end in exactly one `@collect` or `@stdout`,"
+      <> " in tail position, or in `@throw`. To stream several producers, call them on one sink inside"
+      <> " a single `@collect`"
+
+    -- Signatures below the top level, and class methods, may not mention Collect.
+    checkNestedSigs (ExprI _ (AssE _ b ws)) = mapM_ checkLocal (b : ws)
+    checkNestedSigs e@(ExprI _ (IstE _ _ _ _ xs))
+      | any containsSource xs =
+          failAt e "an instance method may not use `@collect` or `@stdout`; only a command returning `Collect` does"
+      | otherwise = mapM_ checkLocal xs
+    checkNestedSigs e@(ExprI _ (ClsE (Typeclass _ _ _ sigs)))
+      | any (\(Signature _ _ et) -> mentionsCollect (etype et)) sigs =
+          failAt e "a class method may not return or take `Collect`"
+    checkNestedSigs _ = return ()
+    checkLocal e@(ExprI _ (SigE (Signature v _ et)))
+      | mentionsCollect (etype et) =
+          failAt e ("the local `" <> T.unpack (unEVar v) <> "` mentions `Collect`; only a top-level command returns it")
+    checkLocal (ExprI _ x) = mapM_ checkLocal (subExprs x)
+
+    -- An alias of Collect would hide it from every rule here, which read
+    -- types as written.
+    checkTypeDecl e@(ExprI _ (TypE td))
+      | mentionsCollect (exprTypeType td) =
+          failAt e ("the type `" <> T.unpack (unTVar (exprTypeName td)) <> "` mentions `Collect`;"
+                    <> " `Collect` is only written as a command's result")
+    checkTypeDecl _ = return ()
+
+    checkHandlers (sigE, _, ws) =
+      mapM_ (\h -> when (Set.member h commands) $
+                failAt sigE ("the output action handler `" <> T.unpack (unEVar h) <> "` returns `Collect`;"
+                             <> " a handler returns a value"))
+            (concatMap handlerTerms ws)
+    handlerTerms w = wsTerm w : maybe [] (\f -> [fsStep f, fsInit f, fsCombine f]) (wsFold w)
+
+    checkNames e@(ExprI _ (VarE _ v))
+      | Set.member v commands =
+          failAt e ("`" <> T.unpack (unEVar v) <> "` returns `Collect`, so it is a command and cannot be called from"
+                    <> " morloc code; share its producer instead")
+    checkNames (ExprI _ x) = mapM_ checkNames (subExprs x)
+
+    checkBracketClose (ExprI _ x) = do
+      case x of
+        IntrinsicE IntrStdoutBracket [f] | Just (o, b) <- bracketLambda f ->
+          mapM_ (\c -> failAt c "the handle of `@stdout` is closed when its body returns; remove this `@close`")
+                (take 1 (closesOf o b))
+        _ -> return ()
+      mapM_ checkBracketClose (subExprs x)
+    bracketLambda (ExprI _ (ParenE f)) = bracketLambda f
+    bracketLambda (ExprI _ (LamE [o] b)) = Just (o, b)
+    bracketLambda _ = Nothing
+    closesOf o c@(ExprI _ (IntrinsicE IntrClose [ExprI _ (VarE _ o')])) | o' == o = [c]
+    closesOf o (ExprI _ x) = concatMap (closesOf o) (subExprs x)
+
+
+-- | Whether a type's result, after its arguments and effects, is @Collect a@.
+returnsCollect :: TypeU -> Bool
+returnsCollect = isJust . collectElem
+
+-- | The element type of a @Collect a@ result.
+collectElem :: TypeU -> Maybe TypeU
+collectElem t = case valueTypeOf t of
+  AppU (VarU v) [a] | v == BT.collectVar -> Just a
+  _ -> Nothing
+
+mentionsCollect :: TypeU -> Bool
+mentionsCollect (VarU v) = v == BT.collectVar
+mentionsCollect t = any mentionsCollect (typeUParts t)
+
+-- | Whether an expression is a stdout source: @collect or @stdout.
+isStdoutSource :: Expr -> Bool
+isStdoutSource (IntrinsicE IntrStdoutBracket _) = True
+isStdoutSource e = isCollectNode e
+
+-- | Whether any stdout source is reachable.
+containsSource :: ExprI -> Bool
+containsSource = containsBy isStdoutSource
+
+-- | 'directCollect' for any stdout source: a definition whose every path
+-- ends in exactly one source in tail position (STRM-4).
+directSource :: ExprI -> Bool
+directSource = directBy isStdoutSource
 
 -- | Add to the companions synthesized for a command.
 recordCompanions :: (EVar, [CompanionRole]) -> D ()
@@ -3866,10 +3997,9 @@ rejectReservedMlcpPrefix body =
 recordStreamElems :: Map.Map EVar TypeU -> [ExprI] -> D ()
 recordStreamElems visibleSigs body = do
   let found = Map.fromList
-        [ (n, t)
-        | e@(ExprI _ (AssE n _ _)) <- body
-        , containsCollect e
-        , Just t <- [collectStreamType visibleSigs e]
+        [ (n, BT.listU a)
+        | ExprI _ (AssE n _ _) <- body
+        , Just a <- [collectElem =<< Map.lookup n visibleSigs]
         ]
   State.modify $ \st ->
     st { dsStreamElems = Map.union found (dsStreamElems st) }
@@ -3975,29 +4105,20 @@ emitFor assMap sigMap (sigExprI, parentName, specs) = do
   let arity = sigArity pt
       isEff = returnIsEffectful pt
       mAss = Map.lookup parentName assMap
-      isCollect = maybe False containsCollect mAss
-  mapM_ (validateWithSpec sp parentName arity isCollect) specs
-  case mAss of
-    Just assI | isCollect -> do
-      -- Streaming command (body produces via @collect). An action applies to
-      -- everything the command streams, so it runs on a fresh run of the
-      -- command only when that is what composing it into the one @collect
-      -- sink gives ('directCollect'); otherwise it runs on the staged stream.
-      unless (returnsUnit pt) $ dfail (startPos sp) (nonUnitStreamMsg parentName)
-      let direct = directCollect assI
-          batchT = mfilter isConcreteType (collectStreamType sigMap assI)
-      when (not direct && isNothing batchT) $
-        dfail (startPos sp) (unstageableStreamMsg parentName)
-      directs <- if direct
-        then mapM (synthStreamingBinding sp parentName assI sigMap) specs
+      mElem = collectElem pt
+  mapM_ (validateWithSpec sp parentName arity (isJust mElem)) specs
+  case (mAss, mElem) of
+    (Just assI, Just elemT) -> do
+      -- Streaming command (STRM-7). An action applies to everything the
+      -- command streams, so it runs on a fresh run of the command when its
+      -- every path ends in a @collect, whose sink the action is composed
+      -- into ('directCollect'); otherwise (a @stdout body) it runs on the
+      -- staged stream.
+      directs <- if directCollect assI
+        then mapM (synthStreamingBinding sp parentName assI sigMap (BT.listU elemT)) specs
         else return []
-      replays <- case batchT of
-        Just t@(AppU (VarU v) [elemT]) | v == BT.list -> do
-          mapM_ (\w -> recordPlan w (Replayed (collectKind w))) specs
-          mapM (synthCollectReplay sp parentName pt t elemT sigMap) specs
-        _ -> do
-          mapM_ (\w -> recordPlan w (NotReplayed (collectKind w) noBatchTypeReason)) specs
-          return []
+      mapM_ (\w -> recordPlan w (Replayed (collectKind w))) specs
+      replays <- mapM (synthCollectReplay sp parentName pt (BT.listU elemT) elemT sigMap) specs
       return (directs ++ replays)
     _ -> do
       directs <- mapM (synthWithBinding sp parentName arity isEff) specs
@@ -4018,15 +4139,8 @@ emitFor assMap sigMap (sigExprI, parentName, specs) = do
       | isJust (wsFold w) = KindFold
       | wsStream w = KindStream
       | otherwise = KindGather
-    noBatchTypeReason =
-      "its command's `@collect` producer has no signature with a concrete batch type"
     unstageableValueReason =
       "its command returns a value that cannot be saved to a file (it holds a function or a stream handle)"
-
--- | A streaming command's actions apply to what it streams, so its own
--- return must carry nothing else.
-returnsUnit :: TypeU -> Bool
-returnsUnit = (== BT.unitU) . valueTypeOf
 
 -- | The value a command produces, after all its arguments and effects.
 valueTypeOf :: TypeU -> TypeU
@@ -4049,20 +4163,7 @@ isStageableType t = case t of
   NamU _ _ ps rs -> all isStageableType ps && all (isStageableType . snd) rs
   _ -> True
   where
-    handleVars = [BT.ifileVar, BT.istreamVar, BT.ostreamVar]
-
-nonUnitStreamMsg :: EVar -> String
-nonUnitStreamMsg parentName =
-  "`" <> T.unpack (unEVar parentName) <> "` streams its output through `@collect` "
-  <> "and also returns a value. A terminal action applies to what the command "
-  <> "streams, so the command must return `()`."
-
-unstageableStreamMsg :: EVar -> String
-unstageableStreamMsg parentName =
-  "the terminal actions of `" <> T.unpack (unEVar parentName) <> "` run on its "
-  <> "whole streamed output, which needs the type of what it streams, but its "
-  <> "`@collect` producer has no signature with a concrete batch type. Give the "
-  <> "producer a signature."
+    handleVars = [BT.ifileVar, BT.istreamVar, BT.ostreamVar, BT.collectVar]
 
 -- | True iff every @collect of a streaming definition is in tail position
 -- of the body and every way the body can end is one of them, so each run
@@ -4072,44 +4173,56 @@ unstageableStreamMsg parentName =
 -- leading lambdas, a let or do body, the body of an immediately applied
 -- lambda, and both branches of an if (a match lowers to nested ifs).
 directCollect :: ExprI -> Bool
-directCollect (ExprI _ (AssE _ body wheres)) =
-  not (any containsCollect wheres) && and (collectSites True b) && endsInCollect b
+directCollect = directBy isCollectNode
+
+isCollectNode :: Expr -> Bool
+isCollectNode (IntrinsicE IntrCollect _) = True
+isCollectNode _ = False
+
+-- | Whether a definition's every path ends in exactly one site, as judged
+-- by @isSite@, in tail position.
+directBy :: (Expr -> Bool) -> ExprI -> Bool
+directBy isSite (ExprI _ (AssE _ body wheres)) =
+  not (any (containsBy isSite) wheres) && and (sitesBy isSite True b) && endsInBy isSite b
   where
     b = stripSpine body
     stripSpine (ExprI _ (LamE _ x)) = stripSpine x
     stripSpine e = e
-directCollect _ = False
+directBy _ _ = False
 
--- | Whether every way out of an expression ends in a @collect, or abandons
+containsBy :: (Expr -> Bool) -> ExprI -> Bool
+containsBy isSite (ExprI _ e) = isSite e || any (containsBy isSite) (subExprs e)
+
+-- | Whether every way out of an expression ends in a site, or abandons
 -- the run with @throw (which streams nothing on any path).
-endsInCollect :: ExprI -> Bool
-endsInCollect (ExprI _ e) = case e of
-  IntrinsicE IntrCollect _ -> True
+endsInBy :: (Expr -> Bool) -> ExprI -> Bool
+endsInBy isSite (ExprI _ e) = case e of
+  _ | isSite e -> True
   IntrinsicE IntrThrow _ -> True
   AppE (ExprI _ (IntrinsicE IntrThrow _)) _ -> True
-  LetE _ b -> endsInCollect b
-  DoBlockE b -> endsInCollect b
-  EvalE b -> endsInCollect b
-  ParenE b -> endsInCollect b
-  AnnE b _ -> endsInCollect b
-  AppE f _ | Just b <- appliedLambdaBody f -> endsInCollect b
-  IfE _ t f -> endsInCollect t && endsInCollect f
+  LetE _ b -> endsInBy isSite b
+  DoBlockE b -> endsInBy isSite b
+  EvalE b -> endsInBy isSite b
+  ParenE b -> endsInBy isSite b
+  AnnE b _ -> endsInBy isSite b
+  AppE f _ | Just b <- appliedLambdaBody f -> endsInBy isSite b
+  IfE _ t f -> endsInBy isSite t && endsInBy isSite f
   _ -> False
 
--- | One flag per @collect site in an expression: whether it is in tail
--- position, given whether the expression itself is.
-collectSites :: Bool -> ExprI -> [Bool]
-collectSites d (ExprI _ e) = case e of
-  IntrinsicE IntrCollect as -> d : concatMap (collectSites False) as
-  LetE bs b -> concatMap (collectSites False . snd) bs ++ collectSites d b
-  DoBlockE b -> collectSites d b
-  EvalE b -> collectSites d b
-  ParenE b -> collectSites d b
-  AnnE b _ -> collectSites d b
+-- | One flag per site in an expression: whether it is in tail position,
+-- given whether the expression itself is.
+sitesBy :: (Expr -> Bool) -> Bool -> ExprI -> [Bool]
+sitesBy isSite d (ExprI _ e) = case e of
+  IntrinsicE _ as | isSite e -> d : concatMap (sitesBy isSite False) as
+  LetE bs b -> concatMap (sitesBy isSite False . snd) bs ++ sitesBy isSite d b
+  DoBlockE b -> sitesBy isSite d b
+  EvalE b -> sitesBy isSite d b
+  ParenE b -> sitesBy isSite d b
+  AnnE b _ -> sitesBy isSite d b
   AppE f xs | Just b <- appliedLambdaBody f ->
-    collectSites d b ++ concatMap (collectSites False) xs
-  IfE c t f -> collectSites False c ++ collectSites d t ++ collectSites d f
-  _ -> concatMap (collectSites False) (subExprs e)
+    sitesBy isSite d b ++ concatMap (sitesBy isSite False) xs
+  IfE c t f -> sitesBy isSite False c ++ sitesBy isSite d t ++ sitesBy isSite d f
+  _ -> concatMap (sitesBy isSite False) (subExprs e)
 
 -- | The body of the function in an application, when it is a lambda.
 appliedLambdaBody :: ExprI -> Maybe ExprI
@@ -4134,6 +4247,7 @@ subExprs e = case e of
   DoBlockE b -> [b]
   EvalE b -> [b]
   IntrinsicE _ es -> es
+  ConE _ _ _ es -> es
   ParenE b -> [b]
   BopE l _ _ r -> [l, r]
   _ -> []
@@ -4254,10 +4368,10 @@ validateWithSpec sp parentName arity isCollect
       <> " argument(s) (valid: $1.." <> show arity <> ")."
     streamMsg =
       "formatter `--" <> lg <> "` uses `@stream`/`@offset`, but `" <> parent
-      <> "` does not stream its output (no reachable `@collect`)."
+      <> "` does not stream its output (its signature does not return `Collect`)."
     foldNoCollectMsg =
       "formatter `--" <> lg <> "` declares `@fold`, but `" <> parent
-      <> "` does not stream its output (no reachable `@collect`); there "
+      <> "` does not stream its output (its signature does not return `Collect`); there "
       <> "is nothing to fold over."
     foldStreamMsg =
       "formatter `--" <> lg <> "` combines `@fold` with `@stream`/`@offset`. "
@@ -4280,97 +4394,6 @@ payloadParamIsIFile srcs = go
     isIFileHead (AppU (VarU v) _) = v == BT.ifileVar
     isIFileHead _ = False
 
--- | True iff an expression contains a @collect node (i.e. the command
--- streams its output). Fully recursive over 'Expr'.
-containsCollect :: ExprI -> Bool
-containsCollect (ExprI _ e) = case e of
-  IntrinsicE IntrCollect _ -> True
-  _ -> any containsCollect (subExprs e)
-
--- | The batch type a `@collect` command writes to standard output.
---
--- A streaming command returns `()` at the morloc level: its data leaves
--- through a sink rather than the return slot, so nothing downstream can
--- recover what a caller receives from the signature alone. The
--- producer's declared type can. `@collect` takes a function of exactly
--- one parameter -- the sink -- so however many arguments were already
--- applied to the producer, the sink is the last parameter of its full
--- signature, and the sink's own parameter is the batch that reaches
--- standard output.
---
--- Returns Nothing when the producer is not a named term with a
--- signature (an inline lambda, say). The caller must then report that
--- it does not know rather than claim the function's `()`.
-collectStreamType :: Map.Map EVar TypeU -> ExprI -> Maybe TypeU
-collectStreamType sigs body = findCollectArg body >>= streamTypeOfProducer sigs
-  where
-    -- The expression `@collect` was applied to, if the body reaches one.
-    findCollectArg :: ExprI -> Maybe ExprI
-    findCollectArg (ExprI _ e) = case e of
-      IntrinsicE IntrCollect (a : _) -> Just a
-      ModE _ xs -> firstSome (map findCollectArg xs)
-      AssE _ b ws -> firstSome (map findCollectArg (b : ws))
-      IstE _ _ _ _ b -> firstSome (map findCollectArg b)
-      LstE es -> firstSome (map findCollectArg es)
-      TupE es -> firstSome (map findCollectArg es)
-      NamE kes -> firstSome (map (findCollectArg . snd) kes)
-      AppE f xs -> firstSome (map findCollectArg (f : xs))
-      LamE _ b -> findCollectArg b
-      AnnE b _ -> findCollectArg b
-      LetE bs b -> firstSome (map (findCollectArg . snd) bs ++ [findCollectArg b])
-      IfE c t f -> firstSome [findCollectArg c, findCollectArg t, findCollectArg f]
-      DoBlockE b -> findCollectArg b
-      EvalE b -> findCollectArg b
-      IntrinsicE _ es -> firstSome (map findCollectArg es)
-      ParenE b -> findCollectArg b
-      BopE l _ _ r -> firstSome [findCollectArg l, findCollectArg r]
-      _ -> Nothing
-
-    firstSome = foldr (\x acc -> maybe acc Just x) Nothing
-
--- | The batch type a @collect producer streams, read off the producer's
--- declared signature. Takes the expression @\@collect@ was applied to,
--- so a body with several @collect nodes resolves each against its own
--- producer.
---
--- Nothing when the producer is not a named term with a signature (an
--- inline lambda, say).
-streamTypeOfProducer :: Map.Map EVar TypeU -> ExprI -> Maybe TypeU
-streamTypeOfProducer _ (ExprI _ (AnnE _ t)) = do
-  sink <- lastParamOf (peelForall t)
-  firstParamOf (peelForall sink)
-  where
-    peelForall (ForallU _ x) = peelForall x
-    peelForall (EffectU _ x) = peelForall x
-    peelForall x = x
-    lastParamOf (FunU ts _) | not (null ts) = Just (last ts)
-    lastParamOf _ = Nothing
-    firstParamOf (FunU (x : _) _) = Just x
-    firstParamOf _ = Nothing
-streamTypeOfProducer sigs arg = do
-  producer <- headVarOf arg
-  sig <- Map.lookup producer sigs
-  sink <- lastParamOf (peelForall sig)
-  firstParamOf (peelForall sink)
-  where
-    -- The term at the head of a (possibly partial) application.
-    headVarOf :: ExprI -> Maybe EVar
-    headVarOf (ExprI _ e) = case e of
-      VarE _ v -> Just v
-      AppE f _ -> headVarOf f
-      ParenE b -> headVarOf b
-      AnnE b _ -> headVarOf b
-      _ -> Nothing
-
-    peelForall (ForallU _ t) = peelForall t
-    peelForall (EffectU _ t) = peelForall t
-    peelForall t = t
-
-    lastParamOf (FunU ts _) | not (null ts) = Just (last ts)
-    lastParamOf _ = Nothing
-
-    firstParamOf (FunU (t : _) _) = Just t
-    firstParamOf _ = Nothing
 
 -- | Synthesize a `--' @with` flag command for a streaming (@collect) parent.
 -- Reuses the parent's body (re-indexed with fresh ids to avoid annotation
@@ -4386,8 +4409,8 @@ streamTypeOfProducer sigs arg = do
 --     materialized `[a]` (via @load) or, when the handler takes `IFile [a]`, as
 --     a random-access IFile. The command returns the handler's result, which
 --     the nexus formats per `-f` (or emits verbatim for `render`).
-synthStreamingBinding :: Span -> EVar -> ExprI -> Map.Map EVar TypeU -> WithSpec -> D ExprI
-synthStreamingBinding sp parentName assI sigMap
+synthStreamingBinding :: Span -> EVar -> ExprI -> Map.Map EVar TypeU -> TypeU -> WithSpec -> D ExprI
+synthStreamingBinding sp parentName assI sigMap batchT
   WithSpec { wsLong = long
            , wsTerm = tTerm
            , wsRender = render
@@ -4410,10 +4433,10 @@ synthStreamingBinding sp parentName assI sigMap
       --             sink [handler .. c] (one Str per batch, emitted verbatim).
       -- `@offset` in argSrcs binds `off <- @tell` and places it in the arg list.
       do
-        -- The synthesized entry returns `()` like its parent, but what it
-        -- writes per batch is the handler's own result. Record it here,
-        -- where the handler's signature is in scope, so the entry can
-        -- report what a caller receives rather than the `()` it returns.
+        -- What the synthesized entry writes per batch is the handler's own
+        -- result. Record it here, where the handler's signature is in
+        -- scope, so the entry can report what a caller receives rather than
+        -- the `()` it returns.
         recordHandlerStreamOf sigMap tTerm (mangleTerminalName parentName long)
         withParentBody $ \ps -> composeHandlerIntoCollect render ps argSrcs tTerm
   | otherwise =
@@ -4423,30 +4446,25 @@ synthStreamingBinding sp parentName assI sigMap
       -- emitted verbatim. Synthesis is identical -- only the manifest `render`
       -- flag differs.
       let useIFile = maybe False (payloadParamIsIFile argSrcs) (Map.lookup tTerm sigMap)
-      in withParentBody $ \ps -> composeWholeIntoCollect useIFile sigMap ps argSrcs tTerm
+      in withParentBody $ \ps -> composeWholeIntoCollect useIFile batchT ps argSrcs tTerm
   where
     -- Every local binder already has a unique name ('Rename.renameLocals'), so
     -- nothing placed at a @collect site can be captured. `$N` names the Nth
-    -- parameter of the body's leading lambdas; where-bindings see only the
-    -- outermost lambda's.
+    -- parameter of the body's leading lambdas.
     withParentBody rewrite = case assI of
       ExprI _ (AssE _ bodyExpr wheres) -> do
         let levels = lambdaSpine bodyExpr
             spine = concat levels
-        mapM_ (checkArgRef (length spine) (length (concat (take 1 levels))) (any containsCollect wheres)) argSrcs
+        mapM_ (checkArgRef (length spine)) argSrcs
         bodyExpr' <- rewrite spine bodyExpr >>= pinParentArgTypes
-        wheres' <- mapM (rewrite spine) wheres
-        freshExprSpan sp (AssE (mangleTerminalName parentName long) bodyExpr' wheres')
+        freshExprSpan sp (AssE (mangleTerminalName parentName long) bodyExpr' wheres)
       _ -> dfail (startPos sp) "internal: streaming `@with` parent is not an AssE"
 
-    checkArgRef nSpine nOuter collectInWhere (ArgPos n)
+    checkArgRef nSpine (ArgPos n)
       | n > nSpine = argRefError n $
           "its definition binds only " <> T.pack (show nSpine)
           <> " parameter(s); name the parameter in the definition."
-      | n > nOuter && collectInWhere = argRefError n
-          "that parameter is bound by a lambda in the body, and a where-binding that \
-          \streams cannot see it; name the parameter before the `=`."
-    checkArgRef _ _ _ _ = return ()
+    checkArgRef _ _ = return ()
 
     argRefError n reason = dfail (startPos sp) . T.unpack $
       "formatter `--" <> long <> "` on `" <> unEVar parentName
@@ -4612,9 +4630,9 @@ wrapFoldCollect params argSrcs (FoldSpec step ini comb) handler ref collectArg =
 -- data. When @useIFile@ the handler receives a random-access @IFile [a]@;
 -- otherwise it receives a materialized @[a]@ (via @load).
 composeWholeIntoCollect ::
-  Bool -> Map.Map EVar TypeU -> [EVar] -> [ArgSource] -> EVar -> ExprI -> D ExprI
-composeWholeIntoCollect useIFile sigs params argSrcs handler =
-  rewriteCollectWith $ \self arg' -> wrapWholeCollect useIFile sigs params argSrcs self handler arg'
+  Bool -> TypeU -> [EVar] -> [ArgSource] -> EVar -> ExprI -> D ExprI
+composeWholeIntoCollect useIFile batchT params argSrcs handler =
+  rewriteCollectWith $ \self arg' -> wrapWholeCollect useIFile batchT params argSrcs self handler arg'
 
 -- | Build the whole-list gather-and-apply do-block for one @collect arg@.
 -- For a @[a] -> b@ handler:
@@ -4634,8 +4652,8 @@ composeWholeIntoCollect useIFile sigs params argSrcs handler =
 -- >     _    <- @close path        -- unlink the temp file
 -- >     r
 wrapWholeCollect ::
-  Bool -> Map.Map EVar TypeU -> [EVar] -> [ArgSource] -> ExprI -> EVar -> ExprI -> D ExprI
-wrapWholeCollect False sigs params argSrcs ref handler collectArg = do
+  Bool -> TypeU -> [EVar] -> [ArgSource] -> ExprI -> EVar -> ExprI -> D ExprI
+wrapWholeCollect False batchT params argSrcs ref handler collectArg = do
   idx <- freshIdPos (Pos 0 0 "")
   let nm base = EV (base <> T.pack (show idx))
       gV  = nm "_whole_g_"
@@ -4667,10 +4685,10 @@ wrapWholeCollect False sigs params argSrcs ref handler collectArg = do
     freshExprFrom ref (EvalE gE)
   appArgs <- buildStreamArgs ref params Nothing xsV argSrcs
   handlerApp <- freshExprFrom ref (AppE handlerRef appArgs)
-  pinned <- pinGathered False sigs ref handler collectArg xsV id handlerApp
+  pinned <- pinGathered batchT ref xsV id handlerApp
   t1 <- freshExprFrom ref (LetE [(xsV, gatherBind)] pinned)
   freshExprFrom ref (DoBlockE t1)
-wrapWholeCollect True sigs params argSrcs ref handler collectArg = do
+wrapWholeCollect True batchT params argSrcs ref handler collectArg = do
   idx <- freshIdPos (Pos 0 0 "")
   let nm base = EV (base <> T.pack (show idx))
       pathV = nm "_whole_path_"
@@ -4725,7 +4743,7 @@ wrapWholeCollect True sigs params argSrcs ref handler collectArg = do
   t1 <- freshExprFrom ref (LetE [(g4, unlink)] rRef)
   t2 <- freshExprFrom ref (LetE [(g3, closeFBare)] t1)
   t3 <- freshExprFrom ref (LetE [(rV, handlerBind)] t2)
-  t3' <- pinGathered True sigs ref handler collectArg fV (\a -> AppU (VarU BT.ifileVar) [a]) t3
+  t3' <- pinGathered batchT ref fV (\a -> AppU (VarU BT.ifileVar) [a]) t3
   tailE <- bindOkFrom ref fV openFBind t3'
   b1 <- freshExprFrom ref (LetE [(g2, closeOBare)] tailE)
   b2 <- freshExprFrom ref (LetE [(g1, gatherBare)] b1)
@@ -4733,44 +4751,18 @@ wrapWholeCollect True sigs params argSrcs ref handler collectArg = do
   b4 <- bindOkFrom ref pathV tmpBind b3
   freshExprFrom ref (DoBlockE b4)
 
--- | Tie the gathered value to what the producer streams.
+-- | Tie the gathered value to what the command streams.
 --
 -- The stream leaves through a file and comes back through @load or
 -- @open, and both are polymorphic: their element type is inferred from
--- whatever reads them, which is the handler. Nothing else relates the
--- two ends, so a handler whose receiver disagrees with the stream is
--- accepted and then reads the file's bytes as a type they do not hold.
--- The producer's declared signature is what closes the loop, and
--- `wrap` says how the handler sees the stream: as the list itself, or
--- behind an @IFile@.
---
--- A producer with no reachable signature, or one whose batch type is
--- generic, cannot be pinned: there is nothing to check against, and a
--- rigid annotation would over-constrain a legitimately generic handler.
--- That leaves the handler unchecked, so it is said out loud rather than
--- passed over. A gather's handle already ties the two ends, so there the
--- annotation only fixes the element type and nothing is said.
-pinGathered :: Bool -> Map.Map EVar TypeU -> ExprI -> EVar -> ExprI -> EVar -> (TypeU -> TypeU) -> ExprI -> D ExprI
-pinGathered warn sigs ref handler collectArg v wrap body =
-  case streamTypeOfProducer sigs collectArg of
-    Just t | isConcreteType t -> do
-      vRef <- freshExprFrom ref (VarE defaultValue v)
-      annV <- freshExprFrom ref (AnnE vRef (wrap t))
-      freshExprFrom ref (LetE [(v, annV)] body)
-    mt -> do
-      when warn $ dwarn [unpinnedMsg mt]
-      return body
-  where
-    unpinnedMsg mt =
-      "the whole-list handler `" <> unEVar handler <> "` is not checked "
-        <> "against what this `@collect` streams, because " <> reason
-        <> ". A handler whose receiver type disagrees with the stream will "
-        <> "read the gathered data as a type it does not hold. Give the "
-        <> "producer a concrete signature to have the handler checked."
-      where
-        reason = case mt of
-          Nothing -> "its producer has no declared signature"
-          Just _ -> "its producer streams a generic batch type"
+-- whatever reads them, which is the handler. The command's signature
+-- (`Collect a`, STRM-7) is what closes the loop, and `wrap` says how the
+-- handler sees the stream: as the list itself, or behind an @IFile@.
+pinGathered :: TypeU -> ExprI -> EVar -> (TypeU -> TypeU) -> ExprI -> D ExprI
+pinGathered batchT ref v wrap body = do
+  vRef <- freshExprFrom ref (VarE defaultValue v)
+  annV <- freshExprFrom ref (AnnE vRef (wrap batchT))
+  freshExprFrom ref (LetE [(v, annV)] body)
 
 -- | Build the per-batch streaming do-block that replaces a @collect arg@:
 --

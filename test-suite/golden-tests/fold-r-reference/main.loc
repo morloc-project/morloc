@@ -32,12 +32,12 @@ showR :: Counter -> Str
 
 --' Fold two sites in one run
 --' @render --n=showR @fold=countIntoR @init=zeroR @combine=mergeR
-twoSites :: <IO> ()
-twoSites = do
-  @collect produceR
-  @collect produceR
+twoSites :: <IO> (Collect I64)
+twoSites = @collect (\k -> do
+  _ <- produceR k
+  produceR k)
 
 --' Fold a parent's and a forked child's batches
 --' @render --n=showR @fold=countIntoR @init=zeroR @combine=mergeR
-forked :: <IO> ()
+forked :: <IO> (Collect I64)
 forked = @collect forkR

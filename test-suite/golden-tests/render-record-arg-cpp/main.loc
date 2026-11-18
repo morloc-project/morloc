@@ -28,7 +28,7 @@ produce keep sink = do
 --' @with -d/--doubled=dbl @stream
 --' @render -j/--joined=joinAll
 --' @render -b/--buffered=joinAll @stream
-report :: Opts -> <IO> ()
+report :: Opts -> <IO> (Collect Int)
 report opts = do
   let keep = ? isNull (.lo opts) = const True
              : let limit = require (.lo opts)

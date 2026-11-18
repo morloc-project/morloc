@@ -27,7 +27,7 @@ produce sink = do
 
 --' Stream integer batches
 --' @render -f/--folded=showAcc @fold=addBatch @init=zeroAcc @combine=mergeAcc
-stream :: <IO> ()
+stream :: <IO> (Collect Int)
 stream = @collect produce
 
 writeBags :: Int -> (Str, Str, Int)

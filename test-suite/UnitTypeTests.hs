@@ -2530,7 +2530,7 @@ unitTypeTests =
       [ -- programs that reach a positional pairing with lists of different
         -- lengths are refused as the user's error
         expectError "a definition with more parameters than its @with signature"
-          "module main (streamNums)\nsumFile :: IFile [Int] -> <IO> Int\nproduce :: ([Int] -> <IO> ()) -> <IO> ()\n--' Stream numbers\n--' @with -m/--summary=sumFile\nstreamNums :: Int -> <IO> ()\nstreamNums x y = @collect produce\n"
+          "module main (streamNums)\nsumFile :: IFile [Int] -> <IO> Int\nproduce :: ([Int] -> <IO> ()) -> <IO> ()\n--' Stream numbers\n--' @with -m/--summary=sumFile\nstreamNums :: Int -> <IO> (Collect Int)\nstreamNums x y = @collect produce\n"
       , expectError "a specialized alias applied to too many arguments"
           "module main (f)\ntype Q Int b = (b, Str)\nf :: Q Int Int Int -> Real\n"
       , expectError "a specialized alias applied to none"
@@ -10479,7 +10479,7 @@ withDocstringTests =
         produce :: ([Int] -> <IO> ()) -> <IO> ()
         produce sink = sink (mk 0)
         --' @render -p/--plain=showStr
-        stream :: <IO> ()
+        stream :: <IO> (Collect Int)
         stream = @collect produce
           |]
 
@@ -10499,7 +10499,7 @@ withDocstringTests =
         produce :: ([Int] -> <IO> ()) -> <IO> ()
         produce sink = sink (mk 0)
         --' @render -p/--pair=showPair
-        stream :: <IO> ()
+        stream :: <IO> (Collect Int)
         stream = @collect produce
           |]
 
@@ -10518,7 +10518,7 @@ withDocstringTests =
         produce :: ([Int] -> <IO> ()) -> <IO> ()
         produce sink = sink (mk 0)
         --' @render -p/--plain=showInts
-        stream :: <IO> ()
+        stream :: <IO> (Collect Int)
         stream = @collect produce
           |]
 
@@ -10537,7 +10537,7 @@ withDocstringTests =
         produce :: ([Int] -> <IO> ()) -> <IO> ()
         produce sink = sink (mk 0)
         --' @with -n/--count=countAny
-        stream :: <IO> ()
+        stream :: <IO> (Collect Int)
         stream = @collect produce
           |]
 
@@ -10860,9 +10860,9 @@ withDocstringTests =
           |]
 
         -- An action applies to the whole output, whatever the shape of the
-        -- body: a `@collect` in one branch of a guard builds.
+        -- body: a `@collect` in each branch of a guard builds.
       , expectPass
-          "with: a gathering action on a @collect in one branch"
+          "with: a gathering action on a @collect in each branch"
           [r|
         module main (foo)
         effect IO
@@ -10870,8 +10870,8 @@ withDocstringTests =
         nop :: <IO> ()
         fmt :: [Int] -> Str
         --' @render -a/--all=fmt
-        foo :: Bool -> <IO> ()
-        foo b = ? b = @collect produce : nop
+        foo :: Bool -> <IO> (Collect Int)
+        foo b = ? b = @collect produce : @collect (\k -> nop)
           |]
 
         -- A leading-underscore long flag name is rejected: those names are
@@ -10906,7 +10906,7 @@ withDocstringTests =
         produce :: Str -> ([Int] -> <IO> ()) -> <IO> ()
         produce s sink = sink (mk s)
         --' @render -p/--plain=showInts
-        stream :: Int -> <IO> ()
+        stream :: Int -> <IO> (Collect Int)
         stream x =
           let x = "s"
               y = x
@@ -10928,14 +10928,14 @@ withDocstringTests =
         produce :: Int -> ([Int] -> <IO> ()) -> <IO> ()
         produce n sink = sink (mk n)
         --' @render -p/--plain=showInts
-        stream :: Int -> <IO> ()
+        stream :: Int -> <IO> (Collect Int)
         stream n = let showInts = 5 in @collect (produce showInts)
           |]
 
-        -- A command streams when a @collect is reachable from its definition,
-        -- including from a where-binding.
-      , expectPass
-          "with: a command streaming from a where-binding"
+        -- A stdout source ends the body itself, never a where-binding
+        -- (STRM-4).
+      , expectError
+          "with: a command may not stream from a where-binding"
           [r|
         module main (stream)
         effect IO
@@ -10947,18 +10947,16 @@ withDocstringTests =
         produce :: Int -> ([Int] -> <IO> ()) -> <IO> ()
         produce n sink = sink (mk n)
         --' @render -r/--text=render2($1)
-        stream :: Int -> Int -> <IO> ()
+        stream :: Int -> Int -> <IO> (Collect Int)
         stream x y = go
           where
             go = @collect (produce x)
           |]
 
-        -- A where-binding sees only the definition's own parameters, so a
-        -- `$N` naming a parameter bound by a lambda in the body cannot reach
-        -- a @collect inside a where-binding.
-      -- A command that streams from a where-binding runs its actions on its
-      -- staged output, where `$2` is the second argument the stage saved.
-      , testCase "with: `$N` naming a body lambda's parameter from a where-binding" $ do
+        -- A `@stdout` command runs its actions on its staged output, where
+        -- `$2` is the second argument the stage saved, even when a lambda
+        -- in the body binds it.
+      , testCase "with: `$N` naming a body lambda's parameter of a staged command" $ do
           result <- runFront [r|
         module main (stream)
         effect IO
@@ -10970,10 +10968,8 @@ withDocstringTests =
         produce :: Int -> ([Int] -> <IO> ()) -> <IO> ()
         produce n sink = sink (mk n)
         --' @render -r/--text=render2($2)
-        stream :: Int -> Int -> <IO> ()
-        stream x = \y -> go
-          where
-            go = @collect (produce x)
+        stream :: Int -> Int -> <IO> (Collect Int)
+        stream x = \y -> @stdout (\o -> @write 0 o (mk x))
           |]
           case result of
             Right _ -> return ()

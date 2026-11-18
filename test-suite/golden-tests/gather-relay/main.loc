@@ -34,10 +34,10 @@ zero = 0
 
 --' Fold Python batches in C++
 --' @render --n=showNC @fold=addC @init=zero @combine=mergeC
-foldPyCpp :: <IO> ()
+foldPyCpp :: <IO> (Collect I64)
 foldPyCpp = @collect produceP
 
 --' Gather Rust batches handed on by Python
 --' @render --show=showC
-relay :: <IO> ()
+relay :: <IO> (Collect I64)
 relay = @collect (\sink -> produceRs (\xs -> sink (incP xs)))

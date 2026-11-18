@@ -25,5 +25,5 @@ produce sink = do
 
 --' Stream each batch as text
 --' @render -t/--text=render @stream @default
-texts :: Int -> <IO> ()
+texts :: Int -> <IO> (Collect Int)
 texts n = @collect produce

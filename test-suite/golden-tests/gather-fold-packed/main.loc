@@ -1,9 +1,7 @@
 -- A fold whose batch type is an opaque native type with a packer (SIDE-10):
 -- the parent's batches fold natively, and the batch a forked child sends
 -- has no wire form, so the fold fails rather than lose it. The fold over
--- the same type with no fork answers. Each producer is given through a
--- lambda, so the command has no replay entry (a replay of a packed element
--- type does not build; model/runtime/issues/cli-directives.md).
+-- the same type with no fork answers.
 
 module main (foldCpp, forkCpp, foldRust, forkRust)
 
@@ -46,20 +44,20 @@ zero = 0
 
 --' Fold tallies in C++
 --' @render --n=showNC @fold=addC @init=zero @combine=mergeC
-foldCpp :: <IO> ()
+foldCpp :: <IO> (Collect Tally)
 foldCpp = @collect (\s -> produceC s)
 
 --' Fold tallies over a C++ forked child
 --' @render --n=showNC @fold=addC @init=zero @combine=mergeC
-forkCpp :: <IO> ()
+forkCpp :: <IO> (Collect Tally)
 forkCpp = @collect (\s -> produceForksC s)
 
 --' Fold tallies in Rust
 --' @render --n=showNRs @fold=addRs @init=zero @combine=mergeRs
-foldRust :: <IO> ()
+foldRust :: <IO> (Collect Tally)
 foldRust = @collect (\s -> produceRs s)
 
 --' Fold tallies over a Rust forked child
 --' @render --n=showNRs @fold=addRs @init=zero @combine=mergeRs
-forkRust :: <IO> ()
+forkRust :: <IO> (Collect Tally)
 forkRust = @collect (\s -> produceForksRs s)

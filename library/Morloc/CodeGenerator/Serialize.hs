@@ -731,9 +731,18 @@ serializeHosted' reg heads argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
           mAst <- if intr == IntrTry
                     then return Nothing
                     else resultSerialAst m intr payloadTf
-          let packed = case (mAst, msch) of
-                (Just ast, Just sch) -> WireToNativeN payloadTf ast intr sch es''
-                _ -> IntrinsicN (if intr == IntrTry then innerTf else payloadTf) intr msch es''
+          -- @replay hands each frame to its function, so the frame, not the
+          -- result, is the value a packer finishes: the function's batch.
+          mAst' <- case (intr, es'') of
+            (IntrReplay, [_, f']) | FunF [batchTf] _ <- typeFof f' -> do
+              ast <- Serial.makeSerialAST m lang batchTf
+              return $ if Serial.isSerializable ast then Nothing else Just ast
+            _ -> return mAst
+          packed <- case (mAst', msch) of
+                (Just ast, Just sch) -> return $ WireToNativeN payloadTf ast intr sch es''
+                (Just _, Nothing) | intr == IntrReplay -> MM.throwCompilerBug $
+                  "@" <> pretty (intrinsicName intr) <+> "needs a packer but has no schema"
+                _ -> return $ IntrinsicN (if intr == IntrTry then innerTf else payloadTf) intr msch es''
           -- Reuse @try rather than a bespoke wrap: converting a raised
           -- failure into an Ok/Err value is exactly what it does, and
           -- routing through it keeps one lowering (and one per-language
@@ -845,13 +854,13 @@ serializeHosted' reg heads argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
         _ | Serial.isSerializable ast -> return [dataArg]
           | otherwise -> return [NativeToWireN (Serial.unpackedAsTypeF (Serial.serialAstToType ast)) ast dataArg]
 
-    -- @load, @read and @unpack return their value in its wire
+    -- @load, @read, @unpack and @next return their value in its wire
     -- form, as the runtime decodes it. Where a packer builds the native form
     -- at any level, the serial AST is returned so the value is finished as a
     -- received argument is.
     resultSerialAst :: Int -> Intrinsic -> TypeF -> MorlocMonad (Maybe SerialAST)
     resultSerialAst m intr resultTf
-      | intr `elem` [IntrLoad, IntrRead, IntrUnpack] = do
+      | intr `elem` [IntrLoad, IntrRead, IntrUnpack, IntrNext] = do
           ast <- Serial.makeSerialAST m lang resultTf
           return $ if Serial.isSerializable ast then Nothing else Just ast
       | otherwise = return Nothing

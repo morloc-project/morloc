@@ -1,0 +1,117 @@
+-- A stream whose element type has only a packer for its wire form (a
+-- native `Tally` in each language). An action's replay of the saved stream
+-- (a run with a path action) and `@next` over a file of it hand each handler
+-- native values, packed and unpacked as an argument would be; the producer
+-- writes an empty batch between two others, which the per-batch action
+-- sees. A handler given the wire form fails (C++ and Rust do not build).
+-- `@next` in Rust is left out: its `Ok xs <-` bind does not build for a
+-- non-Clone native type (model/runtime/issues/cli-directives.md).
+
+module main
+  ( streamCpp, readCpp, streamPy, readPy, streamR, readR, streamRust
+  )
+
+import root-cpp
+import root-py
+import root-r
+import root-rust
+
+newtype Tally = Int
+type Cpp => Tally = "Tally"
+type Rust => Tally = "Tally"
+type Py => Tally = "dict"
+type R => Tally = "list"
+
+instance Packable Int Tally where
+  source Cpp from "impl.hpp" ("pack_tally" as pack, "unpack_tally" as unpack)
+
+instance Packable Int Tally where
+  source Py from "impl.py" ("pack_tally" as pack, "unpack_tally" as unpack)
+
+instance Packable Int Tally where
+  source R from "impl.R" ("pack_tally" as pack, "unpack_tally" as unpack)
+
+instance Packable Int Tally where
+  source Rust from "impl.rs" ("pack_tally" as pack, "unpack_tally" as unpack)
+
+source Cpp from "impl.hpp" ("produce" as produceCpp, "show_all" as showAllCpp, "show_batch" as showBatchCpp)
+source Py from "impl.py" ("produce" as producePy, "show_all" as showAllPy, "show_batch" as showBatchPy)
+source R from "impl.R" ("produce" as produceR, "show_all" as showAllR, "show_batch" as showBatchR)
+source Rust from "impl.rs" ("produce" as produceRust, "show_all" as showAllRust, "show_batch" as showBatchRust)
+
+produceCpp :: ([Tally] -> <IO> ()) -> <IO> ()
+
+--' Every value, shown by Cpp
+showAllCpp :: [Tally] -> Str
+
+--' The size of one batch, shown by Cpp
+showBatchCpp :: [Tally] -> Str
+
+--' Stream tallies from Cpp
+--' @render -a/--all=showAllCpp
+--' @render -e/--each=showBatchCpp @stream
+streamCpp :: <IO> (Collect Tally)
+streamCpp = @collect produceCpp
+
+--' Show the first batch of a file of tallies, read in Cpp
+readCpp :: Str -> <IO> Str
+readCpp path = do
+  Ok s <- @open path :: <IO> (Try Str (IStream Tally))
+  Ok xs <- @next s
+  showAllCpp xs
+
+producePy :: ([Tally] -> <IO> ()) -> <IO> ()
+
+--' Every value, shown by Py
+showAllPy :: [Tally] -> Str
+
+--' The size of one batch, shown by Py
+showBatchPy :: [Tally] -> Str
+
+--' Stream tallies from Py
+--' @render -a/--all=showAllPy
+--' @render -e/--each=showBatchPy @stream
+streamPy :: <IO> (Collect Tally)
+streamPy = @collect producePy
+
+--' Show the first batch of a file of tallies, read in Py
+readPy :: Str -> <IO> Str
+readPy path = do
+  Ok s <- @open path :: <IO> (Try Str (IStream Tally))
+  Ok xs <- @next s
+  showAllPy xs
+
+produceR :: ([Tally] -> <IO> ()) -> <IO> ()
+
+--' Every value, shown by R
+showAllR :: [Tally] -> Str
+
+--' The size of one batch, shown by R
+showBatchR :: [Tally] -> Str
+
+--' Stream tallies from R
+--' @render -a/--all=showAllR
+--' @render -e/--each=showBatchR @stream
+streamR :: <IO> (Collect Tally)
+streamR = @collect produceR
+
+--' Show the first batch of a file of tallies, read in R
+readR :: Str -> <IO> Str
+readR path = do
+  Ok s <- @open path :: <IO> (Try Str (IStream Tally))
+  Ok xs <- @next s
+  showAllR xs
+
+produceRust :: ([Tally] -> <IO> ()) -> <IO> ()
+
+--' Every value, shown by Rust
+showAllRust :: [Tally] -> Str
+
+--' The size of one batch, shown by Rust
+showBatchRust :: [Tally] -> Str
+
+--' Stream tallies from Rust
+--' @render -a/--all=showAllRust
+--' @render -e/--each=showBatchRust @stream
+streamRust :: <IO> (Collect Tally)
+streamRust = @collect produceRust

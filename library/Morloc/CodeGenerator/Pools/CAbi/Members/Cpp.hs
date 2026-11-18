@@ -1495,6 +1495,12 @@ PROPAGATE_ERROR(errmsg)|]
           , poolBorrowedLocal = Nothing
           , poolChain = Nothing
           }
+    , lcMakeCallback = \param mt stmts expr ->
+        return
+          ( []
+          , "[&](const" <+> maybe "auto" renderIType mt <> "&" <+> param <> ")" <+> "{"
+              <> nest 4 (line <> vsep (stmts ++ ["return" <+> expr <> ";"])) <> line <> "}"
+          )
     , lcMakeDoBlock = \t stmts expr ->
         let isUnit = case t of
               VarF (FV tv _) -> tv == TV "Unit"

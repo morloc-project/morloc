@@ -27,7 +27,8 @@ import Morloc.Namespace.Type
 
 import Morloc.Data.Doc (pretty, (<+>), squotes)
 import Morloc.Frontend.Typecheck (isPattern)
-import Morloc.Typecheck.Internal (prettyTypeU)
+import Morloc.Typecheck.Internal (mapTypeUChildren, prettyTypeU)
+import qualified Morloc.BaseTypes as BT
 import qualified Data.Map as Map
 import qualified Data.Text as T
 import qualified Morloc.Build.Params as BP
@@ -115,6 +116,8 @@ typecheck path code =
     >>= skipGenericExports
     -- the shared specializations the exports call are trees of their own
     >>= (\es -> MM.gets stateSpecs >>= \(Specs specs) -> return (es <> specs))
+    -- a streaming command's `Collect a` is unit from here on (STRM-7)
+    >>= eraseCollect
     -- lower guest-language sources (e.g. Futhark) into host glue
     >>= lowerGuests
     -- resolve all TypeU types to Type
@@ -129,6 +132,20 @@ typecheck path code =
     -- evaluate each named value once, where its uses need it
     >>= mapM shareBindings
     >>= realityCheck
+
+-- | Replace every @Collect a@ with @()@ and @closeCollect with @close, in
+-- the trees and in the export types codegen reads. What a command streams
+-- was recorded from its signature before typechecking ('stateStreamElems').
+eraseCollect :: [AnnoS (Indexed TypeU) Many Int] -> MorlocMonad [AnnoS (Indexed TypeU) Many Int]
+eraseCollect es = do
+  MM.modify' (\s -> s {stateExportTypes = Map.map eraseU (stateExportTypes s)})
+  return (map eraseTree es)
+  where
+    eraseTree (AnnoS (Idx i t) c e) = AnnoS (Idx i (eraseU t)) c (eraseE (mapExprS eraseTree e))
+    eraseE (IntrinsicS IntrCloseCollect xs) = IntrinsicS IntrClose xs
+    eraseE x = x
+    eraseU (AppU (VarU v) [_]) | v == BT.collectVar = BT.unitU
+    eraseU t = mapTypeUChildren eraseU t
 
 -- | Set aside the exports whose type keeps a type variable: they are not
 -- commands and are never realized (SIG-5, CMD-2). Each is warned about and

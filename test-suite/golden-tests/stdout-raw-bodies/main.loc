@@ -29,15 +29,15 @@ produce sink = do
 
 --' Stream each batch as text
 --' @render -t/--text=render @stream @default
-texts :: Int -> <IO> ()
+texts :: Int -> <IO> (Collect Int)
 texts n = @collect produce
 
 --' Stream each batch as bytes
 --' @render -b/--bytes=renderBytes @stream @default
-binary :: Int -> <IO> ()
+binary :: Int -> <IO> (Collect Int)
 binary n = @collect produce
 
 --' Stream each batch as text that is not UTF-8
 --' @render -t/--text=renderBad @stream @default
-bad :: Int -> <IO> ()
+bad :: Int -> <IO> (Collect Int)
 bad n = @collect produce

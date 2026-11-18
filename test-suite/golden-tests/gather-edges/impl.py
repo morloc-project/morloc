@@ -32,6 +32,7 @@ def produce_stash(sink):
     _stash.append(sink)
 
 
-def fire_late():
+def show_late(xs):
     for sink in _stash:
         sink([3])
+    return show_ints(xs)

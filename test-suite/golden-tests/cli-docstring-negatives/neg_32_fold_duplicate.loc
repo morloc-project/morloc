@@ -22,5 +22,5 @@ produce sink = sink [1,2,3]
 
 -- A repeated modifier would otherwise let the last one silently win.
 --' @render -t/--total=showAcc @fold=step @fold=other @init=zero @combine=merge
-run :: <IO> ()
+run :: <IO> (Collect Int)
 run = @collect produce

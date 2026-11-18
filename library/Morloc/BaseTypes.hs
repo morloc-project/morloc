@@ -44,6 +44,7 @@ module Morloc.BaseTypes
   , istreamVar
   , ostreamVar
   , cellVar
+  , collectVar
   , tryVar
   , tryOkCtor
   , tryErrCtor
@@ -211,6 +212,12 @@ ostreamVar = TV "OStream"
 -- 'handleStorageType'.
 cellVar :: TVar
 cellVar = TV "Cell"
+
+-- | @newtype Collect a = Unit@, what a streaming command returns
+-- (STRM-7). Produced only by the expansion of @collect and @stdout, and
+-- erased to unit after typechecking.
+collectVar :: TVar
+collectVar = TV "Collect"
 
 -- | @data Try e a = Err e | Ok a@, declared in the @internal@ stdlib module
 -- and named here so the compiler can give fallible intrinsics a result type

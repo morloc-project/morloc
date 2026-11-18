@@ -13,21 +13,17 @@ module main (big, mixed, slice, count)
 import root-cpp
 
 -- 100k elements in two sub-packets, written at level 3.
-big :: <IO> ()
-big = do
-  o <- @stdout :: <IO> (OStream Int)
+big :: <IO> (Collect Int)
+big = @stdout (\o -> do
   @write 3 o (range 0 50000)
   @flush o
-  @write 3 o (range 50000 100000)
-  @close o
+  @write 3 o (range 50000 100000))
 
-mixed :: <IO> ()
-mixed = do
-  o <- @stdout :: <IO> (OStream Int)
+mixed :: <IO> (Collect Int)
+mixed = @stdout (\o -> do
   @write 3 o [1, 2, 3]
   @flush o
-  @write 0 o [4, 5, 6]
-  @close o
+  @write 0 o [4, 5, 6])
 
 -- A slice that starts in the first sub-packet and ends in the second.
 slice :: Str -> <IO> [Int]

@@ -14,5 +14,5 @@ produce :: ([Int] -> <IO> ()) -> <IO> ()
 produce sink = sink [1,2,3]
 
 --' @render -t/--total=showAcc @fold=step
-run :: <IO> ()
+run :: <IO> (Collect Int)
 run = @collect produce

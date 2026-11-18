@@ -218,12 +218,12 @@ slot is printed empty. Help never fills it with a different field, such as
 a media type or a type name.
 
 ### CLI-11 The Return block of a command with output actions
-Intent: ruled 2026-10-10
+Intent: ruled 2026-11-15
 Tests: spec-cli-11-1
 Code: conforms 2026-10-10
 
 A command without actions prints `Return: T` and then its return
-description lines. A command with actions prints `Return:` and then:
+description lines; for a streaming command `T` is `[a]` (STRM-7). A command with actions prints `Return:` and then:
 
 - `type:` what the command writes when no action writes stdout (CLI-7 case
   4); for a streaming command, the batch element type.

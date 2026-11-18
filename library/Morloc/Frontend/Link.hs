@@ -504,7 +504,7 @@ linkLocalTerms m0 s0 e0 = linkLocal Set.empty s0 (toCondensedState s0) e0
         _ | origin == Derived
           , m0 == MV "internal"
           , [_, h] <- ts
-          , extractKey h `elem` [BT.ifileVar, BT.istreamVar, BT.ostreamVar, BT.cellVar, BT.patternChainVar] ->
+          , extractKey h `elem` [BT.ifileVar, BT.istreamVar, BT.ostreamVar, BT.cellVar, BT.patternChainVar, BT.collectVar] ->
               return ()
         -- A derived instance is of the compiler's class: one that merely
         -- shares its name is not given it. A newtype's own conversions are

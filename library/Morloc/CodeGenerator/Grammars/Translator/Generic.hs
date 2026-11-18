@@ -40,6 +40,7 @@ import Morloc.CodeGenerator.Grammars.Translator.Imperative
   , containsClosure
   , IAccessor (..)
   , IExpr (..)
+  , IType
   , IOwnership (..)
   , IProgram (..)
   , IStmt (..)
@@ -699,6 +700,7 @@ genericLowerConfig desc srcNamer debugInfo traceInfo debugMode = cfg
             if T.null (ldOwnedArgFn desc)
               then Nothing
               else Just (v <+> pretty (ldAssignOp desc) <+> pretty (ldOwnedArgFn desc) <> "(" <> e <> ")", v)
+        , lcMakeCallback = genericMakeCallback desc cfg
         , lcMakeDoBlock = genericMakeDoBlock desc cfg
         , lcMakeTry = genericMakeTry desc
         , lcSerialize = defaultSerialize cfg
@@ -1218,20 +1220,27 @@ genericMakeDoBlock desc cfg _ stmts expr
         let body = render (vsep (stmts <> [expr]))
          in return ([], pretty $ substituteT suspendBlock [("body", body)])
   | null stmts = return ([], exprThunk)
-  | otherwise = do
-      idx <- lcNewIndex cfg
-      let nm = (helperNamer (ldManifoldPrefix desc)) idx
-          header =
-            pretty $
-              substituteT (ldFuncDefHeader desc) [("name", render nm), ("args", "")]
-          retLine = pretty $ substituteT (ldReturnTemplate desc) [("expr", render expr)]
-          def = case ldBlockStyle desc of
-            BraceBlock -> block 4 header (vsep (stmts <> [retLine]))
-            IndentBlock -> nest 4 (vsep [header, vsep (stmts <> [retLine])])
-      return ([def], nm)
+  | otherwise = namedLocalDef desc cfg "" stmts expr
   where
     suspendBlock = ldDoBlockBlock desc
     exprThunk = pretty $ substituteT (ldDoBlockExpr desc) [("expr", render expr)]
+
+-- | A one-argument function as a named local def, which holds statements in
+-- every generic language.
+genericMakeCallback :: LangDescriptor -> LowerConfig IndexM -> MDoc -> Maybe IType -> [MDoc] -> MDoc -> IndexM ([MDoc], MDoc)
+genericMakeCallback desc cfg param _ = namedLocalDef desc cfg param
+
+-- | A function of @args@ defined as a hoisted line, and its name.
+namedLocalDef :: LangDescriptor -> LowerConfig IndexM -> MDoc -> [MDoc] -> MDoc -> IndexM ([MDoc], MDoc)
+namedLocalDef desc cfg args stmts expr = do
+  idx <- lcNewIndex cfg
+  let nm = (helperNamer (ldManifoldPrefix desc)) idx
+      header = pretty $ substituteT (ldFuncDefHeader desc) [("name", render nm), ("args", render args)]
+      retLine = pretty $ substituteT (ldReturnTemplate desc) [("expr", render expr)]
+      def = case ldBlockStyle desc of
+        BraceBlock -> block 4 header (vsep (stmts <> [retLine]))
+        IndentBlock -> nest 4 (vsep [header, vsep (stmts <> [retLine])])
+  return ([def], nm)
 
 -- | @try body@ as a call to the language's mlc_try helper with two unary
 -- lambdas. The parameter names avoid a leading underscore, which R does

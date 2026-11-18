@@ -16,7 +16,7 @@ wbDigest :: [Str] -> Int
 wbExpected :: Int -> Int -> Int
 
 --' Write n batches of per strings to standard output
-produce :: Int -> Int -> <IO> ()
+produce :: Int -> Int -> <IO> (Collect Str)
 produce n per = @collect (wbProduce n per)
 
 writeLevel3 :: OStream Str -> [Str] -> <IO> ()

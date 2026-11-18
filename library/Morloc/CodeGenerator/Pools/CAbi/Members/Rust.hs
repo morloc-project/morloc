@@ -3437,6 +3437,13 @@ rustLowerConfig mask makers consumed userArms =
               [] -> "||" <+> "{" <+> expr <+> "}"
               _ -> "||" <+> "{" <> nest 4 (line <> vsep (stmts ++ [expr])) <> line <> "}"
           )
+    , lcMakeCallback = \param mt stmts expr ->
+        let lent = param <> "_lent"
+         in return
+              ( []
+              , "|" <> lent <> ": &" <> maybe "_" RP.rustType mt <> "|" <+> "{"
+                  <> nest 4 (line <> vsep (("let" <+> param <+> "=" <+> lent <> ".clone();") : stmts ++ [expr])) <> line <> "}"
+              )
     -- The helper hands back a plain Result so the panic-payload downcast
     -- (which decides what is catchable) stays in rustmorloc; the arms are
     -- built here because only the caller knows this Try's representation.

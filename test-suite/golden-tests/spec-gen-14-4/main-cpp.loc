@@ -80,15 +80,15 @@ saveLoad p = do
   sumDays xs
 
 --' Batches of pairs, gathered
-collectPairs :: <IO> ()
+collectPairs :: <IO> (Collect (Pair Date))
 collectPairs = @collect producePairs
 
 --' Batches of pairs, folded
 --' @render --n=showSum @fold=addPairs @init=zeroSum @combine=mergeSums
-foldPairs :: <IO> ()
+foldPairs :: <IO> (Collect (Pair Date))
 foldPairs = @collect producePairs
 
 --' Batches of pairs, gathered into Python
 --' @render --py=showPairs
-crossPairs :: <IO> ()
+crossPairs :: <IO> (Collect (Pair Date))
 crossPairs = @collect producePairs

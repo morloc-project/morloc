@@ -1,13 +1,10 @@
--- Two sequential `@collect` sites in one run must produce well-formed
--- output in every stream format. Under `-f packet` the run's stdout is one
--- stream packet (header once, one final footer indexing every sub-packet)
--- that a later command can read back whole. Under `-f json` each stream is
--- its own array, closed when the stream closes, so anything printed
--- afterwards follows it; jsonl needs no framing. A command that streams and
--- then returns a value prints the closed stream before the value. Reported
--- as issue #114.
+-- Two producers sharing one `@collect` sink must produce well-formed output
+-- in every stream format. Under `-f packet` the run's stdout is one stream
+-- packet (header once, one final footer indexing every sub-packet) that a
+-- later command can read back whole. Under `-f json` the stream is one
+-- array; jsonl needs no framing (issue #114).
 
-module main (twoSites, seqRet, total)
+module main (twoSites, total)
 
 import root-py
 
@@ -19,12 +16,7 @@ total :: [Int] -> Int
 produce :: Int -> ([Int] -> <IO> ()) -> <IO> ()
 produce n sink = sink (mk n)
 
-twoSites :: <IO> ()
-twoSites = do
-  @collect (produce 1)
-  @collect (produce 2)
-
-seqRet :: Int -> <IO> Int
-seqRet n = do
-  @collect (produce 1)
-  n
+twoSites :: <IO> (Collect Int)
+twoSites = @collect (\k -> do
+  _ <- produce 1 k
+  produce 2 k)

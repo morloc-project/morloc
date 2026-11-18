@@ -82,70 +82,70 @@ zero = 0
 
 --' Fold nothing in C++
 --' @render --n=showNC @fold=addSumC @init=zero @combine=mergeC
-emptyCpp :: <IO> ()
+emptyCpp :: <IO> (Collect I64)
 emptyCpp = @collect noneC
 
 --' Fold nothing in Python
 --' @render --n=showNP @fold=addSumP @init=zero @combine=mergeP
-emptyPy :: <IO> ()
+emptyPy :: <IO> (Collect I64)
 emptyPy = @collect noneP
 
 --' Fold nothing in R
 --' @render --n=showNR @fold=addSumR @init=zero @combine=mergeR
-emptyR :: <IO> ()
+emptyR :: <IO> (Collect I64)
 emptyR = @collect noneR
 
 --' Fold nothing in Rust
 --' @render --n=showNRs @fold=addSumRs @init=zero @combine=mergeRs
-emptyRust :: <IO> ()
+emptyRust :: <IO> (Collect I64)
 emptyRust = @collect noneRs
 
 --' Fold nothing from a C++ fork
 --' @render --n=showNC @fold=addSumC @init=zero @combine=mergeC
-emptyForkCpp :: <IO> ()
+emptyForkCpp :: <IO> (Collect I64)
 emptyForkCpp = @collect forkNoneC
 
 --' Fold nothing from a Python fork
 --' @render --n=showNP @fold=addSumP @init=zero @combine=mergeP
-emptyForkPy :: <IO> ()
+emptyForkPy :: <IO> (Collect I64)
 emptyForkPy = @collect forkNoneP
 
 --' Fold nothing from C++ in Python
 --' @render --n=showNP @fold=addSumP @init=zero @combine=mergeP
-emptyFilePy :: <IO> ()
+emptyFilePy :: <IO> (Collect I64)
 emptyFilePy = @collect noneC
 
 --' Fold nothing from C++ in R
 --' @render --n=showNR @fold=addSumR @init=zero @combine=mergeR
-emptyFileR :: <IO> ()
+emptyFileR :: <IO> (Collect I64)
 emptyFileR = @collect noneC
 
 --' Fold C++ threads in C++
 --' @render --n=showNC @fold=addSumC @init=zero @combine=mergeC
-threadsCpp :: <IO> ()
+threadsCpp :: <IO> (Collect I64)
 threadsCpp = @collect threadsC
 
 --' Fold C++ threads in Python
 --' @render --n=showNP @fold=addSumP @init=zero @combine=mergeP
-threadsPy :: <IO> ()
+threadsPy :: <IO> (Collect I64)
 threadsPy = @collect threadsC
 
 --' Fold C++ threads in R
 --' @render --n=showNR @fold=addSumR @init=zero @combine=mergeR
-threadsR :: <IO> ()
+threadsR :: <IO> (Collect I64)
 threadsR = @collect threadsC
 
 --' Fold Rust threads in Rust
 --' @render --n=showNRs @fold=addSumRs @init=zero @combine=mergeRs
-threadsRust :: <IO> ()
+threadsRust :: <IO> (Collect I64)
 threadsRust = @collect threadsRs
 
 --' Fold Python threads in place
 --' @render --n=showCountsP @fold=countIntoP @init=zeroCountsP @combine=mergeCountsP
-inplacePy :: <IO> ()
+inplacePy :: <IO> (Collect I64)
 inplacePy = @collect threadsP
 
 --' Call a finished fold's sink
 --' @render --n=showLateC @fold=addSumC @init=zero @combine=mergeC
-lateCpp :: <IO> ()
+lateCpp :: <IO> (Collect I64)
 lateCpp = @collect storeC

@@ -1,12 +1,8 @@
 -- Daemon-mode regression for the @stdout claim wedge.
 --
--- @collect wires a @stdout OStream into `produce*` inside the language
--- pool. A daemon refuses such a call before it runs; `rawStdout` opens
--- @stdout itself, which only the pool-side open refuses (DAEMON-15).
---
--- A daemon reuses one pool and one registry across every call, so a claim
--- left behind by a refused open would make every later open fail "@stdout
--- already open in this nexus" instead of being refused. @stderr still opens
+-- Both stdout sources return `Collect` (STRM-7), so a daemon refuses
+-- `useStdout` (@collect) and `rawStdout` (@stdout) before they run, every
+-- time, never as "@stdout already open in this nexus". @stderr still opens
 -- in a daemon: `leakStderr` raises with it open, and the per-call reclaim
 -- must release it for `useStderr`. A one-shot golden cannot show either:
 -- each run gets a fresh registry.
@@ -24,14 +20,12 @@ produceOk sink = do
   _ <- sink (mk 1)
   sink (mk 2)
 
-useStdout :: <IO> ()
+useStdout :: <IO> (Collect Int)
 useStdout = @collect produceOk
 
-rawStdout :: <IO> ()
-rawStdout = do
-  o <- @stdout :: <IO> OStream Int
-  @write 0 o (mk 1)
-  @close o
+rawStdout :: <IO> (Collect Int)
+rawStdout = @stdout (\o -> do
+  @write 0 o (mk 1))
 
 useStderr :: <IO> Int
 useStderr = do

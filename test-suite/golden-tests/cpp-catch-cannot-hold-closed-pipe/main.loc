@@ -11,12 +11,10 @@ source Cpp from "guard.hpp" ("guarded")
 
 guarded :: <IO> Int -> <IO> Int
 
-stream :: <IO> Int
-stream = do
-  o <- @stdout :: <IO> (OStream Int)
-  @write 0 o (range 0 100000)
-  @close o
+writeAll :: OStream Int -> <IO> Int
+writeAll o = do
+  _ <- @write 0 o (range 0 100000)
   0
 
-run :: <IO> Int
-run = guarded stream
+run :: <IO> (Collect Int)
+run = @stdout (\o -> guarded (writeAll o))

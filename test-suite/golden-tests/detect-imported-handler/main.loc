@@ -12,5 +12,5 @@ produce sink = do
 --' Stream, with an IMPORTED offset handler and IMPORTED IFile handler
 --' @with -t/--tag-off=tagOff(@offset) @stream
 --' @with -m/--summary=sumFile
-streamNums :: <IO> ()
+streamNums :: <IO> (Collect Int)
 streamNums = @collect produce

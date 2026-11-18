@@ -1922,6 +1922,15 @@ synthE _ g (IntrinsicS IntrNext [handleE]) = do
          )
 synthE i _ (IntrinsicS IntrNext args) =
   MM.throwCompilerBugAt i $ "@next expects 1 arguments but got" <+> pretty (length args)
+-- @closeCollect :: OStream a -> <IO> (Collect a), ending the expansion of
+-- @collect and @stdout (STRM-7): the handle's element type is the output's.
+synthE _ g (IntrinsicS IntrCloseCollect [handleE]) = do
+  let (g1, a) = newvar "collect_a_" g
+  (g2, _, handleE') <- checkG g1 handleE (AppU (VarU BT.ostreamVar) [a])
+  return ( g2
+         , EffectU ioEffectSet (AppU (VarU BT.collectVar) [apply g2 a])
+         , IntrinsicS IntrCloseCollect [handleE']
+         )
 synthE i _ (IntrinsicS IntrDatafile [pathE])
   | not (isStaticStr pathE) =
       MM.throwSourcedError i
@@ -2072,6 +2081,8 @@ intrinsicType IntrListLenTest = Nothing
 intrinsicType IntrListElem = Nothing
 intrinsicType IntrStdin = Nothing
 intrinsicType IntrStdout = Nothing
+intrinsicType IntrStdoutBracket = Nothing
+intrinsicType IntrCloseCollect = Nothing
 intrinsicType IntrStderr = Nothing
 intrinsicType IntrThrow = Nothing
 intrinsicType IntrTry = Nothing

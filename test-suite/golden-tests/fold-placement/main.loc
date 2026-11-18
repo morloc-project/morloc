@@ -28,10 +28,10 @@ zero = 0
 
 --' Fold C++ batches with a step in two languages
 --' @render --n=show_n @fold=add_sum @init=zero @combine=merge
-cmd :: <IO> ()
+cmd :: <IO> (Collect I64)
 cmd = @collect produceC
 
 --' Fold Python batches with a step in two languages
 --' @render --n=show_n @fold=add_sum @init=zero @combine=merge
-cmdPy :: <IO> ()
+cmdPy :: <IO> (Collect I64)
 cmdPy = @collect produceP

@@ -27,5 +27,5 @@ produce sink = do
 --' Stream integer batches
 --' @render -j/--joined=joinAll
 --' @render -b/--bytes=toBytes
-stream :: <IO> ()
+stream :: <IO> (Collect Int)
 stream = @collect produce

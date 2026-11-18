@@ -595,11 +595,19 @@ data Intrinsic
                     -- (the second open gives an Err arm via the CAS-per-kind
                     -- guard). Read-time failures (EOF, malformed packet)
                     -- surface at @next, whose result carries them as an Err arm.
-  | IntrStdout      -- ^ @stdout :: <IO> OStream a@ -- nullary; opens
-                    -- process stdout as an OStream. @write routes through
-                    -- the nexus. At most one @stdout per nexus.
-  | IntrStderr      -- ^ @stderr :: <IO> OStream a@ -- symmetric with
-                    -- @stdout for stderr.
+  | IntrStdout      -- ^ internal @<IO> OStream a@: open process stdout as
+                    -- an OStream; @write routes through the nexus. NOT
+                    -- user-facing: emitted only by the expansion of
+                    -- 'IntrStdoutBracket' and 'IntrCollect'.
+  | IntrStdoutBracket -- ^ @stdout :: (OStream a -> <IO,e> b) -> <IO,e> (Collect a)@
+                    -- (STRM-8). Desugar-expands to
+                    -- `do { o <- internal open; _ <- body o; @closeCollect o }`.
+  | IntrCloseCollect -- ^ internal @OStream a -> <IO> (Collect a)@: close the
+                    -- stdout stream and give the command its result
+                    -- (STRM-7). NOT user-facing; erased to 'IntrClose' after
+                    -- typechecking.
+  | IntrStderr      -- ^ @stderr :: <IO> OStream a@ -- open process stderr
+                    -- as an OStream, like the internal stdout open.
   | IntrThrow       -- ^ @throw :: e -> a@ -- abandon the computation,
                     -- rendering the payload into the traceback. A bottom
                     -- rather than a tracked effect: it does not return, so
@@ -619,10 +627,10 @@ data Intrinsic
                     -- element_count). Used by the offset-aware `@with`/
                     -- `@render` synthesis to thread the per-batch element
                     -- offset into a handler; also user-callable.
-  | IntrCollect     -- ^ @collect :: (([a] -> <IO,e> ()) -> <IO,e> ()) -> <IO,e> ()@
+  | IntrCollect     -- ^ @collect :: (([a] -> <IO,e> ()) -> <IO,e> ()) -> <IO,e> (Collect a)@
                     -- Provide the default stdout sink to a producer body and
                     -- manage its lifecycle. Desugar-expands to
-                    -- `do { o <- @stdout; body (@write 0 o); @close o }`. The
+                    -- `do { o <- open; body (@write 0 o); @closeCollect o }`. The
                     -- sink type `[a] -> ...` carries the stream element type,
                     -- which the `@with`/`@render` handler synthesis reads off
                     -- to type the flag handlers.
@@ -753,7 +761,9 @@ intrinsicSig IntrAppend = IntrSig "append" (Just 1) True True
 intrinsicSig IntrConcat = IntrSig "concat" (Just 2) True True
 intrinsicSig IntrFlush = IntrSig "flush" (Just 1) True True
 intrinsicSig IntrStdin = IntrSig "stdin" (Just 0) True True
-intrinsicSig IntrStdout = IntrSig "stdout" (Just 0) True True
+intrinsicSig IntrStdout = IntrSig "stdout" (Just 0) True False
+intrinsicSig IntrStdoutBracket = IntrSig "stdout" (Just 1) True True
+intrinsicSig IntrCloseCollect = IntrSig "closeCollect" (Just 1) True False
 intrinsicSig IntrStderr = IntrSig "stderr" (Just 0) True True
 intrinsicSig IntrThrow = IntrSig "throw" (Just 1) False True
 intrinsicSig IntrTry = IntrSig "try" (Just 1) False True

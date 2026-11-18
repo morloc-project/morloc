@@ -1,0 +1,13 @@
+pick :: Bool -> Int -> <IO> (Collect Int)
+plain :: Int -> <IO> (Collect Int)
+[0,0,1,10]
+[100,101]
+0,0,1,10,2,20
+33
+Return: [Int]
+Return:
+  type: [Int]
+  actions:
+    -a/--all: Str  (raw bytes)
+pick True [Int]
+plain True [Int]

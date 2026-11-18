@@ -39,11 +39,9 @@ wReals kind z path = do
   @close o
 
 --' Write Reals batches of each size to standard output
-sReals :: Str -> Int -> <IO> ()
-sReals kind z = do
-  o <- @stdout :: <IO> (OStream Real)
-  dReals z o kind [0, 1, 7, 5000, 3, 20000, 1]
-  @close o
+sReals :: Str -> Int -> <IO> (Collect Real)
+sReals kind z = @stdout (\o -> do
+  dReals z o kind [0, 1, 7, 5000, 3, 20000, 1])
 
 dI32s :: Int -> OStream I32 -> Str -> [Int] -> <IO> ()
 dI32s z o kind ns = do
@@ -61,11 +59,9 @@ wI32s kind z path = do
   @close o
 
 --' Write I32s batches of each size to standard output
-sI32s :: Str -> Int -> <IO> ()
-sI32s kind z = do
-  o <- @stdout :: <IO> (OStream I32)
-  dI32s z o kind [0, 1, 7, 5000, 3, 20000, 1]
-  @close o
+sI32s :: Str -> Int -> <IO> (Collect I32)
+sI32s kind z = @stdout (\o -> do
+  dI32s z o kind [0, 1, 7, 5000, 3, 20000, 1])
 
 dI8s :: Int -> OStream I8 -> Str -> [Int] -> <IO> ()
 dI8s z o kind ns = do
@@ -83,11 +79,9 @@ wI8s kind z path = do
   @close o
 
 --' Write I8s batches of each size to standard output
-sI8s :: Str -> Int -> <IO> ()
-sI8s kind z = do
-  o <- @stdout :: <IO> (OStream I8)
-  dI8s z o kind [0, 1, 7, 5000, 3, 20000, 1]
-  @close o
+sI8s :: Str -> Int -> <IO> (Collect I8)
+sI8s kind z = @stdout (\o -> do
+  dI8s z o kind [0, 1, 7, 5000, 3, 20000, 1])
 
 dU8s :: Int -> OStream U8 -> Str -> [Int] -> <IO> ()
 dU8s z o kind ns = do
@@ -105,11 +99,9 @@ wU8s kind z path = do
   @close o
 
 --' Write U8s batches of each size to standard output
-sU8s :: Str -> Int -> <IO> ()
-sU8s kind z = do
-  o <- @stdout :: <IO> (OStream U8)
-  dU8s z o kind [0, 1, 7, 5000, 3, 20000, 1]
-  @close o
+sU8s :: Str -> Int -> <IO> (Collect U8)
+sU8s kind z = @stdout (\o -> do
+  dU8s z o kind [0, 1, 7, 5000, 3, 20000, 1])
 
 dBools :: Int -> OStream Bool -> Str -> [Int] -> <IO> ()
 dBools z o kind ns = do
@@ -127,11 +119,9 @@ wBools kind z path = do
   @close o
 
 --' Write Bools batches of each size to standard output
-sBools :: Str -> Int -> <IO> ()
-sBools kind z = do
-  o <- @stdout :: <IO> (OStream Bool)
-  dBools z o kind [0, 1, 7, 5000, 3, 20000, 1]
-  @close o
+sBools :: Str -> Int -> <IO> (Collect Bool)
+sBools kind z = @stdout (\o -> do
+  dBools z o kind [0, 1, 7, 5000, 3, 20000, 1])
 
 dI16s :: Int -> OStream I16 -> Str -> [Int] -> <IO> ()
 dI16s z o kind ns = do
@@ -149,11 +139,9 @@ wI16s kind z path = do
   @close o
 
 --' Write I16s batches of each size to standard output
-sI16s :: Str -> Int -> <IO> ()
-sI16s kind z = do
-  o <- @stdout :: <IO> (OStream I16)
-  dI16s z o kind [0, 1, 7, 5000, 3, 20000, 1]
-  @close o
+sI16s :: Str -> Int -> <IO> (Collect I16)
+sI16s kind z = @stdout (\o -> do
+  dI16s z o kind [0, 1, 7, 5000, 3, 20000, 1])
 
 dStrs :: Int -> OStream Str -> Str -> [Int] -> <IO> ()
 dStrs z o kind ns = do
@@ -171,11 +159,9 @@ wStrs kind z path = do
   @close o
 
 --' Write Strs batches of each size to standard output
-sStrs :: Str -> Int -> <IO> ()
-sStrs kind z = do
-  o <- @stdout :: <IO> (OStream Str)
-  dStrs z o kind [0, 1, 7, 5000, 3, 20000, 1]
-  @close o
+sStrs :: Str -> Int -> <IO> (Collect Str)
+sStrs kind z = @stdout (\o -> do
+  dStrs z o kind [0, 1, 7, 5000, 3, 20000, 1])
 
 ok :: Try Str () -> Bool
 ok r = match r

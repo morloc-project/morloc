@@ -45,7 +45,7 @@ reservedTypeNames =
     [ "Unit", "Real", "F32", "F64", "Int", "I8", "I16", "I32", "I64"
     , "U8", "UInt", "U16", "U32", "U64", "Bool", "Str", "List", "Optional"
     , "Vector", "Matrix", "Table", "ArrowTable", "Record", "Rec"
-    , "IFile", "IStream", "OStream", "Cell", "Try", "Closure"
+    , "IFile", "IStream", "OStream", "Cell", "Collect", "Try", "Closure"
     , "PatternChain", "PatternAccessible"
     , "Keys", "ListToSet", "Size", "ProjectField", "Singleton", "Restrict"
     ]

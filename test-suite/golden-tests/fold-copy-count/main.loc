@@ -20,5 +20,5 @@ report :: [Int] -> Int
 
 --' Fold n small batches into a large accumulator
 --' @with --n=report @fold=step @init=initAcc @combine=comb
-run :: Int -> <IO> ()
+run :: Int -> <IO> (Collect Int)
 run n = @collect (produce n)

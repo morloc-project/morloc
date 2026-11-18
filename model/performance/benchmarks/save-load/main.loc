@@ -25,8 +25,6 @@ countReals :: I64 -> I64
 countReals n = lenReals (genReals n)
 
 --' Write n Reals to stdout with one @write
-streamReals :: I64 -> <IO> ()
-streamReals n = do
-  o <- @stdout :: <IO> OStream Real
-  @write 0 o (genReals n)
-  @close o
+streamReals :: I64 -> <IO> (Collect Real)
+streamReals n = @stdout (\o -> do
+  @write 0 o (genReals n))

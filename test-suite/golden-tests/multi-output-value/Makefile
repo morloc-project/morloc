@@ -7,10 +7,6 @@ define run_lang
 	: > log.txt
 	./$(1) squares log.txt 4 3 --lines=l.out --pad=p.out --sink=s.out --summary >> obs.txt 2>> obs.err
 	cat log.txt l.out p.out s.out >> obs.txt
-	./$(1) noisy log.txt 2 --lines >> obs.txt 2>> obs.err
-	./$(1) noisy log.txt 2 --lines=n1.out --summary >> obs.txt 2>> obs.err
-	./$(1) noisy log.txt 2 --lines=n2.out --no-stdout >> obs.txt 2>> obs.err
-	cat n1.out n2.out >> obs.txt
 endef
 
 all:

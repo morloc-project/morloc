@@ -29,19 +29,6 @@ sink 0
 sink 1
 sink 4
 sink 9
-[7,8]
-building 2
-0
-1
-[7,8]
-building 2
-2
-[7,8]
-building 2
-0
-1
-0
-1
 --- nexus-cpp ---
 building 4
 0
@@ -73,19 +60,6 @@ sink 0
 sink 1
 sink 4
 sink 9
-[7,8]
-building 2
-0
-1
-[7,8]
-building 2
-2
-[7,8]
-building 2
-0
-1
-0
-1
 --- nexus-r ---
 building 4
 0
@@ -117,19 +91,6 @@ sink 0
 sink 1
 sink 4
 sink 9
-[7,8]
-building 2
-0
-1
-[7,8]
-building 2
-2
-[7,8]
-building 2
-0
-1
-0
-1
 --- nexus-rust ---
 building 4
 0
@@ -161,16 +122,3 @@ sink 0
 sink 1
 sink 4
 sink 9
-[7,8]
-building 2
-0
-1
-[7,8]
-building 2
-2
-[7,8]
-building 2
-0
-1
-0
-1

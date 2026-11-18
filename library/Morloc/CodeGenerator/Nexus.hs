@@ -3521,9 +3521,9 @@ generate cs rASTs helperRASTs = do
     ast <- generalTypeToSerialAST i t
     return (ev, (renderCliType t, render (Serial.serialAstToGeneralSchema ast)))
 
-  -- The batch type is recovered from the producer's sink signature, which does
-  -- not pass through the resolution that argument and return types get, so its
-  -- named types are still bare names. Resolve them here or the glossary has
+  -- The batch type is recorded from the command's signature before the
+  -- resolution that argument and return types get, so its named types are
+  -- still bare names. Resolve them here or the glossary has
   -- nothing to define.
   streamTypes <- fmap Map.fromList . CM.forM (Map.toList streamElemTypes) $ \(ev, tu) -> do
     t <- Docstrings.resolveNestedTypes (typeOf tu)

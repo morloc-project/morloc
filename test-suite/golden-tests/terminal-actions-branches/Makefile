@@ -1,6 +1,5 @@
 # Actions on a command with one tail @collect per branch run on a fresh run
-# (the manifest names an `entry`); a command with an arm that streams nothing
-# keeps a replay entry only.
+# (the manifest names an `entry`), also when an arm's producer streams nothing.
 
 define run
 	printf -- '--- %s ---\n' "$(1)" >> obs.txt

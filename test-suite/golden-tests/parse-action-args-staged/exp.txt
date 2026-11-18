@@ -23,8 +23,7 @@ y=6
 input [1,2,3] batch [1,2,3]
 input [1,2,3] batch [100]
 --- emit lines:n.txt --show=g.out ---
-[1,2,3]
-[100]
+[1,2,3,100]
 input [1,2,3] batch [1,2,3]
 input [1,2,3] batch [100]
 input unchanged

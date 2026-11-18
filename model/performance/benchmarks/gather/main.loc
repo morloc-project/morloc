@@ -42,7 +42,7 @@ loopP k b acc = ? b <= 0 = do
 
 --' C++ batches gathered whole into a C++ handler
 --' @render -s/--sum=summC
-gatherCpp :: I64 -> I64 -> <IO> ()
+gatherCpp :: I64 -> I64 -> <IO> (Collect [U64])
 gatherCpp k b = @collect (produceC k b)
 
 --' The C++ batches alone, each counted where it is made
@@ -51,7 +51,7 @@ controlCpp k b = loopC k b 0
 
 --' Python batches gathered whole into a Python handler
 --' @render -s/--sum=summP
-gatherPy :: I64 -> I64 -> <IO> ()
+gatherPy :: I64 -> I64 -> <IO> (Collect [U64])
 gatherPy k b = @collect (produceP k b)
 
 --' The Python batches alone, each counted where it is made
@@ -60,7 +60,7 @@ controlPy k b = loopP k b 0
 
 --' C++ batches gathered whole into a Python handler
 --' @render -s/--sum=summP
-gatherCross :: I64 -> I64 -> <IO> ()
+gatherCross :: I64 -> I64 -> <IO> (Collect [U64])
 gatherCross k b = @collect (produceC k b)
 
 -- The gather's two halves, split at the file: write the batches to a

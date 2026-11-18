@@ -83,7 +83,7 @@ showHitsRs :: [Hit] -> Str
 --' @render --py=showRowsP
 --' @render --r=showRowsR
 --' @render --rust=showRowsRs
-rowsCpp :: I64 -> <IO> ()
+rowsCpp :: I64 -> <IO> (Collect [U64])
 rowsCpp b = @collect (produceRowsC b)
 
 --' Stream rows from Python
@@ -91,7 +91,7 @@ rowsCpp b = @collect (produceRowsC b)
 --' @render --py=showRowsP
 --' @render --r=showRowsR
 --' @render --rust=showRowsRs
-rowsPy :: I64 -> <IO> ()
+rowsPy :: I64 -> <IO> (Collect [U64])
 rowsPy b = @collect (produceRowsP b)
 
 --' Stream rows from R
@@ -99,7 +99,7 @@ rowsPy b = @collect (produceRowsP b)
 --' @render --py=showRowsP
 --' @render --r=showRowsR
 --' @render --rust=showRowsRs
-rowsR :: I64 -> <IO> ()
+rowsR :: I64 -> <IO> (Collect [U64])
 rowsR b = @collect (produceRowsR b)
 
 --' Stream rows from Rust
@@ -107,7 +107,7 @@ rowsR b = @collect (produceRowsR b)
 --' @render --py=showRowsP
 --' @render --r=showRowsR
 --' @render --rust=showRowsRs
-rowsRust :: I64 -> <IO> ()
+rowsRust :: I64 -> <IO> (Collect [U64])
 rowsRust b = @collect (produceRowsRs b)
 
 --' Stream strings from C++
@@ -115,7 +115,7 @@ rowsRust b = @collect (produceRowsRs b)
 --' @render --py=showStrsP
 --' @render --r=showStrsR
 --' @render --rust=showStrsRs
-strsCpp :: I64 -> <IO> ()
+strsCpp :: I64 -> <IO> (Collect Str)
 strsCpp b = @collect (produceStrsC b)
 
 --' Stream strings from Python
@@ -123,7 +123,7 @@ strsCpp b = @collect (produceStrsC b)
 --' @render --py=showStrsP
 --' @render --r=showStrsR
 --' @render --rust=showStrsRs
-strsPy :: I64 -> <IO> ()
+strsPy :: I64 -> <IO> (Collect Str)
 strsPy b = @collect (produceStrsP b)
 
 --' Stream strings from R
@@ -131,7 +131,7 @@ strsPy b = @collect (produceStrsP b)
 --' @render --py=showStrsP
 --' @render --r=showStrsR
 --' @render --rust=showStrsRs
-strsR :: I64 -> <IO> ()
+strsR :: I64 -> <IO> (Collect Str)
 strsR b = @collect (produceStrsR b)
 
 --' Stream strings from Rust
@@ -139,26 +139,26 @@ strsR b = @collect (produceStrsR b)
 --' @render --py=showStrsP
 --' @render --r=showStrsR
 --' @render --rust=showStrsRs
-strsRust :: I64 -> <IO> ()
+strsRust :: I64 -> <IO> (Collect Str)
 strsRust b = @collect (produceStrsRs b)
 
 --' Stream hits from C++
 --' @render --cpp=showHitsC
 --' @render --py=showHitsP
 --' @render --rust=showHitsRs
-hitsCpp :: I64 -> <IO> ()
+hitsCpp :: I64 -> <IO> (Collect Hit)
 hitsCpp b = @collect (produceHitsC b)
 
 --' Stream hits from Python
 --' @render --cpp=showHitsC
 --' @render --py=showHitsP
 --' @render --rust=showHitsRs
-hitsPy :: I64 -> <IO> ()
+hitsPy :: I64 -> <IO> (Collect Hit)
 hitsPy b = @collect (produceHitsP b)
 
 --' Stream hits from Rust
 --' @render --cpp=showHitsC
 --' @render --py=showHitsP
 --' @render --rust=showHitsRs
-hitsRust :: I64 -> <IO> ()
+hitsRust :: I64 -> <IO> (Collect Hit)
 hitsRust b = @collect (produceHitsRs b)

@@ -64,22 +64,22 @@ produce n sink = sink (pairUp n)
 
 -- -r 1 2 renders 2:4
 --' @render -r/--text=render2($2)
-lambdaParam :: Int -> Int -> <IO> ()
+lambdaParam :: Int -> Int -> <IO> (Collect Int)
 lambdaParam x = \y -> @collect (produce y)
 
 -- -r 1 2 renders 1:4
 --' @render -r/--text=render2($1)
-shadowedParam :: Int -> Int -> <IO> ()
+shadowedParam :: Int -> Int -> <IO> (Collect Int)
 shadowedParam x y = (\x -> @collect (produce x)) y
 
 -- -a 3 gives "all:6"
 --' @with -a/--all=renderAll
-importedBatch :: Int -> <IO> ()
+importedBatch :: Int -> <IO> (Collect Int)
 importedBatch y = @collect (produceBatch y)
 
 -- -a 3 gives "batch:6"
 --' @with -a/--all=renderBatch
-importedHandler :: Int -> <IO> ()
+importedHandler :: Int -> <IO> (Collect Int)
 importedHandler y = @collect (produce y)
 
 countFile :: Reader -> <IO> Int
@@ -89,12 +89,12 @@ countFile f = do
 
 -- -m 3 gives 2
 --' @with -m/--count=countFile
-fileAlias :: Int -> <IO> ()
+fileAlias :: Int -> <IO> (Collect Int)
 fileAlias y = @collect (produce y)
 
 -- -r 7 renders 7:4; `y` is the let-bound `x`, not the parameter
 --' @render -r/--text=render2($1)
-letShadow :: Int -> <IO> ()
+letShadow :: Int -> <IO> (Collect Int)
 letShadow x =
   let x = 2
       y = x
@@ -102,5 +102,5 @@ letShadow x =
 
 -- -a 3 gives "rows:6"; the producer's batch type nests an alias in itself
 --' @with -a/--all=renderRows
-nestedImported :: Int -> <IO> ()
+nestedImported :: Int -> <IO> (Collect [Int])
 nestedImported y = @collect (produceRows y)

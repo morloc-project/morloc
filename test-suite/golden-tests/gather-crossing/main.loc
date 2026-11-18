@@ -50,12 +50,12 @@ both sink = do
 
 --' Gather from two languages
 --' @render --show=showC
-cmd :: <IO> ()
+cmd :: <IO> (Collect I64)
 cmd = @collect both
 
 --' Gather from two languages, a second time
 --' @render --show=showC
-cmd2 :: <IO> ()
+cmd2 :: <IO> (Collect I64)
 cmd2 = @collect both
 
 --' Batches from n levels of recursion
@@ -69,7 +69,7 @@ many n sink
 
 --' Gather through a recursive producer
 --' @render --show=showC
-cmd3 :: I64 -> <IO> ()
+cmd3 :: I64 -> <IO> (Collect I64)
 cmd3 n = @collect (many n)
 
 --' Batches from n levels of C++ recursion
@@ -82,7 +82,7 @@ manyC n sink
 
 --' Gather through a recursive C++ producer
 --' @render --show=showC
-cmd4 :: I64 -> <IO> ()
+cmd4 :: I64 -> <IO> (Collect I64)
 cmd4 n = @collect (manyC n)
 
 --' Batches from n levels of Python recursion
@@ -95,5 +95,5 @@ manyP n sink
 
 --' Fold through a recursive Python producer
 --' @render --n=showNP @fold=addSumP @init=zero @combine=mergeP
-cmd5 :: I64 -> <IO> ()
+cmd5 :: I64 -> <IO> (Collect I64)
 cmd5 n = @collect (manyP n)

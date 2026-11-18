@@ -244,3 +244,17 @@ here touch locks and ownership: model first.
   Parsing after the call, or `R_TRY_WITH(free_schema(schema), ...)`, frees
   it.
 
+- **A second `@stderr` stream in one run loses the first.** [reproduced,
+  2026-11-18] Gap: no item says what several stdio opens in one run make
+  (SLOT-16 covers the queue only). In one-shot mode the stderr branch of
+  morloc-nexus/src/stdio_server.rs (~716-724) never resets `header_done`;
+  only stdout does, in `finish_logical_packet` (~1025). A command that
+  opens `@stderr :: OStream Int`, writes `[1, 2]`, closes, then opens it
+  again and writes `[3]` (`./nexus -f packet @ twoErr 2> err.pkt`) leaves a
+  file that `morloc-nexus file --validate` reads as final, closed, one
+  sub-packet, one element: the first stream's two elements are silently
+  dropped. The same shape on `@stdout` reads back as two sub-packets,
+  three elements. Repro (root-py, no sources):
+  `twoErr :: <IO> ()`, `twoErr = do { e <- @stderr :: <IO> OStream Int;
+  @write 0 e [1, 2]; @close e; e2 <- @stderr :: <IO> OStream Int;
+  @write 0 e2 [3]; @close e2 }`.

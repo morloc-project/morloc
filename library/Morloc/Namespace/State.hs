@@ -220,10 +220,9 @@ data MorlocState = MorlocState
   -- that saves the command's output: their positions (1-based), in the
   -- order of the entry's trailing (flag, path) slots.
   , stateStreamElems :: Map.Map EVar TypeU
-  -- ^ For each command that streams its output through @collect, the batch
-  -- type it writes to standard output. Such a command returns @()@, so the
-  -- signature alone cannot say what a caller receives; see
-  -- 'Morloc.Frontend.Desugar.collectStreamType'.
+  -- ^ For each streaming command, the batch type it writes to standard
+  -- output: @[a]@ for its @Collect a@ result (STRM-7), recorded before the
+  -- result is erased to @()@.
   , stateManifoldConfig :: Map Int ManifoldConfig
   , stateLogTemplate :: Maybe LogTemplate
   -- ^ Program-wide log message template from the main module's YAML

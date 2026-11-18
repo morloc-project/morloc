@@ -1,7 +1,7 @@
 branchy all True
 branchy batches True
 branchy folded True
-partial all False
+partial all True
 pair all True
 --- branchy a ---
 batch of 2

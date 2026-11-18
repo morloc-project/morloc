@@ -84,13 +84,12 @@ produce n sink = do
 
 --' Stream 64 bodies of n bytes as raw text
 --' @render -t/--text=render @stream @default
-rawOut :: Int -> <IO> ()
+rawOut :: Int -> <IO> (Collect Int)
 rawOut n = @collect (produce n)
 
 --' Write 64 bodies of n bytes to a Str stream on stdout
-packetOut :: Int -> <IO> ()
-packetOut n = do
-  o <- @stdout :: <IO> OStream Str
+packetOut :: Int -> <IO> (Collect Str)
+packetOut n = @stdout (\o -> do
   @write 0 o [body n]
   @write 0 o [body n]
   @write 0 o [body n]
@@ -154,5 +153,4 @@ packetOut n = do
   @write 0 o [body n]
   @write 0 o [body n]
   @write 0 o [body n]
-  @write 0 o [body n]
-  @close o
+  @write 0 o [body n])

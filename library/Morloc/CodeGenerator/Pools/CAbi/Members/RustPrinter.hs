@@ -17,6 +17,7 @@ via 'toIType'), so this printer only unwraps the 'ITyNamed' carrier.
 -}
 module Morloc.CodeGenerator.Pools.CAbi.Members.RustPrinter
   ( printExpr
+  , rustType
   , rustManifoldName
   , putValueFn
   , schemaRef

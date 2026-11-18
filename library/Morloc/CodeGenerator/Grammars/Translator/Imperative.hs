@@ -806,6 +806,11 @@ data LowerConfig m = LowerConfig
   -- native param vars (@nvarNamer id@), deserialized once by the manifold
   -- prologue; in a native loop they are declared from their initializers,
   -- since the parameters are read-only.
+  , lcMakeCallback :: MDoc -> Maybe IType -> [MDoc] -> MDoc -> m ([MDoc], MDoc)
+  -- ^ A one-argument function value: the parameter, its type, the statements
+  -- of the body and its result -> (hoisted lines, function expression). Used
+  -- where a runtime helper calls back with a value that must be finished
+  -- first (a @replay frame of a packed element).
   , lcMakeDoBlock :: TypeF -> [MDoc] -> MDoc -> m ([MDoc], MDoc)
   -- ^ type -> prior statements -> return expression -> (hoisted lines,
   -- suspended-thunk expression). Monadic so a language whose thunk form
@@ -3276,6 +3281,30 @@ lowerNativeExprRaw cfg origExpr (MapOptionalN_ _ wireTf src (Low _ innerDocs)) =
     , poolExpr = pretty v'
     }
 
+-- @replay of a packed element: each frame is decoded in its wire form and
+-- finished as a received argument is, then given to the function.
+lowerNativeExprRaw cfg _ (WireToNativeN_ _ s IntrReplay schema [Low _ handleDocs, Low fnE fnDocs]) = do
+  sid <- lcRegisterSchema cfg schema
+  rawElem <- case s of
+    SerialList _ _ se -> lcRawDeserialAstType cfg se
+    _ -> error "morloc bug: a @replay frame is not a list"
+  rawList <- lcRawDeserialAstType cfg s
+  idx <- lcNewIndex cfg
+  fnIdx <- lcNewIndex cfg
+  let w = (helperVar cfg) idx
+      fnVar = render ((helperVar cfg) fnIdx)
+  (x, stmts) <- wireToNative cfg w s
+  let batchTf = case typeFof fnE of
+        FunF [b] _ -> b
+        t -> error ("morloc bug: a @replay function of type " <> show t)
+      arg = lcSourcedArg cfg ClosureArg Owned (typeMof batchTf) (lcPrintExpr cfg x)
+      body = lcApplyClosure cfg (pretty fnVar) [arg]
+      bindFn = lcPrintStmt cfg (IAssign fnVar Nothing (IRawExpr (render (poolExpr fnDocs))))
+  (hoisted, callback) <- lcMakeCallback cfg w rawList (map (lcPrintStmt cfg) stmts) body
+  let raw d = IRawExpr (render (poolExpr d))
+      replayExpr = IIntrinsicReplay sid rawElem (raw handleDocs) (IRawExpr (render callback))
+      merged = mergePoolDocs (const $ lcPrintExpr cfg replayExpr) [handleDocs, fnDocs]
+  return $ merged {poolPriorLines = poolPriorLines merged ++ [bindFn] ++ hoisted}
 -- A decoding intrinsic, its value decoded into the form a received argument
 -- is decoded into and given its native form the same way.
 lowerNativeExprRaw cfg _ (WireToNativeN_ _ s intr schema argLows) = do
@@ -3287,6 +3316,7 @@ lowerNativeExprRaw cfg _ (WireToNativeN_ _ s intr schema argLows) = do
     (IntrLoad, [p]) -> return $ IIntrinsicLoad sid rawType (arg p)
     (IntrRead, [x]) -> return $ IIntrinsicRead sid rawType (arg x)
     (IntrUnpack, [x]) -> return $ IIntrinsicUnpack sid rawType (arg x)
+    (IntrNext, [h]) -> return $ IIntrinsicNext sid rawType (arg h)
     (IntrGather, [f]) -> return $ IIntrinsicGather False sid rawType (arg f)
     _ -> error ("morloc bug: WireToNativeN over " <> show intr)
   idx <- lcNewIndex cfg

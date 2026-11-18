@@ -16,9 +16,9 @@ threadsP :: ([I64] -> <IO> ()) -> <IO> ()
 threadsC :: ([I64] -> <IO> ()) -> <IO> ()
 
 --' Collect batches from four Python threads
-threadsPy :: <IO> ()
+threadsPy :: <IO> (Collect I64)
 threadsPy = @collect threadsP
 
 --' Collect batches from four C++ threads
-threadsCpp :: <IO> ()
+threadsCpp :: <IO> (Collect I64)
 threadsCpp = @collect threadsC

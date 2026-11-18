@@ -46,15 +46,15 @@ zero = 0
 
 --' Fold from an init Python cannot copy
 --' @render --n=showNP @fold=addSumP @init=uncopyableP @combine=mergeP
-copyPy :: <IO> ()
+copyPy :: <IO> (Collect I64)
 copyPy = @collect caughtP
 
 --' Fold from an init C++ cannot copy
 --' @render --n=showLenC @fold=addLenC @init=bigC @combine=mergeLenC
-copyCpp :: <IO> ()
+copyCpp :: <IO> (Collect I64)
 copyCpp = @collect starvedC
 
 --' Fold with an R step that signals a condition
 --' @render --n=showNR @fold=signalR @init=zero @combine=mergeR
-conditionR :: <IO> ()
+conditionR :: <IO> (Collect I64)
 conditionR = @collect caughtR

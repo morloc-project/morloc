@@ -119,85 +119,85 @@ zero = 0
 
 --' Gather in C++
 --' @render --show=showIntsC
-routeCpp :: <IO> ()
+routeCpp :: <IO> (Collect I64)
 routeCpp = @collect produceRouteC
 
 --' Gather in Rust
 --' @render --show=showIntsRs
-routeRust :: <IO> ()
+routeRust :: <IO> (Collect I64)
 routeRust = @collect produceRouteRs
 
 --' Gather from C++ forked children
 --' @render --show=showIntsC
-forksCpp :: <IO> ()
+forksCpp :: <IO> (Collect I64)
 forksCpp = @collect produceForksC
 
 --' Fold over C++ forked children
 --' @render --n=showNC @fold=addBatchC @init=zero @combine=mergeC
-foldCpp :: <IO> ()
+foldCpp :: <IO> (Collect I64)
 foldCpp = @collect produceForksC
 
 --' Fold over Python forked children
 --' @render --n=showNP @fold=addBatchP @init=zero @combine=mergeP
-foldPy :: <IO> ()
+foldPy :: <IO> (Collect I64)
 foldPy = @collect produceForksP
 
 --' Fold over R forked children
 --' @render --n=showNR @fold=addBatchR @init=zero @combine=mergeR
-foldR :: <IO> ()
+foldR :: <IO> (Collect I64)
 foldR = @collect produceForksR
 
 --' Fold in Rust
 --' @render --n=showNRs @fold=addBatchRs @init=zero @combine=mergeRs
-foldRust :: <IO> ()
+foldRust :: <IO> (Collect I64)
 foldRust = @collect produceRouteRs
 
 --' Gather maps in C++
 --' @render --show=showMapsC
-mapsCpp :: <IO> ()
+mapsCpp :: <IO> (Collect (Map Str I64))
 mapsCpp = @collect produceMapsC
 
 --' Fold maps over C++ forked children
 --' @render --n=showNC @fold=addMapsC @init=zero @combine=mergeC
-mapsFoldCpp :: <IO> ()
+mapsFoldCpp :: <IO> (Collect (Map Str I64))
 mapsFoldCpp = @collect produceMapForksC
 
 --' Fold maps over Python forked children
 --' @render --n=showNP @fold=addMapsP @init=zero @combine=mergeP
-mapsFoldPy :: <IO> ()
+mapsFoldPy :: <IO> (Collect (Map Str I64))
 mapsFoldPy = @collect produceMapForksP
 
 --' Gather in Python
 --' @render --show=showIntsP
-routePy :: <IO> ()
+routePy :: <IO> (Collect I64)
 routePy = @collect produceRouteP
 
 --' Ints put for reals
 --' @render --show=showRealsP
-realsPy :: <IO> ()
+realsPy :: <IO> (Collect Real)
 realsPy = @collect produceRealsP
 
 --' Bools put for ints
 --' @render --show=showIntsP
-intsPy :: <IO> ()
+intsPy :: <IO> (Collect I64)
 intsPy = @collect produceIntsP
 
 --' Lists put for tuples
 --' @render --show=showPairsP
-pairsPy :: <IO> ()
+pairsPy :: <IO> (Collect (I64, Str))
 pairsPy = @collect producePairsP
 
 --' Dicts with keys out of order
 --' @render --show=showHitsP
-hitsPy :: <IO> ()
+hitsPy :: <IO> (Collect Hit)
 hitsPy = @collect produceHitsP
 
 --' Gather from Python forked children
 --' @render --show=showIntsP
-forksPy :: <IO> ()
+forksPy :: <IO> (Collect I64)
 forksPy = @collect produceOrderP
 
 --' Non-ASCII strings, native and from a forked child
 --' @render --show=showStrsP
-strsPy :: <IO> ()
+strsPy :: <IO> (Collect Str)
 strsPy = @collect produceStrsP

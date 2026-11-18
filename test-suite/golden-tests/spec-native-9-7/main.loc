@@ -22,10 +22,10 @@ produce sink = do
 
 --' Stream integer batches
 --' @render -f/--folded=showAcc @fold=addBatch @init=zeroAcc @combine=mergeAcc
-stream :: <IO> ()
+stream :: <IO> (Collect Int)
 stream = @collect produce
 
 --' Stream from four threads
 --' @render -f/--folded=showAcc @fold=addBatch @init=zeroAcc @combine=mergeAcc
-pstream :: <IO> ()
+pstream :: <IO> (Collect Int)
 pstream = @collect produceParallel

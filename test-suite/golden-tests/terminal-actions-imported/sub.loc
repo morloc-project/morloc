@@ -16,14 +16,14 @@ showList :: [Int] -> Str
 
 --' Stream from two sites
 --' @render -b/--batches=showBatch @stream @default
-twoSites :: <IO> ()
-twoSites = do
-  @collect produce
-  @collect produce
+twoSites :: <IO> (Collect Int)
+twoSites = @collect (\k -> do
+  _ <- produce k
+  produce k)
 
 --' Stream from one site
 --' @render -b/--batches=showBatch @stream @default
-one :: <IO> ()
+one :: <IO> (Collect Int)
 one = @collect produce
 
 --' A value
