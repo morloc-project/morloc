@@ -135,3 +135,11 @@
   checking it. A writer bounded by the slot's width would make an overrun
   fail. Arrow, table and CLI-shape decoders were covered only by a
   suite-wide audit (no stray frees), not by reading.
+- **A Rust value at an Int schema is taken to be inline.** [read,
+  2026-11-18] Gap in WIRE-3. rustmorloc's WriteWalk::child writes a leaf at
+  an Int schema at once even while deferring, and write_seq_in_place sizes
+  a list of Int elements as a run of slot widths, whatever the Rust type: a
+  user ToVoidstar impl at an Int schema that writes a multi-limb integer
+  (a tail) would be deferred wrongly or overrun its run. Only the built-in
+  integers (ToVoidstar::INLINE) are known to be inline; the converted-field
+  shortcut checks INLINE, these two sites do not.

@@ -1396,6 +1396,9 @@ impl Drop for ShmGuard {
 pub trait ToVoidstar {
     /// A scalar: sized and written directly, never given a frame.
     const IS_LEAF: bool = false;
+    /// A scalar whose every value is written in its inline slot at an `Int`
+    /// schema, with no tail, so its size is the schema's width.
+    const INLINE: bool = false;
 
     fn shm_size(&self, schema: &Schema) -> usize
     where
@@ -1649,6 +1652,16 @@ impl<'c> SizeWalk<'c> {
 
     /// A field written in converted form, converted once per write.
     pub fn child_converted<R: ToVoidstar + 'static>(&mut self, field: usize, which: std::any::TypeId, idx: usize, convert: impl FnOnce() -> R, schema: &Schema, inline_slot: bool) {
+        // A value of fixed width, and an inline integer at an Int schema,
+        // size the same whatever they hold, so they are converted only where
+        // they are written.
+        let s = resolve_recur(schema);
+        if s.is_fixed_width() || (R::INLINE && s.serial_type == SerialType::Int) {
+            if !inline_slot {
+                self.total += s.width as isize;
+            }
+            return;
+        }
         let r: *const R = if self.converted.is_null() {
             self.keep_ref(convert())
         } else {
@@ -1843,11 +1856,20 @@ impl<'a> WriteWalk<'a> {
     /// # Safety
     /// As for `child`.
     pub unsafe fn child_converted<R: ToVoidstar + 'static>(&mut self, field: usize, which: std::any::TypeId, idx: usize, convert: impl FnOnce() -> R, dest: *mut u8, schema: &Schema) {
+        // A value of fixed width, or an inline integer at an Int schema, was
+        // not converted by the size walk; it is converted here, once, and
+        // written at once, since it holds no part a later step writes.
+        let s = resolve_recur(schema);
+        if s.is_fixed_width() || (R::INLINE && s.serial_type == SerialType::Int) {
+            let v = convert();
+            self.child(&v, dest, schema);
+            return;
+        }
         let r: *const R = if self.converted.is_null() {
             self.keep_ref(convert())
         } else {
             // SAFETY: `converted` is non-null only as the `&mut` `with_converted` took.
-            (*self.converted).get_or_make_in(true, resolve_recur(schema).is_fixed_width(), field, which, idx, convert)
+            (*self.converted).get_or_make_in(true, false, field, which, idx, convert)
         };
         self.child(&*r, dest, schema);
     }
@@ -2348,6 +2370,7 @@ macro_rules! int_impl {
     ($t:ty, $kind:ident) => {
         impl ToVoidstar for $t {
             const IS_LEAF: bool = true;
+            const INLINE: bool = true;
             #[inline]
             fn shm_size(&self, schema: &Schema) -> usize { schema.width }
             #[inline]
@@ -2681,7 +2704,7 @@ impl<T: ToVoidstar> ToVoidstar for $container<T> {
                 return;
             }
             w.total += (elem.array_data_alignment() - 1) as isize;
-            if elem.is_primitive_numeric() || elem.serial_type == SerialType::Bool {
+            if elem.is_fixed_width() {
                 w.total += (self.len() * elem.width) as isize;
                 return;
             }

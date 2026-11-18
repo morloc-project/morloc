@@ -220,7 +220,7 @@ without the pool's bounded-stack drain (STATE-8).
 
 ### GEN-14 A generated record or a `data` type converts its own fields, once per write
 Intent: ruled 2026-11-17
-Tests: spec-gen-14-1, spec-gen-14-2, spec-gen-14-3, spec-gen-14-4, spec-gen-14-5, spec-gen-14-6, spec-gen-14-7, spec-gen-14-8, spec-gen-14-9, spec-gen-14-10, spec-gen-14-11
+Tests: spec-gen-14-1, spec-gen-14-2, spec-gen-14-3, spec-gen-14-4, spec-gen-14-5, spec-gen-14-6, spec-gen-14-7, spec-gen-14-8, spec-gen-14-9, spec-gen-14-10, spec-gen-14-11, spec-gen-14-12
 Code: conforms 2026-11-17
 
 In C++ and Rust a generated record, and every `data` type, generated or
@@ -230,7 +230,10 @@ is held (a packed value, a closure) outside any record it holds, which
 converts its own. The value
 that sizing a write converts is the value written, so a packer runs once
 per field per write, and a packer that returns values of different sizes
-cannot overrun the space sized for them. Where a field's conversion
+cannot overrun the space sized for them. A field whose wire form has a
+fixed size, or is an integer held inline, sizes the same whatever it holds,
+so it is converted only where it is written, and its packer fails, if it
+does, in the write. Where a field's conversion
 depends on the record's arguments, each instance converts as its use says;
 two morloc types that are one native type and convert a field differently
 are a compile error naming the type. A packer that fails during a write

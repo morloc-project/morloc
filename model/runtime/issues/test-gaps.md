@@ -17,7 +17,10 @@ timing (from the 2026-11-12 audit of the output-path work).
   changed during the wait is covered only by EncodeInPlace.tla.
 - **A Rust batch failing after begin is untested.** SLOT-36: a place
   error (allocation, a closed stdout pipe) is handled by WriteTxn's Drop
-  after the runtime already aborted; nothing checks it from Rust.
+  after the runtime already aborted; nothing checks it from Rust. A packer
+  of a generated record's fixed-width or inline-integer field also runs
+  after begin, in the write (it is not run while sizing), so a packer that
+  panics mid-batch reaches the same path, also untested.
 - **SHM-18's commit-failure path runs only by hand.** The populate-fails
   fallback (shm.rs commit_large -> remove_pages) is tested only by an
   #[ignore]d test; no fault injection exists for it.
