@@ -1,0 +1,19 @@
+-- GEN-9: a record with a type parameter no field uses has a default form
+-- in every language, and the parameter is erased: `Box Real` and
+-- `Box Str` are one native type (C++ here; twins main-*.loc).
+module main (idB, idS)
+
+import root-cpp
+
+record Box a where
+  n :: Int
+  s :: Str
+
+source Cpp from "f.hpp" ("same")
+same :: a -> a
+
+idB :: Box Real -> Box Real
+idB x = same x
+
+idS :: Box Str -> Box Str
+idS x = same x

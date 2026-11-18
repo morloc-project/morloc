@@ -35,18 +35,6 @@
   `R Int` and `R Str` with both crossing, reflects both instantiations'
   closure fields with whichever schema was harvested last. Key the harvest
   by instantiation. Not reproduced.
-- **A phantom parameter still needs a Python form when a Python function
-  takes the record.** [reproduced] 82a8d98b lets a record with a phantom
-  parameter pass through a pool without a language form for the parameter,
-  but a record literal `{pos = 7} :: Loc Tag` that a Python-sourced function
-  takes, where `Tag` has only a Rust form, fails at the Python use
-  (`pyPos loc`; reproduced 2026-11-14, TypeEval.hs:253): "Could not
-  resolve type for variable 'Tag'". The Python form `record Py => (Loc k) =
-  "dict" k` never uses `k`. Repro: lib/biolib/rnaseq/notes/repros/
-  phantom-py-arg/ (`morloc make -o phantom main.loc`; drop `pyPos` from `f`
-  and it builds). Seen in the bio suite, whose checks run in Python on
-  `Mapping Transcript Genome` values.
-
 - **TEQ-4 contradicts the code's field-order rule.** [reproduced] TEQ-4
   (proposed) says `{x = Int, y = Str} == {y = Str, x = Int}`; c74060f6
   made field order part of a Rec, and `Frame {x,y}` vs `Frame {y,x}` is
@@ -81,13 +69,6 @@
   selection never fixes an open class argument (Instances.hs `resolve` returns
   Undetermined first), so only Packable improvement (CLS-20) can reach the REC-4
   check. The message also shows the internal name `record_2`.
-- **GEN-9 does not yet cover phantom parameters.** [read, 2026-11-16]
-  Violates GEN-9. A record with a parameter no field uses gets no default
-  form in any language (Restructure.hs withDefaultKinds), so it still needs
-  a line such as `record Py => Box a = dict` (spec-cost-15-4); without it
-  the error misleads ("gives no cpp implementation of
-  '__extract_pattern__'" [reproduced]). Plan: GEN9-DESIGN.md (in
-  /work/plans/generated-native-types) stage S9.3.
 - **A C++ template handle cannot be built from a braced list.** [read,
   2026-11-16] Deviates from CPP-6 (lang-cpp.md), which gives `R{{...}}` as
   a handle's construction form. A template handle takes its fields only
@@ -96,15 +77,6 @@
   can be moved instantiate `R_fields<T>`, which holds `std::optional<R<T>>`,
   a cycle g++ rejects. So `R<int>{{...}}` does not compile and a source
   writes `R<int>(R_fields<int>{...})`. Non-template handles take both.
-- **A generated Rust `data` template can take a parameter no arm uses.**
-  [read, 2026-11-16] Violates GEN-9. A template's parameters are the type
-  parameters free in its declared arms (Infer.heldDataParams), but an arm
-  type that does not spell its arguments natively (a phantom `data Tag a =
-  Tagged Int`, a user-mapped non-template form) holds none of them in
-  Rust, so `data W a = W (Tag a)` declares `pub enum W<T_a>` with `T_a`
-  unused: rustc E0392. C++ accepts an unused template parameter. Fix with
-  the phantom-parameter stage (S9.3): count a parameter as held only where
-  the native form spells it.
 - **A public Rust `data` type is not checked for names it cannot import.**
   [speculative, 2026-11-16] GEN-10. Rust.hs planRustPublic adds every
   eligible variant and enum to the names a public record may hold, but
@@ -138,3 +110,12 @@
   is misleading: Box is a generated record. Rust reaches rustc as E0425.
   Fix in /work/plans/nominal-types: key the instance with a self-argument
   (NOM-1) and name it as a self-containing `data` instance is named.
+- **A C++ record mapped to a `$`-free user form takes an argument it cannot
+  resolve as written.** [read, 2026-11-17] Gap in GEN-9. C++ spells every
+  argument of a user form with no `$k` slots (`record Cpp => Box a =
+  "box_t"` is `box_t<int>` at `Box Int`), so its arguments are resolved;
+  TypeEval keeps an argument that is rejected as written, so `Box T` with
+  `T` mapped only in another language reaches g++ as `box_t<T>` instead of
+  a morloc error naming `T`. A Python form that drops an argument the
+  general type holds (`type Py => Tag a = "str"`) likewise does not erase
+  it in Python, which still resolves it.

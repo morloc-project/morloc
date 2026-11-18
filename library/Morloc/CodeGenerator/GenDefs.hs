@@ -34,7 +34,7 @@ module Morloc.CodeGenerator.GenDefs
   ) where
 
 import qualified Data.Text as T
-import Morloc.CodeGenerator.Infer (concreteNameOf, getScope, heldDataParams, inferConcreteType)
+import Morloc.CodeGenerator.Infer (concreteNameOf, getScope, heldParams, erasedType, inferConcreteType, macroSlots, spellingOf)
 import Morloc.CodeGenerator.Namespace
 import Morloc.CodeGenerator.Nominal (KeyArg (..), KeyKind (..), KeyType (..), NomKey (..))
 import qualified Data.Set as Set
@@ -44,10 +44,9 @@ import Morloc.CodeGenerator.Serial (makeSerialAST)
 import qualified Morloc.Data.Map as Map
 import Morloc.Data.Zip (indexedFrom, zipExact, zipSame)
 import qualified Morloc.Monad as MM
+import Control.Monad (unless)
 import Control.Monad.Except (catchError)
-import Morloc.Data.Doc (render)
-import Data.Char (isDigit)
-import Text.Read (readMaybe)
+import Morloc.Data.Doc (pretty, render, (<+>))
 
 -- | A generated record as its declaration defines it in one language.
 data GenDef = GenDef
@@ -100,7 +99,13 @@ genDefs lang used = do
       -- and a use of the record says why.
       r <- (Right <$> atPlaceholders lang gv ps) `catchRejected` (return . Left)
       case r of
-        Right (NamF _ _ _ rs) -> return (gv, Right (GenDef gv form ps rs))
+        Right (NamF _ _ _ rs) -> do
+          let gd = GenDef gv form ps rs
+          (cscope, gscope) <- getScope lang
+          sp <- spellingOf lang
+          unless (all (`elem` heldParams sp gscope cscope gv) (nativeParams gd)) $
+            MM.throwCompilerBug ("the native parameters of" <+> pretty gv <+> "are not among those a value of it holds")
+          return (gv, Right gd)
         Right _ -> return (gv, Left "its declaration does not resolve to a record")
         Left e -> return (gv, Left e)
 
@@ -138,7 +143,7 @@ data DataDef = DataDef
   deriving (Show)
 
 -- | The parameters a `data` definition's native form takes: its type
--- parameters some arm holds, in declaration order (Infer.heldDataParams).
+-- parameters some arm holds, in declaration order (Infer.heldParams).
 nativeDataParams :: DataDef -> [TVar]
 nativeDataParams = ddNative
 
@@ -166,13 +171,14 @@ dataDefs :: Lang -> Set.Set TVar -> MorlocMonad (Map.Map TVar DataDef, Map.Map T
 dataDefs lang used = do
   gscope <- MM.getGeneralScope
   (cscope, _) <- getScope lang
-  results <- mapM (one gscope) [gv | gv <- Set.toList used, concreteNameOf cscope gv == unTVar gv, not (null (heldDataParams gscope gv))]
+  sp <- spellingOf lang
+  results <- mapM (one gscope cscope sp) [gv | gv <- Set.toList used, concreteNameOf cscope gv == unTVar gv, not (null (heldParams sp gscope cscope gv))]
   return (Map.fromList [(gv, dd) | Just (gv, Right dd) <- results], Map.fromList [(gv, e) | Just (gv, Left e) <- results])
   where
-    one gscope gv = case [ps | (ps0, _, _, _, TypedefEnum) <- Map.findWithDefault [] gv gscope, Just ps <- [mapM (either Just (const Nothing)) ps0]] of
+    one gscope cscope sp gv = case [ps | (ps0, _, _, _, TypedefEnum) <- Map.findWithDefault [] gv gscope, Just ps <- [mapM (either Just (const Nothing)) ps0]] of
       (ps : _) ->
         ( ( \tf -> case tf of
-              VariantF (FV _ (CV form)) _ arms | T.any (== '$') form -> Just (gv, Right (DataDef gv form [p | (p, KindType) <- ps] (heldDataParams gscope gv) arms))
+              VariantF (FV _ (CV form)) _ arms | T.any (== '$') form -> Just (gv, Right (DataDef gv form [p | (p, KindType) <- ps] (heldParams sp gscope cscope gv) arms))
               _ -> Nothing
           )
             <$> atPlaceholders lang gv ps
@@ -265,9 +271,6 @@ placeholders = go False
       | T.any (== '$') form = Just (concatMap (go True) [x | (k, x) <- indexedFrom 1 (tyArgs ps), k `elem` macroSlots form])
       | otherwise = Nothing
 
--- | The positions a native form's `$k` slots name.
-macroSlots :: T.Text -> [Int]
-macroSlots form = [k | piece <- drop 1 (T.splitOn "$" form), Just k <- [readMaybe (T.unpack (T.takeWhile isDigit piece))]]
 
 -- | The parameters a record's native form takes (GEN-9): its type
 -- parameters some field holds, in order. Any other parameter is erased.
@@ -355,8 +358,9 @@ placeTypes leafOk generated fieldsOf = go (Map.keysSet fieldsOf)
     nominal pub g f ps
       | Set.member g generated = Set.member g pub
       | otherwise = form f && all (safe pub) (tyArgs ps)
+    -- A parameter, and an erased argument, have no native form to import.
     safe _ t
-      | isJust (paramOf t) = True
+      | isJust (paramOf t) || t == erasedType = True
     safe pub t = case t of
       NamF NamTable _ _ _ -> False
       NamF _ (FV g (CV "struct")) _ _ -> Set.member g pub

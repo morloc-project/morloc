@@ -1775,8 +1775,9 @@ resolvePacker lang m0 resolvedType@(AppF _ _) pin = do
                 (Left typeErr) ->
                   return . Left $
                     "its general form" <+> pretty u <+> "does not cover" <+> pretty ga <> ":" <+> typeErr
-                (Right g2) ->
-                  case weave gscope Map.empty (apply g2 (existential gc)) unpackedConcreteType of
+                (Right g2) -> do
+                 erased <- erasureIn lang
+                 case weave gscope erased Map.empty (apply g2 (existential gc)) unpackedConcreteType of
                     Right t -> return (Right t)
                     Left e ->
                       MM.throwSourcedError m0 $

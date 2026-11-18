@@ -455,14 +455,7 @@ generalTransformTypeWith prot norm bnd0 recurse' resolve' scope = f bnd0
       -- which no field names, and is protected by name.
       let bnd' = (if n' /= n then bindName n' else id) (protect prot n ps bnd)
       rs' <- mapM (traverse (recurse bnd')) rs
-      -- A structural record form holds in its fields every parameter its
-      -- representation uses, so a parameter with no form here is phantom and
-      -- is kept as written (POLY-6). A template form ("Map<$1,$2>") spells
-      -- its parameters and needs each one.
-      ps' <-
-        if MT.isInfixOf "$" (unTVar n')
-          then mapM (recurse bnd') ps
-          else return [either (const p) id (recurse bnd' p) | p <- ps]
+      ps' <- formArgs bnd' n' ps
       return $ NamU o' n' ps' rs'
     -- Flatten nested AppU heads first. Substituting a partial-applied
     -- class head into a method's @f a@ signature produces @AppU (AppU H
@@ -603,6 +596,19 @@ generalTransformTypeWith prot norm bnd0 recurse' resolve' scope = f bnd0
     f bnd (LitU (LSet es)) = LitU . LSet <$> mapM (recurse bnd) es
     f bnd (LabeledU n t) = LabeledU n <$> recurse bnd t
 
+    -- A structural record form holds in its fields every parameter its
+    -- representation uses, so a parameter with no form here is phantom and
+    -- is kept as written (POLY-6). A template form ("Map<$1,$2>") spells
+    -- its parameters and needs each one.
+    formArgs :: Bound -> TVar -> [TypeU] -> Either MorlocError [TypeU]
+    formArgs bnd form ps
+      | MT.isInfixOf "$" (unTVar form) = mapM (recurse bnd) ps
+      | otherwise = mapM keep ps
+      where
+        keep p = case recurse bnd p of
+          Left (Rejected _ _) -> Right p
+          r -> r
+
     terminate :: Bound -> TypeU -> Either MorlocError TypeU
     terminate bnd (ExistU v (ts, tc) (rs, rc)) = do
       ts' <- mapM (recurse bnd) ts
@@ -619,7 +625,7 @@ generalTransformTypeWith prot norm bnd0 recurse' resolve' scope = f bnd0
       -- by which point the recursive references inside @rs@ already
       -- reference whichever name @v@ holds.
       let bnd' = protect prot v ts bnd
-      in NamU o v <$> mapM (recurse bnd') ts <*> mapM (secondM (recurse bnd')) rs
+      in NamU o v <$> formArgs bnd' v ts <*> mapM (secondM (recurse bnd')) rs
     terminate _ (VarU v) = return (VarU v)
     terminate _ t@(NatVarU _) = return t
     terminate _ t@(IntVarU _) = return t

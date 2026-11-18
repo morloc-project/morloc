@@ -29,10 +29,20 @@ module Morloc.CodeGenerator.Infer
   , retagArg
   , groundK
   , kindArgOf
-  , heldDataParams
+  , heldParams
   , declaredDataNames
   , dataTypeParams
   , concreteNameOf
+  , erasedArg
+  , erasedType
+  , macroSlots
+  , Erasure
+  , erasure
+  , erasureIn
+  , erasedOr
+  , Spelling (..)
+  , spellingOf
+  , spelledParams
   ) where
 
 import Morloc.Data.Zip (indexedFrom, zipSame, zipWith3Same, zipWithSame, zipWithSameM)
@@ -52,6 +62,8 @@ import Morloc.Typecheck.Internal (expandTransparentAliases, typeUChildren, typeU
 import qualified Morloc.Typecheck.NatSolver as NS
 import Numeric (showHex)
 import Data.Char (isAlphaNum, isAscii, isDigit)
+import Data.List (mapAccumL)
+import Text.Read (readMaybe)
 
 evalGeneralStep :: TypeU -> MorlocMonad (Maybe TypeU)
 evalGeneralStep t = T.evaluateStep <$> MM.getGeneralScope <*> pure t
@@ -220,7 +232,7 @@ undeterminedError i0 vs = do
 inferConcreteTypeStructural
   :: Lang -> Int -> Scope -> TypeU -> TypeU -> MorlocMonad TypeF
 inferConcreteTypeStructural lang i gscope g c = do
-  knot <- stateKnot
+  knot <- stateKnot =<< erasureIn lang
   case structuralCompound gscope knot (inferConcreteTypeStructural lang i gscope) g c of
     Just r -> hostConvention lang r
     Nothing -> inferConcreteTypeStructural' lang i gscope g c
@@ -329,7 +341,7 @@ inferVariantArms lang i gscope vG vC targs = do
               <+> hsep (map pretty targs) <> ":"
               <+> "its expansion does not terminate."
         arms' <- withVariantAncestor (vG, targs) (mapM (\(n, ts) -> (,) n <$> mapM resolveField ts) arms)
-        name <- instanceName cscope vG targs
+        name <- instanceName lang cscope vG targs
         return $ VariantF (FV vG (CV name)) ps arms'
 
 -- | The name a pool knows one instantiation of a `data` type by.
@@ -343,12 +355,13 @@ inferVariantArms lang i gscope vG vC targs = do
 -- (`data Cpp => (Box a) = "MyBox<$1>" a`), the name they chose is the
 -- contract: a template, if it takes parameters, which the backend
 -- instantiates with the resolved arguments.
-instanceName :: Scope -> TVar -> [TypeU] -> MorlocMonad MT.Text
-instanceName cscope v targs = do
+instanceName :: Lang -> Scope -> TVar -> [TypeU] -> MorlocMonad MT.Text
+instanceName lang cscope v targs = do
   gscope <- MM.getGeneralScope
   let name = concreteNameOf cscope v
-      held = Set.fromList (heldDataParams gscope v)
-      slots = ["$" <> MT.pack (show k) | (k, p) <- indexedFrom 1 (dataTypeParams gscope v), Set.member p held]
+  sp <- spellingOf lang
+  let held = Set.fromList (heldParams sp gscope cscope v)
+      slots = ["$" <> MT.pack (show k) | (k, p) <- indexedFrom 1 (typeParamNames gscope v), maybe False (`Set.member` held) p]
       generated = name == unTVar v
   return $ case () of
     _ | not generated || null targs -> name
@@ -412,12 +425,146 @@ dataTypeParams gscope v = case [[p | Left (p, KindType) <- ps] | (ps, _, _, _, T
 declaredDataNames :: Scope -> Set.Set TVar
 declaredDataNames gscope = Map.keysSet (Map.filter (any (\(_, _, _, _, k) -> k == TypedefEnum)) gscope)
 
--- | The type parameters of a `data` declaration some constructor holds, in
--- order: the parameters of a generated type's native template.
-heldDataParams :: Scope -> TVar -> [TVar]
-heldDataParams gscope v = [p | p <- dataTypeParams gscope v, Set.member p held]
+-- | The type parameters a value of a declared record or `data` type holds
+-- in a language, in order ('spelledParams'): those a generated type's
+-- native template may take.
+heldParams :: Spelling -> Scope -> Scope -> TVar -> [TVar]
+heldParams sp gscope cscope v =
+  [p | (Left (p, KindType), True) <- zipSame (declParams gscope v) (spelledParams sp gscope cscope v)]
+
+-- | A declaration's type arguments in order, as `$k` slots number them:
+-- each a type parameter's name, or Nothing for a fixed type.
+typeParamNames :: Scope -> TVar -> [Maybe TVar]
+typeParamNames gscope v = [n | p <- declParams gscope v, n <- case p of
+  Left (x, KindType) -> [Just x]
+  Left _ -> []
+  Right _ -> [Nothing]]
+
+-- | A declared record's or `data` type's parameters.
+declParams :: Scope -> TVar -> [Either (TVar, Kind) TypeU]
+declParams gscope v = maybe [] fst (declOf gscope v)
+
+-- | A declared record's or `data` type's parameters and the types its
+-- fields or arms hold.
+declOf :: Scope -> TVar -> Maybe ([Either (TVar, Kind) TypeU], [TypeU])
+declOf gscope v = listToMaybe
+  [ (ps, fields)
+  | (ps, body, _, _, kind) <- Map.findWithDefault [] v gscope
+  , Just fields <- [bodyFields kind body]
+  ]
   where
-    held = Set.fromList [p | Just (_, cs) <- [dataDeclOfName gscope v], (_, ts) <- cs, t <- ts, VarU p <- Set.toList (free t)]
+    bodyFields TypedefEnum body = concatMap snd <$> dataBodyCtors body
+    bodyFields _ (NamU NamRecord _ _ rs) = Just (map snd rs)
+    bodyFields _ _ = Nothing
+
+-- | How a language spells a type's arguments: not at all ('Structural', so
+-- a value holds what its general type holds), or in its native forms
+-- ('NativeSpelling'), only at a form's `$k` slots, and, if the flag is set, at every
+-- argument of a user's `$`-free record or `data` form (C++ spells
+-- @"box_t"@ at @Box Int@ as @box_t<int>@).
+data Spelling = Structural | NativeSpelling Bool
+
+-- | The spelling of a language, by the pool its code runs in.
+spellingOf :: Lang -> MorlocMonad Spelling
+spellingOf lang0 = do
+  lang <- LR.poolOf <$> MM.gets stateLangRegistry <*> pure lang0
+  return $ case langName lang of
+    "cpp" -> NativeSpelling True
+    "rust" -> NativeSpelling False
+    _ -> Structural
+
+-- | For each parameter of a declared record or `data` type, whether a value
+-- of it holds the parameter's argument in a language (GEN-9): the
+-- parameter occurs in a field or arm, outside any declared type, or in an
+-- argument at such a position of a declared type the field applies, or the
+-- language's form of the type spells it ('Spelling'). An argument at any
+-- other parameter has no native form. A least fixpoint over the
+-- declarations reachable from the type.
+spelledParams :: Spelling -> Scope -> Scope -> TVar -> [Bool]
+spelledParams sp gscope cscope v0 = spelledIn (fixpoint Set.empty) v0
+  where
+    reachable = go Set.empty [v0]
+      where
+        go seen [] = seen
+        go seen (d : ds)
+          | Set.member d seen = go seen ds
+          | otherwise = go (Set.insert d seen) (named d <> ds)
+        named d = [d' | Just (_, fs) <- [declOf gscope d], t <- fs, d' <- declsIn t]
+    declsIn t = case t of
+      _ | Just (d, args) <- applied t, isJust (declOf gscope d) -> d : concatMap declsIn args
+        | Just t' <- aliasStep t -> declsIn t'
+        | otherwise -> concatMap declsIn (typeUChildren t)
+    fixpoint held =
+      let held' = Set.fromList
+            [ (d, i)
+            | d <- Set.toList reachable
+            , Just (ps, fs) <- [declOf gscope d]
+            , (i, Left (p, KindType)) <- indexedFrom 0 ps
+            , any (occurs held p) fs
+            ]
+       in if held' == held then held else fixpoint held'
+    occurs held p t = case t of
+      VarU x -> x == p
+      _ | Just (h, args) <- applied t -> h == p || appliedHolds held p h args t
+        | otherwise -> any (occurs held p) (typeUChildren t)
+    appliedHolds held p h args t
+      | Just (ps, _) <- declOf gscope h =
+          length ps == length args && or [occurs held p a && s | (a, s) <- zipSame args (spelledIn held h)]
+      | NativeSpelling _ <- sp, Just slots <- formSlots h =
+          or [occurs held p a | (k, a) <- indexedFrom 1 (fst (partitionKindArgs kindOfU args)), k `elem` slots]
+      | Just t' <- aliasStep t = occurs held p t'
+      | otherwise = any (occurs held p) args
+    -- The `$k` slots of a type's own form in the language, where it has one.
+    formSlots h =
+      let form = concreteNameOf cscope h
+       in if form == unTVar h then Nothing else Just (macroSlots form)
+    aliasStep t = case T.evaluateStep gscope t of
+      Just t' | t' /= t, Just (h, _) <- applied t, T.isTransparentAlias gscope h -> Just t'
+      _ -> Nothing
+    spelledIn held d =
+      let ps = declParams gscope d
+          form = concreteNameOf cscope d
+          slots = macroSlots form
+          implicitForm = case sp of
+            NativeSpelling True -> form /= unTVar d && form /= "struct" && not (MT.any (== '$') form)
+            _ -> False
+          typeIndex = snd (mapAccumL (\k p -> case p of Left (_, k') | k' /= KindType -> (k, Nothing); _ -> (k + 1, Just k)) 1 ps)
+       in [ case p of
+              Left (_, KindType) -> Set.member (d, i) held || maybe False (`elem` slots) k || implicitForm
+              Left _ -> False
+              Right _ -> True
+          | (i, (p, k)) <- indexedFrom 0 (zipSame ps typeIndex)
+          ]
+    applied t = case t of
+      VarU d -> Just (d, [])
+      AppU (VarU d) args -> Just (d, args)
+      _ -> Nothing
+
+-- | Which arguments of a declared record or `data` type are erased in a
+-- language: for the type and its number of arguments, a flag per argument,
+-- or Nothing for a type that is not declared at that many arguments.
+type Erasure = TVar -> Int -> Maybe [Bool]
+
+-- | The erasure of a language with the given scopes: an argument at a type
+-- parameter no value holds there ('spelledParams').
+erasure :: Spelling -> Scope -> Scope -> Erasure
+erasure sp gscope cscope v n = case declOf gscope v of
+  Just (ps, _) | length ps == n -> Just [isType p && not s | (p, s) <- zipSame ps (spelledParams sp gscope cscope v)]
+  _ -> Nothing
+  where
+    isType (Left (_, KindType)) = True
+    isType _ = False
+
+-- | The erasure of a language.
+erasureIn :: Lang -> MorlocMonad Erasure
+erasureIn lang = do
+  (cscope, gscope) <- getScope lang
+  sp <- spellingOf lang
+  return (erasure sp gscope cscope)
+
+-- | Arguments, each walked unless erased.
+erasedOr :: Applicative f => Maybe [Bool] -> [a] -> (a -> f ArgF) -> f [ArgF]
+erasedOr mask xs walk = sequenceA [if e then pure erasedArg else walk x | (e, x) <- zipSame (fromMaybe (map (const False) xs) mask) xs]
 
 -- | Resolve one applied argument of a `data` type, keeping an unsolved one
 -- unsolved. See the note at its use in 'inferVariantArms'.
@@ -438,7 +585,7 @@ backEdge lang i cscope v args = do
   -- `data` type already being resolved, and they are resolved as any are.
   if Set.member (v, args) resolving && selfContaining gscope v args
     then do
-      name <- instanceName cscope v args
+      name <- instanceName lang cscope v args
       if MT.any (== '$') name
         then MM.throwSourcedError i $
           "The native form of" <+> squotes (pretty v) <+> "is a template,"
@@ -448,16 +595,18 @@ backEdge lang i cscope v args = do
         else return $ RecF (FV v (CV name)) []
     else do
       ps <- resolveArgs lang i (v, args)
-      name <- instanceName cscope v args
+      name <- instanceName lang cscope v args
       return $ RecF (FV v (CV name)) ps
 
 -- | Resolve the applied arguments of a `data` instantiation, marking it as
 -- resolving its arguments for the duration (see 'backEdge').
 resolveArgs :: Lang -> Int -> (TVar, [TypeU]) -> MorlocMonad [ArgF]
-resolveArgs lang i key@(_, args) = do
+resolveArgs lang i key@(v, args) = do
   gscope <- MM.getGeneralScope
-  withModified stateVariantArgsResolving (\v st -> st {stateVariantArgsResolving = v}) (Set.insert key) $
-    argsWith gscope (fst key) (argType lang i) args
+  erasedAt <- erasureIn lang
+  withModified stateVariantArgsResolving (\x st -> st {stateVariantArgsResolving = x}) (Set.insert key) $
+    erasedOr (erasedAt v (length args)) (zipSame (argKinds gscope v (length args)) args) $
+      \(sl, a) -> argWith sl (argType lang i) a
 
 -- | The structural walk's remaining cases: shapes 'weave' cannot handle on
 -- its own, and the fallback to it.
@@ -518,7 +667,8 @@ inferConcreteTypeWeave
   :: Lang -> Int -> Scope -> TypeU -> TypeU -> MorlocMonad TypeF
 inferConcreteTypeWeave lang i gscope generalType concreteType = do
   anc <- CMS.gets stateRecordAncestors
-  case weave gscope anc generalType concreteType of
+  erased <- erasureIn lang
+  case weave gscope erased anc generalType concreteType of
     (Right tf) -> return tf
     (Left _) ->
       -- Weaving fails for a parameterized definition such as
@@ -559,7 +709,7 @@ inferConcreteTypeUniversal lang i t@(type2typeu -> generalType) = do
 inferConcreteTypeUniversalStructural
   :: Lang -> Int -> Scope -> Type -> TypeU -> TypeU -> MorlocMonad TypeF
 inferConcreteTypeUniversalStructural lang i gscopeUni t g c = do
-  knot <- stateKnot
+  knot <- stateKnot =<< erasureIn lang
   case structuralCompound gscopeUni knot (inferConcreteTypeUniversalStructural lang i gscopeUni t) g c of
     Just r -> hostConvention lang r
     Nothing -> inferConcreteTypeUniversalStructural' lang i gscopeUni t g c
@@ -607,7 +757,8 @@ universalStructuralCases lang i gscopeUni t g c = case (g, c) of
         inferConcreteTypeUniversalStructural lang i gscopeUni t g' c
   _ -> do
     anc <- CMS.gets stateRecordAncestors
-    case weave gscopeUni anc g c of
+    erased <- erasureIn lang
+    case weave gscopeUni erased anc g c of
       (Right tf) -> return tf
       (Left _) -> case T.evaluateStep gscopeUni g of
         (Just reducedGType)
@@ -706,7 +857,7 @@ structuralCompound scope knot walk g c = case (g, c) of
     | o1 == o2 && length ts1 == length ts2 && length rs1 == length rs2 ->
         Just $ do
           let fv = FV v1 (CV (unTVar v2))
-          ps <- argsWith2 scope v1 argRef ts1 ts2
+          ps <- recordArgs v1 ts1 ts2
           rs <- knotEnter knot (v1, map (expandTransparentAliases scope) ts1) (RecF fv ps) walk (\walk' -> zipWithSameM (\(_, g') (k, c') -> (,) k <$> walk' g' c') rs1 rs2)
           return (NamF o1 fv ps rs)
   _ -> Nothing
@@ -717,11 +868,28 @@ structuralCompound scope knot walk g c = case (g, c) of
       _ | Just key <- recordKey scope g', Just back <- Map.lookup key (knotAncestors knot) -> pure back
       (_, NamU NamRecord v2 ts2 _)
         | Just (v1, ts1) <- declaredRecord g', length ts1 == length ts2 ->
-            RecF (FV v1 (CV (unTVar v2))) <$> argsWith2 scope v1 argRef ts1 ts2
+            RecF (FV v1 (CV (unTVar v2))) <$> recordArgs v1 ts1 ts2
       _ -> walk g' c'
+    -- A record's arguments, each a reference to it where it is a declared
+    -- record, and erased where the language erases it ('Erasure').
+    recordArgs v ts1 ts2 =
+      erasedOr (knotErasure knot v (length ts1)) (zipSame (argKinds scope v (length ts1)) (zipSame ts1 ts2)) $
+        \(sl, (g', c')) -> argWith2 argRef sl g' c'
     declaredRecord t = case expandTransparentAliases scope t of
       NamU NamRecord v ts _ | v /= anonRecordVar -> Just (v, ts)
       _ -> recordKey scope t >>= \(v, ts) -> if T.declaresRecord scope v then Just (v, ts) else Nothing
+
+-- | The positions a native form's `$k` slots name.
+macroSlots :: MT.Text -> [Int]
+macroSlots form = [k | piece <- drop 1 (MT.splitOn "$" form), Just k <- [readMaybe (MT.unpack (MT.takeWhile isDigit piece))]]
+
+-- | An erased argument ('Erasure'): it has no native form, so it is not
+-- resolved.
+erasedArg :: ArgF
+erasedArg = TyA erasedType
+
+erasedType :: TypeF
+erasedType = UnkF (FV (TV "_") (CV "_"))
 
 -- | The records whose fields a walk is inside, by name and general
 -- arguments, each with the reference to it, and how a walk enters one:
@@ -736,6 +904,7 @@ data Knot f = Knot
       -> (TypeU -> TypeU -> f TypeF)
       -> ((TypeU -> TypeU -> f TypeF) -> f [(Key, TypeF)])
       -> f [(Key, TypeF)]
+  , knotErasure :: Erasure
   }
 
 -- | The name and arguments a type refers to a record by, with its aliases
@@ -752,10 +921,10 @@ recordKey scope = key . expandTransparentAliases scope
 -- | The knot of a monadic walk: the records in compiler state, so a walk
 -- re-entered from the top ('inferConcreteType', as a `data` type's arms
 -- are) still sees them.
-stateKnot :: MorlocMonad (Knot MorlocM)
-stateKnot = do
+stateKnot :: Erasure -> MorlocMonad (Knot MorlocM)
+stateKnot erased = do
   anc <- CMS.gets stateRecordAncestors
-  return (Knot anc enter)
+  return (Knot anc enter erased)
   where
     enter key back walk k = withModified stateRecordAncestors (\v st -> st {stateRecordAncestors = v}) (Map.insert key back) (k walk)
 
@@ -795,7 +964,7 @@ stepTowardCompound scope g c = case T.evaluateStep scope g of
   _ -> Nothing
   where
     corresponds g' = isJust (dataHeadOf scope g')
-      || isJust (structuralCompound scope (Knot Map.empty (\_ _ w k -> k w)) (\_ _ -> Proxy) g' c)
+      || isJust (structuralCompound scope (Knot Map.empty (\_ _ w k -> k w) (\_ _ -> Nothing)) (\_ _ -> Proxy) g' c)
       || case (g', c) of
            (AppU (VarU _) ts1, AppU (VarU _) ts2) ->
              snd (partitionKindArgs kindOfU ts1) == 0 && appArgsCorrespond ts1 ts2
@@ -842,8 +1011,8 @@ inferConcreteTypeUUniversal lang generalType = do
 -- 'CppTranslator.hs', where every @VarF@/@AppF@/@RecF@ rule consults
 -- cscope to distinguish legitimate user mappings from pairEval bnd-
 -- protect leaks.
-weave :: Scope -> Map.Map (TVar, [TypeU]) TypeF -> TypeU -> TypeU -> Either MDoc TypeF
-weave gscope = w
+weave :: Scope -> Erasure -> Map.Map (TVar, [TypeU]) TypeF -> TypeU -> TypeU -> Either MDoc TypeF
+weave gscope erased = w
   where
     -- @anc@: the records whose fields the walk is inside ('Knot').
     w anc t1 t2 | Just r <- structuralCompound gscope (knotOf anc) (w anc) t1 t2 = r
@@ -880,7 +1049,7 @@ weave gscope = w
     w _ (ForallU v (VarU v')) _ | v == v' = return $ UnkF (FV v (CV (unTVar v)))
     w anc t1 t2 = wStep anc t1 t2
 
-    knotOf anc = Knot anc (\key back _ k -> k (w (Map.insert key back anc)))
+    knotOf anc = Knot anc (\key back _ k -> k (w (Map.insert key back anc))) erased
 
     -- Step the general type one level via @evaluateStep@ and retry.
     wStep anc t1 t2 = case T.evaluateStep gscope t1 of
