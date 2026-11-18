@@ -57,7 +57,7 @@ ldRealNaN: "float('nan')"
 # Constructors
 ldListStyle: bracket
 ldTupleConstructor: ""
-ldRecordConstructor: "OrderedDict"
+ldRecordConstructor: "dict"
 
 # Access styles
 ldIndexStyle: zero_bracket

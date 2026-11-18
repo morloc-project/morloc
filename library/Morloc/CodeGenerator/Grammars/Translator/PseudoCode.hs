@@ -119,7 +119,7 @@ prettyFoldManifold =
       where
         pyDict es' =
           let entries' = zipWithSame (\k v -> pretty k <> "=" <> v) (map fst rs) es'
-           in "OrderedDict" <> tupled entries'
+           in "dict" <> tupled entries'
     makeNativeExpr _ (LogN_ _ v) = return $ defaultValue {poolExpr = if v then "True" else "False"}
     makeNativeExpr _ (RealN_ _ v) = return $ defaultValue {poolExpr = viaShow v}
     makeNativeExpr _ (IntN_ _ v) = return $ defaultValue {poolExpr = viaShow v}

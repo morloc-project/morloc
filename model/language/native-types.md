@@ -85,7 +85,7 @@ Its elements are checked as values sent to another language are.
 
 ### NATIVE-9 One native form per type
 Intent: ruled 2026-10-28
-Tests: spec-native-9-1, spec-native-9-2, spec-native-9-3, spec-native-9-4, spec-native-9-5, spec-native-9-6, spec-native-9-7, spec-native-9-8, spec-native-9-9, spec-native-9-10
+Tests: spec-native-9-1, spec-native-9-2, spec-native-9-3, spec-native-9-4, spec-native-9-5, spec-native-9-6, spec-native-9-7, spec-native-9-8, spec-native-9-9, spec-native-9-10, spec-native-9-11
 Code: deviates (issues/values.md)
 
 In every language L and for every type T with a schema, a value of T built

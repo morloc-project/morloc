@@ -7,7 +7,6 @@ import copy
 import array
 import struct
 import socket as _socket
-from collections import OrderedDict
 import functools
 import importlib
 import importlib.util

@@ -89,11 +89,6 @@ on 0.109.0 unless marked.
   2026-10-21] Violates GEN-11. `record Py => P = "MyCls"` builds;
   the Python function receives a `dict`. The golden object-1-py passes only
   because its function is an identity and the output is JSON. Repro: /work/plans/model-audit-2026-10-21/repro/B/t/nat/n5.loc.
-- **A Python record literal is an OrderedDict, a received record a dict.**
-  [read, 2026-11-15] Violates NATIVE-9. Literals are built with
-  `ldRecordConstructor: "OrderedDict"` (data/lang/py/lang.yaml:50;
-  PseudoCode.hs:122 matches it); pymorloc.c reads every record with
-  `PyDict_New` (MORLOC_MAP, ~2178). `type()` and `repr()` differ.
 - **Reading a field of a Python `object` emits attribute access on a dict.**
   [read, 2026-11-15, not reproduced] Violates GEN-11. genericRecordAccessor
   (Grammars/Translator/Generic.hs:768-769) emits `.f` for `NamObject`, but

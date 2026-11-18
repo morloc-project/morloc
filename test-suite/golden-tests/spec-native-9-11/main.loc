@@ -1,0 +1,18 @@
+-- NATIVE-9: a Python record literal has the form a received record has, a
+-- dict.
+module main (literal, received)
+
+import root-py
+
+record P where
+  x :: Int
+  y :: Str
+
+source Py from "f.py" ("kind")
+kind :: P -> Str
+
+literal :: Int -> Str
+literal n = kind {x = n, y = "a"}
+
+received :: P -> Str
+received p = kind p
