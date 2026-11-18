@@ -192,12 +192,12 @@ sent from Python must be an instance of exactly the generated class. Only
 the package declaring a record, or that package's implementation module
 for Python (`<package>-py`), may give it a class kind; the modules of no
 package (a script and its local imports) count as one package. A record
-has at most one class kind in a language. A user-written Python form
-(`record Py => R = "Cls"`) is constructed by calling the class with the
-fields as keywords and read by attribute.
+has at most one class kind in a language. A user-written Python class
+form (`record Py => R = "Cls"`) is a future feature (ruled 2026-11-18):
+until then such a record is a dict.
 
 ### GEN-12 A Python `data` value is an instance of its arm's class
-Intent: proposed
+Intent: ruled 2026-11-18
 Code: unaudited
 
 Each constructor `C` of a `data` type `D` is a frozen dataclass `C`,

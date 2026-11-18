@@ -18,16 +18,6 @@
   gains a rule rejecting inline record types at the signature, and the
   manual's pattern chapter and existing programs using them must change.
 
-- **A generic Rust struct cannot carry a phantom parameter.** [read] Gap in
-  NATIVE-3. A record whose parameter no field uses, mapped to a generic
-  struct (`record Rust => Loc k = "Loc<$1>" k`), needs the struct to use `k`,
-  which Rust allows only through a field such as `PhantomData<K>`; the
-  generated reader (CodeGenerator/Pools/CAbi/Members/RustPrinter.hs
-  `printRecordImpls`, `Self { .. }` from the schema's fields) has no value
-  for that field, so the pool does not compile. Mapping such a record to a
-  non-generic struct works (one impl serves every instantiation). Open:
-  fill fields the schema does not name with `Default::default()`, or
-  document the non-generic form as the way.
 - **Closure fields of a templated Rust record share one wire schema across
   instantiations.** [read] Rust.hs `generateRustStructs` harvests each
   record's crossing closure fields keyed by (general record name, field), so

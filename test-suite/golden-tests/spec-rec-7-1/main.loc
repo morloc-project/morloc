@@ -1,0 +1,30 @@
+-- REC-7: a user-written Rust struct holds exactly its record's fields. A
+-- parameter no field uses is not passed to it (`LocT`), or the struct uses
+-- it in a field's type through a trait (`Edge<$1,$2>`), as biolib's
+-- Mapping does.
+module main (idLoc, idEdge)
+
+import root-rust
+
+type Gene
+type Rust => Gene = "GeneKind"
+type Exon
+type Rust => Exon = "ExonKind"
+
+record Loc k where
+  pos :: Int
+record Rust => Loc k = "LocT"
+
+record Edge a b where
+  src :: Int
+  dst :: Int
+record Rust => (Edge a b) = "Edge<$1,$2>" a b
+
+source Rust from "f.rs" ("same")
+same :: a -> a
+
+idLoc :: Loc Gene -> Loc Gene
+idLoc x = same x
+
+idEdge :: Edge Gene Exon -> Edge Gene Exon
+idEdge x = same x

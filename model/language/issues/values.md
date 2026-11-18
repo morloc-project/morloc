@@ -86,8 +86,9 @@ on 0.109.0 unless marked.
   notes.txt` fails "Expected str or bytes for MORLOC_STRING, but got
   PosixPath (pymorloc.c:1000)" [reproduced 2026-11-14]. Repro: /work/plans/model-audit-2026-10-21/repro/B/t/n7/c2.loc.
 - **A Python record class form is accepted and ignored.** [reproduced,
-  2026-10-21] Violates GEN-11. `record Py => P = "MyCls"` builds;
-  the Python function receives a `dict`. The golden object-1-py passes only
+  2026-10-21] Gap in GEN-11, which rules user class forms a future feature
+  (2026-11-18). `record Py => P = "MyCls"` builds; the Python function
+  receives a `dict`, with no warning that the form is not used. The golden object-1-py passes only
   because its function is an identity and the output is JSON. Repro: /work/plans/model-audit-2026-10-21/repro/B/t/nat/n5.loc.
 - **Reading a field of a Python `object` emits attribute access on a dict.**
   [read, 2026-11-15, not reproduced] Violates GEN-11. genericRecordAccessor

@@ -56,3 +56,18 @@ Code: conforms 2026-10-21
 `record L => R = "name"` names the representation of `R` in language `L`.
 Field names and types come from the general declaration and are not
 repeated. What the named container must provide is in native-types.md.
+
+### REC-7 A user-written record struct holds exactly its record's fields
+Intent: ruled 2026-11-18
+Tests: spec-rec-7-1
+Code: conforms 2026-11-18
+
+In a compiled language, the struct a user-written form names
+(`record Rust => R = "S"`) has exactly the record's fields, and a value of
+it is built from them alone: no other field is filled. A type parameter no
+field of the record uses is usually not passed to the struct
+(`record Rust => Loc k = "LocT"`); a struct that takes it uses it in a
+field's type (through a trait, `<A as Kind>::Id`), since Rust refuses an
+unused parameter and a marker field (`PhantomData`) would be a field the
+record lacks.
+
