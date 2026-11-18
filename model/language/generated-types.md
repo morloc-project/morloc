@@ -7,7 +7,7 @@ Prefix: GEN. Plan: /work/plans/generated-native-types/PLAN.md.
 ### GEN-1 Every record and `data` type has a native form in every language
 Intent: ruled 2026-11-14
 Tests: spec-gen-1-1, spec-gen-1-2, spec-gen-1-3
-Code: unaudited
+Code: deviates (issues/records.md)
 
 A type's form in language `L` is the one its program declares
 (`record L => R = ...`, `data L => D = ...`), or else `L`'s default kind.
@@ -28,7 +28,7 @@ are refused unless a `data` type cuts the cycle (SUM-4).
 ### GEN-2 A kind is a word the language defines
 Intent: ruled 2026-11-14
 Tests: spec-gen-2-1
-Code: unaudited
+Code: deviates (issues/records.md)
 
 Each language lists its record kinds and its `data` kinds, and one default
 of each, in its descriptor. A kind word the language does not list is a
@@ -43,7 +43,7 @@ Kinds: C++ `struct` (records) and `variant` (`data`); Rust `struct` and
 ### GEN-3 The legacy container strings mean the default kind
 Intent: ruled 2026-11-14
 Tests: spec-gen-3-1
-Code: unaudited
+Code: conforms 2026-11-18
 
 `record Py => R = "dict"`, `"OrderedDict"`, `record R => R = "list"` and
 `record Cpp => R = "struct"` / `record Rust => R = "struct"` mean the
@@ -51,7 +51,7 @@ language's default record kind, with a deprecation warning at the line.
 
 ### GEN-4 A generated type's name is derived from its declaring module
 Intent: ruled 2026-11-14
-Code: unaudited
+Code: conforms 2026-11-18
 
 The public name of a generated type `T` declared in module `m1.m2-x` is a
 fixed prefix, then the module's components, then `T`: C++
@@ -71,7 +71,7 @@ way before and after it is installed.
 ### GEN-5 Colliding or unspellable generated names are compile errors
 Intent: proposed
 Tests: spec-gen-5-1, spec-gen-5-2
-Code: unaudited
+Code: deviates (issues/records.md)
 
 A build fails, naming both declarations, when two generated types get one
 public name in a language. It fails, naming the type and the word, when a
@@ -81,7 +81,7 @@ that generates the type (a keyword with no escape there).
 ### GEN-6 The definitions are written to files the pool reads first
 Intent: ruled 2026-11-14
 Tests: spec-gen-6-1, spec-gen-6-2
-Code: unaudited
+Code: deviates (issues/records.md)
 
 For every module `M` and language `L` with a generated type the program
 uses in `L`, the build writes one file under the build directory:

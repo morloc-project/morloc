@@ -119,3 +119,43 @@
   a morloc error naming `T`. A Python form that drops an argument the
   general type holds (`type Py => Tag a = "str"`) likewise does not erase
   it in Python, which still resolves it.
+- **A Rust self-referential record is not spelled as GEN-1 says.** [read,
+  2026-11-18] Violates GEN-1. GEN-1 gives `pub struct R(pub Arc<RFields>)`;
+  RustPrinter.hs printRustHandle emits
+  `pub struct R(pub ::std::mem::ManuallyDrop<::std::sync::Arc<RFields>>)`,
+  so a source building `R(Arc::new(f))` does not compile (`R::new(f)`
+  does). Fix the code or amend GEN-1 to this spelling and `R::new`.
+- **Languages define no `data` kinds.** [reproduced, 2026-11-18] Violates
+  GEN-2. lang.yaml and LangRegistry.hs TypeKinds hold only record kinds;
+  `data L => D = word` parses as a type alias, so `data Cpp => Shape =
+  variant`, `data Py => Shape = pydantic` and `data Py => Shape = bogus` all
+  fail "Could not resolve type for variable 'variant'", naming no kind and
+  listing none. Python `data` types get no class file. Repro: /work/plans/generated-native-types/audit-repros/d1, d2, d3.
+- **Python class names that collide are merged silently.** [reproduced,
+  2026-11-18] Violates GEN-5. Modules `geo-util` and `geo_util` each
+  declaring `record Pt` with `= dataclass` build; PyClasses.hs `used`
+  (Map.fromListWith by class name) merges them, and a call fails at run
+  time "the class mlc_types._local.geo_util.Pt has no field 'x'". Repro:
+  /work/plans/generated-native-types/audit-repros/p5py.
+- **A Rust field named `self`, `super`, `crate` or `Self` crashes the
+  compiler.** [reproduced, 2026-11-18] Violates GEN-5. RustPrinter.hs
+  (rustFieldIdent, about 330) calls `error`; the output is a CallStack
+  naming no type. Repro: /work/plans/generated-native-types/audit-repros/p5self.
+- **A C++ field named like a standard macro reaches g++.** [reproduced,
+  2026-11-18] Violates GEN-5. `record P where errno :: Int` fails in g++
+  ("expected unqualified-id"); Cpp.hs checkFields checks keywords only.
+  Repro: /work/plans/generated-native-types/audit-repros/p5errno.
+- **A Rust type file imports the whole crate root.** [read, 2026-11-18]
+  Violates GEN-6 (a file imports only what its definitions name).
+  Rust.hs rustTypeFiles writes `use crate::*;` atop every type file (and
+  private modules), so a sourced crate-root item outranks a prelude name
+  the file uses unqualified (`Vec`, `String`, `Option`). Not reproduced.
+- **A Rust record named like a prelude type is kept in the pool.** [read,
+  2026-11-18] Gap in GEN-10. Rust.hs planRustPublic `nameOk` keeps a
+  record named `String` or `Vec` (and every record holding it) out of the
+  Rust type files, while C++ makes it public; GEN-10 does not list the
+  case. Repro: /work/plans/generated-native-types/audit-repros/p6opt.
+- **Legacy form warnings are given only in the program's own modules.**
+  [reproduced, 2026-11-18] Gap in GEN-3. Desugar.hs (about 1394) warns of a
+  legacy form (`"dict"`, `"struct"`) in the program's modules, never in an
+  installed package's; GEN-3 does not say which.
