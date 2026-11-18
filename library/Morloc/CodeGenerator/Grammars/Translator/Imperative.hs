@@ -578,6 +578,11 @@ data LowerConfig m = LowerConfig
   -- plain int from the runtime, so the tag is the value. R holds an ordered
   -- factor, which is its whole level set plus a 1-based code into it, so a
   -- literal cannot be written without the other constructors.
+  , lcNoArmMatched :: Maybe (MDoc -> MDoc -> MDoc)
+  -- ^ Where a value's form is not checked by its type, the expression a
+  -- branch on its arm takes when no arm matched, given the type's rendered
+  -- spelling and the subject; then the last arm is tested too. Nothing where
+  -- the type guarantees one arm matches.
   , lcVariantTagTest :: MDoc -> Text -> Int -> MDoc -> MDoc
   -- ^ Test whether a payload-bearing value carries a given arm: the type's
   -- rendered spelling, the arm's name, its tag, and the subject.
@@ -1116,7 +1121,13 @@ byVariantArm cfg resultType ty v arms rebuild = chain (indexed arms)
       | all (isMsgpackLeaf cfg) ss = pass
       | otherwise = rebuild n i ss
     chain [] = pass
-    chain [a] = arm a
+    chain [a@(i, (n, _))]
+      | Just noMatch <- lcNoArmMatched cfg = do
+          (thenStmts, thenExpr) <- arm a
+          v' <- render . (helperVar cfg) <$> lcNewIndex cfg
+          let cond = IRawExpr (render (lcVariantTagTest cfg ty n i v))
+          return ([IIf v' resultType cond thenStmts thenExpr [] (IRawExpr (render (noMatch ty v)))], IVar v')
+      | otherwise = arm a
     chain (a@(i, (n, _)) : rest) = do
       (thenStmts, thenExpr) <- arm a
       (elseStmts, elseExpr) <- chain rest

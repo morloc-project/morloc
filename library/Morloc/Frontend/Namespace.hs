@@ -59,6 +59,7 @@ copyState oldIdx newIdx = do
       , stateNewtypeHeaders = stateNewtypeHeaders s
       , stateTypeHomes = stateTypeHomes s
       , stateGeneratedClasses = stateGeneratedClasses s
+      , stateGeneratedData = stateGeneratedData s
       , stateModulePackages = stateModulePackages s
       , stateExportTypes = stateExportTypes s
       , stateSources = updateGMap (stateSources s)

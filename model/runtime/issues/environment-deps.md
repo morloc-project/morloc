@@ -107,3 +107,11 @@ model/issues/LIST.md), checked against the code 2026-11-04 [read].
   language"; plugin languages get no registry entry, so their
   `generated_types` are ignored (Frontend/API.hs psTypeKinds and
   Restructure.hs withDefaultKinds read the built-in registry only).
+- **A provisioned C++ dependency's headers are found only by the
+  environment's compiler.** [reproduced, 2026-11-18] Gap in GEN-7 (a header
+  file includes what its fields name). The C++ pool compile line carries no
+  include directory for `cpp-deps` installed into the environment; their
+  headers are found only through the default search path of the
+  environment's own compiler. Under `stack test`, whose PATH puts the
+  system g++ first, `#include <nlohmann/json.hpp>` (spec-gen-7-2) is not
+  found; the golden sets CXX to the environment's compiler.

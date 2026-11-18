@@ -16,16 +16,21 @@ cannot spell (GEN-5).
 -}
 module Morloc.CodeGenerator.Grammars.Translator.PyClasses
   ( PyClasses (..)
+  , DataShape (..)
   , pythonClasses
+  , pyCtorName
+  , pyCtorRef
   ) where
 
+import Data.Char (isAlphaNum, isAscii)
 import Data.List (sort)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as T
-import Morloc.CodeGenerator.Grammars.Common (collectRecordsWhere, isIdentifier)
+import Morloc.CodeGenerator.Grammars.Common (collectRecordsWhere, isIdentifier, poolNativeTypes)
 import Morloc.CodeGenerator.Namespace
+import Morloc.Data.Zip (indexedFrom)
 import qualified Morloc.LangRegistry as LR
 
 data PyClasses = PyClasses
@@ -36,12 +41,33 @@ data PyClasses = PyClasses
   -- class modules and register each class with the runtime.
   }
 
--- | The class modules the pool's records need, or the reasons they cannot
--- be written, given the classes, those whose record has type parameters,
--- and the language's keywords.
-pythonClasses :: Map.Map Text LR.ClassKind -> Set.Set Text -> Set.Set Text -> [SerialManifold] -> Either [Text] PyClasses
-pythonClasses classes parameterized keywords es
-  | Map.null used = Right (PyClasses [] [])
+-- | A `data` type's constructors (GEN-12): those of an enumeration, or each
+-- constructor with its number of fields.
+data DataShape = EnumShape [Text] | VariantShape [(Text, Int)]
+
+-- | A constructor's attribute name on its type's class: its own name, with
+-- a trailing underscore when it is a Python keyword (`None_`), as PEP 8
+-- has a name that would clash with one.
+pyCtorName :: Set.Set Text -> Text -> Text
+pyCtorName keywords n = if Set.member n keywords then n <> "_" else n
+
+-- | A constructor of a class, read by attribute where its name is plain
+-- ASCII, and by its exact string otherwise: Python normalizes a non-ASCII
+-- identifier in source (NFKC), so two names it normalizes alike would meet.
+pyCtorRef :: Set.Set Text -> Text -> Text -> Text
+pyCtorRef keywords ty n
+  | T.all (\c -> isAscii c && (isAlphaNum c || c == '_')) a = ty <> "." <> a
+  | otherwise = "getattr(" <> ty <> ", \"" <> a <> "\")"
+  where
+    a = pyCtorName keywords n
+
+-- | The class modules the pool's records and the program's `data` types
+-- need, or the reasons they cannot be written, given the record classes,
+-- those whose record has type parameters, the `data` types by qualified
+-- name, and the language's keywords.
+pythonClasses :: Map.Map Text LR.ClassKind -> Set.Set Text -> Map.Map Text DataShape -> Set.Set Text -> [SerialManifold] -> Either [Text] PyClasses
+pythonClasses classes parameterized datas0 keywords es
+  | Map.null used && Map.null datas = Right (PyClasses [] [])
   | not (null problems) = Left problems
   | otherwise = Right (PyClasses files load)
   where
@@ -51,11 +77,21 @@ pythonClasses classes parameterized keywords es
         [ (c, [rs])
         | (FV _ (CV c), _, rs) <- occurrences
         ]
+    -- Every `data` type of the program has its class, since a sourced file
+    -- may import it; one the pool's code never holds and whose name Python
+    -- cannot spell is left out rather than refused.
+    usedData = Set.fromList [c | t <- concatMap poolNativeTypes es, c <- dataNames t]
+    dataNames t = case t of
+      VariantF (FV _ (CV c)) _ _ -> c : concatMap dataNames (childrenOf t)
+      EnumF (FV _ (CV c)) _ _ -> [c]
+      _ -> concatMap dataNames (childrenOf t)
+    spellable c = all (\p -> isIdentifier p && not (Set.member p keywords)) (T.splitOn "." c)
+    datas = Map.filterWithKey (\c _ -> Set.member c usedData || spellable c) datas0
     kindOf c = Map.findWithDefault LR.DataclassKind c classes
     firstFields c = concat (take 1 (Map.findWithDefault [] c used))
     moduleOf c = T.intercalate "." (init (T.splitOn "." c))
     leafOf c = last (T.splitOn "." c)
-    byModule = Map.fromListWith (<>) [(moduleOf c, [c]) | c <- Map.keys used]
+    byModule = Map.fromListWith (<>) [(moduleOf c, [c]) | c <- Map.keys used <> Map.keys datas]
 
     -- A record with type parameters annotates every field as any value: a
     -- field's type at one use is not its declared type, and annotating it
@@ -99,7 +135,7 @@ pythonClasses classes parameterized keywords es
 
     problems =
       [ "the generated Python class " <> c <> " cannot be written: `" <> w <> "` " <> why
-      | c <- Map.keys used
+      | c <- Map.keys used <> Map.keys datas
       , (w, why) <-
           [ (p, "is not a Python identifier or is a keyword, and names a package of it")
           | p <- T.splitOn "." c, not (isIdentifier p) || Set.member p keywords
@@ -114,6 +150,13 @@ pythonClasses classes parameterized keywords es
                , "_" `T.isPrefixOf` k || "model_" `T.isPrefixOf` k || Set.member k pydanticReserved
                ]
       ]
+        <> [ "the generated Python class " <> c <> " is both a record's and a `data` type's"
+           | c <- Map.keys (Map.intersection used datas)
+           ]
+    ctorsOf c = case Map.lookup c datas of
+      Just (EnumShape ns) -> ns
+      Just (VariantShape as) -> map fst as
+      Nothing -> []
 
     files = packageInits <> map moduleFile (Map.toList byModule)
     -- Every package directory above a class module needs its own
@@ -127,19 +170,25 @@ pythonClasses classes parameterized keywords es
     moduleFile (m, cs) =
       let cs' = sort cs
           imports = Set.toList (Set.fromList (concat [referenced m t | c <- cs', (_, t) <- firstFields c]))
-          anyPydantic = any ((== LR.PydanticKind) . kindOf) cs'
-          anyDataclass = any ((== LR.DataclassKind) . kindOf) cs'
-          anyTyping = or [T.isInfixOf "typing." a | c <- cs', (_, a) <- fieldsOf c]
+          records = filter (`Map.member` used) cs'
+          shapes = [(c, d) | c <- cs', Just d <- [Map.lookup c datas]]
+          anyPydantic = any ((== LR.PydanticKind) . kindOf) records
+          anyVariant = not (null [() | (_, VariantShape _) <- shapes])
+          anyEnum = not (null [() | (_, EnumShape _) <- shapes])
+          anyDataclass = any ((== LR.DataclassKind) . kindOf) records || anyVariant
+          anyTyping = or [T.isInfixOf "typing." a | c <- records, (_, a) <- fieldsOf c] || anyVariant
           body =
             [ "# Generated by morloc; do not edit."
             , "from __future__ import annotations"
             ]
               <> ["import dataclasses" | anyDataclass]
+              <> ["import enum" | anyEnum]
               <> ["import typing" | anyTyping]
               <> ["import pydantic" | anyPydantic]
               <> ["import " <> i <> " as " <> aliasOf i | i <- imports]
-              <> concatMap classDef cs'
-              <> concat [["", leafOf c <> ".model_rebuild()"] | c <- cs', kindOf c == LR.PydanticKind]
+              <> concatMap dataDef shapes
+              <> concatMap classDef records
+              <> concat [["", leafOf c <> ".model_rebuild()"] | c <- records, kindOf c == LR.PydanticKind]
        in (T.splitOn "." m <> ["__init__.py"], T.unlines body)
 
     classDef c =
@@ -163,10 +212,54 @@ pythonClasses classes parameterized keywords es
                 <> fields
                 <> getter
 
+    -- An enumeration is an `enum.Enum` whose member values are the tags; any
+    -- other `data` type is a base class whose constructors are its
+    -- attributes: a frozen slotted dataclass per constructor with fields,
+    -- and one instance of a fieldless one per constructor without. Each
+    -- constructor's class carries its tag.
+    -- Constructors are set by their exact names, never written as
+    -- identifiers (see 'pyCtorRef').
+    dataDef (c, EnumShape ns) =
+      let d = leafOf c
+       in [ ""
+          , ""
+          , d <> " = enum.Enum(" <> quoted d <> ", ["
+              <> T.intercalate ", " ["(" <> quoted (pyCtorName keywords n) <> ", " <> T.pack (show i) <> ")" | (i, n) <- indexedFrom 0 ns]
+              <> "], module=__name__, qualname=" <> quoted d <> ")"
+          ]
+    dataDef (c, VariantShape as) =
+      let d = leafOf c
+       in ["", "", "class " <> d <> ":", "    __slots__ = ()"]
+            <> concat
+              [ let tmp = "_mlc_arm" <> T.pack (show i)
+                    a = pyCtorName keywords n
+                 in [ ""
+                    , ""
+                    , "@dataclasses.dataclass(frozen=True, slots=True)"
+                    , "class " <> tmp <> "(" <> d <> "):"
+                    , "    _mlc_tag: typing.ClassVar[int] = " <> T.pack (show i)
+                    ]
+                      <> ["    f" <> T.pack (show j) <> ": typing.Any" | j <- [0 .. k - 1]]
+                      <> [ ""
+                         , tmp <> ".__name__ = " <> quoted a
+                         , tmp <> ".__qualname__ = " <> quoted (d <> "." <> a)
+                         , "setattr(" <> d <> ", " <> quoted a <> ", " <> tmp <> (if k == 0 then "()" else "") <> ")"
+                         , "del " <> tmp
+                         ]
+              | (i, (n, k)) <- indexedFrom 0 as
+              ]
+    quoted x = "\"" <> x <> "\""
+
     load =
       [ "sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), \"..\", \"types\", \"py\"))"
       ]
         <> ["import " <> m | m <- Map.keys byModule]
         <> [ "morloc.register_class(\"" <> c <> "\", " <> c <> ", " <> (if kindOf c == LR.PydanticKind then "1" else "0") <> ")"
            | c <- Map.keys used
+           ]
+        -- Each constructor in tag order: an enumeration's members, or a
+        -- class (fields) or an instance (none) per constructor.
+        <> [ "morloc.register_data(\"" <> c <> "\", " <> (case d of EnumShape _ -> "0"; VariantShape _ -> "1")
+               <> ", (" <> T.concat [pyCtorRef keywords c n <> ", " | n <- ctorsOf c] <> "))"
+           | (c, d) <- Map.toList datas
            ]

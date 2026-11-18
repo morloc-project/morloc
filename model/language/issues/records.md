@@ -121,12 +121,6 @@
   variant`, `data Py => Shape = pydantic` and `data Py => Shape = bogus` all
   fail "Could not resolve type for variable 'variant'", naming no kind and
   listing none. Python `data` types get no class file. Repro: /work/plans/generated-native-types/audit-repros/d1, d2, d3.
-- **Python class names that collide are merged silently.** [reproduced,
-  2026-11-18] Violates GEN-5. Modules `geo-util` and `geo_util` each
-  declaring `record Pt` with `= dataclass` build; PyClasses.hs `used`
-  (Map.fromListWith by class name) merges them, and a call fails at run
-  time "the class mlc_types._local.geo_util.Pt has no field 'x'". Repro:
-  /work/plans/generated-native-types/audit-repros/p5py.
 - **A Rust field named `self`, `super`, `crate` or `Self` crashes the
   compiler.** [reproduced, 2026-11-18] Violates GEN-5. RustPrinter.hs
   (rustFieldIdent, about 330) calls `error`; the output is a CallStack

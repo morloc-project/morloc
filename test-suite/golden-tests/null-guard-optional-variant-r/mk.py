@@ -3,7 +3,8 @@ def in_opt(s):
 
 
 def in_tag(s):
-    return ("Named", (s + chr(0) + s,))
+    from mlc_types._local.main import Tag
+    return Tag.Named(s + chr(0) + s)
 
 
 def in_chain(s, n):
@@ -18,4 +19,5 @@ def clean_opt(s):
 
 
 def clean_tag(s):
-    return ("Named", (s + s,))
+    from mlc_types._local.main import Tag
+    return Tag.Named(s + s)

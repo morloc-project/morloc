@@ -190,6 +190,9 @@ data MorlocState = MorlocState
   , stateGeneratedClasses :: Map.Map Text (LR.ClassKind, TVar)
   -- ^ Each generated class (GEN-11), by its qualified name, which is also
   -- its record's concrete name: the class kind and the record.
+  , stateGeneratedData :: Map.Map Text TVar
+  -- ^ The generated class of each `data` type in a language whose records
+  -- may be classes (GEN-12), by qualified name.
   , stateExportTypes :: Map.Map Int TypeU
   -- ^ Each export's inferred general type, by its index, with its Nat
   -- variables: the contract of an export without a signature (DIM-3).
@@ -1164,6 +1167,7 @@ instance Defaultable MorlocState where
       , stateNewtypeHeaders = Map.empty
       , stateTypeHomes = Map.empty
       , stateGeneratedClasses = Map.empty
+      , stateGeneratedData = Map.empty
       , stateModulePackages = Map.empty
       , stateExportTypes = Map.empty
       , stateSources = GMap Map.empty Map.empty

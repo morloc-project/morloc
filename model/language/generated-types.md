@@ -70,7 +70,7 @@ way before and after it is installed.
 
 ### GEN-5 Colliding or unspellable generated names are compile errors
 Intent: proposed
-Tests: spec-gen-5-1, spec-gen-5-2
+Tests: spec-gen-5-1, spec-gen-5-2, spec-gen-5-3
 Code: deviates (issues/records.md)
 
 A build fails, naming both declarations, when two generated types get one
@@ -196,13 +196,26 @@ has at most one class kind in a language. A user-written Python class
 form (`record Py => R = "Cls"`) is a future feature (ruled 2026-11-18):
 until then such a record is a dict.
 
-### GEN-12 A Python `data` value is an instance of its arm's class
+### GEN-12 A Python `data` value is a member or an instance of its type's class
 Intent: ruled 2026-11-18
-Code: unaudited
+Tests: spec-gen-12-1
+Code: conforms 2026-11-18
 
-Each constructor `C` of a `data` type `D` is a frozen dataclass `C`,
-subclass of an empty base class `D`, with positional fields `f0 ... fn`.
-A nullary constructor is a class with no fields.
+A `data` type whose constructors take no arguments is an `enum.Enum`
+subclass named for the type, with one member per constructor, named for it,
+whose value is its tag (its position in the declaration): `Base.A`. Any
+other `data` type `D` is a class `D` whose constructors are attributes of
+it: a constructor `C` with fields is a frozen, slotted dataclass `D.C`,
+subclass of `D`, with positional fields `f0 ... fn`; one with no fields is
+a single instance `D.C` of such a class with no fields. A value received
+or built is the member or an instance of exactly its constructor's class,
+and a value sent must be one: no other form is accepted. The classes live
+in the generated file of the module declaring the type (GEN-6), for every
+such type the program's Python code can use; a type the compiler itself
+declares (`Try`) lives under `mlc_types._builtin`. A constructor named like
+a Python keyword is the attribute with a trailing underscore (`Opt.None_`).
+A newtype over a `data` type holds that type's value, and a Python form
+written for either is not used (with a warning).
 
 ### GEN-13 `morloc types` writes the generated files anywhere
 Intent: ruled 2026-11-14

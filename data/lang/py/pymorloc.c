@@ -548,26 +548,6 @@ static bool bytes_fit_elements(const Schema* elem) {
             || elem->type == MORLOC_BOOL || elem->type == MORLOC_ENUM);
 }
 
-// Resolve a constructor name against a variant schema's key list, yielding
-// its tag. The tag is the constructor's position in the declaration, which
-// is what the wire carries; the keys arrive in that same order.
-static ssize_t variant_tag_of(const Schema* schema, PyObject* name) {
-    if (!PyUnicode_Check(name)) {
-        PyErr_SetString(PyExc_RuntimeError,
-            "a `data` value's first element must be its constructor name");
-        return -1;
-    }
-    const char* want = PyUnicode_AsUTF8(name);
-    if (!want) return -1;
-    for (size_t i = 0; i < schema->size; i++) {
-        if (schema->keys[i] && strcmp(schema->keys[i], want) == 0) {
-            return (ssize_t)i;
-        }
-    }
-    PyErr_Format(PyExc_RuntimeError, "'%s' is not a constructor of this type", want);
-    return -1;
-}
-
 // -- Marshalling walks ------------------------------------------------------
 //
 // A value is marshalled in three passes -- size, write, read -- and each is
@@ -651,6 +631,11 @@ typedef struct {
     size_t later_cap;
     int in_step;
     int deferring;
+    // The registered classes of the `data` schemas the walk has met
+    // (GEN-12), each looked up once per walk.
+    const Schema* data_schemas[32];
+    struct py_data* data_found[32];
+    size_t n_data;
 } py_walk_t;
 
 // True iff a back-reference occurs anywhere under `schema`.
@@ -709,6 +694,179 @@ static void py_walk_free(py_walk_t* w) {
 // offsets map each field name to its slot, kind 1 a pydantic v2 model.
 static PyObject* py_class_registry = NULL;
 
+// The classes of each `data` type (GEN-12), by schema hint, the type's
+// qualified class name: an enumeration's members, or per constructor its
+// class and, for one with fields, each field's slot offset.
+typedef struct py_data {
+    int kind;               // 0 an enum.Enum, 1 a class per constructor
+    size_t n;
+    PyObject** items;       // members, or classes (fields) and instances (none)
+    PyTypeObject** types;   // each constructor's class
+    size_t* nfields;
+    Py_ssize_t** offsets;   // each field's slot offset, per constructor with fields
+} py_data_t;
+
+static PyObject* py_data_registry = NULL;
+
+// The registered classes of a `data` schema, or NULL with a Python error
+// set: every hint of a `data` type names a class the pool registered.
+static py_data_t* py_data_of(py_walk_t* w, const Schema* schema) {
+    for (size_t i = 0; i < w->n_data; i++) {
+        if (w->data_schemas[i] == schema) return w->data_found[i];
+    }
+    PyObject* cap = (schema->hint != NULL && py_data_registry != NULL)
+        ? PyDict_GetItemString(py_data_registry, schema->hint) : NULL;
+    if (cap == NULL) {
+        PyErr_Format(PyMorlocInternalError, "the `data` type %s has no registered class",
+                     schema->hint ? schema->hint : "(unnamed)");
+        return NULL;
+    }
+    py_data_t* d = (py_data_t*)PyCapsule_GetPointer(cap, NULL);
+    if (d == NULL) return NULL;
+    if (d->n != schema->size) {
+        PyErr_Format(PyMorlocInternalError, "the `data` type %s has %zu registered constructors, its schema %zu",
+                     schema->hint, d->n, schema->size);
+        return NULL;
+    }
+    if (w->n_data < 32) {
+        w->data_schemas[w->n_data] = schema;
+        w->data_found[w->n_data] = d;
+        w->n_data++;
+    }
+    return d;
+}
+
+// The tag of a `data` value: the position of its member, or of its
+// constructor's class, or -1 with a Python error set for any other value.
+static ssize_t py_data_tag(py_data_t* d, const Schema* schema, PyObject* obj) {
+    if (d->n > 16) {
+        // Many constructors: read the tag the member or class carries.
+        PyObject* t = d->kind == 0 ? PyObject_GetAttrString(obj, "_value_")
+                                   : PyObject_GetAttrString((PyObject*)Py_TYPE(obj), "_mlc_tag");
+        if (t != NULL) {
+            long tag = PyLong_Check(t) ? PyLong_AsLong(t) : -1;
+            Py_DECREF(t);
+            if (tag >= 0 && (size_t)tag < d->n
+                && (d->kind == 0 ? obj == d->items[tag] : Py_TYPE(obj) == d->types[tag])) {
+                return (ssize_t)tag;
+            }
+        }
+        PyErr_Clear();
+    } else {
+        for (size_t i = 0; i < d->n; i++) {
+            if (d->kind == 0 ? obj == d->items[i] : Py_TYPE(obj) == d->types[i]) return (ssize_t)i;
+        }
+    }
+    PyErr_Format(PyExc_TypeError, "Expected a value of the `data` type %s, but got %s",
+                 schema->hint ? schema->hint : "(unnamed)", Py_TYPE(obj)->tp_name);
+    return -1;
+}
+
+// A field of a `data` value's constructor, borrowed.
+static PyObject* py_data_field(py_data_t* d, size_t tag, PyObject* obj, size_t j) {
+    PyObject* value = *(PyObject**)((char*)obj + d->offsets[tag][j]);
+    if (value == NULL) {
+        PyErr_Format(PyExc_AttributeError, "field f%zu of a `data` value is unset", j);
+    }
+    return value;
+}
+
+static void py_data_free(py_data_t* d) {
+    if (d == NULL) return;
+    for (size_t i = 0; i < d->n; i++) {
+        if (d->items != NULL) Py_XDECREF(d->items[i]);
+        if (d->offsets != NULL) free(d->offsets[i]);
+    }
+    free(d->items);
+    free(d->types);
+    free(d->nfields);
+    free(d->offsets);
+    free(d);
+}
+
+static void py_data_capsule_free(PyObject* cap) {
+    py_data_free((py_data_t*)PyCapsule_GetPointer(cap, NULL));
+}
+
+static PyObject* pybinding__register_data(PyObject* self, PyObject* args) {
+    (void)self;
+    const char* hint;
+    int kind;
+    PyObject* items;
+    if (!PyArg_ParseTuple(args, "siO!", &hint, &kind, &PyTuple_Type, &items)) return NULL;
+    if (kind != 0 && kind != 1) {
+        PyErr_Format(PyExc_ValueError, "register_data: unknown kind %d", kind);
+        return NULL;
+    }
+    size_t n = (size_t)PyTuple_GET_SIZE(items);
+    py_data_t* d = (py_data_t*)calloc(1, sizeof(py_data_t));
+    if (d == NULL) return PyErr_NoMemory();
+    d->kind = kind;
+    d->n = n;
+    d->items = (PyObject**)calloc(n ? n : 1, sizeof(PyObject*));
+    d->types = (PyTypeObject**)calloc(n ? n : 1, sizeof(PyTypeObject*));
+    d->nfields = (size_t*)calloc(n ? n : 1, sizeof(size_t));
+    d->offsets = (Py_ssize_t**)calloc(n ? n : 1, sizeof(Py_ssize_t*));
+    if (!d->items || !d->types || !d->nfields || !d->offsets) {
+        py_data_free(d);
+        return PyErr_NoMemory();
+    }
+    for (size_t i = 0; i < n; i++) {
+        PyObject* item = PyTuple_GET_ITEM(items, (Py_ssize_t)i);
+        Py_INCREF(item);
+        d->items[i] = item;
+        if (kind == 1 && PyType_Check(item)) {
+            PyTypeObject* cls = (PyTypeObject*)item;
+            d->types[i] = cls;
+            size_t k = 0;
+            while (1) {
+                char name[32];
+                snprintf(name, sizeof name, "f%zu", k);
+                PyObject* descr = PyDict_GetItemString(cls->tp_dict, name);
+                if (descr == NULL) break;
+                if (!Py_IS_TYPE(descr, &PyMemberDescr_Type)) {
+                    PyErr_Format(PyExc_TypeError, "register_data: field %s of %s is not a slot", name, hint);
+                    py_data_free(d);
+                    return NULL;
+                }
+                k++;
+            }
+            d->nfields[i] = k;
+            d->offsets[i] = (Py_ssize_t*)calloc(k ? k : 1, sizeof(Py_ssize_t));
+            if (d->offsets[i] == NULL) {
+                py_data_free(d);
+                return PyErr_NoMemory();
+            }
+            for (size_t j = 0; j < k; j++) {
+                char name[32];
+                snprintf(name, sizeof name, "f%zu", j);
+                PyObject* descr = PyDict_GetItemString(cls->tp_dict, name);
+                d->offsets[i][j] = ((PyMemberDescrObject*)descr)->d_member->offset;
+            }
+        } else {
+            d->types[i] = Py_TYPE(item);
+        }
+    }
+    if (py_data_registry == NULL) {
+        py_data_registry = PyDict_New();
+        if (py_data_registry == NULL) {
+            py_data_free(d);
+            return NULL;
+        }
+    }
+    // The capsule owns the description, so registering a hint again frees
+    // the one it replaces.
+    PyObject* cap = PyCapsule_New(d, NULL, py_data_capsule_free);
+    if (cap == NULL) {
+        py_data_free(d);
+        return NULL;
+    }
+    int r = PyDict_SetItemString(py_data_registry, hint, cap);
+    Py_DECREF(cap);
+    if (r != 0) return NULL;
+    Py_RETURN_NONE;
+}
+
 // A record schema's key objects and its generated class, if any, resolved
 // once per walk rather than once per record. NULL with a Python error set.
 static void py_keyset_free(py_keyset_t* ks) {
@@ -737,6 +895,12 @@ static py_keyset_t* py_record_set(py_walk_t* w, const Schema* schema) {
     }
     PyObject* entry = (schema->hint != NULL && py_class_registry != NULL)
         ? PyDict_GetItemString(py_class_registry, schema->hint) : NULL;
+    // A hint in the generated namespace (lang.yaml's class prefix) names a
+    // class the pool registered (GEN-11); any other record is a dict.
+    if (entry == NULL && schema->hint != NULL && strncmp(schema->hint, "mlc_types.", 10) == 0) {
+        PyErr_Format(PyMorlocInternalError, "the record class %s is not registered", schema->hint);
+        goto fail;
+    }
     if (entry != NULL) {
         ks->cls = (PyTypeObject*)PyTuple_GET_ITEM(entry, 0);
         ks->kind = (int)PyLong_AsLong(PyTuple_GET_ITEM(entry, 1));
@@ -1340,25 +1504,31 @@ static int py_size_step(py_walk_t* w, const Schema* schema, PyObject* obj, size_
         }
 
         case MORLOC_VARIANT: {
-            // ("Circle", (fields...)): the 16-byte slot, worst-case padding
-            // before the payload, and the payload's own size. A nullary arm
-            // has no payload and needs only the slot.
-            if (!PyTuple_Check(obj) || PyTuple_Size(obj) != 2) {
-                PyErr_SetString(PyExc_RuntimeError,
-                    "expected a (constructor, fields) pair for a `data` value");
-                return -1;
-            }
-            ssize_t vtag = variant_tag_of(schema, PyTuple_GetItem(obj, 0));
+            // An instance of a constructor's class (GEN-12): the 16-byte
+            // slot, worst-case padding before the payload, and the payload's
+            // fields, laid out as a tuple. A constructor with no fields
+            // needs only the slot.
+            py_data_t* vd = py_data_of(w, schema);
+            if (vd == NULL) return -1;
+            ssize_t vtag = py_data_tag(vd, schema, obj);
             if (vtag < 0) return -1;
-            PyObject* vfields = PyTuple_GetItem(obj, 1);
             const Schema* varm = schema->parameters[vtag];
             if (varm->size == 0) {
                 w->total += (ssize_t)schema->width;
                 return 0;
             }
+            if (vd->nfields[vtag] != varm->size) {
+                PyRAISE("the constructor %s has %zu fields in its class, %zu in its schema",
+                        schema->keys[vtag], vd->nfields[vtag], varm->size);
+            }
             size_t varm_align = varm->alignment;
-            w->total += (ssize_t)schema->width + (ssize_t)(varm_align - 1);
-            return py_size_child(w, varm, vfields, 0);
+            w->total += (ssize_t)schema->width + (ssize_t)(varm_align - 1) + (ssize_t)varm->width;
+            for (size_t j = 0; j < varm->size; j++) {
+                PyObject* value = py_data_field(vd, (size_t)vtag, obj, j);
+                if (value == NULL) return -1;
+                if (py_size_child(w, varm->parameters[j], value, 1) != 0) return -1;
+            }
+            return 0;
         }
 
         case MORLOC_OPTIONAL: {
@@ -1500,23 +1670,12 @@ static int py_write_step(py_walk_t* w, const Schema* schema, void* dest, PyObjec
         case MORLOC_UINT8:
             HANDLE_UINT_TYPE(uint8_t, PyLong_AsUnsignedLongLong, UINT8_MAX);
             break;
-        // The bound is the constructor count, not UINT8_MAX: a tag no
-        // constructor claims is a type error, and saying which values are
-        // legal is possible because the schema carries their names.
         case MORLOC_ENUM: {
-            if (!PyLong_Check(obj)) {
-                PyErr_Format(PyExc_TypeError,
-                    "Expected an enum member (int) but got %s", Py_TYPE(obj)->tp_name);
-                goto error;
-            }
-            unsigned long long tag = PyLong_AsUnsignedLongLong(obj);
-            if (PyErr_Occurred() || tag >= (unsigned long long)schema->size) {
-                PyErr_Clear();
-                PyErr_Format(PyExc_ValueError,
-                    "enum tag %llu is out of range; the type has %zu constructors",
-                    tag, schema->size);
-                goto error;
-            }
+            // A member of the type's enum.Enum (GEN-12).
+            py_data_t* ed = py_data_of(w, schema);
+            if (ed == NULL) goto error;
+            ssize_t tag = py_data_tag(ed, schema, obj);
+            if (tag < 0) goto error;
             *(uint8_t*)dest = (uint8_t)tag;
             break;
         }
@@ -1854,26 +2013,31 @@ static int py_write_step(py_walk_t* w, const Schema* schema, void* dest, PyObjec
             // Tag byte, determined padding, then a relptr to the arm's
             // fields written at the cursor. A nullary arm writes RELNULL and
             // allocates nothing, matching the wire form.
-            if (!PyTuple_Check(obj) || PyTuple_Size(obj) != 2) {
-                PyErr_SetString(PyExc_RuntimeError,
-                    "expected a (constructor, fields) pair for a `data` value");
-                goto error;
-            }
-            ssize_t wtag = variant_tag_of(schema, PyTuple_GetItem(obj, 0));
+            py_data_t* wd = py_data_of(w, schema);
+            if (wd == NULL) goto error;
+            ssize_t wtag = py_data_tag(wd, schema, obj);
             if (wtag < 0) goto error;
-            PyObject* wfields = PyTuple_GetItem(obj, 1);
             const Schema* warm = schema->parameters[wtag];
             *((uint8_t*)dest) = (uint8_t)wtag;
             memset((char*)dest + 1, 0, 7);
             if (warm->size == 0) {
                 *(relptr_t*)((char*)dest + 8) = RELNULL;
             } else {
+                if (wd->nfields[wtag] != warm->size) {
+                    PyErr_Format(PyMorlocInternalError, "the constructor %s has %zu fields in its class, %zu in its schema",
+                                 schema->keys[wtag], wd->nfields[wtag], warm->size);
+                    goto error;
+                }
                 size_t warm_align = warm->alignment;
                 void* arm_dest = py_take(w, warm_align, warm->width);
                 if (arm_dest == NULL) goto error;
                 if (py_rel(w, arm_dest, (relptr_t*)((char*)dest + 8)) != 0) goto error;
-                if (py_write_child(w, warm, arm_dest, wfields) != 0) {
-                    goto error;
+                for (size_t j = 0; j < warm->size; j++) {
+                    PyObject* value = py_data_field(wd, (size_t)wtag, obj, j);
+                    if (value == NULL) goto error;
+                    if (py_write_child(w, warm->parameters[j], (char*)arm_dest + warm->offsets[j], value) != 0) {
+                        goto error;
+                    }
                 }
             }
             break;
@@ -2111,12 +2275,21 @@ static int py_read_step(py_walk_t* w, const Schema* schema, const void* data, si
         case MORLOC_UINT8:
             obj = PyLong_FromUnsignedLong(*(uint8_t*)data);
             break;
-        // The runtime hands back the ordinal and the generated pool code
-        // wraps it in the enum class. Keeping the Python class out of the
-        // C runtime is what lets a Vector of an enum stay a uint8 array.
-        case MORLOC_ENUM:
-            obj = PyLong_FromUnsignedLong(*(uint8_t*)data);
+        // A member of the type's enum.Enum (GEN-12). A Vector of an enum is
+        // read elsewhere, as a uint8 array.
+        case MORLOC_ENUM: {
+            py_data_t* ed = py_data_of(w, schema);
+            if (ed == NULL) goto error;
+            uint8_t etag = *(const uint8_t*)data;
+            if ((size_t)etag >= ed->n) {
+                PyErr_Format(reading_runtime_value ? PyMorlocInternalError : PyExc_RuntimeError,
+                    "enum tag %u is out of range; the type has %zu constructors", (unsigned)etag, ed->n);
+                goto error;
+            }
+            obj = ed->items[etag];
+            Py_INCREF(obj);
             break;
+        }
         case MORLOC_UINT16:
             obj = PyLong_FromUnsignedLong(*(uint16_t*)data);
             break;
@@ -2393,11 +2566,10 @@ static int py_read_step(py_walk_t* w, const Schema* schema, const void* data, si
         }
         case MORLOC_VARIANT: {
             // A payload-bearing `data` value: a tag byte then a relptr to the
-            // arm's fields. It crosses as a STRUCTURAL pair -- the
-            // constructor's name and a tuple of its fields -- because the
-            // generic marshaller has no access to a pool-level class. See the
-            // note on the Python/R variant spelling in the code generator:
-            // this is a documented interim form, not the intended end state.
+            // constructor's fields, read into an instance of its class
+            // (GEN-12), stored before its fields are filled.
+            py_data_t* rd = py_data_of(w, schema);
+            if (rd == NULL) goto error;
             uint8_t tag = *(const uint8_t*)data;
             if ((size_t)tag >= schema->size) {
                 PyErr_Format(reading_runtime_value ? PyMorlocInternalError : PyExc_RuntimeError,
@@ -2406,28 +2578,30 @@ static int py_read_step(py_walk_t* w, const Schema* schema, const void* data, si
                 goto error;
             }
             const Schema* arm = schema->parameters[tag];
-            PyObject* name = PyUnicode_FromString(schema->keys[tag]);
-            if (!name) goto error;
-            obj = PyTuple_New(2);
-            if (!obj) { Py_DECREF(name); goto error; }
-            PyTuple_SET_ITEM(obj, 0, name);
-            if (py_store(w, slot_kind, parent, slot, key, obj) != 0) return -1;
-            // The pair now belongs to its parent; the error path must not
-            // release it again.
-            PyObject* pair = obj;
-            obj = NULL;
-
-            relptr_t vrelptr = *(const relptr_t*)((const char*)data + 8);
-            if (vrelptr == RELNULL) {
-                PyObject* fields = PyTuple_New(0);
-                if (!fields) return -1;
-                PyTuple_SET_ITEM(pair, 1, fields);
-                return 0;
+            if (arm->size == 0) {
+                obj = rd->items[tag];
+                Py_INCREF(obj);
+                break;
             }
+            if (rd->nfields[tag] != arm->size) {
+                PyErr_Format(PyMorlocInternalError, "the constructor %s has %zu fields in its class, %zu in its schema",
+                             schema->keys[tag], rd->nfields[tag], arm->size);
+                goto error;
+            }
+            obj = rd->types[tag]->tp_alloc(rd->types[tag], 0);
+            if (obj == NULL) goto error;
+            if (py_store(w, slot_kind, parent, slot, key, obj) != 0) return -1;
+            // The instance now belongs to its parent; the error path must
+            // not release it again.
+            PyObject* inst = obj;
+            obj = NULL;
+            relptr_t vrelptr = *(const relptr_t*)((const char*)data + 8);
             const void* payload = PyTRY_READ(resolve_region, vrelptr, arm->width, space);
-            // The arm's schema describes its fields as a tuple, so the walk
-            // over that shape builds the field sequence.
-            return py_read_child(w, arm, payload, PY_SLOT_TUPLE, pair, 1, NULL);
+            for (size_t j = 0; j < arm->size; j++) {
+                const void* field_ptr = (const char*)payload + arm->offsets[j];
+                if (py_read_child(w, arm->parameters[j], field_ptr, PY_SLOT_OFFSET, inst, rd->offsets[tag][j], NULL) != 0) return -1;
+            }
+            return 0;
         }
         case MORLOC_OPTIONAL: {
             // The Optional slot is a relptr (RELNULL = absent). Resolve and
@@ -5661,6 +5835,7 @@ error:
 
 static PyMethodDef Methods[] = {
     {"register_class", pybinding__register_class, METH_VARARGS, "Register a generated record class by its schema hint"},
+    {"register_data", pybinding__register_data, METH_VARARGS, "Register a generated `data` type's classes by its schema hint"},
     {"log_next_id", pybinding__log_next_id, METH_NOARGS, "Allocate a fresh log call id"},
     {"log_emit", pybinding__log_emit, METH_VARARGS, "Emit a formatted log line via libmorloc"},
     {"bench_record", pybinding__bench_record, METH_VARARGS, "Record one benchmark timing via libmorloc"},

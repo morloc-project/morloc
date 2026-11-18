@@ -51,7 +51,7 @@ import Morloc.CodeGenerator.Grammars.Translator.Imperative
   , defaultSerialize
   )
 import Morloc.CodeGenerator.Grammars.Translator.PseudoCode (pseudocodeSerialManifold)
-import Morloc.CodeGenerator.Grammars.Translator.PyClasses (PyClasses (..), pythonClasses)
+import Morloc.CodeGenerator.Grammars.Translator.PyClasses (DataShape (..), PyClasses (..), pyCtorRef, pythonClasses)
 import qualified Data.Set as Set
 import Morloc.CodeGenerator.LanguageDescriptor
 import qualified Morloc.CodeGenerator.Serial as Serial
@@ -114,8 +114,17 @@ translateBuiltin lang desc0 srcs es = do
           , Just ((ps, _, _, _, _) : _) <- [Map.lookup v general]
           , not (null ps)
           ]
+  generatedData <- gets stateGeneratedData
+  let datas =
+        Map.fromList
+          [ (q, if all (null . snd) ctors then EnumShape (map fst ctors) else VariantShape [(n, length fs) | (n, fs) <- ctors])
+          | Just p <- [classPrefix]
+          , (q, v) <- Map.toList generatedData
+          , (p <> ".") `MT.isPrefixOf` q
+          , Just (_, ctors) <- [dataDeclOfName general v]
+          ]
   pyClasses <- either (MM.throwRejected . vsep . map pretty) return $
-    pythonClasses langClasses parameterized (Set.fromList (ldKeywords desc)) es
+    pythonClasses langClasses parameterized datas (Set.fromList (ldKeywords desc)) es
   home <- pretty <$> asks MC.configHome
   lib <- MT.pack <$> asks MC.configLibrary
   state <- MT.pack <$> asks MC.configState
@@ -523,6 +532,8 @@ genericLowerConfig ::
   LowerConfig IndexM
 genericLowerConfig desc srcNamer debugInfo traceInfo debugMode = cfg
   where
+    -- A Python constructor of a generated `data` class (GEN-12).
+    ctorRef ty n = pretty (pyCtorRef (Set.fromList (ldKeywords desc)) (render ty) n)
     -- Shared arg-schema list + result-schema doc for the two reflect hooks;
     -- mlc_reflect and mlc_reflect_from_tuple differ only in whether the wire
     -- tuple has already been parsed.
@@ -543,16 +554,15 @@ genericLowerConfig desc srcNamer debugInfo traceInfo debugMode = cfg
         , lcOwnArg = \_ _ x -> x
         , lcReadArg = \_ x -> x
         , lcWithCallerScope = id
-        -- Python calls the arm's generated dataclass; R builds a classed
-        -- list, whose class carries the arm name the same way a factor's
-        -- levels carry an enum's.
-        , lcVariantLit = \_ n _ xs ->
+        -- A Python constructor is an attribute of its type's generated
+        -- class (GEN-12): a class to call, or the one value of a
+        -- constructor with no fields. R builds a list of the constructor's
+        -- name and its fields.
+        , lcVariantLit = \ty n _ xs ->
             if ldEnumLitByName desc
               then "list" <> tupled [dquotes (pretty n), "list" <> tupled xs]
-              -- A one-element Python tuple needs its trailing comma INSIDE
-              -- the parentheses, or it is just a parenthesised value.
-              else tupled [dquotes (pretty n), pyTuple xs]
-        , lcEnumLit = \_ names n i ->
+              else if null xs then ctorRef ty n else ctorRef ty n <> tupled xs
+        , lcEnumLit = \ty names n i ->
             if ldEnumLitByName desc
               -- An R enum value is an ordered factor: its whole level set
               -- plus a code into it. A literal has to be built the same
@@ -565,39 +575,35 @@ genericLowerConfig desc srcNamer debugInfo traceInfo debugMode = cfg
                      , "levels =" <+> "c" <> tupled (map (dquotes . pretty) names)
                      , "ordered = TRUE"
                      ]
-              else pretty i
-        -- TEMPORARY REPRESENTATION. A payload-bearing `data` crosses into
-        -- Python and R as a STRUCTURAL pair -- the constructor's name and a
-        -- sequence of its fields -- rather than as a declared native type.
-        --
-        -- This matches what morloc already does for the analogous types in
-        -- these two languages (a record is a dict / list, an enum is an int),
-        -- and it needs nothing the generic C marshallers cannot build. A
-        -- native form (a frozen dataclass per arm, an S3 classed list) is the
-        -- intended end state, but it needs a value to be converted at every
-        -- serialization boundary, and no such mechanism exists yet -- the one
-        -- coercion node in the compiler is driven by the typechecker for
-        -- optionals, not by a boundary. Building it is worth doing for every
-        -- composite type at once rather than for sum types alone.
-        , lcVariantTagTest = \_ n _ subj ->
+              -- A Python enumeration's member (GEN-12).
+              else ctorRef ty n
+        -- A Python constructor's class carries its tag, so a value of any
+        -- other form fails the test rather than passing it (GEN-12).
+        , lcNoArmMatched =
+            if ldEnumLitByName desc
+              then Nothing
+              else Just (\ty subj -> "_mlc_wrong_data_form" <> tupled [dquotes ty, subj])
+        , lcVariantTagTest = \_ n i subj ->
             if ldEnumLitByName desc
               then parens (subj <> "[[1]]" <+> "==" <+> dquotes (pretty n))
-              else parens (parens subj <> "[0]" <+> "==" <+> dquotes (pretty n))
+              else parens (parens subj <> "._mlc_tag" <+> "==" <+> pretty i)
         , lcCtorField = \_ _ _ _ i subj ->
             if ldEnumLitByName desc
               -- R indexes from one, so a field's position is its wire index
               -- plus one; the wire index is what the compiler carries.
               then subj <> "[[2]][[" <> pretty (i + 1) <> "]]"
-              else parens subj <> "[1][" <> pretty i <> "]"
-        -- A Python enum value IS its ordinal, so the test is against the
-        -- tag. An R one is a factor, and R matches a factor to a character
-        -- by label -- so comparing against the bare name runs the same test
-        -- the factor-to-factor form would, without building a level set to
-        -- run it against.
-        , lcEnumTagTest = \_ _ n i subj ->
+              else parens subj <> ".f" <> pretty i
+        -- An R enum value is a factor, and R matches a factor to a
+        -- character by label -- so comparing against the bare name runs the
+        -- same test the factor-to-factor form would, without building a
+        -- level set to run it against.
+        , lcEnumTagTest = \ty _ n i subj ->
             if ldEnumLitByName desc
               then parens (subj <+> "==" <+> dquotes (pretty n))
-              else parens (subj <+> "==" <+> pretty i)
+              -- A member, or the uint8 an element of a Vector of the
+              -- enumeration is read as (NATIVE-7); a member never equals an
+              -- int.
+              else parens (subj <+> "is" <+> ctorRef ty n <+> "or" <+> subj <+> "==" <+> pretty i)
         , lcListLenTest = \subj n ->
             if MT.null (ldListLengthTemplate desc)
               then error $ "language " <> MT.unpack (ldName desc)
@@ -1889,14 +1895,6 @@ walkGenericSelectorBrackets desc =
     (\results -> case ldTupleConstructor desc of
         "" -> tupled results
         name -> pretty name <> tupled results)
-
--- | A Python tuple literal, with the trailing comma a one-element tuple
--- needs to be a tuple at all.
-pyTuple :: [MDoc] -> MDoc
-pyTuple [] = "()"
-pyTuple [x] = parens (x <> ",")
-pyTuple xs = tupled xs
-
 -- | A wire codec as the language's runtime reads it: a schema string for
 -- a value, or a closure codec (the closure tuple's schema, its arguments'
 -- codecs, its result's codec) for a function value, applied recursively so

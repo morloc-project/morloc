@@ -1269,10 +1269,18 @@ collectTypes fullDag = do
   packages <- MM.gets stateModulePackages
   checkClassKindPlacement reg packages fullDag
   let declared = Map.unionsWith (Map.unionWith mergeEntries) (map snd found)
-      (concrete, classes) =
+      (concrete0, classes) =
         classForms reg homes . Map.map (completeRecords general) $
           withDefaultKinds reg general declared
-  MM.modify' $ \s -> s {stateGeneratedClasses = classes}
+      (concrete, dataClasses, ignored) = dataClassForms reg homes general concrete0
+  mapM_
+    ( \(lang, v) ->
+        MM.warnAt (-1) $
+          "the" <+> pretty lang <+> "form of" <+> squotes (pretty v)
+            <+> "is not used: its values are instances of a `data` type's generated class (GEN-12)"
+    )
+    ignored
+  MM.modify' $ \s -> s {stateGeneratedClasses = classes, stateGeneratedData = dataClasses}
   let modules = map fst (Map.elems fullDag)
   checkFormLists modules
   checkConflictingForms modules Nothing general
@@ -1770,6 +1778,72 @@ checkInstanceOnRoot dag gscope =
           | otherwise                = Just v
         headOf bnd (AppU h _)        = headOf bnd h
         headOf _   _                 = Nothing
+
+-- | In a language whose records may be classes (GEN-11), every `data` type
+-- is a class too (GEN-12): its form there is its class's qualified name at
+-- its type parameters, which is then its schema hint. A user-written form
+-- of it in such a language is replaced, and reported.
+dataClassForms ::
+  LR.LangRegistry ->
+  Map TVar TypeHome ->
+  Scope ->
+  Map Lang Scope ->
+  (Map Lang Scope, Map Text TVar, [(Lang, TVar)])
+dataClassForms reg homes general scopes =
+  (Map.mapWithKey add scopes, Map.fromList [(q, v) | (lang, _) <- Map.toList scopes, (v, q, _) <- datas lang], ignored)
+  where
+    kindsOf lang = maybe LR.noTypeKinds LR.lreTypeKinds (Map.lookup (langName lang) (LR.lrEntries reg))
+    classLang lang = not (Map.null (LR.classKindForms (kindsOf lang)))
+    datas lang =
+      [ (v, q, ps)
+      | classLang lang
+      , Just p <- [LR.tkPrefix (kindsOf lang)]
+      , (v, (ps, _, _, _, TypedefEnum) : _) <- Map.toList general
+      , Just h <- [homeOf v]
+      , let q = T.intercalate "." (p : typeHomePath h <> [typeHomeName h])
+      ]
+    -- A type the compiler itself declares (`Try`) has no module; its
+    -- classes live under `_builtin`, a component no installed module can
+    -- produce.
+    homeOf v@(TV n) = case Map.lookup v homes of
+      Just h -> Just h
+      Nothing | isReservedTypeName n -> Just (TypeHome ["_builtin"] n)
+      Nothing -> Nothing
+    -- A newtype over a `data` type holds a value of that type, an instance
+    -- of its class.
+    newtypes lang =
+      [ (v, q, ps)
+      | (v, (ps, body, _, _, TypedefNewtype) : _) <- Map.toList general
+      , Just d <- [dataUnder (0 :: Int) body]
+      , (d', q, _) <- datas lang
+      , d' == d
+      ]
+    dataUnder n t
+      | n > 16 = Nothing
+      | otherwise = case headOf t of
+          Just h -> case Map.findWithDefault [] h general of
+            (_, _, _, _, TypedefEnum) : _ -> Just h
+            (_, body, _, _, k) : _ | k `elem` [TypedefNewtype, TypedefAlias] -> dataUnder (n + 1) body
+            _ -> Nothing
+          Nothing -> Nothing
+    headOf t = case t of
+      VarU h -> Just h
+      AppU (VarU h) _ -> Just h
+      _ -> Nothing
+    add lang scope =
+      Map.union
+        (Map.fromList [(v, [(ps, form q ps, ArgDocAlias defaultValue, True, TypedefAlias)]) | (v, q, ps) <- datas lang <> newtypes lang])
+        scope
+    form q ps = case [VarU x | Left (x, KindType) <- ps] of
+      [] -> VarU (TV q)
+      xs -> AppU (VarU (TV q)) xs
+    ignored =
+      [ (lang, v)
+      | (lang, scope) <- Map.toList scopes
+      , (v, _, _) <- datas lang <> newtypes lang
+      , Map.member v scope
+      ]
+
 
 -- | Give each record of a class kind (GEN-11) its class's qualified name as
 -- its form: the language's class prefix, the declaring module's path and

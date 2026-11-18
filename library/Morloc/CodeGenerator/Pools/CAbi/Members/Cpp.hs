@@ -1242,6 +1242,7 @@ cppLowerConfig (ClosureGen reifyThunks stageTable papplyHeads) =
         in ty <> "{mlc::make_arm<" <> arm <> ">"
              <> parens (arm <> encloseSep "{" "}" ", " xs) <> "}"
     , lcEnumLit = \ty _ n _ -> ty <> "::" <> pretty n
+    , lcNoArmMatched = Nothing
     , lcVariantTagTest = \_ _ tag subj ->
         parens (parens subj <> ".v.index() ==" <+> pretty tag)
     , lcCtorField = \_ _ _ tag i subj ->

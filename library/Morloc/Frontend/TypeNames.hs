@@ -96,6 +96,24 @@ resolveTypeNames d = do
           , v@(TV n) <- localTypes e
           , not (isReservedTypeName n)
           ]
+  -- Two modules whose generated types share one module path (`geo-util`
+  -- and `geo_util`) and declare a type of one name would generate one name
+  -- for two types (GEN-5).
+  let namesAt =
+        Map.fromListWith Set.union
+          [ ((homePath (Map.findWithDefault Nothing m packages) m, n), Set.singleton m)
+          | (m, (e, _)) <- Map.toList d
+          , TV n <- localTypes e
+          , not (isReservedTypeName n)
+          ]
+  case [(path, n, Set.toList ms) | ((path, n), ms) <- Map.toList namesAt, Set.size ms > 1] of
+    (path, n, ms) : _ ->
+      let named m = pretty (T.dropWhile (== '.') (unMVar m)) <> "." <> pretty n
+       in MM.throwRejected $
+            "The public name" <+> pretty (T.intercalate "." (path <> [n]))
+              <+> "would name both" <+> hsep (punctuate " and" (map named ms))
+              <> ", whose modules hold their generated types under one path; rename one of them"
+    [] -> return ()
   MM.modify' $ \s -> s {stateTypeHomes = homes, stateModulePackages = Map.mapMaybe id packages}
   result <- DAG.synthesize (resolveModule canonical) rewriteEdge d
   case result of

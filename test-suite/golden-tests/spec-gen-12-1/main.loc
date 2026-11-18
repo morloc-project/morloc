@@ -1,0 +1,59 @@
+-- GEN-12: a Python `data` value is an `enum.Enum` member (no constructor has
+-- fields) or an instance of its constructor's class, nested in its type's
+-- class; a constructor without fields is one instance. The forms hold for
+-- literals, received values, values back from C++, nested and recursive
+-- values and @save/@load; a source matches them by class pattern; a
+-- constructor named like a Python keyword takes a trailing underscore; a
+-- value of any other form, a pair, is refused. An element of a Vector of an
+-- enumeration (a uint8, NATIVE-7) matches its constructor.
+module main (describeLit, describeIn, viaCpp, depth, opt, saved, bad, firstBase)
+
+import root-py
+import root-cpp
+import vector-py
+
+data Base = A | C | G | T
+data Shape = Circle Real | Rect Real Real | Empty
+data Rose = Rose Int [Rose]
+data Opt = Some Int | None
+
+source Py from "f.py" ("describe", "describe_shapes", "rose_depth", "opt_text", "bad_shape")
+describe :: Base -> Shape -> Str
+describe_shapes :: [Shape] -> [Str]
+rose_depth :: Rose -> Int
+opt_text :: Opt -> Str
+bad_shape :: Int -> Shape
+
+source Cpp from "f.hpp" ("same")
+same :: a -> a
+
+describeLit :: Int -> Str
+describeLit k = describe G Empty
+
+describeIn :: Base -> Shape -> Str
+describeIn b s = describe b s
+
+viaCpp :: [Shape] -> [Str]
+viaCpp xs = describe_shapes (same xs)
+
+depth :: Rose -> Int
+depth r = rose_depth r
+
+opt :: Opt -> Str
+opt x = opt_text x
+
+saved :: Str -> [Shape] -> <IO> [Str]
+saved p xs = do
+  s <- @save 0 p xs
+  r <- @load p :: <IO> (Try Str [Shape])
+  match r | (Ok ys) = describe_shapes ys | (Err e) = [e]
+
+bad :: Int -> Shape
+bad k = bad_shape k
+
+firstBase :: Vector n Base -> Str
+firstBase v = match (.[0] v)
+  | A = "a"
+  | C = "c"
+  | G = "g"
+  | T = "t"

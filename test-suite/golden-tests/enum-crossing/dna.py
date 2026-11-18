@@ -1,15 +1,14 @@
-# The generated DNA is an enum.IntEnum, so ordinal arithmetic is available
-# directly and the boundary coerces the returned int back into a member.
-# Int-backed is what keeps a [DNA] a compact buffer rather than a list of
-# objects.
+# The generated DNA is an enum.Enum whose member values are the ordinals, so
+# a member is built back from an ordinal by calling the class.
+from mlc_types._local.main import DNA
 
 
 def complement(x):
-    return 3 - int(x)
+    return DNA(3 - x.value)
 
 
 def complement_all(xs):
-    return [3 - int(b) for b in xs]
+    return [DNA(3 - b.value) for b in xs]
 
 
 def opt_id(x):

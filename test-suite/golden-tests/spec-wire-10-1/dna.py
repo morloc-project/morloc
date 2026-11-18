@@ -1,2 +1,5 @@
+from mlc_types._local.main import DNA
+
+
 def complement_all(xs):
-    return [3 - int(b) for b in xs]
+    return [DNA(3 - b.value) for b in xs]

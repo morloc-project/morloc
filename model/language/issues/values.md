@@ -205,3 +205,19 @@ on 0.109.0 unless marked.
   under root-cpp builds and prints -1294967295
   (/work/plans/model-audit-2026-10-21/repro/C/lit/intc.loc). No literal
   fit check exists; CppPrinter.hs:73 emits `static_cast<T>(i)`.
+- **An element of a Python Vector of an enumeration is a uint8, not a
+  member.** [read, 2026-11-18] Open: NATIVE-7 against GEN-12. A `Vector n D`
+  of an all-nullary `data` type is a numpy uint8 array (one byte a value),
+  so `.[i]` of it gives a numpy.uint8 where every other `D` value in Python
+  is an `enum.Enum` member; generated matches accept both (a member, or the
+  tag), but a source that compares an element with `D.A` sees False and one
+  that passes it where a `D` is sent is refused. Open: return members from
+  Vector reads, or make the uint8 form part of GEN-12.
+- **Building a Python `data` value costs about 200 ns more than a tuple.**
+  [reproduced, 2026-11-18] Perf. A frozen dataclass's `__init__` sets each
+  field through `object.__setattr__`: 1M `Shape.Rect(x, 2.0)` take 641 ms
+  against 439 ms for `("Rect", (x, 2.0))`; marshalling them is faster than
+  the pair form (416 against 619 ms per round trip through C++). A C helper
+  that allocates and fills the slots would remove the difference for
+  generated literals.
+

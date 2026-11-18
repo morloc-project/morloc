@@ -35,6 +35,10 @@ _mlc_socket_paths = _SocketPaths()
 # of no arguments) has a closure codec as its result codec, and so on
 # through any depth. Defined ahead of the generated closure table, which
 # is built from it.
+def _mlc_wrong_data_form(type_name, value):
+    raise TypeError("Expected a value of the `data` type %s, but got %s" % (type_name, type(value).__name__))
+
+
 def mlc_closure_codec(tuple_schema, arg_codecs, res_codec):
     return ("__mlc_closure__", tuple_schema, arg_codecs, res_codec)
 

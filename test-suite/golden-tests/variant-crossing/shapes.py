@@ -1,12 +1,13 @@
-# A payload-bearing `data` value crosses as a structural pair: the
-# constructor's name and a tuple of its fields. This is a documented interim
-# representation; a native form (a frozen dataclass per arm) needs a
-# conversion at the serialization boundary that does not exist yet.
+# A payload-bearing `data` value is an instance of its constructor's
+# generated class (GEN-12), matched by class pattern.
+from mlc_types._local.main import Shape
+
+
 def area(s):
     match s:
-        case ("Circle", (r,)):
+        case Shape.Circle(r):
             return 3.0 * r * r
-        case ("Rect", (w, h)):
+        case Shape.Rect(w, h):
             return w * h
         case _:
             return 0.0
@@ -14,9 +15,9 @@ def area(s):
 
 def grow(s):
     match s:
-        case ("Circle", (r,)):
-            return ("Circle", (r + 1.0,))
-        case ("Rect", (w, h)):
-            return ("Rect", (w + 1.0, h + 1.0))
+        case Shape.Circle(r):
+            return Shape.Circle(r + 1.0)
+        case Shape.Rect(w, h):
+            return Shape.Rect(w + 1.0, h + 1.0)
         case _:
             return s

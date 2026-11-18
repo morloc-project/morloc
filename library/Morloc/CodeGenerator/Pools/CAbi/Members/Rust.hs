@@ -3286,6 +3286,7 @@ rustLowerConfig mask makers consumed userArms =
              Just fs -> arm <> tupled [RP.userFieldFrom f x | (f, x) <- zipSame fs xs]
              Nothing -> arm <> parens (parens (RP.tupled1 xs) <> ".into()")
     , lcEnumLit = \ty _ n _ -> "<" <> ty <> ">::" <> pretty n
+    , lcNoArmMatched = Nothing
     , lcVariantTagTest = \ty n _ subj ->
         "matches!" <> tupled [subj, RP.typeHead ty <> "::" <> pretty n <> " { .. }"]
     -- A generated arm's whole payload sits in one node, mirroring the wire

@@ -1,0 +1,7 @@
+module geo-util (fa)
+import root-py (Int, idpy)
+record Pt where
+  x :: Int
+record Py => Pt = dataclass
+fa :: Pt -> Pt
+fa p = idpy p
