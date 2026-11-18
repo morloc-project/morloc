@@ -454,7 +454,7 @@ declOf gscope v = listToMaybe
   ]
   where
     bodyFields TypedefEnum body = concatMap snd <$> dataBodyCtors body
-    bodyFields _ (NamU NamRecord _ _ rs) = Just (map snd rs)
+    bodyFields _ (NamU o _ _ rs) | o `elem` [NamRecord, NamObject] = Just (map snd rs)
     bodyFields _ _ = Nothing
 
 -- | How a language spells a type's arguments: not at all ('Structural', so
