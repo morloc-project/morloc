@@ -51,6 +51,7 @@ language's default record kind, with a deprecation warning at the line.
 
 ### GEN-4 A generated type's name is derived from its declaring module
 Intent: ruled 2026-11-14
+Tests: spec-gen-4-1, spec-gen-4-2, spec-gen-4-3, spec-gen-4-4
 Code: conforms 2026-11-18
 
 The public name of a generated type `T` declared in module `m1.m2-x` is a
@@ -61,7 +62,11 @@ local submodule of a package (`import .lib.x` inside package `p`) is
 placed under the package's name (`mlc::types::p::lib::x::T`), whether the
 package is being developed or is installed. A module that belongs to no
 package (a script with no `package.yaml`, its local imports) is placed
-under the component `_local`. No override exists. The name is the same in
+under the component `_local`; so is a package that names no library
+(PKG-1). A module of a library `l` other than `std` (`l/m1.m2-x`, PKG-1)
+is placed under the components `_lib` and `l`
+(`mlc::types::_lib::l::m1::m2_x::T`); no name produces a component that
+starts with `_`. No override exists. The name is the same in
 every program that declares `T` in the same module.
 
 Why: 2026-11-15, the `_local` placement was narrowed to modules of no

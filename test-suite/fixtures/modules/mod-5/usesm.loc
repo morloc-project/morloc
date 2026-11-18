@@ -1,0 +1,6 @@
+module usesm (g)
+
+import m (systemValue)
+
+g :: Int
+g = systemValue

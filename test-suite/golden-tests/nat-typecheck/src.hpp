@@ -1,7 +1,7 @@
 #ifndef __SRC_HPP__
 #define __SRC_HPP__
 
-#include "tensor-cpp/tensor.hpp"
+#include "std/tensor-cpp/tensor.hpp"
 #include <vector>
 #include <cstdint>
 #include <cstring>

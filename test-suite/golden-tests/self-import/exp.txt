@@ -1,4 +1,4 @@
 Import cycle: module main imports the entry file ./main.loc as .main
 Import cycle: module .b imports the entry file ./a.loc as .a
-Loading ./lib.loc for the import of .lib defined no module of that name; it declares helper, lib
+Loading ./lib.loc for the import of .lib found no module of that name; it declares helper, library
 Import cycle: .g -> .h -> .g

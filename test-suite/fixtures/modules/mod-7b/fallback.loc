@@ -1,0 +1,6 @@
+module main (f)
+
+import weena/m (systemValue)
+
+f :: Int
+f = systemValue

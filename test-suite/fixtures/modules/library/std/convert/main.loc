@@ -1,0 +1,4 @@
+module convert (stdValue)
+
+stdValue :: Int
+stdValue = 1

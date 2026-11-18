@@ -1,0 +1,6 @@
+module main (f)
+
+import m (systemValue)
+
+f :: Int
+f = systemValue

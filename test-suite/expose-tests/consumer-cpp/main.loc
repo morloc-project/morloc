@@ -5,7 +5,7 @@ module main (result)
 -- legacy "directory of sourced file lands on -I" mechanism does not
 -- fire. The only way `src.hpp`'s `#include "morloc-test-expose-cpp/...`
 -- resolves is via the expose'd copy under $MORLOC_HOME/include/.
-import morloc-test-expose-cpp
+import exposetest/morloc-test-expose-cpp
 import root-cpp
 
 source Cpp from "src.hpp" ("compute")

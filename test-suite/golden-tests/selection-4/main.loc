@@ -8,5 +8,5 @@ import root-py (Integral)
 import root-cpp (Integral)
 
 module main (foo)
-import arithmetic (Integral)
+import .arithmetic (Integral)
 foo x y = x + y + 42.0

@@ -23,3 +23,4 @@ it is solved, and a file when it is empty.
 - [guests.md](guests.md): an unsourced Futhark `bool` entry breaks its file (GUEST-3), unnamed rejections
 - [evaluation.md](evaluation.md): no item says how often the work a function does before the function it returns runs (staging)
 - [modules.md](modules.md): an external dotted import resolves its local imports from the wrong root (MOD-6)
+- [packages.md](packages.md): program name clashes across libraries (PKG-9), no package server (PKG-10), freezes without library lines (PKG-7), no plane id in the layout file (PLANE-1)

@@ -5,11 +5,17 @@ Modules, imports, exports, and which declaration a name refers to across modules
 ## Modules
 
 ### MOD-1 A file holds one or more modules
-Intent: proposed
-Code: conforms 2026-10-21
+Intent: ruled 2026-11-15
+Tests: spec-mod-1-1, spec-mod-1-2, spec-mod-1-3, spec-mod-1-4, spec-mod-1-5, spec-mod-1-6
+Code: conforms 2026-11-18
 
 Each `module` keyword starts a new module, which runs until the next
-`module` keyword or the end of the file. A module body may be empty.
+`module` keyword or the end of the file. A module body may be empty. The
+module an import reaches is the one whose name is the import's last
+component, or the file's anonymous module. Every other module in the file
+is a local module of the file's package: another module of the file
+imports it as `.foo` (inside package `k`, its key is `k.foo`). A sibling
+module and a local file of the same name are a load error.
 
 ### MOD-2 An export list names exactly what a module exports
 Intent: proposed
@@ -35,19 +41,21 @@ Code: conforms 2026-10-21
 
 `module (*)` in `utils.loc`, reached by `import .utils`, is named `utils`.
 
-### MOD-5 What makes two imports the same module
-Intent: open
-Code: unaudited
+### MOD-5 Two imports name one module iff their canonical keys are equal
+Intent: ruled 2026-11-15
+Tests: spec-mod-5-1, spec-mod-5-2, spec-mod-5-3, spec-mod-5-4, spec-mod-5-5
+Code: conforms 2026-11-18
 
-When do two imports name one module rather than two? The cases that
-need an answer:
+Every module has one canonical key: `x` or `x.s` for a standard library module and
+its submodules, `l/x` or `l/x.s` for a module of library `l` (PKG-1), `k.a`
+for the local module `.a` of an installed package with key `k`, and `.a`
+for a local module of the program. Two imports name the same module iff
+their keys are equal. A module's header never becomes its key: a header
+that does not match the key the import gives is a load error, and so is
+one file reached under two keys.
 
-- the same directory, imported locally as `.lib` by one file and installed
-  as `lib` for another;
-- an anonymous module reached by two different import paths;
-- one file reached by two dotted paths through a symlink.
-
-The answer fixes the module identity that MOD-14 and MOD-17 rely on.
+Why: keying a module by its header let a local file declaring `module
+root` replace the stdlib `root`.
 
 ## Imports
 
@@ -69,17 +77,22 @@ Why: a package's own files are relative to it; resolving them from the
 program that imports it made an installed package with submodules
 unloadable.
 
-### MOD-7 A dotless import is a system module
-Intent: ruled 2026-10-29
-Tests: spec-mod-7-1, spec-mod-7-2, spec-mod-7-3, spec-mod-7-4
-Code: conforms 2026-11-01
+### MOD-7 A dotless import is an installed module
+Intent: ruled 2026-11-15
+Tests: spec-mod-7-1, spec-mod-7-2, spec-mod-7-3, spec-mod-7-4, spec-mod-7-5, spec-mod-7-6, spec-mod-7-7, spec-mod-7-8
+Code: conforms 2026-11-18
 
-`import m` names the installed module `m`, and `import .m` names a local
-one. A local module and a system module never collide: a dotless import
-never reaches a local file. `morloc make` installs a missing module, unless
-the importing module's package has a local module of that name. A dotless
-import with no installed module is then a load error; when a local module
-of that name exists, the error names it and says to import it as `.m`.
+`import m` names the standard library module `m`, `import l/m` names module `m` of
+library `l` (PKG-1), and `import .m` names a local one. Each resolves to
+exactly one place in the plane (PKG-3); there is no fallback to any other
+path. `import std/m` is a load error: standard library modules have one
+spelling.
+A local module and an installed module never collide: a dotless import
+never reaches a local file. `morloc make` installs a missing module,
+unless the importing module's package has a local module of that name. A
+dotless import with no installed module is then a load error; when a
+local module of that name exists, the error names it and says to import it
+as `.m`.
 
 ### MOD-8 Both a file module and a directory module exist
 Intent: open

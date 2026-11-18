@@ -42,6 +42,8 @@ module Morloc.Namespace.State
 
     -- * Package metadata
   , PackageMeta (..)
+  , MorlocDep (..)
+  , mdepKey
   , defaultCppVersion
   , DepSpec (..)
   , DepImport (..)
@@ -393,11 +395,11 @@ data MorlocState = MorlocState
   -- during import resolution. Enabled only by `morloc make` (and disabled there
   -- by `--offline`); left False for read-only commands (typecheck, dump) and for
   -- eval/served mode, so those never trigger network installs.
-  , stateSnapshot :: Map.Map Text Text
-  -- ^ Module-pin snapshot: module name -> exact git hash, merged from the env's
-  -- snapshot directory. Consulted AUTHORITATIVELY during on-demand module
-  -- resolution (a snapshot pin overrides package pins). Loaded lazily on the
-  -- make/install path; empty otherwise (read-only commands, no env).
+  , stateSnapshot :: Map.Map Text (Text, Maybe Text)
+  -- ^ The environment's snapshot pins (PKG-7), module key to hash and source.
+  -- Consulted authoritatively during module resolution: a snapshot pin
+  -- overrides package pins. Loaded lazily on the make/install path; empty
+  -- otherwise (read-only commands, no env).
   , stateEvalSandbox :: Maybe (Set.Set MVar)
   -- ^ Nothing = trusted eval (dev CLI): no extra gates. Just mods =
   -- sandboxed eval (served): only these modules may be imported at the
@@ -527,13 +529,12 @@ data Config
   -- The split lets a container mount only the state root without shadowing the
   -- image-baked runtime.
   , configState :: !Path
+  -- | The plane's module directory: module @n@ of library @l@ is installed
+  -- at @<configLibrary>/l/n@ (PKG-3, PLANE-1).
   , configLibrary :: !Path
-  , configPlane :: !Path
-  , configPlaneCore :: !Path
   , configTmpDir :: !Path
   , configBuildConfig :: !Path
   , configLangOverrides :: !(Map Text [Text])
-  , configRegistry :: !(Maybe Text)
   }
   deriving (Show, Ord, Eq)
 
@@ -850,9 +851,28 @@ checkPackageDeps pm =
 defaultCppVersion :: Int
 defaultCppVersion = 20
 
+-- | A pinned dependency (PKG-6): module @mdepName@ of library @mdepLibrary@
+-- at commit @mdepHash@, fetched from @mdepSource@ (@host:owner/name@) when
+-- given, else from the library's origin.
+data MorlocDep = MorlocDep
+  { mdepName :: !Text
+  , mdepLibrary :: !Text
+  , mdepSource :: !(Maybe Text)
+  , mdepHash :: !Text
+  }
+  deriving (Show, Eq, Ord)
+
+-- | The dependency's module key: @name@ for stdlib, else @library/name@.
+mdepKey :: MorlocDep -> Text
+mdepKey d
+  | mdepLibrary d == "std" = mdepName d
+  | otherwise = mdepLibrary d <> "/" <> mdepName d
+
 data PackageMeta
   = PackageMeta
   { packageName :: !Text
+  -- | The library the package belongs to (PKG-1); required to install.
+  , packageLibrary :: !(Maybe Text)
   , packageVersion :: !Text
   , packageHomepage :: !Text
   , packageSynopsis :: !Text
@@ -901,9 +921,9 @@ data PackageMeta
   -- ">=0.98, <0.99" (an interval), "0.98" (the 0.98.x series), or "*". 'Nothing'
   -- means unconstrained. Checked at install and make.
   , packageMorlocVersion :: !(Maybe Text)
-  -- | Pinned morloc module dependencies (name, git commit hash). Optional;
-  -- empty = unpinned, install latest. See plan: closer-to-install-root wins.
-  , packageMorlocDependencies :: [(Text, Text)]
+  -- | Pinned morloc module dependencies (PKG-6). Optional; empty = unpinned,
+  -- install latest. Closer-to-install-root wins.
+  , packageMorlocDependencies :: [MorlocDep]
   -- | Optional path (relative to the module root) to a shell script that
   -- runs once during `morloc install`, after the source is on disk and
   -- after morloc deps are installed. Non-zero exit fails the install.
@@ -1251,6 +1271,7 @@ instance Defaultable PackageMeta where
   defaultValue =
     PackageMeta
       { packageName = ""
+      , packageLibrary = Nothing
       , packageVersion = ""
       , packageHomepage = ""
       , packageSynopsis = ""
@@ -1287,15 +1308,12 @@ instance FromJSON Config where
     Aeson.withObject "object" $ \o -> do
       home' <- o .:? "home" .!= "~/.local/share/morloc"
       source' <- o .:? "source" .!= "~/.local/share/morloc/src/morloc"
-      plane' <- o .:? "plane" .!= "default"
-      planeCore' <- o .:? "plane-core" .!= "morloclib"
       tmpdir' <- o .:? "tmpdir" .!= "~/.local/share/morloc/tmp"
       buildConfig' <- o .:? "build-config" .!= "~/.local/share/morloc/build-config.yaml"
       -- Parse legacy lang_python3/lang_R fields into langOverrides
       pyCmd <- o .:? "lang_python3" .!= ("" :: Text)
       rCmd <- o .:? "lang_R" .!= ("" :: Text)
       overrides <- o .:? "lang_overrides" .!= Map.empty
-      registry' <- o .:? "registry"
       let legacyOverrides =
             Map.fromList $
               filter
@@ -1306,12 +1324,13 @@ instance FromJSON Config where
           allOverrides = Map.union overrides legacyOverrides
       -- configState defaults to home' here; the post-load resolver in
       -- Morloc.Config applies $MORLOC_STATE and re-derives configLibrary from it.
-      return $ Config home' home' source' plane' planeCore' tmpdir' buildConfig' allOverrides registry'
+      return $ Config home' home' source' tmpdir' buildConfig' allOverrides
 
 instance FromJSON PackageMeta where
   parseJSON = Aeson.withObject "object" $ \o ->
     PackageMeta
       <$> o .:? "name" .!= ""
+      <*> o .:? "library"
       <*> o .:? "version" .!= ""
       <*> o .:? "homepage" .!= ""
       <*> o .:? "synopsis" .!= ""
@@ -1371,8 +1390,15 @@ instance FromJSON PackageMeta where
       reservedRoots = Set.fromList ["std", "core", "alloc", "crate", "self", "super", "mlc", "rustmorloc"]
       importList (Aeson.String i) = return [i]
       importList x = Aeson.parseJSON x
-      parseMorlocDep = Aeson.withObject "morloc-dependency" $ \od ->
-        (,) <$> od Aeson..: "name" <*> (od Aeson..: "git-hash" >>= parseGitHash)
+      parseMorlocDep = Aeson.withObject "morloc-dependency" $ \od -> do
+        name <- od Aeson..: "name"
+        library <- od Aeson..:? "library"
+        source <- od Aeson..:? "source"
+        hash <- od Aeson..: "git-hash" >>= parseGitHash
+        case (library, source) of
+          (Nothing, Just _) ->
+            fail $ "morloc-deps entry '" <> T.unpack name <> "' gives a source but no library"
+          _ -> return (MorlocDep name (fromMaybe "std" library) source hash)
       -- A git-hash must be a quoted string. An unquoted, all-numeric hash is
       -- read by YAML as a number; coercing it back to text would silently drop
       -- leading zeros, so we reject it with an actionable message instead.

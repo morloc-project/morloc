@@ -7,3 +7,5 @@
   foo's root. bar's own `import .x` then names a different file depending
   on which import loaded bar first. The MOD-6 test covers only the
   in-package case.
+  Under MOD-5 a program importing both `l/x` and `l/x.a`, where `a.loc`
+  imports `.b`, reaches `b.loc` under two keys and is refused.

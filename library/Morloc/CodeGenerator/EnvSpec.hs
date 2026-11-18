@@ -41,7 +41,7 @@ import Morloc.Internal (unique)
 import Morloc.Language (Lang, showLangName)
 import qualified Morloc.Version
 import Morloc.Namespace.State
-  ( PackageMeta(..), DepSpec(..), RegDep(..), LocalDep(..), DepSource(..)
+  ( PackageMeta(..), MorlocDep(..), mdepKey, DepSpec(..), RegDep(..), LocalDep(..), DepSource(..)
   , effectiveDepSource, depSourceText, condaForgeChannel, dsChannel
   )
 
@@ -85,6 +85,8 @@ data SystemReq = SystemReq
 data ModuleReq = ModuleReq
   { mrName    :: !Text
   , mrGitHash :: !(Maybe Text)
+  -- | Where to fetch it when not from its library's origin (PKG-6)
+  , mrSource  :: !(Maybe Text)
   }
   deriving (Show, Eq, Ord)
 
@@ -193,11 +195,11 @@ buildEnvSpec morlocVersion langs metas = do
       | name <- unique (concatMap packageDependencies metas)
       ]
 
-    -- Exact-git-hash module pins, deduplicated by module name (closer-to-root
-    -- resolution already happened during load/install).
+    -- Exact-git-hash module pins, one per module: the root project's pin
+    -- wins, as at install (the root is loaded first, so it is last in metas).
     moduleReqs =
-      [ ModuleReq name (Just h)
-      | (name, h) <- dedupFst (concatMap packageMorlocDependencies metas)
+      [ ModuleReq name (Just h) src
+      | (name, (h, src)) <- dedupFst [(mdepKey d, (mdepHash d, mdepSource d)) | d <- concatMap packageMorlocDependencies (reverse metas)]
       ]
 
 -- | The channel carried on the wire for a package. Only a conda dependency on a
@@ -310,6 +312,7 @@ renderEnvSpec es =
     sysJson (SystemReq n p) =
       jsonObj [("name", jsonStr n), ("provider", jsonStr p)]
 
-    modJson (ModuleReq n mh) =
+    modJson (ModuleReq n mh src) =
       jsonObj $ [("name", jsonStr n)]
         ++ maybe [] (\h -> [("git_hash", jsonStr h)]) mh
+        ++ maybe [] (\s -> [("source", jsonStr s)]) src

@@ -61,6 +61,7 @@ parse f (Code code) = do
   -- eval never install, so they must neither pay the directory scan nor be
   -- aborted by a conflicting snapshot they will not consult. `morloc install`
   -- loads it separately (Subcommands.cmdInstall).
+  Mod.requirePlaneLayout
   autoInstall <- MM.gets stateAutoInstall
   when autoInstall $ do
     snapshot <- Mod.loadSnapshot
@@ -134,7 +135,14 @@ parse f (Code code) = do
 
   case Parser.readProgram Nothing f code parserState mempty of
     (Left (pos, e)) -> MM.throwRejectedSource (posSrcLoc pos) (pretty e)
-    (Right (mainDag, mainState)) -> do
+    (Right (mainDag0, mainState)) -> do
+      rejectBareSiblingImports mainDag0
+      mainDag <- either MM.throwRejected return (keyEntrySiblings mainDag0)
+      forM_ [k | k <- Map.keys mainDag, Map.notMember k mainDag0] $ \k -> do
+        clash <- Mod.bareLocalMatch projectRoot (MV (lastComponent (unMVar k)))
+        forM_ clash $ \file -> MM.throwRejected $
+          "Module" <+> squotes (pretty k) <+> "declared in the entry file has the name of the local module"
+            <+> pretty file
       -- capture module-level docs from the main module before imports overwrite them
       MM.modify' (\st -> st
         { stateModuleDoc = psModuleDoc mainState
@@ -143,7 +151,8 @@ parse f (Code code) = do
       entryPath <- case f of
         Just path -> Just <$> MM.liftIO (canonicalizePath path)
         Nothing -> return Nothing
-      parseImports entryPath mainDag mainState Map.empty Map.empty Map.empty
+      let entryKeys = [k | k <- Map.keys mainDag, not (Mod.isLocalImport k)]
+      parseImports entryKeys entryPath mainDag mainState Map.empty Map.empty Map.empty
   where
     -- Resolve an import to a file path. Local (.dot) imports are project
     -- files and are never downloaded. A missing bare/namespaced import is
@@ -177,14 +186,15 @@ parse f (Code code) = do
     -- each module's package, absent for the program's own modules; @rw@
     -- holds each renamed import's package root and written name.
     parseImports ::
+      [MVar] ->
       Maybe Path ->
       DAG MVar Import ExprI ->
       PState ->
-      Map.Map MVar Path ->
+      Map.Map Path MVar ->
       Map.Map MVar (MVar, Path) ->
       Map.Map MVar (Path, MVar) ->
       MorlocMonad (DAG MVar Import ExprI)
-    parseImports entryPath d s m pkgs rw = case unimported of
+    parseImports entryKeys entryPath d s m pkgs rw = case unimported of
       [] -> do
         -- transfer source positions from parser state into MorlocState
         MM.modify' (\st -> st
@@ -197,6 +207,14 @@ parse f (Code code) = do
         case psWarnings s of
           [] -> return ()
           ws -> MM.tell ws
+        -- MOD-5: the program's module keeps its header as its key, so no
+        -- import may name a module of that name
+        case [(a, v) | (a, v) <- MDD.edgelist d, v `elem` entryKeys] of
+          (a, v) : _ -> MM.throwRejected $
+            "Module" <+> squotes (pretty a) <+> "imports" <+> squotes (pretty v)
+              <> ", which names an installed module, but the program's own module has that name;"
+              <+> "rename the program's module"
+          [] -> return ()
         case MDD.findCycle d of
           Nothing -> return d
           Just cyc -> MM.throwRejected $
@@ -227,29 +245,33 @@ parse f (Code code) = do
                 | otherwise -> Just (importedModule, MS.takeDirectory importPath)
             newState = s {psModuleConfig = moduleConfig, psOwnModule = isNothing pkg}
 
+        case Map.lookup canonPath m of
+          Just other | other /= importedModule -> MM.throwRejected $
+            "The file" <+> pretty importPath <+> "is reached as both" <+> squotes (pretty other)
+              <+> "and" <+> squotes (pretty importedModule)
+          _ -> return ()
+
         Mod.loadModuleMetadata False importPath
         (childPath, code') <- openLocalModule importPath
-        case Parser.readProgram (Just importedModule) childPath code' newState d of
+        case Parser.readProgram (Just importedModule) childPath code' newState mempty of
           (Left (pos, e)) -> MM.throwRejectedSource (posSrcLoc pos) (pretty e)
-          (Right (d', s')) ->
-            -- The parsed module may have a different internal name than the
-            -- import edge target (e.g., file declares "module units" but
-            -- import edge targets ".units"). Reconcile by renaming the DAG
-            -- entry to match the import name.
-            let d'' = reconcileModuleName importedModule d d'
-                (d3, renamed) = case pkg of
-                  Just (p, root) -> renameLocalImports p root importedModule d''
-                  Nothing -> (d'', [])
-                pkgs' = maybe pkgs (\v -> Map.insert importedModule v pkgs) pkg
+          (Right (fileDag, s')) -> do
+            siblingRoot <- case pkg of
+              Just (_, root) -> return (Just root)
+              Nothing -> MM.gets stateProjectRoot
+            keyed <- keyFileModules importPath code' importedModule (fst <$> pkg) siblingRoot fileDag
+            d3 <- foldM (insertKeyed importPath) d keyed
+            let keys = map fst keyed
+                (d4, renamed) = case pkg of
+                  Just (p, root) ->
+                    foldl
+                      (\(dg, acc) k -> let (dg', r) = renameLocalImports p root k dg in (dg', acc <> r))
+                      (d3, [])
+                      keys
+                  Nothing -> (d3, [])
+                pkgs' = maybe pkgs (\v -> foldl (\acc k -> Map.insert k v acc) pkgs keys) pkg
                 rw' = Map.union rw (Map.fromList renamed)
-            in if Map.member importedModule d3
-                 then parseImports entryPath d3 s' (maybe m (\v -> Map.insert importedModule v m) childPath) pkgs' rw'
-                 else MM.throwRejected $
-                   "Loading" <+> pretty importPath <+> "for the import of" <+> pretty importedModule
-                     <+> "defined no module of that name;"
-                     <+> case newModules d d' of
-                           [] -> "every module it declares was already loaded"
-                           ms -> "it declares" <+> hsep (punctuate "," (map pretty ms))
+            parseImports entryKeys entryPath d4 s' (Map.insert canonPath importedModule m) pkgs' rw'
       where
         -- all modules that have already been parsed
         parsed = Map.keysSet d
@@ -275,27 +297,128 @@ parse f (Code code) = do
             , [(qualified v, (root, v)) | v <- locals]
             )
 
-    -- If readProgram added a key that doesn't match importedModule, rename it.
-    -- This happens when a local import (".units") parses a file that declares
-    -- "module units (...)". We rename the DAG key and the ModE name to match
-    -- the import edge target.
-    newModules :: DAG MVar Import ExprI -> DAG MVar Import ExprI -> [MVar]
-    newModules dOld dNew = filter (`Map.notMember` dOld) (Map.keys dNew)
+    -- MOD-1, MOD-5: the module the import reaches takes the import's key;
+    -- every other module of the file is a local module of the file's
+    -- package. The reached one is the module named by the import's last
+    -- component, or the file's only module when it has no header of its own.
+    keyFileModules ::
+      Path -> Text -> MVar -> Maybe MVar -> Maybe Path -> DAG MVar Import ExprI -> MorlocMonad [(MVar, (ExprI, [(MVar, Import)]))]
+    keyFileModules path source key pkgKey root fileDag = do
+      rejectBareSiblingImports fileDag
+      let entries = Map.toList fileDag
+          lastPart (MV t) = lastComponent t
+          -- the key's module path, e.g. `lib.math` for `.lib.math` or `l/p.lib.math`
+          keyPath = T.dropWhile (== '.') (last (T.splitOn "/" (unMVar key)))
+          names n = n == keyPath || ("." <> n) `T.isSuffixOf` keyPath
+          named = [e | e@(MV n, _) <- entries, names n]
+          -- a header-less file is read as `module main`
+          headerless = not (any (T.isPrefixOf "module" . T.stripStart) (T.lines source))
+          anonymous = case entries of
+            [e@(MV n, _)] | T.isPrefixOf "." n || (n == "main" && headerless) -> [e]
+            _ -> []
+      reached <- case named <> anonymous of
+        (e : _) -> return e
+        [] -> MM.throwRejected $
+          "Loading" <+> pretty path <+> "for the import of" <+> pretty key
+            <+> "found no module of that name; it declares"
+            <+> hsep (punctuate "," (map (pretty . fst) entries))
+      let others = filter ((/= fst reached) . fst) entries
+          localName (MV n) = MV ("." <> lastComponent n)
+          step seen = Set.union seen $ Set.fromList
+            [ v | (n, (_, edges)) <- (fst reached, snd reached) : others
+            , n == fst reached || Set.member (localName n) seen
+            , (v, _) <- edges ]
+          closure seen = let seen' = step seen in if seen' == seen then seen else closure seen'
+          used = closure Set.empty
+      siblings <- forM (filter (\(n, _) -> Set.member (localName n) used) others) $ \(n, e) -> do
+        clash <- Mod.bareLocalMatch root (MV (lastPart n))
+        case clash of
+          Just file -> MM.throwRejected $
+            "Module" <+> squotes (pretty n) <+> "declared in" <+> pretty path
+              <+> "has the name of the local module" <+> pretty file
+          Nothing -> return (siblingKey pkgKey n, e)
+      return ((key, snd reached) : siblings)
 
-    reconcileModuleName :: MVar -> DAG MVar Import ExprI -> DAG MVar Import ExprI -> DAG MVar Import ExprI
-    reconcileModuleName importName dOld dNew =
-      case newKeys of
-        [actualName] | actualName /= importName ->
-          -- Rename: delete the old key, insert under the import name with
-          -- the ModE name rewritten to match
-          case Map.lookup actualName dNew of
-            Just (ExprI i (ModE _ es), edges) ->
-              let renamed = Map.delete actualName dNew
-              in Map.insert importName (ExprI i (ModE importName es), edges) renamed
-            _ -> dNew  -- shouldn't happen
-        _ -> dNew  -- zero or multiple new keys: nothing to reconcile
-      where
-        newKeys = filter (`Map.notMember` dOld) (Map.keys dNew)
+    insertKeyed ::
+      Path -> DAG MVar Import ExprI -> (MVar, (ExprI, [(MVar, Import)])) -> MorlocMonad (DAG MVar Import ExprI)
+    insertKeyed path dag (k, (e, edges))
+      | Map.member k dag = MM.throwRejected $
+          "Loading" <+> pretty path <+> "declares the module" <+> squotes (pretty k)
+            <> ", which is already loaded"
+      | otherwise = return (Map.insert k (renameModE k e, edges) dag)
+
+-- | Imports, by one module of a file, of another module of the file by its
+-- bare name (MOD-1 has them imported as @.name@).
+bareSiblingImports :: DAG MVar Import ExprI -> [(MVar, MVar)]
+bareSiblingImports dag =
+  [ (n, v)
+  | (n, (_, edges)) <- Map.toList dag
+  , (v, _) <- edges
+  , v /= n
+  , Map.member v dag
+  ]
+
+-- | A bare import of a sibling's name names an installed module (MOD-7);
+-- when none is installed, the sibling was meant, and the error says how to
+-- import it.
+rejectBareSiblingImports :: DAG MVar Import ExprI -> MorlocMonad ()
+rejectBareSiblingImports dag =
+  forM_ (bareSiblingImports dag) $ \(n, v) -> do
+    installed <- Mod.findBareModuleMaybe v
+    when (isNothing installed) . MM.throwRejected $
+      "Module" <+> squotes (pretty n) <+> "imports" <+> squotes (pretty v)
+        <+> "by a bare name, which names an installed module, and none is installed;"
+        <+> "a module of the same file is imported as" <+> squotes ("import ." <> pretty v)
+
+-- | A sibling module's key: local to the program, or to package @p@.
+siblingKey :: Maybe MVar -> MVar -> MVar
+siblingKey pkgKey (MV n) = case pkgKey of
+  Just (MV p) -> MV (p <> "." <> lastComponent n)
+  Nothing -> MV ("." <> lastComponent n)
+
+lastComponent :: Text -> Text
+lastComponent t = case T.split (\c -> c == '.' || c == '/') t of
+  [] -> t
+  parts -> last parts
+
+renameModE :: MVar -> ExprI -> ExprI
+renameModE k (ExprI i (ModE _ es)) = ExprI i (ModE k es)
+renameModE _ e = e
+
+-- | In the entry file, the module no sibling imports is the program; when
+-- several are imported by none, the one named @main@ is. Every other module
+-- is a local module, imported as @.name@ (MOD-1); one the program does not
+-- reach is dropped, as in an imported file.
+keyEntrySiblings :: DAG MVar Import ExprI -> Either MDoc (DAG MVar Import ExprI)
+keyEntrySiblings dag
+  | Map.size dag < 2 = Right dag
+  | otherwise =
+      let entries = Map.toList dag
+          local (MV n) = MV ("." <> lastComponent n)
+          imported = Set.fromList [v | (_, (_, edges)) <- entries, (v, _) <- edges]
+          roots = [n | (n, _) <- entries, not (Set.member (local n) imported)]
+          rootOf = case roots of
+            [r] -> Just r
+            _ | MV "main" `elem` roots -> Just (MV "main")
+            _ -> Nothing
+       in case rootOf of
+            Just rootName ->
+              let rekeyed =
+                    Map.fromList
+                      [ if n == rootName then (n, v) else (local n, (renameModE (local n) e, edges))
+                      | (n, v@(e, edges)) <- entries
+                      ]
+                  reach seen [] = seen
+                  reach seen (k : ks)
+                    | Set.member k seen = reach seen ks
+                    | otherwise = reach (Set.insert k seen) (ks <> maybe [] (map fst . snd) (Map.lookup k rekeyed))
+                  reached = reach Set.empty [rootName]
+               in Right (Map.filterWithKey (\k _ -> Set.member k reached) rekeyed)
+            Nothing ->
+              Left $
+                "The entry file declares several modules that no other module of it imports;"
+                  <+> "name the program's module" <+> squotes "main" <> ", and import the others as"
+                  <+> squotes ".name" <> ":" <+> hsep (punctuate "," (map pretty roots))
 
 -- | assume @t@ is a filename and open it, return file name and contents
 openLocalModule :: Path -> MorlocMonad (Maybe Path, Text)

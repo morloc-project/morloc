@@ -19,6 +19,7 @@ import InstanceResolveTests (instanceResolveTests)
 import IrrefutablePatternLexerTests (irrefutablePatternLexerTests)
 import LangSupportTests (langSupportTests)
 import MorlocDepsTests (morlocDepsTests)
+import PackageTests (packageTests)
 import PatternChainTests (patternChainTests)
 import ArgsBoundTests (argsBoundTests)
 import IndexAllocationTests (indexAllocationTests)
@@ -139,6 +140,7 @@ unitTests =
   , refutablePatternTests
   , rustPoolBuildTests
   , lockFileTests
+  , packageTests
   , effectBoundaryTests
   , schemaHintTests
   , systemConfigTests

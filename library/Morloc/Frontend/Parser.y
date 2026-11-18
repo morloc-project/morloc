@@ -18,6 +18,7 @@ import qualified Data.Scientific as DS
 import Data.List (sortBy, foldl')
 import qualified Data.List as List
 import Data.Maybe (fromMaybe, listToMaybe)
+import Control.Monad (foldM)
 import Morloc.Typecheck.Internal (typeUChildren)
 import qualified Control.Monad.State.Strict as State
 import Morloc.Frontend.Token
@@ -1560,10 +1561,9 @@ readProgram _moduleName modulePath sourceCode pstate dag = do
       pstate' = pstate { psModulePath = modulePath, psDocMap = docMap, psSourceLines = srcLines }
   -- Strategy 1: parse as-is (code with module declarations)
   case parseAndDesugar pstate' tokens of
-    Right (result, finalState) ->
-      let dag' = foldl addModule dag result
-          dag'' = attachGroupAnnotations tokens groupToks dag'
-      in return (dag'', finalState)
+    Right (result, finalState) -> do
+      dag' <- insertModules filename (psSourceMap finalState) dag result
+      return (attachGroupAnnotations tokens groupToks dag', finalState)
     Left err ->
       -- Strategy 2: wrap in module, patch trailing expr as __expr__ assignment.
       let wrappedCode = "module main (*)\n" <> sourceCode
@@ -1578,18 +1578,16 @@ readProgram _moduleName modulePath sourceCode pstate dag = do
               wrappedDocMap = Map.mapKeys up wrappedDocMap0
               pstate'' = pstate' { psDocMap = wrappedDocMap }
           in case parseAndDesugar pstate'' wrappedTokens of
-            Right (result, finalState) ->
-              let dag' = foldl addModule dag result
-                  dag'' = attachGroupAnnotations wrappedTokens wrappedGroupToks dag'
-              in return (dag'', finalState)
+            Right (result, finalState) -> do
+              dag' <- insertModules filename (psSourceMap finalState) dag result
+              return (attachGroupAnnotations wrappedTokens wrappedGroupToks dag', finalState)
             Left _ ->
               case patchForTrailingExpr wrappedTokens of
                 Just patchedTokens ->
                   case parseAndDesugar pstate'' patchedTokens of
-                    Right (result, finalState) ->
-                      let dag' = foldl addModule dag result
-                          dag'' = attachGroupAnnotations patchedTokens wrappedGroupToks dag'
-                      in return (dag'', finalState)
+                    Right (result, finalState) -> do
+                      dag' <- insertModules filename (psSourceMap finalState) dag result
+                      return (attachGroupAnnotations patchedTokens wrappedGroupToks dag', finalState)
                     Left _ -> tryExprFallback tokens pstate' dag filename err
                 Nothing -> tryExprFallback tokens pstate' dag filename err
         Left _ -> tryExprFallback tokens pstate' dag filename err
@@ -1636,9 +1634,9 @@ readProgram _moduleName modulePath sourceCode pstate dag = do
                     Just (Left e2) | pePos e2 > pePos e1 -> Left e2
                     _ -> Left e1
           in case parseClosing plain unlaid of
-            Right ((result, finalState), laid, groups) -> Right (withModules laid groups result, finalState)
+            Right ((result, finalState), laid, groups) -> (\d -> (d, finalState)) <$> withModules (psSourceMap finalState) laid groups result
             Left err1 -> case parseClosing wrapped wunlaid of
-              Right ((result, finalState), laid, groups) -> Right (withModules laid groups result, finalState)
+              Right ((result, finalState), laid, groups) -> (\d -> (d, finalState)) <$> withModules (psSourceMap finalState) laid groups result
               Left err2 -> report (if pePos err2 > pePos err1 then err2 else err1)
         _ -> report origErr
       where
@@ -1656,13 +1654,23 @@ readProgram _moduleName modulePath sourceCode pstate dag = do
           | posLine (locPos t) == 0 = t {locPos = (locPos t) {posLine = 1}}
           | otherwise = t
 
-    withModules laid groupToks' result =
-      attachGroupAnnotations laid groupToks' (foldl addModule dag result)
+    withModules srcMap laid groupToks' result =
+      attachGroupAnnotations laid groupToks' <$> insertModules (maybe "<expr>" id modulePath) srcMap dag result
 
-    addModule d e@(ExprI _ (ModE n es)) =
-      let imports = [(importModuleName i', i') | (ExprI _ (ImpE i')) <- es]
-      in Map.insert n (e, imports) d
-    addModule _ _ = error "expected a module"
+-- | Add the modules of a file to the DAG under their header names (MOD-1). A
+-- name already present, from this file or an earlier one, is a load error
+-- (MOD-5): no module replaces another.
+insertModules :: String -> Map.Map Int SrcLoc -> DAG MVar Import ExprI -> [ExprI] -> Either (Pos, String) (DAG MVar Import ExprI)
+insertModules filename srcMap = foldM add
+  where
+    add d e@(ExprI i (ModE n es))
+      | Map.member n d =
+          let pos = maybe (Pos 1 1 filename) (\l -> Pos (srcLocLine l) (srcLocCol l) filename) (Map.lookup i srcMap)
+           in Left (pos, "module " <> T.unpack (unMVar n) <> " is declared twice")
+      | otherwise =
+          let imports = [(importModuleName i', i') | (ExprI _ (ImpE i')) <- es]
+           in Right (Map.insert n (e, imports) d)
+    add _ _ = Left (Pos 1 1 filename, "expected a module")
 
 patchForTrailingExpr :: [Located] -> Maybe [Located]
 patchForTrailingExpr tokens = do

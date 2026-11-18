@@ -35,9 +35,9 @@ preamble:
   - 'dyn.load("{{home}}/lib/librmorloc.so")'
   - '.morloc.pooldir <- dirname(get(".morloc.poolfile", envir = globalenv()))'
   - '.morloc.libdir <- "{{state}}/modules/R"'
-  # Put the environment's R module library on .libPaths() so an installed
-  # package there loads with library(). Guarded so a missing dir adds no noise.
-  - 'if (dir.exists(.morloc.libdir)) .libPaths(c(.morloc.libdir, .libPaths()))'
+  # Put each library's R directory (modules/R/<library>, PKG-3) on .libPaths()
+  # so an installed package there loads with library(). Guarded so a missing dir adds no noise.
+  - 'if (dir.exists(.morloc.libdir)) .libPaths(c(list.dirs(.morloc.libdir, recursive = FALSE), .libPaths()))'
   - '.morloc.source <- function(p) source(if (startsWith(p, "/")) p else { src <- normalizePath(file.path(.morloc.pooldir, "..", "..", "..", p), mustWork=FALSE); cwd <- file.path(".", p); if (file.exists(src)) src else if (file.exists(cwd)) cwd else file.path(.morloc.libdir, p) }, chdir=TRUE)'
   # User R files load further files with .morloc.source and may read these
   # paths, so they are also bound where user files run.

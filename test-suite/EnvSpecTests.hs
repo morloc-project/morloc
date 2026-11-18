@@ -22,7 +22,8 @@ import Morloc.CodeGenerator.EnvSpec
 import Morloc.Language (makeLang)
 import Morloc.Namespace.Prim (Defaultable (..))
 import Morloc.Namespace.State
-  ( PackageMeta (..)
+  ( MorlocDep (..)
+  , PackageMeta (..)
   , DepSpec (..)
   , DepImport (..)
   , RegDep (..)
@@ -77,7 +78,7 @@ pmA =
         Map.fromList [("numpy", dep ">=2,<3" SrcConda), ("requests", dep "*" SrcPypi)]
     , packageRustDeps = Map.fromList [("ndarray", noSrc "0.16")]
     , packageDependencies = ["blas"]
-    , packageMorlocDependencies = [("tensor-cpp", "abc123")]
+    , packageMorlocDependencies = [MorlocDep "tensor-cpp" "std" Nothing "abc123"]
     }
 
 -- A second module declaring a C++ dep (source defaults to conda) and a Python
@@ -245,7 +246,7 @@ envSpecTests =
         , testCase "system libs from bare -l dependencies (provider unspecified)" $
             esSystem spec @?= [SystemReq "blas" "unspecified"]
         , testCase "module pins carried through as git hashes" $
-            esModules spec @?= [ModuleReq "tensor-cpp" (Just "abc123")]
+            esModules spec @?= [ModuleReq "tensor-cpp" (Just "abc123") Nothing]
         ]
     , testGroup
         "channel aggregation across the DAG"

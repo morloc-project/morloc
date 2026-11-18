@@ -33,7 +33,7 @@ import qualified Morloc.Completion as Completion
 import qualified Morloc.Config as Config
 import qualified Morloc.DataFiles as DF
 import qualified Morloc.System as MS
-import Morloc.Module (OverwriteProtocol (..))
+import Morloc.Module (OverwriteProtocol (..), initPlaneLayout)
 
 import qualified Data.List as DL
 import Data.Char (isSpace, toUpper)
@@ -122,6 +122,8 @@ configureAllSteps verbose force slurmSupport sanitize config = do
   ensureDirectory verbose "morloc tmp directory" tmpDir
   ensureDirectory verbose "morloc opt directory" optDir
   ensureDirectory verbose "morloc module directory" srcLibrary
+  -- PLANE-1: a plane of an older layout stops init with the command to remove it
+  initPlaneLayout config
 
   sayInfo verbose $ "Slurm support ... " <> show slurmSupport
 

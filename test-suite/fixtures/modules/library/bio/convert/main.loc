@@ -1,0 +1,4 @@
+module convert (bioValue)
+
+bioValue :: Int
+bioValue = 2

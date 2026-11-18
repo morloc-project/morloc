@@ -1,0 +1,9 @@
+module spare (s)
+
+s :: Int
+s = 9
+
+module main (f)
+
+f :: Int
+f = 1

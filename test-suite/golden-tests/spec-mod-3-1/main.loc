@@ -5,6 +5,6 @@ module foo (inc)
   inc x = x + 1
 
 module main (*)
-  import foo
+  import .foo
   twice :: Int -> Int
   twice x = inc (inc x)

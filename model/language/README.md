@@ -44,6 +44,8 @@ split later.
 | File | Prefix | Scope |
 |---|---|---|
 | [module-names.md](module-names.md) | MOD | modules, imports, exports, and which declaration a name refers to across modules |
+| [packages.md](packages.md) | PKG | package identity, install paths, origins, dependency pins, snapshots |
+| [planes.md](planes.md) | PLANE | one plane per environment; planes never mix |
 
 ### Types
 

@@ -1,6 +1,6 @@
 module main (result)
 
-import morloc-test-expose-py
+import exposetest/morloc-test-expose-py
 import root-py
 
 source Py from "src.py" ("compute")

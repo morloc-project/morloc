@@ -28,6 +28,7 @@ module UI
   , LangSupportCommand (..)
   , EnvspecCommand (..)
   , VersionsCommand (..)
+  , LibraryCommand (..)
   ) where
 
 import Data.Int (Int64)
@@ -61,6 +62,7 @@ data CliCommand
   | CmdLangSupport LangSupportCommand
   | CmdEnvspec EnvspecCommand
   | CmdVersions VersionsCommand
+  | CmdLibrary LibraryCommand
   | CmdTypes TypesCommand
 
 cliParser :: Parser CliCommand
@@ -79,6 +81,7 @@ cliParser =
         <> langSupportSubcommand
         <> envspecSubcommand
         <> versionsSubcommand
+        <> librarySubcommand
         <> typesSubcommand
     )
 
@@ -156,6 +159,34 @@ data VersionsCommand = VersionsCommand
 
 versionsCommandParser :: Parser VersionsCommand
 versionsCommandParser = pure VersionsCommand
+
+-- | @library add <library> <host:owner>@ records a library's origin (PKG-5);
+-- @library list@ prints every recorded origin.
+data LibraryCommand
+  = LibraryAdd String String
+  | LibraryList
+
+librarySubcommand :: Mod CommandFields CliCommand
+librarySubcommand =
+  command
+    "library"
+    ( info
+        ( CmdLibrary
+            <$> hsubparser
+              ( command
+                  "add"
+                  ( info
+                      ( LibraryAdd
+                          <$> argument str (metavar "LIBRARY" <> help "Library name, e.g. weena")
+                          <*> argument str (metavar "ORIGIN" <> help "Where its modules live, e.g. github:weena")
+                      )
+                      (progDesc "Record where a library's modules come from")
+                  )
+                  <> command "list" (info (pure LibraryList) (progDesc "List the libraries and their origins"))
+              )
+        )
+        (progDesc "Record and list library origins")
+    )
 
 versionsSubcommand :: Mod CommandFields CliCommand
 versionsSubcommand =

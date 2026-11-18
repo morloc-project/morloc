@@ -20,12 +20,9 @@ runMM action = do
           { configHome = home <> "/.local/share/morloc"
           , configState = home <> "/.local/share/morloc"
           , configLibrary = home <> "/.local/share/src/morloc"
-          , configPlane = "default"
-          , configPlaneCore = "morloclib"
           , configTmpDir = home <> "/.morloc/tmp"
           , configBuildConfig = home <> "/.morloc/.build-config.yaml"
           , configLangOverrides = mempty
-          , configRegistry = Nothing
           }
   ((r, _), _) <- MM.runMorlocMonad Nothing 0 cfg defaultValue action
   either (assertFailure . show) return r

@@ -146,7 +146,7 @@ runFixture autoInstall rel = do
   let path = root <> "/" <> rel
   code <- MT.pack <$> readFile path
   ((x, _), _) <-
-    MM.runMorlocMonad Nothing 0 config {configLibrary = root <> "/library"} defaultValue
+    MM.runMorlocMonad Nothing 0 config {configLibrary = root <> "/library", configState = root} defaultValue
       (MM.modify (\st -> st {stateAutoInstall = autoInstall}) >> typecheckFrontend (Just path) (Code code))
   return x
 
@@ -172,11 +172,25 @@ modTests :: TestTree
 modTests =
   testGroup
     "MOD"
-    [ acceptFixture "spec-mod-6-1" "mod-6/main.loc"
+    [ acceptFixture "spec-mod-1-1" "mod-1/siblings.loc"
+    , rejectFixture "spec-mod-1-2" False "has the name of the local module" "mod-1/clash.loc"
+    , rejectFixture "spec-mod-1-3" False "import .helper" "mod-1/bare.loc"
+    , acceptFixture "spec-mod-1-4" "mod-1/headless.loc"
+    , acceptFixture "spec-mod-1-6" "mod-1/unused.loc"
+    , acceptFixture "spec-mod-5-1" "mod-5/shadow.loc"
+    , rejectFixture "spec-mod-5-2" False "is reached as both" "mod-5/twice.loc"
+    , acceptFixture "spec-mod-5-3" "mod-5/once.loc"
+    , acceptFixture "spec-mod-5-4" "mod-5/both.loc"
+    , rejectFixture "spec-mod-5-5" False "rename the program's module" "mod-5/selfname.loc"
+    , acceptFixture "spec-mod-6-1" "mod-6/main.loc"
     , acceptFixture "spec-mod-7-1" "mod-7/system.loc"
     , acceptFixture "spec-mod-7-2" "mod-7/local.loc"
     , rejectFixture "spec-mod-7-3" False "import .mloc" "mod-7/missing.loc"
     , rejectFixture "spec-mod-7-4" True "import .mloc" "mod-7/missing.loc"
+    , rejectFixture "spec-mod-7-5" False "without its library" "mod-7b/spelled.loc"
+    , acceptFixture "spec-mod-7-6" "mod-7b/plain.loc"
+    , rejectFixture "spec-mod-7-7" False "failed to import module" "mod-7b/fallback.loc"
+    , acceptFixture "spec-mod-7-8" "mod-7b/library.loc"
     , accept
         "spec-mod-14-1"
         [r|
@@ -184,7 +198,7 @@ modTests =
           type P = Int
           mkP :: Int -> P
         module main (g)
-          import lib (mkP)
+          import .lib (mkP)
           type P = Str
           g :: Int -> Int
           g x = mkP x
@@ -196,7 +210,7 @@ modTests =
           type P = Int
           mkP :: Int -> P
         module main (g)
-          import lib (mkP)
+          import .lib (mkP)
           type P = Str
           g :: Int -> Str
           g x = mkP x
@@ -221,7 +235,7 @@ modTests =
           type P = Int
           mkP :: Int -> P
         module main (f)
-          import lib (P, mkP)
+          import .lib (P, mkP)
           type P = Str
           f :: Int -> P
           f x = mkP x
@@ -233,7 +247,7 @@ modTests =
           type P = Int
           mkP :: Int -> P
         module main (f)
-          import lib (mkP)
+          import .lib (mkP)
           type P = Str
           f :: Int -> Int
           f x = mkP x
@@ -728,7 +742,7 @@ aliasTests =
           type A = Int
           g :: A -> Int
         module main (f)
-          import lib (g)
+          import .lib (g)
           type A = Str
           f :: Int -> Int
           f x = g x
@@ -1753,7 +1767,7 @@ cls3Tests =
         module lib (foo)
           foo :: Int -> Int
         module main (bar)
-          import lib
+          import .lib
           class Foo a where
             foo :: a -> Int
           instance Foo Int where
@@ -1770,8 +1784,8 @@ cls3Tests =
         module libb (foo)
           foo :: Int -> Str
         module main (bar)
-          import liba
-          import libb
+          import .liba
+          import .libb
           class Foo a where
             foo :: a -> Int
           bar :: Int -> Int
@@ -1784,8 +1798,8 @@ cls3Tests =
           foo :: Int -> Int
           one :: Int
         module main (bar)
-          import lib as l
-          import lib (one)
+          import .lib as l
+          import .lib (one)
           class Foo a where
             foo :: a -> Int
           instance Foo Int where
@@ -4079,7 +4093,7 @@ sigTests =
           bad x = 5
 
         module main (useIt)
-          import lib (bad)
+          import .lib (bad)
           useIt :: Int -> Int
           useIt x = bad x
         |]
@@ -4091,7 +4105,7 @@ sigTests =
           good x = x
 
         module main (useIt)
-          import lib (good)
+          import .lib (good)
           useIt :: Int -> Int
           useIt x = good x
         |]
@@ -4103,11 +4117,11 @@ sigTests =
           bad :: a -> a
 
         module impl (bad)
-          import sigs (bad)
+          import .sigs (bad)
           bad x = 5
 
         module main (useIt)
-          import impl (bad)
+          import .impl (bad)
           useIt :: Int -> Int
           useIt x = bad x
         |]
@@ -4122,7 +4136,7 @@ sigTests =
           bad x = 5
 
         module main (useIt)
-          import lib (good)
+          import .lib (good)
           useIt :: Int -> Int
           useIt x = good x
         |]
@@ -4139,7 +4153,7 @@ sigTests =
             shift x = 5
 
         module main (useIt)
-          import lib (Shift)
+          import .lib (Shift)
           useIt :: Int -> Int
           useIt x = x
         |]
@@ -4202,7 +4216,7 @@ sigTests =
         module lib (foo)
           foo :: Int -> Int
         module main (bar)
-          import lib
+          import .lib
           foo :: Int -> Str
           bar :: Int -> Str
           bar x = foo x
@@ -4215,8 +4229,8 @@ sigTests =
         module libb (foo)
           foo :: Int -> Str
         module main (bar)
-          import liba
-          import libb
+          import .liba
+          import .libb
           foo :: Int -> Bool
           bar :: Int -> Bool
           bar x = foo x
@@ -4227,7 +4241,7 @@ sigTests =
         module lib (foo)
           foo :: Int -> Int
         module main (bar)
-          import lib (foo)
+          import .lib (foo)
           foo :: Int -> Str
           bar :: Int -> Str
           bar x = foo x
@@ -4238,7 +4252,7 @@ sigTests =
         module lib (foo)
           foo :: Int -> Int
         module main (bar)
-          import lib (foo)
+          import .lib (foo)
           foo :: Int -> Int
           bar :: Int -> Int
           bar x = foo x
@@ -4249,7 +4263,7 @@ sigTests =
         module lib (foo)
           foo :: Int -> Int
         module main (bar)
-          import lib (foo as libFoo)
+          import .lib (foo as libFoo)
           foo :: Int -> Str
           bar :: Int -> Int
           bar x = libFoo x
@@ -4260,7 +4274,7 @@ sigTests =
         module lib (foo)
           foo :: Int -> Int
         module main (bar)
-          import lib as l (foo)
+          import .lib as l (foo)
           foo :: Int -> Str
           bar :: Int -> Str
           bar x = foo x
@@ -4272,7 +4286,7 @@ sigTests =
           class C a where
             foo :: a -> a
         module main (bar)
-          import lib (C)
+          import .lib (C)
           foo :: Int -> Int
           bar :: Int -> Int
           bar x = foo x
@@ -4283,7 +4297,7 @@ sigTests =
         module lib (foo)
           foo :: Int -> Int
         module main (bar)
-          import lib (foo)
+          import .lib (foo)
           class Foo a where
             foo :: a -> Int
           bar :: Int -> Int
@@ -4295,7 +4309,7 @@ sigTests =
         module lib (foo)
           foo :: Int -> Int
         module main (bar)
-          import lib (foo)
+          import .lib (foo)
           foo x = x
           bar :: Int -> Str
           bar x = foo x
@@ -4306,7 +4320,7 @@ sigTests =
         module lib (foo)
           foo :: Int -> Int
         module main (bar)
-          import lib (foo)
+          import .lib (foo)
           foo x = x
           bar :: Int -> Int
           bar x = foo x
@@ -5038,12 +5052,9 @@ emptyConfig = do
       { configHome = home <> "/.local/share/morloc"
       , configState = home <> "/.local/share/morloc"
       , configLibrary = home <> "/.local/share/src/morloc"
-      , configPlane = "default"
-      , configPlaneCore = "morloclib"
       , configTmpDir = home <> "/.morloc/tmp"
       , configBuildConfig = home <> "/.morloc/.build-config.yaml"
       , configLangOverrides = mempty
-      , configRegistry = Nothing
       }
 
 dim7Tests :: TestTree
@@ -6716,7 +6727,7 @@ checkOnceTests =
         config <- emptyConfig
         ((x, msgs), _) <-
           MM.runMorlocMonad Nothing 0 config defaultValue . typecheck Nothing . Code $
-            "module lib (getFst)\n  getFst = .0\n\nmodule main (getFst, f)\n  import lib (getFst)\n  f :: (Int, Str) -> Int\n  f p = getFst p\n"
+            "module lib (getFst)\n  getFst = .0\n\nmodule main (getFst, f)\n  import .lib (getFst)\n  f :: (Int, Str) -> Int\n  f p = getFst p\n"
         case x of
           Left e -> assertFailure ("expected acceptance, got: " <> show e)
           Right _ -> assertBool ("no warning names getFst: " <> show msgs) (any (MT.isInfixOf "skipping generic export 'getFst'") msgs)

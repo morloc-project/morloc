@@ -532,7 +532,7 @@ nativeServes library env ev m = case methodImpls usePolicy env ev m of
       name `elem` ["root-cpp", "root-py", "root-r", "root-rust", "vector-cpp", "vector-py", "vector-r", "vector-rust"]
         && maybe False installed (srcPath src)
     standard _ = False
-    installed p = (library <> "/") `DL.isPrefixOf` p && ".." `notElem` MS.splitDirectories p
+    installed p = (library <> "/std/") `DL.isPrefixOf` p && ".." `notElem` MS.splitDirectories p
 
 -- | Whether a bracket chain's map is native: over a plain list, as
 -- 'nativeServes' has it, or under an instance that implements no @map@.

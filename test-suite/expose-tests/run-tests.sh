@@ -24,10 +24,11 @@ MORLOC_HOME="${MORLOC_HOME:-$HOME/.local/share/morloc}"
 # runtime while state lives on a mounted volume. It falls back to the home when
 # the state root is unset, and so does this.
 MORLOC_STATE="${MORLOC_STATE:-$MORLOC_HOME}"
-INCLUDE_DIR="$MORLOC_STATE/modules/include"
-PY_LIB_DIR="$MORLOC_STATE/modules/python"
-R_LIB_DIR="$MORLOC_STATE/modules/R"
-SRC_DIR="$MORLOC_STATE/src/morloc/plane/default"
+INCLUDE_DIR="$MORLOC_STATE/modules/include/exposetest"
+PY_LIB_DIR="$MORLOC_STATE/modules/python/mlc_lib/exposetest"
+R_LIB_DIR="$MORLOC_STATE/modules/R/exposetest"
+LIB="exposetest"
+SRC_DIR="$MORLOC_STATE/src/morloc/plane/$LIB"
 FDB_DIR="$MORLOC_STATE/fdb"
 
 CPP_MOD="morloc-test-expose-cpp"
@@ -55,11 +56,11 @@ TOUCHED_MODULES=("$CPP_MOD" "$PY_MOD" "$R_MOD")
 # binary is half-broken during development of this very feature.
 cleanup_module() {
     local name="$1"
-    morloc uninstall --module "$name" >/dev/null 2>&1 || true
+    morloc uninstall --module "$LIB/$name" >/dev/null 2>&1 || true
     rm -rf "$SRC_DIR/$name" \
            "$INCLUDE_DIR/$name" \
            "$R_LIB_DIR/$name" \
-           "$FDB_DIR/$name.module"
+           "$FDB_DIR/$LIB.$name.module"
     # Python form replaces hyphens with underscores.
     local py_name="${name//-/_}"
     rm -rf "$PY_LIB_DIR/$py_name"
@@ -189,7 +190,7 @@ if should_run "cpp"; then
     fi
 
     # `morloc uninstall` should wipe the exposed dir, symmetric with install.
-    morloc uninstall --module "$CPP_MOD" >/dev/null 2>&1 || true
+    morloc uninstall --module "$LIB/$CPP_MOD" >/dev/null 2>&1 || true
     assert_absent "cpp: exposed dir gone after uninstall" "$INCLUDE_DIR/$CPP_MOD"
     echo ""
 fi
@@ -222,7 +223,7 @@ if should_run "py"; then
         run_consumer "$SCRIPT_DIR/consumer-py" "py"
     fi
 
-    morloc uninstall --module "$PY_MOD" >/dev/null 2>&1 || true
+    morloc uninstall --module "$LIB/$PY_MOD" >/dev/null 2>&1 || true
     assert_absent "py: exposed dir gone after uninstall" "$PY_LIB_DIR/$PY_MOD_PY"
     echo ""
 fi
@@ -249,7 +250,7 @@ if should_run "r"; then
         run_consumer "$SCRIPT_DIR/consumer-r" "r"
     fi
 
-    morloc uninstall --module "$R_MOD" >/dev/null 2>&1 || true
+    morloc uninstall --module "$LIB/$R_MOD" >/dev/null 2>&1 || true
     assert_absent "r: exposed dir gone after uninstall" "$R_LIB_DIR/$R_MOD"
     echo ""
 fi

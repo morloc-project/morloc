@@ -1,3 +1,3 @@
 #pragma once
-#include "mlc/types/main.hpp"
-inline int keys(const mlc::types::main::Doc& d) { return (int)d.body.size(); }
+#include "mlc/types/_local/main.hpp"
+inline int keys(const mlc::types::_local::main::Doc& d) { return (int)d.body.size(); }

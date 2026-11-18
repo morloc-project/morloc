@@ -271,12 +271,9 @@ emptyConfig = do
       { configHome = home <> "/.local/share/morloc"
       , configState = home <> "/.local/share/morloc"
       , configLibrary = home <> "/.local/share/src/morloc"
-      , configPlane = "default"
-      , configPlaneCore = "morloclib"
       , configTmpDir = home <> "/.morloc/tmp"
       , configBuildConfig = home <> "/.morloc/.build-config.yaml"
       , configLangOverrides = mempty
-      , configRegistry = Nothing
       }
 
 assertGeneralType :: String -> MT.Text -> TypeU -> TestTree
@@ -801,10 +798,10 @@ whitespaceTests =
 module foo (x)
   x = True
 module bar (y)
-  import foo
+  import .foo
   y = True
 module main (z)
-  import bar
+  import .bar
   z = 1
       |]
           int
@@ -975,7 +972,7 @@ typeAliasTests =
          
            module main (foo)
            import a (A)
-           import b (A)
+           import .b (A)
          
            foo :: A -> A -> A
         |]
@@ -998,8 +995,8 @@ typeAliasTests =
            type A a b = List (Tuple2 a b)
            
            module main (foo)
-           import a (A)
-           import b (A)
+           import .a (A)
+           import .b (A)
            
            foo :: A a b -> A a b -> A a b
         |]
@@ -1012,7 +1009,7 @@ typeAliasTests =
              type Foo = A
            module main (f)
              type B
-             import m1 (Foo)
+             import .m1 (Foo)
              f :: Foo -> B
         |]
           (fun [var "A", var "B"])
@@ -1023,12 +1020,12 @@ typeAliasTests =
              type A
              type Foo = A
            module m2 (Foo)
-             import m3 (Foo)
+             import .m3 (Foo)
            module m1 (Foo)
-             import m2 (Foo)
+             import .m2 (Foo)
            module main (f)
              type B
-             import m1 (Foo)
+             import .m1 (Foo)
              f :: Foo -> B
         |]
           (fun [var "A", var "B"])
@@ -1040,7 +1037,7 @@ typeAliasTests =
              type Foo = A
            module main (f)
              type B
-             import m1 (Foo as Bar)
+             import .m1 (Foo as Bar)
              f :: Bar -> B
         |]
           (fun [var "A", var "B"])
@@ -1052,14 +1049,14 @@ typeAliasTests =
              type Foo1 = A
 
            module m2 (Foo2)
-             import m3 (Foo1 as Foo2)
+             import .m3 (Foo1 as Foo2)
 
            module m1 (Foo3)
-             import m2 (Foo2 as Foo3)
+             import .m2 (Foo2 as Foo3)
 
            module main (f)
              type B
-             import m1 (Foo3 as Foo4)
+             import .m1 (Foo3 as Foo4)
              f :: Foo4 -> B
         |]
           (fun [var "A", var "B"])
@@ -1076,8 +1073,8 @@ typeAliasTests =
 
            module main (f)
              type B
-             import m1 (Foo)
-             import m2 (Foo)
+             import .m1 (Foo)
+             import .m2 (Foo)
              f :: Foo -> B
         |]
       , expectError
@@ -1093,8 +1090,8 @@ typeAliasTests =
              type X
              type Y
              type Z
-             import m1 (Foo)
-             import m2 (Foo)
+             import .m1 (Foo)
+             import .m2 (Foo)
              f :: Foo X Y -> Z
         |]
       -- Type-level record literals use `=` to bind fields (mirroring
@@ -3341,8 +3338,8 @@ unitTypeTests =
           module bar (f)
             f :: a -> [a]
           module main (z)
-            import foo (x)
-            import bar (f)
+            import .foo (x)
+            import .bar (f)
             z = f x
         |]
       , (flip $ assertGeneralType "complex parse (1)") int $
@@ -6760,7 +6757,7 @@ namespaceErrorTests =
         y :: Int
         y = 1
         module main (x)
-        import foo as let
+        import .foo as let
         x :: Int
         x = let.y
           |]
@@ -6772,7 +6769,7 @@ namespaceErrorTests =
         y :: Int
         y = 1
         module main (x)
-        import foo as do
+        import .foo as do
         x :: Int
         x = do.y
           |]
@@ -6792,7 +6789,7 @@ namespaceErrorTests =
         double :: Int -> Int
         double x = x
         module main (x)
-        import helpers as h
+        import .helpers as h
         x :: Int
         x = h.double "hello"
           |]
@@ -6804,7 +6801,7 @@ namespaceErrorTests =
         double :: Int -> Int
         double x = x
         module main (x)
-        import helpers as h
+        import .helpers as h
         x :: Int
         x = double 5
           |]
@@ -6818,7 +6815,7 @@ namespaceErrorTests =
         class Eq a where
           (==) :: a -> a -> Bool
         module main (test)
-        import eq ((==))
+        import .eq ((==))
         test :: Bool
         test = True
           |]
@@ -11795,7 +11792,7 @@ typeIdentityTests =
             mk :: Int -> Batch
             withSink :: Int -> (Batch -> Int) -> Int
           module main (total, viaSink)
-            import lib (mk, withSink)
+            import .lib (mk, withSink)
             sum :: [Int] -> Int
             total :: Int -> Int
             total n = sum (mk n)
@@ -11811,7 +11808,7 @@ typeIdentityTests =
               y :: Int
             mk :: Int -> P
           module main (f)
-            import lib (mk)
+            import .lib (mk)
             f :: Int -> Int
             f n = .y (mk n)
         |]
@@ -11825,7 +11822,7 @@ typeIdentityTests =
             type Batch = [P]
             mk :: Int -> Batch
           module main (f)
-            import lib (mk, Batch)
+            import .lib (mk, Batch)
             map :: (a -> b) -> [a] -> [b]
             f :: Int -> [Int]
             f n = map .y (mk n)
@@ -11837,7 +11834,7 @@ typeIdentityTests =
             type Batch = [Int]
             mk :: Int -> Batch
           module main (f)
-            import lib (mk, Batch as B)
+            import .lib (mk, Batch as B)
             sum :: [Int] -> Int
             f :: Int -> Int
             f n = sum (mk n)
@@ -11853,7 +11850,7 @@ typeIdentityTests =
               size :: a -> Batch
             mk :: Int -> Int
           module main (f)
-            import lib (Sized, mk)
+            import .lib (Sized, mk)
             sum :: [Int] -> Int
             instance Sized Int where
               size x = [x]
@@ -11869,7 +11866,7 @@ typeIdentityTests =
             mk :: Int -> P
             getx :: P -> Int
           module main (f, g)
-            import lib (mk, getx)
+            import .lib (mk, getx)
             record P where
               z :: Str
             mkq :: Str -> P
@@ -11885,7 +11882,7 @@ typeIdentityTests =
             type Batch = [Int]
             mk :: Int -> Batch
           module main (bad)
-            import lib (mk)
+            import .lib (mk)
             type Batch = Str
             bad :: Int -> Str
             bad n = mk n
@@ -11898,7 +11895,7 @@ typeIdentityTests =
               x :: Int
             mk :: Int -> P
           module main (bad)
-            import lib (mk)
+            import .lib (mk)
             record P where
               z :: Str
             bad :: Int -> Str
@@ -11912,7 +11909,7 @@ typeIdentityTests =
               x :: Int
             mk :: Int -> P
           module main (bad)
-            import lib (mk)
+            import .lib (mk)
             record P where
               x :: Int
             bad :: Int -> P
@@ -11932,7 +11929,7 @@ typeIdentityTests =
               x :: Int
             mk :: Int -> P
           module main (f)
-            import lib (mk)
+            import .lib (mk)
             f :: P -> Int
             f p = .x p
         |]
@@ -11942,7 +11939,7 @@ typeIdentityTests =
           module lib (Batch)
             type Batch = [Int]
           module main (f)
-            import lib (Batch)
+            import .lib (Batch)
             type Batch = [Str]
             f :: Batch -> Int
         |]
@@ -11953,7 +11950,7 @@ typeIdentityTests =
             type Batch = [Int]
             mk :: Int -> Batch
           module main (f)
-            import lib (mk, Batch)
+            import .lib (mk, Batch)
             f :: Int -> Int
         |]
       , expectError
@@ -11964,7 +11961,7 @@ typeIdentityTests =
             type B = Int
             x :: A -> B
           module main (f)
-            import lib (x)
+            import .lib (x)
             type A = B
             type B = A
             f :: A -> Int
@@ -11976,7 +11973,7 @@ typeIdentityTests =
             type Cell = Int
             x :: Cell -> Int
           module main (f)
-            import lib (x)
+            import .lib (x)
             type Cell = Str
             f :: Cell -> Int
         |]
@@ -11988,7 +11985,7 @@ typeIdentityTests =
               v :: Int
             record Py => Box = "dict"
           module main (f)
-            import lib (Box)
+            import .lib (Box)
             record Py => Box = "MyBox"
             f :: Box -> Int
         |]

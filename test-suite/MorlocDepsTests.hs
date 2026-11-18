@@ -35,6 +35,7 @@ import Morloc.Namespace.State
   , MorlocError
   , MorlocMonad
   , PackageMeta (..)
+  , MorlocDep (..)
   )
 
 -- | Run a MorlocMonad-returning action and extract the Either result.
@@ -46,12 +47,9 @@ runMM action = do
           { configHome = home <> "/.local/share/morloc"
           , configState = home <> "/.local/share/morloc"
           , configLibrary = home <> "/.local/share/src/morloc"
-          , configPlane = "default"
-          , configPlaneCore = "morloclib"
           , configTmpDir = home <> "/.morloc/tmp"
           , configBuildConfig = home <> "/.morloc/.build-config.yaml"
           , configLangOverrides = mempty
-          , configRegistry = Nothing
           }
   ((r, _), _) <- MM.runMorlocMonad Nothing 0 cfg defaultValue action
   return r
@@ -104,12 +102,9 @@ runMMSnapshot stateDir action = do
           { configHome = home <> "/.local/share/morloc"
           , configState = stateDir
           , configLibrary = stateDir <> "/src/morloc"
-          , configPlane = "default"
-          , configPlaneCore = "morloclib"
           , configTmpDir = home <> "/.morloc/tmp"
           , configBuildConfig = home <> "/.morloc/.build-config.yaml"
           , configLangOverrides = mempty
-          , configRegistry = Nothing
           }
   ((r, _), _) <- MM.runMorlocMonad Nothing 0 cfg defaultValue action
   return r
@@ -131,8 +126,8 @@ loadSnapshotTests =
         case r of
           Left e -> assertFailure (show e)
           Right m -> do
-            Map.lookup "root" m @?= Just "abc"
-            Map.lookup "math" m @?= Just "def"
+            Map.lookup "root" m @?= Just ("abc", Nothing)
+            Map.lookup "math" m @?= Just ("def", Nothing)
     , testCase "conflicting hashes across (non-dot) files is rejected" $ do
         tmp <- SD.getTemporaryDirectory
         let stateDir = tmp </> "morloc-snap-conflict"
@@ -166,20 +161,37 @@ snapshotLineTests =
     "snapshot pin-file line parser"
     [ testCase "name and hash" $
         parseSnapshotLine "root-py 64bc6da7391cbb1784af32ce621dddee56b121f8"
-          @?= Just ("root-py", "64bc6da7391cbb1784af32ce621dddee56b121f8")
+          @?= Just (Right ("root-py", "64bc6da7391cbb1784af32ce621dddee56b121f8", Nothing))
     , testCase "extra whitespace is tolerated" $
         parseSnapshotLine "   math-py    303b8805d406690f3e1d584375001708d9451c42  "
-          @?= Just ("math-py", "303b8805d406690f3e1d584375001708d9451c42")
+          @?= Just (Right ("math-py", "303b8805d406690f3e1d584375001708d9451c42", Nothing))
     , testCase "trailing comment is stripped" $
         parseSnapshotLine "bits 3ce5cc2ae8673b3799d0f8dc942a9931e344c162  # bits v0.2"
-          @?= Just ("bits", "3ce5cc2ae8673b3799d0f8dc942a9931e344c162")
+          @?= Just (Right ("bits", "3ce5cc2ae8673b3799d0f8dc942a9931e344c162", Nothing))
     , testCase "full-line comment is ignored" $
         parseSnapshotLine "# stdlib snapshot for morloc 0.98" @?= Nothing
     , testCase "blank line is ignored" $
         parseSnapshotLine "   " @?= Nothing
-    , testCase "name without a hash is ignored" $
-        parseSnapshotLine "lonely-name" @?= Nothing
+    , testCase "name without a hash is an error" $
+        assertBool "expected Left" (isLeftJust (parseSnapshotLine "lonely-name"))
+    , testCase "PKG-7: library line with its source" $
+        parseSnapshotLine "weena/bits 3ce5 github:weena/bits"
+          @?= Just (Right ("weena/bits", "3ce5", Just "github:weena/bits"))
+    , testCase "PKG-7: shipped library line needs no source" $
+        parseSnapshotLine "bio/convert 3ce5"
+          @?= Just (Right ("bio/convert", "3ce5", Nothing))
+    , testCase "PKG-7: unshipped library line without a source is an error" $
+        assertBool "expected Left" (isLeftJust (parseSnapshotLine "weena/bits 3ce5"))
+    , testCase "PKG-7: std/ spelling is an error" $
+        assertBool "expected Left" (isLeftJust (parseSnapshotLine "std/root 3ce5"))
+    , testCase "PKG-7: a stdlib line gives no source" $
+        assertBool "expected Left" (isLeftJust (parseSnapshotLine "root 3ce5 github:morloclib/root"))
+    , testCase "PKG-7: a fourth token is an error" $
+        assertBool "expected Left" (isLeftJust (parseSnapshotLine "root 3ce5 x y"))
     ]
+  where
+    isLeftJust (Just (Left _)) = True
+    isLeftJust _ = False
 
 -- ---------------------------------------------------------------------------
 -- morloc-version gate integration (loadModuleMetadata, the make-time path)
@@ -256,8 +268,8 @@ packageYamlParserTests =
           Left e -> assertFailure (show e)
           Right pm ->
             packageMorlocDependencies pm
-              @?= [ ("root", "1a2b3c4d5e6f7890abcdef1234567890abcdef12")
-                  , ("table", "9f8e7d6c5b4a39281706050403020100f0e1d2c3")
+              @?= [ MorlocDep "root" "std" Nothing "1a2b3c4d5e6f7890abcdef1234567890abcdef12"
+                  , MorlocDep "table" "std" Nothing "9f8e7d6c5b4a39281706050403020100f0e1d2c3"
                   ]
     , testCase "canonical morloc-deps key is parsed" $ do
         let yamlText =
@@ -269,7 +281,7 @@ packageYamlParserTests =
           Left e -> assertFailure (show e)
           Right pm ->
             packageMorlocDependencies pm
-              @?= [("root", "1a2b3c4d5e6f7890abcdef1234567890abcdef12")]
+              @?= [MorlocDep "root" "std" Nothing "1a2b3c4d5e6f7890abcdef1234567890abcdef12"]
     , testCase "morloc-deps wins when both keys are present" $ do
         let yamlText =
               "name: foo\n\
@@ -283,7 +295,7 @@ packageYamlParserTests =
           Left e -> assertFailure (show e)
           Right pm ->
             packageMorlocDependencies pm
-              @?= [("root", "aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111")]
+              @?= [MorlocDep "root" "std" Nothing "aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111"]
     , testCase "deprecated morloc-dependencies alias still parses" $ do
         let yamlText =
               "name: foo\n\
@@ -294,7 +306,7 @@ packageYamlParserTests =
           Left e -> assertFailure (show e)
           Right pm ->
             packageMorlocDependencies pm
-              @?= [("root", "1a2b3c4d5e6f7890abcdef1234567890abcdef12")]
+              @?= [MorlocDep "root" "std" Nothing "1a2b3c4d5e6f7890abcdef1234567890abcdef12"]
     , testCase "missing git-hash field is rejected" $ do
         let yamlText =
               "name: foo\n\
@@ -333,46 +345,46 @@ resolverTests =
     "Resolver: closer-to-install-root wins"
     [ testCase "two distinct pins at depth 0 coexist" $ do
         result <- runMM $ do
-          m1 <- addPin Map.empty 0 "root-pkg" "X" "hashX"
-          addPin m1 0 "root-pkg" "Y" "hashY"
+          m1 <- addPin Map.empty 0 "root-pkg" "X" "hashX" Nothing
+          addPin m1 0 "root-pkg" "Y" "hashY" Nothing
         case result of
           Left e -> assertFailure (show e)
           Right m -> do
-            Map.lookup "X" m @?= Just (PinEntry "hashX" 0 "root-pkg")
-            Map.lookup "Y" m @?= Just (PinEntry "hashY" 0 "root-pkg")
+            Map.lookup "X" m @?= Just (PinEntry "hashX" 0 "root-pkg" Nothing)
+            Map.lookup "Y" m @?= Just (PinEntry "hashY" 0 "root-pkg" Nothing)
 
     , testCase "shallower pin wins over deeper pin" $ do
         result <- runMM $ do
-          m1 <- addPin Map.empty 0 "root-pkg" "X" "rootHash"
-          addPin m1 1 "child-pkg" "X" "childHash"
+          m1 <- addPin Map.empty 0 "root-pkg" "X" "rootHash" Nothing
+          addPin m1 1 "child-pkg" "X" "childHash" Nothing
         case result of
           Left e -> assertFailure (show e)
           Right m ->
-            Map.lookup "X" m @?= Just (PinEntry "rootHash" 0 "root-pkg")
+            Map.lookup "X" m @?= Just (PinEntry "rootHash" 0 "root-pkg" Nothing)
 
     , testCase "deeper-existing replaced by shallower new pin" $ do
         result <- runMM $ do
-          m1 <- addPin Map.empty 2 "grandchild-pkg" "X" "grandHash"
-          addPin m1 1 "sibling-pkg" "X" "siblingHash"
+          m1 <- addPin Map.empty 2 "grandchild-pkg" "X" "grandHash" Nothing
+          addPin m1 1 "sibling-pkg" "X" "siblingHash" Nothing
         case result of
           Left e -> assertFailure (show e)
           Right m ->
-            Map.lookup "X" m @?= Just (PinEntry "siblingHash" 1 "sibling-pkg")
+            Map.lookup "X" m @?= Just (PinEntry "siblingHash" 1 "sibling-pkg" Nothing)
 
     , testCase "siblings at same depth with same hash is no-op" $ do
         result <- runMM $ do
-          m1 <- addPin Map.empty 1 "sibling-A" "X" "hashAgree"
-          addPin m1 1 "sibling-B" "X" "hashAgree"
+          m1 <- addPin Map.empty 1 "sibling-A" "X" "hashAgree" Nothing
+          addPin m1 1 "sibling-B" "X" "hashAgree" Nothing
         case result of
           Left e -> assertFailure (show e)
           Right m ->
             -- whoever got there first owns the entry; same hash either way
-            Map.lookup "X" m @?= Just (PinEntry "hashAgree" 1 "sibling-A")
+            Map.lookup "X" m @?= Just (PinEntry "hashAgree" 1 "sibling-A" Nothing)
 
     , testCase "siblings at same depth with different hash errors" $ do
         result <- runMM $ do
-          m1 <- addPin Map.empty 1 "sibling-A" "X" "hashOne"
-          addPin m1 1 "sibling-B" "X" "hashTwo"
+          m1 <- addPin Map.empty 1 "sibling-A" "X" "hashOne" Nothing
+          addPin m1 1 "sibling-B" "X" "hashTwo" Nothing
         case result of
           Right m -> assertFailure ("expected conflict error, got: " <> show m)
           Left _ -> return ()  -- expected

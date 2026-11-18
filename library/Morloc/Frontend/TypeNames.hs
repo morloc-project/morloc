@@ -21,13 +21,14 @@ module Morloc.Frontend.TypeNames
   ( resolveTypeNames
   , reservedTypeNames
   , isReservedTypeName
+  , homePath
   ) where
 
 import qualified Data.Set as Set
 import Control.Exception (SomeException, try)
 import qualified Data.Yaml.Config as YC
 import System.Directory (doesFileExist, makeAbsolute)
-import System.FilePath (addTrailingPathSeparator, takeDirectory)
+import System.FilePath (addTrailingPathSeparator, makeRelative, splitDirectories, takeDirectory)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Morloc.Data.DAG as DAG
@@ -170,26 +171,39 @@ resolveModule canonical m e children = do
               <+> "and also declares a type of that name; remove the import or rename one of them"
       | otherwise = return ()
 
--- | A module's path below the generated-type prefix (GEN-4), given the
--- package its file belongs to. Components split at @.@ and @-@ becomes @_@;
--- installed names hold no @_@, so the mapping is one to one for them. A
--- package's local submodule (@.lib.x@) is placed under the package's name,
--- so its path is the same while the package is developed and once it is
--- installed. A module of no package (a script, its local imports) goes
--- under @_local@, which no installed name produces.
+-- | A module's path below the generated-type prefix (GEN-4), given the key
+-- of the package its file belongs to. Components split at @.@ and @-@
+-- becomes @_@; installed names hold no @_@, so the mapping is one to one for
+-- them. A stdlib module's path starts with its name; a module of library @l@
+-- is placed under @_lib@ and @l@. A package's local submodule (@.lib.x@) is
+-- placed under the package, so its path is the same while the package is
+-- developed and once it is installed. A module of no library (a script, a
+-- program's package, their local imports) goes under @_local@. No name
+-- produces a component starting with @_@.
 homePath :: Maybe Text -> MVar -> [Text]
 homePath package (MV name) = case package of
   Just p
-    | T.isPrefixOf "." name -> parts p <> parts (T.dropWhile (== '.') name)
-    | otherwise -> parts name
+    | T.isPrefixOf "." name -> keyParts p <> parts (T.dropWhile (== '.') name)
+    -- the package's own module, built where it is developed, keyed by its
+    -- header: placed as it is once installed
+    | [l, pn] <- T.splitOn "/" p
+    , not ("/" `T.isInfixOf` name)
+    , T.takeWhile (/= '.') name == pn ->
+        keyParts (l <> "/" <> name)
+    | otherwise -> keyParts name
   Nothing -> "_local" : parts (T.dropWhile (== '.') name)
   where
     parts = map (T.replace "-" "_") . filter (not . T.null) . T.splitOn "."
+    keyParts k = case T.splitOn "/" k of
+      [l, rest] -> ["_lib", T.replace "-" "_" l] <> parts rest
+      _ -> parts k
 
--- | The name of the package a module file belongs to: that of the nearest
--- @package.yaml@ in its directory or above it, searching no higher than the
--- module library (for an installed module) or the project root (for any
--- other). Nothing when there is none, or it names no package.
+-- | The key of the package a module file belongs to (@name@ for stdlib,
+-- else @library/name@): that of the nearest @package.yaml@ in its directory
+-- or above it, searching no higher than the module plane (for an installed
+-- module) or the project root (for any other). An installed package is
+-- named by its place in the plane (PKG-3); any other by its @library@ and
+-- @name@. Nothing when there is none, or it names no library and name.
 packageOf :: Path -> Maybe Path -> Maybe Path -> IO (Maybe Text)
 packageOf _ _ Nothing = return Nothing
 packageOf library projectRoot (Just file0) = do
@@ -215,11 +229,20 @@ packageOf library projectRoot (Just file0) = do
                 -- A package.yaml that cannot be read is reported where the
                 -- loader reads it; here it names no package.
                 meta <- try (YC.loadYamlSettings [f] [] YC.ignoreEnv) :: IO (Either SomeException PackageMeta)
-                return $ case meta of
-                  Right m | not (T.null (packageName m)) -> Just (packageName m)
+                let installed = case splitDirectories (makeRelative lib dir) of
+                      [l, n] | addTrailingPathSeparator lib `isPrefixOf` addTrailingPathSeparator dir -> Just (key (T.pack l) (T.pack n))
+                      _ -> Nothing
+                return $ case (installed, meta) of
+                  (Just k, _) -> Just k
+                  (Nothing, Right m)
+                    | not (T.null (packageName m)), Just l <- packageLibrary m -> Just (key l (packageName m))
                   _ -> Nothing
               else if takeDirectory dir == dir then return Nothing else go (takeDirectory dir)
   go (takeDirectory file)
+  where
+    key l n
+      | l == "std" = n
+      | otherwise = l <> "/" <> n
 
 -- | The general types a module declares.
 localTypes :: ExprI -> [TVar]

@@ -1,0 +1,6 @@
+module main (f)
+
+import bio/convert (bioValue)
+
+f :: Int
+f = bioValue
