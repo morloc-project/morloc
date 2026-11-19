@@ -114,4 +114,32 @@ model/issues/LIST.md), checked against the code 2026-11-04 [read].
   headers are found only through the default search path of the
   environment's own compiler. Under `stack test`, whose PATH puts the
   system g++ first, `#include <nlohmann/json.hpp>` (spec-gen-7-2) is not
-  found; the golden sets CXX to the environment's compiler.
+  found; the golden sets CXX to the environment's compiler. [read,
+  2026-11-19] That search path comes from the `conda-gcc-specs` package:
+  its specs file adds `$CONDA_PREFIX/include` and `-rpath
+  $CONDA_PREFIX/lib`, so a provisioned library also links and loads
+  through it (htslib via `cxx-flags: [-lhts]`: RPATH
+  /env/.pixi/envs/default/lib). Any other compiler sees none of it, and
+  macOS has no such package. Design open: put the prefix on the compile
+  line, or require the environment's compiler.
+
+- **A build outside a managed environment ignores declared dependencies.**
+  [reproduced, 2026-11-19] Gap: no spec item says what a build does with
+  `cpp-deps`/`py-deps`/`r-deps` when nothing provisions them. With no
+  `MORLOC_ENV`/`MORLOC_BUILD_HOOK` (ProgramBuilder/Build.hs `runSync`) the
+  declarations are skipped and nothing checks them, so the failure is the
+  foreign tool's: on the CI runners spec-gen-7-2 fails in g++
+  (`nlohmann/json.hpp: No such file or directory`) and a pydantic record
+  kind failed at pool load (`No module named 'pydantic'`). Design open:
+  refuse at make time, check presence (header, import) and name the
+  dependency, or treat CI as a provisioner.
+
+- **A C++ link name is provisioned as a conda package.** [reproduced,
+  2026-11-19] `dependencies` is documented as link names only (`foo` ->
+  `-lfoo`, lang-cpp.asc), but EnvSpec.hs `systemReqs` sends each as a
+  `system` requirement with provider `unspecified`, and mim adds every
+  non-`host` system requirement to the solve as a conda package of that
+  name (morloc-manager morloc-deps/src/pixi.rs). `dependencies: [hts]`
+  fails the solve: "No candidates were found for hts". The documented
+  `boost_filesystem` example fails the same way. Gap: no item in either
+  model says what a `system` requirement means.
