@@ -3377,6 +3377,7 @@ pub(crate) mod tests {
     // not its name starts with '/'.
     #[test]
     fn a_file_backed_segment_lands_in_the_fallback_directory() {
+        let _arena = crate::own_test_shm();
         let fallback = crate::ScopedFallback::new("fbjoin");
         let dir = fallback.path().to_path_buf();
         let name = format!("morloc-{}-fbjoin-0001", std::process::id());
@@ -3414,11 +3415,31 @@ pub(crate) mod tests {
 
     /// A program of one small volume, so that a freed block is soon the
     /// only room left. The caller holds the exclusive test arena.
-    pub(crate) fn small_volume(tag: &str) -> crate::ScopedFallback {
+    pub(crate) fn small_volume(tag: &str) -> SmallVolume {
         let _ = shclose();
         let fallback = crate::ScopedFallback::new(tag);
         shinit(&format!("/morloc-{}-test-{tag}", std::process::id()), 4096).unwrap();
-        fallback
+        SmallVolume { _fallback: fallback }
+    }
+
+    pub(crate) struct SmallVolume {
+        _fallback: crate::ScopedFallback,
+    }
+
+    impl Drop for SmallVolume {
+        fn drop(&mut self) {
+            let _ = shclose();
+        }
+    }
+
+    #[test]
+    fn a_small_volume_is_closed_when_its_scope_ends() {
+        let _arena = crate::own_test_shm();
+        {
+            let _fallback = small_volume("scope");
+        }
+        let left = get_common_basename();
+        assert!(left.is_empty(), "the next test would allocate in {left}");
     }
 
     /// Allocate until `addr` is handed back; the other blocks taken on the way.
