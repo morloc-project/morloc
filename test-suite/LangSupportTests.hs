@@ -65,6 +65,10 @@ langSupportTests =
                 opt name = [pkgOptional p | p <- reqs, pkgName p == name]
             opt "pyarrow" @?= [True]
             opt "numpy" @?= [False]
+        , testCase "python requires pydantic v2 at runtime for pydantic record kinds" $ withParsed $ \t -> do
+            let reqs = maybe [] leRequires (Map.lookup "py" (lsLanguages t))
+            [(pkgConstraint p, pkgPhase p, pkgOptional p) | p <- reqs, pkgName p == "pydantic"]
+                @?= [(">=2,<3", Runtime, False)]
         ]
     , testGroup
         "drift guard vs DataFiles.langSetups"

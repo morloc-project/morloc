@@ -142,7 +142,7 @@ jobs:
             gcc \
             make \
             libgsl-dev
-          python3 -m pip install --break-system-packages --upgrade setuptools numpy pyarrow
+          python3 -m pip install --break-system-packages --upgrade setuptools numpy pyarrow 'pydantic>=2,<3'
 
       - name: Install system dependencies (macOS)
         if: runner.os == 'macOS'
@@ -161,7 +161,7 @@ jobs:
           # the macOS runner breaks R's handling of multibyte (e.g. CJK) strings.
           echo "LANG=en_US.UTF-8" >> "$GITHUB_ENV"
           echo "LC_ALL=en_US.UTF-8" >> "$GITHUB_ENV"
-          python3 -m pip install --break-system-packages --upgrade setuptools numpy pyarrow
+          python3 -m pip install --break-system-packages --upgrade setuptools numpy pyarrow 'pydantic>=2,<3'
           R --version
 
       - name: Install Futhark (hosted-guest toolchain; not in apt) (Linux)

@@ -9,6 +9,8 @@ requires:
   # numpy C-API at runtime for array/tensor data -- always required. <3 guards a
   # future numpy-3 ABI break.
   - { package: numpy,      version: ">=1.22,<3", phase: both }
+  # pydantic: the generated classes of pydantic record kinds use the v2 API.
+  - { package: pydantic,   version: ">=2,<3",    phase: runtime }
   # py3.12 dropped distutils and bare conda python omits setuptools/pip.
   - { package: setuptools, version: "*",         phase: build }
   - { package: pip,        version: "*",         phase: build }
