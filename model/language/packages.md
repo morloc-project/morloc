@@ -130,3 +130,83 @@ the next install replaces it. An install that fails leaves the module as it
 was before (a replaced module is put back) and records no origin;
 dependencies it installed stay installed. Installs and origin changes in one
 environment run one at a time.
+
+## Native dependencies
+
+A package lives in the environment's prefix P (`CONDA_PREFIX` of a managed
+build, one where `MORLOC_ENV` is set): headers in P/include, libraries in
+P/lib, programs in P/bin. A build outside a managed environment has no P.
+
+### PKG-12 A cpp-deps entry declares a package, its headers and its link names
+Intent: ruled 2026-11-19
+Tests: spec-pkg-12-1, spec-pkg-12-2, spec-pkg-12-3, spec-pkg-12-4, spec-pkg-12-5, spec-pkg-12-6
+Code: conforms 2026-11-19
+
+A `cpp-deps` entry names a package the environment provides, with keys
+`version`, `source`, `channel`, `namespace` (GEN-7), `import` (its headers)
+and `libs` (its link names, each one `-l<name>` on a C++ pool's link line);
+any other key is refused. A link name is a bare name: no leading `-`, no
+`lib` prefix, no library suffix, no whitespace. A header is ASCII without
+`<`, `>`, `"` or whitespace. `libs` reaches C++ pools only; Rust names its
+links in its own source. The `dependencies` key is refused, empty or not,
+naming its replacements: a package's `libs`, `tool-deps` for a program, and
+`cxx-flags` for a library the environment does not provide.
+
+Why: one field meant both a link name and a package to install, so a link
+name that is not a package name (`hts`, `boost_filesystem`) failed the
+solve.
+
+### PKG-13 A native pool build sees the environment, whatever the compiler
+Intent: ruled 2026-11-19
+Tests: spec-pkg-13-1, spec-pkg-13-2
+Code: conforms 2026-11-19
+
+In a managed build every native compile (a C++ pool, a Rust pool, a guest's
+C) searches P/include for headers and P/lib for libraries, after morloc's
+own directories, and the pool records P/lib as a run path (DT_RPATH on
+Linux, so a caller's `LD_LIBRARY_PATH` does not replace the environment's
+libraries). A managed build whose `CONDA_PREFIX` is unset, empty or not a
+directory, or whose P/lib holds a libmorloc, is refused. A pool built this
+way runs only where P exists at the same path, as in serve and frozen
+images.
+
+### PKG-14 A declared header that does not resolve is refused by name
+Intent: ruled 2026-11-19
+Tests: spec-pkg-14-1
+Code: conforms 2026-11-19
+
+A C++ pool build checks every `import` header of every cpp-deps entry of
+the program, managed or not, and a header that does not resolve is refused
+naming the dependency and the header. Only headers are checked: a missing
+library is the linker's `cannot find -l<name>`, versions are not checked,
+and a header found outside P passes.
+
+### PKG-15 Each cxx-flags entry is one argument
+Intent: ruled 2026-11-19
+Tests: spec-pkg-15-1
+Code: conforms 2026-11-19
+
+Each entry of `cxx-flags` and of `-X cpp:flags` reaches the compiler as
+exactly one argument, never split or expanded by a shell.
+
+### PKG-16 A tool's declared executables must resolve at build
+Intent: ruled 2026-11-19
+Tests: spec-pkg-16-1, spec-pkg-16-2
+Code: conforms 2026-11-19
+
+A `tool-deps` entry may name its executables under `bin`, as plain names
+without `/` or whitespace; any key other than `version`, `source`,
+`channel` and `bin` is refused. Each executable must resolve at build, in
+P/bin when managed and on `PATH` otherwise, or the build is refused naming
+the dependency and the executable. An entry without `bin` is not checked: a
+package name is not an executable name (`star` installs `STAR`).
+
+### PKG-17 A pool finds the environment's programs first
+Intent: ruled 2026-11-19
+Tests: spec-pkg-17-1
+Code: conforms 2026-11-19
+
+A program built in a managed environment records P, and the nexus starts
+every pool with P/bin first on `PATH`, so declared tools resolve to the
+environment's whatever `PATH` the program was started from. A program built
+outside one records nothing, and its pools inherit `PATH` unchanged.

@@ -77,6 +77,7 @@ import Morloc.CodeGenerator.OwnershipCheck (checkManifold)
 import System.Environment (lookupEnv)
 import Morloc.CodeGenerator.GenDefs (DataDef (..), Disagreement (..), GenDef (..), carriedTemplateArgs, dataDefs, dataNamesIn, nativeDataParams, RecordUse, disagreements, inPoolSerialASTs, placeTypes, genDefs, nativeParam, nativeParams, recordUses, depNamespaces, nameRoot)
 import qualified Morloc.CodeGenerator.Platform as P
+import qualified Morloc.CodeGenerator.SystemConfig as SC
 import Morloc.CodeGenerator.Serial
   ( serialAstToType
   , serialAstToNativeType
@@ -680,6 +681,7 @@ translate srcs es = do
   (ddefs, dfails) <- dataDefs cppLang named
   intrAsts <- inPoolSerialASTs cppLang es
   depRoots <- depNamespaces "cpp"
+  depGuards <- dependencyHeaderGuards
   gscope <- MM.getGeneralScope
   let translatorState = defaultValue
         { translatorEffectLabels = effectMap
@@ -701,7 +703,7 @@ translate srcs es = do
         , translatorRecordUses = uses
         }
       pool = planPool cppCaps es
-      ((code, headers), stEnd) = CMS.runState (makeCppCode labels srcs' es universalScopeMap closureTable stageTable nativeEntries) translatorState
+      ((code, headers), stEnd) = CMS.runState (makeCppCode depGuards labels srcs' es universalScopeMap closureTable stageTable nativeEntries) translatorState
   mapM_ (MM.throwRejected . ("C++ pool:" <+>) . pretty) (translatorErrors stEnd)
   when checkOn $
     case concatMap (checkOne pool) (translatorLowered stEnd) of
@@ -727,11 +729,32 @@ translate srcs es = do
       , scriptMake = maker
       }
 
+-- | PKG-14: one check per header of every cpp-deps entry of the program, so a
+-- header that does not resolve is refused naming its dependency.
+dependencyHeaderGuards :: MorlocMonad [MDoc]
+dependencyHeaderGuards = do
+  metas <- MM.gets statePackageMeta
+  return
+    [ vsep
+        [ "#if !__has_include(<" <> pretty h <> ">)"
+        , "#error \"C++ dependency" <+> pretty name <+> "(header" <+> pretty h <> ") not found\""
+        , "#endif"
+        ]
+    | (name, h) <-
+        unique
+          [ (name, h)
+          | meta <- metas
+          , (name, d) <- Map.toList (Map.findWithDefault Map.empty "cpp" (packageDepImports meta))
+          , h <- diImports d
+          ]
+    ]
+
 -- Substitute the version placeholder shared by the member and host templates.
 subVersion :: Text -> Text
 subVersion = T.replace "__MORLOC_VERSION__" (MT.pack MV.versionStr)
 
 makeCppCode ::
+  [MDoc] ->
   Map.Map Int Text ->
   [Source] ->
   [SerialManifold] ->
@@ -740,7 +763,7 @@ makeCppCode ::
   Map.Map Int StageEntry ->
   Set.Set Int ->
   CppTranslator (MDoc, [([Text], Text)])
-makeCppCode labels srcs es univeralScopeMap closureTable0 stageTable nativeEntries = do
+makeCppCode depGuards labels srcs es univeralScopeMap closureTable0 stageTable nativeEntries = do
   -- Seeded before any type is rendered: 'cppTypeOf' consults it to tell a
   -- back-reference into a generated `data` type from an unmapped alias.
   CMS.modify $ \st -> st
@@ -750,10 +773,11 @@ makeCppCode labels srcs es univeralScopeMap closureTable0 stageTable nativeEntri
   (srcFwds, srcSerial, srcDeserial) <- generateSourcedSerializers univeralScopeMap es
 
   -- write include statements for sources
-  -- The generated headers come first, so a sourced file may name their
-  -- types (GEN-6).
+  -- The dependency checks come first (PKG-14), then the generated headers, so
+  -- a sourced file may name their types (GEN-6).
   let includeDocs =
-        ["#include" <+> dquotes (pretty (cppHeaderPath p)) | (p, _) <- headers]
+        depGuards
+          <> ["#include" <+> dquotes (pretty (cppHeaderPath p)) | (p, _) <- headers]
           <> map translateSource (unique . mapMaybe srcPath $ srcs)
 
   signatures0 <- concat <$> mapM (makeSignature nativeEntries) es
@@ -3345,12 +3369,18 @@ handleFlagsAndPaths :: [Source] -> MorlocMonad ([Source], [Text], [Path])
 handleFlagsAndPaths srcs = do
   state <- MM.get
   let gccversion = gccVersionFlag . foldl max 0 . map packageCppVersion $ statePackageMeta state
-  let explicitLibs = map ("-l" <>) . unique . concatMap packageDependencies $ statePackageMeta state
-  let userCxxFlags = unique . concatMap packageCxxFlags $ statePackageMeta state
+  let quoteArg = MT.pack . MS.shellQuote . MT.unpack
+  -- PKG-12: every cpp-deps entry's link names.
+  let explicitLibs = map (quoteArg . ("-l" <>)) . unique . concatMap (concat . Map.elems . packageCppLibs) $ statePackageMeta state
+  -- PKG-15: each entry is one argument.
+  let userCxxFlags = map quoteArg . unique . concatMap packageCxxFlags $ statePackageMeta state
   -- Raw `-X cpp:flags=...` (and the build-config default) passthrough: ordered,
-  -- verbatim, never deduplicated, appended after the package flags. Kept out of
+  -- never deduplicated, appended after the package flags. Kept out of
   -- `unique` because flag order and adjacency are load-bearing.
-  let cliCxxFlags = BP.lookupFlags "cpp" (stateLangParams state)
+  let cliCxxFlags = map quoteArg (BP.lookupFlags "cpp" (stateLangParams state))
+  let guestArgs = map (MT.pack . MS.shellQuote) (stateGuestObjects state) <> map quoteArg (stateGuestLinkFlags state)
+  -- PKG-13: the environment's headers and libraries, after morloc's own.
+  let envFlags = maybe [] (SC.prefixFlags P.hostPlatform) (stateEnvPrefix state)
   -- Collect sources belonging to this pool: cpp sources and any guest member
   -- whose pool host is cpp (e.g. futhark glue headers, srcLang=futhark). Their
   -- includes/-I flags must reach the cpp pool build.
@@ -3382,7 +3412,7 @@ handleFlagsAndPaths srcs = do
       -- libmorloc via LD_LIBRARY_PATH exported by the nexus at launch, which
       -- guarantees it loads the same libmorloc the nexus resolved. The
       -- state/modules/lib search dir covers a user library referenced by a
-      -- `-l` from dependencies/cxx-flags; its runtime load is likewise handled
+      -- `-l` from cxx-flags; its runtime load is likewise handled
       -- by the nexus LD_LIBRARY_PATH export, not a baked rpath.
       -- -rdynamic exports the pool's own symbols, so the crash handler's
       -- backtrace names generated manifolds rather than printing offsets.
@@ -3390,7 +3420,7 @@ handleFlagsAndPaths srcs = do
 
   return
     ( filter (isJust . srcPath) srcs'
-    , [gccversion] <> explicitLibs <> userCxxFlags <> cliCxxFlags ++ (map MT.pack . concat) (mlcPch : mlcInclude : mlcLib : libflags)
+    , [gccversion] <> guestArgs <> explicitLibs <> userCxxFlags <> cliCxxFlags ++ map MT.pack (mlcPch <> mlcInclude <> mlcLib) <> envFlags <> map MT.pack (concat libflags)
     , unique (catMaybes paths <> moduleDirs)
     )
 

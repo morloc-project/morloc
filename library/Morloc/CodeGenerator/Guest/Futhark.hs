@@ -259,6 +259,7 @@ futharkBuild srcs opts = do
 -- returns (object, header, manifest) paths
 buildOne :: Text -> Path -> GuestSource -> MorlocMonad (Path, Path, Path)
 buildOne backend outDir gs = do
+  envPrefix <- MM.gets stateEnvPrefix
   let stem = takeBaseName (gsPath gs)
       outStem = outDir </> stem
       cFile = outStem <.> "c"
@@ -270,7 +271,9 @@ buildOne backend outDir gs = do
         T.unwords ["futhark", backend, "--library", "-o", q outStem, q (gsPath gs)]
       -- $CC when set: a conda/pixi toolchain names its own compiler, and on
       -- macOS without the command-line tools /usr/bin/gcc is only a stub.
-      gccCmd = T.unwords ["${CC:-cc}", "-O2", "-c", q cFile, "-o", q oFile]
+      -- PKG-13: the environment's headers.
+      envInclude = maybe [] (\p -> ["-isystem", q (p </> "include")]) envPrefix
+      gccCmd = T.unwords (["${CC:-cc}", "-O2"] <> envInclude <> ["-c", q cFile, "-o", q oFile])
   MM.runCommand "Futhark.build" futCmd
   MM.runCommand "Futhark.build" gccCmd
   pure (oFile, hFile, jsonFile)
@@ -282,9 +285,8 @@ buildOne backend outDir gs = do
 backendLinkFlags :: Text -> [Text]
 backendLinkFlags "multicore" = ["-lpthread", "-lm"]
 backendLinkFlags "opencl" = case P.hostPlatform of
-  -- macOS ships OpenCL only as a framework. One element, since the package
-  -- flags are deduplicated and a lone "-framework" could be merged away.
-  P.Darwin -> ["-framework OpenCL", "-lm"]
+  -- macOS ships OpenCL only as a framework.
+  P.Darwin -> ["-framework", "OpenCL", "-lm"]
   _ -> ["-lOpenCL", "-lm"]
 backendLinkFlags "cuda" = ["-lcuda", "-lnvrtc", "-lm"]
 backendLinkFlags "hip" = ["-lamdhip64", "-lhiprtc", "-lm"]

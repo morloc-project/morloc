@@ -1,0 +1,4 @@
+name: main
+version: 0.0.0
+tool-deps:
+  fakepkg: "*"

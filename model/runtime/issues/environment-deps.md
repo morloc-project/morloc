@@ -1,20 +1,5 @@
 # Declared environment dependencies
 
-- **A declared tool is found through whatever PATH the program inherits.**
-  [read] Gap: no spec item says where a pool finds the executables of a
-  module's `tool-deps`. Pools inherit the nexus's environment unchanged
-  (morloc-nexus/src/process.rs, the spawn copies `vars_os()`), so a
-  program built in an environment and started from a shell without the
-  environment's bin dir on PATH runs whatever `STAR` comes first, or fails
-  when it reaches the call. `mim run`, serve and frozen images put the
-  environment's bin first. Interpreters have the same exposure (python3 from
-  PATH). Design open: the nexus could prepend the bin dir of the
-  environment a program was built in, or check the declared tools at
-  startup as `validate_pools` checks interpreters; a startup check needs
-  the executable names, which the conda package name does not give (star ->
-  STAR, trim-galore -> trim_galore), so `tool-deps` would need an optional
-  list of executables.
-
 - **Unknown package.yaml keys are ignored.** [read] Gap: no spec item for
   package.yaml validation. `FromJSON PackageMeta`
   (library/Morloc/Namespace/State.hs) reads only the keys it knows, so a
@@ -90,9 +75,6 @@ model/issues/LIST.md), checked against the code 2026-11-04 [read].
 - **envspec `modules` is first-wins, the resolver closer-wins.**
   `dedupFst` in EnvSpec.hs:200 (defined :265) versus `addPin`
   (Module.hs:128).
-- **A program with only system dependencies builds without a hook.**
-  `packageHasDeps` (ProgramBuilder/Build.hs:271) leaves out
-  `packageDependencies`, so such a program gets a warning, not an error.
 - **An empty `MORLOC_HOME`/`MORLOC_STATE` is unset to Haskell, set to the
   nexus.** Config.hs:86, :147, :256 treat empty as unset; morloc-nexus
   main.rs:39 and :51 do not (main.rs:413 does for `MORLOC_STATE`).
@@ -107,39 +89,31 @@ model/issues/LIST.md), checked against the code 2026-11-04 [read].
   language"; plugin languages get no registry entry, so their
   `generated_types` are ignored (Frontend/API.hs psTypeKinds and
   Restructure.hs withDefaultKinds read the built-in registry only).
-- **A provisioned C++ dependency's headers are found only by the
-  environment's compiler.** [reproduced, 2026-11-18] Gap in GEN-7 (a header
-  file includes what its fields name). The C++ pool compile line carries no
-  include directory for `cpp-deps` installed into the environment; their
-  headers are found only through the default search path of the
-  environment's own compiler. Under `stack test`, whose PATH puts the
-  system g++ first, `#include <nlohmann/json.hpp>` (spec-gen-7-2) is not
-  found; the golden sets CXX to the environment's compiler. [read,
-  2026-11-19] That search path comes from the `conda-gcc-specs` package:
-  its specs file adds `$CONDA_PREFIX/include` and `-rpath
-  $CONDA_PREFIX/lib`, so a provisioned library also links and loads
-  through it (htslib via `cxx-flags: [-lhts]`: RPATH
-  /env/.pixi/envs/default/lib). Any other compiler sees none of it, and
-  macOS has no such package. Design open: put the prefix on the compile
-  line, or require the environment's compiler.
+- **A build outside a managed environment checks only C++ headers and tool
+  executables.** [reproduced, 2026-11-19] Gap: outside a managed environment
+  nothing provisions declared dependencies (by design), and PKG-14/PKG-16
+  check cpp-deps `import` headers and tool-deps `bin` names, but `py-deps`
+  and `r-deps` are not checked, so a missing one fails at pool load (`No
+  module named 'pydantic'` on the CI runners). Design open: check imports at
+  build, or at pool start, naming the dependency.
+- **A system g++ in a managed environment cannot link against the prefix.**
+  [reproduced, 2026-11-19] With strict mode off and `CXX=/usr/bin/g++`, a
+  pool with `cpp-deps: {htslib: {libs: [hts]}}` compiles against P/include
+  but fails to link: the system driver runs the environment's `ld` from
+  PATH, which links conda's sysroot libpthread/libdl (`undefined reference to
+  ... @GLIBC_PRIVATE`). Mixing a host compiler with the environment's
+  libraries is outside PKG-13; mim's strict mode refuses such a compiler.
+  Design open: refuse a host compiler in any managed build, or document it.
 
-- **A build outside a managed environment ignores declared dependencies.**
-  [reproduced, 2026-11-19] Gap: no spec item says what a build does with
-  `cpp-deps`/`py-deps`/`r-deps` when nothing provisions them. With no
-  `MORLOC_ENV`/`MORLOC_BUILD_HOOK` (ProgramBuilder/Build.hs `runSync`) the
-  declarations are skipped and nothing checks them, so the failure is the
-  foreign tool's: on the CI runners spec-gen-7-2 fails in g++
-  (`nlohmann/json.hpp: No such file or directory`) and a pydantic record
-  kind failed at pool load (`No module named 'pydantic'`). Design open:
-  refuse at make time, check presence (header, import) and name the
-  dependency, or treat CI as a provisioner.
+- **The manual still documents the removed `dependencies` field.** [read,
+  2026-11-19] lang-cpp.asc and ecosystem.asc describe `dependencies` (two
+  different ways); PKG-12 removed it in favour of cpp-deps `libs`, and the
+  manual has no `libs`, tool-deps `bin` or PKG-13/17 behaviour yet. Also
+  arch-eco-modules.asc, lang-parameters.asc, deploy-dependencies.asc:70,
+  interface-install.asc:214.
 
-- **A C++ link name is provisioned as a conda package.** [reproduced,
-  2026-11-19] `dependencies` is documented as link names only (`foo` ->
-  `-lfoo`, lang-cpp.asc), but EnvSpec.hs `systemReqs` sends each as a
-  `system` requirement with provider `unspecified`, and mim adds every
-  non-`host` system requirement to the solve as a conda package of that
-  name (morloc-manager morloc-deps/src/pixi.rs). `dependencies: [hts]`
-  fails the solve: "No candidates were found for hts". The documented
-  `boost_filesystem` example fails the same way. Gap: no item in either
-  model says what a `system` requirement means.
+- **The Python binding build discards the environment's CFLAGS.**
+  [read, 2026-11-19] data/lang/py/init.sh exports
+  `CFLAGS="$SANITIZE_FLAGS"`, empty unless sanitizing, so the activation's
+  CFLAGS (`-isystem $CONDA_PREFIX/include`, ...) never reach setuptools.
+  Impact unknown: setup.py names its include dirs itself.

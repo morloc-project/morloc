@@ -101,6 +101,8 @@ import qualified Morloc.Data.Text as MT
 import qualified Morloc.Language as ML
 import qualified Morloc.Monad as MM
 import qualified Morloc.System as MS
+import qualified Morloc.CodeGenerator.Platform as P
+import qualified Morloc.CodeGenerator.SystemConfig as SC
 import qualified Morloc.Version as MV
 import Morloc.Quasi
 import System.Directory (findExecutable)
@@ -1756,6 +1758,7 @@ translate srcs es0 = do
         | not (null typeCrates)
         ]
   installDir <- MM.gets stateInstallDir
+  envPrefix <- MM.gets stateEnvPrefix
   profile <- MM.gets stateLangParams >>= either (MM.throwRejected . pretty) return . resolveRustProfile
   -- The pool crate/bin name is derived from the build LOCATION (unique per
   -- program/build-dir, stable across edits of one program). With a shared cargo
@@ -1767,7 +1770,7 @@ translate srcs es0 = do
       (unmarkedSrc, userCalls) = takeUserCallMarks renderedSrc
       poolSrc = unmarkedSrc <> "\n" <> rustUserCalls userCalls <> "\n"
       crateName = "pool_" <> PH.hashText (maybe poolSrc T.pack installDir)
-      (cargoToml, buildRs) = makeCargoDocs crateName deps localCrates home profile
+      (cargoToml, buildRs) = makeCargoDocs crateName deps localCrates home envPrefix profile
   -- The pool starts from the environment's lock: the lock persisted with the
   -- Rust workspace (so every crate shared with rustmorloc resolves to the
   -- version rustmorloc was built against) extended by the crates earlier
@@ -3090,8 +3093,8 @@ resolveRustProfile lp = do
 -- rustmorloc/morloc-runtime (the SHM arena relies on Drop-on-unwind cleanup).
 -- @crateName@ is unique per program (a source hash) so a shared target-dir
 -- never collides one program's pool binary with another's.
-makeCargoDocs :: Text -> Map.Map Text Text -> Map.Map Text FilePath -> FilePath -> RustProfile -> (MDoc, MDoc)
-makeCargoDocs crateName deps localCrates home profile =
+makeCargoDocs :: Text -> Map.Map Text Text -> Map.Map Text FilePath -> FilePath -> Maybe FilePath -> RustProfile -> (MDoc, MDoc)
+makeCargoDocs crateName deps localCrates home envPrefix profile =
   let rustmorlocPath = home </> "rust" </> "rustmorloc"
       libDir = home </> "lib"
       nameLit = dquotes (pretty crateName)
@@ -3133,17 +3136,32 @@ makeCargoDocs crateName deps localCrates home profile =
           -- PANIC-12: macOS otherwise leaves them in the build cache's object
           -- files; packed, they go to a bundle copied beside the pool.
           ++ [[idoc|split-debuginfo = "packed"|] | SI.os == "darwin"]
-      -- No runtime rpath: the pool is relocatable and finds libmorloc via
-      -- LD_LIBRARY_PATH exported by the nexus at launch. link-search is kept
-      -- for the build-time link only.
+      -- No runtime rpath to libmorloc: the pool is relocatable and finds it
+      -- via LD_LIBRARY_PATH exported by the nexus at launch. link-search is
+      -- kept for the build-time link only. A managed build also searches the
+      -- environment's libraries and runs with a path to them (PKG-13). Each
+      -- directive is a string argument, never part of the format string.
+      directive d = "    println!(\"{}\", " <> rustString d <> ");"
+      envDirectives = case envPrefix of
+        Nothing -> []
+        Just p ->
+          ("cargo:rustc-link-search=native=" <> p </> "lib")
+            : map (("cargo:rustc-link-arg=" <>) . T.unpack) (SC.prefixRustLinkArgs P.hostPlatform p)
       buildRs =
-        vsep
-          [ "fn main() {"
-          , [idoc|    println!("cargo:rustc-link-search=native=#{pretty libDir}");|]
-          , [idoc|    println!("cargo:rustc-link-lib=dylib=morloc");|]
-          , "}"
-          ]
+        vsep $
+          ["fn main() {"]
+            <> map directive (("cargo:rustc-link-search=native=" <> libDir) : "cargo:rustc-link-lib=dylib=morloc" : envDirectives)
+            <> ["}"]
   in (cargoToml, buildRs)
+
+-- | A Rust string literal holding @s@.
+rustString :: String -> MDoc
+rustString s = pretty ("\"" <> concatMap esc s <> "\"")
+  where
+    esc '"' = "\\\""
+    esc '\\' = "\\\\"
+    esc '\n' = "\\n"
+    esc c = [c]
 
 -- | Build the Rust pool with @cargo build@ (one unified dependency resolution
 -- over rustmorloc + any external crates, pinned by the shipped Cargo.lock),

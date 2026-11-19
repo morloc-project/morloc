@@ -24,6 +24,9 @@ module Morloc.CodeGenerator.SystemConfig
   , ToolchainHost (..)
   , toolsOutsidePrefix
   , strictToolchainError
+  , managedPrefix
+  , prefixFlags
+  , prefixRustLinkArgs
   ) where
 
 import qualified System.Info as SI
@@ -36,12 +39,13 @@ import qualified Morloc.System as MS
 import Morloc.Module (OverwriteProtocol (..), initPlaneLayout)
 
 import qualified Data.List as DL
+import qualified Data.Text as T
 import Data.Char (isSpace, toUpper)
 import qualified Data.Text.IO as TIO
 
 import Control.Exception (SomeException, bracket, catch, displayException, fromException, onException, try)
 import System.IO.Error (ioeGetErrorString)
-import System.Directory (canonicalizePath, copyFile, createDirectoryIfMissing, createFileLink, doesDirectoryExist, doesFileExist, executable, findExecutable, findExecutablesInDirectories, getHomeDirectory, getPermissions, pathIsSymbolicLink, removeDirectoryRecursive, removeFile, renameFile)
+import System.Directory (canonicalizePath, copyFile, createDirectoryIfMissing, createFileLink, doesDirectoryExist, doesFileExist, executable, findExecutable, findExecutablesInDirectories, getHomeDirectory, getPermissions, listDirectory, pathIsSymbolicLink, removeDirectoryRecursive, removeFile, renameFile)
 import System.Environment (getEnvironment, lookupEnv, setEnv)
 import System.FilePath (splitSearchPath, takeDirectory, takeFileName)
 import System.IO (hClose, hIsTerminalDevice, hPutStrLn, openTempFile, stderr)
@@ -806,6 +810,57 @@ strictMode = do
           return . Left $
             "MORLOC_STRICT_CONDA is set but CONDA_PREFIX is not: strict mode "
               <> "requires an active conda/pixi environment."
+
+-- | The prefix P of a managed build (PKG-13): Nothing when @MORLOC_ENV@ is
+-- unset or empty, else the canonical @CONDA_PREFIX@. A managed build whose
+-- prefix is unset, not a directory, or holds a libmorloc (which a run path into
+-- it would load in place of the one the nexus chooses) is an error.
+managedPrefix :: IO (Either String (Maybe FilePath))
+managedPrefix = do
+  mEnv <- lookupEnv "MORLOC_ENV"
+  case mEnv of
+    Just e | not (all isSpace e) -> do
+      mPrefix <- lookupEnv "CONDA_PREFIX"
+      case mPrefix of
+        Just prefix | not (all isSpace prefix) -> do
+          isDir <- doesDirectoryExist prefix
+          if not isDir
+            then return . Left $ "MORLOC_ENV is set but CONDA_PREFIX (" <> prefix <> ") is not a directory, so the environment's packages cannot be found"
+            else do
+              p <- canonicalizePath prefix
+              let lib = p <> "/lib"
+              hasLib <- doesDirectoryExist lib
+              own <- if hasLib then filter ("libmorloc" `DL.isPrefixOf`) <$> listDirectory lib else return []
+              return $ case own of
+                _ | ':' `elem` p -> Left ("the environment prefix " <> p <> " holds ':', so its bin directory cannot be put on PATH")
+                [] -> Right (Just p)
+                f : _ -> Left ("the environment prefix " <> p <> " holds a libmorloc (" <> lib <> "/" <> f <> "), which its run path would load in place of morloc's own")
+        _ -> return . Left $ "MORLOC_ENV is set but CONDA_PREFIX is unset or empty, so the environment's packages cannot be found"
+    _ -> return (Right Nothing)
+
+-- | The flags a native C or C++ build in prefix P adds (PKG-13): P's headers
+-- after morloc's, P's libraries, and P/lib as a run path. On Linux the run
+-- path is DT_RPATH, which a caller's LD_LIBRARY_PATH does not override.
+prefixFlags :: P.Platform -> FilePath -> [T.Text]
+prefixFlags platform p =
+  [ "-isystem", q (p <> "/include")
+  , "-L", q (p <> "/lib")
+  , "-Xlinker", "-rpath", "-Xlinker", q (p <> "/lib")
+  ]
+    ++ case platform of
+      P.Linux -> ["-Xlinker", "--disable-new-dtags"]
+      P.Darwin -> []
+  where
+    q = T.pack . MS.shellQuote
+
+-- | The linker arguments a Rust pool built in prefix P adds (PKG-13), one
+-- argument each, unquoted: cargo passes each to the linker as is.
+prefixRustLinkArgs :: P.Platform -> FilePath -> [T.Text]
+prefixRustLinkArgs platform p =
+  ["-Xlinker", "-rpath", "-Xlinker", T.pack (p <> "/lib")]
+    ++ case platform of
+      P.Linux -> ["-Xlinker", "--disable-new-dtags"]
+      P.Darwin -> []
 
 -- | Is an on/off environment variable on? Unset, empty, @0@, @false@, @no@ and
 -- @off@, in any case, are off.

@@ -42,6 +42,7 @@ import Morloc.CodeGenerator.Express (express, addCacheWraps, addDebugWraps, addL
 import Morloc.CodeGenerator.LambdaEval (applyNexusLambdas, applyPoolLambdas)
 import Morloc.CodeGenerator.Namespace (Arg, PolyHead (..), SerialManifold)
 import qualified Morloc.CodeGenerator.Nexus as Nexus
+import qualified Morloc.CodeGenerator.SystemConfig as SC
 import Morloc.CodeGenerator.Parameterize (parameterize)
 import Morloc.CodeGenerator.Guest.Pass (lowerGuests)
 import Morloc.CodeGenerator.Realize (placeNormalized, realityCheck)
@@ -286,10 +287,17 @@ emitPoolScripts translateFn path code = withStagingCleanup $ do
   discardStagingDir
   return pools
 
+-- | Record the prefix of a managed build's environment, refusing a managed
+-- build whose prefix is unusable (PKG-13).
+resolveEnvPrefix :: MorlocMonad ()
+resolveEnvPrefix =
+  MM.liftIO SC.managedPrefix
+    >>= either (MM.throwFailed . pretty) (\p -> MM.modify' (\s -> s {stateEnvPrefix = p}))
+
 -- | Typecheck, realize and emit the nexus and every pool.
 emitProgram :: TranslateFn -> Maybe Path -> Code -> MorlocMonad (Script, Script, [WrapperFile], [Script])
 emitProgram translateFn path code =
-  typecheck path code
+  resolveEnvPrefix >> typecheck path code
     -- Evaluate applied lambdas. gASTs run in the pure nexus evaluator, which
     -- cannot hold a native closure, so let-bound lambdas are always inlined
     -- there; rASTs become pools, where a multiply-used lambda is kept as a
@@ -354,16 +362,24 @@ buildEmitted nexus envspec wrappers pools = do
         -- objects are hashed once here (not re-read per pool) and their
         -- fingerprint folded into the salt.
         params <- MM.gets stateLangParams
-        guestObjects <-
-          MM.gets $ \s ->
-            [ T.unpack f
-            | f <- concatMap packageCxxFlags (statePackageMeta s)
-            , ".o" `T.isSuffixOf` f
-            ]
+        guestObjects <- MM.gets stateGuestObjects
         objHash <- MM.liftIO $ PoolHash.hashFiles guestObjects
-        let buildSalt
+        -- How native pools are compiled and linked, and the environment every
+        -- pool runs in, change results without changing any pool source.
+        native <-
+          MM.gets $ \s ->
+            let metas = statePackageMeta s
+             in ( concatMap packageCxxFlags metas
+                , concatMap (concat . Map.elems . packageCppLibs) metas
+                , stateGuestLinkFlags s
+                , stateEnvPrefix s
+                )
+        let objSalt
               | null guestObjects = BP.renderSalt params
               | otherwise = BP.renderSalt params <> "|obj:" <> PoolHash.poolHashHex objHash
+            buildSalt = case native of
+              ([], [], [], Nothing) -> objSalt
+              _ -> objSalt <> "|native:" <> T.pack (show native)
         sources <- MM.gets (concat . GMap.elems . stateSources)
         let sourcedFiles lang = Set.toAscList (Set.fromList [p | s <- sources, srcLang s == lang, Just p <- [srcPath s]])
             salt = buildSalt <> "|morloc:" <> T.pack Morloc.Version.versionStr

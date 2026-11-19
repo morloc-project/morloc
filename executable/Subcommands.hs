@@ -939,26 +939,7 @@ cmdNew args = do
         if null (newName args)
           then takeFileName <$> getCurrentDirectory
           else return (newName args)
-      writeFile pkgFile $
-        unlines
-          [ "name: " ++ name
-          , "version: 0.1.0"
-          , "homepage: null"
-          , "synopsis: null"
-          , "description: null"
-          , "category: null"
-          , "license: MIT"
-          , "author: null"
-          , "maintainer: null"
-          , "github: null"
-          , "bug-reports: null"
-          , "dependencies: []"
-          , "# Uncomment to restrict which files are copied during install."
-          , "# By default, all files are included (filtered by .morlocignore)."
-          , "# include:"
-          , "#   - \"*.py\""
-          , "#   - \"src/\""
-          ]
+      writeFile pkgFile (Mod.newPackageYaml name)
       hPutStrLn stderr $ "Created package.yaml for '" ++ name ++ "'"
       return True
 

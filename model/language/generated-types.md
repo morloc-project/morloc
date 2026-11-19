@@ -108,15 +108,16 @@ standalone crate supplies, holds the node and the release function its
 drops call.
 
 ### GEN-7 A generated file imports what its fields name
-Intent: ruled 2026-11-14
+Intent: ruled 2026-11-19
 Tests: spec-gen-7-1, spec-gen-7-2, spec-gen-7-3
 Code: conforms 2026-11-18
 
 A field's native form names a namespace root (`std`, `Eigen`, `numpy`).
 The root is another generated file's, a builtin of the language, or the
 `namespace` of a dependency the program's `package.yaml` files declare,
-whose `import` the file then imports. A `cpp-deps` entry gives both keys
-(at least one header) or neither; a `rust-deps` entry's namespace defaults
+whose `import` the file then imports. A `cpp-deps` entry that gives a
+`namespace` gives at least one `import` header; an `import` may stand alone
+(PKG-14 checks it); a `rust-deps` entry's namespace defaults
 to the crate's name with `-` as `_`, and its import is the crate itself,
 which a crate built from the generated files outside morloc lists among its
 dependencies. A namespace is one identifier, not one the language or

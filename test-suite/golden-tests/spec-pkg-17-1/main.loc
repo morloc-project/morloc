@@ -1,0 +1,12 @@
+-- PKG-17: a program built in a managed environment starts its pools with
+-- P/bin first on PATH, so a tool its code runs is found though the PATH the
+-- program starts with lacks P/bin; built outside an environment, the same
+-- program inherits PATH unchanged and does not find it. P is a fake prefix
+-- whose bin/ holds `fakebin`; the hook `true` provisions nothing.
+module main (runTool)
+
+import root-py
+
+source Py from "f.py" ("runTool")
+
+runTool :: Int -> Str

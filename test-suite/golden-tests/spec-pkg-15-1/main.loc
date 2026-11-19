@@ -1,0 +1,9 @@
+-- PKG-15: each cxx-flags entry reaches the compiler as one argument, never
+-- split at a space or expanded by a shell.
+module main (flags)
+
+import root-cpp
+
+source Cpp from "f.hpp" ("flags")
+
+flags :: Int -> Str

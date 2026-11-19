@@ -69,7 +69,7 @@ decodeDep = eitherDecode
 decodeMeta :: BL.ByteString -> Either String PackageMeta
 decodeMeta = eitherDecode
 
--- A module declaring Python + Rust deps, a bare C++ link lib, and a module pin.
+-- A module declaring Python + Rust deps and a module pin.
 -- Python sources are explicit; the Rust crate lets its source default to crates.
 pmA :: PackageMeta
 pmA =
@@ -77,7 +77,6 @@ pmA =
     { packagePyDeps =
         Map.fromList [("numpy", dep ">=2,<3" SrcConda), ("requests", dep "*" SrcPypi)]
     , packageRustDeps = Map.fromList [("ndarray", noSrc "0.16")]
-    , packageDependencies = ["blas"]
     , packageMorlocDependencies = [MorlocDep "tensor-cpp" "std" Nothing "abc123"]
     }
 
@@ -87,6 +86,7 @@ pmB :: PackageMeta
 pmB =
   pm
     { packageCppDeps = Map.fromList [("opencv", noSrc ">=4.8")]
+    , packageCppLibs = Map.fromList [("opencv", ["opencv_core"])]
     , packageCppVersion = 20
     , packageLangVersions = Map.fromList [("py", ">=3.10")]
     }
@@ -107,7 +107,7 @@ envSpecTests =
         "GEN-7 dependency namespaces"
         [ testCase "a cpp-deps entry with namespace and import parses" $
             case decodeMeta "{\"cpp-deps\":{\"nlohmann_json\":{\"namespace\":\"nlohmann\",\"import\":\"nlohmann/json.hpp\"}}}" of
-              Right m -> Map.lookup "cpp" (packageDepImports m) @?= Just (Map.fromList [("nlohmann_json", DepImport "nlohmann" ["nlohmann/json.hpp"])])
+              Right m -> Map.lookup "cpp" (packageDepImports m) @?= Just (Map.fromList [("nlohmann_json", DepImport (Just "nlohmann") ["nlohmann/json.hpp"])])
               Left e -> assertFailure e
         , testCase "a cpp-deps entry with neither key has no namespace" $
             case decodeMeta "{\"cpp-deps\":{\"zlib\":\"*\"}}" of
@@ -123,7 +123,7 @@ envSpecTests =
             assertBool "std" (isLeft (decodeMeta "{\"cpp-deps\":{\"s\":{\"namespace\":\"std\",\"import\":\"vector\"}}}"))
         , testCase "a rust crate's namespace defaults to its name with - as _" $
             case decodeMeta "{\"rust-deps\":{\"serde-json\":\"1\"}}" of
-              Right m -> Map.lookup "rust" (packageDepImports m) @?= Just (Map.fromList [("serde-json", DepImport "serde_json" [])])
+              Right m -> Map.lookup "rust" (packageDepImports m) @?= Just (Map.fromList [("serde-json", DepImport (Just "serde_json") [])])
               Left e -> assertFailure e
         ]
     , testGroup
@@ -243,8 +243,8 @@ envSpecTests =
                   , ("cpp", [ReqRegistry "opencv" ">=4.8" SrcConda Nothing])
                   , ("rust", [ReqRegistry "ndarray" "0.16" SrcCrates Nothing])
                   ]
-        , testCase "system libs from bare -l dependencies (provider unspecified)" $
-            esSystem spec @?= [SystemReq "blas" "unspecified"]
+        , testCase "a cpp-deps entry's link names are not system requirements" $
+            esSystem spec @?= []
         , testCase "module pins carried through as git hashes" $
             esModules spec @?= [ModuleReq "tensor-cpp" (Just "abc123") Nothing]
         ]

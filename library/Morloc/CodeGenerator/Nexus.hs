@@ -2920,6 +2920,7 @@ data ManifestInputs = ManifestInputs
   , miInlineSize          :: !(Maybe Int64)
   , miNoShm               :: !Bool
   , miTmpdir              :: !(Maybe Path)
+  , miEnvPrefix           :: !(Maybe FilePath)
   , miSourceHashes        :: !(Map.Map Lang [(FilePath, Word64)])
   , miRebuild             :: !(Maybe RebuildRecipe)
     -- ^ How to repeat an installed program's build
@@ -2993,6 +2994,7 @@ buildManifest ManifestInputs{..} =
         , ("morloc_version", jsonStr (MT.pack Morloc.Version.versionStr))
         , ("build_params", jsonStr miBuildParams)
         , ("rebuild", maybe "null" rebuildJson miRebuild)
+        , ("env_prefix", maybe jsonNull (jsonStr . MT.pack) miEnvPrefix)
         ]
 
     rebuildJson :: RebuildRecipe -> Text
@@ -3530,6 +3532,7 @@ generate cs rASTs helperRASTs = do
     return (ev, t)
 
   packerInstances <- Serial.findPackerInstances
+  envPrefix <- MM.gets stateEnvPrefix
   recordTypes <- collectRecordTypes
   dataTypes <- collectDataTypes
 
@@ -3553,6 +3556,7 @@ generate cs rASTs helperRASTs = do
             , miInlineSize          = inlineSize
             , miNoShm               = noShm
             , miTmpdir              = tmpdir
+            , miEnvPrefix           = envPrefix
             , miSourceHashes        = sourceHashes
             , miRebuild             = rebuild
             , miBuildParams         = buildParams

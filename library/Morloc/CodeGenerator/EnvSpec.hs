@@ -72,9 +72,9 @@ data LangReq = LangReq
   }
   deriving (Show, Eq, Ord)
 
--- | A system library named by the C++ @dependencies:@ field. 'srProvider' is a
--- forward-compatible enum ("conda-forge" | "host" | "vcpkg" | "unspecified");
--- the compiler cannot know the true provider, so it emits "unspecified".
+-- | A system library entry of the envspec's @system@ list, which mim reads
+-- ("conda-forge" | "host" | "vcpkg" | "unspecified" providers). The compiler
+-- emits none: a C++ link name is not a package name (PKG-12).
 data SystemReq = SystemReq
   { srName     :: !Text
   , srProvider :: !Text
@@ -125,7 +125,7 @@ buildEnvSpec morlocVersion langs metas = do
       , esLanguages     = map langReq langNames
       , esPackages      = packageGroups
       , esTools         = toolReqs
-      , esSystem        = systemReqs
+      , esSystem        = []
       , esModules       = moduleReqs
       }
   where
@@ -188,12 +188,6 @@ buildEnvSpec morlocVersion langs metas = do
     isConda lang ds =
       effectiveDepSource lang ds == Just SrcConda
         && (lang /= "r" || maybe False (/= condaForgeChannel) (dsChannel ds))
-
-    -- The bare C++ `-l` link libraries; provider is unknowable at compile time.
-    systemReqs =
-      [ SystemReq name "unspecified"
-      | name <- unique (concatMap packageDependencies metas)
-      ]
 
     -- Exact-git-hash module pins, one per module: the root project's pin
     -- wins, as at install (the root is loaded first, so it is last in metas).

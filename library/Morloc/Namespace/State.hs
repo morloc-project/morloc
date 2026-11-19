@@ -94,6 +94,8 @@ import Control.Monad.State.Strict (StateT)
 import Control.Monad.Writer.CPS (WriterT)
 import Data.Aeson (FromJSON (..), (.!=), (.:), (.:?))
 import qualified Data.Aeson as Aeson
+import qualified Data.Aeson.Key as AK
+import qualified Data.Aeson.KeyMap as AKM
 import qualified Data.Aeson.Types as AesonTypes
 import Data.Int (Int64)
 import qualified Data.IntMap.Strict as IntMap
@@ -386,6 +388,12 @@ data MorlocState = MorlocState
   -- on-demand provisioning even when it declares no package dependencies.
   , stateEvalMode :: Bool
   -- ^ True when running in eval mode (restricts source/class/instance)
+  , stateEnvPrefix :: Maybe FilePath
+  -- ^ The prefix of a managed build's environment (PKG-13), Nothing outside one
+  , stateGuestObjects :: [FilePath]
+  -- ^ Objects a guest build produced, linked into the C++ pool
+  , stateGuestLinkFlags :: [Text]
+  -- ^ Link arguments those objects need, one argument each
   , stateAllowLocalModules :: Bool
   -- ^ When False, import resolution ignores local/project-relative
   -- modules and resolves only installed (system) modules. False in
@@ -887,7 +895,6 @@ data PackageMeta
   -- (20, 23, ...). Defaults to 'defaultCppVersion' whether or not the package
   -- declares one.
   , packageCppVersion :: !Int
-  , packageDependencies :: [Text]
   -- | Extra flags appended to the C++ pool compile line (e.g. -O3,
   -- -march=native, -DXYZ). Propagates transitively through dependencies.
   , packageCxxFlags :: [Text]
@@ -901,8 +908,7 @@ data PackageMeta
   , packagePyDeps :: Map Text DepSpec
   -- | External R packages (name -> 'DepSpec') needed by the R pool.
   , packageRDeps :: Map Text DepSpec
-  -- | External C++ libraries (name -> 'DepSpec') needed by the C++ pool; the
-  -- structured, version-managed successor to 'packageDependencies'.
+  -- | External C++ libraries (name -> 'DepSpec') needed by the C++ pool.
   , packageCppDeps :: Map Text DepSpec
   -- | Conda packages (name -> 'DepSpec') whose executables the module runs as
   -- programs, whatever its pools' languages. Propagates transitively.
@@ -935,14 +941,20 @@ data PackageMeta
   -- dependency name (GEN-7): a generated file naming a type under one
   -- imports what it lists.
   , packageDepImports :: Map Text (Map Text DepImport)
+  -- | The link names of each cpp-deps entry (PKG-12): each becomes
+  -- @-l<name>@ on a C++ pool's link line.
+  , packageCppLibs :: Map Text [Text]
+  -- | The executables of each tool-deps entry (PKG-16), checked at build.
+  , packageToolBins :: Map Text [Text]
   }
   deriving (Show, Ord, Eq)
 
--- | A dependency's namespace root (@Eigen@, @numpy@, @ndarray@) and what a
--- file naming a type under it imports (headers in C++, modules in Python,
--- nothing in Rust, whose crates are dependencies of the crate).
+-- | A dependency's namespace root (@Eigen@, @numpy@, @ndarray@), if it has
+-- one, and the files it imports: headers in C++ (checked by PKG-14, and
+-- imported by a generated file naming a type under the namespace), nothing
+-- in Rust, whose crates are dependencies of the crate.
 data DepImport = DepImport
-  { diNamespace :: !Text
+  { diNamespace :: !(Maybe Text)
   , diImports :: ![Text]
   }
   deriving (Show, Ord, Eq)
@@ -1250,6 +1262,9 @@ instance Defaultable MorlocState where
       , stateProjectRoot = Nothing
       , stateEnvSpecLangs = []
       , stateEvalMode = False
+      , stateEnvPrefix = Nothing
+      , stateGuestObjects = []
+      , stateGuestLinkFlags = []
       , stateAllowLocalModules = True
       , stateAutoInstall = False
       , stateSnapshot = Map.empty
@@ -1283,7 +1298,6 @@ instance Defaultable PackageMeta where
       , packageGithub = ""
       , packageBugReports = ""
       , packageCppVersion = defaultCppVersion
-      , packageDependencies = []
       , packageCxxFlags = []
       , packageRustDeps = Map.empty
       , packagePyDeps = Map.empty
@@ -1298,6 +1312,8 @@ instance Defaultable PackageMeta where
       , packageSetup = Nothing
       , packageExpose = defaultValue
       , packageDepImports = Map.empty
+      , packageCppLibs = Map.empty
+      , packageToolBins = Map.empty
       }
 
 instance Defaultable ExposeSet where
@@ -1327,7 +1343,19 @@ instance FromJSON Config where
       return $ Config home' home' source' tmpdir' buildConfig' allOverrides
 
 instance FromJSON PackageMeta where
-  parseJSON = Aeson.withObject "object" $ \o ->
+  parseJSON = Aeson.withObject "object" $ \o -> do
+    removedDependencies <- o .:? "dependencies" :: AesonTypes.Parser (Maybe Aeson.Value)
+    case removedDependencies of
+      Just _ ->
+        fail
+          "package.yaml key `dependencies` was removed: declare a package under cpp-deps \
+          \(its link names under `libs`), a program under tool-deps, and a library the \
+          \environment does not provide (a system or setup-built one) in cxx-flags"
+      Nothing -> return ()
+    cppEntries <- o .:? "cpp-deps" .!= Map.empty
+    toolEntries <- o .:? "tool-deps" .!= Map.empty
+    cppLibs <- Map.traverseWithKey (entryList "cpp-deps" cppKeys "libs" validLib) cppEntries
+    toolBins <- Map.traverseWithKey (entryList "tool-deps" toolKeys "bin" validBin) toolEntries
     PackageMeta
       <$> o .:? "name" .!= ""
       <*> o .:? "library"
@@ -1342,7 +1370,6 @@ instance FromJSON PackageMeta where
       <*> o .:? "github" .!= ""
       <*> o .:? "bug-reports" .!= ""
       <*> o .:? "cpp-version" .!= defaultCppVersion
-      <*> o .:? "dependencies" .!= []
       <*> o .:? "cxx-flags" .!= []
       <*> o .:? "rust-deps" .!= Map.empty
       <*> o .:? "py-deps" .!= Map.empty
@@ -1357,11 +1384,39 @@ instance FromJSON PackageMeta where
       <*> o .:? "setup"
       <*> o .:? "expose" .!= defaultValue
       <*> parseDepImports o
+      <*> pure (Map.filter (not . null) cppLibs)
+      <*> pure (Map.filter (not . null) toolBins)
     where
-      -- A dependency's `namespace` and `import` (GEN-7). A C++ dependency
-      -- declares both or neither; a Rust crate's namespace defaults to its
-      -- name with `-` as `_`, and it imports nothing (the crate is a
-      -- dependency of the crate).
+      cppKeys = ["version", "source", "channel", "namespace", "import", "libs"]
+      toolKeys = ["version", "source", "channel", "bin"]
+      -- The list under `listKey` of one entry (PKG-12, PKG-16), refusing a key
+      -- the group does not know and a value `valid` rejects.
+      entryList :: String -> [Text] -> Aeson.Key -> (Text -> Bool) -> Text -> Aeson.Value -> AesonTypes.Parser [Text]
+      entryList grp known listKey valid name v = case v of
+        Aeson.Object d -> do
+          case [k | k <- map AK.toText (AKM.keys d), k `notElem` known] of
+            [] -> return ()
+            ks ->
+              fail ("the " <> grp <> " entry " <> T.unpack name <> " has unknown key " <> T.unpack (T.intercalate ", " ks) <> "; known keys: " <> T.unpack (T.intercalate ", " known))
+          xs <- d .:? listKey .!= []
+          case filter (not . valid) xs of
+            [] -> return xs
+            bad : _ ->
+              fail ("the " <> grp <> " entry " <> T.unpack name <> " lists " <> show bad <> " under " <> T.unpack (AK.toText listKey) <> ", which is not a bare name")
+        _ -> return []
+      validLib l =
+        not (T.null l)
+          && not ("-" `T.isPrefixOf` l)
+          && not ("lib" `T.isPrefixOf` l)
+          && not (any (`T.isSuffixOf` l) [".so", ".a", ".dylib"])
+          && not (".so." `T.isInfixOf` l)
+          && T.all (\c -> c > ' ' && c < '\DEL') l
+      validBin b = not (T.null b) && T.all (\c -> c > ' ' && c < '\DEL' && c /= '/') b
+      validHeader h = not (T.null h) && T.all (\c -> c > ' ' && c < '\DEL' && c `notElem` ("<>\"" :: String)) h
+      -- A dependency's `namespace` and `import` (GEN-7, PKG-14). A C++
+      -- dependency's namespace needs at least one header, and its headers may
+      -- stand alone; a Rust crate's namespace defaults to its name with `-` as
+      -- `_`, and it imports nothing (the crate is a dependency of the crate).
       parseDepImports o' =
         Map.fromList
           <$> mapM
@@ -1372,18 +1427,23 @@ instance FromJSON PackageMeta where
         (ns, imp) <- case v of
           Aeson.Object d -> (,) <$> d .:? "namespace" <*> (d .:? "import" >>= traverse importList)
           _ -> return (Nothing, Nothing)
-        let checked d
-              | not (isRoot (diNamespace d)) =
-                  fail ("the " <> T.unpack lang <> "-deps entry " <> T.unpack name <> " has namespace " <> show (diNamespace d) <> ", which is not one identifier")
-              | Set.member (diNamespace d) reservedRoots =
-                  fail ("the " <> T.unpack lang <> "-deps entry " <> T.unpack name <> " claims the namespace " <> T.unpack (diNamespace d) <> ", which the language or morloc owns")
-              | otherwise = return (Just d)
+        let checked n is
+              | not (isRoot n) =
+                  fail ("the " <> T.unpack lang <> "-deps entry " <> T.unpack name <> " has namespace " <> show n <> ", which is not one identifier")
+              | Set.member n reservedRoots =
+                  fail ("the " <> T.unpack lang <> "-deps entry " <> T.unpack name <> " claims the namespace " <> T.unpack n <> ", which the language or morloc owns")
+              | otherwise = return (Just (DepImport (Just n) is))
+            headers is = case filter (not . validHeader) is of
+              [] -> return is
+              bad : _ -> fail ("the cpp-deps entry " <> T.unpack name <> " imports " <> show bad <> ", which is not a header path")
         case lang of
           "cpp" -> case (ns, imp) of
-            (Just n, Just is@(_ : _)) -> checked (DepImport n is)
+            (Just n, Just is@(_ : _)) -> headers is >>= checked n
+            (Nothing, Just is@(_ : _)) -> Just . DepImport Nothing <$> headers is
             (Nothing, Nothing) -> return Nothing
-            _ -> fail ("the cpp-deps entry " <> T.unpack name <> " must declare both namespace and import (at least one header), or neither")
-          _ -> checked (DepImport (fromMaybe (T.replace "-" "_" name) ns) [])
+            (Nothing, Just []) -> fail ("the cpp-deps entry " <> T.unpack name <> " has an empty import list")
+            (Just _, _) -> fail ("the cpp-deps entry " <> T.unpack name <> " has a namespace but no import header")
+          _ -> checked (fromMaybe (T.replace "-" "_" name) ns) []
       isRoot n = case T.uncons n of
         Just (c, _) -> (isAlpha c || c == '_') && T.all (\x -> isAlphaNum x || x == '_') n
         Nothing -> False

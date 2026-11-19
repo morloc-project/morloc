@@ -18,6 +18,7 @@ Handles all aspects of the morloc module system:
 -}
 module Morloc.Module
   ( findModule
+  , newPackageYaml
   , findLocalModuleAt
   , findBareModuleMaybe
   , bareLocalMatch
@@ -1663,7 +1664,6 @@ buildModuleManifest meta mid morlocDeps installedSelfHash exports installPath in
     , ("author", jsonStr (packageAuthor meta))
     , ("license", jsonStr (packageLicense meta))
     , ("homepage", jsonStr (packageHomepage meta))
-    , ("c_dependencies", jsonStrArr (packageDependencies meta))
     ,
       ( "morloc_dependencies"
       , jsonArr
@@ -2075,3 +2075,25 @@ checkoutRefIO targetDir selector =
           gitQuiet ["checkout", "tags/" ++ MT.unpack tag]
 
 -- }}}
+
+-- | The package.yaml that @morloc new@ writes for a module named @name@.
+newPackageYaml :: String -> String
+newPackageYaml name =
+  unlines
+    [ "name: " ++ name
+    , "version: 0.1.0"
+    , "homepage: null"
+    , "synopsis: null"
+    , "description: null"
+    , "category: null"
+    , "license: MIT"
+    , "author: null"
+    , "maintainer: null"
+    , "github: null"
+    , "bug-reports: null"
+    , "# Uncomment to restrict which files are copied during install."
+    , "# By default, all files are included (filtered by .morlocignore)."
+    , "# include:"
+    , "#   - \"*.py\""
+    , "#   - \"src/\""
+    ]

@@ -1,0 +1,5 @@
+name: main
+version: 0.0.0
+tool-deps:
+  q:
+    bin: [no_such_tool_q]

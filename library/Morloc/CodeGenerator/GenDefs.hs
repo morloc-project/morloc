@@ -344,9 +344,10 @@ depNamespaces lang = do
   let claims =
         Map.fromListWith
           (<>)
-          [ (diNamespace d, [(name, diImports d)])
+          [ (ns, [(name, diImports d)])
           | meta <- metas
           , (name, d) <- Map.toList (Map.findWithDefault Map.empty lang (packageDepImports meta))
+          , Just ns <- [diNamespace d]
           ]
   Map.traverseWithKey
     ( \ns cs -> case unique (map fst cs) of

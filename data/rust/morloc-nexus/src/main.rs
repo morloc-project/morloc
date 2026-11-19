@@ -23,6 +23,7 @@ mod schemas;
 mod sources;
 mod serve_help;
 mod parse_arg;
+mod env_path;
 mod sigrm;
 mod stdio_bridge;
 mod stdio_server;
@@ -371,6 +372,17 @@ fn main() {
     }
     if let Some(ref dir) = manifest.tmpdir {
         crate::process::set_startup_env("MORLOC_TMPDIR", dir);
+    }
+    // The environment the program was built in supplies its pools'
+    // interpreters and tools, whatever PATH it was started with (PKG-17).
+    if let Some(ref prefix) = manifest.build.env_prefix {
+        match env_path::with_env_bin_first(std::env::var_os("PATH"), std::path::Path::new(prefix)) {
+            Some(path) => crate::process::set_startup_env("PATH", path),
+            None => {
+                eprintln!("The environment prefix '{}' recorded in this program cannot be put on PATH", prefix);
+                std::process::exit(1);
+            }
+        }
     }
 
     // Propagate nexus + manifest absolute paths to pools. SLURM remote
