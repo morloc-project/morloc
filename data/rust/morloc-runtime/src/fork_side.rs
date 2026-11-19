@@ -1087,8 +1087,10 @@ pub(crate) mod tests {
     fn a_fork_settles_a_live_native_entry_and_a_spawn_does_not() {
         in_child(|| {
             let id = new(ptr::null_mut(), Kind::Gather).unwrap();
-            let path = std::ffi::CString::new("/bin/true").unwrap();
-            let argv = [path.as_ptr(), ptr::null()];
+            let path = std::ffi::CString::new("/bin/sh").unwrap();
+            let flag = std::ffi::CString::new("-c").unwrap();
+            let script = std::ffi::CString::new("exit 0").unwrap();
+            let argv = [path.as_ptr(), flag.as_ptr(), script.as_ptr(), ptr::null()];
             let mut child: libc::pid_t = 0;
             let rc = unsafe {
                 libc::posix_spawn(&mut child, path.as_ptr(), ptr::null(), ptr::null(), argv.as_ptr() as *const *mut c_char, ptr::null())
