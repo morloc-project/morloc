@@ -1091,6 +1091,17 @@ struct MlcWriteTxn {
     }
 };
 
+// Element `i` of a batch. std::vector<bool>::operator[] may return a bit
+// proxy, whose address the walks would take, so a Bool is read out as bool.
+template <typename E>
+inline decltype(auto) mlc_batch_elem(const std::vector<E>& xs, size_t i) {
+    if constexpr (std::is_same_v<E, bool>) {
+        return static_cast<bool>(xs[i]);
+    } else {
+        return xs[i];
+    }
+}
+
 // Write the batch `xs` in place (SLOT-36), or from a voidstar copy when
 // the stream refuses. Each element is sized before the batch opens.
 template <typename E>
@@ -1109,7 +1120,7 @@ inline void _mlc_write_batch(Schema* schema, int64_t level, const std::vector<E>
         for (size_t i = 0; i < n; i++) {
             sw.total = 0;
             sw.keep.clear();
-            sw.child(elem, xs[i], false);
+            sw.child(elem, mlc_batch_elem(xs, i), false);
             sizes.push_back(static_cast<size_t>(sw.run()));
         }
     }
@@ -1143,7 +1154,7 @@ inline void _mlc_write_batch(Schema* schema, int64_t level, const std::vector<E>
             if constexpr (mlc_is_leaf_v<E>) {
                 mlc_write_leaves(ww, elem, at, xs, i, k);
             } else {
-                for (size_t j = 0; j < k; j++) ww.child(elem, at + j * w, xs[i + j]);
+                for (size_t j = 0; j < k; j++) ww.child(elem, at + j * w, mlc_batch_elem(xs, i + j));
                 ww.run();
                 ww.keep.clear();
             }
@@ -1157,7 +1168,7 @@ inline void _mlc_write_batch(Schema* schema, int64_t level, const std::vector<E>
             MLC_WRITE_RESULT(rc, errmsg, "mlc_write_place");
             void* cursor = room.data;
             ww.place(&cursor, reinterpret_cast<char*>(room.base), reinterpret_cast<char*>(room.origin));
-            ww.child(elem, room.slot, xs[i]);
+            ww.child(elem, room.slot, mlc_batch_elem(xs, i));
             ww.run();
             reached = static_cast<const uint8_t*>(cursor);
         }
