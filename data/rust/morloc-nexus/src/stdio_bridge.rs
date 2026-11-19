@@ -574,6 +574,13 @@ mod json_array_body_tests {
 mod frame_write_tests {
     use super::{write_frame_to_fd, writev_all_with, Frame, WriteError};
 
+    fn set_errno(e: i32) {
+        #[cfg(target_os = "linux")]
+        unsafe { *libc::__errno_location() = e };
+        #[cfg(target_os = "macos")]
+        unsafe { *libc::__error() = e };
+    }
+
     fn sample() -> (Vec<u8>, Vec<u8>, Vec<u8>) {
         let head: Vec<u8> = (0..72u8).collect();
         let payload: Vec<u8> = (0..200_003u32).map(|i| (i * 7 % 251) as u8).collect();
@@ -633,7 +640,7 @@ mod frame_write_tests {
             writev_all_with(-1, &parts, |iov| {
                 calls += 1;
                 if calls % 3 == 0 {
-                    unsafe { *libc::__errno_location() = libc::EINTR };
+                    set_errno(libc::EINTR);
                     return -1;
                 }
                 let mut left = cap;
@@ -664,7 +671,7 @@ mod frame_write_tests {
         let r = writev_all_with(-1, &[&head[..]], |_| 0);
         assert!(matches!(r, Err(WriteError::Other(_))), "{r:?}");
         let r = writev_all_with(-1, &[&head[..]], |_| {
-            unsafe { *libc::__errno_location() = libc::EIO };
+            set_errno(libc::EIO);
             -1
         });
         assert!(matches!(r, Err(WriteError::Other(_))), "{r:?}");
