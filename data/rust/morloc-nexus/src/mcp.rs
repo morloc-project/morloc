@@ -1153,10 +1153,14 @@ impl Drop for ConnectionSlot {
 // NET-3
 pub(crate) fn connection_slot() -> Option<ConnectionSlot> {
     use std::sync::atomic::Ordering;
-    OPEN_CONNECTIONS
-        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| (n < MAX_CONNECTIONS).then_some(n + 1))
-        .ok()
-        .map(|_| ConnectionSlot)
+    let mut n = OPEN_CONNECTIONS.load(Ordering::SeqCst);
+    while n < MAX_CONNECTIONS {
+        match OPEN_CONNECTIONS.compare_exchange_weak(n, n + 1, Ordering::SeqCst, Ordering::SeqCst) {
+            Ok(_) => return Some(ConnectionSlot),
+            Err(cur) => n = cur,
+        }
+    }
+    None
 }
 
 /// A failed accept: with the descriptor table full, wait for one to free

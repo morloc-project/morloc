@@ -3168,18 +3168,6 @@ impl<T> RecNode<T> {
         RecNode(std::mem::ManuallyDrop::new(std::sync::Arc::new(v)))
     }
 
-    /// The value, moved out when this is the only owner and copied
-    /// otherwise.
-    pub fn into_inner(self) -> T
-    where
-        T: Clone,
-    {
-        let mut me = std::mem::ManuallyDrop::new(self);
-        // SAFETY: `me` is never dropped, so the Arc is taken exactly once.
-        let rc = unsafe { std::mem::ManuallyDrop::take(&mut me.0) };
-        std::sync::Arc::try_unwrap(rc).unwrap_or_else(|rc| (*rc).clone())
-    }
-
     /// The value if `Arc::try_unwrap` gives it, else the box back.
     pub fn try_into_inner(self) -> Result<T, RecNode<T>> {
         let mut me = std::mem::ManuallyDrop::new(self);

@@ -32,7 +32,6 @@ rmp = "0.8"
 base64 = "0.22"
 ryu = "1"
 twox-hash = { workspace = true }
-nix = { workspace = true }
 thiserror = { workspace = true }
 arrow-array = { version = "58", features = ["ffi"] }
 arrow-buffer = "58"
@@ -46,10 +45,6 @@ arrow-cast = "58"
 bytes = "1"
 chrono = "0.4"
 anstream = "1"
-
-[build-dependencies]
-cbindgen = "0.28"
-# cc crate no longer needed -- all C files ported to Rust
 
 [dev-dependencies]
 # Generates prototypes the C-header agreement test compiles against morloc.h.

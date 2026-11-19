@@ -2252,7 +2252,15 @@ fn large_region(idx: usize, base: *mut u8, offset: usize, extent: usize) -> Resu
 // SHM-6, SHM-18: give the pages of `len` bytes at `data` back; false when
 // the file system refused, and they still hold their bytes.
 unsafe fn remove_pages(data: *mut u8, len: usize) -> bool {
-    libc::madvise(data as *mut libc::c_void, len, libc::MADV_REMOVE) == 0
+    #[cfg(target_os = "linux")]
+    {
+        libc::madvise(data as *mut libc::c_void, len, libc::MADV_REMOVE) == 0
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (data, len);
+        false
+    }
 }
 
 // SHM-18: the block of a large volume for `size` bytes, or `None` when the

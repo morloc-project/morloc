@@ -176,7 +176,6 @@ pub struct MorlocDataArray {
     pub values: *mut *mut MorlocExpression,
 }
 
-#[repr(C)]
 // Primitive contains a pointer (s: *mut c_char), so DataUnion uses ManuallyDrop
 #[repr(C)]
 pub union DataUnion {
