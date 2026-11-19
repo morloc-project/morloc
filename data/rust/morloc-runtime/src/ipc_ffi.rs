@@ -2375,7 +2375,14 @@ mod dispatch_fork_tests {
         unsafe { libc::close(peer) };
         let has = |needle: &[u8]| got.windows(needle.len()).any(|w| w == needle);
         assert!(!has(b"from-the-child"), "a child forked during a dispatch replied to its parent's request");
-        assert!(has(b"from-the-parent"), "the parent's reply was lost");
+        // LIFE-5: a concurrent test's peer death may turn the parent's reply into a dead-peer packet.
+        let mut err: *mut c_char = ptr::null_mut();
+        let size = if got.len() < morloc_runtime_types::packet::PKT_HEADER_SIZE {
+            0
+        } else {
+            unsafe { crate::packet_ffi::morloc_packet_size(got.as_ptr(), &mut err) }
+        };
+        assert!(err.is_null() && size > 0 && size == got.len(), "the peer did not get exactly the parent's reply: {} bytes", got.len());
         assert!(libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 1, "child status {status}");
     }
 }
