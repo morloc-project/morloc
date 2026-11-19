@@ -141,7 +141,8 @@ jobs:
             g++ \
             gcc \
             make \
-            libgsl-dev
+            libgsl-dev \
+            nlohmann-json3-dev
           python3 -m pip install --break-system-packages --upgrade setuptools numpy pyarrow 'pydantic>=2,<3'
 
       - name: Install system dependencies (macOS)
@@ -155,6 +156,10 @@ jobs:
           # Provide GNU `timeout` (macOS lacks it): several compile-guard goldens
           # call `timeout Ns morloc make`. coreutils ships it as `gtimeout`.
           brew install coreutils
+          # spec-gen-7-2 includes <nlohmann/json.hpp>; Apple clang does not search
+          # Homebrew's prefix, so name the formula's own include dir.
+          brew install nlohmann-json
+          echo "CPLUS_INCLUDE_PATH=$(brew --prefix nlohmann-json)/include" >> "$GITHUB_ENV"
           mkdir -p "$HOME/.local/bin"
           ln -sf "$(brew --prefix)/bin/gtimeout" "$HOME/.local/bin/timeout"
           # Force a UTF-8 locale for later steps: a non-UTF-8 default locale on
