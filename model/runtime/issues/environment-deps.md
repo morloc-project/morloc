@@ -117,3 +117,17 @@ model/issues/LIST.md), checked against the code 2026-11-04 [read].
   `CFLAGS="$SANITIZE_FLAGS"`, empty unless sanitizing, so the activation's
   CFLAGS (`-isystem $CONDA_PREFIX/include`, ...) never reach setuptools.
   Impact unknown: setup.py names its include dirs itself.
+
+- **The python version window is never checked against the binding.**
+  [reproduced, 2026-11-19] Gap: no spec item says how the runtime window in
+  data/lang/py/requirements.yaml is verified. LangSupportTests asserts only
+  the ceiling string; nothing builds pymorloc.c at the window's ends. The
+  window was wrong when written: `<3.14` admitted 3.13, which also failed
+  (`_PyLong_AsByteArray` gained an argument in 3.13; compile 627b58b74's
+  pymorloc.c against conda python-3.13.15 headers), and it stayed stale
+  after 4662b83b7 fixed that. The ceiling is now `<3.15`; 3.14.7 compiles
+  and links with every Py symbol resolved, but no program has run on 3.14
+  (no cp314 numpy offline). pymorloc.c uses private API that can change
+  again: `_PyLong_AsByteArray`, `_PyLong_FromByteArray`, `_PyLong_NumBits`,
+  `_PyObject_GetDictPtr`; public replacements exist since 3.13
+  (`PyLong_AsNativeBytes`, `PyLong_FromNativeBytes`).

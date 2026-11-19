@@ -6,7 +6,7 @@ Description : Unit tests for the language-support table parsed from requirements
 
 Verifies that the SHIPPED requirements.yaml files parse and aggregate, that the
 session's gaps are encoded (python needs setuptools/pip/numpy, R needs r-bit64,
-python capped below the 3.14 break, core toolchain has the C compiler), and pins
+python capped below the untested 3.15, core toolchain has the C compiler), and pins
 the JSON wire format with a directly-constructed minimal table. A drift guard
 fails if a new shim language is added to @DataFiles.langSetups@ without a
 requirements.yaml entry (or an explicit deferral). The VALUES are provisional, so
@@ -56,9 +56,9 @@ langSupportTests =
             assertBool "both metapackages present" (length pins == 3)
             mapM_ (\(n, c) -> assertBool (T.unpack n <> " is an exact 1.x pin: " <> T.unpack c) (T.isPrefixOf "==1." c)) pins
             assertEqual "one release for every metapackage pin" 1 (length (nubOrd (map snd pins)))
-        , testCase "python runtime is capped below the 3.14 break" $ withParsed $ \t ->
+        , testCase "python runtime is capped below 3.15" $ withParsed $ \t ->
             case Map.lookup "py" (lsLanguages t) >>= leRuntime of
-              Just rs -> assertBool "python ceiling <3.14" (T.isInfixOf "<3.14" (rsVersion rs))
+              Just rs -> assertBool "python ceiling <3.15" (T.isInfixOf "<3.15" (rsVersion rs))
               Nothing -> assertFailure "py runtime missing"
         , testCase "pyarrow is an OPTIONAL python requirement; numpy is not" $ withParsed $ \t -> do
             let reqs = maybe [] leRequires (Map.lookup "py" (lsLanguages t))
