@@ -110,3 +110,17 @@ Details and evidence: /work/plans/runtime-audit-2026-10-10/C-processes.md.
   (C++-only 15.7 -> 22.3 ms; crossing bench `.c` terms, results
   2026-11-14-0438 vs -0802). Fix direction: keep run dirs under one
   morloc-owned parent so the scan reads only them.
+- **macOS: a C++ thread's call into a live R pool fails as a dead peer.**
+  [reproduced on macOS CI only, 2026-11-19; cause speculative] Golden
+  fold-native, case threadsR: four C++ producer threads fold through R;
+  one call fails with "the r pool ended during the call (the request could
+  not be sent)", uncaught on the producer thread, and the C++ pool aborts
+  (SIGABRT), so `r n=9080` is missing. Linux passes. The message comes from
+  ipc_ffi.rs send_and_receive_over_socket when send_parts returns
+  SendFail::Other, or PeerClosed on a fresh connection; the message now
+  ends with the send's reason and OS error. Hypothesis: XNU returns
+  EPROTOTYPE (not EPIPE) when a send races the peer closing, so a reused
+  connection the R pool revoked (NET-7) is not retried. Next step: read
+  the reason from the next macOS CI failure. Separately, an exception
+  escaping a user-spawned C++ thread ends the pool by std::terminate; the
+  test's producer does not catch, so this is the expected crash shape.

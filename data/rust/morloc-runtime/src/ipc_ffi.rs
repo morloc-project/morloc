@@ -105,8 +105,12 @@ pub(crate) unsafe fn send_all(fd: i32, buf: *const u8, len: usize) -> bool {
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum SendFail {
     /// The peer's end was closed: no byte sent from here on reached it.
-    PeerClosed,
-    Other,
+    PeerClosed(String),
+    Other(String),
+}
+
+fn os_reason(errno: i32) -> String {
+    std::io::Error::from_raw_os_error(errno).to_string()
 }
 
 /// Send `parts` in order as one stream of bytes. The iovecs are consumed.
@@ -151,14 +155,14 @@ pub(crate) unsafe fn send_parts(fd: i32, parts: &mut [libc::iovec]) -> Result<()
             continue;
         }
         if n == 0 {
-            return Err(SendFail::Other);
+            return Err(SendFail::Other("the send accepted no bytes".into()));
         }
         let e = crate::utility::errno_val();
         if e == libc::EINTR {
             continue;
         }
         if e == libc::EPIPE || e == libc::ECONNRESET {
-            return Err(SendFail::PeerClosed);
+            return Err(SendFail::PeerClosed(os_reason(e)));
         }
         if e == libc::EAGAIN || e == libc::EWOULDBLOCK {
             // Send buffer full on a non-blocking socket. Bail if the peer has
@@ -169,17 +173,17 @@ pub(crate) unsafe fn send_parts(fd: i32, parts: &mut [libc::iovec]) -> Result<()
             let mut pfd = libc::pollfd { fd, events: libc::POLLOUT, revents: 0 };
             if let Some(p) = peer.get_or_insert_with(|| Peer::of(fd)) {
                 if poll_wait(&mut pfd, 1, &PEER_CHECK) == 0 && !p.alive() {
-                    return Err(SendFail::PeerClosed);
+                    return Err(SendFail::PeerClosed("the receiving process ended".into()));
                 }
                 continue;
             }
             if stalled_since.get_or_insert_with(std::time::Instant::now).elapsed() >= stall_dur {
-                return Err(SendFail::Other);
+                return Err(SendFail::Other(format!("no byte was taken for {stall_dur:?}")));
             }
             let _ = poll_wait(&mut pfd, 1, &stall); // EINTR just re-loops (deadline still bounds it)
             continue;
         }
-        return Err(SendFail::Other);
+        return Err(SendFail::Other(os_reason(e)));
     }
     Ok(())
 }
@@ -1358,13 +1362,13 @@ pub(crate) unsafe fn send_and_receive_over_socket(
         };
         match send_request(fd, packet, packet_size, tracked) {
             Ok(()) => {}
-            Err(SendFail::PeerClosed) if reused => {
+            Err(SendFail::PeerClosed(_)) if reused => {
                 drop_conn(fd);
                 continue;
             }
-            Err(_) => {
+            Err(SendFail::PeerClosed(why) | SendFail::Other(why)) => {
                 drop_conn(fd);
-                return peer_died(socket_path, "the request could not be sent");
+                return peer_died(socket_path, &format!("the request could not be sent: {why}"));
             }
         }
 
@@ -2325,6 +2329,20 @@ mod dispatch_fork_tests {
         assert!(!err.is_null());
         unsafe { libc::free(err as *mut c_void) };
         assert!(waited < std::time::Duration::from_secs(5), "waited {waited:?}");
+    }
+
+    #[test]
+    fn a_failed_send_names_the_os_error() {
+        let p = hold_pipe();
+        let mut byte = 0u8;
+        let mut parts = [libc::iovec { iov_base: &mut byte as *mut u8 as *mut c_void, iov_len: 1 }];
+        let got = unsafe { send_parts(p[1], &mut parts) };
+        unsafe {
+            libc::close(p[0]);
+            libc::close(p[1]);
+        }
+        let want = std::io::Error::from_raw_os_error(libc::ENOTSOCK).to_string();
+        assert_eq!(got, Err(SendFail::Other(want)));
     }
 
     fn drain(fd: i32) -> Vec<u8> {
