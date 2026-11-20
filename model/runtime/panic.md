@@ -166,7 +166,14 @@ in the generated source, and the runtime's own frames, above the panic
 machinery, are recognised; otherwise, or
 with no deciding frame, as in a pool built without line tables, the panic
 is the runtime's. Rust pools build with line tables so inlined frames are
-named. Paths are compared as written and absolute; the backtrace is read in
+named, and with merging of identical functions turned off, in the compiler
+and, on macOS, in the linker: a merged body carries one function's debug
+information for both, so a frame could name the other side's source. The
+switch is unstable, so pool builds enable it on a stable toolchain with
+RUSTC_BOOTSTRAP. The release-mode classifier tests reproduce a pool build
+only with the same flags (`RUSTC_BOOTSTRAP=1 RUSTFLAGS=-Zmerge-functions=disabled
+cargo test --release -p rustmorloc -- panic_classifier`); without them the
+test whose runtime code is identical to a user function fails. Paths are compared as written and absolute; the backtrace is read in
 std's full format, which names files absolutely whatever the working
 directory. The walk costs time in proportion to the stack's depth, paid
 only by a panic whose location is ambiguous.

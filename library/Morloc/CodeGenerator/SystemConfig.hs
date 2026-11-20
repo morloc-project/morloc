@@ -27,6 +27,7 @@ module Morloc.CodeGenerator.SystemConfig
   , managedPrefix
   , prefixFlags
   , prefixRustLinkArgs
+  , rustPoolRustflags
   ) where
 
 import qualified System.Info as SI
@@ -455,15 +456,27 @@ provisionRustRuntime verbose config homeDir soPath nexusBinPath = do
         sayInfo verbose "Persisting Rust workspace source to $MORLOC_HOME/rust"
         persistRustSource verbose srcAbs persistedRustDir destExists
     sayInfo verbose "Warming rustmorloc build cache (Rust pool marshaller)"
-    run verbose "cargo" $
-      [ "build", "--release"
+    -- The warm-up builds with the pool profile so that pool builds reuse
+    -- these artifacts: its rustc flags (PANIC-9) and, on macOS, its packed
+    -- debug information (PANIC-12).
+    run verbose "env" $
+      [ "RUSTC_BOOTSTRAP=1", "cargo", "-Zprofile-rustflags"
+      , "build", "--release"
       , "--manifest-path", persistedRustDir </> "Cargo.toml"
       , "-p", "rustmorloc"
       , "--target-dir", poolTargetDir
+      , "--config", "profile.release.rustflags=" <> show rustPoolRustflags
       ]
-      -- The pool profile packs debug information on macOS (PANIC-12); the
-      -- warm-up must match it for pool builds to reuse these artifacts.
       ++ (if SI.os == "darwin" then ["--config", "profile.release.split-debuginfo=\"packed\""] else [])
+
+-- | PANIC-9: the rustc flags a Rust pool crate and its dependencies build
+-- with. The panic hook tells a user panic from a runtime one by the debug
+-- information of the code that raised it, and code merged with an identical
+-- function, by LLVM or by the macOS linker, carries the other function's.
+-- The rustc flag is unstable; RUSTC_BOOTSTRAP enables it on a stable
+-- toolchain.
+rustPoolRustflags :: [String]
+rustPoolRustflags = "-Zmerge-functions=disabled" : ["-Clink-arg=-Wl,-no_deduplicate" | SI.os == "darwin"]
 
 -- | Search for a Rust workspace directory containing Cargo.toml
 findRustDir :: [FilePath] -> IO FilePath

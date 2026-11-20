@@ -93,31 +93,6 @@ thread that outlives the call (a rayon or other persistent pool) skips
 `release_packet` while unwinding, so the blocks it tracked and the frames
 it pushed stay on that thread until it exits. Each caught failure there
 leaks its argument blocks for the life of the process. Not reproduced.
-- **Merged functions make the panic classifier misattribute a panic.**
-  [reproduced 2026-11-20] PANIC-9, PANIC-5, PANIC-6 violated in optimized
-  builds. LLVM merges functions with identical code at opt-level 2 and 3,
-  which pools use (thin LTO joins the user crate and rustmorloc). The
-  merged body keeps one copy's debug info, so the backtrace walk can name
-  the other side's file. A runtime panic can then be treated as the user's
-  (@try continues past it), or a user panic as the runtime's (the pool exits
-  70). Inlining is not involved: inlined frames are listed and walked
-  correctly. Repro: `cargo test --release -p rustmorloc -- panic_classifier`
-  fails `a_std_panic_raised_by_runtime_code_inside_a_user_generic_is_the_runtimes`
-  (exits 10, user, instead of 11). Its runtime closure compiles to the same
-  code as `child_user_steps`'s `user_steps(0)`, and the dumped trace shows
-  that function's frames. It passes in release with
-  `RUSTC_BOOTSTRAP=1 RUSTFLAGS="-Z merge-functions=disabled"`.
-  `-C llvm-args=-enable-merge-functions=false` has no effect. The hole
-  needs a panic located in non-track_caller std or dependency code (a
-  located panic is decided from its location, and the Location constant
-  keeps the bodies distinct), in a function whose code is identical to one
-  on the other side, in the same codegen unit. Linker identical-code
-  folding (ld64 by default on macOS; lld or mold `--icf`) is a second
-  source. Needs a ruling: disable merging in pool builds through
-  RUSTC_BOOTSTRAP (unsupported but used by the Linux kernel), or another
-  cost (e.g. opt-level 1). A dynamic user/runtime scope and detecting the
-  merge from the trace were rejected (DA notes:
-  /work/.claude/agent-memory/devils-advocate/panic-classifier-merged-functions-review.md).
 - **A C++ pool's dispatch catch can throw out of the pool's C entry.**
   [read 2026-11-20, DA review] PANIC-6 gap. `cpp_local_dispatch` and
   `cpp_remote_dispatch` (pool.cpp) build the fail packet's message with

@@ -3216,7 +3216,9 @@ makeCargoDocs crateName deps localCrates home envPrefix profile =
         ]
       cargoToml =
         vsep $
-          [ "[package]"
+          [ [idoc|cargo-features = ["profile-rustflags"]|]
+          , ""
+          , "[package]"
           , "name = " <> nameLit
           , [idoc|version = "0.0.0"|]
           , [idoc|edition = "2021"|]
@@ -3240,6 +3242,7 @@ makeCargoDocs crateName deps localCrates home envPrefix profile =
           , [idoc|panic = "unwind"|]
           -- Line tables let the panic hook walk inlined frames (PANIC-9).
           , [idoc|debug = "line-tables-only"|]
+          , "rustflags = " <> pretty (show SC.rustPoolRustflags)
           ]
           -- PANIC-12: macOS otherwise leaves them in the build cache's object
           -- files; packed, they go to a bundle copied beside the pool.
@@ -3312,7 +3315,7 @@ makeTheMaker crateName locks = do
       -- a network sets CARGO_NET_OFFLINE.
       buildCmd =
         SysRun . Code . render $
-          [idoc|MORLOC_HOME='#{homeD}' cargo build --release --manifest-path '#{manifestPath}' --target-dir '#{targetD}'|]
+          [idoc|MORLOC_HOME='#{homeD}' RUSTC_BOOTSTRAP=1 cargo build --release --manifest-path '#{manifestPath}' --target-dir '#{targetD}'|]
       copyCmd =
         SysRun . Code . render $
           if SI.os == "darwin"
