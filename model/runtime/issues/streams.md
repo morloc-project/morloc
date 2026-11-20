@@ -81,36 +81,21 @@ here touch locks and ownership: model first.
   2638-2639 set and sweep a call id on the pure path only; the remote
   branch (2640 on) does neither, and stream.rs:2500-2502 claims "the nexus
   dispatch always pre-sets a call_id", which holds only there.
-- **A reader cannot tell a finished stream file from an unfinished one.**
-  [reproduced 0.109.0, and read] Spec: SLOT-28 to SLOT-31 (streams.md,
-  "Reading a stream file's end"); SLOT-31 is open. An IStream reads every
-  complete batch and then reports the end of the stream in every end state
-  (SLOT-29), so a program cannot tell a clean close from a file its writer
-  never finished, and any count, statistic or copy over such a file is
-  silently partial. lib/biolib rnaseq R23 hit it, and keeps the check in a
-  separate `knownIssues` export.
-  - No footer: `saveSource 0 p` of batches [1,2,3], [4,5], [6] writes 689
-    bytes; with 300 bytes cut off, `@next` returns `Ok [[1,2,3]]`, `Ok
-    [[4,5]]`, `Ok []`; with 500 cut, `Ok []` at once. Only a cut inside a
-    sub-packet header errors. Cause: stream_format.rs:127-130 forward-scans
-    when no footer parses.
-  - Final footer, FAILED: the status is parsed (stream_format.rs:567-581) and
-    never consulted, so a file whose writer died inside the slot lock reads
-    as a clean one. IFile opens it too (stream.rs:2170 checks only
-    `final_footer`; SLOT-30).
-  - Temporary footer: written both while a stream is being written, when a
-    reader may legitimately read it as it grows, and by a stream that will
-    never change again (discarded without `@close` with its unflushed
-    elements dropped, or a custodian that failed or was killed). The file
-    does not say which. The writing tree's registry knows while the tree
-    runs (the sweeps find open writers there); a reader on another machine
-    (a SLURM job on a shared filesystem) or after the tree has ended
-    cannot know.
-  - Standard input carries no footer at all: an empty sub-packet or EOF
-    ends the stream, so a writer that died mid-stream is not seen either.
+- **An IStream cannot tell a stream still being written from an abandoned
+  one.** [read] Spec: SLOT-29, SLOT-31 (open). FAILED files are refused and
+  a pipe that ends without a final footer fails (SLOT-29, fixed
+  2026-11-20), but an IStream of a file with no footer or a temporary
+  footer still reads its complete batches and ends cleanly, because both
+  states also occur while a writer is live: a file just opened has no
+  footer until its first batch, and the custodian overwrites its last
+  footer with each new batch. So a stream file cut short, or one whose
+  writer was killed or discarded it, still reads as complete through an
+  IStream and `@load` (IFile and `file --validate` refuse it).
+  lib/biolib rnaseq R23 hit it, and keeps the check in a separate
+  `knownIssues` export.
   Needs a TLA+ model before any fix (tla/, beside StreamQueue.tla): a
   writer (writing, flushed, closed, paused, discarded, failed, killed at
-  any step), the custodian's file states (SLOT-28's five, plus a
+  any step), the custodian's file states (SLOT-28's six, plus a
   sub-packet half-written), the registry's view of the writer (live, gone,
   unknown for another machine), and readers that open at any step and read
   to the end. Properties: a reader that reports a clean end has read every
@@ -215,10 +200,6 @@ here touch locks and ownership: model first.
   [read, 2026-11-01] `parse_stream_file`'s fallback takes `element_count`
   from `forward_scan_subpackets`, which counts compressed sub-packets only
   in `compressed_uncounted`. Readers of that count are not traced.
-- **`@concat` writes CLOSED whatever its sources' status.** [read,
-  2026-11-02] A source whose final footer says FAILED or PAUSED is merged
-  into a file whose footer says CLOSED, so the failure is lost. Which status
-  a merge of mixed statuses carries needs a ruling (with SLOT-31).
 - **A stdin batch block may be held until teardown.** [read, not
   reproduced, 2026-11-13] If the nexus fails to write its response
   (morloc-nexus stdio_server.rs ~311, ~455-460) or the pool fails reading

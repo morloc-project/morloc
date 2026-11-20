@@ -441,6 +441,12 @@ pub struct FileArgs {
     /// Ignored without `--validate`.
     #[arg(long, value_name = "STRING")]
     pub schema: Option<String>,
+
+    /// Close a stream file its writer did not finish (no footer, a
+    /// temporary one, or one that says FAILED): keep every complete batch
+    /// and write a final footer marked REPAIRED, which readers accept.
+    #[arg(long)]
+    pub repair: bool,
 }
 
 /// Read a data file and re-emit it in a chosen output format. Uses

@@ -1368,6 +1368,76 @@ pub fn forward_scan_subpackets(
     forward_scan_subpackets_capped(mmap, body_start, u64::MAX)
 }
 
+/// How to close a stream file by repair: keep its first `data_end` bytes
+/// (the header and every complete sub-packet) and append `footer`, a final
+/// footer marked REPAIRED (SLOT-28).
+pub struct RepairPlan {
+    pub data_end: u64,
+    pub footer: Vec<u8>,
+    pub subpackets: u64,
+    pub elements: u64,
+}
+
+/// Plan the repair of a stream file whatever state it ended in. A footer
+/// the tail still points at bounds the data, so bytes of a torn last
+/// sub-packet under it are not taken for one.
+pub fn repair_plan(file: &[u8]) -> Result<RepairPlan, MorlocError> {
+    if file.len() < 32 {
+        return Err(MorlocError::Packet("file too short for a packet header".into()));
+    }
+    let header = PacketHeader::from_bytes(file[..32].try_into().expect("32-byte slice"))?;
+    if !header.is_stream() {
+        return Err(MorlocError::Packet("not a stream file: only a stream has a footer to repair".into()));
+    }
+    let body_start = 32u64
+        .checked_add(header.offset as u64)
+        .filter(|&end| end <= file.len() as u64)
+        .ok_or_else(|| MorlocError::Packet("stream metadata block extends past file end".into()))?;
+    let bound = footer_start(file).filter(|&f| f >= body_start).unwrap_or(file.len() as u64);
+    let body = &file[..bound as usize];
+    let scan = forward_scan_subpackets(body, body_start)?;
+    let data_end = body_start + scan.bytes_scanned;
+    let mut entries = Vec::with_capacity(scan.subpacket_offsets.len());
+    let mut elements = 0u64;
+    for offset in scan.subpacket_offsets {
+        let elem_count = crate::compression::subpacket_elem_count(&file[..data_end as usize], offset)?;
+        elements = elements
+            .checked_add(elem_count)
+            .ok_or_else(|| MorlocError::Packet("the sub-packets' element counts overflow".into()))?;
+        entries.push(SubpacketEntry { offset, elem_count });
+    }
+    let mut diag = StreamDiag::new();
+    diag.subpacket_count = entries.len() as u64;
+    diag.element_count = elements;
+    let footer = make_final_footer_packet(&diag, &entries, FOOTER_STATUS_REPAIRED)?;
+    Ok(RepairPlan { data_end, footer, subpackets: entries.len() as u64, elements })
+}
+
+/// Where the footer the stream tail points at begins, when the tail is
+/// intact and a footer packet sits there.
+fn footer_start(file: &[u8]) -> Option<u64> {
+    let tail_at = file.len().checked_sub(STREAM_TAIL_SIZE)?;
+    let footer_len = decode_stream_tail(file[tail_at..].try_into().ok()?)? as usize;
+    let start = tail_at.checked_sub(footer_len)?;
+    let hdr = PacketHeader::from_bytes(file.get(start..start + 32)?.try_into().ok()?).ok()?;
+    hdr.is_footer().then_some(start as u64)
+}
+
+/// A stream file closed by repair, built in memory: `repair_plan` applied.
+pub struct RepairedStream {
+    pub bytes: Vec<u8>,
+    pub subpackets: u64,
+    pub elements: u64,
+}
+
+pub fn repair_stream(file: &[u8]) -> Result<RepairedStream, MorlocError> {
+    let plan = repair_plan(file)?;
+    let mut bytes = Vec::with_capacity(plan.data_end as usize + plan.footer.len());
+    bytes.extend_from_slice(&file[..plan.data_end as usize]);
+    bytes.extend_from_slice(&plan.footer);
+    Ok(RepairedStream { bytes, subpackets: plan.subpackets, elements: plan.elements })
+}
+
 /// `forward_scan_subpackets`, stopping after `cap` sub-packets with `scan_capped` set.
 pub fn forward_scan_subpackets_capped(
     mmap: &[u8],
@@ -1673,6 +1743,62 @@ mod tests {
         let tail = encode_stream_tail(footer.len() as u32);
         file.extend_from_slice(&tail);
         file
+    }
+
+    fn final_status(file: &[u8]) -> (bool, u8) {
+        let footer_len = decode_stream_tail(file[file.len() - STREAM_TAIL_SIZE..].try_into().unwrap()).unwrap() as usize;
+        let start = file.len() - STREAM_TAIL_SIZE - footer_len;
+        let (mut fin, mut status) = (false, FOOTER_STATUS_CLOSED);
+        for (kind, data) in iter_packet_metadata(&file[start..file.len() - STREAM_TAIL_SIZE]).unwrap() {
+            match kind {
+                METADATA_TYPE_FOOTER_FINAL => fin = true,
+                METADATA_TYPE_FOOTER_STATUS => status = decode_footer_status(data),
+                _ => {}
+            }
+        }
+        (fin, status)
+    }
+
+    // SLOT-28
+    #[test]
+    fn repair_keeps_every_complete_sub_packet_and_marks_the_footer_repaired() {
+        let schema = crate::schema::parse_schema("i8").unwrap();
+        let mut whole = make_stream_header_block(&list_schema(&schema));
+        for n in [2u64, 0, 1] {
+            whole.extend_from_slice(&build_uncompressed_subpacket(n, n as usize * 8));
+        }
+        let footer = make_footer_packet(&[]).unwrap();
+        whole.extend_from_slice(&footer);
+        whole.extend_from_slice(&encode_stream_tail(footer.len() as u32));
+        let subs = enumerate_subpackets(&whole);
+        let body_end = subs.last().unwrap().1;
+        // A temporary footer, no footer, and a cut inside the last sub-packet.
+        let mut torn_under_footer = whole[..body_end - 1].to_vec();
+        torn_under_footer.extend_from_slice(&footer);
+        torn_under_footer.extend_from_slice(&encode_stream_tail(footer.len() as u32));
+        let cuts: [(&str, Vec<u8>, usize); 4] = [
+            ("temporary footer", whole.clone(), 3),
+            ("no footer", whole[..body_end].to_vec(), 3),
+            ("cut sub-packet", whole[..body_end - 1].to_vec(), 2),
+            ("torn sub-packet under a footer", torn_under_footer, 2),
+        ];
+        for (name, file, kept) in cuts {
+            let r = repair_stream(&file).unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert_eq!(r.subpackets, kept as u64, "{name}");
+            assert_eq!(r.elements, [2u64, 0, 1][..kept].iter().sum::<u64>(), "{name}");
+            assert_eq!(enumerate_subpackets(&r.bytes).len(), kept, "{name}");
+            assert_eq!(&r.bytes[..subs[kept - 1].1], &whole[..subs[kept - 1].1], "{name}: data changed");
+            assert_eq!(final_status(&r.bytes), (true, FOOTER_STATUS_REPAIRED), "{name}");
+        }
+    }
+
+    #[test]
+    fn repair_refuses_a_file_that_is_not_a_stream() {
+        let mut header = PacketHeader::data_mesg(PACKET_FORMAT_VOIDSTAR, 8);
+        header.offset = 0;
+        let mut packet = header.to_bytes().to_vec();
+        packet.extend_from_slice(&[0u8; 8]);
+        assert!(repair_stream(&packet).is_err());
     }
 
     /// Walk forward through a stream file's body, returning the byte

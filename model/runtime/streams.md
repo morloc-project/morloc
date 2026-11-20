@@ -578,7 +578,7 @@ How a file ends records why its writer stopped; this section says how each
 reader treats each ending. An issue (issues/streams.md) records what is
 wrong with it.
 
-### SLOT-28 A stream file ends in one of five states
+### SLOT-28 A stream file ends in one of six states
 Status: implemented
 Checked by: a_stopped_writer_finishes_its_file_with_the_given_status, a_discarded_stream_keeps_what_was_queued_and_no_final_footer, a_writer_killed_inside_the_slot_lock_fails_the_stream, a_batch_failing_in_placement_is_absent_or_fails_the_stream
 
@@ -586,25 +586,38 @@ Checked by: a_stopped_writer_finishes_its_file_with_the_given_status, a_discarde
 |---|---|
 | final footer, CLOSED | `@close` (SLOT-15) |
 | final footer, PAUSED | a remote child returns the stream without `@close`; the file is complete and may be appended to |
-| final footer, FAILED | the stream's writer died inside the slot lock (SLOT-14), or daemon recovery stopped the custodian (SLOT-13) |
+| final footer, FAILED | the stream's writer died inside the slot lock (SLOT-14), or daemon recovery stopped the custodian (SLOT-13); or a run whose packet stdout failed after its header (SLOT-40) |
+| final footer, REPAIRED | `morloc-nexus file --repair` closed a file that was in another state; it holds every complete sub-packet the file had, which may be fewer than its writer meant to write |
 | temporary footer | the stream is still being written; or it was discarded, its handle dropped or its run ended without `@close`, with its unflushed elements dropped (SLOT-13); or its custodian failed to write (an I/O error such as a full disk), after which it writes nothing more; or a batch failed after part of it was queued (SLOT-35), after which what was queued is still written; or its custodian was killed after writing a batch |
 | no footer | the custodian was killed before writing any footer; the machine stopped (power loss, kernel panic); or the file was cut short outside morloc (an interrupted copy, a full disk) |
 
-Every footer follows the last complete sub-packet, so in the first four
+Every footer follows the last complete sub-packet, so in the first five
 states the data ends at the footer. A file whose bytes were cut after a
 complete sub-packet is indistinguishable from the last state.
 
-### SLOT-29 An input stream reads every complete batch and ends, whatever the end state
+### SLOT-29 A reader opens a stream file by its end state
 Status: draft
 
+| End state | IStream open, `@load` | IFile open | `file --validate` |
+|---|---|---|---|
+| final CLOSED or PAUSED | opens | opens | passes |
+| final REPAIRED | opens | opens | passes, and says repaired |
+| final FAILED | refused | refused | fails |
+| temporary footer | opens (SLOT-31) | refused (SLOT-30) | fails |
+| no footer | opens (SLOT-31) | refused (SLOT-30) | fails |
+
 `@next` on an IStream walks the sub-packets in order and, past the last
-one, returns an empty batch, in every end state. With a final or
-temporary footer the walk stops at the footer; with no footer it scans
-forward and stops at the last complete sub-packet, or fails if a
-sub-packet's header extends past the end of the file. The footer's status
-is parsed and not consulted: a FAILED file reads as a CLOSED one. A
-reader of a file still being written sees the batches its writer had
-flushed when the reader opened it (SLOT-15).
+one, returns an empty batch; with a temporary footer the walk stops at the
+footer, with no footer at the last complete sub-packet, and a reader of a
+file still being written sees the batches its writer had flushed when the
+reader opened it (SLOT-15): a file just opened has no footer until its first
+batch, so an IStream cannot refuse one that has none (SLOT-31). A refused
+file is read only after `morloc-nexus file --repair` gives it a REPAIRED
+footer.
+A packet stream read from a pipe (`@stdin`, an IStream argument read from
+`-`) gives every complete batch, then fails when the input ends without a
+final footer, inside a sub-packet, or with a FAILED one; a consumer may
+have acted on the earlier batches, and its run fails.
 
 ### SLOT-30 An indexed file opens only with a final footer
 Status: implemented
@@ -612,7 +625,7 @@ Checked by: ifile_rejects_footerless_stream, an_index_out_of_order_is_not_truste
 
 `@open` as an IFile needs the per-sub-packet element counts that only a
 final footer records, so it refuses a file in the temporary-footer or
-no-footer state. It does not consult the status: a FAILED file opens.
+no-footer state, and refuses a FAILED one (SLOT-29).
 
 The index is checked at open without reading the sub-packets (ruled
 2026-11-02): its entries lie in order inside the body, at least a header
@@ -625,16 +638,34 @@ that loads a sub-packet fails when the sub-packet holds a different
 number of elements than the index gives it. `@concat` and `@append`, which
 write a new footer, always walk, and refuse a damaged footer or one that
 differs from the sub-packets; `@concat` also refuses a source without a
-final footer. A writer refuses to write a final footer whose counts do not
+final footer or with a FAILED one, and its footer is REPAIRED when any
+source's is, CLOSED otherwise. `@append` refuses a FAILED or REPAIRED
+file, so a repaired file is never extended into one that reads as closed. A writer refuses to write a final footer whose counts do not
 add up or whose entries are out of order.
 
-### SLOT-31 What a reader reports at an ending that is not a clean close
+### SLOT-31 What an IStream reports at a temporary footer or none
 Status: draft
 
 Open; needs a ruling and a model (issues/streams.md). The endings in
-SLOT-28 tell a reader why its writer stopped, except in one case: a
+SLOT-28 tell a reader why its writer stopped (SLOT-29), except two: a
+file with no footer is both a stream just opened (or between a batch and
+its footer) and one whose writer was killed or that was cut short, and a
 temporary footer is written both by a stream still being written, which a
 reader may legitimately read while it grows, and by a stream discarded or
 killed, whose file will never change again. The registry of the process
 tree that writes a stream can tell the two apart while that tree runs; a
 reader on another machine, or after the tree has ended, cannot.
+
+### SLOT-40 A run's packet output ends in a final footer whatever its outcome
+Status: draft
+
+Standard output in the packet or voidstar form ends in a final footer
+over its complete sub-packets: CLOSED when the run succeeds, FAILED when
+it fails after the stream's header was written. A run killed by a signal
+it cannot handle (SIGKILL) writes no footer: IFile, `--validate` and a
+pipe reader refuse it (SLOT-29), and an IStream of such a file is SLOT-31's
+open case.
+`-o FILE` writes to a file beside FILE and renames it onto FILE only when
+the run succeeds; a failed run leaves FILE as it was. A device or a pipe
+named by `-o` is written in place. A text form (json, jsonl, csv) has no
+footer, and its completeness is the run's exit status.

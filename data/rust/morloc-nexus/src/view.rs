@@ -23,7 +23,7 @@ use crate::cli::{OutputForm, ViewArgs};
 use crate::dispatch::{print_result_c, NexusConfig};
 use crate::file::{classify_path, Classification, DataArg, DEFAULT_PROBE_BYTES};
 use crate::loader::load_with_parsed_schema;
-use crate::process::{self, redirect_stdout_to, take_c_errmsg};
+use crate::process::{self, redirect_stdout_in_place, take_c_errmsg};
 
 /// One runtime argument to `mlc_ifile_walk`. Must match the runtime's
 /// `IFileWalkArg` layout byte-for-byte.
@@ -442,7 +442,11 @@ fn stream_stdin_dispatch(
         // Read the next sub-packet's 32-byte header.
         match read_exact_or_eof(stdin, &mut hdr_buf) {
             Ok(true) => {}
-            Ok(false) => break, // clean EOF
+            // SLOT-29: a pipe that ends before a final footer was not finished.
+            Ok(false) => {
+                eprintln!("Error: the stream ended without a final footer, so its writer did not finish it");
+                process::clean_exit(1);
+            }
             Err(e) => {
                 eprintln!("Error: sub-packet header read: {}", e);
                 process::clean_exit(1);
@@ -455,9 +459,24 @@ fn stream_stdin_dispatch(
                 process::clean_exit(1);
             }
         };
-        // Footer packet: end of stream. Consume its body + EOF tail
-        // for cleanliness, but the exact bytes don't matter for us.
+        // SLOT-29: the footer says whether the stream ended cleanly.
         if sub_hdr.is_footer() {
+            use std::io::Read;
+            let mut footer = hdr_buf.to_vec();
+            let read = morloc_runtime_types::net_limits::read_declared(&mut footer, sub_hdr.length, |b| {
+                stdin.read_exact(b).map(|()| true).or_else(|e| {
+                    if e.kind() == std::io::ErrorKind::UnexpectedEof { Ok(false) } else { Err(e) }
+                })
+            });
+            let ended = match read {
+                Ok(true) => crate::stdio_server::piped_footer_ends(&footer),
+                Ok(false) => Err("the stream was cut inside its footer".into()),
+                Err(e) => Err(format!("footer read: {e}")),
+            };
+            if let Err(e) = ended {
+                eprintln!("Error: {e}");
+                process::clean_exit(1);
+            }
             break;
         }
         if !sub_hdr.is_data() {
@@ -664,7 +683,7 @@ fn drain_stdin_to_temp_with_prefix(
 /// truncation/oversize gate), resolves the schema, loads via the
 /// shared loader, and hands a voidstar to [`print_result_c`].
 pub fn run(args: &ViewArgs) -> ! {
-    redirect_stdout_to(args.output_path.as_deref());
+    redirect_stdout_in_place(args.output_path.as_deref());
 
     let selection = match resolve_output_selection(args) {
         Ok(s) => s,
@@ -924,7 +943,7 @@ fn dispatch_pattern(
         }
     };
 
-    redirect_stdout_to(args.output_path.as_deref());
+    redirect_stdout_in_place(args.output_path.as_deref());
 
     let config = NexusConfig {
         output_format: selection.form.to_internal(),

@@ -35,7 +35,7 @@ struct Output {
 }
 
 /// How an action's file is written.
-enum Write {
+pub(crate) enum Write {
     /// Under a temporary name beside the file, renamed onto it once the
     /// whole run has succeeded.
     Staged { temp: String, dest: std::path::PathBuf },
@@ -271,7 +271,7 @@ enum Existing {
 /// mode, and where the process may set it the owner, of the file it
 /// replaces, or else the mode a plain create would give. A device or pipe
 /// is written in place.
-fn plan_write(target: &FileTarget) -> Result<Write, String> {
+pub(crate) fn plan_write(target: &FileTarget) -> Result<Write, String> {
     let existing = match std::fs::metadata(target.given()) {
         Err(_) => Existing::Absent,
         Ok(m) if m.is_file() => Existing::Regular(m),

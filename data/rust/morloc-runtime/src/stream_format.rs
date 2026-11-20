@@ -50,6 +50,22 @@ pub(crate) struct ParsedStreamFile {
     pub(crate) body_start: u64,
     /// End of the last complete sub-packet: where a reader stops.
     pub(crate) data_end: u64,
+    /// The status of a final footer (`FOOTER_STATUS_*`); None without one.
+    pub(crate) footer_status: Option<u8>,
+}
+
+impl ParsedStreamFile {
+    /// SLOT-29: a stream file whose final footer says its writer failed is
+    /// not read.
+    pub(crate) fn refuse_failed(&self, path: &str) -> Result<(), MorlocError> {
+        if self.footer_status != Some(morloc_runtime_types::packet::FOOTER_STATUS_FAILED) {
+            return Ok(());
+        }
+        Err(MorlocError::Other(format!(
+            "stream file '{path}' is not read: its writer failed (the final footer says FAILED). \
+             `morloc-nexus file --repair {path}` keeps its complete batches and marks it repaired"
+        )))
+    }
 }
 
 /// Parse a mmap'd stream or data packet file into a `ParsedStreamFile`.
@@ -72,6 +88,7 @@ pub(crate) fn parse_stream_file(
 
     let is_data_packet = outer_header.is_data();
     let mut footer_start: Option<u64> = None;
+    let mut footer_status: Option<u8> = None;
     let mut footer_damaged = false;
     let mut scanned_end: Option<u64> = None;
     let (schema_str, subpacket_entries, element_count, final_footer, body_start):
@@ -118,6 +135,7 @@ pub(crate) fn parse_stream_file(
             match footer {
                 Ok(Some(parsed)) => {
                     footer_start = Some(parsed.footer_start);
+                    footer_status = parsed.final_footer.then_some(parsed.footer_status);
                     (
                     parsed.subpacket_entries,
                     parsed.element_count,
@@ -180,6 +198,7 @@ pub(crate) fn parse_stream_file(
         is_data_packet,
         body_start,
         data_end,
+        footer_status,
     })
 }
 
@@ -511,10 +530,6 @@ pub(crate) struct ParsedFooter {
     pub(crate) final_footer: bool,
     /// Status byte from `METADATA_TYPE_FOOTER_STATUS` if present, or
     /// `FOOTER_STATUS_CLOSED` when the block is absent (legacy footer).
-    /// Parsed here so downstream tooling (`morloc-nexus file`, a
-    /// future `@fstatus` intrinsic) can surface it without re-reading
-    /// the footer.
-    #[allow(dead_code)]
     pub(crate) footer_status: u8,
 }
 

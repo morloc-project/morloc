@@ -295,6 +295,7 @@ morloc-nexus/mcp.rs::-::OPEN_CONNECTIONS	exec-only
 morloc-nexus/parse_arg.rs::-::NEXUS_READS_STDIN	exec-only		
 morloc-nexus/parse_arg.rs::-::CONTEXTS	exec-only		
 morloc-nexus/parse_arg.rs::-::STAGE_DIR	exec-only		
+morloc-nexus/process.rs::-::OUTPUT_FILE	exec-only		
 morloc-nexus/process.rs::-::RECOVERY_GENERATION	exec-only		
 morloc-nexus/process.rs::-::RECOVERY_CONTEXT	exec-only		
 morloc-nexus/process.rs::-::POOL_CHECK	exec-only		

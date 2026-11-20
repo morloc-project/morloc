@@ -106,7 +106,11 @@
   Also seen 2026-11-18 with a Python callee: golden fold-native
   `threadsPy` (C++ threads folding through Python) failed once in a `-j 6`
   golden subset with "the py pool ended during the call (Recv error)"; it
-  passed when rerun alone.
+  passed when rerun alone. Again 2026-11-20 in golden pool-kept-connections
+  (`parallel`, an R callee) in a full `-j 6` run; it passed alone.
+  Measured 2026-11-20 on a quiet machine, `MORLOC_POOL_IDLE_TIMEOUT_MS=0
+  ./nexus parallel 400` alone: 1 failure in 36 runs on dev 242487745's
+  runtime, 3 in 48 on the working tree after it (Python or R callee).
 - **A typechecker timing test times out under a parallel run.**
   [reproduced once, 2026-11-20] The unit test "long non-tuple composition
   chain stays linear" hit its 1 s timeout in a full `-j 6` suite run

@@ -19,19 +19,11 @@
   requires Str, [Str], Vector U8, or [Vector U8]"). `@mime` has the check
   (CodeGenerator/Nexus.hs:325 `mediaSerialValid`); terminals (:3388) do not.
 - **@render ignores -f.** [reproduced] Contradicts CLI-5; CLI-9 open.
-- Gap: `-o FILE` is a truncating redirect, not write-then-rename like action
-  outputs; a failed multi-output run leaves partial output. The partial
-  file can read back as valid: a `-f packet -o s.pkt` run that failed
-  (exit 1) after its first stream left an `s.pkt` that a later command read
-  whole [reproduced 2026-11-15, with two `@collect` sites, which STRM-4 now
-  rejects; any run that fails after writing leaves the same].
-  The reader side is the wider hole [read]: a stream with no final footer
-  is accepted by forward scan (`morloc-nexus file --validate` reports
-  `state=missing`, `validated=structure-only`), so any truncated stream
-  (`> file`, a pipe whose producer died, a full disk) reads as complete.
-  `morloc-nexus view` has the same shape: `view sc.dat -f parquet -o
-  x.parquet` on a non-table fails "requires a Table return type" and
-  leaves an empty `x.parquet` [reproduced, 0.109.0].
+- Gap: `morloc-nexus view -o` is a truncating redirect: `view sc.dat -f
+  parquet -o x.parquet` on a non-table fails "requires a Table return type"
+  and leaves an empty `x.parquet` [reproduced, 0.109.0]. Command runs stage
+  `-o` and rename on success (SLOT-40); view writes `-o` itself in some
+  modes and keeps the direct redirect.
 - Gap: model/language/arguments-and-output.md has no rules for @parse.
 - [read] morloc-nexus/src/orchestrate.rs:198 error text omits voidstar and
   raw.

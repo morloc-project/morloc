@@ -37,6 +37,8 @@ struct StdioSlot {
     // `single_data` marks that the stream ends after that one packet.
     pending_prefix: Option<Vec<u8>>,
     single_data: bool,
+    // stdin: the stream reached its footer, so every later read is its end.
+    ended: bool,
     // stdout in one-shot CLI mode: every `@stdout` open in the run writes to
     // one logical stream. The packet formats write the header once, drop
     // each pool footer, and write one final footer at `finish_stdout`; these
@@ -55,7 +57,7 @@ impl StdioSlot {
     const fn new(fd: i32) -> Self {
         StdioSlot {
             fd, header_done: false, json_open: false, json_any: false,
-            pending_prefix: None, single_data: false,
+            pending_prefix: None, single_data: false, ended: false,
             bytes_out: 0, pending: Vec::new(), entries: Vec::new(),
             diag: None, schema: None,
         }
@@ -724,6 +726,11 @@ fn do_write(slot_id: i64, frame: crate::stdio_bridge::Frame<'_>) -> Resp {
         return write_resp(unsafe { br::write_frame_to_fd(slot.fd, frame) });
     }
 
+    // SLOT-40: nothing follows the run's final footer.
+    if slot.ended {
+        return Resp::Err("stdout: the run's output has already ended".into());
+    }
+
     // stdout: transcode per -f. Classify from the 32-byte header only;
     // the transcoding branches read the full sub-packet lazily so the
     // packet pass-through path stays zero-copy for large streams.
@@ -955,23 +962,41 @@ fn merge_diag(a: StreamDiag, b: StreamDiag) -> StreamDiag {
 /// Complete streamed stdout at the end of a one-shot run: write the single
 /// final footer of a packet stream. Must run before anything else the nexus
 /// prints to stdout. A packet stream with frames whose pool footer never
-/// arrived is left without a final footer, which readers treat as an
-/// unclosed stream and recover by scanning.
-pub fn finish_stdout() {
+/// arrived is left without a final footer, which readers refuse (SLOT-29).
+pub fn finish_stdout() -> bool {
+    end_stdout(morloc_runtime_types::packet::FOOTER_STATUS_CLOSED)
+}
+
+/// SLOT-40: end the packet stdout of a run that failed with a final footer
+/// that says so, over the sub-packets whose counts are known.
+pub fn fail_stdout() {
+    end_stdout(morloc_runtime_types::packet::FOOTER_STATUS_FAILED);
+}
+
+/// End the run's stdout stream; false when its footer could not be written.
+/// Frames that arrive later are refused, so none lands after the footer.
+fn end_stdout(status: u8) -> bool {
     use crate::stdio_bridge as br;
     if DAEMON_MODE.load(std::sync::atomic::Ordering::Acquire) {
-        return;
+        return true;
     }
     let mut slot = match STDOUT_SLOT.lock() {
         Ok(s) => s,
-        Err(_) => return,
+        Err(_) => return false,
     };
     let result = match render_cfg().format {
-        OutputFormat::Packet | OutputFormat::VoidStar => finish_logical_packet(&mut slot),
+        OutputFormat::Packet | OutputFormat::VoidStar => finish_logical_packet(&mut slot, status),
         _ => Ok(()),
     };
-    if let Err(br::WriteError::Other(e)) = result {
-        eprintln!("Error: finishing streamed stdout: {}", e);
+    slot.ended = true;
+    match result {
+        Ok(()) => true,
+        Err(br::WriteError::Other(e)) => {
+            eprintln!("Error: finishing streamed stdout: {}", e);
+            false
+        }
+        // The broken pipe sets the run's own status (141).
+        Err(br::WriteError::BrokenPipe) => true,
     }
 }
 
@@ -996,18 +1021,20 @@ pub fn finish_stage() -> Result<(), String> {
     if !slot.pending.is_empty() {
         return Err("the stdout stream was never closed".into());
     }
-    finish_logical_packet(&mut slot).map_err(|e| match e {
+    finish_logical_packet(&mut slot, morloc_runtime_types::packet::FOOTER_STATUS_CLOSED).map_err(|e| match e {
         br::WriteError::BrokenPipe => "the stage file closed".to_string(),
         br::WriteError::Other(m) => m,
     })
 }
 
 /// Write the single final footer of a packet stream whose pool footers
-/// have all been folded in. A stream with frames whose footer never
-/// arrived is left without one, which readers treat as an unclosed stream.
-fn finish_logical_packet(slot: &mut StdioSlot) -> Result<(), crate::stdio_bridge::WriteError> {
+/// have all been folded in. A CLOSED stream with frames whose footer never
+/// arrived is left without one (SLOT-29); a FAILED footer is written over
+/// the sub-packets whose counts are known.
+fn finish_logical_packet(slot: &mut StdioSlot, status: u8) -> Result<(), crate::stdio_bridge::WriteError> {
     use crate::stdio_bridge as br;
-    if !slot.header_done || !slot.pending.is_empty() {
+    let failed = status == morloc_runtime_types::packet::FOOTER_STATUS_FAILED;
+    if !slot.header_done || (!slot.pending.is_empty() && !failed) {
         return Ok(());
     }
     let mut diag = slot.diag.unwrap_or_else(StreamDiag::new);
@@ -1018,11 +1045,9 @@ fn finish_logical_packet(slot: &mut StdioSlot) -> Result<(), crate::stdio_bridge
     for (i, off) in tail.iter().rev().enumerate() {
         diag.tail[i] = *off;
     }
-    let footer = morloc_runtime_types::packet::make_final_footer_packet(
-        &diag, &slot.entries,
-        morloc_runtime_types::packet::FOOTER_STATUS_CLOSED,
-    );
+    let footer = morloc_runtime_types::packet::make_final_footer_packet(&diag, &slot.entries, status);
     slot.header_done = false;
+    slot.pending.clear();
     slot.entries.clear();
     slot.diag = None;
     slot.schema = None;
@@ -1057,20 +1082,28 @@ fn read_one_subpacket_into_shm(slot: &mut StdioSlot) -> Result<Option<(i64, u64)
         .map(Some);
     }
     // A lone data packet's single batch was already emitted -> end of stream.
-    if slot.single_data {
+    if slot.single_data || slot.ended {
         return Ok(None);
     }
 
     // Stream sub-packet: read a fresh header + body.
     let fd = slot.fd;
     let mut hdr = [0u8; 32];
-    if !read_exact_fd(fd, &mut hdr)? {
-        return Ok(None);
+    // SLOT-29: the input ends only at a final footer that does not say FAILED.
+    match read_fill_fd(fd, &mut hdr)? {
+        0 => return Err("stdin: the stream ended without a final footer, so its writer did not finish it".into()),
+        n if n < hdr.len() => return Err("stdin: the stream was cut inside a sub-packet header".into()),
+        _ => {}
     }
     let header = PacketHeader::from_bytes(&hdr)
         .map_err(|e| format!("subpacket header parse: {}", e))?;
+    if header.is_footer() {
+        stdin_footer_ends(fd, &hdr, &header)?;
+        slot.ended = true;
+        return Ok(None);
+    }
     if !header.is_data() {
-        // Footer or anything else -> treat as end-of-stream.
+        slot.ended = true;
         return Ok(None);
     }
     reject_unreadable_subpacket(&header)?;
@@ -1084,6 +1117,43 @@ fn read_one_subpacket_into_shm(slot: &mut StdioSlot) -> Result<Option<(i64, u64)
         )
     }
     .map(Some)
+}
+
+/// SLOT-29: read the footer a stdin stream ended at. A pipe's end is final,
+/// so only a final footer that does not say FAILED ends it cleanly.
+fn stdin_footer_ends(
+    fd: i32,
+    hdr: &[u8; 32],
+    header: &morloc_runtime_types::packet::PacketHeader,
+) -> Result<(), String> {
+    // A footer's metadata is its payload: `length` covers it all (NET-10).
+    let mut footer = hdr.to_vec();
+    if !morloc_runtime_types::net_limits::read_declared(&mut footer, header.length, |b| read_exact_fd(fd, b))? {
+        return Err("stdin: the stream was cut inside its footer".into());
+    }
+    piped_footer_ends(&footer).map_err(|e| format!("stdin: {e}"))
+}
+
+/// SLOT-29: whether the footer a piped stream ended at closes it cleanly:
+/// a final footer that does not say FAILED.
+pub(crate) fn piped_footer_ends(footer: &[u8]) -> Result<(), String> {
+    use morloc_runtime_types::packet as pk;
+    let mut is_final = false;
+    let mut status = pk::FOOTER_STATUS_CLOSED;
+    for (kind, data) in pk::iter_packet_metadata(footer).map_err(|e| format!("footer: {e}"))? {
+        match kind {
+            pk::METADATA_TYPE_FOOTER_FINAL => is_final = true,
+            pk::METADATA_TYPE_FOOTER_STATUS => status = pk::decode_footer_status(data),
+            _ => {}
+        }
+    }
+    if !is_final {
+        return Err("the stream ended at a temporary footer, so its writer did not finish it".into());
+    }
+    if status == pk::FOOTER_STATUS_FAILED {
+        return Err("the stream's writer failed (its final footer says FAILED)".into());
+    }
+    Ok(())
 }
 
 /// Reject a stdin sub-packet the pool decoder can't consume: a non-MESG

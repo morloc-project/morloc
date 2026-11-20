@@ -879,7 +879,28 @@ pub fn init_shm() -> (String, String) {
 /// [`clean_exit`] on any open/dup2 failure. Used by both `run` and
 /// `view` so the redirect covers every output writer uniformly
 /// (Rust, libc printf, raw fd writes).
+// SLOT-40: the temporary file `-o` writes and the file it replaces.
+static OUTPUT_FILE: std::sync::OnceLock<(String, std::path::PathBuf)> = std::sync::OnceLock::new();
+
+// SLOT-40
 pub fn redirect_stdout_to(path: Option<&str>) {
+    let Some(path) = path else { return };
+    let target = crate::phase2::resolve_target(path);
+    let open_path = match crate::orchestrate::plan_write(&target) {
+        Ok(crate::orchestrate::Write::Staged { temp, dest }) => {
+            let _ = OUTPUT_FILE.set((temp.clone(), dest));
+            temp
+        }
+        Ok(crate::orchestrate::Write::Direct { path }) => path,
+        Err(e) => {
+            eprintln!("Error: cannot open output file '{}': {}", path, e);
+            clean_exit(1);
+        }
+    };
+    redirect_stdout_in_place(Some(open_path.as_str()));
+}
+
+pub fn redirect_stdout_in_place(path: Option<&str>) {
     let Some(path) = path else { return };
     use std::os::unix::io::AsRawFd;
     match std::fs::File::create(path) {
@@ -964,12 +985,16 @@ fn teardown(exit_code: i32, unmap: bool) -> ! {
     unsafe { morloc_daemon_remove_endpoints() };
 
     // A successful run completes its streamed stdout (a no-op when the
-    // result printer already did). A failed run leaves it unterminated so
-    // a reader cannot mistake a partial stream for a whole one.
+    // result printer already did); a failed one ends it FAILED (SLOT-40).
     let mut exit_code = exit_code;
     if exit_code == 0 && !BROKEN_PIPE.load(Ordering::Relaxed) {
         crate::custody_finish(false);
-        crate::stdio_server::finish_stdout();
+        if !crate::stdio_server::finish_stdout() {
+            exit_code = 1;
+            EXIT_CODE.store(exit_code, Ordering::SeqCst);
+        }
+    } else if !BROKEN_PIPE.load(Ordering::Relaxed) {
+        crate::stdio_server::fail_stdout();
     }
     // A stage completes the stream it saved even when stdout broke; the
     // run then reports the broken pipe.
@@ -992,8 +1017,30 @@ fn teardown(exit_code: i32, unmap: bool) -> ! {
     // buffered bytes into a dead pipe.
     if !BROKEN_PIPE.load(Ordering::Relaxed) {
         use std::io::Write;
-        let _ = std::io::stdout().lock().flush();
-        unsafe { libc::fflush(std::ptr::null_mut()) };
+        let flushed = std::io::stdout().lock().flush().is_ok();
+        let c_flushed = unsafe { libc::fflush(std::ptr::null_mut()) } == 0;
+        if exit_code == 0 && OUTPUT_FILE.get().is_some() && !(flushed && c_flushed) {
+            eprintln!("Error: writing the output file failed");
+            exit_code = 1;
+            EXIT_CODE.store(exit_code, Ordering::SeqCst);
+        }
+    }
+    // SLOT-40: `-o` replaces its file only when the run succeeded, and only
+    // once its bytes are on disk; a failed run's temporary file is removed
+    // with the run's registrations.
+    if let Some((temp, dest)) = OUTPUT_FILE.get() {
+        if exit_code == 0 && unsafe { libc::fsync(libc::STDOUT_FILENO) } != 0 {
+            eprintln!("Error: writing the output file failed: {}", std::io::Error::last_os_error());
+            exit_code = 1;
+            EXIT_CODE.store(exit_code, Ordering::SeqCst);
+        }
+        if exit_code == 0 {
+            if let Err(e) = std::fs::rename(temp, dest) {
+                eprintln!("Error: cannot write output file '{}': {}", dest.display(), e);
+                exit_code = 1;
+                EXIT_CODE.store(exit_code, Ordering::SeqCst);
+            }
+        }
     }
 
     // Flush nexus stderr so our error messages are visible even if

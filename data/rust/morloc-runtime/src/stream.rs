@@ -2166,10 +2166,12 @@ pub fn shared_open_ifile(path: &str) -> Result<i64, MorlocError> {
             return Err(e);
         }
     };
+    parsed.refuse_failed(path)?;
     if !parsed.is_data_packet && !parsed.final_footer {
         return Err(MorlocError::Other(format!(
             "@open IFile '{}': file is not cleanly closed (no final footer). \
-             Open it as IStream to drain forward, or repair it with morloc-nexus.",
+             Open it as IStream to read it while it is written, or close it \
+             with `morloc-nexus file --repair`.",
             path,
         )));
     }
@@ -2258,6 +2260,8 @@ pub fn shared_open_istream(path: &str) -> Result<i64, MorlocError> {
             return Err(e);
         }
     };
+    // SLOT-29
+    parsed.refuse_failed(path)?;
     // IStream reads element-by-element, so the file's value must be
     // list-shaped. STREAM_PACKET files always are (writer invariant);
     // a DATA_PACKET holding a scalar value cannot be read as IStream.
@@ -2319,7 +2323,8 @@ pub fn shared_open_istream(path: &str) -> Result<i64, MorlocError> {
         cache: crate::fork_policy::ForkLocal::new(Box::new(StreamCache::new(cap_bytes))),
         value_schema: parsed.value_schema.clone(),
         elem_schema: parsed.elem_schema.clone(),
-        subpacket_entries_local: parsed.subpacket_entries.clone(),
+        // SLOT-29: counts come only from a final footer.
+        subpacket_entries_local: if parsed.final_footer { parsed.subpacket_entries.clone() } else { Vec::new() },
         subpacket_elem_cum: None,
         is_data_packet: parsed.is_data_packet,
         fork_epoch: fork_epoch(),
@@ -5636,12 +5641,15 @@ fn collect_sized(
 /// compressed, the sum its frame index carries. Neither touches a payload
 /// byte, so this costs a header read per sub-packet.
 ///
-/// This is a HINT. A footerless file's index was synthesized by a scan of a
-/// writer that may have crashed, and a file can be appended to between this
-/// and the read that follows, so a caller sizes from it and then bound-checks
-/// what it actually writes.
+/// This is a HINT, and None without an index: an IStream keeps one only from
+/// a final footer (SLOT-29). A file can be appended to between this and the
+/// read that follows, so a caller sizes from it and then bound-checks what it
+/// actually writes.
 fn stream_payload_hint(handle: i64) -> Option<(u64, u64)> {
     with_process_local_slot(handle, |local, _| {
+        if local.subpacket_entries_local.is_empty() {
+            return Err(MorlocError::Other("no index".into()));
+        }
         let mut elems = 0u64;
         let mut payload = 0u64;
         for i in 0..local.subpacket_entries_local.len() {
@@ -6419,6 +6427,15 @@ fn host_append(path: &str, expected_schema_str: &str, opener: (u32, u64, u64)) -
     if parsed.is_data_packet {
         return Err(unmap_and(MorlocError::Other(format!(
             "@append: '{}' holds a single value (written by @save), not a stream", path,
+        ))));
+    }
+    // SLOT-30
+    if let Err(e) = parsed.refuse_failed(path) {
+        return Err(unmap_and(e));
+    }
+    if parsed.footer_status == Some(morloc_runtime_types::packet::FOOTER_STATUS_REPAIRED) {
+        return Err(unmap_and(MorlocError::Other(format!(
+            "@append: '{path}' was repaired, and extending it would hide that; `@concat` it into a new file"
         ))));
     }
     let (entries, element_count, resume_off) =
@@ -7360,6 +7377,7 @@ pub fn concat_files(paths: &[&str], dest: &str) -> Result<(), MorlocError> {
     let mut merged_entries: Vec<morloc_runtime_types::packet::SubpacketEntry> = Vec::new();
     let mut total_element_count: u64 = 0;
     let mut reference_schema: Option<String> = None;
+    let mut any_repaired = false;
 
     for (i, &p) in paths.iter().enumerate() {
         // The index is read through the mapping; the bulk copy below uses
@@ -7402,6 +7420,9 @@ pub fn concat_files(paths: &[&str], dest: &str) -> Result<(), MorlocError> {
                  running, failed or was discarded"
             )));
         }
+        // SLOT-30
+        parsed.refuse_failed(p)?;
+        any_repaired |= parsed.footer_status == Some(morloc_runtime_types::packet::FOOTER_STATUS_REPAIRED);
         let walked = crate::stream_format::verified_index(p, &parsed, mmap_ptr, mmap_size)?;
         let (entries, elements, body_end) = (walked.entries, walked.element_count, walked.end);
 
@@ -7463,11 +7484,13 @@ pub fn concat_files(paths: &[&str], dest: &str) -> Result<(), MorlocError> {
     let mut diag = morloc_runtime_types::packet::StreamDiag::new();
     diag.subpacket_count = merged_entries.len() as u64;
     diag.element_count = total_element_count;
-    let footer = morloc_runtime_types::packet::make_final_footer_packet(
-        &diag,
-        &merged_entries,
-        morloc_runtime_types::packet::FOOTER_STATUS_CLOSED,
-    )?;
+    // SLOT-30
+    let status = if any_repaired {
+        morloc_runtime_types::packet::FOOTER_STATUS_REPAIRED
+    } else {
+        morloc_runtime_types::packet::FOOTER_STATUS_CLOSED
+    };
+    let footer = morloc_runtime_types::packet::make_final_footer_packet(&diag, &merged_entries, status)?;
     pwrite_all_fd(dest_fd, &footer, dest_cursor)?;
     staged.commit().map_err(MorlocError::Io)
 }
@@ -9105,6 +9128,132 @@ mod tests {
         assert!(!d.exists());
     }
 
+    fn write_int_stream_ending(path: &std::path::Path, subs: &[&[i64]], status: Option<u8>) {
+        let elem = TSchema::primitive(TSerialType::Sint64);
+        let mut bytes = make_stream_header_block(&list_schema(&elem));
+        let mut entries = Vec::new();
+        let mut total = 0u64;
+        for values in subs {
+            entries.push(morloc_runtime_types::packet::SubpacketEntry {
+                offset: bytes.len() as u64,
+                elem_count: values.len() as u64,
+            });
+            bytes.extend_from_slice(&build_int_voidstar_subpacket(values));
+            total += values.len() as u64;
+        }
+        if let Some(status) = status {
+            let mut diag = TStreamDiag::new();
+            diag.subpacket_count = subs.len() as u64;
+            diag.element_count = total;
+            bytes.extend_from_slice(&make_final_footer_packet(&diag, &entries, status).unwrap());
+        }
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    fn footer_status_of(path: &std::path::Path) -> u8 {
+        let (mp, sz) = mmap_file_readonly(path.to_str().unwrap()).unwrap();
+        let footer = try_read_footer(mp, sz);
+        unsafe { libc::munmap(mp as *mut libc::c_void, sz as usize) };
+        footer.unwrap().expect("a final footer").footer_status
+    }
+
+    // SLOT-29
+    #[test]
+    fn a_failed_file_is_refused_at_every_open() {
+        let _shm = crate::own_test_registry();
+        let dir = concat_test_dir("failed_open");
+        let a = dir.join("a.idx");
+        write_int_stream_ending(&a, &[&[1, 2], &[3]], Some(morloc_runtime_types::packet::FOOTER_STATUS_FAILED));
+        let p = a.to_str().unwrap();
+        assert!(open_istream(p).is_err(), "an IStream opened a FAILED file");
+        assert!(open_ifile(p).is_err(), "an IFile opened a FAILED file");
+        assert!(shared_load_stream_file_as_array(p, None).is_err(), "@load read a FAILED file");
+    }
+
+    // SLOT-29, SLOT-31
+    #[test]
+    fn a_file_with_no_footer_reads_its_complete_batches_as_an_istream_only() {
+        let _shm = crate::own_test_registry();
+        let dir = concat_test_dir("no_footer_open");
+        let a = dir.join("a.idx");
+        write_int_stream_ending(&a, &[&[1, 2], &[3]], None);
+        let p = a.to_str().unwrap();
+        let h = open_istream(p).expect("an IStream reads a file still being written");
+        shared_close_handle(h).unwrap();
+        let arr = shared_load_stream_file_as_array(p, None).unwrap();
+        assert_eq!(unsafe { (*(arr as *const shm_types_crate::Array)).size }, 3, "@load dropped batches");
+        shm::shfree(arr).unwrap();
+        assert!(open_ifile(p).is_err(), "an IFile opened a file with no footer");
+    }
+
+    // SLOT-29
+    #[test]
+    fn closed_paused_and_repaired_files_open() {
+        let _shm = crate::own_test_registry();
+        let dir = concat_test_dir("good_ends");
+        for (name, status) in [
+            ("c.idx", morloc_runtime_types::packet::FOOTER_STATUS_CLOSED),
+            ("p.idx", morloc_runtime_types::packet::FOOTER_STATUS_PAUSED),
+            ("r.idx", morloc_runtime_types::packet::FOOTER_STATUS_REPAIRED),
+        ] {
+            let f = dir.join(name);
+            write_int_stream_ending(&f, &[&[1, 2], &[3]], Some(status));
+            let p = f.to_str().unwrap();
+            let h = open_istream(p).unwrap_or_else(|e| panic!("{name}: {e}"));
+            shared_close_handle(h).unwrap();
+            assert_eq!(stream_len(&f), 3, "{name}");
+            assert!(shared_load_stream_file_as_array(p, None).is_ok(), "{name}");
+        }
+    }
+
+    // SLOT-30
+    #[test]
+    fn concat_refuses_a_failed_source_and_carries_a_repaired_one() {
+        let _shm = crate::own_test_registry();
+        let dir = concat_test_dir("statuses");
+        let closed = dir.join("c.idx");
+        let failed = dir.join("f.idx");
+        let repaired = dir.join("r.idx");
+        write_int_stream_ending(&closed, &[&[1]], Some(morloc_runtime_types::packet::FOOTER_STATUS_CLOSED));
+        write_int_stream_ending(&failed, &[&[2]], Some(morloc_runtime_types::packet::FOOTER_STATUS_FAILED));
+        write_int_stream_ending(&repaired, &[&[3]], Some(morloc_runtime_types::packet::FOOTER_STATUS_REPAIRED));
+
+        let d1 = dir.join("d1.idx");
+        assert!(concat_files(&[closed.to_str().unwrap(), failed.to_str().unwrap()], d1.to_str().unwrap()).is_err());
+        assert!(!d1.exists());
+
+        let d2 = dir.join("d2.idx");
+        concat_files(&[closed.to_str().unwrap(), repaired.to_str().unwrap()], d2.to_str().unwrap()).unwrap();
+        assert_eq!(footer_status_of(&d2), morloc_runtime_types::packet::FOOTER_STATUS_REPAIRED);
+
+        let d3 = dir.join("d3.idx");
+        concat_files(&[closed.to_str().unwrap(), closed.to_str().unwrap()], d3.to_str().unwrap()).unwrap();
+        assert_eq!(footer_status_of(&d3), morloc_runtime_types::packet::FOOTER_STATUS_CLOSED);
+    }
+
+    // SLOT-30
+    #[test]
+    fn append_refuses_a_failed_or_repaired_file() {
+        let _shm = crate::own_test_registry();
+        let dir = concat_test_dir("append_statuses");
+        for (name, status) in [
+            ("f.idx", morloc_runtime_types::packet::FOOTER_STATUS_FAILED),
+            ("r.idx", morloc_runtime_types::packet::FOOTER_STATUS_REPAIRED),
+        ] {
+            let f = dir.join(name);
+            write_int_stream_ending(&f, &[&[1, 2]], Some(status));
+            let before = std::fs::read(&f).unwrap();
+            let schema = {
+                let (mp, sz) = mmap_file_readonly(f.to_str().unwrap()).unwrap();
+                let parsed = parse_stream_file(f.to_str().unwrap(), mp, sz).unwrap();
+                unsafe { libc::munmap(mp as *mut libc::c_void, sz as usize) };
+                parsed.schema_str
+            };
+            assert!(shared_append_to_path(f.to_str().unwrap(), &schema).is_err(), "{name} was appended to");
+            assert_eq!(std::fs::read(&f).unwrap(), before, "{name} changed");
+        }
+    }
+
     #[test]
     fn concat_preserves_dest_on_missing_source() {
         let _shm = crate::own_test_registry();
@@ -9372,20 +9521,21 @@ mod tests {
         // holds its lock. Ending the stream must free the path anyway, or
         // a pool whose user code forked workers could never reopen it.
         type End = fn(i64) -> Result<(), MorlocError>;
-        let ends: [(&str, End); 2] = [
-            ("close", shared_close_handle),
-            ("discard", shared_discard_handle),
+        type Reopen = fn(&str, &str) -> Result<i64, MorlocError>;
+        let ends: [(&str, End, Reopen); 2] = [
+            ("close", shared_close_handle, shared_append_to_path),
+            ("discard", shared_discard_handle, shared_open_ostream_with_schema),
         ];
-        for (name, end) in ends {
+        for (name, end, reopen) in ends {
             let path = dir.join(format!("{name}.idx"));
             let p = path.to_str().unwrap();
             let h = shared_open_ostream_with_schema(p, schema).unwrap();
             let holder = fork_holder();
             end(h).unwrap();
-            let again = shared_append_to_path(p, schema);
+            let again = reopen(p, schema);
             release_forked_holder(holder);
             let h2 = again.unwrap_or_else(|e| {
-                panic!("append after {name} while a forked child lives: {e:?}")
+                panic!("reopen after {name} while a forked child lives: {e:?}")
             });
             shared_close_handle(h2).unwrap();
         }
@@ -11042,7 +11192,7 @@ mod tests {
         // The failed close still ends the stream: the handle is gone, and
         // the path and the slot can be used again.
         assert!(shared_close_handle(h).is_err());
-        let h2 = shared_append_to_path(&p, "ai4").expect("append after the failed close");
+        let h2 = shared_open_ostream_with_schema(&p, "ai4").expect("reopen after the failed close");
         shared_close_handle(h2).unwrap();
     }
 
@@ -11086,7 +11236,7 @@ mod tests {
         assert!(caught.is_err());
         let e = shared_close_handle(h).expect_err("a stream that panicked inside closed cleanly");
         assert!(format!("{e:?}").contains("died"), "unexpected error: {e:?}");
-        let h2 = shared_append_to_path(&p, "ai4").unwrap();
+        let h2 = shared_open_ostream_with_schema(&p, "ai4").unwrap();
         shared_close_handle(h2).unwrap();
     }
 
@@ -13747,9 +13897,14 @@ mod write_behind_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    // What a file kept, whatever its end state (SLOT-28), read through a
+    // repaired copy (SLOT-29).
     fn read_strs(path: &std::path::Path) -> Vec<String> {
         let list = parse_schema("as").unwrap();
-        let h = shared_open_istream(path.to_str().unwrap()).unwrap();
+        let copy = path.with_extension("repaired");
+        let repaired = morloc_runtime_types::packet::repair_stream(&std::fs::read(path).unwrap()).unwrap();
+        std::fs::write(&copy, repaired.bytes).unwrap();
+        let h = shared_open_istream(copy.to_str().unwrap()).unwrap();
         let mut out = Vec::new();
         loop {
             let arr = shared_next_subpacket(h).unwrap();
