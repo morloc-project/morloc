@@ -120,7 +120,7 @@ the fetched `package.yaml` and checked against the library's origin.
 
 ### PKG-11 An install commits a whole module or nothing
 Intent: proposed
-Tests: spec-pkg-11-1, spec-pkg-11-2
+Tests: spec-pkg-11-1, spec-pkg-11-2, spec-pkg-11-3
 Code: conforms 2026-11-18
 
 A module is installed once its record is written, after its dependencies,

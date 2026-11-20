@@ -17,6 +17,7 @@ module Morloc
   , emitPoolScripts
   , typecheck
   , typecheckFrontend
+  , typecheckModule
   , generatePools
   ) where
 
@@ -25,12 +26,13 @@ import Morloc.Namespace.Prim
 import Morloc.Namespace.State
 import Morloc.Namespace.Type
 
-import Morloc.Data.Doc (pretty, (<+>), squotes)
+import Morloc.Data.Doc (pretty, render, (<+>), squotes)
 import Morloc.Frontend.Typecheck (isPattern)
 import Morloc.Typecheck.Internal (mapTypeUChildren, prettyTypeU)
 import qualified Morloc.BaseTypes as BT
 import qualified Data.Map as Map
 import qualified Data.Text as T
+import qualified Morloc.Data.Text as MT
 import qualified Morloc.Build.Params as BP
 import qualified Data.Set as Set
 
@@ -68,7 +70,30 @@ import qualified Morloc.Data.PoolHash as PoolHash
 import qualified Morloc.Data.GMap as GMap
 import qualified Morloc.Version
 import qualified Morloc.Monad as MM
+import Control.Monad.Except (catchError, throwError)
 import Morloc.ProgramBuilder.Build (buildProgram, discardStagingDir, withStagingCleanup)
+
+-- | Typecheck an installed module's entry file, giving each exported name
+-- with its type. The state is left as it was. A rejection comes back with
+-- its location already rendered, since the state that locates it is gone.
+typecheckModule :: Path -> MorlocMonad [(T.Text, T.Text)]
+typecheckModule mainFile = do
+  code <- liftIO $ MT.readFile mainFile
+  savedState <- MM.get
+  r <- (Right <$> typecheckFrontend (Just mainFile) (Code code)) `catchError` (return . Left)
+  st <- MM.get
+  MM.put savedState
+  case r of
+    Left e@(Rejected _ _)
+      | not (MM.isDefect st e) -> MM.throwRejected (MM.makeMorlocError st e)
+    Left e@(EnvFailed _) -> throwError e
+    Left e -> throwError (Fault Nothing (MM.makeMorlocError st e))
+    Right xs ->
+      return
+        [ (render (pretty v), render (prettyTypeU t))
+        | AnnoS (Idx i t) _ _ <- xs
+        , Just v <- [Map.lookup i (stateName st)]
+        ]
 
 -- | Check the general types only
 typecheckFrontend ::

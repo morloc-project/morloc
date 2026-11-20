@@ -160,28 +160,6 @@ readScript _ filename = do
   code <- MT.readFile filename
   return (Just filename, Code code)
 
--- | Typecheck callback for module installation
-typecheckModuleFn :: FilePath -> MorlocMonad [(T.Text, T.Text)]
-typecheckModuleFn mainFile = do
-  code <- liftIO $ MT.readFile mainFile
-  -- Save current state, run typecheck in a clean sub-state
-  savedState <- MM.get
-  result <-
-    MM.recoverRejected
-      ( do
-          xs <- M.typecheckFrontend (Just mainFile) (Code code)
-          st <- MM.get
-          return
-            [ (render (pretty v), render (prettyTypeU t))
-            | AnnoS (Idx i t) _ _ <- xs
-            , Just v <- [Map.lookup i (stateName st)]
-            ]
-      )
-      (return [])
-  -- Restore state so module typechecking doesn't pollute the parent state
-  MM.put savedState
-  return result
-
 -- | Install a module
 cmdInstall :: InstallCommand -> Int -> Config.Config -> BuildConfig -> IO Bool
 cmdInstall args verbosity conf buildConfig = do
@@ -222,7 +200,7 @@ cmdInstall args verbosity conf buildConfig = do
     mayTypecheck =
       if installNoTypecheck args
         then Nothing
-        else Just typecheckModuleFn
+        else Just M.typecheckModule
 
 -- | Build and install executables for installed modules
 buildInstalledModules ::

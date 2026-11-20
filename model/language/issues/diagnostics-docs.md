@@ -53,12 +53,10 @@
   A sourced R file assigning `.__morloc` prints "failed to load pool
   sources: cannot change value of locked binding" bare and again after
   "Error: run failed". Repro: /work/plans/model-audit-2026-10-21/repro/F/src/s6R.loc.
-- **The compiler dies with an uncaught exception on three inputs.**
+- **The compiler dies with an uncaught exception on two inputs.**
   [reproduced, 2026-10-21] Violates DIAG-1 and DIAG-2.
   - A non-UTF-8 source: "morloc: bin.loc: hGetContents: invalid argument
     (cannot decode byte sequence ...)".
-  - A malformed `package.yaml`: `morloc: LoadSettingsException
-    "./package.yaml" (InvalidYaml (Just (YamlParseException ...)))`.
   - `import nosuchmod`: auto-install runs `git clone
     https://github.com/morloclib/nosuchmod`, then "morloc: callProcess: git
     ... (exit 128): failed". A typo in an import triggers a network fetch

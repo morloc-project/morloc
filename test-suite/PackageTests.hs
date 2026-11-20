@@ -12,17 +12,18 @@ module PackageTests
   ( packageTests
   ) where
 
-import Control.Exception (SomeException, try)
+import Control.Exception (SomeException, finally, try)
 import Control.Monad (forM_)
 import qualified Data.Map.Strict as Map
 import qualified Data.Text as T
 import qualified Morloc.Data.Text as MT
+import qualified Morloc
 import qualified Morloc.Module as Mod
 import Morloc.Frontend.TypeNames (homePath)
 import Morloc.Namespace.Prim (MVar (..))
 import qualified Morloc.Monad as MM
 import Morloc.Namespace.Prim (Defaultable (..))
-import Morloc.Namespace.State (Config (..), MorlocError, MorlocMonad, MorlocState (..))
+import Morloc.Namespace.State (Config (..), MorlocError (..), MorlocMonad, MorlocState (..))
 import qualified System.Directory as SD
 import System.Environment (setEnv)
 import System.FilePath ((</>))
@@ -86,6 +87,16 @@ install cfg modstr = do
     Left (e :: SomeException) -> Left (show e)
     Right (Left e) -> Left (show e)
     Right (Right ()) -> Right ()
+
+-- | Install with the typecheck `morloc install` runs. Only a rejection is a
+-- failure; an IO exception propagates and fails the test.
+installChecked :: Config -> T.Text -> IO (Either String ())
+installChecked cfg modstr = do
+  r <- run cfg (Mod.installModule Mod.DoNotOverwrite Mod.HttpsProtocol (Just Morloc.typecheckModule) Map.empty modstr)
+  case r of
+    Left e@(Rejected _ _) -> return (Left (show e))
+    Left e -> assertFailure ("expected a rejection, got: " <> show e)
+    Right () -> return (Right ())
 
 -- | A package directory: package.yaml lines and main.loc text.
 writePackage :: FilePath -> [String] -> String -> IO ()
@@ -325,6 +336,32 @@ packageTests =
         installedAt cfg "partial/dep"
         origins <- run cfg Mod.loadOrigins
         assertBool "a failed install records no origin" (either (const False) (Map.notMember "partial") origins)
+    , testCase "spec-pkg-11-3" . withState $ \cfg -> do
+        tmp <- SD.getTemporaryDirectory
+        forM_
+          [ "module undecl (f)\n\nf :: NoSuchType -> Int\n"
+          , "module undecl (f)\n\nf :: Int -> Int\nf x = x 1\n"
+          ] $ \loc -> do
+            dir <- createTempDirectory tmp "morloc-pkg"
+            writePackage dir ["name: undecl", "library: weena"] loc
+            flip finally (SD.removeDirectoryRecursive dir) $ do
+             r <- installChecked cfg (MT.pack dir)
+             rejected "weena/undecl" r
+             rejected "main.loc" r
+             either (\e -> assertBool ("reported as a defect: " <> e) (not ("Compiler bug" `T.isInfixOf` T.pack e))) return r
+             present <- SD.doesDirectoryExist (configLibrary cfg </> "weena" </> "undecl")
+             assertBool "a module failing typecheck is not installed" (not present)
+    , testCase "spec-diag-1-2" . withState $ \cfg -> do
+        tmp <- SD.getTemporaryDirectory
+        forM_ [["dependencies: []"], ["cpp-deps: 3"], ["include: ["]] $ \extra -> do
+          dir <- createTempDirectory tmp "morloc-pkg"
+          flip finally (SD.removeDirectoryRecursive dir) $ do
+           writePackage dir (["name: yamlbad", "library: weena"] <> extra) (modLoc "yamlbad")
+           r <- installChecked cfg (MT.pack dir)
+           rejected (dir </> "package.yaml") r
+           either (\e -> assertBool ("a Haskell error escaped: " <> e) (not (any (`T.isInfixOf` T.pack e) ["CallStack", "Exception"]))) return r
+           meta <- run cfg (Mod.loadModuleMetadata True (dir </> "main.loc"))
+           either (\e -> assertBool ("make names the file: " <> show e) (T.pack (dir </> "package.yaml") `T.isInfixOf` T.pack (show e))) (const (assertFailure "make accepted a bad package.yaml")) meta
     , testCase "spec-pkg-11-2" . withState $ \cfg -> do
         remoteRepo "debris" "m" ["name: m", "library: debris"] (modLoc "m")
         Mod.initPlaneLayout cfg

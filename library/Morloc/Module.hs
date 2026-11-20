@@ -82,7 +82,7 @@ module Morloc.Module
 import Control.Applicative (optional)
 import Control.Exception (IOException, SomeException, catch, finally, onException, throwIO)
 import qualified Control.Exception as Exc
-import Control.Monad.Except (throwError)
+import Control.Monad.Except (catchError, throwError)
 import Control.Monad.Reader (ask)
 import Control.Monad.State (get, put)
 import Control.Monad.Writer (tell)
@@ -910,7 +910,7 @@ loadModuleMetadata isRoot main = do
   maybef <- liftIO $ findModuleMetadata main
   meta <-
     case maybef of
-      (Just f) -> liftIO $ YC.loadYamlSettings [f] [] YC.ignoreEnv
+      (Just f) -> readPackageYaml f
       Nothing -> return defaultValue
   -- Nudge the top-level project off the deprecated `morloc-dependencies` key,
   -- which has been renamed to `morloc-deps`. Both are still accepted (see the
@@ -918,7 +918,7 @@ loadModuleMetadata isRoot main = do
   -- imported modules still using the old alias do not spam the build.
   when isRoot $ case maybef of
     Just f -> do
-      raw <- liftIO (YC.loadYamlSettings [f] [] YC.ignoreEnv :: IO Aeson.Value)
+      raw <- readPackageYaml f :: MorlocMonad Aeson.Value
       case raw of
         Aeson.Object o
           | KM.member "morloc-dependencies" o && not (KM.member "morloc-deps" o) ->
@@ -1163,7 +1163,27 @@ readPackageMeta dir = do
   exists <- liftIO $ doesFileExist f
   unless exists . MM.throwRejected $
     pretty dir <+> "has no package.yaml; an installed package names its library and name there (PKG-1)"
-  liftIO $ YC.loadYamlSettings [f] [] YC.ignoreEnv
+  readPackageYaml f
+
+-- | Read a package.yaml. A file that does not parse, or that its type
+-- refuses, is a rejection naming the file.
+readPackageYaml :: Aeson.FromJSON a => Path -> MorlocMonad a
+readPackageYaml f = liftIO (readPackageYamlIO f) >>= either MM.throwRejected return
+
+readPackageYamlIO :: Aeson.FromJSON a => Path -> IO (Either MDoc a)
+readPackageYamlIO f =
+  (Right <$> (YC.loadYamlSettings [f] [] YC.ignoreEnv >>= Exc.evaluate))
+    `Exc.catches`
+      [ Exc.Handler $ \e@(Exc.ErrorCall m) ->
+          if convertPrefix `MT.isPrefixOf` MT.pack m
+            then return (Left (refusal (MT.pack m)))
+            else throwIO e
+      , Exc.Handler $ \(Yaml.LoadSettingsException _ pe) -> return (Left (refusal (MT.pack (Yaml.prettyPrintParseException pe))))
+      ]
+  where
+    refusal m = pretty f <> ":" <+> pretty (strip m)
+    convertPrefix = "Could not convert to expected type: "
+    strip m = foldl (\t pre -> maybe t id (MT.stripPrefix pre t)) m [convertPrefix, "Error in $: "]
 
 -- | The library of a local package. A package from before the field existed
 -- that is a clone of a repository of a shipped library belongs to that
@@ -1405,12 +1425,15 @@ installRequest overwrite gitprot mayTypecheck userRequests inProgress pinMap dep
               installRemoteIO gitprot tmpDir remote
       liftIO $ (removePathForcibly tmpDir >> ioAction) `onException` runCleanup tmpDir
 
-      meta <- liftIO $ do
+      metaOrErr <- liftIO $ do
         let pkgYaml = tmpDir </> "package.yaml"
         exists <- doesFileExist pkgYaml
         if exists
-          then YC.loadYamlSettings [pkgYaml] [] YC.ignoreEnv
-          else return defaultValue
+          then readPackageYamlIO pkgYaml `onException` runCleanup tmpDir
+          else return (Right defaultValue)
+      meta <- case metaOrErr of
+        Right m -> return m
+        Left d -> liftIO (runCleanup tmpDir) >> MM.throwRejected d
       let shippedFrom = case source of
             ModuleSourceRemoteGit r -> shippedLibraryOf (Origin (gitRemoteSource r) (gitUsername r))
             ModuleSourceLocal _ _ -> Just (midLibrary mid)
@@ -1472,7 +1495,15 @@ installRequest overwrite gitprot mayTypecheck userRequests inProgress pinMap dep
               renameDirectory oldDir targetDir
               let oldYaml = targetDir </> "package.yaml"
               hasYaml <- doesFileExist oldYaml
-              oldMeta <- if hasYaml then YC.loadYamlSettings [oldYaml] [] YC.ignoreEnv else return defaultValue
+              oldMeta <-
+                if hasYaml
+                  then readPackageYamlIO oldYaml >>= \m -> case m of
+                    Right x -> return x
+                    Left d -> do
+                      TIO.hPutStrLn stderr . render $
+                        "warning: the restored module's exposed files were not restored:" <+> d
+                      return defaultValue
+                  else return defaultValue
               runExpose config mid (packageExpose oldMeta) targetDir
                 `catch` \(_ :: SomeException) -> return ()
               forM_ oldRecord $ \b -> do
@@ -1586,7 +1617,13 @@ installRequest overwrite gitprot mayTypecheck userRequests inProgress pinMap dep
             mainFile <- liftIO $ findMainLocFile targetDir (MT.unpack name)
             case mainFile of
               Nothing -> return []
-              Just f -> typecheckFn f
+              Just f ->
+                typecheckFn f `catchError` \e -> case e of
+                  Rejected p d ->
+                    throwError . Rejected p $
+                      d <> line <> "module" <+> squotes (pretty key) <+> "was not installed: it fails to typecheck"
+                        <+> "(morloc install --no-typecheck installs it unchecked)"
+                  _ -> throwError e
 
         -- Write the record last: it commits the install.
         liftIO $ createDirectoryIfMissing True fdbDir

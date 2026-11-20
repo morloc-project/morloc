@@ -11,6 +11,10 @@ Changed
 
 Fixed
  * `.[i]` and `.[i].field` on an IFile compile inside a Rust pool
+ * `morloc install` refuses a module that fails to typecheck, naming it,
+   instead of installing it with no exports
+ * a refused or malformed package.yaml is reported as an error naming the
+   file, not as a Haskell exception
 
 0.112.0 [2026-11-01]
 --------------------
