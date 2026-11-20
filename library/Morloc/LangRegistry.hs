@@ -32,6 +32,7 @@ module Morloc.LangRegistry
   , registryIsCompiled
   , registryRunCommand
   , registryAllowStringNull
+  , registryForkWorkers
   , registryMakeExtension
   , registryMakeExecutablePoolName
   , registryMakeSourcePoolName
@@ -72,6 +73,8 @@ data LangRegistryEntry = LangRegistryEntry
   -- boundary into a pool of this language. Defaults to True so older
   -- lang.yaml files without the key keep their permissive behaviour.
   , lreAllowStringNull :: !Bool
+  -- | The language's pool forks its workers (NET-9, FOLD-9).
+  , lreForkWorkers :: !Bool
   -- | The pool host language for a co-located "member" language. When set
   -- (e.g. futhark's @host: cpp@), this language has no pool of its own; its
   -- manifolds are compiled into the host language's pool binary and a call
@@ -244,6 +247,10 @@ registryAllowStringNull reg name = case Map.lookup name (lrEntries reg) of
   Just entry -> lreAllowStringNull entry
   Nothing -> True
 
+-- | True if the language's pool forks a worker per call (FOLD-9).
+registryForkWorkers :: LangRegistry -> Text -> Bool
+registryForkWorkers reg name = maybe False lreForkWorkers (Map.lookup name (lrEntries reg))
+
 registryMakeExtension :: LangRegistry -> Text -> String
 registryMakeExtension reg name = case Map.lookup name (lrEntries reg) of
   Just entry -> lreExtension entry
@@ -270,6 +277,7 @@ data LangYamlMeta = LangYamlMeta
   , lymSerialType :: Text
   , lymPreamble :: [Text]
   , lymAllowStringNull :: Bool
+  , lymForkWorkers :: Bool
   , lymHost :: Maybe Text
   , lymTypeKinds :: TypeKinds
   }
@@ -286,6 +294,7 @@ instance Aeson.FromJSON LangYamlMeta where
       <*> o .:? "serial_type" .!= "bytes"
       <*> o .:? "preamble" .!= []
       <*> o .:? "allow_string_null" .!= True
+      <*> o .:? "fork_workers" .!= False
       <*> o .:? "host"
       <*> o .:? "generated_types" .!= noTypeKinds
 
@@ -304,6 +313,7 @@ entryFromYaml ly =
     , lreSerialType = lymSerialType ly
     , lrePreamble = lymPreamble ly
     , lreAllowStringNull = lymAllowStringNull ly
+    , lreForkWorkers = lymForkWorkers ly
     , lreHost = lymHost ly
     , lreTypeKinds = lymTypeKinds ly
     }

@@ -10,6 +10,7 @@ run_command: ["python3"]
 serial_type: "str"
 # Python's str natively supports interior NUL bytes.
 allow_string_null: true
+fork_workers: true
 # Record kinds the compiler generates definitions for (GEN-2). A record with
 # no form of its own in this language takes the default kind.
 generated_types:

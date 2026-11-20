@@ -17,6 +17,7 @@ serial_type: "character"
 # Base R (nchar, paste, regex, jsonlite, etc.) raises "embedded nul in string"
 # on NUL-bearing CHARSXPs. The morloc runtime rejects NULs at the R boundary.
 allow_string_null: false
+fork_workers: true
 # Record kinds the compiler generates definitions for (GEN-2). A record with
 # no form of its own in this language takes the default kind.
 generated_types:

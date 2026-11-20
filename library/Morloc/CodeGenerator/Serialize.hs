@@ -653,7 +653,7 @@ serializeHosted' reg heads argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
               wsch <- Serial.schemaOfHeld m lang wast
               return $ IntrinsicN tf IntrGatherPut (Just wsch) [h', w]
             _ -> MM.throwCompilerBugAt tidx "@gatherput: the batch did not pack to one value"
-    -- FOLD-9: a Python or R fold whose handle crosses pools steps its
+    -- FOLD-9: a fold in a forking pool whose handle crosses pools steps its
     -- batches from a temp-file stream; every other fold holds its slots here.
     nativeExpr m (MonoIntrinsic t@(Idx tidx _) IntrFold [ini, step, comb, f]) = do
       tf <- inferType t
@@ -664,7 +664,7 @@ serializeHosted' reg heads argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
       msch <- batchSchema m ltf
       entries <- MM.gets stateNativeRecEntries
       let crosses = maybe True (handleCrosses entries) (gatherHandles f)
-      if langName lang `elem` ["py", "r"] && crosses
+      if LR.registryForkWorkers reg (langName lang) && crosses
         then case msch of
           Just sch -> return $ IntrinsicN tf IntrFoldFile (Just sch) es
           Nothing ->
