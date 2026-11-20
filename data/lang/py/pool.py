@@ -283,6 +283,44 @@ def mlc_reify(f, home_lang):
     return (home_lang, mid, packets)
 
 
+# FORK-17
+_MLC_FORK_TOOL = 4
+
+
+def _mlc_fork_watch():
+    pool_file = __file__
+    f = sys._getframe(1)
+    user = None
+    while f is not None and f.f_code.co_filename != pool_file:
+        user = f
+        f = f.f_back
+    if f is None or user is None:
+        return
+    target = user
+
+    def leave(*_):
+        if sys._getframe(1) is target:
+            morloc.exit_forked()
+
+    mon = getattr(sys, "monitoring", None)
+    if mon is None:
+        def profile(frame, event, _arg):
+            if event == "return" and frame is target:
+                morloc.exit_forked()
+        sys.setprofile(profile)
+        return
+    if mon.get_tool(_MLC_FORK_TOOL) is None:
+        mon.use_tool_id(_MLC_FORK_TOOL, "morloc-fork")
+    E = mon.events
+    for ev in (E.PY_RETURN, E.PY_YIELD, E.PY_UNWIND):
+        mon.register_callback(_MLC_FORK_TOOL, ev, leave)
+    mon.set_local_events(_MLC_FORK_TOOL, target.f_code, E.PY_RETURN | E.PY_YIELD)
+    mon.set_events(_MLC_FORK_TOOL, E.PY_UNWIND)
+
+
+os.register_at_fork(after_in_child=_mlc_fork_watch)
+
+
 def mlc_gather(schema, f):
     # @gather through a temp-file stream: the handle is the stream, and the
     # result is what @load gives (NATIVE-9).

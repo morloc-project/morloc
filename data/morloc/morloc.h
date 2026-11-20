@@ -1256,6 +1256,9 @@ bool shfree(absptr_t ptr, ERRMSG);
 bool shincref(absptr_t ptr, ERRMSG);
 uint64_t morloc_fork_generation(void);
 void morloc_exit_if_forked(void);
+// FORK-17
+void mlc_exit_if_forked_since(uint64_t generation);
+void mlc_exit_forked(void);
 size_t total_shm_size(void);
 absptr_t rel2abs(relptr_t ptr, ERRMSG);
 

@@ -1295,7 +1295,7 @@ mlc::Unit _mlc_replay(Schema* schema, int64_t handle, F fn) {
         if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
         if (eof) break;
         std::vector<E> frame = _mlc_from_voidstar_freed<std::vector<E>>(schema, voidstar);
-        fn(frame);
+        ((void)mlc::fork_guard{}, fn(frame));
     }
     return mlc::Unit{};
 }
@@ -1352,7 +1352,7 @@ L _mlc_gather_native(Schema* schema, F f) {
     int64_t h = mlc_side_new(static_cast<MlcGatherBase*>(&list), &errmsg);
     if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
     try {
-        f((uint64_t)h);
+        ((void)mlc::fork_guard{}, f((uint64_t)h));
     } catch (...) {
         mlc_side_drop(h);
         throw;
@@ -1404,7 +1404,7 @@ template <typename L, typename F>
 L _mlc_gather_file(Schema* schema, F f) {
     std::string path = _mlc_tmpfile();
     int64_t o = _mlc_open_ostream(schema, path);
-    f((uint64_t)o);
+    ((void)mlc::fork_guard{}, f((uint64_t)o));
     _mlc_close(o);
     L xs = _mlc_load<L>(schema, path);
     _mlc_unlink_tmp(path);
@@ -1485,7 +1485,7 @@ B _mlc_fold_with(const B& init, C combine, F f, R replay) {
     int64_t h = mlc_fold_new(ctx.init, &_mlc_fold_fresh<B>, &errmsg);
     if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
     try {
-        f((uint64_t)h);
+        ((void)mlc::fork_guard{}, f((uint64_t)h));
     } catch (...) {
         MlcFoldValues<B> dropped;
         mlc_fold_drop(h, &dropped.values, &dropped.n);
@@ -1498,10 +1498,10 @@ B _mlc_fold_with(const B& init, C combine, F f, R replay) {
     std::optional<B> acc;
     for (size_t i = 0; i < vs.n; i++) {
         B& v = _mlc_fold_value<B>(vs.values[i])->value;
-        if (acc) acc = combine(std::move(*acc), std::move(v)); else acc.emplace(std::move(v));
+        if (acc) acc = ((void)mlc::fork_guard{}, combine(std::move(*acc), std::move(v))); else acc.emplace(std::move(v));
     }
     if (side) {
-        if (acc) acc = combine(std::move(*acc), std::move(*side)); else acc.emplace(std::move(*side));
+        if (acc) acc = ((void)mlc::fork_guard{}, combine(std::move(*acc), std::move(*side))); else acc.emplace(std::move(*side));
     }
     return acc ? std::move(*acc) : init;
 }
@@ -1512,7 +1512,7 @@ B _mlc_fold(Schema* schema, const B& init, S step, C combine, F f) {
         std::optional<B> side;
         _mlc_side_each<L>(schema, reader, [&](L& b) {
             if (!side) side.emplace(init);
-            side = step(std::move(*side), b);
+            side = ((void)mlc::fork_guard{}, step(std::move(*side), b));
         });
         return side;
     });
@@ -1551,7 +1551,7 @@ mlc::Unit _mlc_fold_step(S step, uint64_t h, const L& batch, P side) {
         } else {
             v.reset(_mlc_fold_value<B>(p));
         }
-        v->value = step(std::move(v->value), batch);
+        v->value = ((void)mlc::fork_guard{}, step(std::move(v->value), batch));
     } catch (...) {
         mlc_fold_failed((int64_t)h);
         throw;

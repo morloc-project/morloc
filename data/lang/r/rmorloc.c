@@ -3472,6 +3472,16 @@ SEXP morloc_mlc_fold_store(SEXP h_r, SEXP value_r) { MAYFAIL
     return R_NilValue;
 }
 
+// FORK-17
+SEXP morloc_mlc_fork_generation(void) {
+    return make_integer64_scalar((int64_t)morloc_fork_generation());
+}
+
+SEXP morloc_mlc_exit_if_forked_since(SEXP g_r) {
+    mlc_exit_if_forked_since((uint64_t)i64_from_sexp(g_r));
+    return R_NilValue;
+}
+
 SEXP morloc_mlc_sink_failed(SEXP h_r) {
     mlc_sink_failed(i64_from_sexp(h_r));
     return R_NilValue;
@@ -4898,6 +4908,8 @@ static void _r_init_impl(DllInfo *info) {
         {"morloc_mlc_fold_store", (DL_FUNC) &morloc_mlc_fold_store, 2},
         {"morloc_mlc_fold_failed", (DL_FUNC) &morloc_mlc_fold_failed, 1},
         {"morloc_mlc_sink_failed", (DL_FUNC) &morloc_mlc_sink_failed, 1},
+        {"morloc_mlc_fork_generation", (DL_FUNC) &morloc_mlc_fork_generation, 0},
+        {"morloc_mlc_exit_if_forked_since", (DL_FUNC) &morloc_mlc_exit_if_forked_since, 1},
         {"morloc_mlc_fold_drop", (DL_FUNC) &morloc_mlc_fold_drop, 1},
         {"morloc_mlc_fold_take", (DL_FUNC) &morloc_mlc_fold_take, 2},
         {"morloc_mlc_side_put", (DL_FUNC) &morloc_mlc_side_put, 3},

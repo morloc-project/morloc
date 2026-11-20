@@ -126,6 +126,15 @@ morloc_mlc_fold_checkout             <- function(...){ .Call("morloc_mlc_fold_ch
 morloc_mlc_fold_store                <- function(...){ .Call("morloc_mlc_fold_store",                ...) }
 morloc_mlc_fold_failed               <- function(...){ .Call("morloc_mlc_fold_failed",               ...) }
 morloc_mlc_sink_failed               <- function(...){ .Call("morloc_mlc_sink_failed",               ...) }
+morloc_mlc_fork_generation           <- function(...){ .Call("morloc_mlc_fork_generation",           ...) }
+morloc_mlc_exit_if_forked_since      <- function(...){ .Call("morloc_mlc_exit_if_forked_since",      ...) }
+
+# FORK-17: `g` is forced before `r`.
+mlc_fork_checked <- function(g, r) {
+  g
+  on.exit(morloc_mlc_exit_if_forked_since(g))
+  r
+}
 morloc_mlc_fold_drop                 <- function(...){ .Call("morloc_mlc_fold_drop",                 ...) }
 morloc_mlc_fold_take                 <- function(...){ .Call("morloc_mlc_fold_take",                 ...) }
 morloc_mlc_side_next                 <- function(...){ .Call("morloc_mlc_side_next",                 ...) }
@@ -154,7 +163,7 @@ morloc_mlc_replay <- function(schema, handle, fn) {
   repeat {
     frame <- morloc_mlc_next_frame(schema, handle)
     if (is.null(frame)) break
-    fn(frame)
+    mlc_fork_checked(morloc_mlc_fork_generation(), fn(frame))
   }
   NULL
 }
@@ -164,7 +173,7 @@ morloc_mlc_replay <- function(schema, handle, fn) {
 mlc_gather <- function(schema, f) {
   path <- morloc_mlc_tmpfile()
   o <- morloc_mlc_open_ostream(schema, path)
-  f(o)
+  mlc_fork_checked(morloc_mlc_fork_generation(), f(o))
   morloc_mlc_close(o)
   xs <- morloc_mlc_load(schema, path)
   morloc_mlc_unlink_tmp(path)
@@ -180,17 +189,17 @@ mlc_fold <- function(schema, init, step, combine, f) {
   h <- morloc_mlc_fold_new(init)
   taken <- FALSE
   on.exit(if (!taken) morloc_mlc_fold_drop(h), add = TRUE)
-  f(h)
+  mlc_fork_checked(morloc_mlc_fork_generation(), f(h))
   taken <- TRUE
   t <- morloc_mlc_fold_take(h, schema)
   values <- t[[1L]]
   side <- NULL
   while (length(b <- morloc_mlc_side_next(t[[2L]])) == 1L) {
     if (is.null(side)) side <- list(mlc_fold_copy(init))
-    side[[1L]] <- step(side[[1L]], b[[1L]])
+    side[[1L]] <- mlc_fork_checked(morloc_mlc_fork_generation(), step(side[[1L]], b[[1L]]))
   }
   values <- c(values, side)
-  if (length(values) == 0L) mlc_fold_copy(init) else Reduce(combine, values)
+  if (length(values) == 0L) mlc_fold_copy(init) else Reduce(function(a, b) mlc_fork_checked(morloc_mlc_fork_generation(), combine(a, b)), values)
 }
 
 # FOLD-9: the handle is a stream; its batches are stepped once the
@@ -198,14 +207,14 @@ mlc_fold <- function(schema, init, step, combine, f) {
 mlc_fold_file <- function(schema, init, step, combine, f) {
   path <- morloc_mlc_tmpfile()
   o <- morloc_mlc_open_ostream(schema, path)
-  tryCatch(f(o), finally = morloc_mlc_close(o))
+  tryCatch(mlc_fork_checked(morloc_mlc_fork_generation(), f(o)), finally = morloc_mlc_close(o))
   acc <- mlc_fold_copy(init)
   i <- morloc_mlc_open_istream(schema, path)
   on.exit({
     morloc_mlc_close(i)
     morloc_mlc_unlink_tmp(path)
   }, add = TRUE)
-  morloc_mlc_replay(schema, i, function(b) acc <<- step(acc, b))
+  morloc_mlc_replay(schema, i, function(b) acc <<- mlc_fork_checked(morloc_mlc_fork_generation(), step(acc, b)))
   acc
 }
 
@@ -233,7 +242,7 @@ mlc_fold_put <- function(schema, step, h, batch) {
     on.exit(if (!stepped) morloc_mlc_fold_failed(h), add = TRUE)
     v <- co[[2L]]
     if (co[[3L]]) v <- mlc_fold_copy(v)
-    v <- step(v, batch)
+    v <- mlc_fork_checked(morloc_mlc_fork_generation(), step(v, batch))
     stepped <- TRUE
     morloc_mlc_fold_store(h, v)
   }
@@ -269,11 +278,16 @@ morloc_mlc_pipe_closed <- function() {
 morloc_mlc_try <- function(body, ok, err) {
   n0 <- sys.nframe()
   trace <- NULL
+  g <- morloc_mlc_fork_generation()
   tryCatch(
     withCallingHandlers(ok(body()), error = function(e) {
       if (is.null(trace)) trace <<- .mlc_trace_below(n0)
     }),
-    error = function(e) err(paste0(.mlc_message(e), trace))
+    error = function(e) {
+      # FORK-17
+      morloc_mlc_exit_if_forked_since(g)
+      err(paste0(.mlc_message(e), trace))
+    }
   )
 }
 

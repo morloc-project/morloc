@@ -86,6 +86,14 @@ inline void frame_restore(size_t saved) noexcept { frames_.depth = saved; }
 
 // STATE-6: restores `saved` and returns the lines above it, innermost first.
 std::string frame_take(size_t saved);
+// FORK-17
+extern std::atomic<uint64_t> fork_count;
+struct fork_guard {
+    uint64_t at = fork_count.load(std::memory_order_relaxed);
+    ~fork_guard() {
+        if (fork_count.load(std::memory_order_relaxed) != at) mlc_exit_forked();
+    }
+};
 // STATE-6: a closure's catch: restores `saved` and keeps the labels above it
 // beside the failure being handled.
 void closure_trace_add(size_t saved) noexcept;

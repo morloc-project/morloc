@@ -1036,11 +1036,15 @@ pub(crate) fn morloc_exit_if_forked() {
 
 pub(crate) fn exit_if_forked_since(generation: u64) {
     if generation != crate::fork_policy::generation() {
-        let msg = b"morloc: a process forked during a call returned into the runtime; it exits instead of replying\n";
-        unsafe {
-            libc::write(2, msg.as_ptr() as *const c_void, msg.len());
-            libc::_exit(1);
-        }
+        exit_forked();
+    }
+}
+
+pub(crate) fn exit_forked() -> ! {
+    let msg = b"morloc: a process forked during a call returned into the runtime; it exits instead of replying\n";
+    unsafe {
+        libc::write(2, msg.as_ptr() as *const c_void, msg.len());
+        libc::_exit(1);
     }
 }
 
@@ -2546,6 +2550,19 @@ mod c_abi {
     #[no_mangle]
     pub extern "C" fn morloc_exit_if_forked() {
         super::morloc_exit_if_forked()
+    }
+
+    /// FORK-17: called when a sourced call returns, with the generation it
+    /// recorded on entry.
+    #[no_mangle]
+    pub extern "C" fn mlc_exit_if_forked_since(generation: u64) {
+        super::exit_if_forked_since(generation)
+    }
+
+    /// FORK-17: a binding that found its own record of the call stale.
+    #[no_mangle]
+    pub extern "C" fn mlc_exit_forked() {
+        super::exit_forked()
     }
 
     #[no_mangle]

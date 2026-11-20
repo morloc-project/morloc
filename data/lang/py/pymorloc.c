@@ -5746,6 +5746,13 @@ static PyObject* pybinding__mlc_gather_put(PyObject* self, PyObject* args) {
     return r;
 }
 
+// FORK-17: exit_forked()
+static PyObject* pybinding__exit_forked(PyObject* self, PyObject* args) {
+    (void)self; (void)args;
+    mlc_exit_forked();
+    Py_RETURN_NONE;
+}
+
 // mlc_sink_failed(h) -> None
 static PyObject* pybinding__mlc_sink_failed(PyObject* self, PyObject* args) {
     long long h_ll;
@@ -5898,6 +5905,7 @@ static PyMethodDef Methods[] = {
     {"put_value", pybinding__put_value, METH_VARARGS, "Convert a Python value to a packet"},
     {"is_ping", pybinding__is_ping, METH_VARARGS, "Packet is a ping"},
     {"exit_if_forked", pybinding__exit_if_forked, METH_NOARGS, "Exit if this process was forked during the current call"},
+    {"exit_forked", pybinding__exit_forked, METH_NOARGS, "FORK-17"},
     {"is_local_call", pybinding__is_local_call, METH_VARARGS, "Packet is a local call"},
     {"is_remote_call", pybinding__is_remote_call, METH_VARARGS, "Packet is a remote call"},
     {"pong", pybinding__pong, METH_VARARGS, "Return a ping"},

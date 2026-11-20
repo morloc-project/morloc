@@ -554,6 +554,7 @@ genericLowerConfig desc srcNamer debugInfo traceInfo debugMode = cfg
         , lcSrcName = srcNamer
         , lcOperator = infixOperator
         , lcApplySrcGroup = \f as -> f <+> tupled as
+        , lcForkChecked = \_ x -> x
         , lcSourcedResult = \_ _ _ x -> x
         , lcSourcedArg = \_ _ _ x -> x
         , lcConstArg = \_ _ x -> x

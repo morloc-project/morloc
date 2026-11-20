@@ -169,12 +169,16 @@ benchmark (issues/streams.md).
 
 ### SLOT-16 Stdout and stderr streams go through the queue
 Status: implemented
-Checked by: a_stdout_stream_reaches_the_nexus_before_its_close_returns, a_stdout_sub_packet_reaches_the_sink_in_parts_that_make_the_packet, threads_write_one_stdio_stream_at_once_and_keep_each_write_whole, golden:collect-threads-stdout, golden:collect-fold-cpp
+Checked by: a_stdout_stream_reaches_the_nexus_before_its_close_returns, a_stdout_sub_packet_reaches_the_sink_in_parts_that_make_the_packet, threads_write_one_stdio_stream_at_once_and_keep_each_write_whole, a_forked_child_writes_its_parents_stdout_in_write_order, a_forked_stdout_writer_that_exits_without_flushing_loses_nothing, a_forked_child_cannot_close_its_parents_stdout, golden:collect-threads-stdout, golden:collect-fold-cpp, golden:spec-strm-8-8, tla:StdioBracket, tla:StdioBracket_write_pinned.bug, tla:StdioBracket_child_closes.bug
 
 The nexus's stdout and stderr writer is the custodian's consumer. A
 sub-packet reaches it as its header block, payload and padding, which it
-writes in order without joining them. Threads of the opening process
-write one stdout or stderr stream at once, each write whole (SLOT-11). A pool
+writes in order without joining them. Any process holding the handle, a
+thread of the opening process or a process forked from it, writes a
+stdout or stderr stream, several at once, each write whole (SLOT-11); a
+write is the same shared-memory append as a file stream's. Only the
+process that opened a standard stream closes it, and only it reads
+standard input, which travels over the nexus socket. A pool
 finishes the stdio streams a call left open before replying, so a call's
 output precedes its result. A write returns once its batches are queued,
 not written; text a pool prints to the shared stdout meanwhile may land

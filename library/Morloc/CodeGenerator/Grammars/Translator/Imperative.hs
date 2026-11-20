@@ -511,6 +511,9 @@ data LowerConfig m = LowerConfig
   -- call itself; each later group applies the function value the previous
   -- group returned. Default is juxtaposition, which is how a host language
   -- with first-class callables spells it.
+  , lcForkChecked :: Bool -> MDoc -> MDoc
+  -- ^ FORK-17: a call of user code, wrapped for the fork check; True when it
+  -- returns unit.
   , lcSourcedResult :: Source -> Int -> TypeF -> MDoc -> MDoc
   -- ^ The value a source call given this many arguments returns, of this
   -- type, as morloc holds it. Default is identity; Rust stores a function
@@ -951,7 +954,7 @@ nativeToWire cfg = go
     construct v (SerialPack _ (p, s)) =
       let unpacker = lcUnpackerName cfg (val (typePackerReverse p))
           arg = if lcBorrowPackArg cfg (typePackerPacked p) then "&(" <> v <> ")" else v
-       in go (unpacker <> parens arg) s
+       in go (lcForkChecked cfg False (unpacker <> parens arg)) s
     construct v lst@(SerialList _ _ s) = do
       idx <- lcNewIndex cfg
       resultType <- lcSerialAstType cfg lst
@@ -1058,12 +1061,11 @@ wireToNative cfg = check
       (x, before) <- check v s'
       let packer = render $ lcPackerName cfg (val (typePackerForward p))
           -- Borrow the packer's arg (the wire value) for a non-Copy wire type,
-          -- matching a `&T` packer parameter. The common (no-borrow) case keeps
-          -- `x` structured; only a borrow needs a rendered `&(..)` wrapper.
+          -- matching a `&T` packer parameter.
           x' = if lcBorrowPackArg cfg (typePackerUnpacked p)
                  then IRawExpr (render ("&(" <> lcPrintExpr cfg x <> ")"))
                  else x
-      return (IPack packer x', before)
+      return (IRawExpr (render (lcForkChecked cfg False (lcPrintExpr cfg (IPack packer x')))), before)
     construct v lst@(SerialList _ _ s) = do
       idx <- lcNewIndex cfg
       resultType <- lcDeserialAstType cfg lst
@@ -2604,6 +2606,14 @@ constArg cfg operands la@(LowArg a t d)
   | namesArg a = la {laDocs = d {poolExpr = lcConstArg cfg operands t (poolExpr d)}}
   | otherwise = la
 
+-- | FORK-17: a call of user code, wrapped for the fork check.
+forkChecked :: LowerConfig m -> Bool -> (MDoc -> MDoc) -> MDoc -> [PoolDocs] -> PoolDocs
+forkChecked cfg unit result call = mergePoolDocs (const (result (lcForkChecked cfg unit call)))
+
+isUnitF :: TypeF -> Bool
+isUnitF (VarF (FV tv _)) = tv == BT.unit
+isUnitF _ = False
+
 lowerNativeExprRaw ::
   (Monad m) =>
   LowerConfig m ->
@@ -2635,7 +2645,7 @@ lowerNativeExprRaw cfg _ (AppExeN_ resT (SrcCallP _ src) es1) = do
         case provideClosure src (zipWithSame (\(i, t, own) e -> lcSourcedArg cfg (site i) own t e) (zip3Indexed 0 argTypes owns) exprs) of
           [] -> lcSrcName cfg src
           (g0 : gs) -> foldl (lcApplySrcGroup cfg) (lcSrcName cfg src <> (if null g0 then tupled g0 else tupledNoFold g0)) gs
-  return $ mergePoolDocs (lcSourcedResult cfg src (length es) resT . handleFunctionArgs) (map laDocs es)
+  return $ forkChecked cfg (isUnitF resT) (lcSourcedResult cfg src (length es) resT) (handleFunctionArgs (map (poolExpr . laDocs) es)) (map laDocs es)
 lowerNativeExprRaw cfg _ (PatN_ t xs) = do
   app <- case xs of
     -- A setter's new values are stored in the rebuilt record, an owned sink.
@@ -2668,10 +2678,11 @@ lowerNativeExprRaw cfg _ (PatN_ t xs) = do
 -- Manifold-call arguments go through lcSourcedArg too (identity for most
 -- languages; the Rust member borrows every native arg so a value can fan out to
 -- several manifold calls as shared borrows instead of a move-after-move).
-lowerNativeExprRaw cfg _ (AppExeN_ _ (LocalCallP idx) xs0) = do
+lowerNativeExprRaw cfg _ (AppExeN_ resT (LocalCallP idx) xs0) = do
   xs <- bindCallArgs cfg =<< mapM keepOrConst xs0
   owns <- argOwnerships cfg xs
-  return $ mergePoolDocs (\es -> lcApplyClosure cfg ((nvar cfg) idx) (zipWith3Same (\own t e -> lcSourcedArg cfg ClosureArg own t e) owns (map laType xs) es)) (map laDocs xs)
+  let applied = lcApplyClosure cfg ((nvar cfg) idx) (zipWith3Same (\own t e -> lcSourcedArg cfg ClosureArg own t e) owns (map laType xs) (map (poolExpr . laDocs) xs))
+  return $ forkChecked cfg (isUnitF resT) id applied (map laDocs xs)
   where
     keepOrConst la@(LowArg (NativeArgExpr e) _ d) = do
       kept <- lcKeepClosureArg cfg e (poolExpr d)
@@ -2687,7 +2698,7 @@ lowerNativeExprRaw cfg _ (AppExeN_ t (PapplyP idx) xs0) = do
   let argTypes = map laType xs
       es = zipWith3Same (\own at e -> lcSourcedArg cfg ClosureArg own at e) owns argTypes (map (poolExpr . laDocs) xs)
   call <- lcPapply cfg t argTypes ((nvar cfg) idx) es
-  return $ mergePoolDocs (const call) (map laDocs xs)
+  return $ forkChecked cfg False id call (map laDocs xs)
 lowerNativeExprRaw cfg _ (AppExeN_ _ (RecCallP mid _) xs0) = do
   xs1 <- bindCallArgs cfg xs0
   xs <- sequence [keepArg j la | (j, la) <- indexed xs1]

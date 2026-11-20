@@ -70,19 +70,9 @@
   direction: the crossing closure's caller marks the sink (its handle is
   among the closure's captured arguments) before re-raising. A remote job's
   put is the same case (issues/remote-dispatch.md).
-- **A forked child cannot put into a stdio `@collect` sink.** [reproduced
-  2026-11-20] Gap in SLOT-16: a Python producer that forks and puts from the
-  child is refused ("stdio stream cannot cross a fork boundary"). Since
-  STRM-9 the refusal fails the command (golden spec-strm-9-1, inChild),
-  where before the batch was dropped and the command exited 0. A gather or
-  fold sink takes the side file from a child (SIDE-4); a whole-list or
-  streamed stdout sink has no such route. Open question: give stdio sinks a
-  child route, or refuse a forking producer at the sink. The refusal's advice
-  ("re-open the stream in this process") is impossible for a run's one
-  stdout. Analysis: /work/plans/forked-child-stdio-sink-analysis.md.
 - **An offset per-batch handler reads @tell and writes in two steps.**
   [read 2026-11-20, DA review] The desugared handler (Desugar.hs ~4796-4815)
   calls `@tell` and then `@write`, so two producer threads can both read
-  the same offset before either writes; a forked child's `@tell` returns 0
-  (stream.rs ~510). No spec item says what offsets a threaded producer
-  sees.
+  the same offset before either writes; the same holds for a forked child
+  (SLOT-16 lets it write stdout). No spec item says what offsets a
+  concurrent producer sees.

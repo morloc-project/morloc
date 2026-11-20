@@ -193,6 +193,9 @@ std::string frame_take(size_t saved) {
     return out;
 }
 
+std::atomic<uint64_t> fork_count{0};
+static const int fork_count_hook_ = pthread_atfork(nullptr, nullptr, [] { fork_count.fetch_add(1, std::memory_order_relaxed); });
+
 struct closure_trace {
     std::exception_ptr failure;
     std::string labels;

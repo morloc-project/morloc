@@ -1138,20 +1138,7 @@ fn enter_local(handle: i64) -> Result<(LocalClaim, ProcessLocalSlot, &'static Re
             handle, state,
         )));
     }
-    // Stdio slots pin to the opener PID: a forked child that inherits
-    // the process-local slot map (and would otherwise sail through
-    // the local cache) has its writes routed to a nexus RPC that
-    // interleaves bytes on the same fd with the parent. Catch the
-    // misuse at the pool-side entry point.
-    if slot.is_stdio.get() != 0 && !is_this_process(slot.opener_pid.get(), slot.opener_pid_start_time.get()) {
-        return Err(MorlocError::Other(format!(
-            "stdio stream cannot cross a fork boundary: slot opened by \
-             PID {}, current process is PID {}. Re-open the stream in \
-             this process, or route the read/write through the opener.",
-            slot.opener_pid.get(), std::process::id(),
-        )));
-    }
-
+    // SLOT-16: any process holding the handle writes a stdio stream.
     let (claim, mut taken, cache_bytes) = claim_process_local_slot(handle);
 
     // Validate cached_generation; dispose on mismatch. The stream it
@@ -2635,11 +2622,7 @@ pub fn shared_handle_stdio_kind(handle: i64) -> Result<Option<u8>, MorlocError> 
     Ok((is_stdio != 0).then_some(kind))
 }
 
-/// Enforce the pool-side fork-boundary invariant: the caller's PID
-/// must match the slot's opener_pid. A forked child that inherits
-/// the nexus socket cannot write to the parent's stdio slot -- its
-/// bytes would interleave with the parent's on the same fd in an
-/// order the user has no way to reason about.
+/// SLOT-16: standard input is read only by the process that opened it.
 pub fn verify_stdio_opener_pid(handle: i64) -> Result<(), MorlocError> {
     use std::sync::atomic::Ordering;
     let (gen_claim, slot_idx) = unpack_handle(handle);
@@ -2657,9 +2640,7 @@ pub fn verify_stdio_opener_pid(handle: i64) -> Result<(), MorlocError> {
     let me = std::process::id();
     if !is_this_process(opener, slot.opener_pid_start_time.get()) {
         return Err(MorlocError::Other(format!(
-            "stdio stream cannot cross a fork boundary: slot opened by \
-             PID {}, current process is PID {}. Re-open the stream in \
-             this process, or route the read/write through the opener.",
+            "standard input is read only by the process that opened it (PID {}); this is PID {}",
             opener, me,
         )));
     }
@@ -3290,6 +3271,13 @@ pub fn shared_close_handle_with_status(
     let slot = slot_ref(slot_idx).ok_or_else(|| MorlocError::Other(format!(
         "shared_close_handle: slot index {} out of range", slot_idx,
     )))?;
+    // STRM-8, SLOT-16
+    if slot.is_stdio.get() != 0 && !is_this_process(slot.opener_pid.get(), slot.opener_pid_start_time.get()) {
+        return Err(MorlocError::Other(format!(
+            "a standard stream is closed only by the process that opened it (PID {}); this is PID {}",
+            slot.opener_pid.get(), std::process::id(),
+        )));
+    }
     // SLOT-36
     if let Ok(Some(())) = with_live_txn(|t| t.discards.0.push(Ending::Close(handle, status))) {
         return Ok(());
@@ -14369,15 +14357,89 @@ mod write_behind_tests {
         let h = open_stdio(MLC_KIND_OSTREAM, STDIO_KIND_STDOUT, "as").unwrap();
         let pid = unsafe { libc::fork() };
         if pid == 0 {
-            let refused = std::panic::catch_unwind(|| write_one(h, &["x".to_string()], 0)).is_err();
             fail_written(h, "a put raised");
-            unsafe { libc::_exit(if refused { 0 } else { 1 }) };
+            unsafe { libc::_exit(0) };
         }
+        reap_child(pid);
+        let e = shared_close_handle(h).expect_err("the stream outlived a child's failed put").to_string();
+        assert!(e.contains("a put raised"), "{e}");
+    }
+
+    fn reap_child(pid: libc::pid_t) {
         let mut status = 0;
         assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid);
         assert!(libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0, "child status {status}");
-        let e = shared_close_handle(h).expect_err("the stream outlived a child's failed put").to_string();
-        assert!(e.contains("a put raised"), "{e}");
+    }
+
+    fn stdout_elements(h: i64, from: usize) -> Vec<String> {
+        let list = parse_schema("as").unwrap();
+        let elem = parse_schema("s").unwrap();
+        let mut got = Vec::new();
+        for (x, bytes, _) in SINK.lock().unwrap()[from..].iter() {
+            let header = morloc_runtime_types::packet::PacketHeader::from_bytes(bytes[..32].try_into().unwrap()).unwrap();
+            if *x != h || !header.is_data() {
+                continue;
+            }
+            let arr = shared_materialize_subpacket_from_bytes(bytes, &elem).unwrap();
+            got.extend(serde_json::from_str::<Vec<String>>(&crate::json::voidstar_to_json_string(arr, &list).unwrap()).unwrap());
+            shm::shfree(arr).unwrap();
+        }
+        got
+    }
+
+    // SLOT-16, SLOT-11
+    #[test]
+    fn a_forked_child_writes_its_parents_stdout_in_write_order() {
+        let _shm = crate::own_test_registry();
+        crate::custody::set_stdio_sink(recording_sink);
+        let seen = SINK.lock().unwrap().len();
+        let h = open_stdio(MLC_KIND_OSTREAM, STDIO_KIND_STDOUT, "as").unwrap();
+        write_one(h, &["1".to_string()], 0);
+        shared_flush_buffer(h).unwrap();
+        let pid = unsafe { libc::fork() };
+        if pid == 0 {
+            let wrote = std::panic::catch_unwind(|| write_one(h, &["5".to_string()], 0)).is_ok();
+            unsafe { libc::_exit(if wrote { 0 } else { 1 }) };
+        }
+        reap_child(pid);
+        write_one(h, &["3".to_string()], 0);
+        shared_close_handle(h).unwrap();
+        assert_eq!(stdout_elements(h, seen), vec!["1", "5", "3"]);
+    }
+
+    // SLOT-13
+    #[test]
+    fn a_forked_stdout_writer_that_exits_without_flushing_loses_nothing() {
+        let _shm = crate::own_test_registry();
+        crate::custody::set_stdio_sink(recording_sink);
+        let seen = SINK.lock().unwrap().len();
+        let h = open_stdio(MLC_KIND_OSTREAM, STDIO_KIND_STDOUT, "as").unwrap();
+        let pid = unsafe { libc::fork() };
+        if pid == 0 {
+            write_one(h, &["5".to_string()], 0);
+            unsafe { libc::_exit(0) };
+        }
+        reap_child(pid);
+        shared_close_handle(h).unwrap();
+        assert_eq!(stdout_elements(h, seen), vec!["5"]);
+    }
+
+    // STRM-8, tla:StdioBracket_child_closes.bug
+    #[test]
+    fn a_forked_child_cannot_close_its_parents_stdout() {
+        let _shm = crate::own_test_registry();
+        crate::custody::set_stdio_sink(recording_sink);
+        let seen = SINK.lock().unwrap().len();
+        let h = open_stdio(MLC_KIND_OSTREAM, STDIO_KIND_STDOUT, "as").unwrap();
+        let pid = unsafe { libc::fork() };
+        if pid == 0 {
+            let refused = shared_close_handle(h).is_err();
+            unsafe { libc::_exit(if refused { 0 } else { 1 }) };
+        }
+        reap_child(pid);
+        write_one(h, &["3".to_string()], 0);
+        shared_close_handle(h).unwrap();
+        assert_eq!(stdout_elements(h, seen), vec!["3"]);
     }
     #[test]
     fn threads_write_one_stdio_stream_at_once_and_keep_each_write_whole() {

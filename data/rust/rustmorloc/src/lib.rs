@@ -159,6 +159,7 @@ extern "C" {
     fn mlc_side_with_native(id: i64, is_fold: i32, f: unsafe extern "C" fn(*mut c_void, *mut c_void), arg: *mut c_void, errmsg: *mut *mut c_char) -> i32;
     fn mlc_side_put(id: i64, schema: *const CSchema, value: *const c_void, errmsg: *mut *mut c_char) -> i32;
     fn mlc_sink_failed(h: i64);
+    fn mlc_exit_forked();
     fn mlc_side_take(id: i64, errmsg: *mut *mut c_char) -> *mut c_void;
     fn mlc_fold_new(ctx: *mut c_void, fresh: unsafe extern "C" fn(*mut c_void) -> *mut c_void, errmsg: *mut *mut c_char) -> i64;
     fn mlc_fold_checkout(id: i64, value: *mut *mut c_void, fresh: *mut i32, errmsg: *mut *mut c_char) -> i32;
@@ -4212,6 +4213,7 @@ where
             break;
         }
         let frame: Vec<E> = read_voidstar(voidstar, err, schema, "@replay");
+        let _fork = ForkGuard::new();
         f(frame);
     }
 }
@@ -4529,11 +4531,48 @@ pub unsafe fn gather_native<L: Batch + FromVoidstar + Send, F: Invoke1<u64, ()>>
         }
     }
     let mut abandon = Abandon(Some(h as i64));
-    f.invoke(&h);
+    { let _fork = ForkGuard::new(); f.invoke(&h) };
     abandon.0 = None;
     let reader = side_take(h);
     side_each::<L>(schema, &reader, |b| list.batches.push(b));
     L::join(std::mem::take(&mut list.batches))
+}
+
+/// FORK-17
+static FORK_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+extern "C" fn count_fork() {
+    FORK_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+static FORK_COUNT_INSTALLED: std::sync::Once = std::sync::Once::new();
+
+/// FORK-17
+pub fn install_fork_count() {
+    FORK_COUNT_INSTALLED.call_once(|| unsafe {
+        libc::pthread_atfork(None, None, Some(count_fork));
+    });
+}
+
+/// FORK-17
+pub struct ForkGuard(u64);
+
+impl ForkGuard {
+    #[inline(always)]
+    #[allow(clippy::new_without_default)]
+    pub fn new() -> Self {
+        install_fork_count();
+        ForkGuard(FORK_COUNT.load(std::sync::atomic::Ordering::Relaxed))
+    }
+}
+
+impl Drop for ForkGuard {
+    #[inline(always)]
+    fn drop(&mut self) {
+        if FORK_COUNT.load(std::sync::atomic::Ordering::Relaxed) != self.0 {
+            unsafe { mlc_exit_forked() };
+        }
+    }
 }
 
 /// SIDE-12: armed for a put, so a put that panics or throws fails its sink.
@@ -4579,7 +4618,7 @@ unsafe fn gather_put_unguarded<L: Batch + ToVoidstar + Send>(schema: &Schema, h:
 pub unsafe fn gather_file<L: FromVoidstar, F: Invoke1<u64, ()>>(schema: &Schema, f: F) -> L {
     let path = tmpfile();
     let o = open_ostream(schema, &path);
-    f.invoke(&o);
+    { let _fork = ForkGuard::new(); f.invoke(&o) };
     close(o);
     let xs = load::<L>(schema, &path);
     unlink_tmp(&path);
@@ -4668,7 +4707,7 @@ where
         }
     }
     let mut abandon = Abandon::<B>(Some(h), std::marker::PhantomData);
-    f.invoke(&(h as u64));
+    { let _fork = ForkGuard::new(); f.invoke(&(h as u64)) };
     abandon.0 = None;
     let (mut values, mut n) = (std::ptr::null_mut(), 0usize);
     let r = mlc_fold_take(h, &mut values, &mut n, &mut err);
@@ -4681,7 +4720,7 @@ where
     let mut acc: Option<B> = None;
     for v in held.0.into_iter().map(|v| v.value).chain(side) {
         acc = Some(match acc {
-            Some(a) => combine.invoke(&a, &v),
+            Some(a) => { let _fork = ForkGuard::new(); combine.invoke(&a, &v) }
             None => v,
         });
     }
@@ -4700,7 +4739,7 @@ where
         let mut side: Option<B> = None;
         side_each::<L>(schema, reader, |b| {
             let acc = side.take().unwrap_or_else(|| init.clone());
-            side = Some(step.invoke(&acc, &b));
+            side = Some({ let _fork = ForkGuard::new(); step.invoke(&acc, &b) });
         });
         side
     })
@@ -4747,7 +4786,7 @@ where
     }
     let mut failed = Failed(Some(h as i64));
     let mut v = if fresh != 0 { fold_init::<B>(p) } else { fold_value::<B>(p) };
-    v.value = step.invoke(&v.value, batch);
+    v.value = { let _fork = ForkGuard::new(); step.invoke(&v.value, batch) };
     failed.0 = None;
     let raw = Box::into_raw(v);
     if mlc_fold_store(h as i64, raw as *mut c_void, &mut err) != 0 {

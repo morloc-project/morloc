@@ -69,6 +69,7 @@ fn main() {
     }
 
     ::rustmorloc::install_crash_handler();
+    ::rustmorloc::install_fork_count();
     ::rustmorloc::install_panic_hook();
     // PANIC-9
     ::rustmorloc::register_pool_files(&[::std::file!(), ::std::concat!(::std::env!("CARGO_MANIFEST_DIR"), "/", ::std::file!())], __MORLOC_USER_FILES, __MORLOC_USER_CALLS);

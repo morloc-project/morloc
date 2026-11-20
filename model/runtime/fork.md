@@ -225,18 +225,44 @@ tick) is kept until that process is gone. Model: `tla/TempEpoch.tla`.
 
 ### FORK-12 A forked child never returns into the dispatch loop
 Status: implemented
-Checked by: a_child_forked_during_a_dispatch_exits_instead_of_replying, a_child_forked_by_user_code_never_returns_from_the_dispatch, golden:fork-inside-call, tla:DispatchFork, tla:DispatchFork_unguarded.bug, tla:DispatchFork_by_pid.bug, tla:DispatchFork_reply_only.bug
+Checked by: a_child_forked_during_a_dispatch_exits_instead_of_replying, a_child_forked_by_user_code_never_returns_from_the_dispatch, golden:fork-inside-call, golden:spec-strm-8-8, tla:DispatchFork, tla:DispatchFork_unguarded.bug, tla:DispatchFork_by_pid.bug, tla:DispatchFork_reply_only.bug
 
-A child forked from user code during a dispatch shares the parent's
-connection and worker state; returning from the user function would send a
-second reply, or run the worker's cleanup on the parent's state, and
-continue as an uncounted worker taking the parent's scheduler locks. The
-fork generation is recorded when a request is read, and a process whose
-generation differs exits as soon as user code returns in it, however it
-returns: the shared dispatch checks right after the call, the Python pool
-on every path out of the call, and every reply on the request's connection
-checks again. A child made without the fork handler (FORK-14) is outside
-this item. Model: `tla/DispatchFork.tla`.
+A child forked from user code during a call shares the parent's
+connection, worker state and the generated code around the call:
+returning would run the rest of the generated function (a bracket's close,
+a fold's replay, a later effect), send a second reply, or run the worker's
+cleanup on the parent's state and continue as an uncounted worker taking
+the parent's scheduler locks. FORK-17 stops the child earlier.
+The fork generation is also recorded when a request is read;
+the shared dispatch checks right after the call, the Python pool on every
+path out of the call, and every reply on the request's connection checks
+again. A child made without the fork handler (FORK-14) is outside this
+item. Model: `tla/DispatchFork.tla`.
+
+### FORK-17 A forked child exits when it leaves the call of user code it was forked inside
+Status: deviation
+
+A child forked inside a call of user code exits as soon as it leaves the
+call, by returning or by failing, before
+any more generated or runtime code runs; calls it makes itself end
+normally. Python adds nothing to calls: a fork handler in the child finds
+the user frame that generated or runtime code called and exits when that
+frame returns, yields or unwinds; the handler runs in every child where
+Python may run, since CPython runs it from PyOS_AfterFork_Child, which C
+code that forks must call first. C++ and Rust check at every call of user
+code (a sourced function, a function value, a packer, a fold's step or
+combine, a producer, a replay callback): the call records a count its own
+fork handler moves, and a process whose count differs when the call ends
+exits there; Rust checks as the call ends, C++ at the end of the full
+expression holding it, so a C++ child that returns from a call nested in
+another call's arguments runs that call first (deviation:
+issues/pools-and-ipc.md). R checks at the runtime's calls of user code (a
+fold's step and combine, a producer, a replay callback) and when `@try`
+catches a failure, but not at a call from generated code, where a check
+costs recursion depth (deviation: issues/pools-and-ipc.md). An operator
+the language applies is not a call and is not checked.
+Model: `tla/StdioBracket.tla` (`StdioBracket_no_call_check.bug` runs the
+bracket's close in the child).
 
 ### FORK-13 A cached process identity is refreshed in a forked child
 Status: implemented

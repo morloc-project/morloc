@@ -72,14 +72,18 @@ that.
 
 ### STRM-8 `@stdout` hands a body the stdout stream
 Intent: ruled 2026-11-15
-Tests: spec-strm-8-1, spec-strm-8-2, spec-strm-8-3, spec-strm-8-4, spec-strm-8-5, spec-strm-8-6, spec-strm-8-7
-Code: conforms 2026-11-18
+Tests: spec-strm-8-1, spec-strm-8-2, spec-strm-8-3, spec-strm-8-4, spec-strm-8-5, spec-strm-8-6, spec-strm-8-7, spec-strm-8-8
+Code: conforms 2026-11-20
 
 `@stdout :: (OStream a -> <IO,e> b) -> <IO,e> (Collect a)` opens stdout,
 runs the body on its handle and closes it. `@collect p` is
 `@stdout (\o -> p (\xs -> @write 0 o xs))`. The body may pass the handle
 on. `@close` applied to the bracket's parameter is a build error; a handle
 closed any other way (through a helper or another name) fails the run.
+A process the body forks (os.fork, multiprocessing, mclapply, fork())
+writes the handle as the body does, each batch whole, in the order the
+writes happen (ruled 2026-11-20); only the bracket closes it, and a child
+that returns from the call it was forked in ends there (FORK-17).
 
 ### STRM-6 A batch handed to a sink is not changed afterwards
 Intent: proposed

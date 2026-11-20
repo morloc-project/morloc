@@ -1060,9 +1060,8 @@ pub(crate) unsafe fn mlc_open_stdin(
     )
 }
 
-/// `@stdout :: <IO> OStream a` -- typed intrinsic. Nexus owns fd 1;
-/// `mlc_write` routes through the pool-nexus RPC socket. At most one
-/// `@stdout` per nexus.
+/// `@stdout :: <IO> OStream a` -- typed intrinsic. SLOT-16: the nexus
+/// writes fd 1. At most one `@stdout` per nexus.
 pub(crate) unsafe fn mlc_open_stdout(
     schema_str: *const c_char,
     errmsg: *mut *mut c_char,
@@ -1087,9 +1086,8 @@ pub(crate) unsafe fn mlc_reclaim_stdio_after_dispatch() {
     crate::stream::pool_reclaim_stdio_after_dispatch();
 }
 
-/// `@stderr :: <IO> OStream a` -- typed intrinsic. Nexus owns fd 2;
-/// `mlc_write` routes through the pool-nexus RPC socket. At most one
-/// `@stderr` per nexus.
+/// `@stderr :: <IO> OStream a` -- typed intrinsic. SLOT-16: the nexus
+/// writes fd 2. At most one `@stderr` per nexus.
 pub(crate) unsafe fn mlc_open_stderr(
     schema_str: *const c_char,
     errmsg: *mut *mut c_char,

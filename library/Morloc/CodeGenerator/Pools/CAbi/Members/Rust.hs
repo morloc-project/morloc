@@ -3344,6 +3344,7 @@ rustLowerConfig mask makers consumed userArms =
     -- function value. One a call group returns is the host's too; a
     -- function at a type variable of the signature is one the host was
     -- given, and is returned as it was (HOST-8).
+    , lcForkChecked = \_ x -> "({ let _mlc_fork = ::rustmorloc::ForkGuard::new(); " <> x <> " })"
     , lcSourcedResult = \src n t x -> case t of
         FunF ins@(_ : _) _
           | n < maybe 0 length (Map.lookup (srcName src) mask) || Set.member (srcName src) makers ->

@@ -277,6 +277,8 @@ rustmorloc/lib.rs::-::LIVE_CSCHEMAS	test-only
 rustmorloc/lib.rs::-::TEST_BASE	thread		
 rustmorloc/lib.rs::-::READING_RUNTIME_VALUE	thread		
 rustmorloc/lib.rs::-::REPLY	thread		
+rustmorloc/lib.rs::-::FORK_COUNT	counter		
+rustmorloc/lib.rs::-::FORK_COUNT_INSTALLED	startup		
 rustmorloc/lib.rs::-::RECUR_ENV	thread		
 rustmorloc/lib.rs::-::SHM_TRACKER	thread		
 rustmorloc/lib.rs::-::FRAMES	thread		
