@@ -87,6 +87,13 @@ None is scheduled.
   fold-copy-count); Python and R mutate in place. Taking the accumulator
   by value (`Fn(A, &B) -> A`) changes the Rust type user code is written
   against. Needs an interface ruling.
+- **The Rust stdlib's folds copy their accumulator every step.** [read
+  2026-11-20, DA review] Same cost as the fold step above, outside `@fold`:
+  root-rust core.rs `morloc_fold_vec` / `morloc_fold_deque` (~309-315, and
+  ~598) call the closure as `f(&acc, x)`, and stream-rust / parallel-rust
+  (stream.rs ~8-18, parallel.rs ~412-426) do the same, so a closure that
+  grows its accumulator clones it per element. Analysis of the general fix
+  (accumulators by value): /work/plans/rust-param-modes-analysis.md.
 - **Every non-vector container copy is entered in the converted-value
   table.** [read, 2026-11-16] GEN-14. cppmorloc.hpp sizes and writes a
   set, map, list or deque through `mlc_converted`, so each one costs a hash

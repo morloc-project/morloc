@@ -131,3 +131,16 @@ Details and evidence: /work/plans/runtime-audit-2026-10-10/C-processes.md.
   the reason from the next macOS CI failure. Separately, an exception
   escaping a user-spawned C++ thread ends the pool by std::terminate; the
   test's producer does not catch, so this is the expected crash shape.
+- **A forked child that returns from sourced code runs the rest of the
+  manifold first.** [reproduced 2026-11-20] FORK-12 violated: it says the
+  child exits as soon as user code returns, but the check runs after the
+  generated manifold (pool.py, pool_ffi.rs, rmorloc.c dispatch paths), so the
+  child first runs the code after the call, including a `@collect`
+  bracket's close. Repro: a Python producer `sink([1,2]); pid = os.fork();
+  if pid == 0: return` then, in the parent, `sleep(0.5); sink([3])` under
+  `inChild :: <IO> (Collect I64); inChild = @collect p` prints `[1,2]`
+  (the child closed stdout) and fails "stream handle ...: generation
+  mismatch ... handle was closed". The same holds for any effect after the
+  call (a file-route fold's replay and unlink, @close of a user stream).
+  Found by DA review of the forked-child stdio question
+  (/work/plans/forked-child-stdio-sink-analysis.md).
