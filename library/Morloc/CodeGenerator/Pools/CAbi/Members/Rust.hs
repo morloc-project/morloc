@@ -107,7 +107,7 @@ import qualified Morloc.Version as MV
 import Morloc.Quasi
 import System.Directory (findExecutable)
 import System.FilePath (takeDirectory)
-import Morloc.CodeGenerator.GenDefs (DataDef (..), Disagreement (..), GenDef (..), carriedTemplateArgs, armDataParams, dataDefs, dataNamesIn, nativeDataParams, RecordUse, disagreements, inPoolSerialASTs, placeTypes, genDefs, nativeParam, nativeParams, paramOf, placeholders, recordUses, depNamespaces, nameRoot)
+import Morloc.CodeGenerator.GenDefs (DataDef (..), Disagreement (..), Extras (..), GenDef (..), extraDefs, noExtras, typeNamesIn, carriedTemplateArgs, armDataParams, dataDefs, dataNamesIn, nativeDataParams, RecordUse, disagreements, inPoolSerialASTs, placeTypes, genDefs, nativeParam, nativeParams, paramOf, placeholders, recordUses, depNamespaces, nameRoot)
 
 -- | Duplicated here (as in Cpp.hs) to match data/lang/rust/lang.yaml. The
 -- second field is the source extension and must match lang.yaml's @extension@
@@ -187,6 +187,10 @@ data RustState = RustState
   -- ^ The `data` types the program declares.
   , rsGenDefs :: Map.Map TVar GenDef
   -- ^ Each generated record's definition from its declaration (GEN-9).
+  , rsExtras :: Extras
+  -- ^ The closure's generated types the pool does not use (GEN-6).
+  , rsRecordDerives :: Map.Map TVar [Text]
+  -- ^ The traits each generated record derives besides Clone (GEN-8).
   , rsRecords :: Map.Map TVar GenDef
   -- ^ The generated records of the pool, each defined from its declaration
   -- (GEN-9).
@@ -239,6 +243,8 @@ instance Defaultable RustState where
       , rsNeedsNode = False
       , rsUserArms = Map.empty
       , rsGenDefs = Map.empty
+      , rsExtras = noExtras
+      , rsRecordDerives = Map.empty
       , rsDataDefs = Map.empty
       , rsDataNames = Set.empty
       , rsDataFailures = Map.empty
@@ -395,7 +401,7 @@ rustTypeOf = f
     -- which are native at both levels: the unpacked view keeps a
     -- generated record native (GEN-14).
     f (NamF _ (FV gc (CV "struct")) ps _) = do
-      records <- CMS.gets rsRecords
+      records <- CMS.gets (\st -> rsRecords st <> exRecords (rsExtras st))
       names <- CMS.gets rsRecordNames
       defs <- CMS.gets rsGenDefs
       let q = pretty (Map.findWithDefault (unTVar gc) gc names)
@@ -425,7 +431,7 @@ rustTypeOf = f
     -- its arguments.
     f (RecF (FV gv (CV "struct")) ps) = do
       names <- CMS.gets rsRecordNames
-      records <- CMS.gets rsRecords
+      records <- CMS.gets (\st -> rsRecords st <> exRecords (rsExtras st))
       case Map.lookup gv names of
         Just name -> case Map.lookup gv records of
           Just gd | not (null (nativeParams gd)) -> case carriedTemplateArgs gd ps of
@@ -1723,11 +1729,12 @@ translate srcs es0 = do
       named = dataNamesIn poolTypes
   (gdefs, gfails) <- genDefs rustLang (Set.fromList [g | (g, _, _, _) <- uses] <> named)
   (ddefs, dfails) <- dataDefs rustLang named
+  extras <- extraDefs rustLang (typeNamesIn poolTypes <> Set.fromList [g | (g, _, _, _) <- uses] <> named)
   intrAsts <- inPoolSerialASTs rustLang es
   depRoots <- depNamespaces "rust"
   let poolAsts = concatMap allSerialASTs es <> intrAsts <> closureSerialASTs closureAsts
       recordObjects = Map.map unique (Map.fromListWith (<>) [(g, [rs]) | a <- poolAsts, o@(SerialObject _ (FV g _) _ rs) <- serialSubtrees a, generatedObject o])
-  let st0 = defaultValue {rsRecordObjects = recordObjects, rsPoolAsts = poolAsts, rsDepNamespaces = depRoots, rsGenFailures = gfails, rsGenDefs = gdefs, rsDataDefs = ddefs, rsDataNames = declaredDataNames generalScope, rsDataFailures = dfails, rsRecordUses = uses, rsTypeHomes = typeHomes, rsDebugInfo = debugInfo, rsCScope = mergedRustScope, rsSrcTypeVarMask = srcTypeVarMask, rsSrcMakers = srcMakers, rsLogTemplates = logTemplates, rsStageTable = stageTable, rsPool = pool, rsBuilds = lastBuilds Map.empty Set.empty (rustSeeds pool es0) es0}
+  let st0 = defaultValue {rsRecordObjects = recordObjects, rsPoolAsts = poolAsts, rsDepNamespaces = depRoots, rsGenFailures = gfails, rsGenDefs = gdefs, rsExtras = extras, rsDataDefs = ddefs, rsDataNames = declaredDataNames generalScope, rsDataFailures = dfails, rsRecordUses = uses, rsTypeHomes = typeHomes, rsDebugInfo = debugInfo, rsCScope = mergedRustScope, rsSrcTypeVarMask = srcTypeVarMask, rsSrcMakers = srcMakers, rsLogTemplates = logTemplates, rsStageTable = stageTable, rsPool = pool, rsBuilds = lastBuilds Map.empty Set.empty (rustSeeds pool es0) es0}
       pool = planPool (rustCaps mergedRustScope) es
       ((code, typeFiles), stEnd) = CMS.runState (runReaderT (makeRustCode includeDocs closureAsts closureTable es) emptyOwnEnv) st0
   mapM_ (MM.throwRejected . ("Rust pool:" <+>) . pretty) (rsErrors stEnd)
@@ -2613,21 +2620,66 @@ planRustPublic es = do
   -- can name only what any crate can import -- the standard library, the
   -- language's own types, its parameters, and the generated types other
   -- files hold.
+  ex <- CMS.gets rsExtras
+  let known =
+        Set.unions
+          [ Map.keysSet recDefs, Map.keysSet ddefs
+          , Set.fromList [gv | (FV gv _, _, _) <- allVars], Set.fromList [gv | (FV gv _, _, _) <- allEnums] ]
+      -- An unused type (GEN-6) is declared only where a sourced file can name
+      -- it, its module's file, and only when it can be written there.
+      writable gv = Set.notMember gv known && nameOk gv && spellableHome gv
+      spellableHome gv = and [not (Set.member c rustUnspellable) && isIdentifier c | Just h <- [Map.lookup gv homes], c <- typeHomePath h]
+      exRecs0 =
+        Map.filterWithKey
+          (\gv gd -> writable gv && all (isIdentifier . nativeParam) (nativeParams gd) && all ((`Set.notMember` rustUnspellable) . unKey . fst) (gdFields gd))
+          (exRecords ex)
+      exDatas0 = Map.filterWithKey (\gv dd -> writable gv && all (isIdentifier . nativeParam) (nativeDataParams dd)) (exData ex)
+      exVars0 = Map.filterWithKey (\gv _ -> writable gv) (exVariants ex)
+      exEnums0 = Map.filterWithKey (\gv _ -> writable gv) (exEnums ex)
+      -- An unused type one of whose names another type's would take is left
+      -- out.
+      armsOf =
+        Map.fromList
+          ( [(gv, [c | (c, _ : _) <- arms]) | (FV gv _, _, arms) <- allVars]
+              <> [(gv, [c | (c, _ : _) <- ddArms dd]) | (gv, dd) <- Map.toList (ddefs <> exDatas0)]
+              <> [(gv, [c | (c, _ : _) <- arms]) | (gv, arms) <- Map.toList exVars0] )
+      namesFor gv = case Map.lookup gv homes of
+        Nothing -> []
+        Just h ->
+          let n = qualifiedRustName h
+           in n : [n <> "Fields" | Just gd <- [Map.lookup gv (recDefs <> exRecs0)], selfRef gd]
+                <> [n <> "_" <> c | c <- Map.findWithDefault [] gv armsOf]
+      owners =
+        Map.fromListWith Set.union
+          [ (n, Set.singleton gv)
+          | gv <- Set.toList (Set.unions [known, Map.keysSet exRecs0, Map.keysSet exDatas0, Map.keysSet exVars0, Map.keysSet exEnums0])
+          , n <- namesFor gv ]
+      clashing = Set.unions [os | os <- Map.elems owners, Set.size os > 1]
+      unclashed :: Map.Map TVar x -> Map.Map TVar x
+      unclashed = Map.filterWithKey (\gv _ -> Set.notMember gv clashing)
+      exRecs = unclashed exRecs0
+      exDatas = unclashed exDatas0
+      exVars = unclashed exVars0
+      exEnumCands = unclashed exEnums0
+      extraNames = Set.unions [Map.keysSet exRecs, Map.keysSet exDatas, Map.keysSet exVars, Map.keysSet exEnumCands]
   let candidates = Map.filterWithKey (\gv gd -> nameOk gv && all (isIdentifier . nativeParam) (nativeParams gd)) recDefs
       nameAll pub = Map.mapWithKey (\gv _ -> if Set.member gv pub then maybe (privateName gv) qualifiedRustName (Map.lookup gv homes) else privateName gv) recDefs
-      generated = Set.unions [Map.keysSet recDefs, Set.fromList [gv | (FV gv _, _, _) <- allVars], Set.fromList [gv | (FV gv _, _, _) <- allEnums]]
+      generated = Set.unions [Map.keysSet recDefs, Set.fromList [gv | (FV gv _, _, _) <- allVars], Set.fromList [gv | (FV gv _, _, _) <- allEnums], extraNames]
       placed =
         placeTypes (rustImportable (Map.keysSet depRoots) Set.empty Set.empty) generated . Map.fromList $
-          [(gv, map snd (gdFields gd)) | (gv, gd) <- Map.toList candidates]
+          [(gv, map snd (gdFields gd)) | (gv, gd) <- Map.toList (candidates <> exRecs)]
             <> [(gv, concatMap snd arms) | (FV gv _, _, arms) <- vars]
+            <> [(gv, concatMap snd arms) | (gv, arms) <- Map.toList exVars]
             <> [(gv, []) | (FV gv _, _, _) <- enums]
-            <> [(gv, concatMap snd (ddArms dd)) | (gv, dd) <- Map.toList ddefs, nameOk gv, all (isIdentifier . nativeParam) (nativeDataParams dd)]
+            <> [(gv, []) | gv <- Map.keys exEnumCands]
+            <> [(gv, concatMap snd (ddArms dd)) | (gv, dd) <- Map.toList (ddefs <> exDatas), nameOk gv, all (isIdentifier . nativeParam) (nativeDataParams dd)]
       recPublic = Set.intersection placed (Map.keysSet candidates)
-  CMS.modify $ \s -> s {rsRecords = recDefs, rsRecordNames = nameAll recPublic}
+      extraRecNames = Map.fromList [(gv, qualifiedRustName h) | gv <- Map.keys exRecs, Set.member gv placed, Just h <- [Map.lookup gv homes]]
+  CMS.modify $ \s -> s {rsRecords = recDefs, rsRecordNames = nameAll recPublic <> extraRecNames}
   unnamed <- filterM (fmap not . usesParams) (Map.elems recDefs)
   let public = placed
       names = Map.fromList [(gv, qualifiedRustName h) | gv <- Set.toList public, Just h <- [Map.lookup gv homes]]
-      handles = Map.keysSet (Map.filter selfRef recDefs)
+      handles = Map.keysSet (Map.filter selfRef (recDefs <> Map.filterWithKey (\gv _ -> Set.member gv placed) exRecs))
       badWords =
         [ (gv, c)
         | gv <- Set.toList (Set.union public (Map.keysSet recDefs)), Just h <- [Map.lookup gv homes]
@@ -2668,6 +2720,61 @@ planRustPublic es = do
              , length gvs > 1 ]
           <> rsErrors s
     }
+  -- Each record derives Debug and PartialEq, and Default, where every
+  -- field's type does: a builtin, a standard container, a parameter, a
+  -- generated enum (not Default) or another such record.
+  errors0 <- CMS.gets rsErrors
+  let allRecs = Map.filter (not . selfRef) (recDefs <> exRecs)
+  fieldTexts <- mapM (\gd -> concatMap (rustPaths . render) <$> mapM (rustFieldType . snd) (gdFields gd)) allRecs
+  enumTexts <- Set.fromList . concatMap (rustPaths . render) <$> mapM rustTypeOf
+    ([EnumF fv ps ns | (fv, ps, ns) <- allEnums] <> [EnumF (FV gv (CV (unTVar gv))) [] ns | (gv, ns) <- Map.toList exEnumCands])
+  recNames <- CMS.gets rsRecordNames
+  CMS.modify $ \s -> s {rsErrors = errors0}
+  let paramNames gv = maybe Set.empty (Set.fromList . map nativeParam . nativeParams) (Map.lookup gv allRecs)
+      builtin p =
+        Set.member p (Set.fromList ["i8", "i16", "i32", "i64", "i128", "isize", "u8", "u16", "u32", "u64", "u128", "usize", "f32", "f64", "bool", "char", "String", "Vec", "Option", "Box"])
+          || any (`T.isPrefixOf` p) ["std::collections::", "::std::collections::"] || T.all isDigit p
+      qualifying withEnums = go (Map.keysSet allRecs)
+        where
+          go ok =
+            let named = Set.fromList [n | (gv, n) <- Map.toList recNames, Set.member gv ok]
+                allowed gv p = builtin p || Set.member p named || Set.member p (paramNames gv) || (withEnums && Set.member p enumTexts)
+                ok' = Set.filter (\gv -> all (allowed gv) (Map.findWithDefault [] gv fieldTexts)) ok
+             in if ok' == ok then ok else go ok'
+      eqLike = qualifying True
+      defaultable = qualifying False
+  CMS.modify $ \s -> s
+    { rsRecordDerives =
+        Map.fromList
+          [ (gv, ["Debug", "PartialEq"] <> ["Default" | Set.member gv defaultable])
+          | gv <- Set.toList eqLike ]
+    }
+  derives <- CMS.gets rsRecordDerives
+  -- The unused types placed in their modules' files are declared there
+  -- alone, with no marshalling.
+  let declareExtra :: TVar -> (MDoc -> MDoc) -> Maybe [Text] -> RustM ()
+      declareExtra gv decl keep = case Map.lookup gv homes of
+        Just h | Set.member gv placed ->
+          CMS.modify $ \s -> s {rsPublicDecls = rsPublicDecls s <> [(gv, decl (pretty (typeHomeName h)), keep)]}
+        _ -> return ()
+  forM_ (Map.toList exRecs) $ \(gv, gd) -> do
+    fields <- mapM (\(k, t) -> (,) (RP.rustFieldIdent k) <$> rustFieldType t) (gdFields gd)
+    let params = map (pretty . nativeParam) (nativeParams gd)
+        decl n = if selfRef gd then RP.printRustHandle n params fields else RP.printRustStruct n params (Map.findWithDefault [] gv derives) fields
+    declareExtra gv decl Nothing
+  forM_ (Map.toList exDatas) $ \(gv, dd) -> do
+    arms' <- mapM (\(c, ts) -> (,) c <$> mapM rustFieldType ts) (ddArms dd)
+    let generics ps = RP.paramList (map (pretty . nativeParam) ps)
+        armDecl n c = pretty (render n <> "_" <> c) <> generics (armDataParams dd c)
+        decl n = RP.printRustVariant (n <> generics (nativeDataParams dd)) (armDecl n) (armDecl n) arms'
+    when (Set.member gv placed && any (not . null . snd) arms') $ CMS.modify $ \s -> s {rsNeedsNode = True}
+    declareExtra gv decl Nothing
+  forM_ (Map.toList exVars) $ \(gv, arms) -> do
+    arms' <- mapM (\(c, ts) -> (,) c <$> mapM rustFieldType ts) arms
+    when (Set.member gv placed && any (not . null . snd) arms') $ CMS.modify $ \s -> s {rsNeedsNode = True}
+    declareExtra gv (\n -> RP.printRustVariant n (RP.armTypeName n) (RP.armTypeName n) arms') Nothing
+  forM_ (Map.toList exEnumCands) $ \(gv, ctors) ->
+    declareExtra gv (\n -> RP.printRustEnum n ctors) Nothing
 
 -- | Whether a rendered Rust type names only what a crate of generated
 -- types can import (GEN-10): the standard library, the language's own and
@@ -2898,6 +3005,7 @@ generateRustStructs closureAsts es = do
           Just gd -> do
             names <- CMS.gets rsRecordNames
             handle <- Set.member gv <$> CMS.gets rsHandles
+            derives <- Map.findWithDefault [] gv <$> CMS.gets rsRecordDerives
             let name = pretty (Map.findWithDefault (unTVar gv) gv names)
                 params = map (pretty . nativeParam) (nativeParams gd)
             -- A field holding a parameter has the width of its argument,
@@ -2905,7 +3013,7 @@ generateRustStructs closureAsts es = do
             fields <- mapM (\(k, t) -> (\ty -> (RP.rustFieldIdent k, ty, isVarWidthF t || not (null (placeholders t)))) <$> rustFieldType t) (gdFields gd)
             let printDecl n
                   | handle = RP.printRustHandle n params [(fld, ty) | (fld, ty, _) <- fields]
-                  | otherwise = RP.printRustStruct n params [(fld, ty) | (fld, ty, _) <- fields]
+                  | otherwise = RP.printRustStruct n params derives [(fld, ty) | (fld, ty, _) <- fields]
             decl <- declareRecord gv printDecl
             impls <- recordImpls handle gd name params
             return $ map ((,) Nothing) (decl <> impls)

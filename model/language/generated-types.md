@@ -84,12 +84,19 @@ module component, type name or field name cannot be spelled in a language
 that generates the type (a keyword with no escape there).
 
 ### GEN-6 The definitions are written to files the pool reads first
-Intent: ruled 2026-11-14
-Tests: spec-gen-6-1, spec-gen-6-2
+Intent: ruled 2026-11-14, 2026-11-20
+Tests: spec-gen-6-1, spec-gen-6-2, spec-gen-6-3
 Code: deviates (issues/records.md)
 
-For every module `M` and language `L` with a generated type the program
-uses in `L`, the build writes one file under the build directory:
+A pool in language `L` has every generated type of the program's closure,
+used or not: a sourced file compiled whole may name any type of a module it
+is compiled with. A type the pool does not use is declared only in its
+module's file, and is left out when it cannot be written there on its own
+(GEN-10), cannot be spelled in `L` (GEN-5), or would take a name another
+type's takes; a sourced file naming it then
+fails in its own compiler. A Python record of the `dict` kind has no class
+to name. For every module `M` and language `L` with such a type, the build
+writes one file under the build directory:
 `pools/types/cpp/mlc/types/<path>.hpp`,
 `pools/types/rust/mlc/types/<path>.rs`, `pools/types/py/mlc_types/<path>/__init__.py`. The pool includes it before any
 sourced file, so a sourced file may name the type. A sourced C++ or
@@ -138,9 +145,17 @@ stays a callable of no arguments. Morloc code that builds such a record or
 reads such a field adapts the function where it does so, so in morloc the
 field keeps its declared type (EFF-2).
 
+A generated record compares and prints as a hand-written one would. In C++
+it declares a defaulted `operator==`, usable where every field's type has
+one. In Rust it derives `Debug` and `PartialEq` where every field's type
+is a builtin, a standard container, a parameter, a generated enum or such a
+record, and also `Default` where no field is an enum (ruled 2026-11-20). A
+record that refers to itself, and a `data` type with fields, derive neither.
+Tested by spec-gen-6-3.
+
 ### GEN-9 A generated definition follows its declaration
 Intent: ruled 2026-11-16
-Tests: spec-gen-9-1, spec-gen-9-2, spec-gen-9-3, spec-gen-9-4, spec-gen-9-5, spec-gen-9-6, spec-gen-9-7, spec-gen-9-8, spec-gen-9-9, spec-gen-9-10, spec-gen-9-11
+Tests: spec-gen-9-1, spec-gen-9-2, spec-gen-9-3, spec-gen-9-4, spec-gen-9-5, spec-gen-9-6, spec-gen-9-7, spec-gen-9-8, spec-gen-9-9, spec-gen-9-10, spec-gen-9-11, spec-gen-9-12
 Code: deviates (issues/records.md)
 
 A generated record or `data` type has the declaration's type parameters as

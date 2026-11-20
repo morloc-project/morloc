@@ -64,19 +64,34 @@ pyCtorRef keywords ty n
 -- | The class modules the pool's records and the program's `data` types
 -- need, or the reasons they cannot be written, given the record classes,
 -- those whose record has type parameters, the `data` types by qualified
--- name, and the language's keywords.
-pythonClasses :: Map.Map Text LR.ClassKind -> Set.Set Text -> Map.Map Text DataShape -> Set.Set Text -> [SerialManifold] -> Either [Text] PyClasses
-pythonClasses classes parameterized datas0 keywords es
+-- name, the language's keywords, and each record class's fields as its
+-- declaration gives them. A record class the pool does not use is written
+-- too, since a sourced file may import it (GEN-6), unless it cannot be.
+pythonClasses :: Map.Map Text LR.ClassKind -> Set.Set Text -> Map.Map Text DataShape -> Set.Set Text -> Map.Map Text [(Key, TypeF)] -> [SerialManifold] -> Either [Text] PyClasses
+pythonClasses classes parameterized datas0 keywords declared es
   | Map.null used && Map.null datas = Right (PyClasses [] [])
   | not (null problems) = Left problems
   | otherwise = Right (PyClasses files load)
   where
     occurrences = concatMap (collectRecordsWhere (`Map.member` classes)) es
-    used =
+    usedByPool =
       Map.fromListWith (<>)
         [ (c, [rs])
         | (FV _ (CV c), _, rs) <- occurrences
         ]
+    used = usedByPool <> Map.map (: []) (closed (Map.filterWithKey writableExtra declared))
+    -- An unused class is written only when every class its fields name is.
+    closed ext =
+      let written = Set.unions [Map.keysSet usedByPool, Map.keysSet ext, Map.keysSet datas0]
+          ext' = Map.filter (all (all (`Set.member` written) . classesIn . snd)) ext
+       in if Map.size ext' == Map.size ext then ext else closed ext'
+    classesIn t = case t of
+      NamF _ (FV _ (CV c)) _ rs | Map.member c classes -> c : concatMap (classesIn . snd) rs
+      _ -> concatMap classesIn (childrenOf t)
+    writableExtra c rs =
+      Map.notMember c usedByPool && Map.member c classes && Map.notMember c datas0 && spellable c
+        && all (\(Key k, _) -> isIdentifier k && not (Set.member k keywords) && not ("__" `T.isPrefixOf` k)
+                  && (kindOf c /= LR.PydanticKind || not ("_" `T.isPrefixOf` k || "model_" `T.isPrefixOf` k || Set.member k pydanticReserved))) rs
     -- Every `data` type of the program has its class, since a sourced file
     -- may import it; one the pool's code never holds and whose name Python
     -- cannot spell is left out rather than refused.
@@ -253,9 +268,9 @@ pythonClasses classes parameterized datas0 keywords es
     load =
       [ "sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), \"..\", \"types\", \"py\"))"
       ]
-        <> ["import " <> m | m <- Map.keys byModule]
+        <> ["import " <> m | m <- Set.toList (Set.fromList (map moduleOf (Map.keys usedByPool <> Map.keys datas)))]
         <> [ "morloc.register_class(\"" <> c <> "\", " <> c <> ", " <> (if kindOf c == LR.PydanticKind then "1" else "0") <> ")"
-           | c <- Map.keys used
+           | c <- Map.keys usedByPool
            ]
         -- Each constructor in tag order: an enumeration's members, or a
         -- class (fields) or an instance (none) per constructor.

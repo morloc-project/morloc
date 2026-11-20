@@ -75,7 +75,7 @@ import Morloc.CodeGenerator.Infer (declaredDataNames)
 import Morloc.CodeGenerator.Ownership (LetMode (..), LetPlan (..), OwnCaps (..), PoolPlan (..), byValueIndices, changedSlots, emptyPoolPlan, letMode, letPlan, nativeLets, planPool)
 import Morloc.CodeGenerator.OwnershipCheck (checkManifold)
 import System.Environment (lookupEnv)
-import Morloc.CodeGenerator.GenDefs (DataDef (..), Disagreement (..), GenDef (..), carriedTemplateArgs, dataDefs, dataNamesIn, nativeDataParams, RecordUse, disagreements, inPoolSerialASTs, placeTypes, genDefs, nativeParam, nativeParams, recordUses, depNamespaces, nameRoot)
+import Morloc.CodeGenerator.GenDefs (DataDef (..), Disagreement (..), Extras (..), GenDef (..), extraDefs, noExtras, typeNamesIn, carriedTemplateArgs, dataDefs, dataNamesIn, nativeDataParams, RecordUse, disagreements, inPoolSerialASTs, placeTypes, genDefs, nativeParam, nativeParams, recordUses, depNamespaces, nameRoot)
 import qualified Morloc.CodeGenerator.Platform as P
 import qualified Morloc.CodeGenerator.SystemConfig as SC
 import Morloc.CodeGenerator.Serial
@@ -341,8 +341,7 @@ instance {-# OVERLAPPABLE #-} (HasTypeF e) => HasCppType e where
       -- which are native at both levels: the unpacked view keeps a
       -- generated record native (GEN-14).
       f (NamF _ (FV gc (CV "struct")) ps _) = do
-        records <- CMS.gets translatorRecords
-        names <- CMS.gets translatorRecordNames
+        (names, records) <- recordsWithExtras
         defs <- CMS.gets translatorGenDefs
         let q = pretty (Map.findWithDefault (unTVar gc) gc names)
         case Map.lookup gc records of
@@ -366,8 +365,7 @@ instance {-# OVERLAPPABLE #-} (HasTypeF e) => HasCppType e where
       -- A back-reference to a generated record names its definition at
       -- its arguments.
       f (RecF (FV gv (CV "struct")) ps) = do
-        names <- CMS.gets translatorRecordNames
-        records <- CMS.gets translatorRecords
+        (names, records) <- recordsWithExtras
         case Map.lookup gv names of
           Just name -> case Map.lookup gv records of
             Just gd | not (null (nativeParams gd)) -> case carriedTemplateArgs gd ps of
@@ -547,6 +545,8 @@ data CppTranslatorState = CppTranslatorState
   -- shared fields (GEN-1, CPP-6), with its fields.
   , translatorGenDefs :: Map.Map TVar GenDef
   -- ^ Each generated record's definition from its declaration (GEN-9).
+  , translatorExtras :: Extras
+  -- ^ The closure's generated types the pool does not use (GEN-6).
   , translatorDataDefs :: Map.Map TVar DataDef
   -- ^ Each generated parameterized `data` type's definition (GEN-9).
   , translatorDataFailures :: Map.Map TVar Text
@@ -597,6 +597,7 @@ instance Defaultable CppTranslatorState where
       , translatorPublic = Map.empty
       , translatorHandles = Map.empty
       , translatorGenDefs = Map.empty
+      , translatorExtras = noExtras
       , translatorDataDefs = Map.empty
       , translatorDataFailures = Map.empty
       , translatorIntrinsicAsts = []
@@ -679,6 +680,7 @@ translate srcs es = do
       named = dataNamesIn poolTypes
   (gdefs, gfails) <- genDefs cppLang (Set.fromList [g | (g, _, _, _) <- uses] <> named)
   (ddefs, dfails) <- dataDefs cppLang named
+  extras <- extraDefs cppLang (typeNamesIn poolTypes <> Set.fromList [g | (g, _, _, _) <- uses] <> named)
   intrAsts <- inPoolSerialASTs cppLang es
   depRoots <- depNamespaces "cpp"
   depGuards <- dependencyHeaderGuards
@@ -701,6 +703,7 @@ translate srcs es = do
         , translatorDepNamespaces = depRoots
         , translatorGenFailures = gfails
         , translatorRecordUses = uses
+        , translatorExtras = extras
         }
       pool = planPool cppCaps es
       ((code, headers), stEnd) = CMS.runState (makeCppCode depGuards labels srcs' es universalScopeMap closureTable stageTable nativeEntries) translatorState
@@ -2809,9 +2812,48 @@ planPublicTypes es = do
   allVarOccs <- filterM (\(FV gv (CV cv), _, _) -> not <$> variantIsUserMapped gv cv) (collectCppVariants es)
   let varOccs = [o | o@(_, ps, _) <- allVarOccs, null ps]
   enumOccs <- filterM (\(FV gv (CV cv), _) -> not <$> variantIsUserMapped gv cv) (collectCppEnums es)
-  let varCands = Map.fromList [(gv, arms) | (FV gv _, _, arms) <- varOccs, eligible gv]
+  ex <- CMS.gets translatorExtras
+  let known =
+        Set.unions
+          [ Map.keysSet recDefs, Map.keysSet ddefs
+          , Set.fromList [gv | (FV gv _, _, _) <- allVarOccs], Set.fromList [gv | (FV gv _, _) <- enumOccs] ]
+      -- An unused type (GEN-6) is declared only where a sourced file can name
+      -- it, its module's header, and only when it can be written there.
+      writable gv = Set.notMember gv known && Map.member gv homes && spellableHome gv
+      spellableHome gv = and [not (Set.member c cppReservedComponents) && isIdentifier c | Just h <- [Map.lookup gv homes], c <- typeHomePath h]
+      exRecs0 =
+        Map.filterWithKey
+          (\gv gd -> writable gv && all (isIdentifier . nativeParam) (nativeParams gd) && all ((`Set.notMember` cppKeywords) . unKey . fst) (gdFields gd))
+          (exRecords ex)
+      exDatas0 = Map.filterWithKey (\gv dd -> writable gv && all (isIdentifier . nativeParam) (nativeDataParams dd)) (exData ex)
+      exVars0 = Map.filterWithKey (\gv _ -> writable gv) (exVariants ex)
+      exEnums0 = Map.filterWithKey (\gv _ -> writable gv) (exEnums ex)
+      -- An unused type one of whose names another type's would take is left
+      -- out.
+      armsOf = Map.fromList ([(gv, map fst arms) | (FV gv _, _, arms) <- varOccs] <> [(gv, map fst (ddArms dd)) | (gv, dd) <- Map.toList (ddefs <> exDatas0)] <> [(gv, map fst arms) | (gv, arms) <- Map.toList exVars0])
+      namesFor gv =
+        let q = maybe (unTVar gv) qualifiedCppName (Map.lookup gv homes)
+         in q : [q <> "_fields" | Just gd <- [Map.lookup gv (recDefs <> exRecs0)], selfRef gd]
+              <> [CP.armNameText q c | c <- Map.findWithDefault [] gv armsOf]
+      owners =
+        Map.fromListWith Set.union
+          [ (n, Set.singleton gv)
+          | gv <- Set.toList (Set.unions [known, Map.keysSet exRecs0, Map.keysSet exDatas0, Map.keysSet exVars0, Map.keysSet exEnums0])
+          , Map.member gv homes
+          , n <- namesFor gv ]
+      clashing = Set.unions [os | os <- Map.elems owners, Set.size os > 1]
+      unclashed :: Map.Map TVar x -> Map.Map TVar x
+      unclashed = Map.filterWithKey (\gv _ -> Set.notMember gv clashing)
+      exRecs = unclashed exRecs0
+      exDatas = unclashed exDatas0
+      exVars = unclashed exVars0
+      exEnumCands = unclashed exEnums0
+      extraNames = Set.unions [Map.keysSet exRecs, Map.keysSet exDatas, Map.keysSet exVars, Map.keysSet exEnumCands]
+  let varCands = Map.fromList [(gv, arms) | (FV gv _, _, arms) <- varOccs, eligible gv] <> exVars
       varAllArms = Map.fromListWith (<>) [(gv, [arms]) | (FV gv _, _, arms) <- varOccs]
-      enumCands = Map.fromList [(gv, ns) | (FV gv _, ns) <- enumOccs, eligible gv]
+      enumCands = Map.fromList [(gv, ns) | (FV gv _, ns) <- enumOccs, eligible gv] <> exEnumCands
+      recCands' = recCands <> exRecs
+      dataCands' = dataCands <> exDatas
       qualified gv = maybe (unTVar gv) (\h -> qualifiedCppName h) (Map.lookup gv homes)
       -- A record not in its module's header is defined in the pool, after
       -- the sourced files, under a pool-private name (GEN-10).
@@ -2841,12 +2883,12 @@ planPublicTypes es = do
         Nothing -> return True
       -- Which types the header holds follows from the declarations alone
       -- (GEN-10).
-      generated = Set.unions [Map.keysSet recDefs, Set.fromList [gv | (FV gv _, _, _) <- allVarOccs], Set.fromList [gv | (FV gv _, _) <- enumOccs]]
+      generated = Set.unions [Map.keysSet recDefs, Set.fromList [gv | (FV gv _, _, _) <- allVarOccs], Set.fromList [gv | (FV gv _, _) <- enumOccs], extraNames]
       fieldsOf drop' =
         Map.fromList $
-          [(gv, map snd (gdFields gd)) | (gv, gd) <- Map.toList recCands]
+          [(gv, map snd (gdFields gd)) | (gv, gd) <- Map.toList recCands']
             <> [(gv, concatMap snd arms) | (gv, arms) <- Map.toList varCands, Set.notMember gv drop']
-            <> [(gv, concatMap snd (ddArms dd)) | (gv, dd) <- Map.toList dataCands]
+            <> [(gv, concatMap snd (ddArms dd)) | (gv, dd) <- Map.toList dataCands']
             <> [(gv, []) | gv <- Map.keys enumCands]
       place drop' = placeTypes (headerSafe (Map.keysSet depRoots) Set.empty) generated (fieldsOf drop')
   _ <- install (place Set.empty)
@@ -2859,7 +2901,12 @@ planPublicTypes es = do
   CMS.modify $ \s -> s {translatorErrors = errors0}
   let public = place disagreeing
   _ <- install public
-  mapM_ (checkComponents homes) (Set.toList (Set.union public (Map.keysSet recDefs)))
+  -- The unused types placed in a header are rendered as the used ones are.
+  CMS.modify $ \s -> s
+    { translatorHandles = translatorHandles s <> Map.fromList [(gv, gdFields gd) | (gv, gd) <- Map.toList exRecs, selfRef gd, Set.member gv public]
+    , translatorVariantNames = translatorVariantNames s <> Set.intersection public (Map.keysSet exVars)
+    }
+  mapM_ (checkComponents homes) (Set.toList (Set.union (Set.difference public extraNames) (Map.keysSet recDefs)))
   mapM_ checkFields (Map.elems recDefs)
   -- Every use of a generated record is an instance of its definition
   -- (GEN-9). A user-mapped record's unpacked use is a tuple in C++, never
@@ -2878,19 +2925,19 @@ planPublicTypes es = do
     | gv <- Set.toList public
     , n <- qualified gv : [qualified gv <> "_fields" | Set.member gv recursive]
         <> [CP.armNameText (qualified gv) c | Just arms <- [Map.lookup gv varCands], (c, _) <- arms]
-        <> [CP.armNameText (qualified gv) c | Just dd <- [Map.lookup gv dataCands], (c, _) <- ddArms dd]
+        <> [CP.armNameText (qualified gv) c | Just dd <- [Map.lookup gv dataCands'], (c, _) <- ddArms dd]
     ]
   let byPath = Map.fromListWith (<>) [(typeHomePath h, [gv]) | gv <- Set.toList public, Just h <- [Map.lookup gv homes]]
       pathOf = Map.fromList [(qualified gv, typeHomePath h) | gv <- Set.toList public, Just h <- [Map.lookup gv homes]]
   handles <- CMS.gets translatorHandles
-  templates <- CMS.gets translatorRecords
-  mapM (header homes recCands templates varCands enumCands pathOf handles) (Map.toList byPath)
+  templates <- (<> exRecs) <$> CMS.gets translatorRecords
+  mapM (header homes recCands' templates varCands enumCands pathOf handles exDatas) (Map.toList byPath)
   where
-    header homes recCands templates varCands enumCands pathOf handles (path, gvs) = do
+    header homes recCands templates varCands enumCands pathOf handles exDatas (path, gvs) = do
       depRoots <- CMS.gets translatorDepNamespaces
       let leaf gv = pretty (maybe (unTVar gv) typeHomeName (Map.lookup gv homes))
           enums = [CP.printCppEnumDecl (leaf gv) ns | gv <- gvs, Just ns <- [Map.lookup gv enumCands]]
-      ddefs <- CMS.gets translatorDataDefs
+      ddefs <- (<> exDatas) <$> CMS.gets translatorDataDefs
       let variantOf gv = case Map.lookup gv varCands of
             Just arms -> Just ([], arms)
             Nothing -> (\dd -> (map (pretty . nativeParam) (nativeDataParams dd), ddArms dd)) <$> Map.lookup gv ddefs
@@ -2903,7 +2950,7 @@ planPublicTypes es = do
       let paramsOf gv = [pretty (nativeParam p) | Just gd <- [Map.lookup gv templates], p <- nativeParams gd]
           fieldsOf gv = gdFields <$> Map.lookup gv templates
       records <- sequence
-        [ (\fields -> (gv, CP.printStructTypedef (paramsOf gv) (structOf gv) fields, map snd fields))
+        [ (\fields -> (gv, CP.printStructTypedef (paramsOf gv) (structOf gv) (Map.notMember gv handles) fields, map snd fields))
             <$> mapM (\(k, t) -> (,) (pretty k) <$> cppTypeOf t) fs
         | gv <- gvs, Just fs <- [fieldsOf gv] ]
       let recNames = Map.fromList [(qualifiedCppName h, gv) | (gv, _, _) <- records, Just h <- [Map.lookup gv homes]]
@@ -2974,6 +3021,18 @@ planPublicTypes es = do
       mapM_
         (\(n, owners) -> complain ("the generated C++ name " <> n <> " would name both " <> T.intercalate " and " owners))
         [(n, os) | (n, os) <- Map.toList (Map.fromListWith (flip (<>)) [(n, [o]) | (n, o) <- named]), length os > 1]
+
+-- | The generated records' names and definitions, the closure's unused ones
+-- included under their public names, which only their modules' headers
+-- spell (GEN-6).
+recordsWithExtras :: CppTranslator (Map.Map TVar Text, Map.Map TVar GenDef)
+recordsWithExtras = do
+  names <- CMS.gets translatorRecordNames
+  records <- CMS.gets translatorRecords
+  extras <- CMS.gets (exRecords . translatorExtras)
+  homes <- CMS.gets translatorTypeHomes
+  let extraNames = Map.fromList [(g, qualifiedCppName h) | g <- Map.keys extras, Just h <- [Map.lookup g homes]]
+  return (names <> extraNames, records <> extras)
 
 -- | The qualified C++ name of a generated type (GEN-4).
 qualifiedCppName :: TypeHome -> Text
@@ -3173,7 +3232,7 @@ generateRecords cfg asts = do
           handle gd = Map.member (gdVar gd) handles
           structOf gd = if handle gd then leafOf gd <> "_fields" else leafOf gd
           params gd = map (pretty . nativeParam) (nativeParams gd)
-      decls <- mapM (\gd -> (\fs -> (gd, CP.printStructTypedef (params gd) (structOf gd) fs, map snd fs)) <$> mapM (\(k, t) -> (,) (pretty k) <$> cppTypeOf t) (gdFields gd)) gds
+      decls <- mapM (\gd -> (\fs -> (gd, CP.printStructTypedef (params gd) (structOf gd) (not (handle gd)) fs, map snd fs)) <$> mapM (\(k, t) -> (,) (pretty k) <$> cppTypeOf t) (gdFields gd)) gds
       let byName = Map.fromList [(Map.findWithDefault "" (gdVar gd) names, gdVar gd) | gd <- gds]
           ordered =
             Graph.flattenSCCs . Graph.stronglyConnComp $

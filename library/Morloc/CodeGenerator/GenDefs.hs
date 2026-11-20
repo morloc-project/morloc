@@ -33,6 +33,10 @@ module Morloc.CodeGenerator.GenDefs
   , nativeDataParams
   , armDataParams
   , dataNamesIn
+  , Extras (..)
+  , noExtras
+  , extraDefs
+  , typeNamesIn
   ) where
 
 import qualified Data.Text as T
@@ -188,6 +192,59 @@ dataDefs lang used = do
           `catchRejected` (\msg -> return (Just (gv, Left msg)))
       [] -> return Nothing
 
+-- | The generated types of the program's closure that its pools do not use,
+-- each read from its declaration alone (GEN-6): a sourced file may name any
+-- type of a module it is compiled with. They are declared in their modules'
+-- files only, never marshalled. One whose declaration cannot be resolved
+-- on its own is left out.
+data Extras = Extras
+  { exRecords :: Map.Map TVar GenDef
+  , exData :: Map.Map TVar DataDef
+  -- ^ those whose native form is a template
+  , exVariants :: Map.Map TVar [(T.Text, [TypeF])]
+  , exEnums :: Map.Map TVar [T.Text]
+  }
+
+noExtras :: Extras
+noExtras = Extras Map.empty Map.empty Map.empty Map.empty
+
+-- | The unused generated types of the closure in a language, given the
+-- names of those the pool uses.
+extraDefs :: Lang -> Set.Set TVar -> MorlocMonad Extras
+extraDefs lang used = do
+  homes <- MM.gets stateTypeHomes
+  gscope <- MM.getGeneralScope
+  (cscope, _) <- getScope lang
+  let cands = Set.difference (Map.keysSet homes) used
+  (recs, _) <- genDefs lang cands
+  (dds, _) <- dataDefs lang cands
+  let plainData =
+        [ gv
+        | gv <- Set.toList cands
+        , Map.notMember gv dds
+        , concreteNameOf cscope gv == unTVar gv
+        , any (\(ps, _, _, _, k) -> null ps && k == TypedefEnum) (Map.findWithDefault [] gv gscope)
+        ]
+  plain <- mapM (\gv -> (Just <$> atPlaceholders lang gv []) `catchRejected` const (return Nothing)) plainData
+  return
+    Extras
+      { exRecords = Map.filter ((== "struct") . gdForm) recs
+      , exData = dds
+      , exVariants = Map.fromList [(gv, arms) | (gv, Just (VariantF _ [] arms)) <- zipSame plainData plain]
+      , exEnums = Map.fromList [(gv, ns) | (gv, Just (EnumF _ [] ns)) <- zipSame plainData plain]
+      }
+
+-- | Every declared type named anywhere in the types.
+typeNamesIn :: [TypeF] -> Set.Set TVar
+typeNamesIn = Set.fromList . concatMap go
+  where
+    go t = case t of
+      VariantF (FV g _) _ _ -> g : concatMap go (childrenOf t)
+      EnumF (FV g _) _ _ -> g : concatMap go (childrenOf t)
+      RecF (FV g _) _ -> g : concatMap go (childrenOf t)
+      NamF _ (FV g _) _ _ -> g : concatMap go (childrenOf t)
+      _ -> concatMap go (childrenOf t)
+
 -- | Run an action, and on a rejection of the program return its message.
 catchRejected :: MorlocMonad a -> (T.Text -> MorlocMonad a) -> MorlocMonad a
 catchRejected act h =
@@ -220,10 +277,15 @@ checkUse gd carried rs = case zipExact [p | (p, KindType) <- gdParams gd] (tyArg
 
 -- | A field type's key without its `Nat`, `Str` and erased kind arguments,
 -- which have no native form (GEN-9) and which a use's field, read back from
--- its serial form, does not keep. A row stays: a table's form keeps it.
+-- its serial form, does not keep. A row stays: a table's form keeps it. A
+-- named type is keyed by its native name, so a transparent alias and the type
+-- it stands for, which either side may carry, are one key.
 fieldKey :: TypeF -> KeyType
-fieldKey = go . typeFKey
+fieldKey = go . typeFKey . native
   where
+    native t = case t of
+      VarF (FV _ c) -> VarF (FV (TV (unCVar c)) c)
+      _ -> mapChildren native t
     go k = case k of
       KFun as r -> KFun (map go as) (go r)
       KApp h as -> KApp (go h) (args as)

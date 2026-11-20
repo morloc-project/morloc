@@ -53,6 +53,7 @@ import Morloc.CodeGenerator.Grammars.Translator.Imperative
   )
 import Morloc.CodeGenerator.Grammars.Translator.PseudoCode (pseudocodeSerialManifold)
 import Morloc.CodeGenerator.Grammars.Translator.PyClasses (DataShape (..), PyClasses (..), pyCtorRef, pythonClasses)
+import Morloc.CodeGenerator.GenDefs (GenDef (..), genDefs)
 import qualified Data.Set as Set
 import Morloc.CodeGenerator.LanguageDescriptor
 import qualified Morloc.CodeGenerator.Serial as Serial
@@ -124,8 +125,15 @@ translateBuiltin lang desc0 srcs es = do
           , (p <> ".") `MT.isPrefixOf` q
           , Just (_, ctors) <- [dataDeclOfName general v]
           ]
+  (declaredDefs, _) <- genDefs lang (Set.fromList [v | (q, (_, v)) <- Map.toList generated, Map.member q langClasses])
+  let classOf = Map.fromList [(v, q) | (q, (_, v)) <- Map.toList generated, Map.member q langClasses]
+      -- A declaration names a nested record by its kind; a use, by its class.
+      byClass t = case t of
+        NamF o (FV g c) ps rs -> NamF o (FV g (maybe c CV (Map.lookup g classOf))) (map (fmap byClass) ps) [(k, byClass x) | (k, x) <- rs]
+        _ -> mapChildren byClass t
+      declared = Map.fromList [(q, [(k, byClass t) | (k, t) <- gdFields gd]) | (q, (_, v)) <- Map.toList generated, Map.member q langClasses, Just gd <- [Map.lookup v declaredDefs]]
   pyClasses <- either (MM.throwRejected . vsep . map pretty) return $
-    pythonClasses langClasses parameterized datas (Set.fromList (ldKeywords desc)) es
+    pythonClasses langClasses parameterized datas (Set.fromList (ldKeywords desc)) declared es
   home <- pretty <$> asks MC.configHome
   lib <- MT.pack <$> asks MC.configLibrary
   state <- MT.pack <$> asks MC.configState

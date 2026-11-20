@@ -635,17 +635,19 @@ printArmMarshallers rtype fields =
 printStructTypedef ::
   [MDoc] -> -- template parameters (e.g., ["T"])
   MDoc -> -- the name of the structure (e.g., "Person")
+  Bool -> -- whether it declares a defaulted equality
   [(MDoc, MDoc)] -> -- key and type for all fields
   MDoc
-printStructTypedef params rname fields = vsep [template, struct]
+printStructTypedef params rname eq fields = vsep [template, struct]
   where
     template = printTemplateHeader params
     struct =
       block
         4
         ("struct" <+> rname)
-        (vsep [t <+> k <> ";" | (k, t) <- fields])
+        (vsep ([t <+> k <> ";" | (k, t) <- fields] <> [equality | eq]))
         <> ";"
+    equality = "bool operator==(const" <+> rname <> "&) const = default;"
 
 -- | The struct holding a handle's fields: @R_fields@ for @R@, and for a
 -- template instance the suffix goes before the arguments (@R_fields<int>@).

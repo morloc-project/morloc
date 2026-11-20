@@ -144,20 +144,7 @@
   legacy form (`"dict"`, `"struct"`) in the program's modules, never in an
   installed package's; GEN-3 does not say which.
 
-- **A generated type is written only when the program uses it (GEN-6).**
-  [reproduced, 2026-11-20] A sourced file naming a type of its module that
-  the program does not use fails to compile (`use ...::main::B` E0432 in
-  Rust, `'B' ... does not name a type` in C++), so a family implementation
-  file over all of its types cannot move to generated types. Ruled
-  2026-11-20: generate every type declared in every imported module.
-  Repro: /work/plans/migration-bugs-2026-11-20/repro/unused-type, unused-type-cpp.
-- **A field of alias type differs from itself in a record literal (GEN-9).**
-  [reproduced, 2026-11-20] `type Sym = Int; record Code where sym :: Sym`
-  plus a literal `{sym = x, len = 1}` is refused: "its field `sym` is
-  `int` there but `int` in the definition" (C++; Rust says `String`).
-  Blocks biolib rnaseq. Repro: /work/plans/migration-bugs-2026-11-20/repro/gen-alias-field-mismatch, -rust.
-- **Generated types derive only Clone; C++ has no operator==.** [reproduced,
-  2026-11-20] Spec gap in GEN-8 / lang-rust.md. Ruled 2026-11-20: derive
-  Debug, PartialEq, Default (C++ defaulted operator==) per type wherever
-  every field allows each. morloc's own `==` on generated records is correct
-  in C++ and Rust (repro/gen-eq, gen-eq-cpp).
+- **A generated `data` type with fields and a self-referring record derive
+  no Debug or PartialEq.** [read, 2026-11-20] Their arms and handles are
+  shared nodes, which would need hand-written impls comparing through the
+  node; GEN-8's derive rule leaves them at Clone.

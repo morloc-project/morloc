@@ -498,13 +498,13 @@ paramList ps = "<" <> hcat (punctuate ", " ps) <> ">"
 -- Fields are (escaped-name, rendered-type). @params@ are the generic type
 -- parameters (non-empty when a field's type differs between the native and wire
 -- forms of a custom-packer record, e.g. `struct S<T1> { w: T1, .. }`).
-printRustStruct :: MDoc -> [MDoc] -> [(MDoc, MDoc)] -> MDoc
-printRustStruct name params fields =
+printRustStruct :: MDoc -> [MDoc] -> [T.Text] -> [(MDoc, MDoc)] -> MDoc
+printRustStruct name params derives fields =
   vsep
     -- Clone is required by the ownership model: a struct value used at more than
     -- one point is cloned at its by-value uses. All field types are Clone-able
     -- morloc types (scalars, Vec, String, Option, tuples, nested structs, Box).
-    [ "#[derive(Clone)]"
+    [ "#[derive(" <> hcat (punctuate ", " (map pretty ("Clone" : derives))) <> ")]"
     , "pub struct" <+> name <> paramList params <+> "{"
     , indent 4 (vsep ["pub" <+> f <> ":" <+> t <> "," | (f, t) <- fields])
     , "}"
@@ -518,7 +518,7 @@ printRustHandle :: MDoc -> [MDoc] -> [(MDoc, MDoc)] -> MDoc
 printRustHandle name params fields =
   vsep
     [ "pub struct" <+> self <> "(pub ::std::mem::ManuallyDrop<::std::sync::Arc<" <> fieldsSelf <> ">>);"
-    , printRustStruct fieldsName params fields
+    , printRustStruct fieldsName params [] fields
     , "impl" <> gens <+> "Clone for" <+> self <+> "{"
     , "    fn clone(&self) -> Self { Self(::std::mem::ManuallyDrop::new(::std::sync::Arc::clone(&self.0))) }"
     , "}"

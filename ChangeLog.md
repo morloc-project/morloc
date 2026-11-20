@@ -15,6 +15,12 @@ Fixed
    instead of installing it with no exports
  * a refused or malformed package.yaml is reported as an error naming the
    file, not as a Haskell exception
+ * a sourced file may name any generated type of a module it is compiled
+   with, used by the program or not
+ * a record literal of a record with a field of alias type builds in C++ and
+   Rust
+ * generated Rust records derive Debug, PartialEq and Default where their
+   fields allow it, and generated C++ records compare with ==
 
 0.112.0 [2026-11-01]
 --------------------
