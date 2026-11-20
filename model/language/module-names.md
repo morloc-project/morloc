@@ -128,13 +128,16 @@ visible transitively? If `a` imports `b` and `b` imports `c`, does `a` see
 `c`'s instances?
 
 ### MOD-12 One term name imported from two modules
-Intent: open
-Code: unaudited
+Intent: ruled 2026-11-20
+Tests: spec-mod-12-1, spec-mod-12-2
+Code: conforms 2026-11-20
 
-If `import a` and `import b` both bring `f` into scope, is `f` one term
-with two implementations (as with `root-py` and `root-cpp`), or is it a
-conflict? If it is one term, what must agree between the two declarations:
-the general type, the class constraints, the docstrings?
+Two imported terms with different signatures cannot both be imported
+unqualified under the same name: the importing module is refused, whether
+or not it uses the name. Import one of them qualified (`import map as m`)
+or select names (`import map (Map)`). Imports of one term, as from a
+module and its language implementations (`root`, `root-py`), are not a
+clash.
 
 ### MOD-13 A `source` path resolves against the file that names it
 Intent: proposed

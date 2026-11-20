@@ -336,6 +336,16 @@ packageTests =
         installedAt cfg "partial/dep"
         origins <- run cfg Mod.loadOrigins
         assertBool "a failed install records no origin" (either (const False) (Map.notMember "partial") origins)
+    , testCase "install of a generic export does not warn" . withState $ \cfg -> do
+        tmp <- SD.getTemporaryDirectory
+        dir <- createTempDirectory tmp "morloc-pkg"
+        writePackage dir ["name: gen", "library: weena"] "module gen (*)\n\nident :: a -> a\nident x = x\n"
+        flip finally (SD.removeDirectoryRecursive dir) $ do
+          ((r, warns), _) <-
+            MM.runMorlocMonad Nothing 0 cfg defaultValue
+              (Mod.installModule Mod.DoNotOverwrite Mod.HttpsProtocol (Just Morloc.typecheckModule) Map.empty (MT.pack dir))
+          either (\e -> assertFailure ("install failed: " <> show e)) return r
+          assertEqual "warnings" [] warns
     , testCase "spec-pkg-11-3" . withState $ \cfg -> do
         tmp <- SD.getTemporaryDirectory
         forM_

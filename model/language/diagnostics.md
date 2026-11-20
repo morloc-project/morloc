@@ -12,7 +12,7 @@ diagnostic. An internal error, an uncaught exception or a crash is a defect.
 
 ### DIAG-2 Every rejection names a source location
 Intent: proposed
-Tests: spec-diag-2-1
+Tests: spec-diag-2-1, spec-diag-2-2, spec-diag-2-3
 Code: deviates (issues/programs.md)
 
 A rejection names the file, line and column of the construct that caused

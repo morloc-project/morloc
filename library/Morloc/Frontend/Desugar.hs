@@ -3334,7 +3334,9 @@ desugarGuards sp ((cond, body) : rest) defaultExpr = do
 --------------------------------------------------------------------
 
 desugarExport :: Span -> CstExport -> D ExprI
-desugarExport sp CstExportAll = freshExprSpan sp (ExpE ExportAll)
+desugarExport _ (CstExportAll tok) = do
+  i <- freshIdPos (locPos tok)
+  return (ExprI i (ExpE ExportAll))
 desugarExport sp (CstExportMany locs) = do
   items <- mapM (\tok -> do i <- freshIdPos (locPos tok); return (i, symVal' tok)) locs
   freshExprSpan sp (ExpE (ExportMany (Set.fromList items) []))

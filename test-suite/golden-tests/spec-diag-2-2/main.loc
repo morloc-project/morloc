@@ -1,0 +1,8 @@
+-- Spec DIAG-2: an export of everything that cannot be a command is
+-- located at the export.
+module main (*)
+
+import root-py
+
+apply :: (Int -> Bool) -> Int -> Bool
+apply f x = f x

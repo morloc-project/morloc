@@ -596,7 +596,7 @@ resolveImports d0 =
 
       case export of
         ExportAll -> do
-          exports <- mapM addIndex (Set.toList allSymbols) |>> Set.fromList
+          exports <- mapM (addIndex e) (Set.toList allSymbols) |>> Set.fromList
           return $ AST.setExport (ExportMany exports []) e
         (ExportMany ungroupedExports groups) ->
           let allExplicit = Set.unions (ungroupedExports : [exportGroupMembers g | g <- groups])
@@ -610,7 +610,7 @@ resolveImports d0 =
                           (\g -> g {exportGroupMembers = resolveExplicitSymbols allSymbols (exportGroupMembers g)})
                           groups
                   resolvedUngrouped <-
-                    exportCtorsWithTypes allSymbols resolved (resolveExplicitSymbols allSymbols ungroupedExports)
+                    exportCtorsWithTypes e allSymbols resolved (resolveExplicitSymbols allSymbols ungroupedExports)
                   return $ AST.setExport (ExportMany resolvedUngrouped resolvedGroups) e
                 else
                   MM.throwRejected $
@@ -643,8 +643,9 @@ resolveImports d0 =
     -- a constructor is not a command. The type may have been named in any
     -- export group; the associations go with the ungrouped exports, since
     -- a group is a set of commands.
-    exportCtorsWithTypes :: Set Symbol -> Set (Int, Symbol) -> Set (Int, Symbol) -> MorlocMonad (Set (Int, Symbol))
-    exportCtorsWithTypes ss allExplicit ungrouped = do
+    exportCtorsWithTypes ::
+      ExprI -> Set Symbol -> Set (Int, Symbol) -> Set (Int, Symbol) -> MorlocMonad (Set (Int, Symbol))
+    exportCtorsWithTypes e ss allExplicit ungrouped = do
       let exportedTypes = Set.fromList [t | (_, TypeSymbol t) <- Set.toList allExplicit]
           carried =
             Set.fromList
@@ -653,11 +654,14 @@ resolveImports d0 =
               , Set.member t exportedTypes
               ]
           already = Set.map snd allExplicit
-      extra <- mapM addIndex (Set.toList (carried `Set.difference` already))
+      extra <- mapM (addIndex e) (Set.toList (carried `Set.difference` already))
       return $ Set.union ungrouped (Set.fromList extra)
 
-    addIndex :: a -> MorlocMonad (Int, a)
-    addIndex x = (,) <$> MM.getCounter <*> pure x
+    -- an export the module did not list by name is located at its export
+    addIndex :: ExprI -> a -> MorlocMonad (Int, a)
+    addIndex e x = do
+      i <- maybe MM.getCounter MM.getCounterWithPos (AST.findExportIndex e)
+      return (i, x)
 
     -- TODO: distinguish between these expressions at the type-level
     --       the contains unresolved imports, that later resolved

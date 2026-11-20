@@ -1,0 +1,9 @@
+-- Spec MOD-12: the same two terms imported qualified are accepted.
+module main (g)
+
+import root-py
+import .a as a
+import .b as b
+
+g :: Int -> Int
+g x = a.f x

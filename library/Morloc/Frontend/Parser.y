@@ -277,7 +277,7 @@ module_comp :: { Text }
 --------------------------------------------------------------------
 
 exports :: { CstExport }
-  : '*'                     { CstExportAll }
+  : '*'                     { CstExportAll $1 }
   | export_list             { CstExportMany $1 }
   | {- empty -}             { CstExportMany [] }
 
