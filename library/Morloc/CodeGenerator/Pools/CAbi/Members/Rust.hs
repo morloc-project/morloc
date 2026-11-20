@@ -3456,12 +3456,11 @@ rustLowerConfig mask makers consumed userArms =
               _ -> "||" <+> "{" <> nest 4 (line <> vsep (stmts ++ [expr])) <> line <> "}"
           )
     , lcMakeCallback = \param mt stmts expr ->
-        let lent = param <> "_lent"
-         in return
-              ( []
-              , "|" <> lent <> ": &" <> maybe "_" RP.rustType mt <> "|" <+> "{"
-                  <> nest 4 (line <> vsep (("let" <+> param <+> "=" <+> lent <> ".clone();") : stmts ++ [expr])) <> line <> "}"
-              )
+        return
+          ( []
+          , "|" <> param <> ":" <+> maybe "_" RP.rustType mt <> "|" <+> "{"
+              <> nest 4 (line <> vsep (stmts ++ [expr])) <> line <> "}"
+          )
     -- The helper hands back a plain Result so the panic-payload downcast
     -- (which decides what is catchable) stays in rustmorloc; the arms are
     -- built here because only the caller knows this Try's representation.
@@ -3642,7 +3641,7 @@ rustTakeField ty n i subj =
   "{ let __morloc_ls = ::std::mem::ManuallyDrop::new(" <> subj <> "); match &*__morloc_ls {"
     <+> RP.typeHead ty <> "::" <> pretty n <> "(__morloc_lb)"
     <+> "=> ::rustmorloc::MlcTake::take_with(unsafe { ::std::ptr::read(__morloc_lb) }, |__morloc_lv| __morloc_lv." <> pretty i
-    <> ", |__morloc_lv| __morloc_lv." <> pretty i <> ".clone()),"
+    <> ", |__morloc_lv| ::rustmorloc::mlc_copy!(__morloc_lv." <> pretty i <> ")),"
     <+> "#[allow(unreachable_patterns)] _ => unreachable!()"
     <+> "} }"
 

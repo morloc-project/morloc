@@ -113,7 +113,7 @@ says, as it would from a crash.
 
 ### PANIC-6 An error in user code is the call's failure
 Status: implemented
-Checked by: golden:rust-user-panic, golden:rust-error
+Checked by: golden:rust-user-panic, golden:rust-error, golden:cpp-user-thread-failure
 
 An exception, error or condition a foreign function raises that its
 language's error handling catches (a Python `Exception`, an R condition,

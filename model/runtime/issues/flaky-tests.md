@@ -98,13 +98,18 @@
   about 1 run in 60 under load: "the r pool ended during the call (Recv
   error)". Seen once in a full `-j 6` suite run and once in 60 stressed
   runs with the allocator tuning off. The C++ thread that receives the
-  error then throws a std::runtime_error out of a std::thread, so the C++
-  pool aborts (SIGABRT) instead of failing the call. Two questions: why
-  an R pool ends while a call is in flight (FORK-*, the retire path), and
-  whether a failure on a user thread should end the pool (PANIC-5 says a
-  failure to reach the callee ends the pool). Four concurrent shell loops
+  error then throws a std::runtime_error out of a std::thread, which
+  ends the C++ pool with status 70 (PANIC-6, golden
+  cpp-user-thread-failure). Open: why an R pool ends while a call is in
+  flight (FORK-*, the retire path). Four concurrent shell loops
   of 15 runs each reproduce it in about a minute.
   Also seen 2026-11-18 with a Python callee: golden fold-native
   `threadsPy` (C++ threads folding through Python) failed once in a `-j 6`
-  golden subset with "the py pool ended during the call (Recv error)" and
-  the same C++ SIGABRT; it passed when rerun alone.
+  golden subset with "the py pool ended during the call (Recv error)"; it
+  passed when rerun alone.
+- **A typechecker timing test times out under a parallel run.**
+  [reproduced once, 2026-11-20] The unit test "long non-tuple composition
+  chain stays linear" hit its 1 s timeout in a full `-j 6` suite run
+  (1.03 s); alone it takes 0.14 s, three runs of three. A wall-clock bound
+  in a suite that runs beside builds measures load as much as growth; a
+  step count, or a ratio between two sizes, would not.

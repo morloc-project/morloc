@@ -4,11 +4,9 @@
 -- native values, packed and unpacked as an argument would be; the producer
 -- writes an empty batch between two others, which the per-batch action
 -- sees. A handler given the wire form fails (C++ and Rust do not build).
--- `@next` in Rust is left out: its `Ok xs <-` bind does not build for a
--- non-Clone native type (model/runtime/issues/cli-directives.md).
 
 module main
-  ( streamCpp, readCpp, streamPy, readPy, streamR, readR, streamRust
+  ( streamCpp, readCpp, streamPy, readPy, streamR, readR, streamRust, readRust
   )
 
 import root-cpp
@@ -115,3 +113,10 @@ showBatchRust :: [Tally] -> Str
 --' @render -e/--each=showBatchRust @stream
 streamRust :: <IO> (Collect Tally)
 streamRust = @collect produceRust
+
+--' Show the first batch of a file of tallies, read in Rust
+readRust :: Str -> <IO> Str
+readRust path = do
+  Ok s <- @open path :: <IO> (Try Str (IStream Tally))
+  Ok xs <- @next s
+  showAllRust xs

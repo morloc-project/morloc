@@ -253,8 +253,9 @@ here touch locks and ownership: model first.
   again and writes `[3]` (`./nexus -f packet @ twoErr 2> err.pkt`) leaves a
   file that `morloc-nexus file --validate` reads as final, closed, one
   sub-packet, one element: the first stream's two elements are silently
-  dropped. The same shape on `@stdout` reads back as two sub-packets,
-  three elements. Repro (root-py, no sources):
+  dropped. Readers disagree: `@load` of the same file gives `[1,2]`, so the
+  second stream is what is lost there. The same shape on `@stdout` reads
+  back as two sub-packets, three elements (`[1,2,3]`). Repro (root-py, no sources):
   `twoErr :: <IO> ()`, `twoErr = do { e <- @stderr :: <IO> OStream Int;
   @write 0 e [1, 2]; @close e; e2 <- @stderr :: <IO> OStream Int;
   @write 0 e2 [3]; @close e2 }`.

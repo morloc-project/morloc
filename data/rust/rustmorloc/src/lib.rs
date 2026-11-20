@@ -3177,9 +3177,49 @@ impl<T> RecNode<T> {
     }
 }
 
+/// Copy `x`, a value held in a payload that is shared: a `Clone` type is
+/// cloned, and any other fails the call ('MlcCopy').
+#[macro_export]
+macro_rules! mlc_copy {
+    ($x:expr) => {{
+        #[allow(unused_imports)]
+        use $crate::{MlcCopyClone, MlcCopyFail};
+        (&$crate::MlcCopy(&$x)).mlc_copy()
+    }};
+}
+
+/// The copy a take falls back to when the payload is shared. A type that is
+/// `Clone` is cloned; any other type cannot be copied, so the call fails.
+/// The choice is made at the concrete type by method resolution: write
+/// `(&::rustmorloc::MlcCopy(&x)).mlc_copy()` with both traits in scope.
+pub struct MlcCopy<'a, T>(pub &'a T);
+
+pub trait MlcCopyClone<T> {
+    fn mlc_copy(&self) -> T;
+}
+
+impl<'a, T: Clone> MlcCopyClone<T> for MlcCopy<'a, T> {
+    fn mlc_copy(&self) -> T {
+        self.0.clone()
+    }
+}
+
+pub trait MlcCopyFail<T> {
+    fn mlc_copy(&self) -> T;
+}
+
+impl<'a, T> MlcCopyFail<T> for &MlcCopy<'a, T> {
+    fn mlc_copy(&self) -> T {
+        morloc_throw_as(format!(
+            "a value of type `{}` is held in more than one place and cannot be copied (it is not Clone)",
+            std::any::type_name::<T>()
+        ))
+    }
+}
+
 /// The box around a constructor's payload, taken apart at the last use of
 /// the value that holds it: the payload is moved out when the box is its
-/// only owner, and otherwise the part needed is cloned from it. A generated
+/// only owner, and otherwise the part needed is copied ('MlcCopy'). A generated
 /// type's arms are its crate's nodes; a user-written arm's fields are taken
 /// through `MlcField` instead.
 pub trait MlcTake: Sized {
@@ -4154,6 +4194,15 @@ pub unsafe fn replay<E, F: Invoke1<Vec<E>, ()>>(schema: &Schema, handle: u64, f:
 where
     Vec<E>: FromVoidstar,
 {
+    replay_owned(schema, handle, |frame: Vec<E>| f.invoke(&frame))
+}
+
+/// @replay whose function takes each frame by value, so the frame can be
+/// taken apart without a copy (a frame of a packed element is unpacked).
+pub unsafe fn replay_owned<E, F: Fn(Vec<E>)>(schema: &Schema, handle: u64, f: F)
+where
+    Vec<E>: FromVoidstar,
+{
     loop {
         let mut err: *mut c_char = std::ptr::null_mut();
         let mut eof: i32 = 0;
@@ -4162,7 +4211,7 @@ where
             break;
         }
         let frame: Vec<E> = read_voidstar(voidstar, err, schema, "@replay");
-        f.invoke(&frame);
+        f(frame);
     }
 }
 
@@ -5244,6 +5293,56 @@ mod panic_classifier_tests {
     #[ignore]
     fn child_user_index() {
         classify_in_child(|| { user_index(&[1], std::hint::black_box(5)); });
+    }
+}
+
+#[cfg(test)]
+mod copy_tests {
+    use super::*;
+    use std::sync::Arc;
+
+    struct NotClone(i64);
+
+    #[test]
+    fn a_shared_payload_of_a_clone_type_is_copied() {
+        #[allow(unused_imports)]
+        use super::{MlcCopyClone, MlcCopyFail};
+        let held = vec![1i64, 2];
+        let copy: Vec<i64> = (&MlcCopy(&held)).mlc_copy();
+        assert_eq!(copy, held);
+    }
+
+    #[test]
+    fn a_shared_payload_of_a_type_that_is_not_clone_fails_the_call() {
+        #[allow(unused_imports)]
+        use super::{MlcCopyClone, MlcCopyFail};
+        let held = NotClone(3);
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _: NotClone = (&MlcCopy(&held)).mlc_copy();
+        }));
+        let payload = r.expect_err("copying a value that is not Clone must fail");
+        assert!(payload.downcast_ref::<MorlocThrow>().is_some(), "the failure is a morloc throw");
+        assert_eq!(held.0, 3);
+    }
+
+    #[test]
+    fn taking_a_shared_payload_that_is_not_clone_fails_the_call() {
+        let a: Arc<NotClone> = Arc::new(NotClone(7));
+        let keep = Arc::clone(&a);
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            a.take_with(|x| x.0, |x| crate::mlc_copy!(*x).0)
+        }));
+        assert!(r.expect_err("a shared payload cannot be taken").downcast_ref::<MorlocThrow>().is_some());
+        assert_eq!(keep.0, 7);
+    }
+
+    #[test]
+    fn a_unique_payload_that_is_not_clone_is_moved_out() {
+        #[allow(unused_imports)]
+        use super::{MlcCopyClone, MlcCopyFail};
+        let a: Arc<NotClone> = Arc::new(NotClone(7));
+        let v = a.take_with(|x| x.0, |x| (&MlcCopy(x)).mlc_copy().0);
+        assert_eq!(v, 7);
     }
 }
 

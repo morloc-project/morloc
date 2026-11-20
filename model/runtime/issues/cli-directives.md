@@ -25,6 +25,10 @@
   (exit 1) after its first stream left an `s.pkt` that a later command read
   whole [reproduced 2026-11-15, with two `@collect` sites, which STRM-4 now
   rejects; any run that fails after writing leaves the same].
+  The reader side is the wider hole [read]: a stream with no final footer
+  is accepted by forward scan (`morloc-nexus file --validate` reports
+  `state=missing`, `validated=structure-only`), so any truncated stream
+  (`> file`, a pipe whose producer died, a full disk) reads as complete.
   `morloc-nexus view` has the same shape: `view sc.dat -f parquet -o
   x.parquet` on a non-table fails "requires a Table return type" and
   leaves an empty `x.parquet` [reproduced, 0.109.0].
@@ -57,18 +61,6 @@
   initialised or handle is corrupt"); the command still exits 0 with the
   right output. A late call inside the run fails cleanly ("generation
   mismatch ... handle was closed").
-- **A Rust `Ok x <-` bind over a non-`Clone` native type does not build.**
-  [reproduced, 2026-11-18] Gap in the Rust lowering of a refutable bind: it
-  clones the matched payload (`__morloc_lv.0.clone()`), so with a sourced
-  `struct Tally` that is not `Clone`, `Ok xs <- pick n` for
-  `pick :: Int -> <IO> (Try Str [Tally])` fails ("the method `clone` exists
-  for struct `Vec<Tally>`, but its trait bounds were not satisfied"). With
-  `Ok xs <- @next s` on an `IStream Tally` it also emits
-  `::rustmorloc::show` of a value needing `Tally: ToVoidstar`. Repro: the
-  Rust `Tally` of golden stream-packed-element (impl.rs, `pub struct Tally
-  { v: i64 }` with packers) and `pick n = do { ? n > 0 = Ok (mkList n) :
-  Err "none" }`, `useIt n = do { Ok xs <- pick n; showAllRust xs }`;
-  stream-packed-element leaves `@next` in Rust out until fixed.
 - **A file-route gather leaves its stream open when the producer
   raises.** [read, 2026-11-14] Gap in STRM-4 / SIDE: `_mlc_gather_file`
   (pool.cpp), `gather_file` (rustmorloc), `mlc_gather` (pool.py, pool.R)

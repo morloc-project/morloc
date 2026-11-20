@@ -1461,7 +1461,7 @@ genericPrintExpr desc = go
         <> go ini <> ", " <> go step <> ", " <> go comb <> ", " <> go fn <> ")"
     go (IIntrinsicFoldPut msid _ _ step handle value) =
       pool desc "mlc_fold_put" <> "(" <> schemaOrNull msid <> ", " <> go step <> ", " <> go handle <> ", " <> go value <> ")"
-    go (IIntrinsicReplay sid _ handle fn) =
+    go (IIntrinsicReplay _ sid _ handle fn) =
       let prefix = ldIntrinsicPrefix desc
        in pretty prefix <> "mlc_replay("
             <> schemaRef sid <> ", " <> go handle <> ", " <> go fn <> ")"

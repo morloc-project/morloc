@@ -1,0 +1,43 @@
+-- A refutable bind over a value that holds a native Rust type which is not
+-- Clone: `Ok xs <- e` moves the payload out, and its failure path needs no
+-- wire form for the native type. `pickIt` binds the result of a morloc
+-- function, `readIt` the result of `@next` on a stream of the type.
+
+module main (pickIt, writeIt, readIt)
+
+import root-rust
+
+newtype Tally = Int
+type Rust => Tally = "Tally"
+
+instance Packable Int Tally where
+  source Rust from "impl.rs" ("pack_tally" as pack, "unpack_tally" as unpack)
+
+source Rust from "impl.rs" ("mk_list" as mkList, "produce", "show_all" as showAll)
+
+mkList :: Int -> [Tally]
+produce :: ([Tally] -> <IO> ()) -> <IO> ()
+
+--' Show tallies
+showAll :: [Tally] -> Str
+
+pick :: Int -> <IO> (Try Str [Tally])
+pick n = do
+  ? n > 0 = Ok (mkList n) : Err "no tallies"
+
+--' Bind a picked list
+pickIt :: Int -> <IO> Str
+pickIt n = do
+  Ok xs <- pick n
+  showAll xs
+
+--' Stream tallies
+writeIt :: <IO> (Collect Tally)
+writeIt = @collect produce
+
+--' Read the first batch of a stream of tallies
+readIt :: Str -> <IO> Str
+readIt path = do
+  Ok s <- @open path :: <IO> (Try Str (IStream Tally))
+  Ok xs <- @next s
+  showAll xs

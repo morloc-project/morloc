@@ -22,6 +22,7 @@ all:
 	-./nexus streamRust --all >> obs.txt 2>> obs.err
 	-./nexus streamRust --all=a.out --each >> obs.txt 2>> obs.err
 	-cat a.out >> obs.txt
+	-./nexus readRust s.pkt >> obs.txt 2>> obs.err
 
 clean:
 	rm -rf nexus pools __pycache__ *.err s.pkt a.out

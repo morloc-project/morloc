@@ -264,9 +264,10 @@ data IExpr
   | IIntrinsicTell
       -- ^ @tell :: <IO> U64: nullary. Number of elements written to the
       --   process's @stdout OStream so far (its element_count).
-  | IIntrinsicReplay Int (Maybe IType) IExpr IExpr
-      -- ^ @replay: schemaId of one frame (the list `[a]`), element type
-      --   `a`, stream handle, function. The per-language helper reads the
+  | IIntrinsicReplay Bool Int (Maybe IType) IExpr IExpr
+      -- ^ @replay: whether the function takes each frame by value, schemaId
+      --   of one frame (the list `[a]`), element type `a`, stream handle,
+      --   function. The per-language helper reads the
       --   stream to its end and calls the function on each frame.
   | IIntrinsicGather Bool Int (Maybe IType) IExpr
       -- ^ @gather: whether the batches are held natively (else gathered
@@ -3181,7 +3182,7 @@ lowerNativeExprRaw cfg _ (IntrinsicN_ _ IntrReplay (Just schema)
     AppF _ (tyArgs -> e : _) -> lcTypeOf cfg e
     _ -> return Nothing
   let raw d = IRawExpr (render (poolExpr d))
-      replayExpr = IIntrinsicReplay sid elemType (raw handleDocs) (raw fnDocs)
+      replayExpr = IIntrinsicReplay False sid elemType (raw handleDocs) (raw fnDocs)
   return $ mergePoolDocs (const $ lcPrintExpr cfg replayExpr) [handleDocs, fnDocs]
 lowerNativeExprRaw cfg origExpr (IntrinsicN_ _ IntrThrow _ [Low _ msgDocs]) = do
   resultType <- lcTypeOf cfg (typeFof origExpr)
@@ -3302,7 +3303,7 @@ lowerNativeExprRaw cfg _ (WireToNativeN_ _ s IntrReplay schema [Low _ handleDocs
       bindFn = lcPrintStmt cfg (IAssign fnVar Nothing (IRawExpr (render (poolExpr fnDocs))))
   (hoisted, callback) <- lcMakeCallback cfg w rawList (map (lcPrintStmt cfg) stmts) body
   let raw d = IRawExpr (render (poolExpr d))
-      replayExpr = IIntrinsicReplay sid rawElem (raw handleDocs) (IRawExpr (render callback))
+      replayExpr = IIntrinsicReplay True sid rawElem (raw handleDocs) (IRawExpr (render callback))
       merged = mergePoolDocs (const $ lcPrintExpr cfg replayExpr) [handleDocs, fnDocs]
   return $ merged {poolPriorLines = poolPriorLines merged ++ [bindFn] ++ hoisted}
 -- A decoding intrinsic, its value decoded into the form a received argument

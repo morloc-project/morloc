@@ -8,6 +8,7 @@
 #include <sys/mman.h>
 #include <atomic>
 #include <new>
+#include <exception>
 
 #include "cppmorloc.hpp"
 
@@ -213,6 +214,32 @@ extern "C" const char* mlc_current_frame(size_t* len) {
     std::fprintf(stderr, "morloc internal error (C++ pool): %s\n", msg.c_str());
     std::fflush(stderr);
     // PANIC-5
+    _exit(70);
+}
+
+// PANIC-6: an exception no handler holds ends the pool, on a thread user
+// code started or anywhere else std::terminate is reached.
+[[noreturn]] void mlc_on_terminate() {
+    const char* what = "an exception with no message";
+    if (std::exception_ptr e = std::current_exception()) {
+        try {
+            std::rethrow_exception(e);
+        } catch (const std::exception& x) {
+            what = x.what();
+        } catch (...) {
+        }
+    } else {
+        what = "std::terminate was called with no exception";
+    }
+    size_t len = 0;
+    const char* frame = mlc_current_frame(&len);
+    if (frame != nullptr && len > 0) {
+        std::fprintf(stderr, "error with no handler to hold it (C++ pool): %s\n  at %.*s\n", what, (int)len, frame);
+    } else {
+        std::fprintf(stderr, "error with no handler to hold it (C++ pool): %s\n", what);
+    }
+    std::fflush(stderr);
+    // PANIC-1
     _exit(70);
 }
 

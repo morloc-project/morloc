@@ -152,9 +152,9 @@ printExpr (IIntrinsicFoldPut (Just sid) mb ml step h v) =
   [idoc|_mlc_fold_put#{foldTypes mb ml}(mlc_schema_table[#{pretty sid}], #{printExpr step}, #{printExpr h}, #{printExpr v})|]
 printExpr (IIntrinsicFoldPut Nothing mb ml step h v) =
   [idoc|_mlc_fold_put_schemaless#{foldTypes mb ml}(#{printExpr step}, #{printExpr h}, #{printExpr v})|]
-printExpr (IIntrinsicReplay sid (Just t) h f) =
+printExpr (IIntrinsicReplay _ sid (Just t) h f) =
   [idoc|_mlc_replay<#{renderIType t}>(mlc_schema_table[#{pretty sid}], #{printExpr h}, #{printExpr f})|]
-printExpr (IIntrinsicReplay sid Nothing h f) =
+printExpr (IIntrinsicReplay _ sid Nothing h f) =
   [idoc|_mlc_replay(mlc_schema_table[#{pretty sid}], #{printExpr h}, #{printExpr f})|]
 printExpr (IIntrinsicRead sid (Just t) e) =
   [idoc|_mlc_read<#{renderIType t}>(mlc_schema_table[#{pretty sid}], #{printExpr e})|]

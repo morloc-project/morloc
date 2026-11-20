@@ -143,3 +143,14 @@
   (a tail) would be deferred wrongly or overrun its run. Only the built-in
   integers (ToVoidstar::INLINE) are known to be inline; the converted-field
   shortcut checks INLINE, these two sites do not.
+- **A Rust value of a non-`Clone` native type read twice does not build.**
+  [read, 2026-11-20] Needs a ruling. A field projection that is not the
+  subject's last read (FieldCopy, Members/Rust.hs `lcCtorField`), and a
+  user-written arm's field (`MlcField::unfield`), clone the field, so a
+  pattern that binds several fields of a subject, or reads a subject again,
+  over a sourced type that is not `Clone` stops at a rustc error. A copy is
+  needed there, so the choices are a morloc diagnostic (which needs to know
+  whether the type is `Clone`), a ruled `Clone` requirement, or binding by
+  reference where the code after it only borrows. The last read of a
+  subject moves the payload out, or fails the call when it is shared
+  (`mlc_copy!`, golden rust-bind-non-clone).

@@ -215,10 +215,10 @@ printExpr (IIntrinsicFoldPut (Just sid) mb ml step h v) =
 printExpr (IIntrinsicFoldPut Nothing mb ml step h v) =
   "::rustmorloc::fold_put_schemaless" <> foldTurbofish 1 mb ml <> "(" <> printExpr step <> ", "
     <> printExpr h <> ", " <> refExpr v <> ")"
-printExpr (IIntrinsicReplay sid mt h f) =
+printExpr (IIntrinsicReplay owned sid mt h f) =
   -- The element type is given, the function's closure type is left to
   -- inference.
-  "::rustmorloc::replay" <> reduceTurbofish mt <> "(" <> schemaRef sid <> ", "
+  "::rustmorloc::" <> (if owned then "replay_owned" else "replay") <> reduceTurbofish mt <> "(" <> schemaRef sid <> ", "
     <> printExpr h <> ", " <> printExpr f <> ")"
 printExpr (IIntrinsicStdin sid) = "::rustmorloc::open_stdin(" <> schemaRef sid <> ")"
 printExpr (IIntrinsicStdout sid) = "::rustmorloc::open_stdout(" <> schemaRef sid <> ")"

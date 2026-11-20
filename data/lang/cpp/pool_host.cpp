@@ -15,6 +15,7 @@
 #include <cstdlib>
 #include <cstdio>
 #include <unistd.h>
+#include <exception>
 
 #include "morloc.h"
 
@@ -25,6 +26,9 @@ extern void cpp_register(pool_config_t* config, const char* tmpdir);
 // for the crash report.
 extern "C" const char* mlc_current_frame(size_t* len);
 
+// Ends the pool on an exception no call holds (cppmorloc).
+[[noreturn]] extern void mlc_on_terminate();
+
 int main(int argc, char* argv[]) {
     // Line-buffer stderr so diagnostic output is not lost on pool shutdown.
     // stdout is left fully buffered for performance (genome-scale piping)
@@ -34,6 +38,7 @@ int main(int argc, char* argv[]) {
     // On a fatal signal, report the signal, the executing manifold and a
     // backtrace, then die of the signal (see morloc_install_crash_handler).
     morloc_install_crash_handler("cpp", mlc_current_frame);
+    std::set_terminate(mlc_on_terminate);
 
     // Health check: confirm binary links and print version
     if (argc == 2 && std::string(argv[1]) == "--health") {

@@ -25,3 +25,4 @@ rust batch 2
 rust batch 0
 rust batch 1
 rust 1 2 3
+"rust 1 2 3\n"
