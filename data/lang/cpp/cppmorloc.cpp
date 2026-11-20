@@ -9,6 +9,8 @@
 #include <atomic>
 #include <new>
 #include <exception>
+#include <deque>
+#include <mutex>
 
 #include "cppmorloc.hpp"
 
@@ -190,6 +192,107 @@ std::string frame_take(size_t saved) {
     for (size_t k = depth; k > saved && k < s.cap; k--) out += s.base[k];
     return out;
 }
+
+struct closure_trace {
+    std::exception_ptr failure;
+    std::string labels;
+    pthread_t thread;
+    size_t depth;
+};
+
+// STATE-6, STATE-5
+static std::mutex* closure_traces_lock_ = new std::mutex();
+static std::deque<closure_trace>* closure_traces_ = new std::deque<closure_trace>();
+static const int closure_traces_reset_ = pthread_atfork(nullptr, nullptr, [] {
+    closure_traces_lock_ = new std::mutex();
+    closure_traces_ = new std::deque<closure_trace>();
+});
+
+constexpr size_t closure_traces_cap = 256;
+
+// STATE-6: the same propagation, when the failure left a closure on this
+// thread and nothing has been taken from the stack since, or came from
+// another thread.
+static bool continues(const closure_trace& t, size_t depth) {
+    return !pthread_equal(t.thread, pthread_self()) || t.depth == depth;
+}
+
+void closure_trace_add(size_t saved) noexcept {
+    std::exception_ptr failure = std::current_exception();
+    std::deque<closure_trace> evicted;
+    try {
+        size_t depth = frame_depth();
+        std::string labels = frame_take(saved);
+        if (!failure || labels.empty()) return;
+        std::lock_guard<std::mutex> g(*closure_traces_lock_);
+        std::deque<closure_trace>& kept = *closure_traces_;
+        for (closure_trace& t : kept) {
+            if (t.failure == failure) {
+                if (continues(t, depth)) t.labels += labels; else t.labels = std::move(labels);
+                t.thread = pthread_self();
+                t.depth = saved;
+                return;
+            }
+        }
+        if (kept.size() >= closure_traces_cap) {
+            evicted.push_back(std::move(kept.front()));
+            kept.pop_front();
+        }
+        kept.push_back(closure_trace{failure, std::move(labels), pthread_self(), saved});
+    } catch (...) {
+        frame_restore(saved);
+    }
+}
+
+static std::string closure_labels_locked(const std::exception_ptr& failure) {
+    std::lock_guard<std::mutex> g(*closure_traces_lock_);
+    std::deque<closure_trace>& kept = *closure_traces_;
+    for (auto it = kept.begin(); it != kept.end(); ++it) {
+        if (it->failure == failure) {
+            std::string out = continues(*it, frame_depth()) ? std::move(it->labels) : std::string();
+            kept.erase(it);
+            return out;
+        }
+    }
+    return std::string();
+}
+
+std::string closure_labels() noexcept {
+    std::exception_ptr failure = std::current_exception();
+    if (!failure) return std::string();
+    try {
+        return closure_labels_locked(failure);
+    } catch (...) {
+        return std::string();
+    }
+}
+
+std::string failure_trace(size_t saved) noexcept {
+    std::string out = closure_labels();
+    try {
+        out += frame_take(saved);
+    } catch (...) {
+        frame_restore(saved);
+    }
+    return out;
+}
+
+void closure_traces_drop_thread() noexcept {
+    std::deque<closure_trace> dropped;
+    try {
+        std::lock_guard<std::mutex> g(*closure_traces_lock_);
+        std::deque<closure_trace>& kept = *closure_traces_;
+        for (auto it = kept.begin(); it != kept.end();) {
+            if (pthread_equal(it->thread, pthread_self())) {
+                dropped.push_back(std::move(*it));
+                it = kept.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    } catch (...) {
+    }
+}
 }
 
 // The frame a crash report names: under --debug the marked manifold, else
@@ -221,6 +324,7 @@ extern "C" const char* mlc_current_frame(size_t* len) {
 // code started or anywhere else std::terminate is reached.
 [[noreturn]] void mlc_on_terminate() {
     const char* what = "an exception with no message";
+    std::string labels = mlc::closure_labels();
     if (std::exception_ptr e = std::current_exception()) {
         try {
             std::rethrow_exception(e);
@@ -234,9 +338,9 @@ extern "C" const char* mlc_current_frame(size_t* len) {
     size_t len = 0;
     const char* frame = mlc_current_frame(&len);
     if (frame != nullptr && len > 0) {
-        std::fprintf(stderr, "error with no handler to hold it (C++ pool): %s\n  at %.*s\n", what, (int)len, frame);
+        std::fprintf(stderr, "error with no handler to hold it (C++ pool): %s%s\n  at %.*s\n", what, labels.c_str(), (int)len, frame);
     } else {
-        std::fprintf(stderr, "error with no handler to hold it (C++ pool): %s\n", what);
+        std::fprintf(stderr, "error with no handler to hold it (C++ pool): %s%s\n", what, labels.c_str());
     }
     std::fflush(stderr);
     // PANIC-1

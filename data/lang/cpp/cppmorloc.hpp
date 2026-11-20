@@ -86,6 +86,16 @@ inline void frame_restore(size_t saved) noexcept { frames_.depth = saved; }
 
 // STATE-6: restores `saved` and returns the lines above it, innermost first.
 std::string frame_take(size_t saved);
+// STATE-6: a closure's catch: restores `saved` and keeps the labels above it
+// beside the failure being handled.
+void closure_trace_add(size_t saved) noexcept;
+// STATE-6: the labels kept beside the failure being handled, once.
+std::string closure_labels() noexcept;
+// STATE-6: a report's trace: those labels, then the calls above `saved`,
+// which it restores.
+std::string failure_trace(size_t saved) noexcept;
+// STATE-6: at the end of a thread's outermost dispatch.
+void closure_traces_drop_thread() noexcept;
 }
 
 // ============================================================

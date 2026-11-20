@@ -91,7 +91,7 @@ call behind).
 
 ### STATE-6 A trace boundary leaves the frame stack at the depth it found
 Status: implemented
-Checked by: a_closure_boundary_carries_the_calls_a_panic_unwound_and_restores_the_depth, a_closed_pipe_passes_a_closure_boundary_unchanged_and_restores_the_depth, tla:FrameStack, tla:FrameStack_reset_at_dispatch.bug, tla:FrameStack_no_closure_boundary.bug, tla:FrameStack_pass_keeps_depth.bug, golden:spec-diag-5-1, golden:frame-stack-suspension-boundary
+Checked by: a_closure_boundary_carries_the_calls_a_panic_unwound_and_restores_the_depth, a_closed_pipe_passes_a_closure_boundary_unchanged_and_restores_the_depth, golden:cpp-closure-exception-type, tla:FrameStack, tla:FrameStack_reset_at_dispatch.bug, tla:FrameStack_no_closure_boundary.bug, tla:FrameStack_pass_keeps_depth.bug, golden:spec-diag-5-1, golden:frame-stack-suspension-boundary
 
 The boundaries are a pool's dispatch, `@try` and every closure: a function
 value code outside morloc may call and whose failure it may catch,
@@ -102,8 +102,15 @@ it finds the saved depth; dispatch checks this, which covers every
 boundary inside it, and a mismatch is a broken runtime invariant that
 ends the pool (PANIC-13). Left by a failure, it restores the saved depth
 on every path. A user failure also takes the labels above the saved depth,
-innermost first, into its message: `@try` and dispatch report it, and a
-closure raises it again as a failure carrying that message. A closed pipe
+innermost first: `@try` and dispatch report them after its message. A Rust
+closure raises it again as a failure carrying that message. A C++ closure
+raises the same exception again, of the type it was thrown with, so
+sourced C++ can catch it by type, and keeps the labels beside it in a table
+the process shares (a forked child gets an empty one). A report of
+that same exception on any thread (`@try`, dispatch, or an exception no
+handler holds, PANIC-6) adds them before its own and drops them. The table
+keeps the latest 256 such failures; a C++ failure a handler replaces with
+another is reported without them. A closed pipe
 or an infrastructure error passes through unchanged and carries no trace.
 So sourced code that catches a failure, or enters a nested dispatch on the
 same thread, finds the stack as it left it. Model: `tla/FrameStack.tla`

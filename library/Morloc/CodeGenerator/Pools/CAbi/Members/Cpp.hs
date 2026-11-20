@@ -512,8 +512,7 @@ data CppTranslatorState = CppTranslatorState
   -- named function, 'Nothing' for any other manifold (DIAG-5).
   , translatorDebugMode :: Bool
   -- ^ Snapshot of 'stateDebugTrace'. When True, DebugWrapS drains the
-  -- traceback in 'cppDebugWrap'; the manifold-level catch in
-  -- 'lcMakeFunction' skips its frame-line append to avoid duplicates.
+  -- traceback in 'cppDebugWrap', and no manifold pushes a frame line.
   , translatorPool :: PoolPlan
   -- ^ The pool's ownership decisions; its takes are keyed by the top-level
   -- manifold and the let index, because a let index names a binding within
@@ -1617,42 +1616,12 @@ PROPAGATE_ERROR(errmsg)|]
                 (userName, srclocStr)
                   | debugMode = translatorDebugInfo state callIndex
                   | otherwise = maybe ("", "") id traceLabel
-                -- Raw text with a literal newline; escapeCxxStringLit converts
-                -- '\n' -> "\\n" so the emitted C++ string literal contains the
-                -- escape, not an actual newline byte.
                 frameName = cppFrameName callIndex userName srclocStr
-                frameLine = "\n  at " <> frameName
-                frameLit :: MDoc
-                frameLit = dquotes (pretty (escapeCxxStringLit frameLine))
                 -- Marks this manifold as the one executing on the thread,
                 -- so a fatal signal is reported against it.
                 frameScope = "mlc::frame_scope _mlc_frame(" <> dquotes (pretty (escapeCxxStringLit frameName)) <> ");"
                 fullName = mname <> mnameExt headForm
                 decl = returnTypeStr <+> fullName <> tupled typedArgs
-                tryBody = block 4 "try" (vsep $ frameScope : priorLines <> [body])
-                -- In --debug the drain owns the traceback; appending a
-                -- frame line here would duplicate every frame. The
-                -- normalize-to-std::runtime_error step remains so that
-                -- non-std::exception throws (const char*, std::string)
-                -- surface their message through the outer dispatch's
-                -- 'catch (const std::exception&)'.
-                appendFrame lit e =
-                  if debugMode
-                    then "throw std::runtime_error(" <> e <> ");"
-                    else "throw std::runtime_error(" <> e <> " + " <> lit <> ");"
-                -- A closed pipe keeps its class through every frame, so no
-                -- outer @try takes it.
-                catchBody = vsep
-                  [ block 4 "catch (const MorlocPipeClosed&)" "throw;"
-                  , block 4 "catch (const std::exception& e)"
-                      (appendFrame frameLit "std::string(e.what())")
-                  , block 4 "catch (const char* e)"
-                      (appendFrame frameLit "std::string(e)")
-                  , block 4 "catch (const std::string& e)"
-                      (appendFrame frameLit "e")
-                  , block 4 "catch (...)"
-                      (appendFrame frameLit "std::string(\"An unknown error occurred\")")
-                  ]
                 -- STATE-5: a named function records its call; the pop is in
                 -- its return statement ('lcFrameReturn'). STATE-6: a closure,
                 -- which code outside morloc may call and whose failure it may
@@ -1661,7 +1630,8 @@ PROPAGATE_ERROR(errmsg)|]
                   Just lit -> ["mlc::frame_push(" <> lit <> ");"]
                   Nothing -> []
                 innerBlock
-                  | debugMode = tryBody <+> catchBody
+                  -- STATE-6: a failure passes on as it was thrown.
+                  | debugMode = vsep (frameScope : priorLines <> [body])
                   | isClosure =
                       vsep
                         [ "size_t _mlc_saved = mlc::frame_enter();"

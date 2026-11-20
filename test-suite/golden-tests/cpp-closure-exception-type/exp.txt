@@ -1,0 +1,29 @@
+== typed
+"caught out_of_range: boom 0"
+== deep
+Error: run failed
+boom 0
+  at down [cpp] (main.loc:17:1)
+  [previous line repeated 2 more times]
+  at deep [cpp] (main.loc:27:1)
+== tried
+Error: run failed
+{"Err":["boom 0\n  at down [cpp] (main.loc:17:1)\n  at down [cpp] (main.loc:17:1)\n  at down [cpp] (main.loc:17:1)"]}
+== nested
+Error: run failed
+boom 0
+  at down [cpp] (main.loc:17:1)
+  [previous line repeated 2 more times]
+  at inner [cpp] (main.loc:34:1)
+  at nested [cpp] (main.loc:38:1)
+== cstr
+Error: run failed
+{"Err":["cboom"]}
+== typed --debug
+"caught out_of_range: boom 0"
+== deep --debug
+Error: run failed
+boom 0
+== tried --debug
+Error: run failed
+{"Err":["boom 0"]}

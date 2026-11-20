@@ -1,0 +1,42 @@
+-- STATE-6: a C++ exception thrown inside a morloc closure reaches the C++
+-- code that called the closure with its own type, and a failure that is not
+-- caught still reports the named calls it passed through, across nested
+-- closures, for any thrown type, and under --debug.
+module main (typed, deep, tried, nested, cstr)
+
+import root-cpp
+
+source Cpp from "f.hpp" ("boom", "cboom", "catchRange", "callIt")
+
+boom :: Int -> Int
+cboom :: Int -> Int
+catchRange :: (Int -> Int) -> Str
+callIt :: (Int -> Int) -> Int
+
+down :: Int -> Int
+down n
+  ? n == 0 = boom n
+  : 1 + down (n - 1)
+
+--' Catch a closure's out_of_range by its type
+typed :: Int -> Str
+typed n = catchRange (\x -> down (x + n))
+
+--' Fail through a closure without catching
+deep :: Int -> Int
+deep n = callIt (\x -> down (x + n))
+
+--' Catch a closure's failure with @try
+tried :: Int -> Try Str Int
+tried n = @try (callIt (\x -> down (x + n)))
+
+inner :: Int -> Int -> Int
+inner n x = 1 + callIt (\y -> down (x + y + n))
+
+--' Fail through two nested closures
+nested :: Int -> Int
+nested n = callIt (\x -> inner n x)
+
+--' Catch a closure's thrown C string with @try
+cstr :: Int -> Try Str Int
+cstr n = @try (callIt (\x -> cboom (x + n)))

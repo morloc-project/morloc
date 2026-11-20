@@ -799,36 +799,36 @@ auto _mlc_try(MlcBody&& body, MlcOk&& ok, MlcErr&& err) -> decltype(err(std::str
     catch (const MorlocPipeClosed&) { mlc::frame_restore(saved); throw; }
     MLC_CATCH_FORCED_UNWIND(saved)
     catch (const std::exception& e) {
-        std::string msg(e.what());
-        return err(msg + mlc::frame_take(saved));
+        std::string trace = mlc::failure_trace(saved);
+        return err(std::string(e.what()) + trace);
     }
     catch (const char* e) {
-        std::string msg(e ? e : "An unknown error occurred");
-        return err(msg + mlc::frame_take(saved));
+        std::string trace = mlc::failure_trace(saved);
+        return err(std::string(e ? e : "An unknown error occurred") + trace);
     }
-    catch (const std::string& e) { return err(e + mlc::frame_take(saved)); }
-    catch (...) { return err(std::string("An unknown error occurred") + mlc::frame_take(saved)); }
+    catch (const std::string& e) {
+        std::string trace = mlc::failure_trace(saved);
+        return err(e + trace);
+    }
+    catch (...) {
+        std::string trace = mlc::failure_trace(saved);
+        return err(std::string("An unknown error occurred") + trace);
+    }
 }
 
 // STATE-6: the catch of a closure, which code outside morloc may call and
 // whose failure it may catch. Called from that catch, so `throw;` raises the
-// failure being handled.
+// failure being handled, as it was thrown.
 [[noreturn, gnu::noinline, gnu::cold]] static void _mlc_closure_rethrow(size_t saved) {
     try {
         throw;
     }
     catch (const MorlocPipeClosed&) { mlc::frame_restore(saved); throw; }
     MLC_CATCH_FORCED_UNWIND(saved)
-    catch (const std::exception& e) {
-        std::string msg(e.what());
-        throw std::runtime_error(msg + mlc::frame_take(saved));
+    catch (...) {
+        mlc::closure_trace_add(saved);
+        throw;
     }
-    catch (const char* e) {
-        std::string msg(e ? e : "An unknown error occurred");
-        throw std::runtime_error(msg + mlc::frame_take(saved));
-    }
-    catch (const std::string& e) { throw std::runtime_error(e + mlc::frame_take(saved)); }
-    catch (...) { throw std::runtime_error(std::string("An unknown error occurred") + mlc::frame_take(saved)); }
 }
 // @fschema: read a file's element schema string without opening it.
 inline std::string _mlc_fschema(const std::string& path) {
@@ -1948,7 +1948,9 @@ extern "C" void morloc_debug_record_frame(
 // trace of named calls it unwound through (DIAG-5, STATE-6), and under
 // --debug the drained debug trace.
 static uint8_t* make_fail_packet_with_trace(const char* msg0, size_t saved) {
-    std::string withTrace = std::string(msg0) + mlc::frame_take(saved);
+    std::string withTrace = mlc::failure_trace(saved);
+    withTrace.insert(0, msg0);
+    if (saved == 0) mlc::closure_traces_drop_thread();
     const char* msg = withTrace.c_str();
     char* trace = morloc_debug_drain_frames();
     if (trace == NULL) {
@@ -1969,6 +1971,7 @@ static inline uint8_t* _mlc_dispatch_balanced(uint8_t* result, size_t saved) {
         mlc_runtime_defect("frame stack depth " + std::to_string(mlc::frame_depth())
             + " at the end of a dispatch that began at " + std::to_string(saved));
     }
+    if (saved == 0) mlc::closure_traces_drop_thread();
     return result;
 }
 
@@ -1994,8 +1997,6 @@ uint8_t* cpp_local_dispatch(uint32_t mid, const uint8_t** args,
     } catch (const std::exception& e) {
         return make_fail_packet_with_trace(e.what(), saved);
     } catch (const char* e) {
-        // A sourced function's throw reaches here as thrown unless a
-        // closure's catch on the way normalized it.
         return make_fail_packet_with_trace(e ? e : "An unknown error occurred", saved);
     } catch (const std::string& e) {
         return make_fail_packet_with_trace(e.c_str(), saved);

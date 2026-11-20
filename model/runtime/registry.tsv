@@ -1,6 +1,8 @@
 id	class	rank	cites
 data/lang/cpp/cppmorloc.cpp::-::mlc_frame_	thread		
 data/lang/cpp/cppmorloc.cpp::-::frames_	thread		
+data/lang/cpp/cppmorloc.cpp::-::closure_traces_lock_	fork-scoped		
+data/lang/cpp/cppmorloc.cpp::-::closure_traces_	fork-scoped		
 data/lang/cpp/cppmorloc.cpp::-::frames_key_	lazy		
 data/lang/cpp/cppmorloc.cpp::-::frames_key_once_	lazy		
 data/lang/cpp/cppmorloc.cpp::-::arm_depth_	thread		
