@@ -208,3 +208,17 @@
   types a slice of `Vector n a` (COLL-3 covers `[T]`). Repro: /work/plans/model-audit-2026-10-21/repro/C/dim/sl.loc,
   conv.loc.
 
+
+- [reproduced, 2026-11-20] POLY-7/DIM-10: a where-bound value of a declared
+  Nat-indexed type is observed once per reference, not once per
+  application. `common k = filt (flagsT t) t where t = sim k` with
+  `type Tbl (n :: Nat)` (or stdlib `Table`) is refused; the same body over
+  builtin `Table` or `Vector` is accepted. Likely the same root as "a
+  Table's row count is not among the lengths" above. Blocks tests/tables
+  01, 02, 04. Repro: /work/plans/migration-bugs-2026-11-20/repro/poly7-imported-filterRows (minimal.loc).
+- [reproduced, 2026-11-20] Add to the DIM-10 wording entry above:
+  `two :: Table 4 {a = Int}; two = mk 2` (correctly refused, `mk`
+  chooses `n`) says "The body does not hold for every value of the Nat and
+  Int variables of its signature (POLY-7)" though `two` has none; it should
+  name `mk` as choosing the row count and suggest `n@Int`.
+  Repro: /work/plans/migration-bugs-2026-11-20/repro/poly7-instantiated-nat.
