@@ -139,7 +139,7 @@ than on the whole argument (POLY-3).
 
 ### DIM-10 A length or label known only at run time stands for every value
 Intent: ruled 2026-11-05
-Tests: spec-dim-10-1, spec-dim-10-2, spec-dim-10-3, spec-dim-10-4, spec-dim-10-5, spec-dim-10-6, spec-dim-10-7, spec-dim-10-8, spec-dim-10-9, spec-dim-10-10, spec-dim-10-11, spec-dim-10-12, spec-dim-10-13, spec-dim-10-14, spec-dim-10-15, spec-dim-10-16, spec-dim-10-17, spec-dim-10-18, spec-dim-10-19, spec-dim-10-20, spec-dim-10-21, spec-dim-10-22, spec-dim-10-23, spec-dim-10-24, spec-dim-10-25, spec-dim-10-26, spec-dim-10-27, spec-dim-10-28, spec-dim-10-29, spec-dim-10-30, spec-dim-10-31, spec-dim-10-32, spec-dim-10-33
+Tests: spec-dim-10-1, spec-dim-10-2, spec-dim-10-3, spec-dim-10-4, spec-dim-10-5, spec-dim-10-6, spec-dim-10-7, spec-dim-10-8, spec-dim-10-9, spec-dim-10-10, spec-dim-10-11, spec-dim-10-12, spec-dim-10-13, spec-dim-10-14, spec-dim-10-15, spec-dim-10-16, spec-dim-10-17, spec-dim-10-18, spec-dim-10-19, spec-dim-10-20, spec-dim-10-21, spec-dim-10-22, spec-dim-10-23, spec-dim-10-24, spec-dim-10-25, spec-dim-10-26, spec-dim-10-27, spec-dim-10-28, spec-dim-10-29, spec-dim-10-30, spec-dim-10-31, spec-dim-10-32, spec-dim-10-33, spec-dim-10-34, spec-dim-10-35, spec-dim-10-36, spec-dim-10-37, spec-dim-10-38, spec-dim-10-39, spec-dim-10-40
 Code: deviates (issues/kinds-dimensions.md)
 
 A label's value at a call is known before run time when its argument is a
@@ -185,3 +185,10 @@ whose body makes the call, nor the input of a command: in `bar v = dot (mk
 A recursive call is an application like any other: it observes the
 lengths it chooses afresh, and its labelled ones, since its label arguments
 are not read.
+A where-binding with no parameters and a data type is one value in each
+evaluation of the definition that owns it, so the lengths its calls choose
+are chosen once for all its uses: `common k = filt (flags t) t where t =
+sim k` is accepted, while `filt (flags (sim k)) (sim k)` makes two calls
+and is refused. A binding whose value is a suspension runs at each use, so
+its uses are not joined; nor are uses in exclusive branches, or of a
+binding holding a recursive call.

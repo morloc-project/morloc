@@ -209,16 +209,14 @@
   conv.loc.
 
 
-- [reproduced, 2026-11-20] POLY-7/DIM-10: a where-bound value of a declared
-  Nat-indexed type is observed once per reference, not once per
-  application. `common k = filt (flagsT t) t where t = sim k` with
-  `type Tbl (n :: Nat)` (or stdlib `Table`) is refused; the same body over
-  builtin `Table` or `Vector` is accepted. Likely the same root as "a
-  Table's row count is not among the lengths" above. Blocks tests/tables
-  01, 02, 04. Repro: /work/plans/migration-bugs-2026-11-20/repro/poly7-imported-filterRows (minimal.loc).
-- [reproduced, 2026-11-20] Add to the DIM-10 wording entry above:
-  `two :: Table 4 {a = Int}; two = mk 2` (correctly refused, `mk`
-  chooses `n`) says "The body does not hold for every value of the Nat and
-  Int variables of its signature (POLY-7)" though `two` has none; it should
-  name `mk` as choosing the row count and suggest `n@Int`.
-  Repro: /work/plans/migration-bugs-2026-11-20/repro/poly7-instantiated-nat.
+- [read, 2026-11-20] DIM-10: the typechecker joins the lengths of copies of
+  a parameterless where-binding by a rule that restates the one
+  Frontend/Share.hs uses to bind those copies once (Typecheck.hs
+  `shareWhereLengths`), meant to be stricter but not checked against it. Share should confirm that each joined pair ended up under one binder
+  and report a compiler bug otherwise, or both should call one predicate.
+- [read, 2026-11-20] DIM-10: some copies of a where-binding that Share binds
+  once are not joined, so a correct program using the value twice is
+  refused: uses inside an `if` arm (even with another use in the
+  condition), under a pattern or an intrinsic, of a binding whose type
+  holds a type variable, and the Int labels a call chooses (only Nat
+  lengths are joined). Incomplete, not unsound.

@@ -1657,6 +1657,107 @@ dimTests =
         run :: Int -> V 3
         run x = g 3
         |]
+    , accept
+        "spec-dim-10-34"
+        [r|
+        module main (common)
+        type Tbl (n :: Nat)
+        sim :: Int -> Tbl n
+        flags :: Tbl n -> Vector n Bool
+        filt :: Vector n Bool -> Tbl n -> Tbl m
+        common :: Int -> Tbl m
+        common k = filt (flags t) t
+          where
+            t = sim k
+        |]
+    , accept
+        "spec-dim-10-35"
+        [r|
+        module main (common)
+        type Tbl (n :: Nat)
+        sim :: Int -> Tbl n
+        flags :: Tbl n -> Vector n Bool
+        filt :: Vector n Bool -> Tbl n -> Tbl m
+        common k = filt (flags t) t
+          where
+            t = sim k
+        |]
+    , reject
+        "spec-dim-10-36"
+        [r|
+        module main (common)
+        type Tbl (n :: Nat)
+        sim :: Int -> Tbl n
+        flags :: Tbl n -> Vector n Bool
+        filt :: Vector n Bool -> Tbl n -> Tbl m
+        common :: Int -> Tbl m
+        common k = filt (flags (sim k)) (sim k)
+        |]
+    , reject
+        "spec-dim-10-37"
+        [r|
+        module main (common)
+        type Tbl (n :: Nat)
+        sim :: Int -> Tbl n
+        flags :: Tbl n -> Vector n Bool
+        filt :: Vector n Bool -> Tbl n -> Tbl m
+        common :: Int -> Tbl m
+        common k = filt (flags (t k)) (t k)
+          where
+            t x = sim x
+        |]
+    , accept
+        "spec-dim-10-38"
+        [r|
+        module main (run)
+        type Tbl (n :: Nat)
+        sim :: Int -> Tbl n
+        flags :: Tbl n -> Vector n Bool
+        filt :: Vector n Bool -> Tbl n -> Tbl m
+        common k = filt (flags t) t
+          where
+            t = sim k
+        size :: Tbl n -> Int
+        run :: Int -> Int
+        isPos :: Int -> Bool
+        run k = ? isPos k = size (common k) : 0
+        |]
+    , reject
+        "spec-dim-10-40"
+        [r|
+        module main (run)
+        type Tbl (n :: Nat)
+        sim :: Int -> Tbl n
+        flags :: Tbl n -> Vector n Bool
+        filt :: Vector n Bool -> Tbl n -> Int
+        fst :: (a, b) -> a
+        inc :: Int -> Int
+        common :: a -> Int -> Int
+        common x k = filt (flags (fst t)) (fst t)
+          where
+            t = (sim k, x)
+        run :: Int -> Int
+        run k = common inc k
+        |]
+    , reject
+        "spec-dim-10-39"
+        [r|
+        module main (common)
+        effect IO
+        type Tbl (n :: Nat)
+        sim :: Int -> Tbl n
+        flags :: Tbl n -> Vector n Bool
+        filt :: Vector n Bool -> Tbl n -> Tbl m
+        type Job n = <IO> Tbl n
+        mkJob :: Int -> Job n
+        common :: Int -> <IO> Tbl m
+        common k = do
+          a <- t
+          b <- t
+          filt (flags a) b
+          where
+            t = mkJob k
+        |]
     ]
 
 teqTests :: TestTree

@@ -281,7 +281,7 @@ finishRoot g1raw rootT e1 = run
       (g2, e3) <- resolveTree g1 e2
       g3 <- case settleDeferred scope (apply g2 g2) of
         Left (site, err) -> MM.throwSourcedError (fromMaybe (case e1 of AnnoS (Idx gi _) _ _ -> gi) site) err
-        Right g -> return g
+        Right g -> shareWhereLengths g e3
       checkShapes g3 e1
 
       -- Decide the Nat and Int conditions left open now that existentials
@@ -3888,7 +3888,7 @@ checkSigned e0@(AnnoS i _ _) = do
       scope <- MM.getGeneralScope
       g1 <- case settleDeferred scope g1unsettled of
         Left (site, err) -> MM.throwSourcedError (fromMaybe i site) err
-        Right g -> return g
+        Right g -> shareWhereLengths g e1
       -- An equation over a variable of the signature must hold at every
       -- value of it; one still undecided is not shown to (POLY-1). Nat
       -- equations are decided by 'checkRigidNats' (POLY-7).
@@ -4054,7 +4054,7 @@ inferScheme e0 = do
   let g1u = foldl (\g (AnnoS (Idx _ t) _ _, sh) -> imposeShape g t sh) g1s [(r, sh) | AnnoS _ _ (ShapeS _ sh r) <- annoNodes e1]
   case settleDeferred scope g1u of
     Left _ -> groundCheck g1u e1 >> return (Left "an undecided kind-level equation")
-    Right g1 -> groundCheck g1 e1 >> do
+    Right g1settled -> shareWhereLengths g1settled e1 >>= \g1 -> groundCheck g1 e1 >> do
       let t1 = apply g1 t0
           exists = List.nub [(v, not (null ps && null rs)) | ExistU v (ps, _) (rs, _) <- everyType t1]
           openShape = isPattern t1
@@ -4183,6 +4183,94 @@ checkShapes g e = do
           MM.throwSourcedError i $
             "This" <+> kind <+> "pattern destructures a value that is also used as" <+> what
 
+-- | DIM-10: a parameterless where-binding of data type is one value per
+-- evaluation of the definition that owns it ('Morloc.Frontend.Share'), but
+-- each of its uses is a copy here, whose calls observe their lengths afresh.
+-- The lengths of copies of one binding at one type are made one: the later
+-- copies' are solved to the first's. Only copies Share is sure to bind once
+-- are joined: outside every branch, implementation choice and intrinsic of
+-- their owner's expansion, and with no recursive call.
+shareWhereLengths :: Foldable f => Gamma -> AnnoS (Indexed TypeU) f Int -> MorlocMonad Gamma
+shareWhereLengths g root = do
+  scope <- MM.getGeneralScope
+  GMap idmap _ <- MM.gets stateSignatures
+  owners <- MM.gets stateWhereOwner
+  let ownerSet = Set.fromList (Map.elems owners)
+      termOf ci = Map.lookup ci idmap
+      walk owner armed node@(AnnoS (Idx _ t) ci x) = case x of
+        VarS _ alts
+          | Just k <- termOf ci
+          , Just d <- Map.lookup k owners
+          , Just (d', sid) <- owner
+          , d == d'
+          , not armed
+          , eligible (toList alts) (expandTransparentAliases scope (apply g t)) ->
+              ((sid, k), node) : concatMap (walk owner armed) (toList alts)
+          | Just d <- termOf ci
+          , Set.member d ownerSet ->
+              concatMap (walk (Just (d, ci)) (length (toList alts) > 1)) (toList alts)
+          | otherwise -> concatMap (walk owner (armed || length (toList alts) > 1)) (toList alts)
+        IfS c a b -> walk owner armed c <> walk owner True a <> walk owner True b
+        PatS {} -> concatMap (walk owner True) (foldExprS (: []) x)
+        IntrinsicS {} -> concatMap (walk owner True) (foldExprS (: []) x)
+        _ -> concatMap (walk owner armed) (foldExprS (: []) x)
+      eligible alts t =
+        dataU t
+          && not (null alts)
+          && and [not (isLam a) && not (any isCall (annoNodes a)) | a <- alts]
+      isLam (AnnoS _ _ (LamS _ _)) = True
+      isLam _ = False
+      isCall (AnnoS _ _ (CallS _)) = True
+      isCall _ = False
+      -- a type variable may stand for a function at a use, where Share
+      -- does not bind the value once
+      dataU t = case t of
+        FunU _ _ -> False
+        EffectU _ _ -> False
+        ExistU {} -> False
+        VarU v | isTypeVariableName (unTVar v), Set.notMember v observed -> False
+        _ -> all dataU (typeUChildren t)
+      -- an observed length is a Nat variable, or a type variable in a
+      -- declared type's Nat position
+      lengthVar t = case t of
+        NatVarU v | Set.member v observed -> Just v
+        VarU v | Set.member v observed -> Just v
+        KVarU (v, KindNat) | Set.member v observed -> Just v
+        _ -> Nothing
+      blank t = case lengthVar t of
+        Just _ -> NatVarU (TV "")
+        Nothing -> mapTypeUChildren blank t
+      natVars t = case lengthVar t of
+        Just v -> [v]
+        Nothing -> concatMap natVars (typeUChildren t)
+      typeOfNode (AnnoS (Idx _ t) _ _) = expandTransparentAliases scope (apply g t)
+      groups = Map.fromListWith (flip (<>)) [((key, blank (typeOfNode c)), [c]) | (key, c) <- walk Nothing False root]
+      observed = gammaObserved g
+      -- copies of one binding are one expression: their nodes correspond
+      -- one to one, and each node's observed lengths in order
+      pairs =
+        [ (a, b)
+        | (c0 : rest) <- Map.elems groups
+        , c <- rest
+        , Just nodes <- [zipExact (annoNodes c0) (annoNodes c)]
+        , (n0, n) <- nodes
+        , let (t0, t) = (typeOfNode n0, typeOfNode n)
+        , blank t0 == blank t
+        , (a, b) <- zipSame (natVars t0) (natVars t)
+        , a /= b
+        ]
+      -- union-find over the pairs, each class represented by the first
+      -- copy's variable met
+      rep m v = maybe v (rep m) (Map.lookup v m)
+      joined = foldl (\m (a, b) -> let ra = rep m a; rb = rep m b in if ra == rb then m else Map.insert rb ra m) Map.empty pairs
+      merged = Map.keys joined
+  return
+    g
+      { gammaKindSubs = Map.union (Map.fromList [((v, KindNat), NatVarU (rep joined v)) | v <- merged]) (gammaKindSubs g)
+      , gammaSolved = Map.union (Map.fromList [(v, VarU (rep joined v)) | v <- merged]) (gammaSolved g)
+      , gammaObserved = foldr Set.delete observed merged
+      }
+
 -- | POLY-7: the body of a definition holds for every value of its
 -- signature's Nat variables at which the signature's own Nat positions are
 -- non-negative (KIND-4). The Nat equations checking left, solved or
@@ -4199,6 +4287,17 @@ checkRigidNats i g bodyTypes
       [] -> return ()
       conds -> case ND.decideAssuming rigidAll domain conds of
         ND.Holds _ -> return ()
+        ND.Refuted env
+          | not (Map.null env)
+          , all (`Set.member` gammaObserved g) (Map.keys env)
+          , all (`Set.notMember` Set.union rigid rigidSizes) (Map.keys env) ->
+              MM.throwSourcedError (failingTerm env) $ vsep
+                [ "A length that a call here chooses when it runs must meet a condition"
+                    <+> "that nothing known before the call can show (DIM-10)."
+                , "Each call chooses its own length, and a type annotation cannot fix one."
+                    <+> "Name a value once (`where t = ...`) to use it twice, or label the argument"
+                    <+> "the length follows (`n@Int -> Table n r`) so the call states it."
+                ]
         ND.Refuted env ->
           MM.throwSourcedError (failingTerm env) $ vsep
             [ "The body does not hold for every value of the Nat and Int variables of its signature (POLY-7)."

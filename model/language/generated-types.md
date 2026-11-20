@@ -84,7 +84,7 @@ module component, type name or field name cannot be spelled in a language
 that generates the type (a keyword with no escape there).
 
 ### GEN-6 The definitions are written to files the pool reads first
-Intent: ruled 2026-11-14, 2026-11-20
+Intent: ruled 2026-11-20
 Tests: spec-gen-6-1, spec-gen-6-2, spec-gen-6-3
 Code: deviates (issues/records.md)
 
