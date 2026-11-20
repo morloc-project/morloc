@@ -649,7 +649,13 @@ enum Wait<'a> {
 unsafe fn read_packet(client_fd: i32, wait: Wait, reply: bool, errmsg: *mut *mut c_char) -> *mut u8 {
     clear_errmsg(errmsg);
     match read_packet_raw(client_fd, wait, reply) {
-        Ok(p) => p,
+        // NET-11: this connection carries one packet, so bytes behind it are a defect.
+        Ok(p) if p.past_end => {
+            libc::free(p.packet as *mut c_void);
+            set_errmsg(errmsg, &MorlocError::Ipc("a reply was followed by more bytes on its connection".into()));
+            ptr::null_mut()
+        }
+        Ok(p) => p.packet,
         Err(ReadFailure::Packet(e)) => {
             *errmsg = e;
             ptr::null_mut()
@@ -673,7 +679,14 @@ pub(crate) enum ReadFailure {
     Packet(*mut c_char),
 }
 
-unsafe fn read_packet_raw(client_fd: i32, wait: Wait, reply: bool) -> Result<*mut u8, ReadFailure> {
+/// One packet read from a socket. `past_end`: the read also took bytes
+/// that follow the packet, which are not kept (NET-11).
+pub(crate) struct ReadPacket {
+    pub(crate) packet: *mut u8,
+    pub(crate) past_end: bool,
+}
+
+unsafe fn read_packet_raw(client_fd: i32, wait: Wait, reply: bool) -> Result<ReadPacket, ReadFailure> {
     let mut reader = PacketReader {
         fd: client_fd,
         pfd: libc::pollfd { fd: client_fd, events: libc::POLLIN, revents: 0 },
@@ -699,6 +712,8 @@ unsafe fn read_packet_raw(client_fd: i32, wait: Wait, reply: bool) -> Result<*mu
     if result.is_null() {
         return Err(ReadFailure::Alloc);
     }
+    // NET-11: a read past the packet is reported; its caller ends the connection.
+    let past_end = have > packet_length;
     let copied = have.min(packet_length);
     ptr::copy_nonoverlapping(head.as_ptr(), result, copied);
     let mut got = copied;
@@ -711,7 +726,7 @@ unsafe fn read_packet_raw(client_fd: i32, wait: Wait, reply: bool) -> Result<*mu
             }
         }
     }
-    Ok(result)
+    Ok(ReadPacket { packet: result, past_end })
 }
 
 /// Bytes read before the header is parsed: a whole small packet.
@@ -878,10 +893,16 @@ pub(crate) unsafe fn read_request(client_fd: i32) -> Result<*mut u8, ReadFailure
         r.set(request);
     });
     // NET-5: a sender that cannot be named has its stalls bounded instead.
-    let request = match Peer::of(client_fd) {
+    let read = match Peer::of(client_fd) {
         Some(peer) => read_packet_raw(client_fd, Wait::Peer(&peer), false),
         None => read_packet_raw(client_fd, Wait::Stall, false),
     }?;
+    // NET-11: nothing follows a request (NET-7), so one with bytes behind it is not run.
+    if read.past_end {
+        libc::free(read.packet as *mut c_void);
+        return Err(ReadFailure::Io("a request was followed by more bytes on its connection"));
+    }
+    let request = read.packet;
     let asked = take_keep_bit(request);
     REQUEST.with(|r| r.set(Request {
         fd: client_fd,
@@ -1347,7 +1368,7 @@ pub(crate) unsafe fn send_and_receive_over_socket(
     // the peer closed, which delivered nothing; that alone is retried.
     let path = CStr::from_ptr(socket_path).to_bytes();
     let mut cached = take_cached(path);
-    let (client_fd, tracked, result) = loop {
+    let (client_fd, tracked, past_end, result) = loop {
         let reused = cached.is_some();
         let (fd, tracked) = match cached.take() {
             Some(fd) => (fd, true),
@@ -1379,8 +1400,8 @@ pub(crate) unsafe fn send_and_receive_over_socket(
         }
 
         let peer = Peer::of(fd);
-        let result = match read_packet_raw(fd, reply_wait(&peer), true) {
-            Ok(p) => p,
+        let (past_end, result) = match read_packet_raw(fd, reply_wait(&peer), true) {
+            Ok(p) => (p.past_end, p.packet),
             Err(ReadFailure::Io(why)) => {
                 drop_conn(fd);
                 return peer_died(socket_path, why);
@@ -1409,7 +1430,7 @@ pub(crate) unsafe fn send_and_receive_over_socket(
             )));
             return ptr::null_mut();
         }
-        break (fd, tracked, result);
+        break (fd, tracked, past_end, result);
     };
     let reply_header = &*(result as *const morloc_runtime_types::packet::PacketHeader);
     if reply_header.is_pipe_closed() {
@@ -1428,7 +1449,8 @@ pub(crate) unsafe fn send_and_receive_over_socket(
     }
 
     let kept = take_keep_bit(result);
-    if !(kept && tracked && put_cached(path, client_fd)) {
+    // NET-11: bytes behind the reply can only be a revoke's notice.
+    if !(kept && tracked && !past_end && put_cached(path, client_fd)) {
         drop_conn(client_fd);
     }
     // SHM-8
@@ -2569,6 +2591,11 @@ mod reuse_tests {
         Revoke,
         // NET-7: answers every request with a not-run notice.
         NotRun,
+        // NET-11: on its first connection, writes a kept reply of this many
+        // bytes and a revoke's notice in one write, waits until the next
+        // request has arrived, and closes without reading it; later
+        // connections keep.
+        RevokeCoalesced(usize),
     }
 
     struct TestCallee {
@@ -2585,6 +2612,7 @@ mod reuse_tests {
     }
 
     fn callee(behaviour: Callee) -> TestCallee {
+        use std::os::fd::AsRawFd;
         let dir = std::env::temp_dir().join(format!("mlc-reuse-{}-{:?}", std::process::id(), std::thread::current().id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -2603,10 +2631,11 @@ mod reuse_tests {
             for conn in listener.incoming() {
                 let Ok(mut conn) = conn else { return };
                 accepts.fetch_add(1, Ordering::SeqCst);
-                if behaviour != Callee::Pong {
+                if !matches!(behaviour, Callee::Pong | Callee::RevokeCoalesced(_)) {
                     conns.lock().unwrap().push(conn.try_clone().unwrap());
                 }
                 let (runs, eofs) = (runs.clone(), eofs.clone());
+                let first = accepts.load(Ordering::SeqCst) == 1;
                 let mut served = 0;
                 std::thread::spawn(move || loop {
                     let mut header = [0u8; PKT_HEADER_SIZE];
@@ -2622,6 +2651,27 @@ mod reuse_tests {
                     }
                     served += 1;
                     runs.fetch_add(1, Ordering::SeqCst);
+                    if let (Callee::RevokeCoalesced(size), true) = (behaviour, first) {
+                        let mut reply = PacketHeader::ping();
+                        reply.length = (size - PKT_HEADER_SIZE) as u64;
+                        let mut bytes = reply.to_bytes().to_vec();
+                        bytes[PKT_MODE_OFF..PKT_MODE_OFF + 2].copy_from_slice(&MODE_KEEP.to_le_bytes());
+                        bytes.resize(size, 0);
+                        let mut notice = PacketHeader::ping().to_bytes();
+                        notice[PKT_MODE_OFF..PKT_MODE_OFF + 2].copy_from_slice(&MODE_NOT_RUN.to_le_bytes());
+                        bytes.extend_from_slice(&notice);
+                        conn.write_all(&bytes).unwrap();
+                        let mut peek = [0u8; PKT_HEADER_SIZE];
+                        loop {
+                            let n = unsafe {
+                                libc::recv(conn.as_raw_fd(), peek.as_mut_ptr() as *mut c_void, PKT_HEADER_SIZE, libc::MSG_PEEK)
+                            };
+                            if n <= 0 || n as usize == PKT_HEADER_SIZE {
+                                return;
+                            }
+                            std::thread::sleep(std::time::Duration::from_millis(1));
+                        }
+                    }
                     if behaviour == Callee::DieAfterRead {
                         let _ = conn.shutdown(std::net::Shutdown::Both);
                         return;
@@ -2771,6 +2821,54 @@ mod reuse_tests {
         assert_eq!(cached_connections(), 1);
         drop_cached_connections();
         let _ = std::fs::remove_dir_all(&t.dir);
+    }
+
+    // NET-11: a revoke's notice read with the kept reply in front of it,
+    // whole or in part, ends the connection, so the next call is not sent
+    // on a connection whose callee will never read it.
+    #[test]
+    fn a_notice_read_behind_a_kept_reply_ends_the_connection() {
+        let mut failed = Vec::new();
+        for size in [PKT_HEADER_SIZE, 4064, 4065, 4095, 4096, 4097, 9000] {
+            let t = callee(Callee::RevokeCoalesced(size));
+            let got = (call(&t), call(&t), t.runs.load(Ordering::SeqCst), t.accepts.load(Ordering::SeqCst));
+            if got != (Ok(0), Ok(0), 2, 2) {
+                failed.push(format!("reply of {size} bytes: (first, second, runs, accepts) = {got:?}"));
+            }
+            drop_cached_connections();
+            let _ = std::fs::remove_dir_all(&t.dir);
+        }
+        assert!(failed.is_empty(), "the call after a notice read behind a kept reply:\n{}", failed.join("\n"));
+    }
+
+    // NET-11: nothing follows a request, so one with bytes behind it is
+    // refused, not run.
+    #[test]
+    fn a_request_with_bytes_behind_it_is_refused() {
+        let (ours, theirs) = std::os::unix::net::UnixStream::pair().unwrap();
+        let mut two = PacketHeader::ping().to_bytes().to_vec();
+        two.extend_from_slice(&PacketHeader::ping().to_bytes());
+        (&theirs).write_all(&two).unwrap();
+        use std::os::fd::AsRawFd;
+        let got = unsafe { read_request(ours.as_raw_fd()) };
+        assert!(matches!(got, Err(ReadFailure::Io(_))), "a request with bytes behind it was read");
+    }
+
+    // NET-11: bytes queued before the peer's end closes are read before its
+    // end of file, even when the peer left bytes of ours unread.
+    #[test]
+    fn queued_bytes_are_read_before_the_end_of_a_closed_peer() {
+        let (ours, theirs) = std::os::unix::net::UnixStream::pair().unwrap();
+        let mut notice = PacketHeader::ping().to_bytes();
+        notice[PKT_MODE_OFF..PKT_MODE_OFF + 2].copy_from_slice(&MODE_NOT_RUN.to_le_bytes());
+        (&theirs).write_all(&notice).unwrap();
+        (&ours).write_all(&PacketHeader::ping().to_bytes()).unwrap();
+        drop(theirs);
+        use std::os::fd::AsRawFd;
+        let got = unsafe { read_packet_raw(ours.as_raw_fd(), Wait::Forever, true) };
+        let Ok(read) = got else { panic!("the queued notice was not read before the reset") };
+        assert!(unsafe { is_not_run(read.packet) });
+        unsafe { libc::free(read.packet as *mut c_void) };
     }
 
     #[test]

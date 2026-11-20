@@ -407,6 +407,15 @@ impl<'ast> Visit<'ast> for Scan<'_, 'ast> {
         }
         syn::visit::visit_expr_call(self, c);
     }
+    fn visit_expr_method_call(&mut self, m: &'ast syn::ExprMethodCall) {
+        self.out.calls.push(Call {
+            site: format!("{}::{}", self.file, self.scope()),
+            path: format!(".{}", m.method),
+            args: m.args.to_token_stream().to_string(),
+            test_only: self.test_depth > 0,
+        });
+        syn::visit::visit_expr_method_call(self, m);
+    }
 }
 
 fn test_only_modules(src: &Path) -> HashSet<String> {
@@ -768,6 +777,66 @@ fn every_descriptor_is_created_close_on_exec() {
         }
     }
     assert!(found.is_empty(), "descriptors not created close-on-exec:\n{}", found.join("\n"));
+}
+
+/// NET-11: each raw read and why it cannot discard bytes that follow what
+/// it reads. A new read fails until it is reviewed and listed here.
+const NET_11_READ_SITES: &[(&str, &str)] = &[
+    ("morloc-nexus/stdio_server.rs::read_fill_fd libc::read", "fills exactly the buffer asked"),
+    ("morloc-runtime-types/net_limits.rs::recv_flags_by libc::recv", "callers bound it to the bytes still owed"),
+    ("morloc-runtime/daemon_ffi.rs::drain_pair libc::read", "drains a wake pipe"),
+    ("morloc-runtime/daemon_ffi.rs::handle_lp_connection libc::recv", "one-byte peek"),
+    ("morloc-runtime/daemon_ffi.rs::recv_exact libc::recv", "reads exactly the length owed"),
+    ("morloc-runtime/daemon_ffi.rs::refuse_busy libc::recv", "drains a connection that then closes"),
+    ("morloc-runtime/fork_policy.rs::morloc_fork_worker libc::read", "one gate byte"),
+    ("morloc-runtime/fork_pool.rs::peek libc::recv", "one-byte peek"),
+    ("morloc-runtime/fork_pool.rs::read_retired libc::read", "whole 4-byte tokens, checked"),
+    ("morloc-runtime/fork_pool.rs::run libc::read", "drains a wake pipe"),
+    ("morloc-runtime/ipc_ffi.rs::recv libc::recv", "the frame reader: reports a read past the packet"),
+    ("morloc-runtime/ipc_ffi.rs::try_answer_ping libc::recv", "peeks a header, then reads exactly it"),
+    ("morloc-runtime/lifeline.rs::wait_for_end libc::read", "reads to end of file"),
+    ("morloc-nexus/cli.rs::resolve_manifest_target .read", "a file's first bytes, to classify it"),
+    ("morloc-nexus/file.rs::read_at_most .read", "a file's first bytes, to classify it"),
+    ("morloc-nexus/file/tests.rs::read .read", "test reader"),
+    ("morloc-nexus/mcp.rs::read .read", "the deadline reader under one BufReader per connection"),
+    ("morloc-nexus/mcp.rs::serve BufReader::new", "one BufReader over stdin for the server's life"),
+    ("morloc-nexus/mcp.rs::serve_conn BufReader::new", "one BufReader per connection, for its life"),
+    ("morloc-nexus/process.rs::wait_for_daemon .read", "reads exactly the reply's length"),
+    ("morloc-nexus/view.rs::drain_stdin_to_temp_with_prefix .read", "copies every byte to a file"),
+    ("morloc-nexus/view.rs::handle_stdin_input .read", "a prefix that is handed on with the rest"),
+    ("morloc-nexus/view.rs::read_exact_or_eof .read", "fills exactly the buffer asked"),
+    ("morloc-runtime-types/compression.rs::decompress_payload_zstd_into .read", "an in-memory decoder"),
+    ("morloc-runtime/cli.rs::spool_to_temp .read", "copies every byte to a file"),
+    ("morloc-runtime/slurm_bridge.rs::rpc BufReader::new", "one request per connection"),
+    ("morloc-runtime/stream.rs::read_schema_from_file .read", "a file's first bytes; the file is opened again to read it"),
+    ("morloc-runtime/pool_ffi.rs::serve libc::read", "drains a wake pipe"),
+];
+
+#[test]
+fn every_raw_read_is_reviewed_against_its_framing() {
+    let raw = ["recv", "recvfrom", "recvmsg", "read"];
+    let partial = [".read", "BufReader::new", "std::io::BufReader::new"];
+    let scan = scan_rust();
+    let reads: HashSet<String> = scan
+        .calls
+        .iter()
+        .filter(|c| !c.test_only)
+        .filter(|c| {
+            c.path.strip_prefix("libc::").is_some_and(|f| raw.contains(&f))
+                || (partial.contains(&c.path.as_str()) && !matches!(c.args.trim(), "" | "true"))
+        })
+        .map(|c| format!("{} {}", c.site, c.path))
+        .collect();
+    let listed: HashSet<String> = NET_11_READ_SITES.iter().map(|(s, _)| s.to_string()).collect();
+    let mut new: Vec<&String> = reads.difference(&listed).collect();
+    let mut gone: Vec<&String> = listed.difference(&reads).collect();
+    new.sort();
+    gone.sort();
+    assert!(
+        new.is_empty() && gone.is_empty(),
+        "NET-11: a reader never discards a byte that follows what it reads. Unreviewed reads: {new:?}; \
+         listed but gone: {gone:?}"
+    );
 }
 
 #[test]

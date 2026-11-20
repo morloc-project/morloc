@@ -176,7 +176,11 @@ unsafe fn read_retired(fd: i32, into: &mut HashSet<libc::pid_t>) {
         if n <= 0 {
             return;
         }
-        for c in buf[..n as usize / 4 * 4].chunks_exact(4) {
+        // NET-11: a token is written whole (PIPE_BUF), so a part of one is a defect.
+        if n as usize % 4 != 0 {
+            morloc_runtime_types::panic::fatal("the retire pipe gave part of a worker id");
+        }
+        for c in buf[..n as usize].chunks_exact(4) {
             into.insert(libc::pid_t::from_ne_bytes([c[0], c[1], c[2], c[3]]));
         }
     }

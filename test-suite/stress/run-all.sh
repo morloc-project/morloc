@@ -7,7 +7,8 @@
 #
 # The workload tests (zombie, concurrent, crash, valgrind) run one golden
 # program per language combination. deep-recursion builds its own programs
-# in every pool language and runs once, after the sweep.
+# in every pool language and runs once, after the sweep, as does
+# kept-connections, which builds the pool-kept-connections golden.
 
 set -euo pipefail
 
@@ -188,6 +189,10 @@ done
 
 if should_run "deep"; then
     run_suite "deep-recursion.sh" "deep-recursion"
+fi
+
+if should_run "kept"; then
+    run_suite "kept-connections.sh" "kept-connections"
 fi
 
 echo ""

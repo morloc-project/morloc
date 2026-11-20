@@ -2,6 +2,13 @@
 
 Details and evidence: /work/plans/runtime-audit-2026-10-10/C-processes.md.
 
+- **A revoke whose notice cannot be sent closes silently.** [read,
+  2026-11-20] NET-7, NET-9. revoke (morloc-runtime/src/fork_pool.rs ~532)
+  ignores the result of sending the not-run notice. A send cannot wait
+  (send_all waits while the caller lives) and EPIPE means the caller is
+  gone, but ENOBUFS or ENOMEM under memory pressure close the connection
+  with no notice, so a request the caller already sent on it fails as the
+  pool's death (the `revoke_without_notice` case of tla:KeptConn).
 - [speculative] A connect to a pool that died while idle may retry for up
   to 30 s before failing.
 - [measured] Python and R pools queue concurrent daemon requests behind a

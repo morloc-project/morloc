@@ -25,6 +25,12 @@ contention.
 with SIGKILL (default 10 iterations) and verifies the nexus exits promptly
 without leaking resources.
 
+**kept-connections.sh** `[-- loops runs]` — Runs the `parallel` call of
+golden pool-kept-connections in concurrent loops (default 4x15, about 12 s)
+and requires every run to exit 0 with the exact result: a call on a kept
+connection its worker revoked is retried, never reported as the pool's
+death (NET-7, NET-11).
+
 **valgrind-check.sh** — Runs the nexus under valgrind and checks for large
 memory leaks (>4KB) or file descriptor leaks (>3 extra). Requires valgrind.
 

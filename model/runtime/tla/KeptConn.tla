@@ -6,9 +6,13 @@
 (* listening socket; it is never pinned and never counts busy. It serves  *)
 (* a request on its held connection, or accepts a new one; before it      *)
 (* serves a new one it revokes what it holds: it appends a not-run notice *)
-(* and closes its end without reading again, so a request sent on the     *)
-(* revoked connection was never run and its caller retries it once on a  *)
-(* fresh connection. A retiring worker revokes the same way. A request    *)
+(* and later closes its end without reading again (two system calls, so  *)
+(* a request can arrive between them), so a request sent on the revoked  *)
+(* connection was never run and its caller retries it once on a fresh    *)
+(* connection. A retiring worker revokes the same way. A caller's read   *)
+(* may return what is queued behind a reply in the same call (NET-11):   *)
+(* the caller keeps no byte past the reply and does not reuse that       *)
+(* connection. Queued bytes are read before end of file. A request       *)
 (* sent on a connection whose callee end is closed delivered nothing and  *)
 (* is retried (NET-7); end of file after a complete send with no reply    *)
 (* is the pool's death. t1's call calls back into the caller's pool, whose *)
@@ -40,6 +44,8 @@ CONSTANTS Variant, Faults, Threads, Workers, NConns, Calls2
 \*   even when its reply was not sent.
 \* "ignore_eof": a worker never lets go of a held connection its caller
 \*   closed.
+\* "read_past_frame": a caller's read that took bytes queued behind the
+\*   reply drops them and reuses the connection when the reply kept it.
 
 Own(t) == CASE t = "t1" -> 1 [] t = "t2" -> Calls2 [] OTHER -> 0
 Conns == 1..NConns
@@ -63,6 +69,7 @@ VARIABLES
     outbox,     \* conn -> sequence of replies and notices not yet read
     kept,       \* conn -> a reply on it carried the keep bit
     killed,     \* conn -> its worker end closed with the pool's death or a failed reply
+    revoked,    \* connections whose notice is sent and whose worker end is still open
     backlog,    \* connections queued on the listening socket
     ws,         \* worker -> "absent" | "idle" | "computing" | "blocked" | "gone"
     held,       \* worker -> connections it holds for their next request
@@ -80,11 +87,11 @@ VARIABLES
     notRunLie
 
 vars == <<ts, cache, cur, curReq, isCb, calls, own, cs, inbox, outbox, kept,
-          killed, backlog, ws, held, srv, req, runs, poolUp, deaths, retired, failed,
+          killed, revoked, backlog, ws, held, srv, req, runs, poolUp, deaths, retired, failed,
           cbState, cbBy, falseCrash, wrongReply, notRunLie>>
 
 callerVars == <<ts, cache, cur, curReq, isCb, calls, own>>
-connVars == <<cs, inbox, outbox, kept, killed, backlog>>
+connVars == <<cs, inbox, outbox, kept, killed, revoked, backlog>>
 workerVars == <<ws, held, srv, req>>
 otherVars == <<runs, poolUp, deaths, retired, failed, cbState, cbBy, falseCrash, wrongReply, notRunLie>>
 
@@ -101,6 +108,7 @@ Init ==
     /\ outbox = [x \in Conns |-> <<>>]
     /\ kept = [x \in Conns |-> FALSE]
     /\ killed = [x \in Conns |-> FALSE]
+    /\ revoked = {}
     /\ backlog = {}
     /\ ws = [w \in Workers |-> IF w = "w1" THEN "idle" ELSE "absent"]
     /\ held = [w \in Workers |-> {}]
@@ -156,7 +164,7 @@ CallOwn(t) ==
     /\ own[t] < Own(t)
     /\ ~(cbBy = t /\ cbState = "taken")
     /\ StartCall(t, [who |-> t, n |-> calls[t] + 1], FALSE)
-    /\ UNCHANGED <<calls, own, outbox, kept, killed>>
+    /\ UNCHANGED <<calls, own, outbox, kept, killed, revoked>>
     /\ UNCHANGED workerVars
     /\ UNCHANGED otherVars
 
@@ -178,7 +186,7 @@ CallCb(t) ==
     /\ cbBy = t
     /\ cbState' = "sent"
     /\ StartCall(t, [who |-> t, n |-> calls[t] + 1], TRUE)
-    /\ UNCHANGED <<calls, own, outbox, kept, killed>>
+    /\ UNCHANGED <<calls, own, outbox, kept, killed, revoked>>
     /\ UNCHANGED workerVars
     /\ UNCHANGED <<runs, poolUp, deaths, retired, failed, cbBy, falseCrash, wrongReply, notRunLie>>
 
@@ -189,26 +197,30 @@ Finish(t) ==
     /\ cbState' = IF isCb[t] THEN "done" ELSE cbState
 
 \* The next message on the call's connection: its reply, or a notice that
-\* the request was not run, which is retried on a fresh connection.
+\* the request was not run, which is retried on a fresh connection. A read
+\* of a reply may also take what is queued behind it (`more`); the caller
+\* keeps none of it and ends the connection (NET-11).
 Receive(t) ==
     /\ ts[t] = "waiting"
     /\ LET x == cur[t] IN
          /\ outbox[x] # <<>>
-         /\ outbox' = [outbox EXCEPT ![x] = Tail(@)]
          /\ IF Head(outbox[x]) = NotRun
-            THEN /\ notRunLie' = (notRunLie \/ runs[curReq[t]] > 0)
+            THEN /\ outbox' = [outbox EXCEPT ![x] = Tail(@)]
+                 /\ notRunLie' = (notRunLie \/ runs[curReq[t]] > 0)
                  /\ cache' = [cache EXCEPT ![t] = None]
                  /\ Connect(t, curReq[t], x)
                  /\ UNCHANGED <<ts, calls, own, cbState, wrongReply>>
-            ELSE /\ wrongReply' = (wrongReply \/ Head(outbox[x]) # curReq[t])
-                 /\ IF kept[x]
+            ELSE \E more \in IF Len(outbox[x]) > 1 THEN BOOLEAN ELSE {FALSE} :
+                 /\ outbox' = [outbox EXCEPT ![x] = IF more THEN <<>> ELSE Tail(@)]
+                 /\ wrongReply' = (wrongReply \/ Head(outbox[x]) # curReq[t])
+                 /\ IF kept[x] /\ (~more \/ Variant = "read_past_frame")
                     THEN /\ cache' = [cache EXCEPT ![t] = x]
                          /\ UNCHANGED cs
                     ELSE /\ cache' = [cache EXCEPT ![t] = None]
                          /\ cs' = [cs EXCEPT ![x] = CloseCaller(cs, x)]
                  /\ Finish(t)
                  /\ UNCHANGED <<notRunLie, cur, inbox, backlog>>
-    /\ UNCHANGED <<curReq, isCb, kept, killed>>
+    /\ UNCHANGED <<curReq, isCb, kept, killed, revoked>>
     /\ UNCHANGED workerVars
     /\ UNCHANGED <<runs, poolUp, deaths, retired, failed, cbBy, falseCrash>>
 
@@ -223,7 +235,7 @@ PeerGone(t) ==
          /\ cs' = [cs EXCEPT ![x] = "closed"]
          /\ cache' = [cache EXCEPT ![t] = None]
     /\ Finish(t)
-    /\ UNCHANGED <<cur, curReq, isCb, inbox, outbox, kept, killed, backlog>>
+    /\ UNCHANGED <<cur, curReq, isCb, inbox, outbox, kept, killed, revoked, backlog>>
     /\ UNCHANGED workerVars
     /\ UNCHANGED <<runs, poolUp, deaths, retired, failed, cbBy, wrongReply, notRunLie>>
 
@@ -240,7 +252,7 @@ Exit(t) ==
        THEN cs' = [cs EXCEPT ![cache[t]] = CloseCaller(cs, cache[t])]
        ELSE UNCHANGED cs
     /\ cache' = [cache EXCEPT ![t] = None]
-    /\ UNCHANGED <<cur, curReq, isCb, calls, own, inbox, outbox, kept, killed, backlog>>
+    /\ UNCHANGED <<cur, curReq, isCb, calls, own, inbox, outbox, kept, killed, revoked, backlog>>
     /\ UNCHANGED workerVars
     /\ UNCHANGED otherVars
 
@@ -272,11 +284,13 @@ ServeKept(w) ==
          /\ held' = [held EXCEPT ![w] = @ \ {x}]
          /\ ws' = [ws EXCEPT ![w] = "computing"]
     /\ UNCHANGED callerVars
-    /\ UNCHANGED <<cs, outbox, kept, killed, backlog>>
+    /\ UNCHANGED <<cs, outbox, kept, killed, revoked, backlog>>
     /\ UNCHANGED <<poolUp, deaths, retired, failed, cbState, cbBy, falseCrash, wrongReply, notRunLie>>
 
 \* An idle worker accepts a queued connection, revokes what it holds, and
-\* reads the new connection's request.
+\* reads the new connection's request. A revoke with a notice sends it now
+\* and closes the worker end in a later step (CloseRevoked); one without a
+\* notice closes it now.
 Accept(w) ==
     /\ ws[w] = "idle"
     /\ \E x \in backlog :
@@ -284,11 +298,13 @@ Accept(w) ==
                   THEN {} ELSE held[w]
              S == IF Variant \in {"serve_while_holding", "notice_keeps_reading"}
                   THEN {} ELSE held[w]
+             C == S \ N
          IN /\ backlog' = backlog \ {x}
-            /\ cs' = [y \in Conns |-> IF y \in S THEN CloseWorker(cs, y) ELSE cs[y]]
-            /\ inbox' = [y \in Conns |-> IF y \in S \/ y = x THEN NoReq ELSE inbox[y]]
+            /\ cs' = [y \in Conns |-> IF y \in C THEN CloseWorker(cs, y) ELSE cs[y]]
+            /\ inbox' = [y \in Conns |-> IF y \in C \/ y = x THEN NoReq ELSE inbox[y]]
             /\ outbox' = [y \in Conns |-> IF y \in N
                                           THEN Append(outbox[y], NotRun) ELSE outbox[y]]
+            /\ revoked' = revoked \cup (S \cap N)
             /\ runs' = [runs EXCEPT ![inbox[x]] = @ + 1]
             /\ req' = [req EXCEPT ![w] = inbox[x]]
             /\ srv' = [srv EXCEPT ![w] = x]
@@ -297,6 +313,18 @@ Accept(w) ==
     /\ UNCHANGED callerVars
     /\ UNCHANGED <<kept, killed>>
     /\ UNCHANGED <<poolUp, deaths, retired, failed, cbState, cbBy, falseCrash, wrongReply, notRunLie>>
+
+\* The worker end of a revoked connection closes; a request that reached it
+\* after the notice is never read.
+CloseRevoked(x) ==
+    /\ x \in revoked
+    /\ revoked' = revoked \ {x}
+    /\ cs' = [cs EXCEPT ![x] = CloseWorker(cs, x)]
+    /\ inbox' = [inbox EXCEPT ![x] = NoReq]
+    /\ UNCHANGED callerVars
+    /\ UNCHANGED <<outbox, kept, killed, backlog>>
+    /\ UNCHANGED workerVars
+    /\ UNCHANGED otherVars
 
 \* t1's call calls back into the caller's pool and waits for that call.
 CallBack(w) ==
@@ -330,7 +358,7 @@ Reply(w) ==
     /\ srv' = [srv EXCEPT ![w] = None]
     /\ ws' = [ws EXCEPT ![w] = "idle"]
     /\ UNCHANGED callerVars
-    /\ UNCHANGED <<cs, inbox, killed, backlog, req>>
+    /\ UNCHANGED <<cs, inbox, killed, revoked, backlog, req>>
     /\ UNCHANGED otherVars
 
 \* The reply is not sent whole: the connection closes and the call fails.
@@ -350,7 +378,7 @@ ReplyFail(w) ==
     /\ ws' = [ws EXCEPT ![w] = "idle"]
     /\ failed' = 1
     /\ UNCHANGED callerVars
-    /\ UNCHANGED <<inbox, outbox, kept, backlog, req>>
+    /\ UNCHANGED <<inbox, outbox, kept, revoked, backlog, req>>
     /\ UNCHANGED <<runs, poolUp, deaths, retired, cbState, cbBy, falseCrash, wrongReply, notRunLie>>
 
 \* A held connection whose caller closed it is closed and let go.
@@ -363,7 +391,7 @@ Eof(w) ==
          /\ cs' = [cs EXCEPT ![x] = "closed"]
          /\ held' = [held EXCEPT ![w] = @ \ {x}]
     /\ UNCHANGED callerVars
-    /\ UNCHANGED <<inbox, outbox, kept, killed, backlog>>
+    /\ UNCHANGED <<inbox, outbox, kept, killed, revoked, backlog>>
     /\ UNCHANGED <<ws, srv, req>>
     /\ UNCHANGED otherVars
 
@@ -376,10 +404,12 @@ Retire(w) ==
     /\ backlog = {}
     /\ LET S == held[w]
            notice == Variant # "retire_silently"
-       IN /\ cs' = [y \in Conns |-> IF y \in S THEN CloseWorker(cs, y) ELSE cs[y]]
-          /\ inbox' = [y \in Conns |-> IF y \in S THEN NoReq ELSE inbox[y]]
+           C == IF notice THEN {} ELSE S
+       IN /\ cs' = [y \in Conns |-> IF y \in C THEN CloseWorker(cs, y) ELSE cs[y]]
+          /\ inbox' = [y \in Conns |-> IF y \in C THEN NoReq ELSE inbox[y]]
           /\ outbox' = [y \in Conns |-> IF y \in S /\ notice
                                         THEN Append(outbox[y], NotRun) ELSE outbox[y]]
+          /\ revoked' = IF notice THEN revoked \cup S ELSE revoked
     /\ held' = [held EXCEPT ![w] = {}]
     /\ ws' = [ws EXCEPT ![w] = "gone"]
     /\ retired' = 1
@@ -403,6 +433,7 @@ Die ==
     /\ cs' = [x \in Conns |-> IF WorkerOpen(x) THEN CloseWorker(cs, x) ELSE cs[x]]
     /\ killed' = [x \in Conns |-> killed[x] \/ WorkerOpen(x)]
     /\ inbox' = [x \in Conns |-> NoReq]
+    /\ revoked' = {}
     /\ UNCHANGED callerVars
     /\ UNCHANGED <<outbox, kept>>
     /\ UNCHANGED <<runs, retired, failed, cbState, cbBy, falseCrash, wrongReply, notRunLie>>
@@ -427,7 +458,7 @@ Recycle(x) ==
     /\ kept' = [kept EXCEPT ![x] = FALSE]
     /\ killed' = [killed EXCEPT ![x] = FALSE]
     /\ UNCHANGED callerVars
-    /\ UNCHANGED backlog
+    /\ UNCHANGED <<revoked, backlog>>
     /\ UNCHANGED workerVars
     /\ UNCHANGED otherVars
 
@@ -440,7 +471,7 @@ Next ==
          \/ Eof(w) \/ Retire(w)
     \/ Die
     \/ Restart
-    \/ \E x \in Conns : Recycle(x)
+    \/ \E x \in Conns : Recycle(x) \/ CloseRevoked(x)
     \/ UNCHANGED vars
 
 Spec ==
@@ -450,7 +481,7 @@ Spec ==
     /\ WF_vars(\E t \in Helpers : TakeCallback(t))
     /\ WF_vars(Spawn)
     /\ WF_vars(Restart)
-    /\ \A x \in Conns : WF_vars(Recycle(x))
+    /\ \A x \in Conns : WF_vars(Recycle(x)) /\ WF_vars(CloseRevoked(x))
     /\ \A w \in Workers : WF_vars(ServeKept(w)) /\ WF_vars(Accept(w)) /\ WF_vars(CallBack(w))
                          /\ WF_vars(Resume(w)) /\ WF_vars(Reply(w)) /\ WF_vars(Eof(w))
 

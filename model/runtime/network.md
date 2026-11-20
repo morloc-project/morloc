@@ -131,9 +131,12 @@ carried nothing, and makes another; it makes none while a fork is under
 way. A callee that keeps a connection closes it while it lives only by a
 revoke: it sends a header-only reply whose not-run bit is set (FMT-1) and
 closes without reading the connection again, so whatever request the
-connection carries was not run. A send that fails because the callee's end is
-closed delivered nothing, and is retried once on a new connection; so is a
-call answered by a not-run notice on a reused connection, while a not-run
+connection carries was not run. The notice and the close are two system
+calls, so a request can reach the connection between them; it is never
+read, and the caller reads the notice before the end of file (NET-11). A
+send that fails because the callee's end is closed delivered nothing, and
+is retried once on a new connection; so is a call answered by a not-run
+notice on a reused connection, while a not-run
 notice on a new connection is an error, since a new connection is never
 kept yet. A connection that ends after a complete send means the callee is
 gone, and the call fails without a retry, so a call runs at most once and
@@ -223,3 +226,25 @@ malformed header line or name, a `Transfer-Encoding`, or a
 `Content-Length` that is not digits or disagrees with another (RFC 9110
 8.6). A body shorter than its declared length is refused, never served.
 Nothing in a request is truncated.
+
+### NET-11 A reader of a framed message keeps every byte it reads, and a reused connection holds nothing it skipped
+Status: implemented
+Checked by: a_notice_read_behind_a_kept_reply_ends_the_connection, a_request_with_bytes_behind_it_is_refused, queued_bytes_are_read_before_the_end_of_a_closed_peer, every_raw_read_is_reviewed_against_its_framing, the_job_id_is_the_last_line_of_sbatchs_output, tla:KeptConn, tla:KeptConn_read_past_frame.bug
+
+A read of one message from a stream socket, pipe or file may return bytes
+that follow it: on a kept connection, the not-run notice of a revoke can
+arrive behind the reply in the same read (NET-7, NET-9). A reader never
+discards a byte it has read. Either the bytes past the message stay unread
+in the descriptor, or the connection ends after the message and is never
+reused, polled or read again. A caller whose reply read took bytes past
+the reply uses the reply and closes the connection instead of keeping it,
+so its next call opens a fresh one. A callee that reads a request with
+bytes past it refuses the request without running it, since nothing
+follows a request (NET-7). On a local stream socket, bytes queued before
+the peer's end closes are read before its end of file or reset; the
+caller reads a revoke's notice even when its own request was left unread.
+Every raw read (`recv`, `read`) and every partial standard-library read
+(`Read::read`, a `BufReader`) is reviewed against this item, and a new one
+fails a check until it is. Model: tla:KeptConn (a read takes what is queued behind a reply;
+the revoke sends its notice and closes in two steps) with its `.bug`
+variant `read_past_frame`.
