@@ -104,3 +104,16 @@ not stop it. Its manifest also records how to repeat its build. After
 `morloc install --force`, every installed program whose recorded files no
 longer match is rebuilt that way; the install fails if one cannot be
 rebuilt. `--no-rebuild` names those programs instead.
+
+### SRC-9 A program's own source of a term shadows an imported one
+Intent: ruled 2026-11-20
+Tests: spec-src-9-1
+Code: conforms 2026-11-20
+
+When the program's own modules (those of the root module's package, or
+the modules of no package for a script) source a term in a language, a
+source of the same term in that language from an imported module is not
+an implementation of it, anywhere in the program: the imported modules'
+own uses of the term call the program's implementation too. So a root
+module that gains a function does not break a program that implemented it. Two imported modules sourcing one
+term in one language remain ambiguous.

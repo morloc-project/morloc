@@ -23,6 +23,8 @@ Fixed
    fields allow it, and generated C++ records compare with ==
  * a where-binding used twice is one value to the length checks: the row
    count its call chooses is the same at every use
+ * a program's own source of a term shadows an imported module's source of
+   it in the same language, instead of being ambiguous
  * a length a call chooses at run time that a body cannot rely on is
    reported as such (DIM-10), not as a signature failure naming `?n`
 

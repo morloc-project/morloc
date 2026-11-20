@@ -73,6 +73,25 @@ data Namer = Namer
   }
   deriving (Show)
 
+-- | Drop each source the program's own modules shadow (SRC-9): a term the
+-- program sources in a language has no imported source in it. Every reader
+-- of a term's sources sees the result. The program's own modules are those
+-- of the root module's package, or, for a script, the root module and its
+-- local submodules.
+shadowImportedSources :: MVar -> MorlocMonad ()
+shadowImportedSources root = do
+  packages <- MM.gets stateModulePackages
+  let package m = Map.lookup m packages
+      own m = case package root of
+        Just p -> package m == Just p
+        Nothing -> m == root || MT.isPrefixOf "." (unMVar m)
+      unshadowed srcs =
+        let ownLangs = Set.fromList [srcLang src | (m, Idx _ src) <- srcs, own m]
+         in [x | x@(m, Idx _ src) <- srcs, own m || Set.notMember (srcLang src) ownLangs]
+      shadow (Monomorphic t) = Monomorphic t {termConcrete = unshadowed (termConcrete t)}
+      shadow x = x
+  MM.modify' $ \st -> st {stateSignatures = GMap.mapVals shadow (stateSignatures st)}
+
 -- When I see a term, I need to look it up. To do so, I need to walk up through
 -- scope and fine all sources/declarations and type annotations. This involves
 -- walking up through where statements (shadowing is possible), up through lambdas
@@ -121,6 +140,7 @@ treeify d
 
             -- move all to state, after this the DAG will no longer be needed
             _ <- MFL.link d'
+            shadowImportedSources k
 
             -- every effect label used in a `<...>` row must be declared
             -- (the compiler hardcodes none); checked after link populates
