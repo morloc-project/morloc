@@ -181,8 +181,8 @@ printExpr (IIntrinsicOpenOStream sid path) =
   "::rustmorloc::open_ostream(" <> schemaRef sid <> ", " <> refExpr path <> ")"
 printExpr (IIntrinsicOpenIStream sid path) =
   "::rustmorloc::open_istream(" <> schemaRef sid <> ", " <> refExpr path <> ")"
-printExpr (IIntrinsicWrite sid level value handle) =
-  "::rustmorloc::write(" <> schemaRef sid <> ", " <> printExpr level
+printExpr (IIntrinsicWrite sink sid level value handle) =
+  (if sink then "::rustmorloc::sink_write(" else "::rustmorloc::write(") <> schemaRef sid <> ", " <> printExpr level
     <> ", " <> refExpr value <> ", " <> printExpr handle <> ")"
 printExpr (IIntrinsicAppend sid path) =
   "::rustmorloc::append(" <> schemaRef sid <> ", " <> refExpr path <> ")"

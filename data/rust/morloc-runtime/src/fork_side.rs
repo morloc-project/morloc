@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 use std::ffi::{c_char, c_void, CString};
 use std::ptr;
-use std::sync::atomic::{AtomicI64, AtomicPtr, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicPtr, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::error::MorlocError;
@@ -21,6 +21,8 @@ const TAKEN: i64 = 4;
 
 const OPEN: u8 = 0;
 const CLOSED: u8 = 1;
+// SIDE-12: marked in place, so the mark needs no room the put lacked.
+const MARKED: u8 = 2;
 
 // SIDE-10: the state byte, the committed length and its complement.
 const HEADER: u64 = 17;
@@ -52,6 +54,8 @@ pub struct SideEntry {
     path: AtomicPtr<String>,
     lock: Mutex<()>,
     native: AtomicPtr<c_void>,
+    // SIDE-12
+    failed: AtomicBool,
 }
 
 #[derive(Default)]
@@ -247,6 +251,9 @@ impl SideEntry {
     fn append(&self, len: u64, body: &[u8]) -> Result<(), MorlocError> {
         let f = self.lock_file()?;
         let (state, committed) = read_header(f.0)?;
+        if state == MARKED {
+            return Err(err("an earlier put in a forked child raised, so this fold or gather has failed"));
+        }
         if state != OPEN {
             return Err(late(self.kind.noun()));
         }
@@ -270,13 +277,26 @@ impl SideEntry {
         r
     }
 
+    // SIDE-12: a file already closed was taken; the put was late.
+    fn mark_failed(&self) -> Result<(), MorlocError> {
+        let f = self.lock_file()?;
+        let (state, _) = read_header(f.0)?;
+        if state != OPEN {
+            return Ok(());
+        }
+        if unsafe { libc::pwrite(f.0, [MARKED].as_ptr() as *const c_void, 1, 0) } != 1 {
+            return Err(io());
+        }
+        Ok(())
+    }
+
     fn mark_closed(&self) -> Result<Reader, MorlocError> {
         let f = self.lock_file()?;
         let h = read_header(f.0);
         if unsafe { libc::pwrite(f.0, [CLOSED].as_ptr() as *const c_void, 1, 0) } != 1 {
             return Err(io());
         }
-        let (_, committed) = h?;
+        let (state, committed) = h?;
         let size = unsafe { libc::lseek(f.0, 0, libc::SEEK_END) };
         if size < 0 {
             return Err(io());
@@ -285,7 +305,13 @@ impl SideEntry {
             return Err(torn());
         }
         unsafe { libc::flock(f.0, libc::LOCK_UN) };
-        Ok(Reader { file: Some(f), at: HEADER, end: committed })
+        let mut r = Reader { file: Some(f), at: HEADER, end: committed };
+        // SIDE-12: a poison record names the failure better than the mark.
+        if state == MARKED {
+            while r.next()?.is_some() {}
+            return Err(err("a put in a forked child raised, so its batch is missing; the producer went on without it"));
+        }
+        Ok(r)
     }
 
     // SIDE-1: one CAS to TAKEN, after any prepare settles the word. FOLD-2:
@@ -347,6 +373,7 @@ pub fn new(native: *mut c_void, kind: Kind) -> Result<i64, MorlocError> {
         path: AtomicPtr::new(ptr::null_mut()),
         lock: Mutex::new(()),
         native: AtomicPtr::new(native),
+        failed: AtomicBool::new(false),
     });
     // SIDE-2: made only with no fork in progress, waiting with the lock released.
     loop {
@@ -476,7 +503,34 @@ pub(crate) fn finish(id: i64, kind: Kind) -> (*mut c_void, Result<Reader, Morloc
         TAKEN => Err(twice()),
         _ => Err(err("a forked child's batches were lost: the side file could not be made")),
     };
+    // SIDE-12
+    let records = records.and_then(|r| if e.failed.load(Ordering::Acquire) { Err(failed_put(noun)) } else { Ok(r) });
     (native, records)
+}
+
+fn failed_put(noun: &str) -> MorlocError {
+    MorlocError::Other(format!(
+        "a put into this {noun} raised, so its batch is missing; the producer went on without it"
+    ))
+}
+
+/// SIDE-12: a put that raised fails its gather or fold. A late call,
+/// or one for an entry this process cannot see, changes nothing.
+pub fn fail(id: i64) {
+    let Some(e) = lookup(id) else { return };
+    if generation() == e.owner {
+        let _g = e.lock.lock().unwrap_or_else(|p| p.into_inner());
+        if e.state.load(Ordering::Acquire) != TAKEN {
+            e.failed.store(true, Ordering::Release);
+        }
+    } else if e.state.load(Ordering::Acquire) == SIDE {
+        if let Err(m) = e.mark_failed() {
+            morloc_runtime_types::panic::fatal(&format!(
+                "morloc: a put in a forked child raised, and marking its {} failed failed too: {m}",
+                e.kind.noun()
+            ));
+        }
+    }
 }
 
 // SIDE-2: called from the prepare handler before any held lock is taken.
@@ -556,6 +610,17 @@ impl Reader {
 mod c_abi {
     use super::*;
     use crate::cschema::CSchema;
+
+    /// SIDE-12: called by a binding whose put into `h` raised: a gather or
+    /// fold id, or a stream handle (FOLD-9).
+    #[no_mangle]
+    pub extern "C" fn mlc_sink_failed(h: i64) {
+        if h < 0 {
+            fail(h);
+        } else {
+            crate::stream::fail_written(h, "a put into this stream raised, so its batch is missing; the producer went on without it");
+        }
+    }
 
     unsafe fn schema_of(s: *const CSchema, what: &str) -> Result<Schema, MorlocError> {
         if s.is_null() {
@@ -933,6 +998,79 @@ pub(crate) mod tests {
             let child_ok = reaped(pid);
             let failed = take_all(id).err().is_some_and(|e| format!("{e}").contains("no wire form"));
             owner_refused && unwritten && child_ok && failed
+        });
+    }
+
+    #[test]
+    fn a_marked_side_file_reports_its_poison_record() {
+        in_child(|| {
+            let id = new(ptr::null_mut(), Kind::Gather).unwrap();
+            force_side(id);
+            let pid = unsafe { libc::fork() };
+            if pid == 0 {
+                let failed = unsafe { put_side(id, None, ptr::null_mut()) }.is_err();
+                fail(id);
+                unsafe { libc::_exit(if failed { 0 } else { 1 }) };
+            }
+            let child_ok = reaped(pid);
+            let named = take_all(id).err().is_some_and(|e| format!("{e}").contains("no wire form"));
+            child_ok && named
+        });
+    }
+
+    // tla:ForkSide_failed_put_unmarked.bug, tla:ForkSide_fold_failed_put_unmarked.bug
+    #[test]
+    fn a_failed_put_in_the_owner_fails_the_take() {
+        in_child(|| {
+            let g = new(ptr::null_mut(), Kind::Gather).unwrap();
+            fail(g);
+            let gather = take_all(g).err().is_some_and(|e| format!("{e}").contains("raised"));
+            let f = new(ptr::null_mut(), Kind::Fold).unwrap();
+            force_side(f);
+            let path = lookup(f).unwrap().path().unwrap().to_string();
+            fail(f);
+            let fold = finish(f, Kind::Fold).1.err().is_some_and(|e| format!("{e}").contains("raised"));
+            gather && fold && !std::path::Path::new(&path).exists()
+        });
+    }
+
+    #[test]
+    fn a_failed_put_after_take_changes_nothing() {
+        in_child(|| {
+            let id = new(ptr::null_mut(), Kind::Gather).unwrap();
+            let taken = take_all(id).is_ok();
+            fail(id);
+            fail(-12345);
+            taken
+        });
+    }
+
+    #[test]
+    fn a_failed_put_in_a_forked_child_fails_the_take_even_on_a_full_disk() {
+        in_child(|| {
+            let id = new(ptr::null_mut(), Kind::Gather).unwrap();
+            force_side(id);
+            let e = lookup(id).unwrap();
+            e.write_record(b"parent").unwrap();
+            let pid = unsafe { libc::fork() };
+            if pid == 0 {
+                let ok = write_capped(&e, &[7u8; 1000]) && {
+                    let size = std::fs::metadata(e.path().unwrap()).unwrap().len();
+                    let mut lim = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+                    unsafe {
+                        libc::getrlimit(libc::RLIMIT_FSIZE, &mut lim);
+                        let capped = libc::rlimit { rlim_cur: size, rlim_max: lim.rlim_max };
+                        libc::setrlimit(libc::RLIMIT_FSIZE, &capped);
+                    }
+                    fail(id);
+                    e.write_record(b"later").is_err()
+                };
+                unsafe { libc::_exit(if ok { 0 } else { 1 }) };
+            }
+            let child_ok = reaped(pid);
+            let path = e.path().unwrap().to_string();
+            let failed = take_all(id).err().is_some_and(|e| format!("{e}").contains("forked child raised"));
+            child_ok && failed && !std::path::Path::new(&path).exists()
         });
     }
 

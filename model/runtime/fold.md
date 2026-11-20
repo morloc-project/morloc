@@ -2,10 +2,11 @@
 
 A `@fold` keeps its accumulator native in the pool where `step` runs. The
 bracket makes a fork-side entry (SIDE) whose native pointer is the
-runtime's slot table (morloc-runtime fold.rs): one slot per thread that
-puts, keyed by the calling thread's id as the runtime reads it, at most
-MAX_SLOTS. A slot is FREE (it holds the thread's value), BUSY (a put has it
-checked out) or FAILED (a step on it threw). Values are the binding's own
+runtime's slot table (morloc-runtime fold.rs): a list of slots, one per
+put that was ever in flight at the same time as the others, at most
+MAX_SLOTS. A slot is FREE (it holds a value), BUSY (a put has it checked
+out, and the slot records that put's thread) or FAILED (a step on it
+threw). No slot belongs to a thread. Values are the binding's own
 pointers, which the runtime never reads. The entry lock guards the native
 pointer and the slot table; no user code runs under it. Each put carries
 the fold's step itself, so nothing a put runs belongs to the bracket's
@@ -14,16 +15,19 @@ frame. A forked child's put goes to the side file, as for a gather
 
 ### FOLD-1 A fold put checks its slot out, steps it unlocked, and stores it back
 Status: implemented
-Checked by: each_thread_folds_into_its_own_fresh_slot, a_store_after_the_seal_fails_and_the_fold_fails, a_dropped_fold_returns_its_values_and_refuses_puts, golden:fold-native, golden:collect-fold-cpp, tla:ForkSide_fold, tla:ForkSide_fold_store_ignores_seal.bug, tla:ForkSide_fold_append_ignores_taken.bug
+Checked by: a_put_while_another_steps_folds_into_its_own_fresh_slot, a_store_after_the_seal_fails_and_the_fold_fails, a_dropped_fold_returns_its_values_and_refuses_puts, golden:fold-native, golden:collect-fold-cpp, tla:ForkSide_fold, tla:ForkSide_fold_store_ignores_seal.bug, tla:ForkSide_fold_append_ignores_taken.bug
 
 A put in the entry's owner (SIDE-4) has three phases. Under the entry
-lock: if the native pointer is null the put fails late; otherwise it finds
-the calling thread's slot, or makes one (FOLD-6); a BUSY slot fails the put
-(FOLD-5); it moves the value out and marks the slot BUSY. With no lock
+lock: if the native pointer is null the put fails late; a FAILED slot
+fails the put (FOLD-4), and so does a BUSY slot the calling thread holds
+(FOLD-5); otherwise it takes the lowest FREE slot, or makes one when none
+is FREE (FOLD-6), moves the value out and marks the slot BUSY, held by
+the calling thread. With no lock
 held, it runs `step value batch`; the value is exclusive to the thread, so
 a step may mutate it in place. Under the entry lock again: if the native
 pointer is null the put fails late and drops the value after unlocking;
-otherwise it stores the new value and marks the slot FREE, and only then
+otherwise it stores the new value into the BUSY slot its thread holds,
+marks it FREE, and only then
 returns success. So no put returns success once take has sealed the entry
 (FOLD-2). A store that skips the null check returns success for a batch
 the result may already have been combined without.
@@ -34,8 +38,8 @@ the step ran (FOLD-10). A put with a stream handle writes and flushes the
 batch instead (FOLD-9).
 
 In the owner the put checks out natively in every state but TAKEN, SIDE
-and FAILED included: a fold's result has no order, and only a child's
-batches need the side file. A null native pointer in the owner is a late
+and FAILED included: only a child's batches need the side file, and they
+need commutativity anyway (STRM-5). A null native pointer in the owner is a late
 put, never a side write; the runtime's `with_native` reports the two
 outcomes apart.
 
@@ -64,15 +68,13 @@ value, made from a fresh init, which it combines with the slots. The seal
 keeps every other put out of the slot table, so the replay needs no lock
 while it runs `step`. A take that finds a slot not FREE fails before any
 replay (FOLD-4), so no replay can clear a BUSY mark and hide the batches
-a thrown step lost. (The model replays into the take thread's slot and
-skips a BUSY one; replaying only when every slot is FREE is one of its
-behaviours.)
+a thrown step lost. The replay value is combined after the slots.
 
-### FOLD-4 A BUSY slot at take fails the fold
+### FOLD-4 A BUSY or FAILED slot at take fails the fold
 Status: implemented
 Checked by: a_busy_slot_at_take_fails_the_fold_even_with_side_records, a_failed_step_fails_later_puts_and_the_fold, a_folds_errors_name_the_fold, golden:fold-step-failures, tla:ForkSide_fold, tla:ForkSide_fold_reduce_ignores_busy.bug, tla:ForkSide_fold_replay_over_busy.bug
 
-Before it combines, take checks every slot; if any is BUSY the fold fails
+Before it combines, take checks every slot; if any is not FREE the fold fails
 loudly and nothing is combined. A BUSY slot holds no value: its batches,
 which returned success, are in a thread's hands (a producer thread still
 stepping, which escaped the producer callback) or gone (a step that
@@ -81,9 +83,9 @@ threw). Combining the moved-from value would drop them silently.
 A step that throws fails its put and marks the slot FAILED, so the fold
 fails at take even when the producer catches the put's error. So does a
 fresh slot's copy of init that throws, and a step that unwinds by any
-other means (an R condition that is not an error, an interrupt). A later
-put on the same thread fails; its message says that an earlier step on
-this thread failed, not that the put is re-entrant. A step that ends its
+other means (an R condition that is not an error, an interrupt). Every
+later put, on any thread, fails; its message says that an earlier step
+failed, not that the put is re-entrant. A step that ends its
 thread without marking the slot leaves it BUSY, which fails the take the
 same way. A fold's errors name the fold, never a gather.
 
@@ -91,15 +93,17 @@ same way. A fold's errors name the fold, never a gather.
 Status: implemented
 Checked by: a_reentrant_put_fails_and_changes_nothing, tla:ForkSide_fold, tla:ForkSide_fold_reentry_no_busy.bug
 
-A put that finds its own thread's slot BUSY (the step called the sink, or
+A put from a thread that holds a BUSY slot (the step called the sink, or
 a handle the user stashed) fails with "re-entrant fold put" and leaves the
-slot and its checked-out value as they were. Without the check, the inner
-put steps the moved-from value and stores it, and the outer put's store
-then overwrites it: the inner put returned success and its batch is lost.
+slot and its checked-out value as they were. The third phase finds a
+put's slot by the thread that holds it, so a thread holds at most one.
+Without the check, an inner put that steps the moved-from value in the
+outer put's slot is overwritten by the outer put's store: the inner put
+returned success and its batch is lost.
 
 ### FOLD-6 Each slot starts from its own copy of init
 Status: implemented
-Checked by: each_thread_folds_into_its_own_fresh_slot, golden:fold-native, golden:fold-r-reference, golden:spec-strm-5-1, tla:ForkSide_fold, tla:ForkSide_fold_shared_init.bug
+Checked by: a_put_while_another_steps_folds_into_its_own_fresh_slot, golden:fold-native, golden:fold-r-reference, golden:spec-strm-5-1, tla:ForkSide_fold, tla:ForkSide_fold_shared_init.bug
 
 A slot, the replay value and an empty fold's result start from a fresh
 init: Python `copy.deepcopy(init)`, Rust `B: Clone`, C++ the copy
@@ -164,3 +168,20 @@ the put drops its value. The step is the put's own argument, held by the
 sink closure that called it, and a fresh value never borrows the bracket's
 init (FOLD-6), so the put uses nothing the bracket frees.
 
+### FOLD-11 A sequential producer's batches fold in the order it put them
+Status: implemented
+Checked by: sequential_puts_on_alternating_threads_keep_their_order, puts_from_more_threads_than_the_slot_cap_share_one_slot, golden:fold-sequential-order, tla:ForkSide_fold, tla:ForkSide_fold_checkout_by_thread.bug
+
+When no two of a producer's puts are in flight at once and none comes
+from a forked child, the fold is `foldl step init xs` over the batches in
+the order they were put, with no need for commutativity (STRM-5). Such a
+producer's puts may still be served by different pool threads: a callback
+from another pool runs on whichever worker serves its connection, and a
+producer whose threads take turns, or that reconnects (NET-7, FORK-14,
+NET-9), or whose workers retire, reaches several. Since a put takes the
+lowest FREE slot, and with no put in flight every slot is FREE, every
+batch of a sequential producer folds into the first slot, in put order.
+Slots keyed by thread instead would split the batches across slots that
+take combines in slot order, out of the order they were put, and would
+grow with every thread that ever put until MAX_SLOTS fails the fold. The
+slot count is bounded by the puts in flight at once.

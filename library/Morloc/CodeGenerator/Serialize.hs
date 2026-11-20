@@ -691,7 +691,7 @@ serializeHosted' reg heads argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
       | intr `elem` [IntrSave, IntrSaveJ, IntrLoad, IntrRead, IntrUnpack,
                      IntrOpen, IntrClose, IntrFSchema,
                      IntrFLength, IntrStreamLayout, IntrNext, IntrStream,
-                     IntrWrite, IntrAppend, IntrConcat, IntrFlush,
+                     IntrWrite, IntrSinkWrite, IntrAppend, IntrConcat, IntrFlush,
                      IntrStdin, IntrStdout, IntrStderr, IntrThrow,
                      IntrTell, IntrTmpfile,
                      IntrReplay, IntrTry, IntrChannel, IntrSpawn, IntrSettle] = do
@@ -705,7 +705,7 @@ serializeHosted' reg heads argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
           case (intr, esBase) of
             (IntrSave, _ : _ : d : _) -> writeCheck d
             (IntrSaveJ, _ : d : _) -> writeCheck d
-            (IntrWrite, _ : _ : d : _) -> writeCheck d
+            (w, _ : _ : d : _) | isWrite w -> writeCheck d
             _ -> return ()
           -- @try's body must reach mlc_try as a no-arg callable; see
           -- 'thunkifyForTry' below.
@@ -825,9 +825,10 @@ serializeHosted' reg heads argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
       rest' <- packDataArg m dataArg
       return (levelArg : pathArg : rest' ++ rest)
     -- @write's args are [level, handle, value]; the value is at index 2.
-    unpackDataArgIfNeeded m IntrWrite (levelArg : handleArg : dataArg : rest) = do
-      rest' <- packDataArg m dataArg
-      return (levelArg : handleArg : rest' ++ rest)
+    unpackDataArgIfNeeded m intr (levelArg : handleArg : dataArg : rest)
+      | isWrite intr = do
+          rest' <- packDataArg m dataArg
+          return (levelArg : handleArg : rest' ++ rest)
     -- @savej's args are [path, value]; the value is at index 1.
     unpackDataArgIfNeeded m intr (pathArg : dataArg : rest)
       | intr == IntrSaveJ = do
@@ -1007,9 +1008,10 @@ serializeHosted' reg heads argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
     -- @write's data arg (at index 2, after level Int and handle) carries `[a]`;
     -- schema describes that list type so to_voidstar produces the right
     -- voidstar layout for the runtime's flatten_to_buffer.
-    intrinsicSchema m IntrWrite _ (_levelArg : _handleArg : dataArg : _) = do
-      ast <- Serial.makeSerialAST m lang (typeFof dataArg)
-      Just <$> Serial.schemaOfHeld m lang ast
+    intrinsicSchema m intr _ (_levelArg : _handleArg : dataArg : _)
+      | isWrite intr = do
+          ast <- Serial.makeSerialAST m lang (typeFof dataArg)
+          Just <$> Serial.schemaOfHeld m lang ast
     -- @open names what the file stores: an OStream writes it into the
     -- header, and an IFile or IStream checks the file against it.
     intrinsicSchema m IntrOpen tf _ = case unwrapHandleHead tf of

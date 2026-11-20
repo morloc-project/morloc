@@ -245,7 +245,7 @@ data IExpr
       --   runtime open the stdin sentinel (routing to the nexus stdin
       --   channel and guarding the incoming stream schema); for a real
       --   file the schema is still read from disk.
-  | IIntrinsicWrite Int IExpr IExpr IExpr
+  | IIntrinsicWrite Bool Int IExpr IExpr IExpr
       -- ^ @write: schemaId of the [a] value type, level, value, handle.
   | IIntrinsicAppend Int IExpr
       -- ^ @append :: Str -> <IO> (OStream a): schemaId of `[a]`, path.
@@ -3069,8 +3069,9 @@ lowerNativeExprRaw cfg _ (IntrinsicN_ _ IntrStream _ [Low _ handleDocs]) =
 -- (level, value, handle) to match the C ABI `mlc_write(level, handle,
 -- voidstar)` and the pool's `_mlc_write(schema, level, value, handle)`
 -- helper.
-lowerNativeExprRaw cfg _ (IntrinsicN_ _ IntrWrite (Just schema)
-                                  [Low _ levelDocs, Low _ handleDocs, Low valueE valueDocs]) = do
+lowerNativeExprRaw cfg _ (IntrinsicN_ _ intr (Just schema)
+                                  [Low _ levelDocs, Low _ handleDocs, Low valueE valueDocs])
+  | isWrite intr = do
   sid <- lcRegisterSchema cfg schema
   -- The written value is only read, through a 'ToVoidstar' (&T) sink (see
   -- @hash above). level and handle are not value sinks.
@@ -3079,7 +3080,7 @@ lowerNativeExprRaw cfg _ (IntrinsicN_ _ IntrWrite (Just schema)
       raw d = IRawExpr (render (poolExpr d))
   return $ handleDocs
     { poolExpr = lcPrintExpr cfg
-        (IIntrinsicWrite sid (raw levelDocs) (raw valueDocs') (raw handleDocs))
+        (IIntrinsicWrite (intr == IntrSinkWrite) sid (raw levelDocs) (raw valueDocs') (raw handleDocs))
     , poolPriorExprs = concatMap poolPriorExprs allDocs
     , poolPriorLines = concatMap poolPriorLines allDocs
     , poolCompleteManifolds = concatMap poolCompleteManifolds allDocs
@@ -3154,7 +3155,7 @@ lowerNativeExprRaw cfg _ (IntrinsicN_ _ intr (Just schema) [Low _ handleDocs, Lo
       let raw d = IRawExpr (render (poolExpr d))
           putExpr
             | native = IIntrinsicGatherPut sid (raw handleDocs) (raw valueDocs')
-            | otherwise = IIntrinsicWrite sid (IIntLit Nothing 0) (raw valueDocs') (raw handleDocs)
+            | otherwise = IIntrinsicWrite True sid (IIntLit Nothing 0) (raw valueDocs') (raw handleDocs)
       return $ mergePoolDocs (const $ lcPrintExpr cfg putExpr) [handleDocs, valueDocs']
 lowerNativeExprRaw cfg origExpr (IntrinsicN_ _ intr mschema [Low iniE iniDocs, Low stepE stepDocs, Low _ combDocs, Low _ fnDocs])
   | intr `elem` [IntrFold, IntrFoldFile] = do

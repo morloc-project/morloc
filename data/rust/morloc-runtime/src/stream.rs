@@ -3955,6 +3955,25 @@ fn fail_stream(g: &SlotGuard, msg: &str) {
     slot.write_buffer_data_used.set(0);
 }
 
+/// SLOT-35: a sink whose put raised fails its output stream or channel; the
+/// buffer stays the slot's, freed with it.
+pub fn fail_written(handle: i64, msg: &str) {
+    let (gen_claim, slot_idx) = unpack_handle(handle);
+    let Some(slot) = slot_ref(slot_idx) else { return };
+    let Ok(g) = lock_for_write(slot, gen_claim, "") else { return };
+    match g.slot().kind.get() {
+        MLC_KIND_OSTREAM => {
+            if let Ok(q) = slot_queue(g.slot()) {
+                q.fail(crate::custody::FAILED_IO, msg);
+            }
+        }
+        MLC_KIND_CHANNEL => {
+            let _ = channel_fail_locked(&g, msg);
+        }
+        _ => {}
+    }
+}
+
 // SLOT-35: a closing channel whose buffered batches cannot be handed on fails.
 fn flush_channel_or_fail(g: &SlotGuard, local: &mut ProcessLocalSlot) -> Result<(), MorlocError> {
     let slot = g.slot();
@@ -13698,6 +13717,23 @@ mod channel_tests {
         }
     }
 
+    // SLOT-35
+    #[test]
+    fn a_sink_put_that_raised_fails_its_channel_after_what_was_handed_on() {
+        let _shm = crate::own_test_registry();
+        assert!(crate::fork_policy::exits_cleanly_in_a_forked_child(|| {
+            let h = shared_open_channel("as").unwrap();
+            write(h, r#"["a"]"#).unwrap();
+            fail_written(h, "a put raised");
+            let refused = write(h, r#"["b"]"#).is_err();
+            let first = read(h).unwrap();
+            let failed = read(h).err().is_some_and(|e| e.to_string().contains("a put raised"));
+            let _ = shared_close_handle(h);
+            let _ = shared_settle_channel(h);
+            refused && first.as_deref() == Some(r#"["a"]"#) && failed
+        }));
+    }
+
     #[test]
     fn a_settled_channel_leaves_no_reference_counted_to_its_process() {
         let _shm = crate::own_test_registry();
@@ -14324,6 +14360,25 @@ mod write_behind_tests {
     }
 
     // SLOT-16, SLOT-11
+
+    // SLOT-35
+    #[test]
+    fn a_forked_child_whose_put_raised_fails_its_parents_stdio_stream() {
+        let _shm = crate::own_test_registry();
+        crate::custody::set_stdio_sink(recording_sink);
+        let h = open_stdio(MLC_KIND_OSTREAM, STDIO_KIND_STDOUT, "as").unwrap();
+        let pid = unsafe { libc::fork() };
+        if pid == 0 {
+            let refused = std::panic::catch_unwind(|| write_one(h, &["x".to_string()], 0)).is_err();
+            fail_written(h, "a put raised");
+            unsafe { libc::_exit(if refused { 0 } else { 1 }) };
+        }
+        let mut status = 0;
+        assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid);
+        assert!(libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0, "child status {status}");
+        let e = shared_close_handle(h).expect_err("the stream outlived a child's failed put").to_string();
+        assert!(e.contains("a put raised"), "{e}");
+    }
     #[test]
     fn threads_write_one_stdio_stream_at_once_and_keep_each_write_whole() {
         let _shm = crate::own_test_registry();

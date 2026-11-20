@@ -57,6 +57,7 @@ module Morloc.Namespace.Expr
   , SaveFormat (..)
   , saveFormatName
   , intrinsicName
+  , isWrite
   , intrinsicArity
   , WireComparison (..)
   , derivedComparisons
@@ -570,6 +571,8 @@ data Intrinsic
   | IntrStream      -- ^ @stream :: IFile [a] -> <IO> IStream a@ -- derive a
                     -- forward-only IStream from an open IFile, bound to the
                     -- same path with an independent fd, mmap, and cursor.
+  | IntrSinkWrite   -- ^ internal: the @write of a @collect sink, typed as
+                    -- @write; a write that raises fails its stream (STRM-9).
   | IntrWrite       -- ^ @write :: Int -> OStream a -> [a] -> <IO> (Try Str ())@ --
                     -- emit one sub-packet of element-list type. The Int is
                     -- the zstd compression level (0 = uncompressed); the
@@ -757,6 +760,7 @@ intrinsicSig IntrStreamLayout = IntrSig "streamLayout" (Just 1) True True
 intrinsicSig IntrNext = IntrSig "next" (Just 1) True True
 intrinsicSig IntrStream = IntrSig "stream" (Just 1) True True
 intrinsicSig IntrWrite = IntrSig "write" (Just 3) True True
+intrinsicSig IntrSinkWrite = IntrSig "write" (Just 3) True False
 intrinsicSig IntrAppend = IntrSig "append" (Just 1) True True
 intrinsicSig IntrConcat = IntrSig "concat" (Just 2) True True
 intrinsicSig IntrFlush = IntrSig "flush" (Just 1) True True
@@ -784,6 +788,10 @@ intrinsicSig IntrFoldFile = IntrSig "foldfile" (Just 4) True False
 intrinsicSig IntrFoldPut = IntrSig "foldput" (Just 3) True False
 intrinsicSig IntrIFileWalk = IntrSig "ifile_walk" Nothing True False
 intrinsicSig IntrConform = IntrSig "conform" (Just 1) False False
+
+-- | @write and the @write of a @collect sink, which differ only in printing.
+isWrite :: Intrinsic -> Bool
+isWrite i = i == IntrWrite || i == IntrSinkWrite
 
 intrinsicName :: Intrinsic -> Text
 intrinsicName = sigName . intrinsicSig

@@ -1805,7 +1805,7 @@ synthE i g (IntrinsicS intr args)
 -- IntrWrite: @Int -> OStream a -> [a] -> <IO> Try Str ()@. The handle is
 -- checked before the list, so that in @write 0 (o :: OStream UInt64) [1]@
 -- the literal can be a UInt64 rather than synthesize Int.
-synthE _ g (IntrinsicS IntrWrite [levelE, handleE, listE]) = do
+synthE _ g (IntrinsicS w [levelE, handleE, listE]) | isWrite w = do
   let (g1, a) = newvar "write_a_" g
       listExpectedT   = AppU (VarU BT.list) [a]
       handleExpectedT = AppU (VarU BT.ostreamVar) [a]
@@ -1814,10 +1814,10 @@ synthE _ g (IntrinsicS IntrWrite [levelE, handleE, listE]) = do
   (g4, _, listE')   <- checkG g3 listE   listExpectedT
   return ( g4
          , EffectU ioEffectSet (BT.tryU BT.strU BT.unitU)
-         , IntrinsicS IntrWrite [levelE', handleE', listE']
+         , IntrinsicS w [levelE', handleE', listE']
          )
-synthE i _ (IntrinsicS IntrWrite args) =
-  MM.throwCompilerBugAt i $ "IntrWrite expects 3 args (level, handle, list), got " <> pretty (length args)
+synthE i _ (IntrinsicS w args) | isWrite w =
+  MM.throwCompilerBugAt i $ "@write expects 3 args (level, handle, list), got " <> pretty (length args)
 -- @fold :: b -> (b -> [a] -> b) -> (b -> b -> b) -> (Cell b -> <IO> ()) -> <IO> b.
 -- `Cell b` carries the accumulated type, so every put's step agrees with
 -- the fold's.
@@ -2054,6 +2054,7 @@ intrinsicType IntrTmpfile = Just (EffectU ioEffectSet (BT.tryU BT.strU BT.strU))
 intrinsicType IntrNext = Nothing
 intrinsicType IntrStream = Nothing
 intrinsicType IntrWrite = Just (EffectU ioEffectSet (BT.tryU BT.strU BT.unitU))
+intrinsicType IntrSinkWrite = Just (EffectU ioEffectSet (BT.tryU BT.strU BT.unitU))
 -- One clause each, not a guard over a list: this match is exhaustive on
 -- purpose, so that a new Intrinsic constructor fails the build here rather
 -- than falling through to a runtime error.

@@ -61,31 +61,20 @@
   the unlink, so the stream's slot and its temp file stay until the
   dispatch's sweep (if any reaches them). The native route drops its entry
   on the same path.
-- **A fold's slots are never reclaimed while it runs.** [read
-  2026-11-15] FOLD-1, FOLD-6 say nothing on it. fold.rs keeps one slot per
-  ThreadId that ever put, until take; MAX_SLOTS (4096) then fails the put.
-  Pool worker threads retire and respawn, so a long fold fed by
-  cross-pool callbacks (each batch on whichever worker serves it) can
-  reach the cap with few live threads. The message now names both causes.
-  Fix direction: let a FREE slot whose thread has ended be merged, by
-  combine, into another slot or a carried value (needs combine reachable
-  from the runtime, or the binding to do it at checkout), or key slots by
-  worker index instead of ThreadId. Model the change in ForkSide.tla
-  first (it touches FOLD-2's seal and FOLD-4's count).
-- **A sequential producer's fold batches may be combined out of order.**
-  [speculative 2026-11-15, DA review] Callbacks from another pool run on any
-  idle C++/Rust pool worker, and fold slots are keyed by thread
-  (morloc-runtime fold.rs), so a sequential producer in Python feeding a
-  native C++ fold can split its batches across slots; take combines in slot
-  order, so a non-commutative fold (concatenation) is reordered. STRM-5
-  requires commutativity only for threaded or forking producers. Same with
-  the former SHM cells. Repro to try: warm a C++ pool with a parallel map,
-  then fold 100 string batches from a sequential Python producer. Fix
-  direction: checkout takes any FREE slot (re-entry by a per-thread flag);
-  also bounds slots under worker turnover. Plan:
-  /work/plans/next-session-open-issues.md.
-- **A producer that swallows a sink error exits 0 with short output.**
-  [read 2026-11-15] A Python thread's default excepthook drops the error
-  of a failed put (encode failure, closed stream), and nothing marks the
-  stream failed, so the command succeeds with missing batches. Same for a
-  remote job. Needs a spec item: a failed write fails its stream.
+- **A batch that fails to cross to a sink in another pool marks nothing.**
+  [read 2026-11-20] STRM-9 deviates. When the `@collect` sink lives in
+  another pool, the producer's pool encodes each batch to cross before the
+  sink's guarded put runs; an encode failure raises in the producer's pool
+  only, so a producer that catches it (or a thread whose excepthook drops
+  it) finishes with the batch missing and the command exits 0. Fix
+  direction: the crossing closure's caller marks the sink (its handle is
+  among the closure's captured arguments) before re-raising. A remote job's
+  put is the same case (issues/remote-dispatch.md).
+- **A forked child cannot put into a stdio `@collect` sink.** [reproduced
+  2026-11-20] Gap in SLOT-16: a Python producer that forks and puts from the
+  child is refused ("stdio stream cannot cross a fork boundary"). Since
+  STRM-9 the refusal fails the command (golden spec-strm-9-1, inChild),
+  where before the batch was dropped and the command exited 0. A gather or
+  fold sink takes the side file from a child (SIDE-4); a whole-list or
+  streamed stdout sink has no such route. Open question: give stdio sinks a
+  child route, or refuse a forking producer at the sink.

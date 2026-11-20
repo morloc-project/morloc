@@ -1980,6 +1980,8 @@ int32_t mlc_fold_store(int64_t id, void* value, ERRMSG);
 
 // FOLD-4: this thread's checked-out step failed.
 void mlc_fold_failed(int64_t id);
+// SIDE-12: a put into a gather, fold or stream handle raised.
+void mlc_sink_failed(int64_t h);
 
 // FOLD-2..4: seal and end the fold. *values (free with free()) holds every
 // stored value, the caller's to release, even on error. Returns the reader

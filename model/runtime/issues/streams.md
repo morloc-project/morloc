@@ -251,3 +251,11 @@ here touch locks and ownership: model first.
   (iii) allow typed `@stderr` only with a guarantee no text reaches fd 2.
   The user leans to (i) but deferred it 2026-11-19: it needs a model
   first. The second-`@stderr` entry above belongs with it.
+- **A `-f json` stdout stream left open at the end of a run exits 0.**
+  [read 2026-11-20, code review] SLOT-40 covers only packet output:
+  `end_stdout` (morloc-nexus stdio_server.rs) checks for an unfinished
+  stream only for the packet and voidstar formats and returns `Ok` for
+  every other, so a JSON stream whose footer never arrived (`json_open`
+  still set) leaves `[1,2` on stdout and the run exits 0, where the packet
+  run fails. Test `a_stdout_stream_still_open_at_the_end_is_failed` uses
+  packet output only.

@@ -3472,6 +3472,11 @@ SEXP morloc_mlc_fold_store(SEXP h_r, SEXP value_r) { MAYFAIL
     return R_NilValue;
 }
 
+SEXP morloc_mlc_sink_failed(SEXP h_r) {
+    mlc_sink_failed(i64_from_sexp(h_r));
+    return R_NilValue;
+}
+
 SEXP morloc_mlc_fold_failed(SEXP h_r) {
     mlc_fold_failed(i64_from_sexp(h_r));
     return R_NilValue;
@@ -4892,6 +4897,7 @@ static void _r_init_impl(DllInfo *info) {
         {"morloc_mlc_fold_checkout", (DL_FUNC) &morloc_mlc_fold_checkout, 1},
         {"morloc_mlc_fold_store", (DL_FUNC) &morloc_mlc_fold_store, 2},
         {"morloc_mlc_fold_failed", (DL_FUNC) &morloc_mlc_fold_failed, 1},
+        {"morloc_mlc_sink_failed", (DL_FUNC) &morloc_mlc_sink_failed, 1},
         {"morloc_mlc_fold_drop", (DL_FUNC) &morloc_mlc_fold_drop, 1},
         {"morloc_mlc_fold_take", (DL_FUNC) &morloc_mlc_fold_take, 2},
         {"morloc_mlc_side_put", (DL_FUNC) &morloc_mlc_side_put, 3},

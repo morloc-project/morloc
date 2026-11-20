@@ -334,7 +334,7 @@ per death, until the volume is torn down.
 
 ### SLOT-35 A `@write` batch that fails leaves no trace, or fails its stream
 Status: implemented
-Checked by: a_batch_with_a_failing_element_leaves_no_trace, a_batch_failing_in_placement_is_absent_or_fails_the_stream, the_first_failure_of_a_queue_is_the_one_reported
+Checked by: a_batch_with_a_failing_element_leaves_no_trace, a_batch_failing_in_placement_is_absent_or_fails_the_stream, the_first_failure_of_a_queue_is_the_one_reported, a_forked_child_whose_put_raised_fails_its_parents_stdio_stream, golden:spec-strm-9-1
 
 Under the slot lock and before the stream's level is pinned, `@write` to
 an output stream or a channel resolves the path of every handle-form
@@ -356,7 +356,12 @@ stream instead: the error
 is returned, the batch's unhanded bytes are dropped, later writes are
 refused with the failure, an output stream keeps its temporary footer
 (SLOT-28) and a channel's reader gets the failure after what was handed
-on. When the writer and the custodian fail a stream at once, the first
+on. A `@collect` sink's write or put into a stream that raised before or
+after the write (STRM-9) fails the output stream the same way, from any
+process that holds its handle, a forked child of a stdio stream's opener
+included, so the opener's close returns the failure; a stream already
+closed or failed is left as it is. A user's own `@write` that fails before
+a hand-off still leaves no trace. When the writer and the custodian fail a stream at once, the first
 failure recorded is the one reported. A relptr of the write buffer's own bytes
 that will not shift when its index grows is a defect: the writer panics
 inside the slot lock, which fails the stream (SLOT-14). What was

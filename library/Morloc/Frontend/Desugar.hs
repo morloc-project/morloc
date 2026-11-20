@@ -3104,7 +3104,7 @@ mkWriteSink flush ref zeroE oRef = do
       dVar = EV (BT.doDiscardPrefix <> "collect_w_" <> T.pack (show idx))
       fVar = EV (BT.doDiscardPrefix <> "collect_f_" <> T.pack (show idx))
   vRef <- freshExprFrom ref (VarE defaultValue vVar)
-  writeE <- freshExprFrom ref (IntrinsicE IntrWrite [zeroE, oRef, vRef])
+  writeE <- freshExprFrom ref (IntrinsicE IntrSinkWrite [zeroE, oRef, vRef])
   forceWrite <- freshExprFrom ref (EvalE writeE)
   unitE <- freshExprFrom ref UniE
   afterWrite <-
@@ -4841,7 +4841,7 @@ mkEmitWrite singletonWrap ref oVar value = do
   oRef <- freshExprFrom ref (VarE defaultValue oVar)
   zeroE <- freshExprFrom ref (IntE 0)
   idx <- freshIdPos (Pos 0 0 "")
-  writeE <- freshExprFrom ref (IntrinsicE IntrWrite [zeroE, oRef, emitted])
+  writeE <- freshExprFrom ref (IntrinsicE IntrSinkWrite [zeroE, oRef, emitted])
   forceWrite <- freshExprFrom ref (EvalE writeE)
   unitE <- freshExprFrom ref UniE
   let dVar = EV (BT.doDiscardPrefix <> "emit_w_" <> T.pack (show idx))

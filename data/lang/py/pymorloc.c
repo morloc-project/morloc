@@ -5585,7 +5585,7 @@ static PyObject* py_gather_form(const Schema* schema, PyObject* batch) {
 
 // mlc_gather_put(handle, schema, batch) -> None. SIDE-4: a gather id puts
 // to its record, a stream handle to its stream.
-static PyObject* pybinding__mlc_gather_put(PyObject* self, PyObject* args) { MAYFAIL
+static PyObject* py_gather_put(PyObject* self, PyObject* args) { MAYFAIL
     long long h_ll;
     const char* schema_str;
     PyObject* batch;
@@ -5725,6 +5725,33 @@ static PyObject* pybinding__mlc_fold_store(PyObject* self, PyObject* args) { MAY
     Py_RETURN_NONE;
 error:
     return NULL;
+}
+
+// SIDE-12: a put that raised fails its sink, so a producer that catches the
+// error cannot finish with the batch missing.
+static void py_sink_failed_on_error(PyObject* args) {
+    PyObject *type, *value, *tb;
+    PyErr_Fetch(&type, &value, &tb);
+    if (PyTuple_Check(args) && PyTuple_GET_SIZE(args) > 0) {
+        long long h = PyLong_AsLongLong(PyTuple_GET_ITEM(args, 0));
+        if (!(h == -1 && PyErr_Occurred())) mlc_sink_failed((int64_t)h);
+        PyErr_Clear();
+    }
+    PyErr_Restore(type, value, tb);
+}
+
+static PyObject* pybinding__mlc_gather_put(PyObject* self, PyObject* args) {
+    PyObject* r = py_gather_put(self, args);
+    if (r == NULL) py_sink_failed_on_error(args);
+    return r;
+}
+
+// mlc_sink_failed(h) -> None
+static PyObject* pybinding__mlc_sink_failed(PyObject* self, PyObject* args) {
+    long long h_ll;
+    if (!PyArg_ParseTuple(args, "L", &h_ll)) return NULL;
+    mlc_sink_failed((int64_t)h_ll);
+    Py_RETURN_NONE;
 }
 
 // mlc_fold_failed(h) -> None
@@ -5912,6 +5939,7 @@ static PyMethodDef Methods[] = {
     {"mlc_replay", pybinding__mlc_replay, METH_VARARGS, "Call a function on every element of an IStream"},
     {"mlc_gather_new", pybinding__mlc_gather_new, METH_VARARGS, "Start a native gather"},
     {"mlc_gather_put", pybinding__mlc_gather_put, METH_VARARGS, "Add a batch to a native gather"},
+    {"mlc_sink_failed", pybinding__mlc_sink_failed, METH_VARARGS, "Fail a sink whose put raised"},
     {"mlc_gather_take", pybinding__mlc_gather_take, METH_VARARGS, "End a native gather"},
     {"mlc_side_drop", pybinding__mlc_side_drop, METH_VARARGS, "End a gather without reading it"},
     {"mlc_side_put", pybinding__mlc_side_put, METH_VARARGS, "Send a fold batch to the side file"},

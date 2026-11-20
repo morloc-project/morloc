@@ -125,6 +125,7 @@ morloc_mlc_fold_new                  <- function(...){ .Call("morloc_mlc_fold_ne
 morloc_mlc_fold_checkout             <- function(...){ .Call("morloc_mlc_fold_checkout",             ...) }
 morloc_mlc_fold_store                <- function(...){ .Call("morloc_mlc_fold_store",                ...) }
 morloc_mlc_fold_failed               <- function(...){ .Call("morloc_mlc_fold_failed",               ...) }
+morloc_mlc_sink_failed               <- function(...){ .Call("morloc_mlc_sink_failed",               ...) }
 morloc_mlc_fold_drop                 <- function(...){ .Call("morloc_mlc_fold_drop",                 ...) }
 morloc_mlc_fold_take                 <- function(...){ .Call("morloc_mlc_fold_take",                 ...) }
 morloc_mlc_side_next                 <- function(...){ .Call("morloc_mlc_side_next",                 ...) }
@@ -208,8 +209,19 @@ mlc_fold_file <- function(schema, init, step, combine, f) {
   acc
 }
 
-# FOLD-1, FOLD-9
+# SIDE-12, SLOT-35: a sink's write that does not finish fails its stream.
+mlc_sink_write <- function(schema, level, batch, h) {
+  put <- FALSE
+  on.exit(if (!put) morloc_mlc_sink_failed(h), add = TRUE)
+  morloc_mlc_write(schema, level, batch, h)
+  put <- TRUE
+  invisible(NULL)
+}
+
+# FOLD-1, FOLD-9. SIDE-12: a put that does not finish fails its sink.
 mlc_fold_put <- function(schema, step, h, batch) {
+  put <- FALSE
+  on.exit(if (!put) morloc_mlc_sink_failed(h), add = TRUE)
   co <- morloc_mlc_fold_checkout(h)
   if (co[[1L]] == 2L) {
     morloc_mlc_write(schema, 0L, batch, h)
@@ -225,6 +237,7 @@ mlc_fold_put <- function(schema, step, h, batch) {
     stepped <- TRUE
     morloc_mlc_fold_store(h, v)
   }
+  put <- TRUE
   invisible(NULL)
 }
 

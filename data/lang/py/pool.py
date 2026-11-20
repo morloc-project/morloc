@@ -360,7 +360,24 @@ def mlc_fold_file(schema, init, step, combine, f):
     return acc[0]
 
 
+def mlc_sink_write(schema, level, batch, h):
+    # SIDE-12, SLOT-35: a sink's write that raises fails its stream.
+    try:
+        morloc.mlc_write(schema, level, batch, h)
+    except BaseException:
+        morloc.mlc_sink_failed(h)
+        raise
+
 def mlc_fold_put(schema, step, h, batch):
+    # SIDE-12: a put that raises fails its sink.
+    try:
+        _mlc_fold_put(schema, step, h, batch)
+    except BaseException:
+        morloc.mlc_sink_failed(h)
+        raise
+
+
+def _mlc_fold_put(schema, step, h, batch):
     # FOLD-1, FOLD-9
     if h >= 0:
         morloc.mlc_write(schema, 0, batch, h)

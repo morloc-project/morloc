@@ -174,3 +174,20 @@ another process names nothing there. A gather or fold put whose id has no entry
 in its process fails: as a late put if the process or an ancestor made the
 id, and otherwise as a handle that reached another process. It never
 appends to another gather.
+
+### SIDE-12 A put that raised fails the take
+Status: implemented
+Checked by: a_failed_put_in_the_owner_fails_the_take, a_failed_put_after_take_changes_nothing, a_failed_put_in_a_forked_child_fails_the_take_even_on_a_full_disk, a_marked_side_file_reports_its_poison_record, golden:spec-strm-9-1, tla:ForkSide, tla:ForkSide_fold, tla:ForkSide_failed_put_unmarked.bug, tla:ForkSide_fold_failed_put_unmarked.bug
+
+A binding whose put into a gather or fold raised (STRM-9) fails the entry
+before it re-raises. In the owner it sets the entry's failed flag under the
+entry lock, unless the entry is TAKEN; the take reads the flag after its
+CAS and fails, after closing and removing the side file. In a forked child
+it marks the side file failed by rewriting the header's state byte under
+the file's lock, unless the file is already closed (the put was late). The
+mark grows nothing, so a put that failed for want of room still marks; a
+mark that cannot be written ends the process (PANIC). A marked file
+refuses later writes, and the owner's take fails on it, with a poison
+record's error (SIDE-10) if the file holds one, since that names the
+failure. A call for an id
+the process does not hold changes nothing.

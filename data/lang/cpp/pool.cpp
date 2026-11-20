@@ -1178,6 +1178,14 @@ inline void _mlc_write_batch(Schema* schema, int64_t level, const std::vector<E>
     MLC_WRITE_RESULT(rc, errmsg, "mlc_write_commit");
 }
 
+// SIDE-12: a put that raises fails its sink, so a producer that catches the
+// error cannot finish with the batch missing.
+struct MlcSinkPut {
+    int64_t h;
+    bool done = false;
+    ~MlcSinkPut() { if (!done) mlc_sink_failed(h); }
+};
+
 // @write: emit one batch. An output file's batch is encoded in place
 // (SLOT-37); other streams take a voidstar copy.
 template <typename T>
@@ -1189,6 +1197,14 @@ inline void _mlc_write(Schema* schema, int64_t level, const T& value, int64_t ha
     } else {
         _mlc_write_copy(schema, level, value, handle);
     }
+}
+
+// SIDE-12, SLOT-35: a sink's write that throws fails its stream.
+template <typename T>
+inline void _mlc_sink_write(Schema* schema, int64_t level, const T& value, int64_t handle) {
+    MlcSinkPut put{handle};
+    _mlc_write(schema, level, value, handle);
+    put.done = true;
 }
 
 // @append: open existing file for append; schema must match.
@@ -1359,10 +1375,10 @@ L _mlc_gather_native(Schema* schema, F f) {
 
 // SIDE-4: a gather id puts to its record, a stream handle to its stream.
 template <typename L>
-mlc::Unit _mlc_gather_put(Schema* schema, uint64_t h, L batch) {
+void _mlc_gather_put_unguarded(Schema* schema, uint64_t h, L batch) {
     if ((int64_t)h >= 0) {
         _mlc_write(schema, 0, batch, (int64_t)h);
-        return mlc::Unit{};
+        return;
     }
     char* errmsg = NULL;
     int32_t r = mlc_side_with_native((int64_t)h, 0, &_mlc_gather_append<L>, &batch, &errmsg);
@@ -1373,6 +1389,13 @@ mlc::Unit _mlc_gather_put(Schema* schema, uint64_t h, L batch) {
         shfree_cpp(voidstar);
         if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
     }
+}
+
+template <typename L>
+mlc::Unit _mlc_gather_put(Schema* schema, uint64_t h, L batch) {
+    MlcSinkPut put{(int64_t)h};
+    _mlc_gather_put_unguarded(schema, h, std::move(batch));
+    put.done = true;
     return mlc::Unit{};
 }
 
@@ -1541,31 +1564,37 @@ mlc::Unit _mlc_fold_step(S step, uint64_t h, const L& batch, P side) {
 // FOLD-1, FOLD-9: a fold id steps its slot, a stream handle takes the batch.
 template <typename B, typename L, typename S>
 mlc::Unit _mlc_fold_put(Schema* schema, S step, uint64_t h, const L& batch) {
+    MlcSinkPut put{(int64_t)h};
     if ((int64_t)h >= 0) {
         _mlc_write(schema, 0, batch, (int64_t)h);
         _mlc_flush((int64_t)h);
-        return mlc::Unit{};
+    } else {
+        _mlc_fold_step<B>(step, h, batch, [&]() {
+            char* errmsg = NULL;
+            void* voidstar = to_voidstar(schema, batch);
+            mlc_side_put((int64_t)h, schema, voidstar, &errmsg);
+            shfree_cpp(voidstar);
+            if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
+        });
     }
-    return _mlc_fold_step<B>(step, h, batch, [&]() {
-        char* errmsg = NULL;
-        void* voidstar = to_voidstar(schema, batch);
-        mlc_side_put((int64_t)h, schema, voidstar, &errmsg);
-        shfree_cpp(voidstar);
-        if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
-    });
+    put.done = true;
+    return mlc::Unit{};
 }
 
 // SIDE-10: a batch with no wire form poisons the side file.
 template <typename B, typename L, typename S>
 mlc::Unit _mlc_fold_put_schemaless(S step, uint64_t h, const L& batch) {
+    MlcSinkPut put{(int64_t)h};
     if ((int64_t)h >= 0) {
         throw MorlocException("@fold: this fold reads its batches from a stream, but its batch type has no wire form in C++");
     }
-    return _mlc_fold_step<B>(step, h, batch, [&]() {
+    _mlc_fold_step<B>(step, h, batch, [&]() {
         char* errmsg = NULL;
         mlc_side_put((int64_t)h, NULL, NULL, &errmsg);
         if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
     });
+    put.done = true;
+    return mlc::Unit{};
 }
 
 // Array-based foreign call: send a local-call packet carrying a runtime-sized

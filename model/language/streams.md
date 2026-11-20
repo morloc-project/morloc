@@ -90,9 +90,23 @@ any value inside it, afterwards. A whole-list gather may keep the batch
 itself rather than a copy, so a producer that refills one buffer and hands
 it on each time would gather that buffer's last contents many times over.
 
+### STRM-9 A put that raises fails its gather or fold
+Intent: ruled 2026-11-15
+Code: deviates 2026-11-20 (a batch that fails to encode while crossing to a sink in another pool marks nothing; issues/cli-directives.md)
+Tests: spec-strm-9-1
+
+A put into a `@collect` sink that raises (a batch that does not encode, a
+write that fails, a fold step that throws, an interrupt) fails the
+`@collect`, and so the command, even when the producer catches the error
+and returns normally. A batch the producer put is either in the result or
+the command fails; nothing is lost silently. A put counts from the moment
+it is made until the `@collect` takes its result: a put still running
+after that, from a thread or process the producer let outlive its call,
+fails as a late put and is not part of the result.
+
 ### STRM-5 What `@fold` promises when `@init` and `@combine` break their laws
-Intent: ruled 2026-11-14
-Code: conforms 2026-11-15
+Intent: ruled 2026-11-20
+Code: conforms 2026-11-20
 Tests: spec-strm-5-1
 
 `@fold init step combine` promises the sequential fold `foldl step init xs`
@@ -100,7 +114,7 @@ over the batches `xs` the producer put, for any split of the batches across
 threads, forked children and the side replay, provided:
 - identity: combine init a == a == combine a init;
 - associativity: combine a (combine b c) == combine (combine a b) c;
-- commutativity, when the producer is threaded or forks:
+- commutativity, when the producer's puts can run concurrently or it forks:
   combine a b == combine b a;
 - homomorphism over splits: for every xs = ys ++ zs,
   combine (foldl step init ys) (foldl step init zs) == foldl step init xs.

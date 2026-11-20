@@ -1,0 +1,26 @@
+-- FOLD-11: a producer whose puts never overlap gets its batches folded in
+-- the order it put them, even when each put is served by another thread
+-- of the fold's pool. A Python producer hands each put to the next of its
+-- threads in turn; each thread keeps its own connection to the C++ pool,
+-- so the puts alternate between C++ workers. The step concatenates, which
+-- does not commute, so any reorder shows.
+
+module main (seq)
+
+import root-cpp
+import root-py
+
+source Py from "impl.py" ("produce_seq" as produceSeq)
+source Cpp from "impl.hpp" ("empty_str" as emptyStr, "cat_batch" as catBatch, "cat", "show_s" as showS)
+
+produceSeq :: Int -> Int -> ([Str] -> <IO> ()) -> <IO> ()
+emptyStr :: Str
+catBatch :: Str -> [Str] -> Str
+cat :: Str -> Str -> Str
+--' The concatenation
+showS :: Str -> Str
+
+--' Concatenate batches put in turn by several threads
+--' @render --s=showS @fold=catBatch @init=emptyStr @combine=cat
+seq :: Int -> Int -> <IO> (Collect Str)
+seq n threads = @collect (produceSeq n threads)

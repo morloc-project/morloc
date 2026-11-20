@@ -893,8 +893,9 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
       withTryResult t $ \inner -> StreamLayoutX <$> type2schema inner <*> toNexusExpr handle
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrStream [handle])) =
       StreamX <$> type2schema t <*> toNexusExpr handle
-    toNexusExpr (AnnoS (Idx ix t) _ (IntrinsicS IntrWrite [levelE, handleE, valE@(AnnoS (Idx _ valT) _ _)])) =
-      writeCheck ix IntrWrite valE >>
+    toNexusExpr (AnnoS (Idx ix t) _ (IntrinsicS w [levelE, handleE, valE@(AnnoS (Idx _ valT) _ _)]))
+      | isWrite w =
+      writeCheck ix w valE >>
       withTryResult t (\_ -> WriteX
         <$> type2schema valT
         <*> toNexusExpr levelE

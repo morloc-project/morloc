@@ -158,6 +158,7 @@ extern "C" {
     fn mlc_side_new(native: *mut c_void, errmsg: *mut *mut c_char) -> i64;
     fn mlc_side_with_native(id: i64, is_fold: i32, f: unsafe extern "C" fn(*mut c_void, *mut c_void), arg: *mut c_void, errmsg: *mut *mut c_char) -> i32;
     fn mlc_side_put(id: i64, schema: *const CSchema, value: *const c_void, errmsg: *mut *mut c_char) -> i32;
+    fn mlc_sink_failed(h: i64);
     fn mlc_side_take(id: i64, errmsg: *mut *mut c_char) -> *mut c_void;
     fn mlc_fold_new(ctx: *mut c_void, fresh: unsafe extern "C" fn(*mut c_void) -> *mut c_void, errmsg: *mut *mut c_char) -> i64;
     fn mlc_fold_checkout(id: i64, value: *mut *mut c_void, fresh: *mut i32, errmsg: *mut *mut c_char) -> i32;
@@ -4243,6 +4244,11 @@ pub unsafe fn write<T: ToVoidstar>(schema: &Schema, level: i64, value: &T, handl
     stream_result(rc, std::ptr::null_mut(), "@write");
 }
 
+/// SIDE-12, SLOT-35: a sink's write that panics fails its stream.
+pub unsafe fn sink_write<T: ToVoidstar>(schema: &Schema, level: i64, value: &T, handle: u64) {
+    guarded_put(handle, || write(schema, level, value, handle))
+}
+
 /// What `ToVoidstar::write_in_place` did: wrote the batch, or left it to the
 /// voidstar copy, with the copy's size when it already knows it.
 pub enum InPlace {
@@ -4530,8 +4536,27 @@ pub unsafe fn gather_native<L: Batch + FromVoidstar + Send, F: Invoke1<u64, ()>>
     L::join(std::mem::take(&mut list.batches))
 }
 
+/// SIDE-12: armed for a put, so a put that panics or throws fails its sink.
+struct SinkPut(i64);
+
+impl Drop for SinkPut {
+    fn drop(&mut self) {
+        unsafe { mlc_sink_failed(self.0) };
+    }
+}
+
+fn guarded_put(h: u64, put: impl FnOnce()) {
+    let guard = SinkPut(h as i64);
+    put();
+    std::mem::forget(guard);
+}
+
 /// SIDE-4: a gather id puts to its record, a stream handle to its stream.
 pub unsafe fn gather_put<L: Batch + ToVoidstar + Send>(schema: &Schema, h: u64, batch: L) {
+    guarded_put(h, || gather_put_unguarded(schema, h, batch))
+}
+
+unsafe fn gather_put_unguarded<L: Batch + ToVoidstar + Send>(schema: &Schema, h: u64, batch: L) {
     if (h as i64) >= 0 {
         write(schema, 0, &batch, h);
         return;
@@ -4739,12 +4764,14 @@ where
     L: ToVoidstar,
     S: Invoke2<B, L, B>,
 {
-    if (h as i64) >= 0 {
-        write(schema, 0, batch, h);
-        flush(h);
-        return;
-    }
-    fold_step(step, h, batch, || side_put(schema, h, batch));
+    guarded_put(h, || {
+        if (h as i64) >= 0 {
+            write(schema, 0, batch, h);
+            flush(h);
+        } else {
+            fold_step(step, h, batch, || side_put(schema, h, batch));
+        }
+    })
 }
 
 /// SIDE-10: a batch with no wire form poisons the side file.
@@ -4753,14 +4780,16 @@ where
     B: Clone + Send + 'static,
     S: Invoke2<B, L, B>,
 {
-    if (h as i64) >= 0 {
-        morloc_throw("@fold: this fold reads its batches from a stream, but its batch type has no wire form in Rust");
-    }
-    fold_step(step, h, batch, || {
-        let mut err: *mut c_char = std::ptr::null_mut();
-        mlc_side_put(h as i64, std::ptr::null(), std::ptr::null(), &mut err);
-        check_err(err);
-    });
+    guarded_put(h, || {
+        if (h as i64) >= 0 {
+            morloc_throw("@fold: this fold reads its batches from a stream, but its batch type has no wire form in Rust");
+        }
+        fold_step(step, h, batch, || {
+            let mut err: *mut c_char = std::ptr::null_mut();
+            mlc_side_put(h as i64, std::ptr::null(), std::ptr::null(), &mut err);
+            check_err(err);
+        });
+    })
 }
 
 /// @open (OStream): open a file for writing with the element schema.

@@ -1,5 +1,5 @@
-//! Native fold slots (fold.md): one slot per thread that puts, held in a
-//! fork-side entry (side.md) whose native pointer is the slot table.
+//! Native fold slots (fold.md, FOLD-1), held in a fork-side entry (side.md)
+//! whose native pointer is the slot table.
 
 use std::ffi::{c_char, c_void};
 use std::ptr;
@@ -19,7 +19,7 @@ enum Mark {
 }
 
 struct Slot {
-    thread: ThreadId,
+    holder: Option<ThreadId>,
     mark: Mark,
     value: *mut c_void,
 }
@@ -53,32 +53,37 @@ fn table<'a>(native: *mut c_void) -> &'a mut Table {
     unsafe { &mut *(native as *mut Table) }
 }
 
-/// FOLD-1, FOLD-5, FOLD-6
+/// FOLD-1, FOLD-5, FOLD-6, FOLD-11
 pub fn checkout(id: i64) -> Result<Checkout, MorlocError> {
     let me = std::thread::current().id();
     let got = fork_side::with_native(id, fork_side::Kind::Fold, |n| {
         let t = table(n);
-        let full = t.slots.len() >= MAX_SLOTS;
-        match t.slots.iter_mut().find(|s| s.thread == me) {
-            Some(s) => match s.mark {
-                Mark::Busy => Err(err("@fold: re-entrant fold put: this thread's accumulator is already being stepped")),
-                Mark::Failed => Err(err("@fold: an earlier step of this fold failed on this thread")),
-                Mark::Free => {
-                    s.mark = Mark::Busy;
-                    Ok((std::mem::replace(&mut s.value, ptr::null_mut()), false))
+        let mut free = None;
+        for (i, s) in t.slots.iter().enumerate() {
+            match s.mark {
+                Mark::Failed => return Err(err("@fold: an earlier step of this fold failed")),
+                Mark::Busy if s.holder == Some(me) => {
+                    return Err(err("@fold: re-entrant fold put: this thread's accumulator is already being stepped"))
                 }
-            },
-            None if full => Err(MorlocError::Other(format!(
-                "@fold: more than {MAX_SLOTS} accumulators in one fold. A folding handler keeps one per \
-                 thread that has folded into it, for as long as the fold runs, so more than {MAX_SLOTS} \
-                 distinct threads called its sink: either the producer starts a thread per batch, or the \
-                 fold ran long enough for the pool's worker threads to retire and be replaced many times \
-                 (as when batches arrive through callbacks from another pool)."
+                Mark::Free if free.is_none() => free = Some(i),
+                _ => {}
+            }
+        }
+        match free {
+            Some(i) => {
+                let s = &mut t.slots[i];
+                s.mark = Mark::Busy;
+                s.holder = Some(me);
+                Ok((std::mem::replace(&mut s.value, ptr::null_mut()), false))
+            }
+            None if t.slots.len() >= MAX_SLOTS => Err(MorlocError::Other(format!(
+                "@fold: more than {MAX_SLOTS} puts into one fold were stepping at once; a folding handler \
+                 keeps one accumulator per put in flight, so the producer started too many concurrent puts"
             ))),
             None => {
                 // SAFETY: FOLD-6: `fresh` was given with `ctx`, which the binding keeps until the seal.
                 let v = unsafe { (t.fresh)(t.ctx) };
-                t.slots.push(Slot { thread: me, mark: Mark::Busy, value: ptr::null_mut() });
+                t.slots.push(Slot { holder: Some(me), mark: Mark::Busy, value: ptr::null_mut() });
                 Ok((v, true))
             }
         }
@@ -89,18 +94,23 @@ pub fn checkout(id: i64) -> Result<Checkout, MorlocError> {
     }
 }
 
+fn held_by<'a>(t: &'a mut Table, me: ThreadId) -> Option<&'a mut Slot> {
+    t.slots.iter_mut().find(|s| s.mark == Mark::Busy && s.holder == Some(me))
+}
+
 /// FOLD-1: on error the caller keeps `value`.
 pub fn store(id: i64, value: *mut c_void) -> Result<(), MorlocError> {
     let me = std::thread::current().id();
     #[cfg(test)]
     tests::hook(&tests::BEFORE_STORE);
-    let stored = fork_side::with_native(id, fork_side::Kind::Fold, |n| match table(n).slots.iter_mut().find(|s| s.thread == me) {
-        Some(s) if s.mark == Mark::Busy => {
+    let stored = fork_side::with_native(id, fork_side::Kind::Fold, |n| match held_by(table(n), me) {
+        Some(s) => {
             s.value = value;
             s.mark = Mark::Free;
+            s.holder = None;
             true
         }
-        _ => false,
+        None => false,
     })?;
     match stored {
         Some(true) => Ok(()),
@@ -112,7 +122,7 @@ pub fn store(id: i64, value: *mut c_void) -> Result<(), MorlocError> {
 pub fn failed(id: i64) {
     let me = std::thread::current().id();
     let _ = fork_side::with_native(id, fork_side::Kind::Fold, |n| {
-        if let Some(s) = table(n).slots.iter_mut().find(|s| s.thread == me && s.mark == Mark::Busy) {
+        if let Some(s) = held_by(table(n), me) {
             s.mark = Mark::Failed;
         }
     });
@@ -288,6 +298,13 @@ pub(crate) mod tests {
         store(id, b).inspect_err(|_| { get(b); })
     }
 
+    fn put_digit(id: i64, d: u64) -> Result<(), MorlocError> {
+        let Checkout::Value { value, .. } = checkout(id)? else { return Err(err("side")) };
+        let v = get(value) * 10 + d;
+        let b = Box::into_raw(Box::new(v)) as *mut c_void;
+        store(id, b).inspect_err(|_| { get(b); })
+    }
+
     fn sum(t: Taken) -> Result<u64, MorlocError> {
         let s = t.values.into_iter().map(get).sum();
         t.records.map(|_| s)
@@ -317,15 +334,52 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn each_thread_folds_into_its_own_fresh_slot() {
+    fn a_put_while_another_steps_folds_into_its_own_fresh_slot() {
         in_child(|| {
             let id = fold();
             ID.store(id, Ordering::SeqCst);
             put(id, 1).unwrap();
-            put(id, 2).unwrap();
+            let Ok(Checkout::Value { value, .. }) = checkout(id) else { return false };
             let other = std::thread::spawn(|| put(ID.load(Ordering::SeqCst), 10)).join().unwrap();
+            let v = get(value) + 2;
+            store(id, Box::into_raw(Box::new(v)) as *mut c_void).unwrap();
             let t = take(id);
             other.is_ok() && t.values.len() == 2 && FRESH.load(Ordering::SeqCst) == 2 && sum(t).unwrap() == 13
+        });
+    }
+
+    // tla:ForkSide_fold_checkout_by_thread.bug: puts made one at a time, on
+    // whichever thread serves each, fold in the order they were made.
+    #[test]
+    fn sequential_puts_on_alternating_threads_keep_their_order() {
+        in_child(|| {
+            let id = fold();
+            ID.store(id, Ordering::SeqCst);
+            let mut ok = true;
+            for d in 1..=6u64 {
+                ok &= if d % 2 == 0 {
+                    std::thread::spawn(move || put_digit(ID.load(Ordering::SeqCst), d)).join().unwrap().is_ok()
+                } else {
+                    put_digit(id, d).is_ok()
+                };
+            }
+            let t = take(id);
+            let vs: Vec<u64> = t.values.into_iter().map(get).collect();
+            ok && vs == vec![123456] && FRESH.load(Ordering::SeqCst) == 1
+        });
+    }
+
+    // tla:ForkSide_fold_checkout_by_thread.bug: the slots are bounded by the
+    // puts in flight, not by the threads that ever put.
+    #[test]
+    fn puts_from_more_threads_than_the_slot_cap_share_one_slot() {
+        in_child(|| {
+            let id = fold();
+            ID.store(id, Ordering::SeqCst);
+            let n = MAX_SLOTS as u64 + 10;
+            let all = (0..n).all(|_| std::thread::spawn(|| put(ID.load(Ordering::SeqCst), 1)).join().unwrap().is_ok());
+            let t = take(id);
+            all && t.values.len() == 1 && sum(t).unwrap() == n
         });
     }
 
@@ -372,8 +426,10 @@ pub(crate) mod tests {
             get(value);
             failed(id);
             let again = put(id, 1).err().is_some_and(|e| format!("{e}").contains("earlier step"));
+            ID.store(id, Ordering::SeqCst);
+            let elsewhere = std::thread::spawn(|| put(ID.load(Ordering::SeqCst), 1)).join().unwrap().is_err();
             let t = take(id);
-            again && t.records.err().is_some_and(|e| format!("{e}").contains("failed"))
+            again && elsewhere && t.records.err().is_some_and(|e| format!("{e}").contains("failed"))
         });
     }
 
