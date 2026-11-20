@@ -1350,7 +1350,9 @@ pub(crate) fn print_result_c(
     // A command that streamed to stdout and then returns a value prints the
     // completed stream first.
     crate::custody_finish(true);
-    crate::stdio_server::finish_stdout();
+    if !crate::stdio_server::finish_stdout() {
+        process::clean_exit(1);
+    }
 
     // A stage saves the result for the actions, and prints it only when
     // stdout wants the command's own output.

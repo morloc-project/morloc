@@ -596,7 +596,8 @@ states the data ends at the footer. A file whose bytes were cut after a
 complete sub-packet is indistinguishable from the last state.
 
 ### SLOT-29 A reader opens a stream file by its end state
-Status: draft
+Status: implemented
+Checked by: a_failed_file_is_refused_at_every_open, a_file_with_no_footer_reads_its_complete_batches_as_an_istream_only, closed_paused_and_repaired_files_open, a_piped_stream_holding_another_packet_is_refused, golden:stream-end-states
 
 | End state | IStream open, `@load` | IFile open | `file --validate` |
 |---|---|---|---|
@@ -616,8 +617,9 @@ file is read only after `morloc-nexus file --repair` gives it a REPAIRED
 footer.
 A packet stream read from a pipe (`@stdin`, an IStream argument read from
 `-`) gives every complete batch, then fails when the input ends without a
-final footer, inside a sub-packet, or with a FAILED one; a consumer may
-have acted on the earlier batches, and its run fails.
+final footer, inside a sub-packet, with a FAILED one, or at a packet that
+is neither data nor a footer; a consumer may have acted on the earlier
+batches, and its run fails.
 
 ### SLOT-30 An indexed file opens only with a final footer
 Status: implemented
@@ -657,11 +659,14 @@ tree that writes a stream can tell the two apart while that tree runs; a
 reader on another machine, or after the tree has ended, cannot.
 
 ### SLOT-40 A run's packet output ends in a final footer whatever its outcome
-Status: draft
+Status: implemented
+Checked by: a_stdout_stream_still_open_at_the_end_is_failed, golden:stream-end-states
 
 Standard output in the packet or voidstar form ends in a final footer
 over its complete sub-packets: CLOSED when the run succeeds, FAILED when
-it fails after the stream's header was written. A run killed by a signal
+it fails after the stream's header was written. A stream still open when
+the run ends did not finish: its footer says FAILED and the run fails. A
+footer that cannot be written fails the run. A run killed by a signal
 it cannot handle (SIGKILL) writes no footer: IFile, `--validate` and a
 pipe reader refuse it (SLOT-29), and an IStream of such a file is SLOT-31's
 open case.

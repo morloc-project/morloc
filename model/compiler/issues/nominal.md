@@ -89,3 +89,15 @@ Plan: /work/plans/nominal-types/PLAN.md, phase A stages P1-P4.
   [read, 2026-11-17] Pools/CAbi/Members/Cpp.hs (the generated-record case of
   the type renderer, about 356) returns the record's morloc name with no
   error when the record has a definition but no generated struct.
+- **Generated types derive traits a user's source may also implement.**
+  [read, 2026-11-20] Gap in GEN-* (records.md): nothing says which traits
+  or operators a generated type carries. Rust records derive `Debug`,
+  `PartialEq` and, when every field allows, `Default`
+  (CodeGenerator/Pools/CAbi/Members/Rust.hs ~2745); C++ structs get a
+  defaulted member `operator==` (CppPrinter.hs ~650). A sourced
+  `impl PartialEq for mlc::types::<m>::T` or `impl Default for ...` fails
+  with E0119, and a free `operator==(const T&, const T&)` in a sourced
+  header makes `==` ambiguous, so a program that built before fails.
+  Question: does a generated type carry these, and may a user's source
+  supply them instead?
+

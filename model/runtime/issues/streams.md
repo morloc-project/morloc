@@ -240,3 +240,14 @@ here touch locks and ownership: model first.
   `twoErr :: <IO> ()`, `twoErr = do { e <- @stderr :: <IO> OStream Int;
   @write 0 e [1, 2]; @close e; e2 <- @stderr :: <IO> OStream Int;
   @write 0 e2 [3]; @close e2 }`.
+- **Pool text shares fd 2 (and fd 1) with typed stdio streams.** [read,
+  2026-11-19] Gap: no item says who owns the process's stdio fds. Pools
+  inherit fd 1 and fd 2 and write raw text there (prints, tracebacks,
+  crash messages), while a typed `@stderr` (or `@stdout`) stream writes
+  packet frames to the same fd, so the text can land inside the packet
+  stream. Options weighed: (i) the nexus owns fd 1 and fd 2 and pool text
+  goes through a pipe it keeps separate (one extra copy; crash text must
+  still get out when the nexus is stuck); (ii) forbid typed `@stderr`;
+  (iii) allow typed `@stderr` only with a guarantee no text reaches fd 2.
+  The user leans to (i) but deferred it 2026-11-19: it needs a model
+  first. The second-`@stderr` entry above belongs with it.

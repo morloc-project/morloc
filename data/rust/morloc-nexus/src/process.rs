@@ -874,11 +874,6 @@ pub fn init_shm() -> (String, String) {
     (tmpdir, shm_basename)
 }
 
-/// Apply the `-o FILE` redirect by `dup2`ing a freshly-opened file
-/// onto STDOUT_FILENO. No-op when `path` is `None`. Exits via
-/// [`clean_exit`] on any open/dup2 failure. Used by both `run` and
-/// `view` so the redirect covers every output writer uniformly
-/// (Rust, libc printf, raw fd writes).
 // SLOT-40: the temporary file `-o` writes and the file it replaces.
 static OUTPUT_FILE: std::sync::OnceLock<(String, std::path::PathBuf)> = std::sync::OnceLock::new();
 

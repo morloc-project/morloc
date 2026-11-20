@@ -1028,15 +1028,16 @@ pub fn finish_stage() -> Result<(), String> {
 }
 
 /// Write the single final footer of a packet stream whose pool footers
-/// have all been folded in. A CLOSED stream with frames whose footer never
-/// arrived is left without one (SLOT-29); a FAILED footer is written over
-/// the sub-packets whose counts are known.
+/// have all been folded in, over the sub-packets whose counts are known.
 fn finish_logical_packet(slot: &mut StdioSlot, status: u8) -> Result<(), crate::stdio_bridge::WriteError> {
     use crate::stdio_bridge as br;
-    let failed = status == morloc_runtime_types::packet::FOOTER_STATUS_FAILED;
-    if !slot.header_done || (!slot.pending.is_empty() && !failed) {
+    if !slot.header_done {
         return Ok(());
     }
+    // SLOT-40: a stream still open at the end of the run did not finish, so
+    // the output says FAILED and the run fails.
+    let unfinished = !slot.pending.is_empty() && status != morloc_runtime_types::packet::FOOTER_STATUS_FAILED;
+    let status = if unfinished { morloc_runtime_types::packet::FOOTER_STATUS_FAILED } else { status };
     let mut diag = slot.diag.unwrap_or_else(StreamDiag::new);
     let tail: Vec<u64> = slot.entries.iter().rev()
         .take(morloc_runtime_types::packet::STREAM_DIAG_TAIL_MAX)
@@ -1053,7 +1054,11 @@ fn finish_logical_packet(slot: &mut StdioSlot, status: u8) -> Result<(), crate::
     slot.schema = None;
     slot.bytes_out = 0;
     let footer = footer.map_err(|e| br::WriteError::Other(e.to_string()))?;
-    unsafe { br::write_bytes_to_fd(slot.fd, &footer) }
+    unsafe { br::write_bytes_to_fd(slot.fd, &footer) }?;
+    if unfinished {
+        return Err(br::WriteError::Other("a stream written to stdout was still open when the run ended".into()));
+    }
+    Ok(())
 }
 
 /// Read one full `MORLOC_DATA_PACKET` sub-packet into a fresh SHM block.
@@ -1102,9 +1107,13 @@ fn read_one_subpacket_into_shm(slot: &mut StdioSlot) -> Result<Option<(i64, u64)
         slot.ended = true;
         return Ok(None);
     }
+    // SLOT-29: a stream holds data sub-packets and ends at its footer.
     if !header.is_data() {
         slot.ended = true;
-        return Ok(None);
+        return Err(format!(
+            "stdin: the stream holds a packet that is neither data nor a footer (command type {})",
+            unsafe { header.command.cmd_type.cmd_type }
+        ));
     }
     reject_unreadable_subpacket(&header)?;
     let rest = (header.offset as u64)
@@ -1215,4 +1224,63 @@ fn read_fill_fd(fd: i32, buf: &mut [u8]) -> Result<usize, String> {
 /// whole buffer was filled, `Ok(false)` if EOF was hit first (short read).
 fn read_exact_fd(fd: i32, buf: &mut [u8]) -> Result<bool, String> {
     Ok(read_fill_fd(fd, buf)? == buf.len())
+}
+
+#[cfg(test)]
+mod end_tests {
+    use super::*;
+    use morloc_runtime_types::packet as pk;
+
+    fn pipe() -> (i32, i32) {
+        let mut p = [0i32; 2];
+        assert_eq!(unsafe { libc::pipe(p.as_mut_ptr()) }, 0);
+        (p[0], p[1])
+    }
+
+    fn drain(fd: i32) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut buf = [0u8; 4096];
+        loop {
+            let n = unsafe { libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
+            if n <= 0 {
+                return out;
+            }
+            out.extend_from_slice(&buf[..n as usize]);
+        }
+    }
+
+    // SLOT-40: a stream still open when a run ends is written FAILED and
+    // fails the run, never left without a footer while the run succeeds.
+    #[test]
+    fn a_stdout_stream_still_open_at_the_end_is_failed() {
+        let (r, w) = pipe();
+        let mut slot = StdioSlot::new(w);
+        slot.header_done = true;
+        slot.pending.push(32);
+        let got = finish_logical_packet(&mut slot, pk::FOOTER_STATUS_CLOSED);
+        unsafe { libc::close(w) };
+        assert!(matches!(got, Err(crate::stdio_bridge::WriteError::Other(_))), "the run was not failed");
+        let footer = drain(r);
+        unsafe { libc::close(r) };
+        let status = pk::iter_packet_metadata(&footer)
+            .unwrap()
+            .find(|(k, _)| *k == pk::METADATA_TYPE_FOOTER_STATUS)
+            .map(|(_, d)| pk::decode_footer_status(d));
+        assert_eq!(status, Some(pk::FOOTER_STATUS_FAILED));
+    }
+
+    // SLOT-29: a piped stream holds data sub-packets and ends at its footer;
+    // any other packet is an error, not its end.
+    #[test]
+    fn a_piped_stream_holding_another_packet_is_refused() {
+        let (r, w) = pipe();
+        let ping = pk::PacketHeader::ping().to_bytes();
+        assert_eq!(unsafe { libc::write(w, ping.as_ptr() as *const libc::c_void, ping.len()) }, 32);
+        unsafe { libc::close(w) };
+        let mut slot = StdioSlot::new(r);
+        slot.header_done = true;
+        let got = read_one_subpacket_into_shm(&mut slot);
+        unsafe { libc::close(r) };
+        assert!(matches!(&got, Err(m) if m.contains("neither data nor a footer")), "{got:?}");
+    }
 }
