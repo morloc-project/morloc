@@ -154,14 +154,3 @@
   reference where the code after it only borrows. The last read of a
   subject moves the payload out, or fails the call when it is shared
   (`mlc_copy!`, golden rust-bind-non-clone).
-
-- **Python `@load` of a list whose element holds an enum segfaults.**
-  [reproduced, 2026-11-20] `@load path :: <IO> (Try Str [T])`, `T` any type
-  with an enum anywhere inside, crashes the Python pool (signal 11 in
-  mlc_load). Single values, and C++/Rust, are fine. Suspect the in-place
-  list path `py_load_in_place`/`py_slice_decode` (pymorloc.c). Violates the
-  PANIC rules. Repro: /work/plans/migration-bugs-2026-11-20/repro/py-load-data-segfault, py-load-enum-variants.
-- **`@save` of one enum value cannot be `@load`ed (STRM-1).** [reproduced,
-  2026-11-20] `@save 0 p Cos` records schema `u1`; `@load p :: ... F`
-  requests `e23Sin3Cos` and fails with a schema mismatch, in every
-  language. Lists of enums round-trip. Repro: /work/plans/migration-bugs-2026-11-20/repro/save-load-single-enum.

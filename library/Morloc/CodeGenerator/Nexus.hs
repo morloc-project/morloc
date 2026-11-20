@@ -236,6 +236,8 @@ data NexusExpr
   | NamX Text [(Text, NexusExpr)]
   | StrX Text Text
   | LitX LitType Text
+  | EnumX Text Int
+  -- ^ a constructor of an enum: its schema and its tag byte
   | ShowX Text NexusExpr  -- schema (return type = Str), child expression
   | ReadX Text NexusExpr  -- schema (return type = ?a), child expression
   | HashX Text NexusExpr  -- schema + child -> Str (xxhash hex)
@@ -713,12 +715,8 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
       resolveNumericToLitX litIx t (NL.RealSrc v)
     toNexusExpr (AnnoS (Idx _ t) _ (IntS litIx v)) =
       resolveNumericToLitX litIx t (NL.IntSrc v)
-    -- A `data` constructor is its tag byte, and an enum's voidstar form is
-    -- exactly that byte -- so the constructor needs no node of its own here,
-    -- only the one-byte literal it already is.
-    -- An argument-free constructor of an all-nullary type is its tag byte,
-    -- and that byte IS the value's wire form, so it needs no node of its
-    -- own here.
+    -- A constructor of an all-nullary type is its tag byte, with the
+    -- enum's schema, so a value saved or sent records its type ('EnumX').
     --
     -- The test is on the TYPE, not on this constructor's arity: a nullary
     -- arm of a payload-bearing type still has the 16-byte tagged-pointer
@@ -728,7 +726,7 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
     toNexusExpr (AnnoS (Idx _ t) _ (ConS tv _ ordinal xs)) = do
       scope <- MM.gets stateGeneralTypedefs
       if TE.dataIsEnum scope (TE.whnf scope (VarU tv))
-        then return $ LitX U8X (MT.pack (show ordinal))
+        then EnumX <$> type2schema t <*> pure ordinal
         else do
           sch <- type2schema t
           fields <- mapM toNexusExpr xs
@@ -2526,6 +2524,15 @@ exprToJson (LitX lt v) =
     , ("schema", jsonStr (litSchemaStr lt))
     , ("lit_type", jsonStr (litSchemaStr lt))
     , ("value", jsonStr v)
+    ]
+-- The byte is read as a U8 and carries the enum's schema, so a value saved
+-- or sent records its type.
+exprToJson (EnumX schema ordinal) =
+  jsonObj
+    [ ("tag", jsonStr "lit")
+    , ("schema", jsonStr schema)
+    , ("lit_type", jsonStr (litSchemaStr U8X))
+    , ("value", jsonStr (MT.pack (show ordinal)))
     ]
 exprToJson (StrX schema v) =
   jsonObj

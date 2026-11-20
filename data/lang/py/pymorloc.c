@@ -4463,6 +4463,10 @@ static bool schema_has_view(const Schema* schema, int depth){
     if (schema->hint != NULL && strcmp(schema->hint, "numpy.ndarray") == 0) {
         return true;
     }
+    // An enum's size counts constructors and it has no parameters.
+    if (schema->type == MORLOC_ENUM) {
+        return false;
+    }
     for (size_t i = 0; i < schema->size; i++) {
         if (schema_has_view(schema->parameters[i], depth - 1)) {
             return true;

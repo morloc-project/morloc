@@ -27,6 +27,9 @@ Fixed
    it in the same language, instead of being ambiguous
  * a length a call chooses at run time that a body cannot rely on is
    reported as such (DIM-10), not as a signature failure naming `?n`
+ * a Python `@load` of a list whose elements hold an enum no longer crashes
+   the pool
+ * a single enum value saved with `@save` loads back with `@load`
 
 0.112.0 [2026-11-01]
 --------------------

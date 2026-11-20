@@ -1,0 +1,45 @@
+--' Enums round-trip through @save and @load, alone and inside lists
+--'
+--' A Python @load of a whole list decodes it where it lies; a list whose
+--' elements hold an enum anywhere must load as the list it was. A single
+--' enum value saved records its enum schema, so it loads back. Each list
+--' passes through a Python function, so the Python pool runs the load.
+module main (loadEnums, loadRecords, loadNested, single)
+
+import root-py
+
+source Py from "ident.py" ("ident")
+
+ident :: [a] -> [a]
+
+data F = Sin | Cos
+
+data T = A Real | C F Real
+
+record R where
+  f :: F
+  x :: Real
+
+loadEnums :: Str -> <IO> [F]
+loadEnums path = do
+  @save 0 path [Cos, Sin, Cos]
+  Ok xs <- @load path :: <IO> (Try Str [F])
+  ident xs
+
+loadRecords :: Str -> <IO> [R]
+loadRecords path = do
+  @save 0 path ([{f = Cos, x = 1.5}, {f = Sin, x = 2.5}] :: [R])
+  Ok xs <- @load path :: <IO> (Try Str [R])
+  ident xs
+
+loadNested :: Str -> <IO> [[T]]
+loadNested path = do
+  @save 0 path [[A 1.0, C Cos 2.0], [C Sin 3.0]]
+  Ok xs <- @load path :: <IO> (Try Str [[T]])
+  ident xs
+
+single :: Str -> <IO> F
+single path = do
+  @save 0 path Cos
+  Ok x <- @load path :: <IO> (Try Str F)
+  x
