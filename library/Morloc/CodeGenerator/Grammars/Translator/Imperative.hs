@@ -75,6 +75,10 @@ module Morloc.CodeGenerator.Grammars.Translator.Imperative
   , markLastReadsInNative
   , namedIn
   , loopBorrowLocals
+  , ownedPartLets
+  , usesIndex
+  , paramReads
+  , loopSlots
   , BorrowPart (..)
   , BorrowTest (..)
   , borrowPartOf
@@ -469,6 +473,9 @@ data ArgSite
   | ManifoldArg Int Int
   -- ^ argument of a generated manifold call: the callee and the position of
   -- its parameter
+  | TwinArg Int Int
+  -- ^ argument of a call of a manifold's by-value form (OWN-7), named as by
+  -- 'ManifoldArg'
   | ClosureArg
   -- ^ argument of a native closure application (a function-valued variable)
 
@@ -650,6 +657,9 @@ data LowerConfig m = LowerConfig
   -- const-ref/by-value param implicitly); Rust borrows a non-'Copy' arg so it
   -- matches the packer's `&T` parameter. The argument is the arg's type.
   , lcBorrowPackArg :: TypeF -> Bool
+  , lcWireListIter :: MDoc -> MDoc -> (MDoc, MDoc)
+  -- ^ A native list walked to write its wire form, and its loop variable:
+  -- the collection to loop over and how the body names an element.
   , lcRecordAccessor :: NamType -> FVar -> MDoc -> MDoc -> m MDoc
   , lcDeserialRecordAccessor :: Int -> Key -> MDoc -> MDoc
   -- ^ How to access record fields during deserialization.
@@ -686,6 +696,14 @@ data LowerConfig m = LowerConfig
   , lcKeepCallArg :: Int -> Int -> NativeExpr -> MDoc -> m MDoc
   -- ^ Adapt argument @j@ of a call of native manifold @m@, given its
   -- original (OWN-7).
+  , lcTwinCall :: Int -> [IOwnership] -> m (Maybe MDoc)
+  -- ^ The name of manifold @m@'s by-value form, for a call whose arguments
+  -- have these ownerships, when the call uses it (OWN-7); Nothing calls the
+  -- manifold by its own name.
+  , lcBuildOwnership :: Int -> Int -> IOwnership -> m IOwnership
+  -- ^ The ownership of local @i@ as a context argument of a fully applied
+  -- call of manifold @m@, given its ownership as a read that is not its
+  -- last; a member may know the call is its last read (OWN-3).
   , lcKeepSourcedArg :: NativeExpr -> MDoc -> m (Maybe MDoc)
   -- ^ An argument of a sourced call, moved at its last read of an owned
   -- value (OWN-2); Nothing where it is not.
@@ -980,8 +998,9 @@ nativeToWire cfg = go
       resultType <- lcSerialAstType cfg lst
       let v' = render $ (helperVar cfg) idx
           iterVar = render $ pretty (lcLocalPrefix cfg) <> "i" <> pretty idx
-      (before, x) <- go (pretty (lcLocalPrefix cfg) <> "i" <> pretty idx) s
-      return ([IMapList v' resultType iterVar (IRawExpr (render v)) before x], IVar v')
+          (coll, elemOf) = lcWireListIter cfg v (pretty iterVar)
+      (before, x) <- go elemOf s
+      return ([IMapList v' resultType iterVar (IRawExpr (render coll)) before x], IVar v')
     construct v tup@(SerialTuple _ ss) = do
       results <- mapIndexedM (\i s -> go (lcTupleAccessor cfg i v) s) ss
       let (befores, exprs) = unzip results
@@ -1229,7 +1248,7 @@ lowerSerialExprRaw _ _ (NativeLetS_ i (Low (ManN (NativeManifold _ _ form _)) e1
 -- As for a native let ('NativeLetN_'): the bound local is owned, so its RHS
 -- is an owned sink.
 lowerSerialExprRaw cfg _ (NativeLetS_ i (Low rhsE e1) (Low _ e2)) = do
-  e1' <- adaptOwnedElem cfg rhsE e1 >>= keepRhs cfg rhsE >>= lcLetRhs cfg i rhsE
+  e1' <- loopBorrowOr cfg i rhsE e1 (adaptOwnedElem cfg rhsE e1 >>= keepRhs cfg rhsE >>= lcLetRhs cfg i rhsE)
   lcMakeLet cfg (nvar cfg) i (Just (typeFof rhsE)) (Just rhsE) e1' e2
 lowerSerialExprRaw cfg _ (LetVarS_ _ i) = return $ defaultValue {poolExpr = (svar cfg) i}
 lowerSerialExprRaw cfg _ (BndVarS_ _ i) = return $ defaultValue {poolExpr = (svar cfg) i}
@@ -1648,6 +1667,8 @@ namedIn n = here n <> Set.unions (map namedIn (rnodeChildren n))
     here m = case m of
       RN (LetVarN _ j _) -> Set.singleton j
       RN (BndVarN _ j _) -> Set.singleton j
+      RN (AppExeN _ (LocalCallP j) _) -> Set.singleton j
+      RN (AppExeN _ (PapplyP j) _) -> Set.singleton j
       RNM (NativeManifold _ _ f _) -> Set.fromList [i | Arg i _ <- manifoldContext f]
       RSM (SerialManifold _ _ f _ _) -> Set.fromList [i | Arg i _ <- manifoldContext f]
       _ -> Set.empty
@@ -1801,6 +1822,9 @@ readCounts :: RNode -> Map.Map Int Int
 readCounts n = case n of
   RN (LetVarN _ j _) -> Map.singleton j 1
   RN (BndVarN _ j _) -> Map.singleton j 1
+  -- calling a local function reads it (OWN-2)
+  RN (AppExeN _ (LocalCallP j) _) -> Map.unionsWith (+) (Map.singleton j 1 : map readCounts (rnodeChildren n))
+  RN (AppExeN _ (PapplyP j) _) -> Map.unionsWith (+) (Map.singleton j 1 : map readCounts (rnodeChildren n))
   RN (IfN _ c a b) -> Map.unionWith (+) (readCounts (RN c)) (Map.unionWith max (readCounts (RN a)) (readCounts (RN b)))
   RN (DoBlockN _ _) -> repeated n
   RN (LoopN _ starts body) -> Map.unionsWith (+) (repeated (RLN body) : [readCounts (RN x) | (_, x) <- starts])
@@ -1924,6 +1948,77 @@ loopBorrowLocals mayBorrow g root = go g root
     isManifold (RNM _) = True
     isManifold (RSM _) = True
     isManifold _ = False
+
+-- | The lets under a manifold bound to a part of a value the manifold owns
+-- (not in @g@) that the let's scope reads again, each with that value: a
+-- reference into it, so the part is not copied, and a read of it (OWN-2,
+-- OWN-6). A part the value's last read could take (OWN-5) is left alone,
+-- unless it is a list element of a value another of these lets refers into
+-- and @lendElems@ says a lent list gives up no element.
+ownedPartLets :: (NativeExpr -> Bool) -> Bool -> Set.Set Int -> RNode -> Map.Map Int Int
+ownedPartLets mayBorrow lendElems g root = base <> siblings
+  where
+    base = go (\later _ r -> any (usesIndex r) later) [] root
+    lentRoots = Set.fromList (Map.elems base)
+    siblings
+      | lendElems = go (\_ part r -> isElem part && Set.member r lentRoots) [] root
+      | otherwise = Map.empty
+    go lends later n = case rnodeLet n of
+      Just (i, rhs, body) -> here lends i rhs (body : later) <> go lends (body : later) rhs <> go lends later body
+      Nothing -> mconcat (map (go lends later) (filter (not . isManifold) (rnodeChildren n)))
+    here lends i (RN rhs) later
+      | not (Set.member i reused)
+      , not (isFunction (typeFof rhs))
+      , Just part <- borrowPartOf mayBorrow (const True) rhs
+      , Just r <- partRoot part
+      , not (Set.member r g)
+      , lends later part r =
+          Map.singleton i r
+    here _ _ _ _ = Map.empty
+    partRoot p = case p of
+      BorrowCtorField _ q _ _ -> rootOf q
+      BorrowElem q _ -> rootOf q
+      BorrowField j _ -> Just j
+      BorrowLet j q (BorrowVar k) | j == k -> partRoot q
+      _ -> Nothing
+    rootOf (BorrowVar j) = Just j
+    rootOf q = partRoot q
+    isElem BorrowElem {} = True
+    isElem _ = False
+    reused = Map.keysSet (Map.filter (> (1 :: Int)) (Map.fromListWith (+) [(i, 1) | i <- bindings root]))
+    bindings n = loopIds n <> maybe [] (\(i, _, _) -> [i]) (rnodeLet n) <> concatMap bindings (rnodeChildren n)
+    loopIds (RN (LoopN _ starts _)) = map fst starts
+    loopIds (RS (LoopS _ ids _)) = ids
+    loopIds _ = []
+    isManifold (RNM _) = True
+    isManifold (RSM _) = True
+    isManifold _ = False
+    -- a call of a local function is not a read (readCounts)
+    isFunction FunF {} = True
+    isFunction _ = False
+
+-- | A segment with the reads of the parameters manifold @m@ takes by value
+-- (@seeds m@) written as reads of a parameter: such a parameter shares its
+-- index with what its caller passes, which may be one of the caller's lets.
+paramReads :: (Int -> [Int]) -> SerialManifold -> SerialManifold
+paramReads seeds = mmap (defaultValue {mapNativeManifold = onNM})
+  where
+    onNM (NativeManifold m l f e) = case seeds m of
+      [] -> NativeManifold m l f e
+      ps -> NativeManifold m l f (asParams (Set.fromList ps) e)
+    asParams ps = mgatedMap gate (defaultValue {mapNativeExpr = rd})
+      where
+        rd (LetVarN t i r) | Set.member i ps = BndVarN t i r
+        rd x = x
+    gate = defaultValue {gateNativeManifold = const False, gateSerialManifold = const False}
+
+-- | The carried locals of every loop under a node.
+loopSlots :: RNode -> Set.Set Int
+loopSlots n = here n <> Set.unions (map loopSlots (rnodeChildren n))
+  where
+    here (RN (LoopN _ starts _)) = Set.fromList (map fst starts)
+    here (RS (LoopS _ ids _)) = Set.fromList ids
+    here _ = Set.empty
 
 -- | The candidate parameters OWN-7 passes by value. The sinks are found
 -- only on the part of the body every evaluation runs.
@@ -2105,15 +2200,22 @@ scanDef i rhs = mempty {csDefs = Map.singleton i rhs, csAllDefs = [(i, rhs)]}
 scanLet :: Int -> NativeExpr -> ConsumeScan
 scanLet i rhs = scanDef i rhs <> mempty {csProjections = projectionOf i rhs, csGetters = getterOf i rhs}
 
--- | A getter of one tuple or record field of a variable, as @(this let, the
--- variable)@. Tuples and records hold their fields by value, so a field of
--- a value the frame owns is unique to it.
+-- | A getter of one tuple or record field of a variable, or an element of a
+-- list variable, as @(this let, the variable)@. Tuples, records and lists
+-- hold their parts by value, so a part of a value the frame owns is unique
+-- to it.
 getterOf :: Int -> NativeExpr -> [(Int, Int)]
 getterOf letIdx (PatN _ (PatGet sel [] (NativeArgExpr v)))
   | not (selectorHasBracket sel)
   , [_] <- ungroup sel
   , Just subjIdx <- varIndexOf v =
       [(letIdx, subjIdx)]
+  where
+    varIndexOf (LetVarN _ j _) = Just j
+    varIndexOf (BndVarN _ j _) = Just j
+    varIndexOf _ = Nothing
+getterOf letIdx (IntrinsicN _ IntrListElem _ (v : _))
+  | Just subjIdx <- varIndexOf v = [(letIdx, subjIdx)]
   where
     varIndexOf (LetVarN _ j _) = Just j
     varIndexOf (BndVarN _ j _) = Just j
@@ -2862,7 +2964,10 @@ lowerNativeExprRaw cfg _ (AppExeN_ _ (RecCallP mid _) xs0) = do
   xs1 <- bindCallArgs cfg xs0
   xs <- sequence [keepArg j la | (j, la) <- indexed xs1]
   owns <- argOwnerships cfg xs
-  return $ mergePoolDocs (\es -> lcManifoldName cfg mid <> tupled [lcSourcedArg cfg (ManifoldArg mid j) own t e | (j, (own, t, e)) <- indexed (zip3Same owns (map laType xs) es)]) (map laDocs xs)
+  twin <- lcTwinCall cfg mid owns
+  let name = fromMaybe (lcManifoldName cfg mid) twin
+      site = maybe ManifoldArg (const TwinArg) twin mid
+  return $ mergePoolDocs (\es -> name <> tupled [lcSourcedArg cfg (site j) own t e | (j, (own, t, e)) <- indexed (zip3Same owns (map laType xs) es)]) (map laDocs xs)
   where
     keepArg j la@(LowArg (NativeArgExpr e) _ d) = (\v -> la {laDocs = d {poolExpr = v}}) <$> lcKeepCallArg cfg mid j e (poolExpr d)
     keepArg _ la = return la
@@ -3037,11 +3142,14 @@ lowerNativeExprRaw _ _ (CoerceN_ (CoerceNewtype _ _) _ (Low _ x)) = return x
 -- The two arms feed the conditional's owned result sink, so adapt each to an
 -- owned value (like every other owned sink); the condition is not a sink.
 lowerNativeExprRaw cfg origExpr (IfN_ _ (Low condE condDocs) (Low thenE thenDocs) (Low elseE elseDocs)) = do
-  thenDocs' <- adaptOwnedElem cfg thenE thenDocs
-  elseDocs' <- adaptOwnedElem cfg elseE elseDocs
+  -- An arm's value is the conditional's value, kept on that arm's path (OWN-2).
+  thenDocs' <- adaptOwnedElem cfg thenE thenDocs >>= keepArm thenE
+  elseDocs' <- adaptOwnedElem cfg elseE elseDocs >>= keepArm elseE
   case shortCircuit cfg condE thenE elseE condDocs thenDocs' elseDocs' of
     Just docs -> docs
     Nothing -> guardChain cfg origExpr condE thenE elseE condDocs thenDocs' elseDocs'
+  where
+    keepArm e d = (\x -> d {poolExpr = x}) <$> lcKeepElem cfg e (poolExpr d)
 lowerNativeExprRaw cfg _ (IntrinsicN_ _ IntrHash (Just schema) [Low dataE dataDocs]) = do
   sid <- lcRegisterSchema cfg schema
   -- The hashed value is only read, through a 'ToVoidstar' (&T) sink; see
@@ -3602,19 +3710,22 @@ lowerManifold cfg m form headForm bodyType bodyPool = do
           -- The call arguments are named by index-aliasing after the CALLER's
           -- variables, so their ownership is read in the caller's scope. A
           -- non-Native (serialized) argument is an owned deserialized value.
-          callArgs <- lcWithCallerScope cfg $
-            mapIndexedM
-              ( \j a@(Arg i t) -> do
-                  own <- case t of
-                    Native tf -> lcOwnership cfg (BndVarN tf i KeptRead)
-                    _ -> return Owned
-                  x <- case t of
-                    Native tf -> lcKeepContextArg cfg m j i tf ((argName cfg) a)
-                    _ -> return ((argName cfg) a)
-                  return $ lcSourcedArg cfg (ManifoldArg m j) own t x
-              )
-              (typeMofRs rs)
-          return $ mname <> tupled callArgs
+          lcWithCallerScope cfg $ do
+            callArgs <-
+              mapIndexedM
+                ( \j a@(Arg i t) -> do
+                    own <- case t of
+                      Native tf -> lcOwnership cfg (BndVarN tf i KeptRead) >>= lcBuildOwnership cfg m i
+                      _ -> return Owned
+                    x <- case t of
+                      Native tf -> lcKeepContextArg cfg m j i tf ((argName cfg) a)
+                      _ -> return ((argName cfg) a)
+                    return (own, t, x)
+                )
+                (typeMofRs rs)
+            twin <- lcTwinCall cfg m [own | (own, _, _) <- callArgs]
+            let site = maybe ManifoldArg (const TwinArg) twin m
+            return $ fromMaybe mname twin <> tupled [lcSourcedArg cfg (site j) own t x | (j, (own, t, x)) <- indexed callArgs]
         (ManifoldPart rs vs) -> do
           -- The closure's callable signature is result(bound...) -- only the
           -- REMAINING parameters, never the captured context args. Build it

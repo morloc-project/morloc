@@ -48,21 +48,6 @@ Generated code that a language's own tools refuse.
   call to 'Tok::Tok()'". Tail loops hold their result in `std::optional<T>`
   for this reason; a conditional does not. Spec gap: no item says what a
   native type must provide (here, a default constructor).
-- [reproduced, 2026-10-17, 9f24abe4] A C++ or Rust function that builds
-  a `data` value whose field is a Packable-mapped newtype does not build.
-  With `newtype Counted = Int`, `type Cpp => Counted = "Counted"`, a
-  Packable instance, and `data Chain = End | Link Counted Chain`,
-  `build k acc ? k == 0 = acc : build (k - 1) (Link (one k) acc)` fails with
-  "C++ pool: the data type Chain is used with two field types for its
-  constructor Link: (Counted, Chain) and (int, Chain)"
-  (Grammars/Common.hs:1019, mergeVariantOccurrences). `[Counted]` fails
-  the same way with `std::vector<int>`. [traced 2026-11-02,
-  briefs/A5-B4.md] Recursion is not the cause: exporting a plain
-  `mkC`/`lenC` fails the same way, and Rust too ("... (Counted, Chain) and (i64, Chain)"). The variant
-  collectors read the wire type (`serialAstToType`) under the native
-  type's name, and `wireField` converts a field between its two forms only
-  for closures. Fix: the collectors use the native type; `wireField` also
-  converts a field that contains a pack.
 - [reproduced, 2026-10-17, 9f24abe4] A function called from several sites
   is emitted once per site: a Rust pool held 19 identical loop bodies for
   `count`, a C++ pool about 9 for `build`. Code size and build time only.
@@ -109,3 +94,18 @@ Generated code that a language's own tools refuse.
   sourced file's item reaches rustc as E0428 instead of a morloc error.
   Likewise the crate root's `mlc` module, declared when the pool generates
   arms or handles, clashes with a sourced `mod mlc`.
+- [reproduced, 2026-11-21] A Rust pool does not build when a user `data`
+  type is named like a type in Rust's prelude. With `data Box = Box Pay Int
+  | NoBox` and a record with a field of type `Box`, the generated record's
+  derives resolve `Box` to `std::boxed::Box` ("`Box` doesn't implement
+  `Debug`", "the trait bound `Box: Default` is not satisfied"); renaming
+  the type to `Bx` builds. Generated type names need qualifying, or a
+  prelude name refusing with a message.
+- [reproduced, 2026-11-21] A Rust pool for a `data` type whose arm holds
+  a user-mapped newtype (`data Bx = Bx Pay Int | NoBox`, `newtype Pay =
+  Int`, `type Rust => Pay = "Pay"`, a Packable instance) may not compile,
+  depending on which functions are exported: golden own7-matrix-rust's
+  main.loc with its export list cut to
+  `(c000, c288, c056, c348)` fails rustc E0277 "`Pay: ToVoidstar` is not
+  satisfied" in the generated `Bx` impls (the whole list builds). Same
+  result before and after the 2026-11-21 Rust marking change.

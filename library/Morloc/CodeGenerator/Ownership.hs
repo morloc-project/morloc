@@ -39,6 +39,8 @@ import Morloc.CodeGenerator.Grammars.Translator.Imperative
   , borrowableRoot
   , isBorrowableProjection
   , loopBorrowLocals
+  , ownedPartLets
+  , usesIndex
   , nativeManifoldsUnder
   )
 import Morloc.CodeGenerator.Namespace
@@ -53,6 +55,10 @@ data OwnCaps = OwnCaps
   , ocLends :: NativeExpr -> Bool
   -- ^ whether a part of a value, as this projection reads it, has a value of
   -- its own type in memory to lend a reference to (OWN-6)
+  , ocTakesElems :: Bool
+  -- ^ whether an element can be taken out of a list the frame owns while
+  -- another part of the list is lent (OWN-5); where it cannot, the element
+  -- is lent too
   }
 
 -- | Whether a projection may be borrowed rather than copied (OWN-6).
@@ -68,18 +74,50 @@ data PoolPlan = PoolPlan
   -- ^ per fully applied native manifold, the parameter positions it takes by
   -- value (OWN-7); also a fold's step and combine the fold alone calls
   -- (COPY-7)
+  , ppTwoForm :: Map.Map Int (Set.Set Int)
+  -- ^ per fully applied native manifold, the positions of the parameters
+  -- it keeps, or keeps a part of, on some evaluations but takes by
+  -- reference: a member may give it a second form taking them by value,
+  -- for a call that may move every one of them (OWN-7)
   }
 
 emptyPoolPlan :: PoolPlan
-emptyPoolPlan = PoolPlan {ppTakes = Set.empty, ppByValue = Map.empty}
+emptyPoolPlan = PoolPlan {ppTakes = Set.empty, ppByValue = Map.empty, ppTwoForm = Map.empty}
 
 planPool :: OwnCaps -> [SerialManifold] -> PoolPlan
 planPool caps sms =
   PoolPlan
-    { ppTakes = consumableProjectionLets (ocTagAfterTake caps) (\m -> Map.findWithDefault Set.empty m byValue) sms
+    { ppTakes = consumableProjectionLets (ocTagAfterTake caps) (\m -> Map.findWithDefault Set.empty m byValue <> Map.findWithDefault Set.empty m twoForm) sms
     , ppByValue = byValue
+    , ppTwoForm = twoForm
     }
   where
+    twoForm = settleTwo Map.empty
+    settleTwo known =
+      let next = twoFormGiven known
+       in if next == known then known else settleTwo next
+    twoFormGiven known =
+      Map.filter (not . Set.null) . Map.fromListWith Set.intersection $
+        [ (m, positions)
+        | NativeManifold m _ form@(ManifoldFull _) body <- natives
+        , not (Set.member m asValues)
+        , let args = typeMofForm form
+              own = Map.findWithDefault Set.empty m byValue
+              keeps c = Map.findWithDefault Set.empty c byValue <> Map.findWithDefault Set.empty c known
+              kept = keptSomewhere keeps body
+              sources = letSources (RN body)
+              positions =
+                Set.fromList
+                  [ j
+                  | (j, Arg i (Native tf)) <- indexed args
+                  , not (ocCheap caps tf)
+                  , not (isFunT tf)
+                  , Set.notMember j own
+                  , not (Set.null (Set.intersection kept (flowsFrom sources i)))
+                  ]
+        ]
+    isFunT FunF {} = True
+    isFunT _ = False
     byValue = Map.unionWith Set.union (settle Map.empty) foldParams
     -- A fold's step and combine that capture nothing, and occur nowhere
     -- else, are called by the fold alone, which hands over the accumulator
@@ -128,6 +166,74 @@ planPool caps sms =
     notFull ManifoldFull {} = False
     notFull _ = True
 
+-- | The variables a native expression's reads keep anywhere in it: an
+-- element of a constructor, list, tuple or record; a value it or a let's
+-- right-hand side ends in, on either arm of a conditional; a loop's start
+-- or next value; and an argument
+-- a call takes by value (@keeps m@, the positions manifold @m@ takes or may
+-- take by value). Nested function values and suspensions are their own
+-- scopes (OWN-3).
+keptSomewhere :: (Int -> Set.Set Int) -> NativeExpr -> Set.Set Int
+keptSomewhere keeps body = ends body <> go (RN body)
+  where
+    go n = case n of
+      RN (DoBlockN _ _) -> Set.empty
+      RNM (NativeManifold m _ form@(ManifoldFull _) _) ->
+        Set.fromList [p | (j, Arg p _) <- indexed (typeMofForm form), Set.member j (keeps m)]
+      RNM _ -> Set.empty
+      RSM _ -> Set.empty
+      RN e -> here e <> foldMap go (rnodeChildren n)
+      RLN (LoopContinue es) -> vars (map snd es) <> foldMap go (rnodeChildren n)
+      RLS (LoopContinue es) -> vars (map snd es) <> foldMap go (rnodeChildren n)
+      RLN (LoopBase e) -> ends e <> foldMap go (rnodeChildren n)
+      _ -> foldMap go (rnodeChildren n)
+    here e = case e of
+      VariantN _ _ _ xs -> vars xs
+      ListN _ _ xs -> vars xs
+      TupleN _ xs -> vars xs
+      RecordN _ _ _ kvs -> vars (map snd kvs)
+      AppExeN _ (RecCallP mid _) args -> Set.fromList [p | (j, NativeArgExpr a) <- indexed args, Just p <- [varOf a], Set.member j (keeps mid)]
+      LoopN _ starts _ -> vars (map snd starts)
+      NativeLetN _ rhs _ -> ends rhs
+      _ -> Set.empty
+    ends e = case e of
+      NativeLetN _ _ b -> ends b
+      IfN _ _ a b -> ends a <> ends b
+      ReturnN x -> ends x
+      CoerceN _ _ x -> ends x
+      _ -> maybe Set.empty Set.singleton (varOf e)
+    vars xs = Set.fromList [p | Just p <- map varOf xs]
+    varOf (LetVarN _ p _) = Just p
+    varOf (BndVarN _ p _) = Just p
+    varOf _ = Nothing
+
+-- | Each native let under a node, with the variables its value may be or
+-- refer into: the variable a projection reads from, or a value its
+-- right-hand side ends in.
+letSources :: RNode -> [(Int, Set.Set Int)]
+letSources n = maybe [] (\(i, rhs, _) -> [(i, sourcesOf rhs)]) (rnodeLet n) <> concatMap letSources (rnodeChildren n)
+  where
+    sourcesOf (RN e) = from e
+    sourcesOf _ = Set.empty
+    from e = case e of
+      LetVarN _ j _ -> Set.singleton j
+      BndVarN _ j _ -> Set.singleton j
+      IntrinsicN _ IntrCtorField _ (x : _) -> from x
+      IntrinsicN _ IntrListElem _ (x : _) -> from x
+      PatN _ (PatGet _ [] (NativeArgExpr x)) -> from x
+      NativeLetN _ _ b -> from b
+      IfN _ _ a b -> from a <> from b
+      CoerceN _ _ x -> from x
+      _ -> Set.empty
+
+-- | A variable and every let whose value may be it or refer into it.
+flowsFrom :: [(Int, Set.Set Int)] -> Int -> Set.Set Int
+flowsFrom sources = grow . Set.singleton
+  where
+    grow s =
+      let s' = s <> Set.fromList [i | (i, from) <- sources, not (Set.null (Set.intersection from s))]
+       in if Set.size s' == Set.size s then s else grow s'
+
 -- | The value a right-hand side ends in, past the lets it binds for itself.
 letValue :: NativeExpr -> NativeExpr
 letValue (NativeLetN _ _ b) = letValue b
@@ -153,6 +259,7 @@ letMode :: PoolPlan -> Int -> Int -> NativeExpr -> LetMode
 letMode pp root i rhs
   | IntrinsicN _ IntrCtorField _ (LetVarN {} : _) <- rhs, Set.member (root, i) (ppTakes pp) = LetTake
   | PatN _ (PatGet _ [] (NativeArgExpr _)) <- rhs, Set.member (root, i) (ppTakes pp) = LetTake
+  | IntrinsicN _ IntrListElem _ (_ : _) <- rhs, Set.member (root, i) (ppTakes pp) = LetTake
   | isPlace rhs = LetBorrow
   | otherwise = LetCopy
   where
@@ -224,28 +331,56 @@ data ManifoldPlan = ManifoldPlan
   -- ^ indices read at more than one point (OWN-2)
   , mpCarried :: Set.Set Int
   -- ^ the loop-carried indices of a native-loop manifold
+  , mpOwnedParts :: Map.Map Int Int
+  -- ^ the borrowed locals that refer into a value the manifold owns, each
+  -- with that value ('ownedPartLets')
   }
 
-planSerialManifold :: OwnCaps -> SerialManifold -> ManifoldPlan
-planSerialManifold caps sm@(SerialManifold _ _ form _ e) =
-  ManifoldPlan
-    { mpBorrowed = borrowed <> loopBorrowLocals (lendable caps) borrowed (RSM sm)
-    , mpShared = sharedOf (runIdentity (foldSerialExprM varUseCountOps e)) `Set.union` carried
+planSerialManifold :: OwnCaps -> PoolPlan -> SerialManifold -> ManifoldPlan
+planSerialManifold caps pp sm@(SerialManifold _ _ form _ e) =
+  (borrowPlan caps pp (borrowedIndicesOfForm caps form) (RSM sm))
+    { mpShared = sharedOf (runIdentity (foldSerialExprM varUseCountOps e)) `Set.union` carried
     , mpCarried = carried
     }
   where
     carried = loopCarriedIdsSM sm
-    borrowed = borrowedIndicesOfForm caps form
 
 planNativeManifold :: OwnCaps -> PoolPlan -> NativeManifold -> ManifoldPlan
 planNativeManifold caps pp nm@(NativeManifold m _ form e) =
-  ManifoldPlan
-    { mpBorrowed = borrowed <> loopBorrowLocals (lendable caps) borrowed (RNM nm)
-    , mpShared = sharedOf (runIdentity (foldNativeExprM varUseCountOps e))
-    , mpCarried = Set.empty
+  (borrowPlan caps pp borrowed (RNM nm))
+    { mpShared = sharedOf (runIdentity (foldNativeExprM varUseCountOps e))
     }
   where
     borrowed = borrowedIndicesOfForm caps form `Set.difference` byValueIndices pp m form
+
+-- | The borrows of a manifold given its borrowed parameters: the locals
+-- that borrow from them (OWN-6), the lets that refer into a value the
+-- manifold owns, and the locals that borrow from those.
+borrowPlan :: OwnCaps -> PoolPlan -> Set.Set Int -> RNode -> ManifoldPlan
+borrowPlan caps pp borrowed n =
+  ManifoldPlan
+    { mpBorrowed = refs
+    , mpShared = Set.empty
+    , mpCarried = Set.empty
+    , mpOwnedParts = Map.filter (`Set.notMember` refs) owned
+    }
+  where
+    -- A part lent from a value a take later empties is read before it.
+    owned = Map.filterWithKey (\i j -> not (any (afterTake i j) takes)) (ownedPartLets (lendable caps) (not (ocTakesElems caps)) borrowed n)
+    taken = Set.map snd (ppTakes pp)
+    takes = [(j, body) | m <- universe n, Just (i, RN rhs, body) <- [rnodeLet m], Set.member i taken, Just j <- [takeSubject rhs]]
+    afterTake i j (j', body) = j == j' && (usesIndex i body || i `elem` boundIn body)
+    boundIn m = maybe [] (\(i, _, _) -> [i]) (rnodeLet m) <> concatMap boundIn (rnodeChildren m)
+    takeSubject rhs = case rhs of
+      IntrinsicN _ IntrCtorField _ (LetVarN _ j _ : _) -> Just j
+      PatN _ (PatGet _ [] (NativeArgExpr x)) -> case x of
+        LetVarN _ j _ -> Just j
+        BndVarN _ j _ -> Just j
+        _ -> Nothing
+      _ -> Nothing
+    universe m = m : concatMap universe (rnodeChildren m)
+    start = borrowed <> Map.keysSet owned
+    refs = start <> loopBorrowLocals (lendable caps) start n
 
 -- | Per-index variable-use counts over a manifold (OWN-2). Every read
 -- counts, borrows included; the two arms of an 'IfN' count as their larger

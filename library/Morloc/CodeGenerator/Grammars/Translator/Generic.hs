@@ -639,6 +639,7 @@ genericLowerConfig desc srcNamer debugInfo traceInfo debugMode = cfg
         , lcPackerName = srcNamer
         , lcUnpackerName = srcNamer
         , lcBorrowPackArg = \_ -> False
+        , lcWireListIter = (,)
         , lcRecordAccessor = \nt (FV _ c) r k -> return (genericRecordAccessor desc nt c r k)
         , lcDeserialRecordAccessor = \_ k v -> case ldKeyAccess desc of
             "double_bracket" -> v <> "[[" <> dquotes (pretty k) <> "]]"
@@ -670,6 +671,8 @@ genericLowerConfig desc srcNamer debugInfo traceInfo debugMode = cfg
         , lcTakeSetter = \_ _ _ _ -> return Nothing
         , lcKeepContextArg = \_ _ _ _ v -> return v
         , lcKeepCallArg = \_ _ _ v -> return v
+        , lcTwinCall = \_ _ -> return Nothing
+        , lcBuildOwnership = \_ _ own -> return own
         , lcKeepClosureArg = \_ _ -> return Nothing
         , lcKeepSourcedArg = \_ _ -> return Nothing
         , lcMoveWhereAccepted = \_ _ x -> x

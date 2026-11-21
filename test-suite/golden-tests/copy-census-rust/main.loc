@@ -31,6 +31,7 @@
 --   twoLets                    one value kept by two lets in turn
 --   capStaged capStagedKeep    a staged function capturing a chain, passed as a value
 --   tryLet doTwice             a let kept inside a @try body, a do block run twice
+--   letAlias                   loop step reading a field of the tuple it carries on
 module main
   ( nestedOut, nestedLoop, tagNested, tagField
   , fieldArg, fieldSrc, fieldSrcLit, fieldRet, tupleArg, tupleFresh
@@ -41,7 +42,7 @@ module main
   , letOnce, letParam, letField, matchUnwrap, matchArg, matchTry
   , throughTwo, throughLoop, throughCli, nonTail
   , guardTwice, guardLoop, guardKeep, mixedLoop, matchedTwice, twoLets
-  , capStaged, capStagedKeep, tryLet, doTwice
+  , capStaged, capStagedKeep, tryLet, doTwice, letAlias
   )
 
 import root-rust
@@ -382,3 +383,11 @@ doTwice n = do
   a <- d
   b <- d
   clones (a + b)
+
+aliasStep :: Int -> (Chain, Int) -> Int -> Int
+aliasStep k t s
+  ? k == 0 = s + chainLen (.0 t)
+  : (let u = (.0 t, k) in let ys = .0 u in aliasStep (k - 1) u (s + chainLen ys))
+
+letAlias :: Int -> (Int, Int)
+letAlias n = clones (aliasStep 10 (mkChain n, 0) 0)

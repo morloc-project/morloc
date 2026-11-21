@@ -23,13 +23,13 @@
 --- listPat ---
 [1101,0]
 --- listRet ---
-[100,1]
+[100,0]
 --- listLit ---
 [2,0]
 --- listRecords ---
 [2003,0]
 --- listLoop ---
-[1200,2]
+[1200,0]
 --- listStep ---
 [110,0]
 --- twiceRead ---
@@ -79,11 +79,11 @@
 --- letSource ---
 [100,0]
 --- matchCond ---
-[100,1]
+[100,0]
 --- matchCondFresh ---
 [100,0]
 --- matchRec ---
-[100,2]
+[100,0]
 --- matchUnwrap ---
 [100,0]
 --- matchTry ---
@@ -91,17 +91,17 @@
 --- throughTwo ---
 [100,0]
 --- throughLoop ---
-[100,1]
+[100,0]
 --- loopFresh ---
 [1,0]
 --- loopGrow ---
 [1,0]
 --- loopCarried ---
-[300,1]
+[300,0]
 --- loopField ---
-[300,1]
+[300,0]
 --- loopTuple ---
-[300,1]
+[300,0]
 --- tupleStep ---
 [4,0]
 --- loopLet ---
@@ -115,7 +115,7 @@
 --- guardLoop ---
 [9803,0]
 --- guardKeep ---
-[100,1]
+[100,0]
 --- mixedLoop ---
 [323207,0]
 --- matchedTwice ---
@@ -132,3 +132,5 @@
 [2,0]
 --- doLoop ---
 [100,0]
+--- swapSlots ---
+[2001,0]

@@ -95,6 +95,8 @@ all:
 	./nexus tryLet 100 >> obs.txt 2>> obs.err || echo "failed" >> obs.txt
 	echo "--- doTwice ---" >> obs.txt
 	./nexus doTwice 100 >> obs.txt 2>> obs.err || echo "failed" >> obs.txt
+	echo "--- letAlias ---" >> obs.txt
+	./nexus letAlias 100 >> obs.txt 2>> obs.err || echo "failed" >> obs.txt
 
 clean:
 	rm -rf nexus pools __pycache__

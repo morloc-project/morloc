@@ -185,6 +185,10 @@ lastReadCases =
         -- a leaf that depends on a serial let keeps its lets in its values
         sealed (sealLoop (cont [D (rd 10) [(10, Right (rd 1))], D (rd 11) [(11, Left (LetVarS Nothing 3))]]))
           @?= ([], [True, False])
+    -- a call of a local function is a read of it
+    , testCase "spec-own-2-18" $
+        marks (loop [1] (LoopNLet 10 (rd 1) (LoopBase (tup [rd 10, AppExeN ty (LocalCallP 1) []]))))
+          @?= [[], [10]]
     -- a do block a let's value holds through a conditional's arm holds what
     -- it reads
     , testCase "spec-own-3-3" $

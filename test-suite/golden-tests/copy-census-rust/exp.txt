@@ -27,7 +27,7 @@
 --- twiceKeep ---
 [202,200]
 --- twoSteps ---
-[201,100]
+[201,0]
 --- partsBorrowed ---
 [100,0]
 --- partsFresh ---
@@ -61,7 +61,7 @@
 --- matchUnwrap ---
 [100,0]
 --- matchArg ---
-[100,100]
+[100,0]
 --- matchTry ---
 [100,0]
 --- throughTwo ---
@@ -89,6 +89,8 @@
 --- capStagedKeep ---
 [203,0]
 --- tryLet ---
-[100,100]
+[100,0]
 --- doTwice ---
-[202,200]
+[202,0]
+--- letAlias ---
+[1100,0]

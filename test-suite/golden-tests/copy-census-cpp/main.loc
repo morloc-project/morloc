@@ -41,6 +41,7 @@
 --   aliasKeep                  a value kept while a reference into it is still read
 --   tryLet tryCapture          a let kept inside a @try body, captured by a lambda there
 --   doTwice doLoop             a let kept inside a do block run twice, run in a loop
+--   swapSlots                  a loop whose step swaps two carried values
 module main
   ( baseBuild, baseWalk, nestedOut, nestedLoop, nestedLoop2, tagNested, tagField
   , fieldArg, fieldArgM, fieldRet, tupleArg
@@ -53,7 +54,7 @@ module main
   , matchCond, matchCondFresh, matchRec, matchUnwrap, matchTry
   , throughTwo, throughLoop
   , loopFresh, loopGrow, loopCarried, loopField, loopTuple, tupleStep, loopLet, loopLetTwice, loopLetAlias
-  , nonTail, guardLoop, guardKeep, mixedLoop, matchedTwice, twoLets, aliasKeep, tryLet, tryCapture, doTwice, doLoop
+  , nonTail, guardLoop, guardKeep, mixedLoop, matchedTwice, twoLets, aliasKeep, tryLet, tryCapture, doTwice, doLoop, swapSlots
   )
 
 import root
@@ -554,3 +555,11 @@ doLoop :: Int -> <IO> (Int, Int)
 doLoop n = do
   s <- stepL n 0
   census s
+
+swapStep :: Int -> [Int] -> [Int] -> Int
+swapStep k a b
+  ? k == 0 = 1000 * keyL a + keyL b
+  : swapStep (k - 1) b a
+
+swapSlots :: Int -> (Int, Int)
+swapSlots n = census (swapStep (n + 1) (mkL 1) (mkL 2))

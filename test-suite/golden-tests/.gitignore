@@ -22,3 +22,8 @@ make.log
 runs/
 dynamic
 unshareable
+own7-*/oracle
+own7-*/asan
+own7-*/run.txt
+own7-*/oracle.txt
+own7-*/asan.txt

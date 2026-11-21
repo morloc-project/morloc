@@ -23,7 +23,7 @@
 --- takenG ---
 200
 --- takenRec ---
-[103,100]
+[103,0]
 --- loopOwned ---
 6
 --- loopFields ---

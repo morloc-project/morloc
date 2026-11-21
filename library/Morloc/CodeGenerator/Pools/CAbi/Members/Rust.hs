@@ -34,6 +34,7 @@ module Morloc.CodeGenerator.Pools.CAbi.Members.Rust
   ) where
 
 import Morloc.Data.Zip (indexed, indexedFrom, mapIndexed, mapIndexedM, zip3Same, zip4Same, zipExact, zipPrefix, zipSame, zipWithSame)
+import System.Environment (lookupEnv)
 import Data.Foldable (toList)
 import Control.Monad.Identity (Identity, runIdentity)
 import Control.Monad.Reader (ReaderT, asks, local, runReaderT)
@@ -68,7 +69,9 @@ import Morloc.CodeGenerator.Grammars.Translator.Imperative
   , LowerConfig (..)
   , FoldFn (..)
   , buildProgramM
-  , markLastReads
+  , markLastReadsSeeded
+  , paramReads
+  , loopSlots
   , BorrowPart (..)
   , BorrowTest (..)
   , FieldRead (..)
@@ -156,9 +159,15 @@ data RustState = RustState
   , rsPapplyHeads :: Set.Set Text
   -- ^ The stored types of the function values this pool partially applies.
   , rsPool :: PoolPlan
+  , rsNoMoves :: Bool
+  -- ^ MORLOC_NO_MOVES: no last reads are marked
   , rsBuilds :: Set.Set (Int, Int)
   -- ^ The (manifold, local) pairs whose building is the local's last read
   -- (OWN-3).
+  , rsTwin :: Maybe Int
+  -- ^ The manifold whose by-value form is being lowered (OWN-7).
+  , rsTwinDone :: Set.Set Int
+  -- ^ The manifolds whose by-value form is written.
   , rsCurrentRoot :: Int
   -- ^ The top-level manifold being lowered (the takes in 'rsPool' are keyed
   -- by it).
@@ -234,7 +243,10 @@ instance Defaultable RustState where
       , rsStageTable = Map.empty
       , rsPapplyHeads = Set.empty
       , rsPool = emptyPoolPlan
+      , rsNoMoves = False
       , rsBuilds = Set.empty
+      , rsTwin = Nothing
+      , rsTwinDone = Set.empty
       , rsCurrentRoot = 0
       , rsErrors = []
       , rsTypeHomes = Map.empty
@@ -287,10 +299,13 @@ data OwnEnv = OwnEnv
   -- 'NativeContent' so 'letWrap' emits a deserialize let) and reassigned by the
   -- loop's continue, so its entry let is emitted @let mut@ ('rustMakeLet') and it
   -- is unioned into 'oeShared' so the body borrows/clones but never moves it.
+  , oeOwnedParts :: Map.Map Int Int
+  -- ^ The locals of 'oeCurrent' that refer into a value the manifold owns,
+  -- each with that value ('mpOwnedParts').
   }
 
 emptyOwnEnv :: OwnEnv
-emptyOwnEnv = OwnEnv Set.empty Set.empty Set.empty Set.empty Set.empty
+emptyOwnEnv = OwnEnv Set.empty Set.empty Set.empty Set.empty Set.empty Map.empty
 
 type RustM = ReaderT OwnEnv (CMS.StateT RustState Identity)
 
@@ -1363,12 +1378,6 @@ capInit dead a@(Arg i t) = do
       then "::rustmorloc::PacketRef::new(" <> name <> ")"
       else if rustArgIsRef t && not (dead && not (Set.member i parentBorrowed)) then deref <> ".clone()" else deref
 
--- | The parameters each fully applied native manifold takes by value (OWN-7).
-rustSeeds :: PoolPlan -> [SerialManifold] -> Int -> [Int]
-rustSeeds pp sms = \m -> Set.toList (Map.findWithDefault Set.empty m byValue)
-  where
-    byValue = Map.fromListWith Set.intersection [(m, byValueIndices pp m form) | sm <- sms, NativeManifold m _ form _ <- nativeManifoldsUnder (RSM sm), Map.member m (ppByValue pp)]
-
 -- | How a proxy hands one of its arguments to the wire: a value is put as it
 -- is; a closure is reified first (its wire form is its origin tuple).
 closureArgPush :: Int -> SerialAST -> Int -> RustM MDoc
@@ -1711,8 +1720,9 @@ fromSourceSignatures f0 = do
       [(srcName s, f qs t') | (_, isrc) <- srcs, let s = val isrc, srcLang s == rustLang]
 
 translate :: [Source] -> [SerialManifold] -> MorlocMonad Script
-translate srcs es0 = do
-  let es = map markLastReads es0
+translate srcs es = do
+  -- MORLOC_NO_MOVES: the oracle the copy and move tests compare against
+  noMoves <- maybe False (`notElem` ["", "0"]) <$> liftIO (lookupEnv "MORLOC_NO_MOVES")
   let rustSrcs = mapMaybe srcPath [s | s <- srcs, srcLang s == rustLang]
   absSrcs <- unique <$> liftIO (mapM MS.canonicalizePath rustSrcs)
   localCrateDirs <- Map.elems <$> rustLocalDeps
@@ -1754,8 +1764,8 @@ translate srcs es0 = do
   depRoots <- depNamespaces "rust"
   let poolAsts = concatMap allSerialASTs es <> intrAsts <> closureSerialASTs closureAsts
       recordObjects = Map.map unique (Map.fromListWith (<>) [(g, [rs]) | a <- poolAsts, o@(SerialObject _ (FV g _) _ rs) <- serialSubtrees a, generatedObject o])
-  let st0 = defaultValue {rsRecordObjects = recordObjects, rsPoolAsts = poolAsts, rsDepNamespaces = depRoots, rsGenFailures = gfails, rsGenDefs = gdefs, rsExtras = extras, rsDataDefs = ddefs, rsDataNames = declaredDataNames generalScope, rsDataFailures = dfails, rsRecordUses = uses, rsTypeHomes = typeHomes, rsDebugInfo = debugInfo, rsCScope = mergedRustScope, rsSrcTypeVarMask = srcTypeVarMask, rsSrcMakers = srcMakers, rsLogTemplates = logTemplates, rsStageTable = stageTable, rsPool = pool, rsBuilds = lastBuilds Map.empty Set.empty (rustSeeds pool es0) es0}
-      pool = planPool (rustCaps mergedRustScope) es
+  let st0 = defaultValue {rsRecordObjects = recordObjects, rsPoolAsts = poolAsts, rsDepNamespaces = depRoots, rsGenFailures = gfails, rsGenDefs = gdefs, rsExtras = extras, rsDataDefs = ddefs, rsDataNames = declaredDataNames generalScope, rsDataFailures = dfails, rsRecordUses = uses, rsTypeHomes = typeHomes, rsDebugInfo = debugInfo, rsCScope = mergedRustScope, rsSrcTypeVarMask = srcTypeVarMask, rsSrcMakers = srcMakers, rsLogTemplates = logTemplates, rsStageTable = stageTable, rsPool = pool, rsNoMoves = noMoves}
+      pool = if noMoves then emptyPoolPlan else planPool (rustCaps mergedRustScope) es
       ((code, typeFiles), stEnd) = CMS.runState (runReaderT (makeRustCode includeDocs closureAsts closureTable es) emptyOwnEnv) st0
   mapM_ (MM.throwRejected . ("Rust pool:" <+>) . pretty) (rsErrors stEnd)
   let privateNote = poolPrivateNote [unTVar gv | gv <- Map.keys (rsRecords stEnd), Map.notMember gv (rsPublic stEnd)]
@@ -2346,9 +2356,9 @@ generateRustVariants closureAsts es = do
     loweringConfig = do
       mask <- CMS.gets rsSrcTypeVarMask
       makers <- CMS.gets rsSrcMakers
-      consumed <- CMS.gets (ppByValue . rsPool)
+      pool <- CMS.gets rsPool
       userArms <- CMS.gets rsUserArms
-      return (rustLowerConfig mask makers consumed userArms)
+      return (rustLowerConfig mask makers pool userArms)
 
 -- | Whether a type holds a function or suspension.
 holdsFunR :: TypeF -> Bool
@@ -2460,11 +2470,11 @@ recordImpls handle gd name params = do
   objectsOf <- CMS.gets rsRecordObjects
   mask <- CMS.gets rsSrcTypeVarMask
   makers <- CMS.gets rsSrcMakers
-  consumed <- CMS.gets (ppByValue . rsPool)
+  pool <- CMS.gets rsPool
   userArms <- CMS.gets rsUserArms
   homesOf <- CMS.gets rsTypeHomes
   let gv = gdVar gd
-      cfg = rustLowerConfig mask makers consumed userArms
+      cfg = rustLowerConfig mask makers pool userArms
       objects = Map.findWithDefault [] gv objectsOf
       converts fa = case fa of
         SerialClosure _ _ -> True
@@ -3081,9 +3091,9 @@ isVarWidthF _ = True
 -- mutating state, the scope is purely lexical -- sibling and nested manifolds
 -- cannot corrupt each other's view, and the answer does not depend on the fold's
 -- evaluation order.
-withManifoldScope :: Set.Set Int -> Set.Set Int -> Set.Set Int -> RustM a -> RustM a
-withManifoldScope borrowed shared carried =
-  local (\e -> OwnEnv {oeCurrent = borrowed, oeParent = oeCurrent e, oeShared = shared, oeParentShared = oeShared e, oeLoopCarried = carried})
+withManifoldScope :: ManifoldPlan -> RustM a -> RustM a
+withManifoldScope p =
+  local (\e -> OwnEnv {oeCurrent = mpBorrowed p, oeParent = oeCurrent e, oeShared = mpShared p, oeParentShared = oeShared e, oeLoopCarried = mpCarried p, oeOwnedParts = mpOwnedParts p})
 
 -- | Run an action in the caller's ownership scope, by making 'oeCurrent' the
 -- caller's set ('oeParent'). Used when rendering a manifold call whose arguments
@@ -3100,20 +3110,19 @@ rustSurround :: SurroundManifoldM RustM PoolDocs PoolDocs LowS LowN (TypeS, Pool
 rustSurround =
   defaultValue
     { surroundSerialManifoldM = \recurse sm -> do
+        pp <- CMS.gets rsPool
         cscope <- CMS.gets rsCScope
-        withPlan (planSerialManifold (rustCaps cscope) sm) (recurse sm)
+        withManifoldScope (planSerialManifold (rustCaps cscope) pp sm) (recurse sm)
     , surroundNativeManifoldM = \recurse nm -> do
         pp <- CMS.gets rsPool
         cscope <- CMS.gets rsCScope
-        withPlan (planNativeManifold (rustCaps cscope) pp nm) (recurse nm)
+        withManifoldScope (planNativeManifold (rustCaps cscope) pp nm) (recurse nm)
     }
-  where
-    withPlan p = withManifoldScope (mpBorrowed p) (mpShared p) (mpCarried p)
 
 -- | No tag test may follow a take (see the projection-consume golden's
 -- secondMatchRust).
 rustCaps :: Scope -> OwnCaps
-rustCaps cscope = OwnCaps {ocCheap = rustIsCopy, ocTagAfterTake = False, ocLends = lends}
+rustCaps cscope = OwnCaps {ocCheap = rustIsCopy, ocTagAfterTake = False, ocLends = lends, ocTakesElems = False}
   where
     -- RUST-4: an optional field of a user-written enum may sit behind a
     -- pointer, leaving no optional value in memory to lend.
@@ -3129,15 +3138,89 @@ userMapsVariantIn cscope gv cvText = case Map.lookup gv cscope of
   Nothing -> False
 
 translateSegment :: SerialManifold -> RustM MDoc
-translateSegment m0@(SerialManifold root _ _ _ _) = do
+translateSegment m00@(SerialManifold root _ _ _ _) = do
   resetCounter
   CMS.modify (\st -> st {rsCurrentRoot = root})
+  pp <- CMS.gets rsPool
+  noMoves <- CMS.gets rsNoMoves
   mask <- CMS.gets rsSrcTypeVarMask
   makers <- CMS.gets rsSrcMakers
-  consumed <- CMS.gets (ppByValue . rsPool)
   userArms <- CMS.gets rsUserArms
-  e <- surroundFoldSerialManifoldM rustSurround (defaultFoldRules (rustLowerConfig mask makers consumed userArms)) m0
-  return $ renderPoolDocs e
+  let cfg = rustLowerConfig mask makers pp userArms
+  before <- CMS.gets rsLocalSet
+  m0 <- prepareSegment m00
+  e <- surroundFoldSerialManifoldM rustSurround (defaultFoldRules cfg) m0
+  after <- CMS.gets rsLocalSet
+  let defined = after `Set.difference` before
+      twins =
+        Map.keys $
+          Map.fromList
+            [ (m, ())
+            | NativeManifold m _ (ManifoldFull _) _ <- nativeManifoldsUnder (RSM m00)
+            , Set.member m defined
+            , Map.member m (ppTwoForm pp)
+            ]
+  forms <- if noMoves then return [] else mapM (byValueForm cfg pp) twins
+  return $ vsep (renderPoolDocs e : concat forms)
+  where
+    -- The by-value form of a manifold (OWN-7): the segment planned again
+    -- with the parameters it keeps on some evaluations taken by value, and
+    -- only that manifold lowered. Calls are rendered by the plan without
+    -- it, so each call chooses its form ('rustTwinCall').
+    byValueForm cfg pp m = do
+      let pp' = pp {ppByValue = Map.insertWith Set.union m (Map.findWithDefault Set.empty m (ppTwoForm pp)) (ppByValue pp)}
+      CMS.modify (\st -> st {rsPool = pp', rsTwin = Just m})
+      m0 <- prepareSegment m00
+      docs <- case [nm | nm@(NativeManifold m' _ (ManifoldFull _) _) <- nativeManifoldsUnder (RSM m0), m' == m] of
+        (nm : _) -> surroundFoldNativeManifoldM rustSurround (defaultFoldRules cfg) nm
+        [] -> error "morloc bug: a by-value form whose manifold is not in its segment"
+      CMS.modify (\st -> st {rsPool = pp, rsTwin = Nothing})
+      return (poolCompleteManifolds docs)
+
+-- | Mark a segment's last reads under the current pool plan, and record
+-- the builds that are a local's last read (OWN-2, OWN-3).
+prepareSegment :: SerialManifold -> RustM SerialManifold
+prepareSegment m00@(SerialManifold root _ form00 _ _) = do
+  pp <- CMS.gets rsPool
+  cscope <- CMS.gets rsCScope
+  noMoves <- CMS.gets rsNoMoves
+  let byValue = Map.fromListWith Set.intersection [(m, byValueIndices pp m form) | NativeManifold m _ form _ <- nativeManifoldsUnder (RSM m00), Map.member m (ppByValue pp)]
+      params = Set.unions (Map.elems byValue) `Set.difference` loopSlots (RSM m00)
+      seeds m = Set.toList (Map.findWithDefault Set.empty m byValue `Set.intersection` params)
+      m0' = paramReads seeds m00
+      caps = rustCaps cscope
+      localRefs plan form = mpBorrowed plan `Set.difference` Set.fromList [i | Arg i _ <- typeMofForm form]
+      refs = Set.unions
+        ( localRefs (planSerialManifold caps pp m00) form00
+            : [localRefs (planNativeManifold caps pp nm) form | nm@(NativeManifold _ _ form _) <- nativeManifoldsUnder (RSM m00)]
+        )
+      modes = [(i, rhs, rustLetMode i rhs) | (i, rhs) <- nativeLets m00]
+      rustLetMode i rhs
+        | Set.member i refs = LetBorrow
+        | otherwise = case letMode pp root i rhs of
+            LetBorrow -> LetCopy
+            mode -> mode
+      plan = letPlan modes
+  CMS.modify (\st -> st {rsBuilds = if noMoves then Set.empty else lastBuilds (lpAliases plan) (lpHeld plan) seeds [m0']})
+  return (if noMoves then m0' else markLastReadsSeeded (lpAliases plan) (lpHeld plan) seeds m0')
+
+-- | The by-value form of manifold @m@, for a call that may move every
+-- argument it takes by value only there (OWN-7).
+rustTwinCall :: Int -> [IOwnership] -> RustM (Maybe MDoc)
+rustTwinCall m owns = do
+  pp <- CMS.gets rsPool
+  noMoves <- CMS.gets rsNoMoves
+  let ps = Map.findWithDefault Set.empty m (ppTwoForm pp)
+      moved = [own | (j, own) <- indexed owns, Set.member j ps]
+      takes = not noMoves && not (Set.null ps) && length moved == Set.size ps && all (== Owned) moved
+  return (if takes then Just (RP.rustManifoldName m <> "_v") else Nothing)
+
+-- | A shared local handed to manifold @m@ is owned there when building @m@
+-- is its last read (OWN-3).
+rustBuildOwnership :: Int -> Int -> IOwnership -> RustM IOwnership
+rustBuildOwnership m i own = do
+  builds <- CMS.gets rsBuilds
+  return (if own == BorrowedPlace && Set.member (m, i) builds then Owned else own)
 
 -- | Local (filesystem-path) Rust crates declared in @local-deps: {rust: ...}@,
 -- resolved to absolute paths for the generated pool @Cargo.toml@ (@crate = { path
@@ -3350,8 +3433,8 @@ makeTheMaker crateName locks = do
 -- closures/partial application, remote calls, caching, and pattern evaluation
 -- raise a clear v1-unsupported error and are unreachable for the pool shapes
 -- v1 supports.
-rustLowerConfig :: Map.Map SrcName [(Bool, Bool)] -> Set.Set SrcName -> Map.Map Int (Set.Set Int) -> Map.Map Text [(Text, [RP.UserField])] -> LowerConfig RustM
-rustLowerConfig mask makers consumed userArms =
+rustLowerConfig :: Map.Map SrcName [(Bool, Bool)] -> Set.Set SrcName -> PoolPlan -> Map.Map Text [(Text, [RP.UserField])] -> LowerConfig RustM
+rustLowerConfig mask makers pool userArms =
   LowerConfig
     { lcLocalPrefix = rustLocals
     , lcSrcName = \src -> pretty (T.cons userCallMark (unSrcName (srcName src)))
@@ -3423,7 +3506,10 @@ rustLowerConfig mask makers consumed userArms =
                 | ClosureArg <- site -> rustRef own x
                 | isVar -> rustRef own x
                 | ManifoldArg m j <- site
-                , Set.member j (Map.findWithDefault Set.empty m consumed) ->
+                , Set.member j (Map.findWithDefault Set.empty m (ppByValue pool)) ->
+                    rustOwn own tf x
+                | TwinArg m j <- site
+                , Set.member j (Map.findWithDefault Set.empty m (ppByValue pool) <> Map.findWithDefault Set.empty m (ppTwoForm pool)) ->
                     rustOwn own tf x
                 | otherwise -> byType tf
               _ -> x
@@ -3499,6 +3585,8 @@ rustLowerConfig mask makers consumed userArms =
     -- A non-Copy arg to a pack/unpack function is borrowed to match the packer's
     -- `&T` parameter (a Copy arg is passed by value).
     , lcBorrowPackArg = \t -> not (rustIsCopy t)
+    -- the list may be borrowed, so its elements are read through a reference
+    , lcWireListIter = \v i -> ("(" <> v <> ").iter()", "(*" <> i <> ")")
     , lcRecordAccessor = \_ _ record field -> return (record <> "." <> field)
     , lcDeserialRecordAccessor = \i _ v -> v <> "." <> pretty i
     , lcTupleAccessor = \i v -> v <> "." <> pretty i
@@ -3519,6 +3607,8 @@ rustLowerConfig mask makers consumed userArms =
     , lcTakeSetter = rustTakeSetter
     , lcKeepContextArg = \_ _ _ _ v -> return v
     , lcKeepCallArg = \_ _ _ v -> return v
+    , lcTwinCall = rustTwinCall
+    , lcBuildOwnership = rustBuildOwnership
     , lcKeepClosureArg = \_ _ -> return Nothing
     , lcKeepSourcedArg = \_ _ -> return Nothing
     , lcMoveWhereAccepted = \_ _ x -> x
@@ -3622,8 +3712,8 @@ rustLowerConfig mask makers consumed userArms =
           , "|mlcTryV|" <+> okWrap "mlcTryV"
           , "|mlcTryM|" <+> errWrap "mlcTryM"
           ]
-    , lcSerialize = defaultSerialize (rustLowerConfig mask makers consumed userArms)
-    , lcDeserialize = \_ -> defaultDeserialize (rustLowerConfig mask makers consumed userArms)
+    , lcSerialize = defaultSerialize (rustLowerConfig mask makers pool userArms)
+    , lcDeserialize = \_ -> defaultDeserialize (rustLowerConfig mask makers pool userArms)
     -- Reify a crossing closure to its wire tuple via the arity-indexed trait
     -- method `reifyN` (`ClosureOrigin` = `(String, i64, Vec<Vec<u8>>)`). This is
     -- uniform across a closure built here and a proxy reflected from another
@@ -3697,43 +3787,45 @@ rustConsumeLetRhs _ _ d = return d
 rustLoopBorrow :: Int -> NativeExpr -> RustM (Maybe MDoc)
 rustLoopBorrow i e = do
   borrowed <- asks oeCurrent
+  ownedRoot <- Map.lookup i <$> asks oeOwnedParts
+  let var j = (if ownedRoot == Just j then "&" else "") <> (nvarNamer rustLocals) j
   if not (Set.member i borrowed)
     then return Nothing
     else case borrowPartOf (const True) (const True) e of
-      Just part -> Just <$> renderPart part
+      Just part -> Just <$> renderPart var part
       Nothing -> error ("rustLoopBorrow: a borrowed loop local bound to " <> show e)
   where
-    renderPart part = case part of
-      BorrowVar j -> return ((nvarNamer rustLocals) j)
+    renderPart var part = case part of
+      BorrowVar j -> return (var j)
       BorrowCtorField t p n k -> do
         ty <- rustTypeOf t
-        p' <- renderPart p
+        p' <- renderPart var p
         userArms <- CMS.gets rsUserArms
         return $ case userArmFields userArms ty n of
           Just fs -> userCtorField FieldBorrow ty n fs (fromIntegral k) ("*" <> p')
           Nothing -> rustArmField ty n p' ("&__morloc_lb." <> pretty k)
       BorrowField j path -> return ("&" <> writeSelectorRust ((nvarNamer rustLocals) j) path)
-      BorrowElem p k -> (`rustElemRef` k) <$> renderPart p
+      BorrowElem p k -> (`rustElemRef` k) <$> renderPart var p
       BorrowIf c a b -> do
-        c' <- renderTest c
-        a' <- renderPart a
-        b' <- renderPart b
+        c' <- renderTest var c
+        a' <- renderPart var a
+        b' <- renderPart var b
         return ("if" <+> c' <+> "{" <+> a' <+> "} else {" <+> b' <+> "}")
       BorrowLet j rhs body -> do
-        rhs' <- renderPart rhs
-        body' <- renderPart body
+        rhs' <- renderPart var rhs
+        body' <- renderPart var body
         return ("{ let" <+> (nvarNamer rustLocals) j <+> "=" <+> rhs' <> ";" <+> body' <+> "}")
       BorrowFail t msg -> do
         ty <- rustTypeOf t
         return ("::rustmorloc::morloc_throw_as::<&" <> ty <> ">(" <> RP.printExpr (IStrLit Nothing msg) <> ")")
-    renderTest c = case c of
+    renderTest var c = case c of
       TestTag t p n -> do
         ty <- rustTypeOf t
-        p' <- renderPart p
+        p' <- renderPart var p
         return ("matches!(" <> p' <> "," <+> RP.typeHead ty <> "::" <> pretty n <+> "{ .. })")
       TestAnd x y -> do
-        x' <- renderTest x
-        y' <- renderTest y
+        x' <- renderTest var x
+        y' <- renderTest var y
         return (parens (x' <+> "&&" <+> y'))
 
 -- | A reference to element @k@ of a list.
@@ -3964,17 +4056,21 @@ rustMakeFunction callIndex mname args manifoldType priorLines body headForm isCl
   let isRemote = case headForm of
         Just HeadManifoldFormRemoteWorker -> True
         _ -> False
-      done =
-        if isRemote
-          then Set.member callIndex (rsRemoteSet st)
-          else Set.member callIndex (rsLocalSet st)
+      twin = rsTwin st == Just callIndex
+      done
+        | twin = Set.member callIndex (rsTwinDone st)
+        | isRemote = Set.member callIndex (rsRemoteSet st)
+        | otherwise = Set.member callIndex (rsLocalSet st)
   if done
     then return Nothing
     else do
       CMS.modify $ \s ->
-        if isRemote
-          then s {rsRemoteSet = Set.insert callIndex (rsRemoteSet s)}
-          else s {rsLocalSet = Set.insert callIndex (rsLocalSet s)}
+        if twin
+          then s {rsTwinDone = Set.insert callIndex (rsTwinDone s)}
+          else
+            if isRemote
+              then s {rsRemoteSet = Set.insert callIndex (rsRemoteSet s)}
+              else s {rsLocalSet = Set.insert callIndex (rsLocalSet s)}
       -- A function value is a trait object in every position, so a returned
       -- closure names no lifetime: it owns what it captures ('capInit')
       -- and a captured function value is an `Arc` clone, not a borrow.
@@ -3984,7 +4080,10 @@ rustMakeFunction callIndex mname args manifoldType priorLines body headForm isCl
         mapIndexedM
           (\j a@(Arg _ t) -> if Set.member j kept then (\ts -> (argNamer rustLocals) a <> ":" <+> ts) <$> rustArgType t else rustArgOf a)
           args
-      let fullName = mname <> if isRemote then "_remote" else ""
+      let fullName
+            | twin = mname <> "_v"
+            | isRemote = mname <> "_remote"
+            | otherwise = mname
           decl = "unsafe fn" <+> fullName <> tupled typedArgs <+> "->" <+> retStr
           -- STATE-5: a named function records its call; the pop is in its
           -- return statement ('lcFrameReturn'), which follows any sourced

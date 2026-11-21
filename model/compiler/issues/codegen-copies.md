@@ -19,16 +19,21 @@ records and user-mapped types copy deeply.
   element (`[Link _ rest]` clones `rest`, since a list element is not a
   borrowable projection root), a tag test on a nested field, a conditional
   whose arms are fields (`count 0 (match r | Good c = c ...)`), and a
-  non-tail recursion that rebuilds a chain (`inc`, quadratic). Rust binds
-  a let to a reference only when its root is borrowed, so a getter on a
-  record the function built and reads twice copies the field
-  (`let h = {c = mkChain n, k = 3} in .k h + chainLen (.c h)`: 100 clones;
-  golden spec-own-6-14 takenRec). In a loop that grows the value it
-  carries this is quadratic: `let u = (Link k (.0 t), k) in let ys = .0 u
-  in step (k - 1) u (s + chainLen ys)` clones the chain each step (5350
-  links over 100 steps, 2026-11-21); C++ binds `ys` by reference. C++: lets borrow, but a
+  non-tail recursion that rebuilds a chain (`inc`, quadratic). C++: lets borrow, but a
   tail loop's lets and a list element do not (`auto n = ...`), so a nested
-  pattern in a loop copies each bound field per step.
+  pattern in a loop copies each bound field per step. The Rust cases of
+  golden own7-matrix-rust above OWN-7's prediction (column 7 of cases.tsv)
+  are all this copy in the caller's reader (`.t.clone()` of a nested
+  record, `.p.clone()` of a borrowed record's field), 2026-11-21.
+- **OWN-7's two forms deviate in C++.** [reproduced 2026-11-21, golden
+  own7-matrix-cpp] A `data` part kept on one branch is copied (shapes D
+  part if tmp/last/param, j=1: 1 each, predicted 0); how a part of a `data`
+  arm is taken awaits a ruling (CPP-6). A record kept by a nested
+  conditional, called through `map (f j)`, copies once more than
+  predicted (R ret nested pap: 2 at j=1, 1 at j=0); the same shape with
+  one conditional does not. A list kept in part by a recursive function
+  that a loop calls on its carried list copies the element twice per
+  step (L part rec loop: 6, predicted 3).
 - **A `match` arm that builds a constant makes a walking loop own its
   value.** [reproduced] `tl c = match c | End = End | (Link _ rest) = rest`
   stepped in a Rust tail loop copies the rest of the chain each step
@@ -45,8 +50,8 @@ records and user-mapped types copy deeply.
   value matched twice is copied. C++ moves an owned local at its last read
   into a constructor, tuple, record, optional, list literal, loop continue,
   local closure capture, by-value manifold argument or source argument
-  named once in its call; conditional arms still copy one (golden
-  copy-census-cpp matchCond: 1 copy; re-checked 2026-11-21).
+  named once in its call, or a conditional's arm (OWN-7 two forms,
+  2026-11-21).
 - **A let no spine reaches is never moved.** [read, 2026-11-09; G1 not
   reproduced] Gap in OWN-2. Marking finds owned lets only along a spine
   of let forms starting at a manifold, loop or do-block body (Imperative.hs
@@ -70,23 +75,11 @@ records and user-mapped types copy deeply.
   Fix shape: every weave site is a spine root and every let form weave
   emits is a spine node (not a fallback spine for unreached lets, which
   would hide grammar gaps; assert in a test that every let is visited).
-  Rust first needs parity with C++: it marks with no aliases or held set
-  (Rust.hs ~1430), so wider marking could move a value a reference into
-  it still reads (rustc E0505); and it marks without by-value parameter
-  seeds while finding builds with them (~1460), so a by-value parameter
-  is never moved at its last read (OWN-7; read), and its seeds do not
-  drop loop slots as C++ does (Cpp.hs ~2142).
   Cost: marking walks each body twice per segment, once to mark and once
   in `lastBuilds` to collect builds, which returns the same captures; one
   pass returning both would do. `heldReads` is recomputed per nested
   root and `stepReads` walks the owned list per step (quadratic in a
   spine's lets); not measured against g++/rustc time.
-- **A C++ loop copies a carried value no step changes.** [reproduced] A
-  loop slot every continue passes on unchanged is a borrow in Rust (OWN-6)
-  but a copy of its start in C++ (golden copy-census-cpp throughLoop,
-  loopCarried). Binding it by const reference was tried and dropped: it
-  blocks the move of the slot into the loop's result. EVAL-7 (ruled
-  2026-10-18) forbids a source taking `T&`, which was the other obstacle.
 - **A gather sink copies its batch into the suspension it returns.**
   [reproduced, stage 6 prototype] A C++ closure takes its parameters by
   reference (OWN-7), so the sink of a whole-list gather copies the batch

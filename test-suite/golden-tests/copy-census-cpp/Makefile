@@ -135,6 +135,8 @@ all:
 	./nexus doTwice 100 >> obs.txt 2>> obs.err || echo "failed" >> obs.txt
 	echo "--- doLoop ---" >> obs.txt
 	./nexus doLoop 100 >> obs.txt 2>> obs.err || echo "failed" >> obs.txt
+	echo "--- swapSlots ---" >> obs.txt
+	./nexus swapSlots 100 >> obs.txt 2>> obs.err || echo "failed" >> obs.txt
 
 clean:
 	rm -rf nexus pools __pycache__

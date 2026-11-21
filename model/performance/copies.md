@@ -70,10 +70,10 @@ Bench: copies
 Model: net = s * q * u; k steps of `let u = (.0 t, k) in let ys = .0 u in step (k - 1) u (s + len ys)` (s = k); Rust: a chain of n, q = n; C++: q = 1 before a let naming a reference became one
 Measured: results/2026-11-21-1209-648d2825e+dirty-getter-take: rs k=1000 n=10000: t 0.280 s, net 0.233 s, per_step 10000, u 23.3 ns; cpp k=250000: t 0.0470 s, net about 0, per_step 0
 
-`ys` only reads the field of a value the step passes on. Rust clones it,
-since it binds a let to a reference only when the let's root is borrowed
-(compiler/issues/codegen-copies.md); a loop that grows the value it carries
-is quadratic for it.
+`ys` only reads the field of a value the step passes on. Rust cloned it
+until a let naming a part of a value the frame owns and reads again became
+a reference (golden copy-census-rust letAlias: 0 clones; not yet re-timed);
+a loop that grows the value it carries was quadratic for it.
 
 ### COPY-6 A C++ loop step that reads a value and builds onto it copies the value
 Intent: proposed

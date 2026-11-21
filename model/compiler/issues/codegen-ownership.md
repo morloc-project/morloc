@@ -104,3 +104,29 @@ same name sees what was taken.
   bytes until the process ends and its shared memory until the dispatch's
   flush. Needs a reproduction (a same-pool serial recursion in C++ whose
   callee returns an argument) before changing who releases it.
+
+- **The ownership check trusts the last-read marks.** [reproduced,
+  2026-11-21, by a planted bug] `MORLOC_CHECK_OWNERSHIP` checks the takes
+  and moves a member decided against evaluation order, given which reads
+  are marked as last reads; it does not check that a rendered move sits at
+  one. A C++ member changed to move an owned let at any read in a keeping
+  position built cleanly under the check, and the runtime payload checks of
+  golden own7-matrix-cpp caught it (15 cases read a moved payload). A check
+  that recomputes last reads, or that reads the moves from the rendered
+  code, would close the gap.
+- **A call of a local function is not a read in last-read marking.**
+  [reproduced in Rust, read in C++] Code violates OWN-2: `readCounts`
+  (Imperative.hs) counts `LetVarN`/`BndVarN` only, so in `f a` (an
+  `AppExeN` of `LocalCallP f`) `f` is not read, and a value `f` refers
+  into may be marked last before the call. Rust binds no function-typed
+  let as a reference into an owned value (`ownedPartLets` skips them); a
+  version that did failed rustc E0505 in golden
+  variant-closures-crossing-rust (`unboxG`: `f` borrowed from `b`, then
+  `.1 b` took `b`). C++ binds a constructor-field let of function type by
+  reference (`cppLetMode` LetBorrow), so the same shape may read a moved
+  closure there. Probed 2026-11-21 under ASan and payload checks: a closure
+  stored in a tuple and called after, and a function field of a `data`
+  value bound by reference and called beside a move of the value into a
+  list, both give the right value; the generated code calls the function
+  before the move, an order nothing guarantees. `usesIndex` already counts
+  `LocalCallP` and `PapplyP` as uses.

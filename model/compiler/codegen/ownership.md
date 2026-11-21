@@ -32,7 +32,7 @@ out of scope.
 
 ### OWN-2 A move happens only at a last read
 Intent: ruled 2026-10-17
-Tests: spec-own-2-1, spec-own-2-2, spec-own-2-3, spec-own-2-4, spec-own-2-5, spec-own-2-6, spec-own-2-7, spec-own-2-8, spec-own-2-9, spec-own-2-10, spec-own-2-11, spec-own-2-12, spec-own-2-13, spec-own-2-14, spec-own-2-15, spec-own-2-16, spec-own-2-17
+Tests: spec-own-2-1, spec-own-2-2, spec-own-2-3, spec-own-2-4, spec-own-2-5, spec-own-2-6, spec-own-2-7, spec-own-2-8, spec-own-2-9, spec-own-2-10, spec-own-2-11, spec-own-2-12, spec-own-2-13, spec-own-2-14, spec-own-2-15, spec-own-2-16, spec-own-2-17, spec-own-2-18
 Code: conforms 2026-10-18
 
 A read may move a value it owns only if no later read on its path reads
@@ -111,21 +111,32 @@ copies none of it, however deep it is. A carried value that some iteration
 replaces with a value it builds is owned, and starts from a copy.
 
 ### OWN-7 A function that keeps an argument takes it from its caller
-Intent: ruled 2026-10-18
-Tests: spec-own-7-1, spec-own-7-2
-Code: conforms 2026-10-18
+Intent: ruled 2026-11-21
+Why: amended from one form, where a parameter kept on one branch stayed a reference
+Tests: spec-own-7-1, spec-own-7-2, spec-own-7-3, spec-own-7-4
+Code: deviates (compiler/issues/codegen-copies.md)
 
 A fully applied manifold takes a parameter by value instead of by
 reference when its body reads that parameter once, on every evaluation, and
 keeps what it reads: as the start of a loop value that is not a borrow
 (OWN-6), as an element of a value it builds, or as an argument a fully
 applied manifold it calls takes by value, so the mode carries up a chain of
-calls. A parameter kept on only
-one branch stays a reference, so the branch that drops it copies nothing. Each call then moves the argument when the caller
-reads it for the last time, and copies it otherwise, so a copy happens at
-most once per call and only where the caller still needs the value. A
-closure keeps taking its parameters by reference, since its signature is
-shared by every caller.
+calls. Each call then moves the argument when the caller reads it for the
+last time, and copies it otherwise, so a copy happens at most once per call
+and only where the caller still needs the value.
+
+A parameter the body keeps, or keeps a part of, on only some evaluations
+has two forms of the manifold. The first takes it by reference, and copies
+what a branch keeps. The second takes it by value: OWN-2 and OWN-5 apply to
+it as to a local the manifold owns, so it is moved where it is kept and
+released where it is not. A call uses the second form when it may move
+every such argument, being a temporary or a value it reads for the last
+time (OWN-2, OWN-3), and the first otherwise, so a branch that keeps
+nothing copies nothing, and a copy happens only where the caller still
+needs its value. In C++ the forms are overloads of one name, `const T&` and
+`T&&`, so the call's arguments select the form. A field of a C++ `data`
+arm is taken from a parameter only as CPP-6 allows. A closure keeps taking
+its parameters by reference, since its signature is shared by every caller.
 
 ### OWN-8 A function that returns part of what it borrowed returns a reference
 Intent: open
