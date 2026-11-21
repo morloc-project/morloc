@@ -79,23 +79,18 @@ None is scheduled.
   keeps a parameter takes it by value (an OWN-7 extension; expected 3 -> 2);
   only if a benchmark shows the gain. The captured-list copy needs shared
   capture storage.
-- **A @fold step copies its accumulator every batch, in Rust and C++.**
-  [reproduced 2026-11-20, bench fold-growth] COPY-7 goal missed: time grows
-  as b^2 with the batch count for a step that appends to a list. The step
-  reaches the runtime as a closure over a generated function whose
-  accumulator parameter is a reference (`const std::vector<..>&` in C++,
-  `&T` in Rust; a closure's parameters are references, OWN-7 and HOST-8),
-  so a step written by value (`step_val(std::vector acc, ..)`,
-  `fn step(mut acc: Vec<i64>, ..)`) is called with a copy: in C++
-  `step_val(std::as_const(n), ..)`, in Rust `step(lend(acc), ..)`. The
-  runtimes already move the slot's value into the closure. Fix direction:
-  let the step closure, and the generated function under it, take the
-  accumulator by value; the same question as HOST-8's callback modes
-  (/work/plans/rust-param-modes-analysis.md, prototype in the 2026-11-20
-  session notes). Earlier claims that the C++ fold moves the accumulator
-  into the step held for the closure only.
+- **A @fold step that is not a sourced function copies its accumulator
+  every batch, in Rust and C++.** [read 2026-11-21] COPY-7 holds only for a
+  step or combine that is a sourced function of the fold's language, passed
+  whole (Express.hs bareFoldSteps). A step written in morloc, a partial
+  application, a step in another language, or one whose call is adapted
+  reaches the fold as a closure over a generated function whose parameters
+  are references, so a by-value parameter under it is given a copy. Fix
+  direction: let that closure, and the generated function under it, take
+  the accumulator by value; the same question as HOST-8's callback modes
+  (/work/plans/rust-param-modes-analysis.md).
 - **The Rust stdlib's folds copy their accumulator every step.** [read
-  2026-11-20, DA review] Same cost as the fold step above, outside `@fold`:
+  2026-11-20, DA review] COPY-7's cost, outside `@fold`:
   root-rust core.rs `morloc_fold_vec` / `morloc_fold_deque` (~309-315, and
   ~598) call the closure as `f(&acc, x)`, and stream-rust / parallel-rust
   (stream.rs ~8-18, parallel.rs ~412-426) do the same, so a closure that

@@ -7,14 +7,15 @@ by-reference step, the Rust stdlib fold, and C++'s @fold for reference.
 import perf
 
 S = 1000
-# Every series is quadratic today (COPY-7), so larger counts would take
-# hours; widen them for a series once its step moves the accumulator.
+# A series that copies the accumulator is quadratic, so its counts stay
+# small; a series that moves it runs to larger counts.
 COUNTS = [250, 500, 1000, 2000]
+WIDE = [1000, 2000, 4000, 8000]
 QUICK = [250, 500, 1000]
 SERIES = {
     # name: (nexus, command, argv tail, batch counts)
-    "rs.fold.val": ("nexus-val", "foldValRs", ["--n"], COUNTS),
-    "cpp.fold.val": ("nexus", "foldValCpp", ["--n"], COUNTS),
+    "rs.fold.val": ("nexus-val", "foldValRs", ["--n"], WIDE),
+    "cpp.fold.val": ("nexus", "foldValCpp", ["--n"], WIDE),
     "rs.fold.ref": ("nexus", "foldRefRs", ["--n"], COUNTS),
     "rs.hof.ref": ("nexus", "hofRefRs", [], COUNTS),
 }

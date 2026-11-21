@@ -40,7 +40,7 @@ import Morloc.CodeGenerator.Docstrings (processDocstrings)
 import Morloc.CodeGenerator.EffectBoundary (checkEffectBoundaries, insertEffectBoundaries)
 import Morloc.CodeGenerator.Emit (TranslateFn, checkManifoldIds, emit, pool)
 import Morloc.CodeGenerator.StaticArgs (specializeStaticArgs)
-import Morloc.CodeGenerator.Express (express, addCacheWraps, addDebugWraps, addLoopWraps, addNativeRecEntries, etaReduceForwarders)
+import Morloc.CodeGenerator.Express (express, addCacheWraps, addDebugWraps, addLoopWraps, addNativeRecEntries, etaReduceForwarders, bareFoldSteps)
 import Morloc.CodeGenerator.LambdaEval (applyNexusLambdas, applyPoolLambdas)
 import Morloc.CodeGenerator.Namespace (Arg, PolyHead (..), SerialManifold)
 import qualified Morloc.CodeGenerator.Nexus as Nexus
@@ -254,7 +254,7 @@ lowerPools rASTs = do
     >>= mapM (\ph -> do
                  ph' <- insertEffectBoundaries ph
                  checkEffectBoundaries ph'
-                 lowerSuspensions (etaReduceForwarders ph'))
+                 lowerSuspensions (bareFoldSteps (etaReduceForwarders ph')))
     >>= mapM segment |>> concat
     -- every variable a generated manifold refers to is bound in it
     >>= mapM checkScopes

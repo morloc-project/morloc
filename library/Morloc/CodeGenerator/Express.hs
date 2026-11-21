@@ -20,6 +20,7 @@ module Morloc.CodeGenerator.Express
   , addLoopWraps
   , addNativeRecEntries
   , etaReduceForwarders
+  , bareFoldSteps
   , polyFreeVars
   , recursiveTargetOf
   ) where
@@ -145,11 +146,39 @@ etaReduceForwarders (PolyHead lang m args body) = PolyHead lang m args (go body)
           | j == j'
           , k /= Preserved
           , length ins == length xs
-          , map bndId xs == map (Just . ann) bound ->
+          , map bndVarId xs == map (Just . ann) bound ->
               PolyBndVar (C t) j
       e' -> e'
-    bndId (PolyBndVar _ i) = Just i
-    bndId _ = Nothing
+
+bndVarId :: PolyExpr -> Maybe Int
+bndVarId (PolyBndVar _ i) = Just i
+bndVarId _ = Nothing
+
+-- | Pass a fold's step and combine as the sourced function itself, instead
+-- of the closure that only forwards to it, when it is one in the fold's own
+-- language and the closure adapts nothing (COPY-7).
+bareFoldSteps :: PolyHead -> PolyHead
+bareFoldSteps (PolyHead lang m args body) = PolyHead lang m args (go lang body)
+  where
+    go l e = case e of
+      PolyManifold l' mid f k b -> PolyManifold l' mid f k (go l' b)
+      PolyRemoteInterface l' t ids form b -> PolyRemoteInterface l' t ids form (go l' b)
+      PolyIntrinsic t intr [i, s, c, f]
+        | intr `elem` [IntrFold, IntrFoldFile] -> PolyIntrinsic t intr [go l i, bare l s, bare l c, go l f]
+      PolyIntrinsic t IntrFoldPut [s, h, x] -> PolyIntrinsic t IntrFoldPut [bare l s, go l h, go l x]
+      _ -> mapPolySubExprs (go l) e
+    bare l x = case x of
+      PolyManifold l' _ (ManifoldPass bound) Transparent
+        (PolyReturn (PolyApp exe@(PolyExe (Idx _ (FunT ins _)) (SrcCallP _ src)) xs))
+          | l' == l
+          , srcLang src == l
+          , not (srcOperator src)
+          , null (srcRsize src)
+          , length ins == length xs
+          , map bndVarId xs == map (Just . ann) bound
+          , map Just ins == map val bound ->
+              exe
+      _ -> go l x
 
 -- | Give every recursive manifold or shared specialization that a caller in
 -- its own pool reaches a native entry point, and record it.

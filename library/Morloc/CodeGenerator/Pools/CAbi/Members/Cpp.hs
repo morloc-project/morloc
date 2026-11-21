@@ -1234,8 +1234,15 @@ cppLowerConfig (ClosureGen reifyThunks stageTable papplyHeads) =
     , lcSrcName = \src -> pretty (srcName src)
     , lcOperator = infixOperator
     , lcApplySrcGroup = \f as -> f <+> tupled as
-    , lcFoldStep = \_ x -> x
-    , lcFoldCombine = \_ x -> x
+    -- COPY-7
+    , lcFoldStep = \bare x ->
+        if bare
+          then "[](auto&& a, const auto& b) { return " <> x <> "(std::forward<decltype(a)>(a), b); }"
+          else x
+    , lcFoldCombine = \bare x ->
+        if bare
+          then "[](auto&& a, auto&& b) { return " <> x <> "(std::forward<decltype(a)>(a), std::forward<decltype(b)>(b)); }"
+          else x
     , lcForkChecked = \_ x -> "[&]() { mlc::fork_guard _mlc_fork; return " <> x <> "; }()"
     , lcSourcedResult = \_ _ _ x -> x
     , lcSourcedArg = \_ _ _ x -> x

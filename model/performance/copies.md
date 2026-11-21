@@ -79,13 +79,14 @@ read, so q grew with the rest of the chain and the walk was quadratic
 Intent: proposed
 Bench: fold-growth
 Model: t(b) = c + a*b^p for b batches of 1000 integers appended to one list accumulator; p near 2 means each step copies the accumulator, near 1 that it moves it. rs.fold.val: Rust @fold, step by value; rs.fold.ref: step by reference, which must copy; rs.hof.ref: the Rust stdlib fold; cpp.fold.val: C++ @fold, step by value
-Measured: 2026-11-21-0023-de9c8ba82+dirty-rust-param-modes, load 2.0, b = 250..2000: rs.fold.val.p 2.87, cpp.fold.val.p 2.73, rs.fold.ref.p 2.90, rs.hof.ref.p 2.80 (every series copies; above 2 from page faults on each fresh copy)
+Measured: 2026-11-21-0252-841bb44e8+dirty-fold-bare-step, b = 1000..8000 for the by-value series and 250..2000 for the others: rs.fold.val.p 1.23, cpp.fold.val.p 0.82, rs.fold.ref.p 2.84, rs.hof.ref.p 2.73 (below 1 and near 1.2, the fixed cost of a run still dominates)
 Goal: rs.fold.val.p <= 1.3, cpp.fold.val.p <= 1.3
 
-Today neither goal holds: the step reaches the runtime as a closure over a
-generated function whose accumulator parameter is a reference, so even a
-step written by value is passed a copy every batch, in Rust and in C++
-(issues/call-and-stream-copies.md). One written with `&Vec<i64>` copies it
-every batch by its own choice. The stdlib fold calls its function with
+A step or combine that is a sourced function in the fold's language is
+called by the fold directly, not through a closure, so a step written by
+value is given the slot's accumulator (golden `fold-step-by-value`); any
+other step still reaches the fold as a closure whose parameters are
+references, and is passed a copy (issues/call-and-stream-copies.md). One
+written with `&Vec<i64>` copies it every batch by its own choice. The stdlib fold calls its function with
 the accumulator by reference (HOST-8), so a step there that grows the
 accumulator copies it every batch (issues/call-and-stream-copies.md).
