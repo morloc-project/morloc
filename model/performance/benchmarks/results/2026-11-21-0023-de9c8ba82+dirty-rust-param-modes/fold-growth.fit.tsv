@@ -1,0 +1,6 @@
+# fold-growth 2026-11-21 00:23 load=1.99 load_max=1.99 morloc=0.112.0 commit=de9c8ba82+dirty cpu=AMD Ryzen 5 7535U with Radeon Graphics cores=12
+item	param	value	unit	note
+COPY-7	rs.fold.val.p	2.87397		time ~ b**p, r2=0.999
+COPY-7	cpp.fold.val.p	2.72641		time ~ b**p, r2=0.990
+COPY-7	rs.fold.ref.p	2.90341		time ~ b**p, r2=0.998
+COPY-7	rs.hof.ref.p	2.80266		time ~ b**p, r2=0.994

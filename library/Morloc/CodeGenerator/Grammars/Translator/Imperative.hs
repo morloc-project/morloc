@@ -511,6 +511,10 @@ data LowerConfig m = LowerConfig
   -- call itself; each later group applies the function value the previous
   -- group returned. Default is juxtaposition, which is how a host language
   -- with first-class callables spells it.
+  , lcFoldStep :: Bool -> MDoc -> MDoc
+  -- ^ A fold's step as the runtime calls it, given whether it is a sourced
+  -- function itself (OWN-7: the step takes its accumulator by value).
+  , lcFoldCombine :: Bool -> MDoc -> MDoc
   , lcForkChecked :: Bool -> MDoc -> MDoc
   -- ^ FORK-17: a call of user code, wrapped for the fork check; True when it
   -- returns unit.
@@ -2610,6 +2614,11 @@ constArg cfg operands la@(LowArg a t d)
 forkChecked :: LowerConfig m -> Bool -> (MDoc -> MDoc) -> MDoc -> [PoolDocs] -> PoolDocs
 forkChecked cfg unit result call = mergePoolDocs (const (result (lcForkChecked cfg unit call)))
 
+-- | A function value that is a sourced function itself, not a closure.
+isSourcedFn :: NativeExpr -> Bool
+isSourcedFn (ExeN _ (SrcCallP _ src)) = not (srcOperator src)
+isSourcedFn _ = False
+
 isUnitF :: TypeF -> Bool
 isUnitF (VarF (FV tv _)) = tv == BT.unit
 isUnitF _ = False
@@ -3168,14 +3177,16 @@ lowerNativeExprRaw cfg _ (IntrinsicN_ _ intr (Just schema) [Low _ handleDocs, Lo
             | native = IIntrinsicGatherPut sid (raw handleDocs) (raw valueDocs')
             | otherwise = IIntrinsicWrite True sid (IIntLit Nothing 0) (raw valueDocs') (raw handleDocs)
       return $ mergePoolDocs (const $ lcPrintExpr cfg putExpr) [handleDocs, valueDocs']
-lowerNativeExprRaw cfg origExpr (IntrinsicN_ _ intr mschema [Low iniE iniDocs, Low stepE stepDocs, Low _ combDocs, Low _ fnDocs])
+lowerNativeExprRaw cfg origExpr (IntrinsicN_ _ intr mschema [Low iniE iniDocs, Low stepE stepDocs, Low combE combDocs, Low _ fnDocs])
   | intr `elem` [IntrFold, IntrFoldFile] = do
       msid <- traverse (lcRegisterSchema cfg) mschema
       accType <- lcTypeOf cfg (typeFof origExpr)
       batchType <- stepBatchType cfg stepE
       iniDocs' <- adaptReadElem cfg iniE iniDocs
       let raw d = IRawExpr (render (poolExpr d))
-          call = IIntrinsicFold (intr == IntrFoldFile) msid accType batchType (raw iniDocs') (raw stepDocs) (raw combDocs) (raw fnDocs)
+          step = IRawExpr (render (lcFoldStep cfg (isSourcedFn stepE) (poolExpr stepDocs)))
+          comb = IRawExpr (render (lcFoldCombine cfg (isSourcedFn combE) (poolExpr combDocs)))
+          call = IIntrinsicFold (intr == IntrFoldFile) msid accType batchType (raw iniDocs') step comb (raw fnDocs)
       return $ mergePoolDocs (const $ lcPrintExpr cfg call) [iniDocs', stepDocs, combDocs, fnDocs]
 lowerNativeExprRaw cfg _ (IntrinsicN_ _ IntrFoldPut mschema [Low stepE stepDocs, Low _ handleDocs, Low batchE batchDocs]) = do
   msid <- traverse (lcRegisterSchema cfg) mschema
@@ -3185,7 +3196,8 @@ lowerNativeExprRaw cfg _ (IntrinsicN_ _ IntrFoldPut mschema [Low stepE stepDocs,
   batchType <- stepBatchType cfg stepE
   batchDocs' <- adaptReadElem cfg batchE batchDocs
   let raw d = IRawExpr (render (poolExpr d))
-      putExpr = IIntrinsicFoldPut msid accType batchType (raw stepDocs) (raw handleDocs) (raw batchDocs')
+      step = IRawExpr (render (lcFoldStep cfg (isSourcedFn stepE) (poolExpr stepDocs)))
+      putExpr = IIntrinsicFoldPut msid accType batchType step (raw handleDocs) (raw batchDocs')
   return $ mergePoolDocs (const $ lcPrintExpr cfg putExpr) [stepDocs, handleDocs, batchDocs']
 lowerNativeExprRaw cfg _ (IntrinsicN_ _ IntrReplay (Just schema)
                                   [Low handleE handleDocs, Low _ fnDocs]) = do

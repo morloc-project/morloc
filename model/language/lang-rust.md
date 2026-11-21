@@ -13,8 +13,9 @@ moves).
 Intent: ruled 2026-10-18
 Code: conforms 2026-10-21
 
-Morloc passes a `Copy` argument by value and any other value as `&T`,
-so a parameter of type `&mut T` does not build. A parameter whose type in
+Morloc passes a `Copy` argument by value and gives or lends any other
+value as its parameter's type asks (RUST-5), so a parameter of type
+`&mut T` does not build. A parameter whose type in
 the morloc signature is a type variable, or an optional or tuple holding
 one, is `&T` at every instantiation, since generic host code cannot depend
 on whether its instantiation is `Copy`. A type with interior
@@ -59,3 +60,22 @@ lend: a copy that is deep behind a `Box` and a count behind an `Arc`.
 
 Why: replaces 2026-10 contract, where every arm held one `Box` of a tuple of
 its fields.
+
+### RUST-5 A sourced Rust parameter of a concrete type takes the value or a reference to it
+Intent: ruled 2026-11-20
+Tests: spec-rust-5-1
+Code: conforms 2026-11-20
+
+A parameter of a sourced Rust function whose morloc type is a concrete
+type that is not `Copy` is written `T`, `&T`, `&str` for a `Str` or `&[A]`
+for a list, never `&mut` or a generic or `impl Trait` type. Morloc passes
+each argument to match: when the call is the argument's last use it is
+given, so a `T` parameter takes it with no copy; otherwise it is lent, so
+a `T` parameter takes a copy and the others a reference. A copy happens at
+most once per argument and only where the caller still needs the value.
+A `T` parameter whose type is not `Clone` builds only where the argument
+is given. Any other parameter type is a build error naming this rule;
+a generic one fails as rustc's "type annotations needed". A type-variable
+parameter, and a function parameter, is a reference as RUST-1 and HOST-8
+say, and so is an argument a closure passes on (a fold's step is called
+with its accumulator lent: issues/call-and-stream-copies.md).

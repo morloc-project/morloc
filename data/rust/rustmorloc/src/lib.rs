@@ -4538,6 +4538,94 @@ pub unsafe fn gather_native<L: Batch + FromVoidstar + Send, F: Invoke1<u64, ()>>
     L::join(std::mem::take(&mut list.batches))
 }
 
+/// RUST-5: an argument the caller still needs, lent to a sourced function.
+pub struct Lend<'a, T>(pub &'a T);
+/// RUST-5: an argument the caller is done with, given to a sourced function.
+pub struct Give<'a, T>(pub &'a mut Option<T>);
+
+/// RUST-5: the conversion a sourced function's parameter type selects.
+#[diagnostic::on_unimplemented(
+    message = "RUST-5: a sourced Rust function cannot take `{Self}` for this argument",
+    note = "write the parameter as T or &T, &str for Str, or &[A] for a list; never &mut or a generic"
+)]
+pub trait FromArg<S>: Sized {
+    fn from_arg(s: S) -> Self;
+}
+
+impl<'a, T> FromArg<Lend<'a, T>> for &'a T {
+    #[inline(always)]
+    fn from_arg(s: Lend<'a, T>) -> Self {
+        s.0
+    }
+}
+
+impl<'a, T: Clone> FromArg<Lend<'a, T>> for T {
+    #[inline(always)]
+    fn from_arg(s: Lend<'a, T>) -> Self {
+        s.0.clone()
+    }
+}
+
+impl<'a, T> FromArg<Give<'a, T>> for T {
+    #[inline(always)]
+    fn from_arg(s: Give<'a, T>) -> Self {
+        match s.0.take() {
+            Some(v) => v,
+            None => morloc_infra_abort("RUST-5: an argument was given twice"),
+        }
+    }
+}
+
+impl<'a, T> FromArg<Give<'a, T>> for &'a T {
+    #[inline(always)]
+    fn from_arg(s: Give<'a, T>) -> Self {
+        match s.0.as_ref() {
+            Some(v) => v,
+            None => morloc_infra_abort("RUST-5: an argument was given twice"),
+        }
+    }
+}
+
+impl<'a> FromArg<Lend<'a, String>> for &'a str {
+    #[inline(always)]
+    fn from_arg(s: Lend<'a, String>) -> Self {
+        s.0.as_str()
+    }
+}
+
+impl<'a> FromArg<Give<'a, String>> for &'a str {
+    #[inline(always)]
+    fn from_arg(s: Give<'a, String>) -> Self {
+        <&String as FromArg<Give<'a, String>>>::from_arg(s).as_str()
+    }
+}
+
+impl<'a, A> FromArg<Lend<'a, Vec<A>>> for &'a [A] {
+    #[inline(always)]
+    fn from_arg(s: Lend<'a, Vec<A>>) -> Self {
+        s.0.as_slice()
+    }
+}
+
+impl<'a, A> FromArg<Give<'a, Vec<A>>> for &'a [A] {
+    #[inline(always)]
+    fn from_arg(s: Give<'a, Vec<A>>) -> Self {
+        <&Vec<A> as FromArg<Give<'a, Vec<A>>>>::from_arg(s).as_slice()
+    }
+}
+
+/// RUST-5
+#[inline(always)]
+pub fn lend<'a, T, P: FromArg<Lend<'a, T>>>(x: &'a T) -> P {
+    P::from_arg(Lend(x))
+}
+
+/// RUST-5
+#[inline(always)]
+pub fn give<'a, T, P: FromArg<Give<'a, T>>>(x: &'a mut Option<T>) -> P {
+    P::from_arg(Give(x))
+}
+
 /// FORK-17
 static FORK_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
@@ -4677,7 +4765,7 @@ unsafe fn fold_values<B: 'static>(values: *mut *mut c_void, n: usize) -> FoldVal
 unsafe fn fold_with<B, C, F>(init: &B, combine: C, f: F, replay: impl FnOnce(&SideReader) -> Option<B>) -> B
 where
     B: Clone + Send + 'static,
-    C: Invoke2<B, B, B>,
+    C: Fn(B, B) -> B,
     F: Invoke1<u64, ()>,
 {
     let ctx = std::sync::Arc::into_raw(std::sync::Arc::new(FoldInit {
@@ -4720,7 +4808,7 @@ where
     let mut acc: Option<B> = None;
     for v in held.0.into_iter().map(|v| v.value).chain(side) {
         acc = Some(match acc {
-            Some(a) => { let _fork = ForkGuard::new(); combine.invoke(&a, &v) }
+            Some(a) => { let _fork = ForkGuard::new(); combine(a, v) }
             None => v,
         });
     }
@@ -4731,15 +4819,15 @@ pub unsafe fn fold<B, L, S, C, F>(schema: &Schema, init: &B, step: S, combine: C
 where
     B: Clone + Send + 'static,
     L: FromVoidstar,
-    S: Invoke2<B, L, B>,
-    C: Invoke2<B, B, B>,
+    S: Fn(B, &L) -> B,
+    C: Fn(B, B) -> B,
     F: Invoke1<u64, ()>,
 {
     fold_with(init, combine, f, |reader| {
         let mut side: Option<B> = None;
         side_each::<L>(schema, reader, |b| {
             let acc = side.take().unwrap_or_else(|| init.clone());
-            side = Some({ let _fork = ForkGuard::new(); step.invoke(&acc, &b) });
+            side = Some({ let _fork = ForkGuard::new(); step(acc, &b) });
         });
         side
     })
@@ -4749,8 +4837,8 @@ where
 pub unsafe fn fold_schemaless<B, L, S, C, F>(init: &B, _step: S, combine: C, f: F) -> B
 where
     B: Clone + Send + 'static,
-    S: Invoke2<B, L, B>,
-    C: Invoke2<B, B, B>,
+    S: Fn(B, &L) -> B,
+    C: Fn(B, B) -> B,
     F: Invoke1<u64, ()>,
 {
     fold_with(init, combine, f, |reader| {
@@ -4766,7 +4854,7 @@ where
 unsafe fn fold_step<B, L, S>(step: S, h: u64, batch: &L, side: impl FnOnce())
 where
     B: Clone + Send + 'static,
-    S: Invoke2<B, L, B>,
+    S: Fn(B, &L) -> B,
 {
     let mut err: *mut c_char = std::ptr::null_mut();
     let (mut p, mut fresh) = (std::ptr::null_mut(), 0i32);
@@ -4785,10 +4873,11 @@ where
         }
     }
     let mut failed = Failed(Some(h as i64));
-    let mut v = if fresh != 0 { fold_init::<B>(p) } else { fold_value::<B>(p) };
-    v.value = { let _fork = ForkGuard::new(); step.invoke(&v.value, batch) };
+    let v = if fresh != 0 { fold_init::<B>(p) } else { fold_value::<B>(p) };
+    let FoldValue { tag, value } = *v;
+    let value = { let _fork = ForkGuard::new(); step(value, batch) };
     failed.0 = None;
-    let raw = Box::into_raw(v);
+    let raw = Box::into_raw(Box::new(FoldValue { tag, value }));
     if mlc_fold_store(h as i64, raw as *mut c_void, &mut err) != 0 {
         drop(Box::from_raw(raw));
         check_err(err);
@@ -4801,7 +4890,7 @@ pub unsafe fn fold_put<B, L, S>(schema: &Schema, step: S, h: u64, batch: &L)
 where
     B: Clone + Send + 'static,
     L: ToVoidstar,
-    S: Invoke2<B, L, B>,
+    S: Fn(B, &L) -> B,
 {
     guarded_put(h, || {
         if (h as i64) >= 0 {
@@ -4817,7 +4906,7 @@ where
 pub unsafe fn fold_put_schemaless<B, L, S>(step: S, h: u64, batch: &L)
 where
     B: Clone + Send + 'static,
-    S: Invoke2<B, L, B>,
+    S: Fn(B, &L) -> B,
 {
     guarded_put(h, || {
         if (h as i64) >= 0 {
@@ -6740,7 +6829,7 @@ mod fold_tests {
         }
     }
 
-    fn step(acc: &Probe, xs: &Vec<i64>) -> Probe {
+    fn step(acc: Probe, xs: &Vec<i64>) -> Probe {
         Probe(acc.0 + xs.len() as u64)
     }
 
@@ -6769,7 +6858,7 @@ mod fold_tests {
             fold_schemaless::<Probe, Vec<i64>, _, _, _>(
                 &Probe(0),
                 step,
-                |a: &Probe, b: &Probe| Probe(a.0 + b.0),
+                |a: Probe, b: Probe| Probe(a.0 + b.0),
                 |h: &u64| {
                     let h = *h;
                     std::thread::scope(|s| {

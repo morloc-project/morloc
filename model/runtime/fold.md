@@ -138,6 +138,8 @@ accumulator type must be `Send`. It need not be `Sync`: with the checkout
 protocol each slot's value has one user at a time, and the fold's one
 init, which every producer thread copies (FOLD-6), is held in a mutex of
 its own, so no two threads copy it at once. It is also `Clone` (FOLD-6).
+The Rust runtime moves a slot's value into the step and the step's result
+back, and moves both values into combine.
 A gather's batch type is `Send` for the same reason.
 
 ### FOLD-9 A Python or R fold fed from another pool takes the file route

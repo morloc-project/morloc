@@ -1,0 +1,45 @@
+-- COPY-7: folding batches into a growing accumulator, timed against the
+-- batch count. A step that copies its accumulator costs time quadratic in
+-- the count; one that moves it, linear.
+module main (foldRefRs, hofRefRs, foldValCpp)
+
+import root
+import root-rust
+import root-cpp
+
+source Rust from "f.rs"
+  ( "produce" as produceR, "batches" as batchesR, "empty" as emptyR
+  , "step_ref" as stepRefR, "cat" as catR, "len_of" as lenR )
+
+source Cpp from "f.hpp"
+  ( "produce" as produceC, "empty" as emptyC, "step_val" as stepValC
+  , "cat" as catC, "len_of" as lenC )
+
+produceR :: I64 -> I64 -> ([I64] -> <IO> ()) -> <IO> ()
+batchesR :: I64 -> I64 -> [[I64]]
+emptyR :: [I64]
+stepRefR :: [I64] -> [I64] -> [I64]
+catR :: [I64] -> [I64] -> [I64]
+--' The accumulator's length
+lenR :: [I64] -> Str
+
+produceC :: I64 -> I64 -> ([I64] -> <IO> ()) -> <IO> ()
+emptyC :: [I64]
+stepValC :: [I64] -> [I64] -> [I64]
+catC :: [I64] -> [I64] -> [I64]
+--' The accumulator's length
+lenC :: [I64] -> Str
+
+--' A Rust @fold whose step takes its accumulator by reference
+--' @render --n=lenR @fold=stepRefR @init=emptyR @combine=catR
+foldRefRs :: I64 -> I64 -> <IO> (Collect I64)
+foldRefRs s b = @collect (produceR s b)
+
+--' The Rust stdlib fold over the same batches
+hofRefRs :: I64 -> I64 -> Str
+hofRefRs s b = lenR (fold stepRefR emptyR (batchesR s b))
+
+--' A C++ @fold whose step takes its accumulator by value
+--' @render --n=lenC @fold=stepValC @init=emptyC @combine=catC
+foldValCpp :: I64 -> I64 -> <IO> (Collect I64)
+foldValCpp s b = @collect (produceC s b)

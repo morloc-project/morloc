@@ -219,7 +219,7 @@ planNativeManifold caps pp nm@(NativeManifold m _ form e) =
 
 -- | Per-index variable-use counts over a manifold (OWN-2). Every read
 -- counts, borrows included; the two arms of an 'IfN' count as their larger
--- arm, since one runs. A nested manifold counts as one use of each of its
+-- arm, since one runs; a read in a closure body counts as two. A nested manifold counts as one use of each of its
 -- context args, the call or capture that hands them over; its body reads are
 -- its own scope's (OWN-3).
 varUseCountOps :: FoldManifoldM Identity (Map.Map Int Int) (Map.Map Int Int) (Map.Map Int Int) (Map.Map Int Int) (Map.Map Int Int) (Map.Map Int Int)
@@ -232,6 +232,10 @@ varUseCountOps =
         BndVarN_ _ i _ -> Map.singleton i 1
         LetVarN_ _ i _ -> Map.singleton i 1
         IfN_ _ c t f -> c `add` Map.unionWith max t f
+        -- A suspension or @try body is a closure that may run more than
+        -- once, so what it reads is never moved out of the manifold.
+        DoBlockN_ _ inner -> Map.map (* 2) inner
+        IntrinsicN_ _ IntrTry _ xs -> Map.map (* 2) (foldl add mempty xs)
         _ -> foldlNE add mempty node
     , opSerialArgM = \node -> return (foldlSA add mempty node)
     , opNativeArgM = \node -> return (foldlNA add mempty node)

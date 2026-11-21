@@ -12,7 +12,7 @@ pub fn unpackDate(d: &MlcDate) -> String {
     d.v.to_string()
 }
 pub fn dateOf(x: i64) -> MlcDate { MlcDate { v: x * 10, bad: false } }
-pub fn unpacksAfter<T>(_: &T) -> i64 { UNPACKS.load(Ordering::SeqCst) }
+pub fn unpacksAfter<T>(_: &[T]) -> i64 { UNPACKS.load(Ordering::SeqCst) }
 pub fn badDate(x: i64) -> MlcDate { MlcDate { v: x, bad: true } }
 
 #[derive(Clone)]

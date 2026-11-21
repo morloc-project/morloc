@@ -1098,6 +1098,14 @@ rustOwn BorrowedPlace tf x
   | rustIsCopy tf = x
   | otherwise = x <> ".clone()"
 
+-- | RUST-5: an argument of a sourced function, given when it is owned here
+-- and lent otherwise, so the callee's parameter type picks a move, a borrow
+-- or a copy.
+rustPass :: IOwnership -> MDoc -> MDoc
+rustPass Owned x = "::rustmorloc::give(&mut ::std::option::Option::Some(" <> x <> "))"
+rustPass BorrowedRef x = "::rustmorloc::lend(" <> x <> ")"
+rustPass BorrowedPlace x = "::rustmorloc::lend(&(" <> x <> "))"
+
 -- | Adapt an expression to a shared reference at a reference sink (a @&T@
 -- parameter or a closure application): an owned value or a borrowed place is
 -- borrowed; a value that is already a reference is forwarded unchanged.
@@ -3344,6 +3352,17 @@ rustLowerConfig mask makers consumed userArms =
     -- function value. One a call group returns is the host's too; a
     -- function at a type variable of the signature is one the host was
     -- given, and is returned as it was (HOST-8).
+    -- OWN-7, RUST-5: a fold's step and combine take the accumulator by
+    -- value. A sourced function is called with it given; any other function
+    -- value borrows it.
+    , lcFoldStep = \bare x ->
+        if bare
+          then "|a, b| " <> x <> "(::rustmorloc::give(&mut ::std::option::Option::Some(a)), ::rustmorloc::lend(b))"
+          else "{ let s = " <> x <> "; move |a, b| ::rustmorloc::Invoke2::invoke(&s, &a, b) }"
+    , lcFoldCombine = \bare x ->
+        if bare
+          then "|a, b| " <> x <> "(::rustmorloc::give(&mut ::std::option::Option::Some(a)), ::rustmorloc::give(&mut ::std::option::Option::Some(b)))"
+          else "{ let c = " <> x <> "; move |a, b| ::rustmorloc::Invoke2::invoke(&c, &a, &b) }"
     , lcForkChecked = \_ x -> "({ let _mlc_fork = ::rustmorloc::ForkGuard::new(); " <> x <> " })"
     , lcSourcedResult = \src n t x -> case t of
         FunF ins@(_ : _) _
@@ -3363,9 +3382,14 @@ rustLowerConfig mask makers consumed userArms =
               SourcedArg src i ->
                 maybe (False, False) (\bs -> if i < length bs then bs !! i else (False, False)) (Map.lookup (srcName src) mask)
               _ -> (False, False)
-            -- A value parameter: a Copy type is a by-value (owned) sink, a
-            -- non-Copy type is a reference sink.
-            byType tf = if rustIsCopy tf then rustOwn own tf x else rustRef own x
+            -- A value parameter: a Copy type is a by-value (owned) sink. A
+            -- non-Copy parameter of a sourced function takes the argument as
+            -- its type says (RUST-5): given when this is its last use, lent
+            -- otherwise. A generated function's is a reference sink.
+            byType tf
+              | rustIsCopy tf = rustOwn own tf x
+              | SourcedArg _ _ <- site = rustPass own x
+              | otherwise = rustRef own x
          in case tm of
               -- A function-typed argument is a function value (a saturated
               -- sub-manifold is typed by its result, so it never lands here).

@@ -74,3 +74,18 @@ The borrowing read and the keeping read of `rest` are in one step. Before
 C++ read fields in place, the walk inside the step copied each payload it
 read, so q grew with the rest of the chain and the walk was quadratic
 (golden `copy-census-cpp`, `mixedLoop`: 5149 copies at n=100, now 198).
+
+### COPY-7 A fold's growing accumulator costs time linear in the batches
+Intent: proposed
+Bench: fold-growth
+Model: t(b) = c + a*b^p for b batches of 1000 integers appended to one list accumulator; p near 2 means each step copies the accumulator, near 1 that it moves it. rs.fold.val: Rust @fold, step by value; rs.fold.ref: step by reference, which must copy; rs.hof.ref: the Rust stdlib fold; cpp.fold.val: C++ @fold, step by value
+Measured: 2026-11-21-0023-de9c8ba82+dirty-rust-param-modes, load 2.0, b = 250..2000: rs.fold.val.p 2.87, cpp.fold.val.p 2.73, rs.fold.ref.p 2.90, rs.hof.ref.p 2.80 (every series copies; above 2 from page faults on each fresh copy)
+Goal: rs.fold.val.p <= 1.3, cpp.fold.val.p <= 1.3
+
+Today neither goal holds: the step reaches the runtime as a closure over a
+generated function whose accumulator parameter is a reference, so even a
+step written by value is passed a copy every batch, in Rust and in C++
+(issues/call-and-stream-copies.md). One written with `&Vec<i64>` copies it
+every batch by its own choice. The stdlib fold calls its function with
+the accumulator by reference (HOST-8), so a step there that grows the
+accumulator copies it every batch (issues/call-and-stream-copies.md).
