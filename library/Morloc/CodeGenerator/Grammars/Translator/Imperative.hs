@@ -962,10 +962,19 @@ nativeToWire cfg = go
     construct v s@(SerialClosure _ _) = do
       reified <- lcReifyClosure cfg v s
       return ([], IRawExpr (render reified))
-    construct v (SerialPack _ (p, s)) =
-      let unpacker = lcUnpackerName cfg (val (typePackerReverse p))
-          arg = if lcBorrowPackArg cfg (typePackerPacked p) then "&(" <> v <> ")" else v
-       in go (lcForkChecked cfg False (unpacker <> parens arg)) s
+    -- An unpacked value that is not a leaf is read once per part, so it is
+    -- bound to a local first, and the unpacker runs once.
+    construct v (SerialPack _ (p, s))
+      | isMsgpackLeaf cfg s = go call s
+      | otherwise = do
+          idx <- lcNewIndex cfg
+          let h = render ((helperVar cfg) idx)
+          (stmts, e) <- go (pretty h) s
+          return (IAssign h Nothing (IRawExpr (render call)) : stmts, e)
+      where
+        unpacker = lcUnpackerName cfg (val (typePackerReverse p))
+        arg = if lcBorrowPackArg cfg (typePackerPacked p) then "&(" <> v <> ")" else v
+        call = lcForkChecked cfg False (unpacker <> parens arg)
     construct v lst@(SerialList _ _ s) = do
       idx <- lcNewIndex cfg
       resultType <- lcSerialAstType cfg lst

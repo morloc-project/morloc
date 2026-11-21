@@ -1,6 +1,7 @@
 #pragma once
 #include <cstdint>
 #include <cstdio>
+#include <tuple>
 #include <vector>
 
 struct outer_t { std::vector<double> v; };
@@ -21,3 +22,13 @@ inline outer_t mk(int64_t n) {
     for (int64_t i = 0; i < n; i++) o.v.push_back(double(i));
     return o;
 }
+
+struct p_t { double a, b, c; };
+inline p_t packP(const std::tuple<double, double, double>& t) { return {std::get<0>(t), std::get<1>(t), std::get<2>(t)}; }
+inline std::tuple<double, double, double> unpackP(const p_t& p) {
+    FILE* f = std::fopen("calls.log", "a");
+    std::fprintf(f, "unpackP\n");
+    std::fclose(f);
+    return {p.a, p.b, p.c};
+}
+inline p_t mkP(int64_t n) { return {double(n), double(n + 1), double(n + 2)}; }

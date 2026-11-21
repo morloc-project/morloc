@@ -2,7 +2,9 @@ all:
 	rm -f obs.txt *.err calls.log
 	morloc make -o nexus main.loc 2> build.err
 	./nexus mk 5 > obs.txt 2>> obs.err
-	wc -l < calls.log >> obs.txt
+	./nexus mkP 1 >> obs.txt 2>> obs.err
+	./nexus mkPR 1 >> obs.txt 2>> obs.err
+	sort calls.log | uniq -c >> obs.txt
 
 clean:
 	rm -rf nexus pools *.err calls.log
