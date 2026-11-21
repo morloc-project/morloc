@@ -87,6 +87,9 @@ called by the fold directly, not through a closure, so a step written by
 value is given the slot's accumulator (golden `fold-step-by-value`); any
 other step still reaches the fold as a closure whose parameters are
 references, and is passed a copy (issues/call-and-stream-copies.md). One
-written with `&Vec<i64>` copies it every batch by its own choice. The stdlib fold calls its function with
-the accumulator by reference (HOST-8), so a step there that grows the
-accumulator copies it every batch (issues/call-and-stream-copies.md).
+written with `&Vec<i64>` copies it every batch by its own choice. A
+host's fold, such as the stdlib's, calls its function with the
+accumulator by reference (HOST-8), so a step there that grows the
+accumulator copies it every batch; that cost is accepted (ruled
+2026-11-21), and a fold that must move its accumulator is written with
+`@fold`.

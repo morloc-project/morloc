@@ -86,17 +86,9 @@ None is scheduled.
   application, a step in another language, or one whose call is adapted
   reaches the fold as a closure over a generated function whose parameters
   are references, so a by-value parameter under it is given a copy. Fix
-  direction: let that closure, and the generated function under it, take
-  the accumulator by value; the same question as HOST-8's callback modes
-  (/work/plans/rust-param-modes-analysis.md).
-- **The Rust stdlib's folds copy their accumulator every step.** [read
-  2026-11-20, DA review] COPY-7's cost, outside `@fold`:
-  root-rust core.rs `morloc_fold_vec` / `morloc_fold_deque` (~309-315, and
-  ~598) call the closure as `f(&acc, x)`, and stream-rust / parallel-rust
-  (stream.rs ~8-18, parallel.rs ~412-426) do the same, so a closure that
-  grows its accumulator clones it per element. Fixing these needs HOST-8 to
-  let a host function take a callback's argument by value (bench:
-  fold-growth rs.hof.ref).
+  direction: give the fold a by-value variant of the generated function
+  under that closure; the fold is morloc's own caller, so HOST-8 (ruled
+  2026-11-21 to stay by reference for host functions) does not apply.
 - **Every non-vector container copy is entered in the converted-value
   table.** [read, 2026-11-16] GEN-14. cppmorloc.hpp sizes and writes a
   set, map, list or deque through `mlc_converted`, so each one costs a hash
