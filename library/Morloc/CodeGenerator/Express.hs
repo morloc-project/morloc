@@ -54,7 +54,7 @@ import qualified Morloc.Monad as MM
 import qualified Morloc.TypeEval as TE
 import qualified Morloc.Frontend.Instances as FI
 import Morloc.Typecheck.Internal (emptyGamma, functorMapMethod, getterMethods, indexMethods, prettyConstraint, sliceMethods, unqualify)
-import Morloc.CodeGenerator.Serial (containsFunT, findCoveringPacker, makeSerialAST)
+import Morloc.CodeGenerator.Serial (containsEffectT, containsFunT, findCoveringPacker, makeSerialAST)
 import GHC.Stack (HasCallStack, withFrozenCallStack)
 
 mkIdx :: AnnoS g One (Indexed c, d) -> Type -> Indexed Type
@@ -169,8 +169,9 @@ bareFoldSteps (PolyHead lang m args body) = PolyHead lang m args (go lang body)
       _ -> mapPolySubExprs (go l) e
     bare l x = case x of
       PolyManifold l' _ (ManifoldPass bound) Transparent
-        (PolyReturn (PolyApp exe@(PolyExe (Idx _ (FunT ins _)) (SrcCallP _ src)) xs))
+        (PolyReturn (PolyApp exe@(PolyExe (Idx _ (FunT ins out)) (SrcCallP _ src)) xs))
           | l' == l
+          , not (any (\t -> containsFunT t || containsEffectT t) (out : ins))
           , srcLang src == l
           , not (srcOperator src)
           , null (srcRsize src)
