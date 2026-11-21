@@ -6,7 +6,7 @@ import root-cpp
 source Cpp from "srcs.hpp"
   ( "mk", "bumpRef", "bumpConst", "sizeV", "fwdSize", "ovl", "pick"
   , "applyFn", "inc", "colorCode", "addRef", "addConst"
-  , "ltRef", "ltConst", "applyFnRef", "applyFnConst"
+  , "ltRef", "ltConst", "applyFnRef", "applyFnConst", "tmplSize", "takeV"
   , "+" as (<+>)
   , "-" as (<->)
   , "*" as (<*>)
@@ -18,6 +18,8 @@ bumpRef :: [Int] -> Int
 bumpConst :: [Int] -> Int
 sizeV :: [Int] -> Int
 fwdSize :: [Int] -> Int
+tmplSize :: [Int] -> Int
+takeV :: [Int] -> Int
 ovl :: [Int] -> Int
 pick :: Bool -> Int -> Int
 applyFn :: (Int -> Int) -> Int -> Int

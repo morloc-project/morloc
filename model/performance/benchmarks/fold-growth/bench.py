@@ -1,7 +1,8 @@
 """COPY-7: b batches of S integers folded into one growing list. The time
 grows as b**p; p near 2 means each step copies the accumulator, near 1
 that it moves it. Rust's @fold with a by-value step (val.loc), with a
-by-reference step, the Rust stdlib fold, and C++'s @fold for reference.
+by-reference step, the Rust stdlib fold, and C++'s @fold for reference;
+the .mor series fold with a step written in morloc over the by-value one.
 """
 
 import perf
@@ -16,6 +17,8 @@ SERIES = {
     # name: (nexus, command, argv tail, batch counts)
     "rs.fold.val": ("nexus-val", "foldValRs", ["--n"], WIDE),
     "cpp.fold.val": ("nexus", "foldValCpp", ["--n"], WIDE),
+    "rs.fold.mor": ("nexus-val", "foldMorRs", ["--n"], WIDE),
+    "cpp.fold.mor": ("nexus", "foldMorCpp", ["--n"], WIDE),
     "rs.fold.ref": ("nexus", "foldRefRs", ["--n"], COUNTS),
     "rs.hof.ref": ("nexus", "hofRefRs", [], COUNTS),
 }

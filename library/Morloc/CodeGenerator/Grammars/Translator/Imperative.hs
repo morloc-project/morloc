@@ -57,6 +57,7 @@ module Morloc.CodeGenerator.Grammars.Translator.Imperative
 
     -- * Full lowering config
   , LowerConfig (..)
+  , FoldFn (..)
   , infixOperator
   , LoopResult (..)
   , ArgSite (..)
@@ -116,6 +117,7 @@ import GHC.Generics (Generic)
 import qualified Morloc.BaseTypes as BT
 import Morloc.CodeGenerator.Grammars.Common
   ( Chain (..)
+  , capturesNothing
   , ChainDocs (..)
   , ChainKind (..)
   , Guards (..)
@@ -511,10 +513,9 @@ data LowerConfig m = LowerConfig
   -- call itself; each later group applies the function value the previous
   -- group returned. Default is juxtaposition, which is how a host language
   -- with first-class callables spells it.
-  , lcFoldStep :: Bool -> MDoc -> MDoc
-  -- ^ A fold's step as the runtime calls it, given whether it is a sourced
-  -- function itself (OWN-7: the step takes its accumulator by value).
-  , lcFoldCombine :: Bool -> MDoc -> MDoc
+  , lcFoldStep :: FoldFn -> MDoc -> MDoc
+  -- ^ A fold's step as the runtime calls it, given what it is (COPY-7).
+  , lcFoldCombine :: FoldFn -> MDoc -> MDoc
   , lcForkChecked :: Bool -> MDoc -> MDoc
   -- ^ FORK-17: a call of user code, wrapped for the fork check; True when it
   -- returns unit.
@@ -686,6 +687,13 @@ data LowerConfig m = LowerConfig
   , lcKeepCallArg :: Int -> Int -> NativeExpr -> MDoc -> m MDoc
   -- ^ Adapt argument @j@ of a call of native manifold @m@, given its
   -- original (OWN-7).
+  , lcKeepSourcedArg :: NativeExpr -> MDoc -> m (Maybe MDoc)
+  -- ^ An argument of a sourced call, moved at its last read of an owned
+  -- value (OWN-2); Nothing where it is not.
+  , lcMoveWhereAccepted :: [MDoc] -> MDoc -> MDoc -> MDoc
+  -- ^ A sourced call given the moved arguments where the callee accepts
+  -- them, and the call with every argument as it is otherwise: the locals
+  -- that move, the call with them moved, the call without.
   , lcKeepClosureArg :: NativeExpr -> MDoc -> m (Maybe MDoc)
   -- ^ An argument of a function value's call, moved at its last read of an
   -- owned value (OWN-2); Nothing where it is not.
@@ -2614,6 +2622,17 @@ constArg cfg operands la@(LowArg a t d)
 forkChecked :: LowerConfig m -> Bool -> (MDoc -> MDoc) -> MDoc -> [PoolDocs] -> PoolDocs
 forkChecked cfg unit result call = mergePoolDocs (const (result (lcForkChecked cfg unit call)))
 
+-- | What a fold's step or combine is: a sourced function itself, a
+-- generated function that captures nothing (its name), or any other
+-- function value (COPY-7).
+data FoldFn = FoldSourced | FoldManifold MDoc | FoldValue
+
+foldFn :: LowerConfig m -> NativeExpr -> FoldFn
+foldFn cfg e
+  | isSourcedFn e = FoldSourced
+  | ManN (NativeManifold m _ form _) <- e, capturesNothing form = FoldManifold (lcManifoldName cfg m)
+  | otherwise = FoldValue
+
 -- | A function value that is a sourced function itself, not a closure.
 isSourcedFn :: NativeExpr -> Bool
 isSourcedFn (ExeN _ (SrcCallP _ src)) = not (srcOperator src)
@@ -2639,6 +2658,7 @@ lowerNativeExprRaw cfg _ (AppExeN_ _ (SrcCallP _ src) [l0, r0])
           r = laDocs (constArg cfg operands r0)
       return $ mergePoolDocs (const (lcOperator cfg src (laType l0, ol, poolExpr l) (laType r0, or', poolExpr r))) [l, r]
 lowerNativeExprRaw cfg _ (AppExeN_ resT (SrcCallP _ src) es1) = do
+  kept <- mapM keepable es1
   es <- bindCallArgs cfg (constArgs cfg Nothing es1)
   owns <- argOwnerships cfg es
   let argTypes = map laType es
@@ -2654,7 +2674,15 @@ lowerNativeExprRaw cfg _ (AppExeN_ resT (SrcCallP _ src) es1) = do
         case provideClosure src (zipWithSame (\(i, t, own) e -> lcSourcedArg cfg (site i) own t e) (zip3Indexed 0 argTypes owns) exprs) of
           [] -> lcSrcName cfg src
           (g0 : gs) -> foldl (lcApplySrcGroup cfg) (lcSrcName cfg src <> (if null g0 then tupled g0 else tupledNoFold g0)) gs
-  return $ forkChecked cfg (isUnitF resT) (lcSourcedResult cfg src (length es) resT) (handleFunctionArgs (map (poolExpr . laDocs) es)) (map laDocs es)
+      asIs = map (poolExpr . laDocs) es
+      call = case [v | Just (v, _) <- kept] of
+        [] -> handleFunctionArgs asIs
+        vs -> lcMoveWhereAccepted cfg vs (handleFunctionArgs (zipWithSame (\c k -> maybe c snd k) asIs kept)) (handleFunctionArgs asIs)
+  return $ forkChecked cfg (isUnitF resT) (lcSourcedResult cfg src (length es) resT) call (map laDocs es)
+  where
+    -- The local an argument names, and its moved form, where it moves.
+    keepable (LowArg (NativeArgExpr e) _ d) = fmap ((,) (poolExpr d)) <$> lcKeepSourcedArg cfg e (poolExpr d)
+    keepable _ = return Nothing
 lowerNativeExprRaw cfg _ (PatN_ t xs) = do
   app <- case xs of
     -- A setter's new values are stored in the rebuilt record, an owned sink.
@@ -3184,8 +3212,8 @@ lowerNativeExprRaw cfg origExpr (IntrinsicN_ _ intr mschema [Low iniE iniDocs, L
       batchType <- stepBatchType cfg stepE
       iniDocs' <- adaptReadElem cfg iniE iniDocs
       let raw d = IRawExpr (render (poolExpr d))
-          step = IRawExpr (render (lcFoldStep cfg (isSourcedFn stepE) (poolExpr stepDocs)))
-          comb = IRawExpr (render (lcFoldCombine cfg (isSourcedFn combE) (poolExpr combDocs)))
+          step = IRawExpr (render (lcFoldStep cfg (foldFn cfg stepE) (poolExpr stepDocs)))
+          comb = IRawExpr (render (lcFoldCombine cfg (foldFn cfg combE) (poolExpr combDocs)))
           call = IIntrinsicFold (intr == IntrFoldFile) msid accType batchType (raw iniDocs') step comb (raw fnDocs)
       return $ mergePoolDocs (const $ lcPrintExpr cfg call) [iniDocs', stepDocs, combDocs, fnDocs]
 lowerNativeExprRaw cfg _ (IntrinsicN_ _ IntrFoldPut mschema [Low stepE stepDocs, Low _ handleDocs, Low batchE batchDocs]) = do
@@ -3196,7 +3224,7 @@ lowerNativeExprRaw cfg _ (IntrinsicN_ _ IntrFoldPut mschema [Low stepE stepDocs,
   batchType <- stepBatchType cfg stepE
   batchDocs' <- adaptReadElem cfg batchE batchDocs
   let raw d = IRawExpr (render (poolExpr d))
-      step = IRawExpr (render (lcFoldStep cfg (isSourcedFn stepE) (poolExpr stepDocs)))
+      step = IRawExpr (render (lcFoldStep cfg (foldFn cfg stepE) (poolExpr stepDocs)))
       putExpr = IIntrinsicFoldPut msid accType batchType step (raw handleDocs) (raw batchDocs')
   return $ mergePoolDocs (const $ lcPrintExpr cfg putExpr) [stepDocs, handleDocs, batchDocs']
 lowerNativeExprRaw cfg _ (IntrinsicN_ _ IntrReplay (Just schema)

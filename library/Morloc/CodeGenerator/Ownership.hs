@@ -41,6 +41,7 @@ import Morloc.CodeGenerator.Grammars.Translator.Imperative
   , nativeManifoldsUnder
   )
 import Morloc.CodeGenerator.Namespace
+import Morloc.CodeGenerator.Grammars.Common (capturesNothing, foldFnPositions)
 
 -- | What a language's representation decides about ownership.
 data OwnCaps = OwnCaps
@@ -64,7 +65,8 @@ data PoolPlan = PoolPlan
   -- the payload (OWN-5)
   , ppByValue :: Map.Map Int (Set.Set Int)
   -- ^ per fully applied native manifold, the parameter positions it takes by
-  -- value (OWN-7)
+  -- value (OWN-7); also a fold's step and combine the fold alone calls
+  -- (COPY-7)
   }
 
 emptyPoolPlan :: PoolPlan
@@ -74,9 +76,28 @@ planPool :: OwnCaps -> [SerialManifold] -> PoolPlan
 planPool caps sms =
   PoolPlan
     { ppTakes = consumableProjectionLets (ocTagAfterTake caps) sms
-    , ppByValue = settle Map.empty
+    , ppByValue = Map.unionWith Set.union (settle Map.empty) foldParams
     }
   where
+    -- A fold's step and combine that capture nothing, and occur nowhere
+    -- else, are called by the fold alone, which hands over the accumulator
+    -- (COPY-7): the step's first parameter and both of combine's.
+    foldParams = Map.filterWithKey (\m _ -> Map.findWithDefault 0 m foldUses == Map.findWithDefault (0 :: Int) m manUses) $
+      Map.fromListWith Set.intersection
+        [ (m, Set.fromList [j | (j, Arg _ (Native tf)) <- indexed (typeMofForm form), j `elem` ps, not (ocCheap caps tf)])
+        | (m, form, ps) <- foldFns
+        ]
+    foldFns =
+      [ (m, form, ps)
+      | RN (IntrinsicN _ intr _ args) <- nodes
+      , (pos, ps) <- foldFnPositions intr
+      , ManN (NativeManifold m _ form _) <- take 1 (drop pos args)
+      , capturesNothing form
+      ]
+    foldUses = Map.fromListWith (+) [(m, 1) | (m, _, _) <- foldFns]
+    manUses = Map.fromListWith (+) [(m, 1) | RN (ManN (NativeManifold m _ _ _)) <- nodes]
+    nodes = concatMap (universe . RSM) sms
+    universe n = n : concatMap universe (rnodeChildren n)
     -- A parameter passed on to a by-value parameter is kept too, so the
     -- positions grow from the callees up until nothing changes (OWN-7).
     settle known =

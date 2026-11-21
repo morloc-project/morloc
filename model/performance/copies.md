@@ -78,15 +78,18 @@ read, so q grew with the rest of the chain and the walk was quadratic
 ### COPY-7 A fold's growing accumulator costs time linear in the batches
 Intent: proposed
 Bench: fold-growth
-Model: t(b) = c + a*b^p for b batches of 1000 integers appended to one list accumulator; p near 2 means each step copies the accumulator, near 1 that it moves it. rs.fold.val: Rust @fold, step by value; rs.fold.ref: step by reference, which must copy; rs.hof.ref: the Rust stdlib fold; cpp.fold.val: C++ @fold, step by value
-Measured: 2026-11-21-0252-841bb44e8+dirty-fold-bare-step, b = 1000..8000 for the by-value series and 250..2000 for the others: rs.fold.val.p 1.23, cpp.fold.val.p 0.82, rs.fold.ref.p 2.84, rs.hof.ref.p 2.73 (below 1 and near 1.2, the fixed cost of a run still dominates)
+Model: t(b) = c + a*b^p for b batches of 1000 integers appended to one list accumulator; p near 2 means each step copies the accumulator, near 1 that it moves it. rs.fold.val: Rust @fold, step by value; rs.fold.ref: step by reference, which must copy; rs.hof.ref: the Rust stdlib fold; cpp.fold.val: C++ @fold, step by value; rs.fold.mor, cpp.fold.mor: a step written in morloc over the by-value one
+Measured: 2026-11-21-0429-a7de70792+dirty-fold-morloc-step, load 3.2, b = 1000..8000 for the by-value and .mor series and 250..2000 for the others: rs.fold.val.p 0.85, cpp.fold.val.p 1.11, rs.fold.mor.p 1.10, cpp.fold.mor.p 1.03, rs.fold.ref.p 2.84, rs.hof.ref.p 2.76 (near or below 1, the fixed cost of a run still dominates)
 Goal: rs.fold.val.p <= 1.3, cpp.fold.val.p <= 1.3
 
 A step or combine that is a sourced function in the fold's language is
 called by the fold directly, not through a closure, so a step written by
-value is given the slot's accumulator (golden `fold-step-by-value`); any
-other step still reaches the fold as a closure whose parameters are
-references, and is passed a copy (issues/call-and-stream-copies.md). One
+value is given the slot's accumulator (golden `fold-step-by-value`). A
+step written in morloc that captures nothing is called by the fold
+directly as well, with the accumulator as an owned parameter it passes
+on. A step that captures values still reaches the fold as a closure whose
+parameters are references, and is passed a copy
+(issues/call-and-stream-copies.md). One
 written with `&Vec<i64>` copies it every batch by its own choice. A
 host's fold, such as the stdlib's, calls its function with the
 accumulator by reference (HOST-8), so a step there that grows the

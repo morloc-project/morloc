@@ -51,6 +51,7 @@ import Morloc.CodeGenerator.Grammars.Translator.Imperative
   , IType (..)
   , IOwnership (..)
   , LowerConfig (..)
+  , FoldFn (..)
   , buildProgramM
   , defaultFoldRules
   , markLastReadsSeeded
@@ -1235,14 +1236,14 @@ cppLowerConfig (ClosureGen reifyThunks stageTable papplyHeads) =
     , lcOperator = infixOperator
     , lcApplySrcGroup = \f as -> f <+> tupled as
     -- COPY-7
-    , lcFoldStep = \bare x ->
-        if bare
-          then "[](auto&& a, const auto& b) { return " <> x <> "(std::forward<decltype(a)>(a), b); }"
-          else x
-    , lcFoldCombine = \bare x ->
-        if bare
-          then "[](auto&& a, auto&& b) { return " <> x <> "(std::forward<decltype(a)>(a), std::forward<decltype(b)>(b)); }"
-          else x
+    , lcFoldStep = \f x -> case f of
+        FoldSourced -> "[](auto&& a, const auto& b) { return " <> x <> "(std::forward<decltype(a)>(a), b); }"
+        FoldManifold m -> "[](auto&& a, const auto& b) { return " <> m <> "(std::forward<decltype(a)>(a), b); }"
+        FoldValue -> x
+    , lcFoldCombine = \f x -> case f of
+        FoldSourced -> "[](auto&& a, auto&& b) { return " <> x <> "(std::forward<decltype(a)>(a), std::forward<decltype(b)>(b)); }"
+        FoldManifold m -> "[](auto&& a, auto&& b) { return " <> m <> "(std::forward<decltype(a)>(a), std::forward<decltype(b)>(b)); }"
+        FoldValue -> x
     , lcForkChecked = \_ x -> "[&]() { mlc::fork_guard _mlc_fork; return " <> x <> "; }()"
     , lcSourcedResult = \_ _ _ x -> x
     , lcSourcedArg = \_ _ _ x -> x
@@ -1366,6 +1367,13 @@ cppLowerConfig (ClosureGen reifyThunks stageTable papplyHeads) =
           }
     , lcKeepCallArg = cppKeepCallArg
     , lcKeepClosureArg = cppKeptLet
+    , lcKeepSourcedArg = cppKeptLet
+    -- CPP-1: a parameter that takes no rvalue (a `T&` template deducing a
+    -- const reference) is given the value as before. Each local is a
+    -- parameter of the lambda, so the test depends on it and fails softly.
+    , lcMoveWhereAccepted = \vs moved asIs ->
+        "[&](" <> hsep (punctuate "," ["auto&" <+> v | v <- vs]) <> ") { if constexpr (requires { " <> moved
+          <> "; }) return " <> moved <> "; else return " <> asIs <> "; }" <> tupled vs
     , lcKeepContextArg = cppKeepContextArg
     , lcKeepSlot = cppKeepSlot
     , lcKeepElem = cppKeepElem
@@ -2305,7 +2313,7 @@ translateSegment closureGen m0@(SerialManifold root _ _ _ _) = do
   pp <- CMS.gets translatorPool
   let plan = letPlan modes
       held = lpHeld plan
-      byValue = Map.fromListWith Set.intersection [(m, byValueIndices pp m form) | NativeManifold m _ form@(ManifoldFull _) _ <- nativeManifoldsUnder (RSM m0)]
+      byValue = Map.fromListWith Set.intersection [(m, byValueIndices pp m form) | NativeManifold m _ form _ <- nativeManifoldsUnder (RSM m0), Map.member m (ppByValue pp)]
       params = Set.unions (Map.elems byValue) `Set.difference` loopSlots (RSM m0)
       seeds m = Set.toList (Map.findWithDefault Set.empty m byValue `Set.intersection` params)
       m0' = paramReads seeds m0

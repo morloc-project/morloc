@@ -1,7 +1,7 @@
 -- COPY-7: folding batches into a growing accumulator, timed against the
 -- batch count. A step that copies its accumulator costs time quadratic in
 -- the count; one that moves it, linear.
-module main (foldRefRs, hofRefRs, foldValCpp)
+module main (foldRefRs, hofRefRs, foldValCpp, foldMorCpp)
 
 import root
 import root-rust
@@ -13,7 +13,7 @@ source Rust from "f.rs"
 
 source Cpp from "f.hpp"
   ( "produce" as produceC, "empty" as emptyC, "step_val" as stepValC
-  , "cat" as catC, "len_of" as lenC )
+  , "cat" as catC, "len_of" as lenC, "ident" as identC )
 
 produceR :: I64 -> I64 -> ([I64] -> <IO> ()) -> <IO> ()
 batchesR :: I64 -> I64 -> [[I64]]
@@ -27,6 +27,7 @@ produceC :: I64 -> I64 -> ([I64] -> <IO> ()) -> <IO> ()
 emptyC :: [I64]
 stepValC :: [I64] -> [I64] -> [I64]
 catC :: [I64] -> [I64] -> [I64]
+identC :: [I64] -> [I64]
 --' The accumulator's length
 lenC :: [I64] -> Str
 
@@ -43,3 +44,12 @@ hofRefRs s b = lenR (fold stepRefR emptyR (batchesR s b))
 --' @render --n=lenC @fold=stepValC @init=emptyC @combine=catC
 foldValCpp :: I64 -> I64 -> <IO> (Collect I64)
 foldValCpp s b = @collect (produceC s b)
+
+--' A step written in morloc over the C++ by-value step
+stepMorC :: [I64] -> [I64] -> [I64]
+stepMorC acc xs = stepValC acc (identC xs)
+
+--' A C++ @fold whose step is written in morloc
+--' @render --n=lenC @fold=stepMorC @init=emptyC @combine=catC
+foldMorCpp :: I64 -> I64 -> <IO> (Collect I64)
+foldMorCpp s b = @collect (produceC s b)

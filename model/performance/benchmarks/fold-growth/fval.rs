@@ -21,3 +21,7 @@ pub fn cat(mut a: Vec<i64>, b: Vec<i64>) -> Vec<i64> {
 pub fn len_of(a: &Vec<i64>) -> String {
     a.len().to_string()
 }
+
+pub fn ident(xs: &Vec<i64>) -> Vec<i64> {
+    xs.clone()
+}

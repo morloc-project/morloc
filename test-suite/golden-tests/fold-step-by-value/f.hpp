@@ -50,3 +50,10 @@ inline std::vector<int64_t> comb(std::vector<int64_t> a, std::vector<int64_t> b)
 }
 
 inline int64_t fresh(const std::vector<int64_t>& acc) { return acc[0]; }
+
+inline std::vector<int64_t> bump(const std::vector<int64_t>& xs) {
+    std::vector<int64_t> r;
+    for (auto x : xs) r.push_back(x + 1);
+    return r;
+}
+

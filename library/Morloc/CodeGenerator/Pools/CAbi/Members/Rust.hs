@@ -66,6 +66,7 @@ import Morloc.CodeGenerator.Grammars.Translator.Imperative
   , ArgSite (..)
   , IOwnership (..)
   , LowerConfig (..)
+  , FoldFn (..)
   , buildProgramM
   , markLastReads
   , BorrowPart (..)
@@ -1355,7 +1356,7 @@ capInit dead a@(Arg i t) = do
 rustSeeds :: PoolPlan -> [SerialManifold] -> Int -> [Int]
 rustSeeds pp sms = \m -> Set.toList (Map.findWithDefault Set.empty m byValue)
   where
-    byValue = Map.fromListWith Set.intersection [(m, byValueIndices pp m form) | sm <- sms, NativeManifold m _ form@(ManifoldFull _) _ <- nativeManifoldsUnder (RSM sm)]
+    byValue = Map.fromListWith Set.intersection [(m, byValueIndices pp m form) | sm <- sms, NativeManifold m _ form _ <- nativeManifoldsUnder (RSM sm), Map.member m (ppByValue pp)]
 
 -- | How a proxy hands one of its arguments to the wire: a value is put as it
 -- is; a closure is reified first (its wire form is its origin tuple).
@@ -3355,14 +3356,14 @@ rustLowerConfig mask makers consumed userArms =
     -- OWN-7, RUST-5: a fold's step and combine take the accumulator by
     -- value. A sourced function is called with it given; any other function
     -- value borrows it.
-    , lcFoldStep = \bare x ->
-        if bare
-          then "|a, b| " <> x <> "(::rustmorloc::give(&mut ::std::option::Option::Some(a)), ::rustmorloc::lend(b))"
-          else "{ let s = " <> x <> "; move |a, b| ::rustmorloc::Invoke2::invoke(&s, &a, b) }"
-    , lcFoldCombine = \bare x ->
-        if bare
-          then "|a, b| " <> x <> "(::rustmorloc::give(&mut ::std::option::Option::Some(a)), ::rustmorloc::give(&mut ::std::option::Option::Some(b)))"
-          else "{ let c = " <> x <> "; move |a, b| ::rustmorloc::Invoke2::invoke(&c, &a, &b) }"
+    , lcFoldStep = \f x -> case f of
+        FoldSourced -> "|a, b| " <> x <> "(::rustmorloc::give(&mut ::std::option::Option::Some(a)), ::rustmorloc::lend(b))"
+        FoldManifold m -> "|a, b| unsafe { " <> m <> "(::rustmorloc::give(&mut ::std::option::Option::Some(a)), ::rustmorloc::lend(b)) }"
+        FoldValue -> "{ let s = " <> x <> "; move |a, b| ::rustmorloc::Invoke2::invoke(&s, &a, b) }"
+    , lcFoldCombine = \f x -> case f of
+        FoldSourced -> "|a, b| " <> x <> "(::rustmorloc::give(&mut ::std::option::Option::Some(a)), ::rustmorloc::give(&mut ::std::option::Option::Some(b)))"
+        FoldManifold m -> "|a, b| unsafe { " <> m <> "(::rustmorloc::give(&mut ::std::option::Option::Some(a)), ::rustmorloc::give(&mut ::std::option::Option::Some(b))) }"
+        FoldValue -> "{ let c = " <> x <> "; move |a, b| ::rustmorloc::Invoke2::invoke(&c, &a, &b) }"
     , lcForkChecked = \_ x -> "({ let _mlc_fork = ::rustmorloc::ForkGuard::new(); " <> x <> " })"
     , lcSourcedResult = \src n t x -> case t of
         FunF ins@(_ : _) _
@@ -3506,6 +3507,8 @@ rustLowerConfig mask makers consumed userArms =
     , lcKeepContextArg = \_ _ _ _ v -> return v
     , lcKeepCallArg = \_ _ _ v -> return v
     , lcKeepClosureArg = \_ _ -> return Nothing
+    , lcKeepSourcedArg = \_ _ -> return Nothing
+    , lcMoveWhereAccepted = \_ _ x -> x
     , lcKeepSlot = \_ _ v -> return v
     , lcKeepElem = \_ v -> return v
     , lcStoreField = \_ v -> return v

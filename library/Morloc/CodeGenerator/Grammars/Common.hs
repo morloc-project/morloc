@@ -16,6 +16,8 @@ helpers, and the fold framework ('FoldRules', 'foldWithSerialManifoldM').
 -}
 module Morloc.CodeGenerator.Grammars.Common
   ( invertSerialManifold
+  , capturesNothing
+  , foldFnPositions
   , serialManifoldArgsBound
   , sealLoop
   , D (..)
@@ -395,6 +397,20 @@ sealLoop body = case body of
       _ -> fallback
     native (i, Right ne) = Just (i, ne)
     native (_, Left _) = Nothing
+
+-- | The arguments of a fold intrinsic that are its step and combine, each
+-- with the parameters the fold hands it as values it owns (COPY-7).
+foldFnPositions :: Intrinsic -> [(Int, [Int])]
+foldFnPositions intr
+  | intr `elem` [IntrFold, IntrFoldFile] = [(1, [0]), (2, [0, 1])]
+  | intr == IntrFoldPut = [(0, [0])]
+  | otherwise = []
+
+-- | A function value's manifold that takes no context.
+capturesNothing :: ManifoldForm c b -> Bool
+capturesNothing ManifoldPass {} = True
+capturesNothing (ManifoldPart [] _) = True
+capturesNothing _ = False
 
 class Dependable a where
   weave :: D a -> a
@@ -903,8 +919,16 @@ invertSerialManifold next sm0 =
         isLit _ = False
         part (NativeLetN i rhs (LetVarN _ j _)) | i == j = rhs
         part e = e
-    invertNativeExprM (IntrinsicN_ t intr msch nes) =
+    invertNativeExprM (IntrinsicN_ t intr msch nes0) =
       atomize (IntrinsicN t intr msch (map unD nes)) (concatMap getDeps nes)
+      where
+        -- A fold calls a step or combine that captures nothing by its
+        -- name, so the closure stays where the fold can see it (COPY-7).
+        positions = map fst (foldFnPositions intr)
+        nes = [if k `elem` positions then atFold d else d | (k, d) <- zip [0 :: Int ..] nes0]
+        atFold (D (LetVarN _ i _) ((j, Right m@(ManN (NativeManifold _ _ form _))) : deps))
+          | i == j, capturesNothing form = D m deps
+        atFold d = d
     invertNativeExprM (MapOptionalN_ t wt src (D ne lets)) =
       atomize (MapOptionalN t wt src ne) lets
     invertNativeExprM (WireToNativeN_ t s intr sch nes) =

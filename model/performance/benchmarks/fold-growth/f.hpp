@@ -24,3 +24,5 @@ inline std::vector<int64_t> cat(std::vector<int64_t> a, const std::vector<int64_
 }
 
 inline std::string len_of(const std::vector<int64_t>& a) { return std::to_string(a.size()); }
+
+inline std::vector<int64_t> ident(const std::vector<int64_t>& xs) { return xs; }

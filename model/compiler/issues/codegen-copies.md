@@ -41,10 +41,9 @@ records and user-mapped types copy deeply.
   a constructor or `@try` (a sourced call's result is never taken), and a
   value matched twice is copied. C++ moves an owned local at its last read
   into a constructor, tuple, record, optional, list literal, loop continue,
-  local closure capture or by-value manifold argument; conditional arms
-  and by-value source arguments still copy one (golden copy-census-cpp
-  letSource and matchCond: 1 copy each; re-checked 2026-10-19 at
-  25d09170).
+  local closure capture, by-value manifold argument or source argument
+  named once in its call; conditional arms still copy one (golden
+  copy-census-cpp matchCond: 1 copy; re-checked 2026-11-21).
 - **A let no spine reaches is never moved.** [read, 2026-11-09; G1 not
   reproduced] Gap in OWN-2. Marking finds owned lets only along a spine
   of let forms starting at a manifold, loop or do-block body (Imperative.hs

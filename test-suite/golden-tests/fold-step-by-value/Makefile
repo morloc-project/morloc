@@ -6,6 +6,10 @@ all:
 	./nexus foldRs2 --n 50 >> obs.txt 2>> obs.err
 	./nexus foldCpp2 --n 50 >> obs.txt 2>> obs.err
 	./nexus foldAny --n 50 >> obs.txt 2>> obs.err
+	./nexus foldMorlocRs --n 50 >> obs.txt 2>> obs.err
+	./nexus foldMorlocCpp --n 50 >> obs.txt 2>> obs.err
+	./nexus foldCombRs --n 50 >> obs.txt 2>> obs.err
+	./nexus foldCombCpp --n 50 >> obs.txt 2>> obs.err
 
 clean:
 	rm -rf nexus pools *.err

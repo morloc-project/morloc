@@ -79,16 +79,15 @@ None is scheduled.
   keeps a parameter takes it by value (an OWN-7 extension; expected 3 -> 2);
   only if a benchmark shows the gain. The captured-list copy needs shared
   capture storage.
-- **A @fold step that is not a sourced function copies its accumulator
-  every batch, in Rust and C++.** [read 2026-11-21] COPY-7 holds only for a
-  step or combine that is a sourced function of the fold's language, passed
-  whole (Express.hs bareFoldSteps). A step written in morloc, a partial
-  application, a step in another language, or one whose call is adapted
-  reaches the fold as a closure over a generated function whose parameters
-  are references, so a by-value parameter under it is given a copy. Fix
-  direction: give the fold a by-value variant of the generated function
-  under that closure; the fold is morloc's own caller, so HOST-8 (ruled
-  2026-11-21 to stay by reference for host functions) does not apply.
+- **A @fold step that captures values copies its accumulator every batch,
+  in Rust and C++.** [read 2026-11-21] COPY-7 holds for a sourced step and
+  for a step written in morloc that captures nothing (golden
+  fold-step-by-value). A partial application, or a lambda capturing a
+  local, reaches the fold as a closure value whose parameters are
+  references, so a by-value parameter under it is given a copy. Fix
+  direction: call its manifold directly with the captures passed beside
+  the accumulator, as for a capture-free step. A step in another language
+  crosses as a serialized value, which is a copy by nature.
 - **Every non-vector container copy is entered in the converted-value
   table.** [read, 2026-11-16] GEN-14. cppmorloc.hpp sizes and writes a
   set, map, list or deque through `mlc_converted`, so each one costs a hash

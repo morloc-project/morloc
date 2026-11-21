@@ -64,3 +64,8 @@ pub fn step_any<B: Clone>(acc: &B, _xs: &Vec<i64>) -> B {
 pub fn fresh(acc: &Vec<i64>) -> i64 {
     acc[0]
 }
+
+pub fn bump(xs: &Vec<i64>) -> Vec<i64> {
+    xs.iter().map(|x| x + 1).collect()
+}
+
