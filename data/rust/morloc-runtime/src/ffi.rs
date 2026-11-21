@@ -185,9 +185,7 @@ pub(crate) unsafe fn schema_to_string(schema: *const CSchema) -> *mut c_char {
     if schema.is_null() {
         return ptr::null_mut();
     }
-    let rs = CSchema::to_rust(schema);
-    let s = schema::schema_to_string(&rs);
-    match CString::new(s) {
+    match CString::new(CSchema::converted(schema).text()) {
         Ok(cs) => crate::error::malloc_cstr(&cs),
         Err(_) => ptr::null_mut(),
     }
@@ -224,7 +222,7 @@ pub(crate) unsafe fn pack_with_schema(
     *mpkptr = ptr::null_mut();
     *mpk_size = 0;
 
-    let rs = CSchema::to_rust(schema);
+    let rs = crate::packet_ffi::rust_schema(schema);
     match crate::mpack::pack_with_schema(mlc as AbsPtr, &rs) {
         Ok(data) => {
             *mpk_size = data.len();
@@ -277,7 +275,7 @@ pub(crate) unsafe fn unpack_with_schema(
     *mlcptr = ptr::null_mut();
 
     let data = std::slice::from_raw_parts(mpk as *const u8, mpk_size);
-    let rs = CSchema::to_rust(schema);
+    let rs = crate::packet_ffi::rust_schema(schema);
     match crate::mpack::unpack_with_schema(data, &rs) {
         Ok(ptr) => {
             *mlcptr = ptr as *mut c_void;

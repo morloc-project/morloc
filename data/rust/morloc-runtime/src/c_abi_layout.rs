@@ -355,6 +355,7 @@ mod tests {
             alignment => "alignment",
             data_alignment => "data_alignment",
             fixed_width => "fixed_width",
+            converted => "converted",
         ]);
     }
 

@@ -43,7 +43,7 @@ pub(crate) unsafe fn read_json_with_schema(
         return ptr::null_mut();
     }
 
-    let rs = CSchema::to_rust(schema);
+    let rs = crate::packet_ffi::rust_schema(schema);
     let json = match CStr::from_ptr(json_str).to_str() {
         Ok(s) => s,
         Err(e) => {
@@ -71,7 +71,7 @@ pub(crate) unsafe fn voidstar_to_json_string(
     errmsg: *mut *mut c_char,
 ) -> *mut c_char {
     clear_errmsg(errmsg);
-    let rs = CSchema::to_rust(schema);
+    let rs = crate::packet_ffi::rust_schema(schema);
     match crate::json::voidstar_to_json_string(data as *mut u8, &rs) {
         Ok(s) => {
             match CString::new(s) {
@@ -106,7 +106,7 @@ pub(crate) unsafe fn voidstar_to_raw_bytes(
     if !out_len.is_null() {
         *out_len = 0;
     }
-    let rs = CSchema::to_rust(schema);
+    let rs = crate::packet_ffi::rust_schema(schema);
     match crate::json::voidstar_raw_to_bytes(data as *mut u8, &rs) {
         Ok(bytes) => {
             let len = bytes.len();
@@ -161,7 +161,7 @@ pub(crate) unsafe fn print_voidstar_jsonl(
     errmsg: *mut *mut c_char,
 ) -> i32 {
     clear_errmsg(errmsg);
-    let rs = CSchema::to_rust(schema);
+    let rs = crate::packet_ffi::rust_schema(schema);
     match crate::json::print_voidstar_jsonl(data as *mut u8, &rs) {
         Ok(()) => PRINT_RESULT_OK,
         Err(MorlocError::PipeClosed) => PRINT_RESULT_PIPE_CLOSED,
@@ -325,7 +325,7 @@ pub(crate) unsafe fn print_voidstar_raw(
     errmsg: *mut *mut c_char,
 ) -> i32 {
     clear_errmsg(errmsg);
-    let rs = CSchema::to_rust(schema);
+    let rs = crate::packet_ffi::rust_schema(schema);
     match crate::json::print_voidstar_raw(data as *mut u8, &rs) {
         Ok(()) => PRINT_RESULT_OK,
         Err(MorlocError::PipeClosed) => PRINT_RESULT_PIPE_CLOSED,
@@ -341,7 +341,7 @@ unsafe fn print_dispatch(
     write: unsafe fn(*mut u8, &crate::schema::Schema, bool) -> Result<(), MorlocError>,
 ) -> i32 {
     clear_errmsg(errmsg);
-    let rs = CSchema::to_rust(schema);
+    let rs = crate::packet_ffi::rust_schema(schema);
     // SAFETY: the C caller passes a live value of `schema`.
     match unsafe { write(data as *mut u8, &rs, keep_null) } {
         Ok(()) => PRINT_RESULT_OK,

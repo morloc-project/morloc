@@ -238,6 +238,7 @@ typedef struct Schema {
     size_t alignment;       // alignment of a slot of this type
     size_t data_alignment;  // alignment of an array's data when this is its element
     bool fixed_width;       // no pointer anywhere below: a value is its own bytes
+    void* converted;        // the runtime's own forms of this schema; opaque
 } Schema;
 
 // Variable-length array in voidstar representation.

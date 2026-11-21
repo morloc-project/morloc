@@ -3261,11 +3261,12 @@ unsafe fn packet_of(
             return ptr::null_mut();
         }
     };
-    let rs = CSchema::to_rust(schema);
+    let rs = crate::packet_ffi::rust_schema(schema);
+    let meta = crate::packet_ffi::schema_text(schema);
     if !schema.is_null() && crate::arrow_ffi::is_arrow_table_schema(&rs) {
-        crate::packet_ffi::rptr_packet_or_errmsg(relptr, Some(&rs), morloc_runtime_types::packet::PACKET_FORMAT_ARROW, errmsg)
+        crate::packet_ffi::rptr_packet_or_errmsg(relptr, meta, morloc_runtime_types::packet::PACKET_FORMAT_ARROW, errmsg)
     } else {
-        crate::packet_ffi::make_data_packet_with_rs(voidstar, relptr, schema, &rs, whole, errmsg)
+        crate::packet_ffi::make_data_packet_with_rs(voidstar, relptr, schema, &rs, meta, whole, errmsg)
     }
 }
 

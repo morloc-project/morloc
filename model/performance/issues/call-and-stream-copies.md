@@ -5,13 +5,10 @@ measurements on 2026-11-13 (load 0.6-2.1 unless noted; scratch programs
 under the session scratchpad agent-call/, agent-stream/, agent-chan/).
 None is scheduled.
 
-- **Every packet converts its schema.** [read] Building a packet
-  (packet_ffi.rs make_data_packet_with :1225) still runs CSchema::to_rust
-  once and schema_to_string once (build_schema_metadata_rs :213). R
-  parses the schema string on every put_value and get_value
-  (rmorloc.c:2470/2677). Parse time jumps between 7 and 8 fields (1.1 to
-  1.9 us, cause unknown). Fix: cache the Rust Schema and the metadata
-  block on the CSchema, filled eagerly (ABI), and give R schema handles.
+- **Python finds its schema by hashing the string on every call.** [read,
+  2026-11-21] pymorloc.c `cached_schema` hashes and compares the whole
+  schema string per put and get; keying by the table's string object, as R
+  keys by its interned string, would make it a pointer compare.
 - **Mid-size inline values cost more than sending them by reference.**
   [measured] Per call, inline minus MORLOC_INLINE_SIZE=0: 1 KiB -1.1 to
   +0.9 us, 4 KiB +3 to +5, 16 KiB +7, 64 KiB +52 to +62 (about 20 us of

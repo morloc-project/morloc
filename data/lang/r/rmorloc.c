@@ -337,9 +337,42 @@ static void __attribute__((noinline, noreturn)) morloc_internal_abort_impl(
 // pattern in pymorloc.c and pool.cpp.
 
 #define SHM_TRACKER_INIT_CAP 16
+// Parsed schemas, keyed by the schema table's interned string, which is
+// preserved so its address is never reused; each lives until the process
+// ends.
+typedef struct { SEXP key; Schema* schema; } r_schema_t;
+static r_schema_t* r_schemas = NULL;
+static size_t r_schemas_len = 0;
+static size_t r_schemas_cap = 0;
+
+static Schema* r_schema(SEXP schema_str_r) {
+    MAYFAIL
+    SEXP key = STRING_ELT(schema_str_r, 0);
+    for (size_t i = 0; i < r_schemas_len; i++) {
+        if (r_schemas[i].key == key) return r_schemas[i].schema;
+    }
+    char* schema_str = strdup(CHAR(key));
+    Schema* schema = R_TRY_WITH(free(schema_str), parse_schema, schema_str);
+    free(schema_str);
+    if (r_schemas_len == r_schemas_cap) {
+        size_t cap = r_schemas_cap ? r_schemas_cap * 2 : 16;
+        r_schema_t* grown = (r_schema_t*)realloc(r_schemas, cap * sizeof(r_schema_t));
+        if (grown == NULL) {
+            free_schema(schema);
+            MORLOC_INTERNAL_ABORT("out of memory caching a schema");
+        }
+        r_schemas = grown;
+        r_schemas_cap = cap;
+    }
+    R_PreserveObject(key);
+    r_schemas[r_schemas_len].key = key;
+    r_schemas[r_schemas_len].schema = schema;
+    r_schemas_len++;
+    return schema;
+}
+
 typedef struct {
     absptr_t ptr;
-    Schema* schema;  // owned by the tracker; freed in shm_tracker_flush
 } shm_entry_t;
 static shm_entry_t* shm_tracker = NULL;
 static size_t shm_tracker_count = 0;
@@ -351,16 +384,11 @@ static void shm_tracker_forget_inherited(void) {
     if (g == shm_tracker_gen) {
         return;
     }
-    for (size_t i = 0; i < shm_tracker_count; i++) {
-        if (shm_tracker[i].schema) {
-            free_schema(shm_tracker[i].schema);
-        }
-    }
     shm_tracker_count = 0;
     shm_tracker_gen = g;
 }
 
-static void shm_tracker_push(absptr_t ptr, Schema* schema) {
+static void shm_tracker_push(absptr_t ptr) {
     shm_tracker_forget_inherited();
     if (shm_tracker_count >= shm_tracker_cap) {
         size_t new_cap = shm_tracker_cap ? shm_tracker_cap * 2 : SHM_TRACKER_INIT_CAP;
@@ -374,7 +402,6 @@ static void shm_tracker_push(absptr_t ptr, Schema* schema) {
         shm_tracker_cap = new_cap;
     }
     shm_tracker[shm_tracker_count].ptr = ptr;
-    shm_tracker[shm_tracker_count].schema = schema;
     shm_tracker_count++;
 }
 
@@ -384,15 +411,12 @@ static void shm_tracker_flush(void) {
         char* err = NULL;
         shfree(shm_tracker[i].ptr, &err);
         if (err) { free(err); }
-        if (shm_tracker[i].schema) {
-            free_schema(shm_tracker[i].schema);
-        }
     }
     shm_tracker_count = 0;
 }
 
-// Drop one tracker entry matching ptr (swap-with-last), shfree the
-// block, and free its schema. Used by morloc_release_packet_shm to
+// Drop one tracker entry matching ptr (swap-with-last) and shfree the
+// block. Used by morloc_release_packet_shm to
 // free a morloc_put_value-tracked packet's SHM as soon as its
 // codegen-determined scope ends, rather than waiting for the next
 // dispatch flush.
@@ -400,13 +424,11 @@ static bool shm_tracker_release_one(absptr_t ptr) {
     shm_tracker_forget_inherited();
     for (size_t i = 0; i < shm_tracker_count; i++) {
         if (shm_tracker[i].ptr == ptr) {
-            Schema* schema = shm_tracker[i].schema;
             shm_tracker[i] = shm_tracker[shm_tracker_count - 1];
             shm_tracker_count--;
             char* err = NULL;
             shfree(ptr, &err);
             if (err) { free(err); }
-            if (schema) { free_schema(schema); }
             return true;
         }
     }
@@ -1922,7 +1944,6 @@ static void r_encode_cleanup(void* data, Rboolean jump) {
             free(errmsg);
         }
     }
-    free_schema(e->schema);
 }
 
 // Encode `obj` into a new SHM block. When the encoding raises an R error,
@@ -2464,11 +2485,7 @@ SEXP morloc_put_value(SEXP obj_r, SEXP schema_str_r, SEXP self_contained_r) { MA
                         ? (LOGICAL(self_contained_r)[0] == TRUE)
                         : false;
 
-    const char* schema_cstr = CHAR(STRING_ELT(schema_str_r, 0));
-
-    char* schema_str = strdup(schema_cstr);
-    Schema* schema = R_TRY_WITH(free(schema_str), parse_schema, schema_str);
-    free(schema_str);
+    Schema* schema = r_schema(schema_str_r);
 
     // Arrow dispatch: schema marker `T` (MORLOC_TABLE) routes through the
     // Arrow C Data Interface. The legacy `<arrow>` hint has been retired;
@@ -2486,7 +2503,6 @@ SEXP morloc_put_value(SEXP obj_r, SEXP schema_str_r, SEXP self_contained_r) { MA
         SEXP coerce_fn = PROTECT(MORLOC_FIND_IN_FRAME(arrow_ns, install("as_record_batch")));
         if (export_fn == R_UnboundValue || coerce_fn == R_UnboundValue) {
             UNPROTECT(3);
-            free_schema(schema);
             MORLOC_ERROR("arrow::ExportRecordBatch not found; is the arrow package installed?");
         }
 
@@ -2507,7 +2523,6 @@ SEXP morloc_put_value(SEXP obj_r, SEXP schema_str_r, SEXP self_contained_r) { MA
         if (arrow_schema.release) arrow_schema.release(&arrow_schema);
 
         if (errmsg) {
-            free_schema(schema);
             morloc_error_take("Arrow export failed: ", errmsg);
         }
 
@@ -2516,52 +2531,47 @@ SEXP morloc_put_value(SEXP obj_r, SEXP schema_str_r, SEXP self_contained_r) { MA
         void* shm_ptr = rel2abs(relptr, &resolve_err);
         if (resolve_err) { free(resolve_err); }
         if (shm_ptr) {
-            shm_tracker_push((absptr_t)shm_ptr, NULL);
+            shm_tracker_push((absptr_t)shm_ptr);
         }
 
         uint8_t* packet = NULL;
         if (self_contained) {
-            packet = R_TRY_WITH_INFRA(free_schema(schema), make_inline_data_packet, shm_ptr, schema);
+            packet = R_TRY_INFRA(make_inline_data_packet, shm_ptr, schema);
         } else {
             packet = make_arrow_data_packet(relptr, schema);
         }
         if (!packet) {
-            free_schema(schema);
             MORLOC_INTERNAL_ABORT("Failed to create arrow data packet");
         }
 
-        size_t packet_size = R_TRY_WITH({free(packet); free_schema(schema);}, morloc_packet_size, packet);
+        size_t packet_size = R_TRY_WITH({free(packet); }, morloc_packet_size, packet);
         SEXP result = PROTECT(allocVector(RAWSXP, packet_size));
         memcpy(RAW(result), packet, packet_size);
         free(packet);
-        free_schema(schema);
         UNPROTECT(1);
         return result;
     }
 
     void* voidstar = to_voidstar(obj_r, schema, NULL);
     if (!voidstar) {
-        free_schema(schema);
         MORLOC_ERROR("Failed to convert R object to internal representation");
     }
 
-    relptr_t relptr = R_TRY_WITH(free_schema(schema), abs2rel, voidstar);
+    relptr_t relptr = R_TRY(abs2rel, voidstar);
 
     uint8_t* packet = NULL;
     if (self_contained) {
-        packet = R_TRY_WITH_INFRA(free_schema(schema), make_inline_data_packet, voidstar, schema);
+        packet = R_TRY_INFRA(make_inline_data_packet, voidstar, schema);
     } else {
-        packet = R_TRY_WITH_INFRA(free_schema(schema), make_data_packet_auto, voidstar, relptr, schema);
+        packet = R_TRY_INFRA(make_data_packet_auto, voidstar, relptr, schema);
     }
 
     const morloc_packet_header_t* hdr = (const morloc_packet_header_t*)packet;
-    bool tracked = false;
     if (hdr->command.data.source == PACKET_SOURCE_RPTR) {
-        // SHM is referenced by the result packet. Hand voidstar AND schema to
-        // the tracker: they are released once the reply holds the caller's
+        // SHM is referenced by the result packet. Hand voidstar to the
+        // tracker: it is released once the reply holds the caller's
         // reference (send_reply_to_foreign_server in dispatch_manifold_c).
-        shm_tracker_push((absptr_t)voidstar, schema);
-        tracked = true;
+        shm_tracker_push((absptr_t)voidstar);
     } else {
         // Data inlined in packet -- free SHM immediately. shfree zeros the
         // block on final ref-drop.
@@ -2571,15 +2581,12 @@ SEXP morloc_put_value(SEXP obj_r, SEXP schema_str_r, SEXP self_contained_r) { MA
     }
 
     size_t packet_size = R_TRY_WITH(
-        {free(packet); if (!tracked) free_schema(schema);},
+        {free(packet);},
         morloc_packet_size, packet);
 
     SEXP result = PROTECT(allocVector(RAWSXP, packet_size));
     memcpy(RAW(result), packet, packet_size);
     free(packet);
-    if (!tracked) {
-        free_schema(schema);
-    }
 
     UNPROTECT(1);
     return result;
@@ -2673,18 +2680,15 @@ static SEXP morloc_mlc_save_dispatch(SEXP obj_r, SEXP schema_str_r,
     int64_t level = i64_from_sexp(level_r);
     const char* path = CHAR(STRING_ELT(path_r, 0));
 
-    char* schema_str = strdup(CHAR(STRING_ELT(schema_str_r, 0)));
-    Schema* schema = R_TRY_WITH(free(schema_str), parse_schema, schema_str);
-    free(schema_str);
+    Schema* schema = r_schema(schema_str_r);
 
     void* voidstar = to_voidstar(obj_r, schema, NULL);
     if (!voidstar) {
-        free_schema(schema);
         MORLOC_ERROR("%s: failed to convert R object to voidstar", fn_name);
     }
 
     R_TRY_WITH(
-        { char* err = NULL; shfree(voidstar, &err); free(err); free_schema(schema); },
+        { char* err = NULL; shfree(voidstar, &err); free(err); },
         save_fn, (absptr_t)voidstar, schema, level, path);
 
     {
@@ -2692,7 +2696,6 @@ static SEXP morloc_mlc_save_dispatch(SEXP obj_r, SEXP schema_str_r,
         shfree(voidstar, &err);
         free(err);
     }
-    free_schema(schema);
     return R_NilValue;
 }
 
@@ -2717,18 +2720,15 @@ SEXP morloc_mlc_hash(SEXP obj_r, SEXP schema_str_r) { MAYFAIL
     if (TYPEOF(schema_str_r) != STRSXP || LENGTH(schema_str_r) != 1) {
         MORLOC_INTERNAL_ABORT("mlc_hash: schema must be a single string");
     }
-    char* schema_str = strdup(CHAR(STRING_ELT(schema_str_r, 0)));
-    Schema* schema = R_TRY_WITH(free(schema_str), parse_schema, schema_str);
-    free(schema_str);
+    Schema* schema = r_schema(schema_str_r);
 
     void* voidstar = to_voidstar(obj_r, schema, NULL);
     if (!voidstar) {
-        free_schema(schema);
         MORLOC_ERROR("mlc_hash: failed to convert R object to voidstar");
     }
 
     char* hex = R_TRY_WITH(
-        { char* err = NULL; shfree(voidstar, &err); free(err); free_schema(schema); },
+        { char* err = NULL; shfree(voidstar, &err); free(err); },
         mlc_hash, voidstar, schema);
 
     {
@@ -2736,7 +2736,6 @@ SEXP morloc_mlc_hash(SEXP obj_r, SEXP schema_str_r) { MAYFAIL
         shfree(voidstar, &err);
         free(err);
     }
-    free_schema(schema);
 
     SEXP result = PROTECT(mkString(hex));
     free(hex);
@@ -2749,13 +2748,10 @@ SEXP morloc_mlc_compare(SEXP a_r, SEXP b_r, SEXP schema_str_r) { MAYFAIL
     if (TYPEOF(schema_str_r) != STRSXP || LENGTH(schema_str_r) != 1) {
         MORLOC_INTERNAL_ABORT("mlc_compare: schema must be a single string");
     }
-    char* schema_str = strdup(CHAR(STRING_ELT(schema_str_r, 0)));
-    Schema* schema = R_TRY_WITH(free(schema_str), parse_schema, schema_str);
-    free(schema_str);
+    Schema* schema = r_schema(schema_str_r);
 
     void* va = to_voidstar(a_r, schema, NULL);
     if (!va) {
-        free_schema(schema);
         MORLOC_ERROR("mlc_compare: failed to convert R object to voidstar");
     }
     void* vb = to_voidstar(b_r, schema, va);
@@ -2763,12 +2759,11 @@ SEXP morloc_mlc_compare(SEXP a_r, SEXP b_r, SEXP schema_str_r) { MAYFAIL
         char* err = NULL;
         shfree(va, &err);
         free(err);
-        free_schema(schema);
         MORLOC_ERROR("mlc_compare: failed to convert R object to voidstar");
     }
 
     int order = R_TRY_WITH(
-        { char* err = NULL; shfree(va, &err); free(err); err = NULL; shfree(vb, &err); free(err); free_schema(schema); },
+        { char* err = NULL; shfree(va, &err); free(err); err = NULL; shfree(vb, &err); free(err); },
         mlc_compare, va, vb, schema);
 
     {
@@ -2779,7 +2774,6 @@ SEXP morloc_mlc_compare(SEXP a_r, SEXP b_r, SEXP schema_str_r) { MAYFAIL
         shfree(vb, &err);
         free(err);
     }
-    free_schema(schema);
     return ScalarInteger(order);
 }
 
@@ -2794,11 +2788,9 @@ SEXP morloc_mlc_load(SEXP schema_str_r, SEXP path_r) { MAYFAIL
     }
     const char* path = CHAR(STRING_ELT(path_r, 0));
 
-    char* schema_str = strdup(CHAR(STRING_ELT(schema_str_r, 0)));
-    Schema* schema = R_TRY_WITH(free(schema_str), parse_schema, schema_str);
-    free(schema_str);
+    Schema* schema = r_schema(schema_str_r);
 
-    void* voidstar = R_TRY_WITH(free_schema(schema), mlc_load, path, schema);
+    void* voidstar = R_TRY(mlc_load, path, schema);
     if (voidstar == NULL) {
         MORLOC_INTERNAL_ABORT("@load: the runtime failed without giving a reason");
     }
@@ -2806,7 +2798,7 @@ SEXP morloc_mlc_load(SEXP schema_str_r, SEXP path_r) { MAYFAIL
     // Tracked while it is read, so an R error on the way still releases
     // it; from_voidstar deep-copies, so it is released as soon as that
     // returns. The tracker owns `schema` from here.
-    shm_tracker_push((absptr_t)voidstar, schema);
+    shm_tracker_push((absptr_t)voidstar);
     SEXP obj = from_voidstar(voidstar, schema, morloc_shm_space());
     shm_tracker_release_one((absptr_t)voidstar);
     return obj;
@@ -2823,9 +2815,7 @@ SEXP morloc_mlc_read(SEXP schema_str_r, SEXP json_str_r) { MAYFAIL
     }
     const char* json_str = r_str_utf8(STRING_ELT(json_str_r, 0), NULL, false);
 
-    char* schema_str = strdup(CHAR(STRING_ELT(schema_str_r, 0)));
-    Schema* schema = R_TRY_WITH(free(schema_str), parse_schema, schema_str);
-    free(schema_str);
+    Schema* schema = r_schema(schema_str_r);
 
     char* errmsg = NULL;
     void* voidstar = mlc_read(json_str, schema, &errmsg);
@@ -2838,12 +2828,11 @@ SEXP morloc_mlc_read(SEXP schema_str_r, SEXP json_str_r) { MAYFAIL
         } else {
             snprintf(msg_buf, sizeof(msg_buf), "@read: parse failed");
         }
-        free_schema(schema);
         MORLOC_ERROR("%s", msg_buf);
     }
     if (errmsg != NULL) { free(errmsg); }
 
-    shm_tracker_push((absptr_t)voidstar, schema);
+    shm_tracker_push((absptr_t)voidstar);
     SEXP obj = from_voidstar(voidstar, schema, morloc_shm_space());
     shm_tracker_release_one((absptr_t)voidstar);
     return obj;
@@ -2873,38 +2862,6 @@ static SEXP r_literal_elt(SEXP x, size_t i) {
     return e;
 }
 
-// Parsed literal schemas, keyed by the schema table's interned string.
-typedef struct { SEXP key; Schema* schema; } r_literal_schema_t;
-static r_literal_schema_t* r_literal_schemas = NULL;
-static size_t r_literal_schemas_len = 0;
-static size_t r_literal_schemas_cap = 0;
-
-static Schema* r_literal_schema(SEXP schema_str_r) {
-    MAYFAIL
-    SEXP key = STRING_ELT(schema_str_r, 0);
-    for (size_t i = 0; i < r_literal_schemas_len; i++) {
-        if (r_literal_schemas[i].key == key) return r_literal_schemas[i].schema;
-    }
-    char* schema_str = strdup(CHAR(key));
-    Schema* schema = R_TRY_WITH(free(schema_str), parse_schema, schema_str);
-    free(schema_str);
-    if (r_literal_schemas_len == r_literal_schemas_cap) {
-        size_t cap = r_literal_schemas_cap ? r_literal_schemas_cap * 2 : 16;
-        r_literal_schema_t* grown = (r_literal_schema_t*)realloc(r_literal_schemas, cap * sizeof(r_literal_schema_t));
-        if (grown == NULL) {
-            free_schema(schema);
-            MORLOC_INTERNAL_ABORT("out of memory caching a literal schema");
-        }
-        r_literal_schemas = grown;
-        r_literal_schemas_cap = cap;
-    }
-    R_PreserveObject(key);
-    r_literal_schemas[r_literal_schemas_len].key = key;
-    r_literal_schemas[r_literal_schemas_len].schema = schema;
-    r_literal_schemas_len++;
-    return schema;
-}
-
 // A literal built in this pool, given the form the decoder gives a value of
 // its schema (NATIVE-9). A list literal is written element by element with
 // the encoder's checks and filled by the decoder's own construction; an I64
@@ -2913,7 +2870,7 @@ SEXP morloc_mlc_conform(SEXP obj_r, SEXP schema_str_r) { MAYFAIL
     if (TYPEOF(schema_str_r) != STRSXP || LENGTH(schema_str_r) != 1) {
         MORLOC_INTERNAL_ABORT("mlc_conform: schema must be a single string");
     }
-    const Schema* schema = r_literal_schema(schema_str_r);
+    const Schema* schema = r_schema(schema_str_r);
     r_walk_t w;
     if (schema->type == MORLOC_SINT64 || schema->type == MORLOC_UINT64) {
         int64_t v = 0;
@@ -3043,17 +3000,13 @@ SEXP morloc_mlc_ifile_walk(SEXP schema_str_r, SEXP handle_r,
         }
     }
 
-    char* schema_str = strdup(CHAR(STRING_ELT(schema_str_r, 0)));
-    Schema* schema = R_TRY_WITH(do { free(schema_str); free(packed); } while(0),
-                                parse_schema, schema_str);
-    free(schema_str);
+    Schema* schema = r_schema(schema_str_r);
 
-    void* voidstar = R_TRY_WITH(do { free_schema(schema); free(packed); } while(0),
+    void* voidstar = R_TRY_WITH(free(packed),
                                 mlc_ifile_walk,
                                 handle, path, packed, (uint64_t)n);
     free(packed);
     if (voidstar == NULL) {
-        free_schema(schema);
         return R_NilValue;
     }
     SEXP result = from_voidstar(voidstar, schema, morloc_shm_space());
@@ -3062,7 +3015,6 @@ SEXP morloc_mlc_ifile_walk(SEXP schema_str_r, SEXP handle_r,
         shfree(voidstar, &shfree_errmsg);
         free(shfree_errmsg);
     }
-    free_schema(schema);
     return result;
 }
 
@@ -3094,12 +3046,10 @@ SEXP morloc_mlc_next(SEXP schema_str_r, SEXP handle_r) { MAYFAIL
     if ((TYPEOF(handle_r) != INTSXP && TYPEOF(handle_r) != REALSXP) || LENGTH(handle_r) != 1) {
         error("mlc_next: handle must be a single number");
     }
-    const char* schema_str = CHAR(STRING_ELT(schema_str_r, 0));
     int64_t handle = i64_from_sexp(handle_r);
-    Schema* schema = R_TRY(parse_schema, schema_str);
+    Schema* schema = r_schema(schema_str_r);
     void* voidstar = R_TRY(mlc_next, handle);
     if (voidstar == NULL) {
-        free_schema(schema);
         return R_NilValue;
     }
     SEXP result = from_voidstar(voidstar, schema, morloc_shm_space());
@@ -3108,7 +3058,6 @@ SEXP morloc_mlc_next(SEXP schema_str_r, SEXP handle_r) { MAYFAIL
         shfree(voidstar, &shfree_errmsg);
         free(shfree_errmsg);
     }
-    free_schema(schema);
     return result;
 }
 
@@ -3121,21 +3070,19 @@ SEXP morloc_mlc_next_frame(SEXP schema_str_r, SEXP handle_r) { MAYFAIL
     if ((TYPEOF(handle_r) != INTSXP && TYPEOF(handle_r) != REALSXP) || LENGTH(handle_r) != 1) {
         error("mlc_next_frame: handle must be a single number");
     }
-    const char* schema_str = CHAR(STRING_ELT(schema_str_r, 0));
     int64_t handle = i64_from_sexp(handle_r);
     int32_t eof = 0;
     void* voidstar = R_TRY(mlc_next_frame, handle, &eof);
     if (eof) {
         return R_NilValue;
     }
-    Schema* schema = R_TRY(parse_schema, schema_str);
+    Schema* schema = r_schema(schema_str_r);
     SEXP result = from_voidstar(voidstar, schema, morloc_shm_space());
     {
         char* shfree_errmsg = NULL;
         shfree(voidstar, &shfree_errmsg);
         free(shfree_errmsg);
     }
-    free_schema(schema);
     return result;
 }
 
@@ -3146,12 +3093,10 @@ SEXP morloc_mlc_stream_layout(SEXP schema_str_r, SEXP handle_r) { MAYFAIL
     if ((TYPEOF(handle_r) != INTSXP && TYPEOF(handle_r) != REALSXP) || LENGTH(handle_r) != 1) {
         error("mlc_stream_layout: handle must be a single number");
     }
-    const char* schema_str = CHAR(STRING_ELT(schema_str_r, 0));
     int64_t handle = i64_from_sexp(handle_r);
-    Schema* schema = R_TRY(parse_schema, schema_str);
+    Schema* schema = r_schema(schema_str_r);
     void* voidstar = R_TRY(mlc_stream_layout, handle);
     if (voidstar == NULL) {
-        free_schema(schema);
         return R_NilValue;
     }
     SEXP result = from_voidstar(voidstar, schema, morloc_shm_space());
@@ -3160,7 +3105,6 @@ SEXP morloc_mlc_stream_layout(SEXP schema_str_r, SEXP handle_r) { MAYFAIL
         shfree(voidstar, &shfree_errmsg);
         free(shfree_errmsg);
     }
-    free_schema(schema);
     return result;
 }
 
@@ -3391,10 +3335,6 @@ static void r_write_cleanup(void* data, Rboolean jump) {
         free(shfree_errmsg);
         wr->voidstar = NULL;
     }
-    if (wr->schema != NULL) {
-        free_schema(wr->schema);
-        wr->schema = NULL;
-    }
 }
 
 // @write: serialise value to voidstar, emit one sub-packet.
@@ -3410,10 +3350,9 @@ SEXP morloc_mlc_write(SEXP schema_str_r, SEXP level_r, SEXP value_r, SEXP handle
         || LENGTH(handle_r) != 1) {
         error("mlc_write: handle must be a single number");
     }
-    const char* schema_str = CHAR(STRING_ELT(schema_str_r, 0));
     int64_t handle = i64_from_sexp(handle_r);
     int64_t level = i64_from_sexp(level_r);
-    Schema* schema = R_TRY(parse_schema, schema_str);
+    Schema* schema = r_schema(schema_str_r);
     r_write_t wr = { schema, value_r, level, handle, NULL, 0 };
     SEXP cont = PROTECT(R_MakeUnwindCont());
     R_UnwindProtect(r_write_body, &wr, r_write_cleanup, &wr, cont);
@@ -3507,18 +3446,16 @@ SEXP morloc_mlc_side_put(SEXP id_r, SEXP schema_str_r, SEXP value_r) { MAYFAIL
         R_TRY(mlc_side_put, id, NULL, NULL);
         return R_NilValue;
     }
-    const char* schema_str = CHAR(STRING_ELT(schema_str_r, 0));
-    Schema* schema = R_TRY(parse_schema, schema_str);
+    Schema* schema = r_schema(schema_str_r);
     void* voidstar = to_voidstar(value_r, schema, NULL);
     R_TRY_WITH(
-        { char* err = NULL; shfree(voidstar, &err); free(err); free_schema(schema); },
+        { char* err = NULL; shfree(voidstar, &err); free(err); },
         mlc_side_put, id, schema, voidstar);
     {
         char* shfree_errmsg = NULL;
         shfree(voidstar, &shfree_errmsg);
         free(shfree_errmsg);
     }
-    free_schema(schema);
     return R_NilValue;
 }
 
@@ -3531,7 +3468,6 @@ static void side_reader_r_free(SEXP p) {
     side_reader_r* r = (side_reader_r*)R_ExternalPtrAddr(p);
     if (r == NULL) return;
     mlc_side_reader_free(r->reader);
-    if (r->schema) free_schema(r->schema);
     free(r);
     R_ClearExternalPtr(p);
 }
@@ -3553,12 +3489,11 @@ SEXP morloc_mlc_fold_take(SEXP h_r, SEXP schema_str_r) { MAYFAIL
     }
     Schema* schema = NULL;
     if (TYPEOF(schema_str_r) == STRSXP && LENGTH(schema_str_r) == 1) {
-        schema = R_TRY_WITH({ mlc_side_reader_free(reader); UNPROTECT(1); }, parse_schema, CHAR(STRING_ELT(schema_str_r, 0)));
+        schema = r_schema(schema_str_r);
     }
     side_reader_r* r = (side_reader_r*)calloc(1, sizeof(side_reader_r));
     if (r == NULL) {
         mlc_side_reader_free(reader);
-        free_schema(schema);
         MORLOC_ERROR("out of memory");
     }
     r->reader = reader;
@@ -3696,24 +3631,20 @@ SEXP morloc_mlc_show(SEXP obj_r, SEXP schema_str_r) { MAYFAIL
         MORLOC_INTERNAL_ABORT("schema must be a single string");
     }
 
-    char* schema_str = strdup(CHAR(STRING_ELT(schema_str_r, 0)));
-    Schema* schema = R_TRY_WITH(free(schema_str), parse_schema, schema_str);
-    free(schema_str);
+    Schema* schema = r_schema(schema_str_r);
 
     void* voidstar = to_voidstar(obj_r, schema, NULL);
     if (!voidstar) {
-        free_schema(schema);
         MORLOC_ERROR("Failed to convert R object to internal representation");
     }
 
-    char* json = R_TRY_WITH({ char* e_ = NULL; shfree(voidstar, &e_); free(e_); free_schema(schema); }, mlc_show, voidstar, schema);
+    char* json = R_TRY_WITH({ char* e_ = NULL; shfree(voidstar, &e_); free(e_); }, mlc_show, voidstar, schema);
 
     {
         char* shfree_errmsg = NULL;
         shfree(voidstar, &shfree_errmsg);
         free(shfree_errmsg);
     }
-    free_schema(schema);
 
     SEXP result = PROTECT(ScalarString(mkCharCE(json, CE_UTF8)));
     free(json);
@@ -3762,11 +3693,7 @@ SEXP morloc_get_value(SEXP packet_r, SEXP schema_str_r, SEXP check_nul_r) { MAYF
     uint8_t source = header->command.data.source;
     uint8_t format = header->command.data.format;
 
-    const char* schema_cstr = CHAR(STRING_ELT(schema_str_r, 0));
-
-    char* schema_str = strdup(schema_cstr);
-    Schema* schema = R_TRY_WITH(free(schema_str), parse_schema, schema_str);
-    free(schema_str);
+    Schema* schema = r_schema(schema_str_r);
 
     // Arrow dispatch: a table-typed value is a block. It arrives by
     // reference (an Arrow packet) or in a form the runtime materializes
@@ -3778,9 +3705,9 @@ SEXP morloc_get_value(SEXP packet_r, SEXP schema_str_r, SEXP check_nul_r) { MAYF
         // PANIC-14: one another pool built is not.
         uint8_t* arrow_ptr = NULL;
         if (materialized) {
-            arrow_ptr = R_TRY_WITH(free_schema(schema), get_morloc_data_packet_value, packet, schema);
+            arrow_ptr = R_TRY(get_morloc_data_packet_value, packet, schema);
         } else {
-            arrow_ptr = R_TRY_WITH_INFRA(free_schema(schema), get_morloc_data_packet_value, packet, schema);
+            arrow_ptr = R_TRY_INFRA(get_morloc_data_packet_value, packet, schema);
         }
         const arrow_shm_header_t* arrow_hdr = (const arrow_shm_header_t*)arrow_ptr;
 
@@ -3791,7 +3718,6 @@ SEXP morloc_get_value(SEXP packet_r, SEXP schema_str_r, SEXP check_nul_r) { MAYF
                 shfree((absptr_t)arrow_ptr, &ferr);
                 if (ferr) { free(ferr); }
             }
-            free_schema(schema);
             morloc_error_take("Arrow table failed validation: ", validate_err);
         }
 
@@ -3809,7 +3735,6 @@ SEXP morloc_get_value(SEXP packet_r, SEXP schema_str_r, SEXP check_nul_r) { MAYF
                 shfree((absptr_t)arrow_ptr, &ferr);
                 if (ferr) { free(ferr); }
             }
-            free_schema(schema);
             morloc_error_take("Arrow import failed: ", arrow_err);
         }
 
@@ -3822,7 +3747,6 @@ SEXP morloc_get_value(SEXP packet_r, SEXP schema_str_r, SEXP check_nul_r) { MAYF
             if (arrow_schema.release) arrow_schema.release(&arrow_schema);
             if (arrow_array.release) arrow_array.release(&arrow_array);
             UNPROTECT(2);
-            free_schema(schema);
             MORLOC_ERROR("arrow::ImportRecordBatch not found; is the arrow package installed?");
         }
 
@@ -3839,11 +3763,9 @@ SEXP morloc_get_value(SEXP packet_r, SEXP schema_str_r, SEXP check_nul_r) { MAYF
         if (arrow_schema.release) arrow_schema.release(&arrow_schema);
         if (arrow_array.release) arrow_array.release(&arrow_array);
 
-        free_schema(schema);
         return obj_r;
     }
     if (format == PACKET_FORMAT_ARROW) {
-        free_schema(schema);
         MORLOC_ERROR("Arrow packet received for a non-table type");
     }
 
@@ -3859,14 +3781,12 @@ SEXP morloc_get_value(SEXP packet_r, SEXP schema_str_r, SEXP check_nul_r) { MAYF
         const uint8_t* payload = packet + sizeof(morloc_packet_header_t) + header->offset;
         morloc_space_t space = morloc_payload_space(payload, (size_t)header->length);
         if ((size_t)header->length < schema->width) {
-            free_schema(schema);
             MORLOC_ERROR("a %zu-byte inline payload cannot hold its %zu-byte value",
                          (size_t)header->length, schema->width);
         }
         MORLOC_REJECT_NUL(check_nul, (const void*)payload, schema, space,
-                          free_schema(schema));
+                          (void)0);
         SEXP obj_r = from_voidstar((const void*)payload, schema, space);
-        free_schema(schema);
         if (obj_r == NULL) {
             MORLOC_ERROR("Failed to convert internal representation to R object");
         }
@@ -3883,7 +3803,6 @@ SEXP morloc_get_value(SEXP packet_r, SEXP schema_str_r, SEXP check_nul_r) { MAYF
         size_t payload_len = header->length;
         char path[PATH_MAX];
         if (payload_len >= sizeof(path)) {
-            free_schema(schema);
             MORLOC_ERROR("stream ingest: path exceeds PATH_MAX");
         }
         memcpy(path, packet + sizeof(morloc_packet_header_t) + header->offset,
@@ -3901,7 +3820,6 @@ SEXP morloc_get_value(SEXP packet_r, SEXP schema_str_r, SEXP check_nul_r) { MAYF
                 char msg[512];
                 snprintf(msg, sizeof(msg), "stream ingest: %s", open_err);
                 free(open_err);
-                free_schema(schema);
                 MORLOC_ERROR("%s", msg);
             }
             char* len_err = NULL;
@@ -3909,7 +3827,6 @@ SEXP morloc_get_value(SEXP packet_r, SEXP schema_str_r, SEXP check_nul_r) { MAYF
             if (len_err || total_i64 < 0) {
                 char* cerr = NULL; mlc_close(handle, &cerr);
                 if (cerr) free(cerr);
-                free_schema(schema);
                 if (len_err) {
                     char msg[512];
                     snprintf(msg, sizeof(msg), "stream ingest: mlc_ifile_length failed: %s", len_err);
@@ -3937,7 +3854,6 @@ SEXP morloc_get_value(SEXP packet_r, SEXP schema_str_r, SEXP check_nul_r) { MAYF
                     free(nerr);
                     char* cerr = NULL; mlc_close(handle, &cerr);
                     if (cerr) free(cerr);
-                    free_schema(schema);
                     MORLOC_ERROR("%s", msg);
                 }
                 if (eof || chunk == NULL) break;
@@ -3952,7 +3868,6 @@ SEXP morloc_get_value(SEXP packet_r, SEXP schema_str_r, SEXP check_nul_r) { MAYF
                     UNPROTECT(2);
                     char* cerr = NULL; mlc_close(handle, &cerr);
                     if (cerr) free(cerr);
-                    free_schema(schema);
                     MORLOC_ERROR("stream ingest: sub-packets decode to different R types");
                 }
                 R_xlen_t sz = XLENGTH(chunk_r);
@@ -3977,7 +3892,6 @@ SEXP morloc_get_value(SEXP packet_r, SEXP schema_str_r, SEXP check_nul_r) { MAYF
                 REPROTECT(result, result_ix);
             }
             UNPROTECT(1);
-            free_schema(schema);
             return result;
         }
         // Not a stream file -- fall through to legacy FILE+DATA handling.
@@ -3986,13 +3900,12 @@ SEXP morloc_get_value(SEXP packet_r, SEXP schema_str_r, SEXP check_nul_r) { MAYF
     // SHM paths (RPTR source from upstream pool/daemon, or our own
     // unpack_with_schema for MESG msgpack args).
     bool is_rptr = (source == PACKET_SOURCE_RPTR);
-    bool tracked = false;
     // PANIC-13, PANIC-14
     uint8_t* voidstar = NULL;
     if (is_rptr) {
-        voidstar = R_TRY_WITH_INFRA(free_schema(schema), get_morloc_data_packet_value, packet, schema);
+        voidstar = R_TRY_INFRA(get_morloc_data_packet_value, packet, schema);
     } else {
-        voidstar = R_TRY_WITH(free_schema(schema), get_morloc_data_packet_value, packet, schema);
+        voidstar = R_TRY(get_morloc_data_packet_value, packet, schema);
     }
 
     if (is_rptr) {
@@ -4007,14 +3920,12 @@ SEXP morloc_get_value(SEXP packet_r, SEXP schema_str_r, SEXP check_nul_r) { MAYF
         bool acquired = shincref((absptr_t)voidstar, &incref_err);
         if (incref_err) { free(incref_err); }
         if (!acquired) {
-            free_schema(schema);
             MORLOC_INTERNAL_ABORT("received value's shared-memory block is no longer live");
         }
-        shm_tracker_push((absptr_t)voidstar, schema);
-        tracked = true;
+        shm_tracker_push((absptr_t)voidstar);
     }
 
-    MORLOC_REJECT_NUL(check_nul, voidstar, schema, morloc_shm_space(), { if (!tracked) free_schema(schema); });
+    MORLOC_REJECT_NUL(check_nul, voidstar, schema, morloc_shm_space(), {});
 
     r_value_read_t value_read = { voidstar, schema };
     SEXP obj_r;
@@ -4030,11 +3941,6 @@ SEXP morloc_get_value(SEXP packet_r, SEXP schema_str_r, SEXP check_nul_r) { MAYF
             shfree((absptr_t)voidstar, &free_err);
             if (free_err) { free(free_err); }
         }
-        // The tracker owns the schema only where it took the block; the
-        // block itself belongs to its sender unless we allocated it.
-        if (!tracked) {
-            free_schema(schema);
-        }
         MORLOC_ERROR("Failed to convert internal representation to R object");
     }
 
@@ -4047,9 +3953,6 @@ SEXP morloc_get_value(SEXP packet_r, SEXP schema_str_r, SEXP check_nul_r) { MAYF
         char* free_err = NULL;
         shfree((absptr_t)voidstar, &free_err);
         if (free_err) { free(free_err); }
-    }
-    if (!tracked) {
-        free_schema(schema);
     }
 
     return obj_r;
@@ -4134,7 +4037,7 @@ SEXP morloc_foreign_call(SEXP socket_path_r, SEXP mid_r, SEXP args_r) { MAYFAIL
     {
         absptr_t res_block = R_TRY_WITH_INFRA({free(packet); free(result);}, mlc_packet_block, result);
         if (res_block) {
-            shm_tracker_push(res_block, NULL);
+            shm_tracker_push(res_block);
         }
     }
 

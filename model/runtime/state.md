@@ -179,7 +179,7 @@ library, which holds the environment lock across prepare) follow it.
 
 ### INIT-3 A value set on first use without a lock is published by compare-and-swap
 Status: implemented
-Checked by: first_uses_on_many_threads_share_one_value_and_one_side_effect, a_child_forked_while_another_thread_builds_gets_a_value_at_once, no_runtime_value_waits_for_another_thread_to_initialise_it, tla:OncePublish, tla:OncePublish_oncelock.bug, tla:OncePublish_effect_each.bug
+Checked by: first_uses_on_many_threads_share_one_value_and_one_side_effect, a_child_forked_while_another_thread_builds_gets_a_value_at_once, a_dropped_cell_drops_its_published_value, a_schema_node_is_converted_once_and_freed_with_it, no_runtime_value_waits_for_another_thread_to_initialise_it, tla:OncePublish, tla:OncePublish_oncelock.bug, tla:OncePublish_effect_each.bug
 
 The standard library's once cells make later callers wait while one thread
 initialises; a fork in that window leaves the child waiting forever on a
@@ -192,6 +192,9 @@ starting the lifeline's watcher. Nothing waits, so a child either inherits
 the published value or builds its own. Between the publication and the
 side effect another thread, or a child forked in that window, sees the
 value without the effect; a side effect that panics is not retried.
+A schema node keeps the runtime's form of itself, and that form its text,
+the same way, so each is built at most once per node rather than once per
+packet; they are freed with the node.
 Model: `tla/OncePublish.tla`.
 
 ## Classes

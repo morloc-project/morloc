@@ -206,11 +206,31 @@ unsafe fn build_schema_metadata(schema: *const CSchema) -> (*mut u8, usize) {
     if schema.is_null() {
         return (ptr::null_mut(), 0);
     }
-    build_schema_metadata_rs(&CSchema::to_rust(schema))
+    build_schema_metadata_text(CSchema::converted(schema).text())
 }
 
-unsafe fn build_schema_metadata_rs(rs: &crate::schema::Schema) -> (*mut u8, usize) {
-    let schema_str = crate::schema::schema_to_string(rs);
+/// The runtime's form of a schema, converted once per schema (INIT-3); a
+/// null schema is Nil.
+///
+/// # Safety
+/// `schema` must be null or valid for the result's lifetime.
+pub(crate) unsafe fn rust_schema<'a>(schema: *const CSchema) -> std::borrow::Cow<'a, crate::schema::Schema> {
+    if schema.is_null() {
+        std::borrow::Cow::Owned(CSchema::to_rust(schema))
+    } else {
+        std::borrow::Cow::Borrowed(&CSchema::converted(schema).schema)
+    }
+}
+
+/// The metadata text of a schema, or None for a null schema.
+///
+/// # Safety
+/// As [`rust_schema`].
+pub(crate) unsafe fn schema_text<'a>(schema: *const CSchema) -> Option<&'a str> {
+    (!schema.is_null()).then(|| CSchema::converted(schema).text())
+}
+
+unsafe fn build_schema_metadata_text(schema_str: &str) -> (*mut u8, usize) {
     let schema_bytes = schema_str.as_bytes();
     let schema_len = schema_bytes.len() + 1; // +1 for null terminator
     let meta_header_size = 8; // sizeof(morloc_metadata_header_t)
@@ -306,14 +326,14 @@ unsafe fn make_data_packet_with_schema(
 unsafe fn make_data_packet_with_schema_rs(
     data: *const u8,
     data_length: usize,
-    meta: Option<&crate::schema::Schema>,
+    meta: Option<&str>,
     src: u8,
     fmt: u8,
     cmpr: u8,
     encr: u8,
     status: u8,
 ) -> *mut u8 {
-    let (metadata, metadata_length) = meta.map_or((ptr::null_mut(), 0), |rs| build_schema_metadata_rs(rs));
+    let (metadata, metadata_length) = meta.map_or((ptr::null_mut(), 0), |text| build_schema_metadata_text(text));
     packet_with_metadata(data, data_length, metadata, metadata_length, src, fmt, cmpr, encr, status)
 }
 
@@ -365,7 +385,7 @@ unsafe fn reported_rptr_packet(relptr: RelPtr, schema: *const CSchema, format: u
 }
 
 /// 'make_rptr_data_packet' reporting through `errmsg`.
-pub(crate) unsafe fn rptr_packet_or_errmsg(relptr: RelPtr, meta: Option<&crate::schema::Schema>, format: u8, errmsg: *mut *mut c_char) -> *mut u8 {
+pub(crate) unsafe fn rptr_packet_or_errmsg(relptr: RelPtr, meta: Option<&str>, format: u8, errmsg: *mut *mut c_char) -> *mut u8 {
     clear_errmsg(errmsg);
     match make_rptr_data_packet_rs(relptr, meta, format) {
         Ok(packet) => packet,
@@ -379,12 +399,11 @@ pub(crate) unsafe fn rptr_packet_or_errmsg(relptr: RelPtr, meta: Option<&crate::
 // SHM-13: the packet names the allocation the block at `relptr` holds now;
 // refused when no held block begins there.
 pub(crate) unsafe fn make_rptr_data_packet(relptr: RelPtr, schema: *const CSchema, format: u8) -> Result<*mut u8, MorlocError> {
-    let rs = (!schema.is_null()).then(|| CSchema::to_rust(schema));
-    make_rptr_data_packet_rs(relptr, rs.as_ref(), format)
+    make_rptr_data_packet_rs(relptr, schema_text(schema), format)
 }
 
 // SHM-13: as make_rptr_data_packet.
-pub(crate) unsafe fn make_rptr_data_packet_rs(relptr: RelPtr, meta: Option<&crate::schema::Schema>, format: u8) -> Result<*mut u8, MorlocError> {
+pub(crate) unsafe fn make_rptr_data_packet_rs(relptr: RelPtr, meta: Option<&str>, format: u8) -> Result<*mut u8, MorlocError> {
     let abs = shm::rel2abs(relptr)?;
     let shm::BlockState::Held(generation @ 1..) = shm::block_state(abs) else {
         return Err(MorlocError::Shm(
@@ -722,7 +741,7 @@ pub(crate) unsafe fn get_morloc_data_packet_value_from(
         return get_morloc_data_packet_value_from(decompressed.as_ptr(), schema, errmsg, origin);
     }
 
-    let rs = std::cell::LazyCell::new(|| CSchema::to_rust(schema));
+    let rs = rust_schema(schema);
     let source = (*header).command.data.source;
     let format = (*header).command.data.format;
     let payload_start = 32 + (*header).offset as usize;
@@ -1188,7 +1207,7 @@ pub(crate) unsafe fn flatten_voidstar_to_buffer(
     *out_buf = ptr::null_mut();
     *out_size = 0;
 
-    let rs = CSchema::to_rust(schema);
+    let rs = rust_schema(schema);
     match crate::voidstar::flatten_to_buffer(data as AbsPtr, &rs) {
         Ok(buf) => {
             let len = buf.len();
@@ -1229,7 +1248,7 @@ pub(crate) unsafe fn make_data_packet_with(
     whole: bool,
     errmsg: *mut *mut c_char,
 ) -> *mut u8 {
-    make_data_packet_with_rs(voidstar, relptr, schema, &CSchema::to_rust(schema), whole, errmsg)
+    make_data_packet_with_rs(voidstar, relptr, schema, &rust_schema(schema), schema_text(schema), whole, errmsg)
 }
 
 /// [`make_data_packet_with`] given `schema` already converted as `rs`.
@@ -1238,11 +1257,11 @@ pub(crate) unsafe fn make_data_packet_with_rs(
     relptr: RelPtr,
     schema: *const CSchema,
     rs: &crate::schema::Schema,
+    meta: Option<&str>,
     whole: bool,
     errmsg: *mut *mut c_char,
 ) -> *mut u8 {
     clear_errmsg(errmsg);
-    let meta = (!schema.is_null()).then_some(rs);
 
     let threshold = crate::packet::inline_threshold();
     let t_sz = crate::log::trace_enabled().then(std::time::Instant::now);
@@ -1298,15 +1317,14 @@ pub(crate) unsafe fn make_inline_data_packet(
     schema: *const CSchema,
     errmsg: *mut *mut c_char,
 ) -> *mut u8 {
-    let rs = CSchema::to_rust(schema);
-    make_inline_data_packet_rs(voidstar, &rs, (!schema.is_null()).then_some(&rs), errmsg)
+    make_inline_data_packet_rs(voidstar, &rust_schema(schema), schema_text(schema), errmsg)
 }
 
 /// [`make_inline_data_packet`] for a schema already converted.
 pub(crate) unsafe fn make_inline_data_packet_rs(
     voidstar: *mut c_void,
     rs: &crate::schema::Schema,
-    meta: Option<&crate::schema::Schema>,
+    meta: Option<&str>,
     errmsg: *mut *mut c_char,
 ) -> *mut u8 {
     clear_errmsg(errmsg);
@@ -2264,7 +2282,7 @@ pub(crate) unsafe fn print_morloc_data_packet(
     }
     clear_errmsg(errmsg);
 
-    let rs = CSchema::to_rust(schema);
+    let rs = rust_schema(schema);
     let source = (*header).command.data.source;
     let format = (*header).command.data.format;
     let packet_size = morloc_packet_size_from_header(header);

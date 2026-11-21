@@ -687,8 +687,8 @@ mod c_abi {
     #[no_mangle]
     pub unsafe extern "C" fn mlc_side_put(id: i64, schema: *const CSchema, value: *const c_void, errmsg: *mut *mut c_char) -> i32 {
         crate::error::clear_errmsg(errmsg);
-        let s = (!schema.is_null()).then(|| CSchema::to_rust(schema));
-        let r = put_side(id, s.as_ref(), value as AbsPtr);
+        let s = (!schema.is_null()).then(|| &CSchema::converted(schema).schema);
+        let r = put_side(id, s, value as AbsPtr);
         match r {
             Ok(()) => 0,
             Err(e) => {

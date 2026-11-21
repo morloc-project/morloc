@@ -750,7 +750,7 @@ pub(crate) unsafe fn mlc_compare(
     errmsg: *mut *mut c_char,
 ) -> libc::c_int {
     clear_errmsg(errmsg);
-    let rs = CSchema::to_rust(schema);
+    let rs = crate::packet_ffi::rust_schema(schema);
     match crate::compare::compare_voidstar_values(a as *const u8, b as *const u8, &rs) {
         Ok(o) => o as libc::c_int,
         Err(e) => {
@@ -2285,7 +2285,7 @@ pub(crate) unsafe fn mlc_materialize_subpacket_from_bytes(
             return Err(MorlocError::Other(format!("{}: null schema", FN)));
         }
         let slice = std::slice::from_raw_parts(bytes, n as usize);
-        let rs = CSchema::to_rust(elem_schema);
+        let rs = crate::packet_ffi::rust_schema(elem_schema);
         let p = crate::stream::shared_materialize_subpacket_from_bytes(slice, &rs)?;
         Ok(p as *mut c_void)
     })

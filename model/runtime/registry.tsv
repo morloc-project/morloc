@@ -45,9 +45,9 @@ data/lang/r/rmorloc.c::-::r_frames	thread
 data/lang/r/rmorloc.c::-::r_frames_cap	thread		
 data/lang/r/rmorloc.c::-::r_later	thread		
 data/lang/r/rmorloc.c::-::r_later_cap	thread		
-data/lang/r/rmorloc.c::-::r_literal_schemas	thread		
-data/lang/r/rmorloc.c::-::r_literal_schemas_len	thread		
-data/lang/r/rmorloc.c::-::r_literal_schemas_cap	thread		
+data/lang/r/rmorloc.c::-::r_schemas	thread		
+data/lang/r/rmorloc.c::-::r_schemas_len	thread		
+data/lang/r/rmorloc.c::-::r_schemas_cap	thread		
 data/lang/r/rmorloc.c::-::daemon_creator_generation	fork-scoped		
 data/lang/r/rmorloc.c::mlc_trace_ipc::cached	thread		
 data/lang/r/rmorloc.c::r_gc_budget::budget	thread		
@@ -348,6 +348,7 @@ morloc-runtime/source_rules.rs::scan_rust::SCAN	test-only
 morloc-runtime-types/publish_once.rs::first_uses_on_many_threads_share_one_value_and_one_side_effect::CELL	test-only		
 morloc-runtime-types/publish_once.rs::first_uses_on_many_threads_share_one_value_and_one_side_effect::EFFECTS	test-only		
 morloc-runtime-types/publish_once.rs::a_child_forked_while_another_thread_builds_gets_a_value_at_once::CELL	test-only		
+morloc-runtime-types/publish_once.rs::a_dropped_cell_drops_its_published_value::DROPS	test-only		
 morloc-runtime/stream.rs::-::RELEASE_GAP_HOOK	test-only		
 morloc-runtime/stream.rs::-::READ_GAP_HOOK	test-only		
 morloc-runtime/stream.rs::-::GAP_SLOT	test-only		
