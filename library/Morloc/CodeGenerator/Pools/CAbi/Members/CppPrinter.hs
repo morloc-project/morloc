@@ -241,17 +241,25 @@ printStmt :: IStmt -> MDoc
 printStmt (IAssign v Nothing e) = "auto" <+> pretty v <+> "=" <+> printExpr e <> ";"
 printStmt (IAssign v (Just t) e) = renderIType t <+> pretty v <+> "=" <+> printExpr e <> ";"
 -- C++ uses an indexed for loop with push_back
+-- The collection is evaluated once, before the loop: it may be a call.
 printStmt (IMapList resultVar resultType iterVar collection bodyStmts yieldExpr) =
   vsep
     [ resultDecl
     , block
         4
-        [idoc|for(size_t #{pretty iterVar}_idx = 0; #{pretty iterVar}_idx < #{printExpr collection}.size(); #{pretty iterVar}_idx++)|]
+        ""
         ( vsep
-            ( [idoc|auto #{pretty iterVar} = #{printExpr collection}[#{pretty iterVar}_idx];|]
-                : map printStmt bodyStmts
-                ++ [[idoc|#{pretty resultVar}.push_back(#{printExpr yieldExpr});|]]
-            )
+            [ [idoc|auto&& #{pretty iterVar}_c = #{printExpr collection};|]
+            , block
+                4
+                [idoc|for(size_t #{pretty iterVar}_idx = 0; #{pretty iterVar}_idx < #{pretty iterVar}_c.size(); #{pretty iterVar}_idx++)|]
+                ( vsep
+                    ( [idoc|const auto& #{pretty iterVar} = #{pretty iterVar}_c[#{pretty iterVar}_idx];|]
+                        : map printStmt bodyStmts
+                        ++ [[idoc|#{pretty resultVar}.push_back(#{printExpr yieldExpr});|]]
+                    )
+                )
+            ]
         )
     ]
   where

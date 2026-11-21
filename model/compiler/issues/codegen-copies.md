@@ -121,8 +121,8 @@ records and user-mapped types copy deeply.
   captured packet bytes included, is cloned twice when reflected and once
   per application; a closure's non-closure slots are cloned into the wire
   tuple; a variant arm needing wire conversion clones each field, though on
-  the deserialize side the raw value is dead. C++: `IMapList` binds
-  `auto x = coll[i]` and `IIfNotNull` copies the optional's value.
+  the deserialize side the raw value is dead. C++: `IIfNotNull` copies the
+  optional's value.
 - **A C++ optional mapped through a function is copied twice.** [read]
   `MapOptionalN` and the optional-map intrinsic render `auto src = ...;
   T u = src.value();` (Pools/CAbi/Members/CppPrinter.hs `IIfNotNull`, ~260-280), copying the optional and
