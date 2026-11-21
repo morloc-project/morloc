@@ -1236,7 +1236,7 @@ cppLowerConfig (ClosureGen reifyThunks stageTable papplyHeads) =
     , lcApplySrcGroup = \f as -> f <+> tupled as
     , lcFoldStep = \_ x -> x
     , lcFoldCombine = \_ x -> x
-    , lcForkChecked = \_ x -> "((void)mlc::fork_guard{}, " <> x <> ")"
+    , lcForkChecked = \_ x -> "[&]() { mlc::fork_guard _mlc_fork; return " <> x <> "; }()"
     , lcSourcedResult = \_ _ _ x -> x
     , lcSourcedArg = \_ _ _ x -> x
     , lcConstArg = cppConstArg
@@ -1824,8 +1824,9 @@ PROPAGATE_ERROR(errmsg)|]
             -- alias's referent, not hold a reference to it -- today std::bind
             -- decay-copies bound args, '[=]' captures copy the referent, and
             -- a '[&]' capture is only ever an immediately invoked lambda: the
-            -- loop IIFE, and an inline @try thunk ('tryThunkByReference'),
-            -- which '_mlc_try' calls before returning. A by-reference
+            -- loop IIFE, the fork check around a call of user code
+            -- ('lcForkChecked'), and an inline @try thunk
+            -- ('tryThunkByReference'), which '_mlc_try' calls before returning. A by-reference
             -- capture that escaped would dangle. A binding that takes its
             -- referent is a separate decision and a far narrower one
             -- ('consumableProjectionLets'): nothing else may use the referent

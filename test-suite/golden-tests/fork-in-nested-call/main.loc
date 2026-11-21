@@ -1,0 +1,23 @@
+-- FORK-17: a C++ child forked inside a call nested in another call's
+-- arguments exits when it leaves that call, before the enclosing call runs.
+-- Here a forking unpacker's result is the argument of the next unpacker.
+module main (mk)
+
+import root-cpp
+
+newtype Inner = Int
+type Cpp => Inner = "double"
+
+instance Packable Int Inner where
+  source Cpp from "p.hpp" ("packInner" as pack, "unpackInner" as unpack)
+
+newtype Outer = Inner
+type Cpp => Outer = "outer_t"
+
+instance Packable Inner Outer where
+  source Cpp from "p.hpp" ("packOuter" as pack, "unpackOuter" as unpack)
+
+source Cpp from "p.hpp" ("mk")
+
+--' Make an Outer, unpacked through a forking unpacker
+mk :: Int -> Outer

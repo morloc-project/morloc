@@ -196,6 +196,9 @@ data LangDescriptor = LangDescriptor
     -- when the callee first reads it (R's promises). Morloc calls by value,
     -- so each computed argument is bound to a local before its call.
     ldLazyArgs :: !Bool
+  , -- FORK-17: a call of user code with the fork check around it, the call
+    -- written as $CALL; empty when the pool checks some other way.
+    ldForkCheck :: !Text
   , -- External codegen (optional)
     ldCodegenCommand :: !(Maybe Text) -- e.g. "morloc-codegen-generic"
   , -- Converter from an Arrow record batch to a module's mapped table type
@@ -373,6 +376,7 @@ instance Y.FromJSON LangDescriptor where
             . ins "ldSourceHooks" (Y.Array mempty)
             . ins "ldAllowStringNull" (Y.Bool True)
             . ins "ldLazyArgs" (Y.Bool False)
+            . ins "ldForkCheck" (Y.String "")
             . ins "ldCodegenCommand" Y.Null
             . ins "ldTableImportFn" Y.Null
             . ins "ldGeneratedClasses" (Y.Object mempty)
@@ -439,7 +443,11 @@ instance Y.FromJSON LangDescriptor where
             . ins "ldClosureTableHeader" (Y.String "")
             . ins "ldClosureTableEntry" (Y.String "")
             $ obj
-    Aeson.genericParseJSON Aeson.defaultOptions (Y.Object withDefaults)
+    d <- Aeson.genericParseJSON Aeson.defaultOptions (Y.Object withDefaults)
+    let check = ldForkCheck d
+    if T.null check || T.count "$CALL" check == 1
+      then return d
+      else fail "ldForkCheck must name the call as $CALL exactly once"
 
 -- | Load a language descriptor from a YAML file
 loadLangDescriptor :: FilePath -> IO (Either String LangDescriptor)
@@ -505,6 +513,7 @@ defaultLangDescriptor name ext =
     , ldIsCompiled = False
     , ldAllowStringNull = True
     , ldLazyArgs = False
+    , ldForkCheck = ""
     , ldCodegenCommand = Nothing
     , ldTableImportFn = Nothing
     , ldGeneratedClasses = Map.empty

@@ -556,7 +556,10 @@ genericLowerConfig desc srcNamer debugInfo traceInfo debugMode = cfg
         , lcApplySrcGroup = \f as -> f <+> tupled as
         , lcFoldStep = \_ x -> x
         , lcFoldCombine = \_ x -> x
-        , lcForkChecked = \_ x -> x
+        , lcForkChecked = \_ x ->
+            case T.splitOn "$CALL" (ldForkCheck desc) of
+              [pre, post] -> pretty pre <> x <> pretty post
+              _ -> x -- empty: the descriptor parser refuses any other form
         , lcSourcedResult = \_ _ _ x -> x
         , lcSourcedArg = \_ _ _ x -> x
         , lcConstArg = \_ _ x -> x

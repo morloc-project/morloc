@@ -131,22 +131,3 @@ Details and evidence: /work/plans/runtime-audit-2026-10-10/C-processes.md.
   the reason from the next macOS CI failure. Separately, an exception
   escaping a user-spawned C++ thread ends the pool by std::terminate; the
   test's producer does not catch, so this is the expected crash shape.
-- **A forked C++ child can run an enclosing call before it exits.** [read
-  2026-11-20] FORK-17 deviates. The C++ check is a guard temporary of the
-  call's full expression, so a child that returns normally from a sourced
-  call nested in another call's arguments (`g(f(x))`, f forks and returns
-  in the child) runs `g` before the guard exits it. A check right after
-  the inner call that keeps guaranteed copy elision (EMIT-3: no added move)
-  was not found: a forwarding helper moves prvalue arguments, `pass`-style
-  wrappers move results. Open: hoist nested sourced calls into statements
-  for C++, or accept.
-- **A forked R child that returns into generated code runs on until the
-  dispatch ends.** [read 2026-11-20] FORK-17 deviates. Generated R code has
-  no per-call check: in R's bytecode interpreter every variable and call a
-  function references takes node-stack space per frame, and the checks cut
-  the recursion depth below spec-recur-4-1's bar. The runtime's calls of
-  user code (fold step and combine, producers, replay callbacks) and `@try`
-  are checked, and the stdout close is pinned to its opener (STRM-8), so
-  the reachable case is a child of `parallel:::mcfork` that returns from
-  the sourced call (mclapply and mcparallel children exit instead). Open:
-  check only calls of effectful functions, which a fork needs to be.

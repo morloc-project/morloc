@@ -240,7 +240,8 @@ again. A child made without the fork handler (FORK-14) is outside this
 item. Model: `tla/DispatchFork.tla`.
 
 ### FORK-17 A forked child exits when it leaves the call of user code it was forked inside
-Status: deviation
+Status: implemented
+Checked by: golden:fork-in-nested-call, golden:spec-strm-8-8, tla:StdioBracket, tla:StdioBracket_no_call_check.bug
 
 A child forked inside a call of user code exits as soon as it leaves the
 call, by returning or by failing, before
@@ -249,18 +250,13 @@ normally. Python adds nothing to calls: a fork handler in the child finds
 the user frame that generated or runtime code called and exits when that
 frame returns, yields or unwinds; the handler runs in every child where
 Python may run, since CPython runs it from PyOS_AfterFork_Child, which C
-code that forks must call first. C++ and Rust check at every call of user
-code (a sourced function, a function value, a packer, a fold's step or
+code that forks must call first. C++, Rust and R check at every call of
+user code (a sourced function, a function value, a packer, a fold's step or
 combine, a producer, a replay callback): the call records a count its own
 fork handler moves, and a process whose count differs when the call ends
-exits there; Rust checks as the call ends, C++ at the end of the full
-expression holding it, so a C++ child that returns from a call nested in
-another call's arguments runs that call first (deviation:
-issues/pools-and-ipc.md). R checks at the runtime's calls of user code (a
-fold's step and combine, a producer, a replay callback) and when `@try`
-catches a failure, but not at a call from generated code, where a check
-costs recursion depth (deviation: issues/pools-and-ipc.md). An operator
-the language applies is not a call and is not checked.
+exits there, before the result reaches an enclosing call or a failure
+reaches a handler. A C++ call whose result is a reference is copied as it returns (CPP-2). An
+operator the language applies is not a call and is not checked.
 Model: `tla/StdioBracket.tla` (`StdioBracket_no_call_check.bug` runs the
 bracket's close in the child).
 

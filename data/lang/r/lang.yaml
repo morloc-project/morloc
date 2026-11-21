@@ -91,6 +91,9 @@ ldEnumLitByName: true
 # Arguments are promises, forced when the callee first reads them
 ldLazyArgs: true
 
+# FORK-17: the call of user code with the fork check around it
+ldForkCheck: '.__mlc_checked($CALL)'
+
 # Import syntax
 ldQualifiedImports: false
 

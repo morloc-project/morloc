@@ -17,6 +17,14 @@
 assign(".__morloc", .__morloc, envir = .__morloc)
 lockBinding(".__morloc", globalenv())
 
+# FORK-17
+.__mlc_checked <- function(x) {
+  g <- .Call("morloc_mlc_fork_generation")
+  on.exit(.Call("morloc_mlc_exit_if_forked_since", g))
+  x
+}
+lockBinding(".__mlc_checked", globalenv())
+
 local({
 
 # A wire codec is either a schema string (a value) or a closure codec: the
@@ -35,12 +43,13 @@ mlc_manifold <- function(mid) {
   get(paste0(MLC_MANIFOLD_PREFIX, as.character(as.integer(mid))), envir = globalenv(), inherits = FALSE)
 }
 
-# The global names the pool reserves: the manifolds and .__morloc itself.
+# The global names the pool reserves: the manifolds, .__morloc and
+# .__mlc_checked.
 # Their bindings are locked, so a source can only add or remove one.
 mlc_reserved_globals <- function() {
   manifolds <- paste0("^", gsub(".", "\\.", MLC_MANIFOLD_PREFIX, fixed = TRUE), "[0-9]")
   names <- ls(globalenv(), all.names = TRUE)
-  names[grepl(manifolds, names) | names == ".__morloc"]
+  names[grepl(manifolds, names) | names %in% c(".__morloc", ".__mlc_checked")]
 }
 
 # AUTO include preamble start
