@@ -92,6 +92,22 @@ auto take_field(const std::shared_ptr<const T>& p, Get get)
     return get(*p);
 }
 
+// A field taken out of an arm the caller holds for the last time: the
+// arm is released at once (CPP-6, EVAL-7).
+template <class T, class Get>
+auto take_field_release(std::shared_ptr<const T>& p, Get get)
+    -> std::remove_cvref_t<decltype(get(*p))> {
+    if (p.use_count() == 1) {
+        std::atomic_thread_fence(std::memory_order_acquire);
+        auto v = std::move(get(*const_cast<T*>(p.get())));
+        p.reset();
+        return v;
+    }
+    auto v = get(*p);
+    p.reset();
+    return v;
+}
+
 template <class T> struct is_const_shared_ptr : std::false_type {};
 template <class T> struct is_const_shared_ptr<std::shared_ptr<const T>> : std::true_type {};
 

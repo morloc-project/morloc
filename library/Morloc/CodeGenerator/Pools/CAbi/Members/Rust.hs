@@ -3122,7 +3122,7 @@ rustSurround =
 -- | No tag test may follow a take (see the projection-consume golden's
 -- secondMatchRust).
 rustCaps :: Scope -> OwnCaps
-rustCaps cscope = OwnCaps {ocCheap = rustIsCopy, ocTagAfterTake = False, ocLends = lends, ocTakesElems = False}
+rustCaps cscope = OwnCaps {ocCheap = rustIsCopy, ocTagAfterTake = False, ocLends = lends, ocSharedTakes = False, ocTakesElems = False}
   where
     -- RUST-4: an optional field of a user-written enum may sit behind a
     -- pointer, leaving no optional value in memory to lend.

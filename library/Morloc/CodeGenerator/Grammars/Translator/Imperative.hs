@@ -1359,9 +1359,10 @@ borrowableRoot e = isBorrowableProjection e
 -- A let index that two projections in one scan share is never a candidate:
 -- the decision is keyed by the index, so it would also reach the projection
 -- the conditions were not checked for.
-consumableProjectionLets :: Bool -> (Int -> Set.Set Int) -> [SerialManifold] -> Set.Set (Int, Int)
-consumableProjectionLets tagAfterMove byValue sms =
-  Set.fromList
+consumableProjectionLets :: Bool -> Bool -> (Int -> Set.Set Int) -> [SerialManifold] -> (Set.Set (Int, Int), Set.Set (Int, Int))
+consumableProjectionLets tagAfterMove sharedTakes byValue sms = (fresh <> parts, releases)
+  where
+  fresh = Set.fromList
     [ (root, letIdx)
     | sm@(SerialManifold root _ _ _ body) <- sms
     , let scan = scanSM sm
@@ -1370,17 +1371,86 @@ consumableProjectionLets tagAfterMove byValue sms =
     , Map.lookup letIdx projected == Just 1
     , maybe False buildsFreshValue (Map.lookup subjIdx (csDefs scan))
     , Map.findWithDefault 0 subjIdx (csUses scan) == 1
-    , isJust (moveWalk tagAfterMove (const Set.empty) (Set.singleton subjIdx) subjIdx letIdx False (RS body))
+    , isJust (moveWalk tagAfterMove (const Set.empty) (Set.singleton subjIdx) Nothing subjIdx letIdx False (RS body))
     ]
-    <> Set.fromList
-      [ (root, letIdx)
+  candidates =
+      [ (root, letIdx, field, walk, siblings)
       | sm@(SerialManifold root _ _ _ body) <- sms
       , let scan = scanSM sm
-            projected = Map.fromListWith (+) [(l, 1 :: Int) | (l, _) <- csGetters scan <> csProjections scan]
+            projected = Map.fromListWith (+) [(l, 1 :: Int) | (l, _) <- csGetters scan]
+            defs = csAllDefs scan
       , (letIdx, subjIdx) <- csGetters scan
       , Map.lookup letIdx projected == Just 1
-      , isJust (moveWalk False byValue (refersInto [d | d@(i, _) <- csAllDefs scan, i /= letIdx] subjIdx) subjIdx letIdx False (RS body))
+      , let field = fieldOf =<< lookup letIdx defs
+            -- the lets reading another field of the same arm
+            siblings = [i | (i, rhs) <- defs, Just f <- [fieldOf rhs], Just f /= field, (varIndex =<< subjectOf rhs) == Just subjIdx]
+            names others = refersInto [d | d@(i, _) <- defs, i /= letIdx, i `notElem` others] subjIdx
+            walk others = isJust (moveWalk False byValue (names others) (if null others then Nothing else field) subjIdx letIdx False (RS body))
+      , sharedTakes || field == Nothing
+      , walk siblings
+      -- a field read from an arm another value may share is taken only
+      -- where it is kept: a take of a shared arm copies, a borrow does not
+      , field == Nothing || isFresh subjIdx scan || keptIn byValue letIdx (RS body)
       ]
+  parts = Set.fromList [(root, letIdx) | (root, letIdx, _, _, _) <- candidates]
+  -- a take after which nothing names the value, but the other fields taken
+  -- out of it, may release its arm
+  releases =
+    Set.fromList
+      [ (root, letIdx)
+      | (root, letIdx, Just _, walk, siblings) <- candidates
+      , let taken = [i | i <- siblings, Set.member (root, i) parts]
+            order = Map.findWithDefault Map.empty root orders
+            at i = Map.findWithDefault (-1) i order
+      , walk taken
+      , all (\i -> at i < at letIdx) taken
+      ]
+  -- each manifold's lets in the order they are bound
+  orders = Map.fromList [(root, Map.fromList (zip (bound (RS body)) [0 :: Int ..])) | SerialManifold root _ _ _ body <- sms]
+  bound n = maybe [] (\(i, _, _) -> [i]) (rnodeLet n) <> concatMap bound (rnodeChildren n)
+  isFresh subj scan = maybe False buildsFreshValue (Map.lookup subj (csDefs scan))
+  fieldOf (IntrinsicN _ IntrCtorField _ (_ : _ : IntN _ i : _)) = Just (fromIntegral i)
+  fieldOf _ = Nothing
+  subjectOf (IntrinsicN _ IntrCtorField _ (v : _)) = Just v
+  subjectOf _ = Nothing
+
+-- | Whether local @i@ is read somewhere under a node where its value is
+-- kept: an element of a value being built, a loop's start or next value, a
+-- value a body or a let's right-hand side ends in, or an argument a call
+-- takes by value (@byValue m@).
+keptIn :: (Int -> Set.Set Int) -> Int -> RNode -> Bool
+keptIn byValue i = go
+  where
+    go n = here n || any go (rnodeChildren n)
+    here n = case n of
+      RN (VariantN _ _ _ xs) -> any isI xs
+      RN (ListN _ _ xs) -> any isI xs
+      RN (TupleN _ xs) -> any isI xs
+      RN (RecordN _ _ _ kvs) -> any (isI . snd) kvs
+      RN (LoopN _ starts _) -> any (isI . snd) starts
+      RLN (LoopContinue es) -> any (isI . snd) es
+      RLS (LoopContinue es) -> any (isI . snd) es
+      RLN (LoopBase e) -> ends e
+      RN (NativeLetN _ rhs _) -> ends rhs
+      RN (ReturnN e) -> ends e
+      RN (AppExeN _ (RecCallP mid _) args) -> or [isI a | (j, NativeArgExpr a) <- indexed args, Set.member j (byValue mid)]
+      RNM (NativeManifold m _ form@(ManifoldFull _) body) ->
+        ends body || or [j == i | (pos, Arg j _) <- indexed (typeMofForm form), Set.member pos (byValue m)]
+      RSM (SerialManifold _ _ _ _ body) -> endsS body
+      _ -> False
+    ends e = case e of
+      NativeLetN _ _ b -> ends b
+      IfN _ _ a b -> ends a || ends b
+      ReturnN x -> ends x
+      CoerceN _ _ x -> ends x
+      _ -> isI e
+    endsS e = case e of
+      NativeLetS _ _ b -> endsS b
+      SerialLetS _ _ b -> endsS b
+      ReturnS x -> endsS x
+      SerializeS _ x -> ends x
+      _ -> False
+    isI e = varIndex e == Just i
 
 -- | A variable and every let that refers into it, directly or through
 -- another such let, or copies it.
@@ -1512,11 +1582,14 @@ rnodeBinds i n = maybe False (\(j, _, _) -> i == j) (rnodeLet n) || any (rnodeBi
 -- moved by projection let @k@: the state after it, or Nothing when the
 -- subject is named after the move, or moved from inside a closure that did
 -- not bind it. With @tagAfterMove@, a tag test may read the subject after
--- the move.
-moveWalk :: Bool -> (Int -> Set.Set Int) -> Set.Set Int -> Int -> Int -> Bool -> RNode -> Maybe Bool
-moveWalk tagAfterMove byValue names subj k moved n = case n of
+-- the move; with @field@ (the constructor field let @k@ takes), so may a
+-- projection of another of its arm's fields.
+moveWalk :: Bool -> (Int -> Set.Set Int) -> Set.Set Int -> Maybe Int -> Int -> Int -> Bool -> RNode -> Maybe Bool
+moveWalk tagAfterMove byValue names field subj k moved n = case n of
+  RN (IntrinsicN _ IntrCtorField _ (v : _ : IntN _ i : _))
+    | Just f <- field, fromIntegral i /= f, varIndex v == Just subj -> Just moved
   RN (IntrinsicN _ IntrTagTest _ (LetVarN _ j _ : rest))
-    | tagAfterMove && j == subj -> foldM (moveWalk tagAfterMove byValue names subj k) moved (map RN rest)
+    | tagAfterMove && j == subj -> foldM (moveWalk tagAfterMove byValue names field subj k) moved (map RN rest)
   RN (LetVarN _ j _) | Set.member j names -> if moved then Nothing else Just moved
   RN (BndVarN _ j _) | Set.member j names -> if moved then Nothing else Just moved
   RN (IfN _ c t f) -> branch (RN c) (RN t) (RN f)
@@ -1527,18 +1600,18 @@ moveWalk tagAfterMove byValue names subj k moved n = case n of
   RSM _ -> closure
   _ -> case rnodeLet n of
     Just (i, rhs, body)
-      | i == k -> moveWalk tagAfterMove byValue names subj k moved rhs >> moveWalk tagAfterMove byValue names subj k True body
-      | i == subj -> moveWalk tagAfterMove byValue names subj k moved rhs >> moveWalk tagAfterMove byValue names subj k False body
-      | otherwise -> moveWalk tagAfterMove byValue names subj k moved rhs >>= \m -> moveWalk tagAfterMove byValue names subj k m body
-    Nothing -> foldM (moveWalk tagAfterMove byValue names subj k) moved (rnodeChildren n)
+      | i == k -> moveWalk tagAfterMove byValue names field subj k moved rhs >> moveWalk tagAfterMove byValue names field subj k True body
+      | i == subj -> moveWalk tagAfterMove byValue names field subj k moved rhs >> moveWalk tagAfterMove byValue names field subj k False body
+      | otherwise -> moveWalk tagAfterMove byValue names field subj k moved rhs >>= \m -> moveWalk tagAfterMove byValue names field subj k m body
+    Nothing -> foldM (moveWalk tagAfterMove byValue names field subj k) moved (rnodeChildren n)
   where
     branch c t f = do
-      m <- moveWalk tagAfterMove byValue names subj k moved c
-      mt <- moveWalk tagAfterMove byValue names subj k m t
-      mf <- moveWalk tagAfterMove byValue names subj k m f
+      m <- moveWalk tagAfterMove byValue names field subj k moved c
+      mt <- moveWalk tagAfterMove byValue names field subj k m t
+      mf <- moveWalk tagAfterMove byValue names field subj k m f
       return (mt || mf)
     closure
-      | rnodeBinds k n = if introduces byValue subj n then foldM (moveWalk tagAfterMove byValue names subj k) moved (rnodeChildren n) else Nothing
+      | rnodeBinds k n = if introduces byValue subj n then foldM (moveWalk tagAfterMove byValue names field subj k) moved (rnodeChildren n) else Nothing
       | any (`rnodeNames` n) (Set.toList names) = Nothing
       | otherwise = Just moved
 
@@ -2215,6 +2288,12 @@ getterOf letIdx (PatN _ (PatGet sel [] (NativeArgExpr v)))
     varIndexOf (BndVarN _ j _) = Just j
     varIndexOf _ = Nothing
 getterOf letIdx (IntrinsicN _ IntrListElem _ (v : _))
+  | Just subjIdx <- varIndexOf v = [(letIdx, subjIdx)]
+  where
+    varIndexOf (LetVarN _ j _) = Just j
+    varIndexOf (BndVarN _ j _) = Just j
+    varIndexOf _ = Nothing
+getterOf letIdx (IntrinsicN _ IntrCtorField _ (v : _))
   | Just subjIdx <- varIndexOf v = [(letIdx, subjIdx)]
   where
     varIndexOf (LetVarN _ j _) = Just j

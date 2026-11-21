@@ -67,8 +67,8 @@ copying it.
 
 ### CPP-6 A C++ `data` value and a recursive record field are shared and never changed
 Intent: ruled 2026-11-15
-Tests: spec-cpp-6-1, spec-cpp-6-2
-Code: conforms 2026-11-15
+Tests: spec-cpp-6-1, spec-cpp-6-2, spec-cpp-6-3
+Code: conforms 2026-11-21
 
 A `data` type with payloads is a struct holding
 `std::variant<std::shared_ptr<const T_C>...> v`, one alternative per
@@ -88,8 +88,19 @@ store it into a const field. A raw pointer, a `std::unique_ptr`, or a
 `std::shared_ptr` to a non-const type in these positions is rejected at
 build (EVAL-7, CPP-3).
 
-Morloc moves a field out of an arm only when it built the arm itself and no
-other holder shares it, and copies it otherwise (OWN-5). An arm built with
+Morloc moves a field out of an arm it owns when no other holder shares the
+arm, deciding at run time from the arm's count of owners, and copies the
+field otherwise (OWN-5, OWN-7); whoever built the arm. A `std::weak_ptr`, a
+raw pointer or a reference is not an owner and is not counted, so the
+decision rests on EVAL-7: sourced code keeps none of them to a value past
+the call that gave or returned it (ruled 2026-11-21). When nothing in the
+frame names the value after the last field taken from its arm, morloc
+releases the arm at once, so a `std::weak_ptr` kept against EVAL-7 finds it
+expired rather than reading a field that was moved out. A `std::weak_ptr`
+locked on another thread while morloc takes a field has no defined result:
+C++ cannot test that a `std::shared_ptr` has one owner and take it in one
+step, as Rust's `Arc::try_unwrap` does, so the count can rise between the
+test and the move. An arm built with
 `mlc::make_arm` (from `mlc_rec.hpp`) is released in bounded stack (STATE-8);
 one built with `std::make_shared` is released recursively.
 

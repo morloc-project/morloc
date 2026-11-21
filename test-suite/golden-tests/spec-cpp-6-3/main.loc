@@ -1,0 +1,50 @@
+-- Spec CPP-6: a field is moved out of a `data` arm the frame owns when the
+-- arm has no other owner, whoever built it, and copied otherwise. Each
+-- export prints its result and the payloads copied (pay.hpp, which also
+-- aborts on a read of a moved payload).
+--   rebuild     a chain rebuilt from a temporary: no copy
+--   shared      the caller reads the chain again after the rebuild: copied
+--   twoHolders  two values share a tail; rebuilding one copies the shared
+--               part, and the other reads it intact
+module main (rebuild, shared, twoHolders)
+
+import root
+import root-cpp
+
+newtype Pay = Int
+type Cpp => Pay = "Pay"
+
+instance Packable Int Pay where
+  source Cpp from "pay.hpp" ("pay_pack" as pack, "pay_unpack" as unpack)
+
+source Cpp from "pay.hpp" ("mkp", "keyp", "census")
+
+mkp :: Int -> Pay
+keyp :: Pay -> Int
+census :: Int -> (Int, Int)
+
+data Chain = End | Link Pay Chain
+
+build :: Int -> Chain -> Chain
+build k acc
+  ? k == 0 = acc
+  : build (k - 1) (Link (mkp k) acc)
+
+mapC :: Chain -> Chain
+mapC c = match c
+  | End = End
+  | (Link x rest) = Link x (mapC rest)
+
+sumC :: Int -> Chain -> Int
+sumC acc c = match c
+  | End = acc
+  | (Link x rest) = sumC (acc + keyp x) rest
+
+rebuild :: Int -> (Int, Int)
+rebuild n = census (sumC 0 (mapC (build n End)))
+
+shared :: Int -> (Int, Int)
+shared n = census (let c = build n End in let s = sumC 0 (mapC c) in s + sumC 0 c)
+
+twoHolders :: Int -> (Int, Int)
+twoHolders n = census (let c = build n End in let a = Link (mkp 1000) c in let b = Link (mkp 2000) c in let s = sumC 0 (mapC a) in s + sumC 0 b)

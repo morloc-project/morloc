@@ -22,8 +22,8 @@ import root-cpp
 -- `runParts` turns each `Try` into a `(Bool, Str, [Int])` through a match,
 -- as the parallel library's `pullParts` does. The tuple moves out of the
 -- match's arms rather than being copied at each, and the batch moves out of
--- the tuple (OWN-5); three per batch remain: the batch, the tuple built from
--- the `Try`'s payload (which may be shared, so is copied), and the
+-- the tuple (OWN-5), and the `Try`'s payload moves out of its arm, which
+-- nothing else holds (CPP-6); two per batch remain: the batch and the
 -- suspension copy the sink loop above has.
 --
 -- `runSingle` puts each batch, at its last use, into a one-element list.

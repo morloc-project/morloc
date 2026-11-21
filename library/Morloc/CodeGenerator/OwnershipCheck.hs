@@ -38,16 +38,19 @@ data St = St
   -- ^ locals moved whole, which only a reference into them still sees
   , stHeld :: Set.Set Int
   -- ^ locals a @do@ block bound by a let reads (OWN-3)
+  , stFields :: Map.Map Int (Set.Set Int)
+  -- ^ roots with constructor fields taken out of their arm, and which
+  -- fields: another field of the arm may still be read (CPP-6)
   }
   deriving (Eq)
 
 -- | Either of two states, or both.
 joinSt :: St -> St -> St
-joinSt a b = St (stTaken a <> stTaken b) (stCaptured a <> stCaptured b) (stMoved a <> stMoved b) (stHeld a <> stHeld b)
+joinSt a b = St (stTaken a <> stTaken b) (stCaptured a <> stCaptured b) (stMoved a <> stMoved b) (stHeld a <> stHeld b) (Map.unionWith (<>) (stFields a) (stFields b))
 
 -- | A state without the given locals, which are bound again.
 forget :: Set.Set Int -> St -> St
-forget vs st = St (stTaken st `Set.difference` vs) (stCaptured st `Set.difference` vs) (stMoved st `Set.difference` vs) (stHeld st `Set.difference` vs)
+forget vs st = St (stTaken st `Set.difference` vs) (stCaptured st `Set.difference` vs) (stMoved st `Set.difference` vs) (stHeld st `Set.difference` vs) (Map.withoutKeys (stFields st) vs)
 
 
 -- | What evaluating a node did: the state once it is done; the values it
@@ -79,6 +82,8 @@ data Env = Env
   -- ^ the argument positions a native manifold takes by value (OWN-7)
   , envMovedBuilds :: Set.Set (Int, Int)
   -- ^ the (manifold, local) pairs moved into a manifold as it is built
+  , envField :: Map.Map Int Int
+  -- ^ the locals bound to a constructor field of their root, and which
   }
 
 -- | The violations in a top-level manifold's tree, where the lets and
@@ -86,14 +91,14 @@ data Env = Env
 -- native manifold @m@ takes the arguments at @byValue m@ by value.
 checkManifold :: (Int -> NativeExpr -> LetMode) -> Bool -> Set.Set Int -> (Int -> Set.Set Int) -> Set.Set (Int, Int) -> SerialManifold -> [Text]
 checkManifold mode tagOk moves byValue built (SerialManifold m _ _ _ e) =
-  map (\v -> "manifold " <> num m <> ": " <> v) (rViol (walkS (Env mode tagOk Map.empty moves Map.empty byValue built) start e))
+  map (\v -> "manifold " <> num m <> ": " <> v) (rViol (walkS (Env mode tagOk Map.empty moves Map.empty byValue built Map.empty) start e))
 
 -- | The violations in a native expression evaluated from scratch.
 checkNative :: (Int -> NativeExpr -> LetMode) -> Bool -> Set.Set Int -> NativeExpr -> [Text]
-checkNative mode tagOk moves e = rViol (walkN (Env mode tagOk Map.empty moves Map.empty (const Set.empty) Set.empty) start e)
+checkNative mode tagOk moves e = rViol (walkN (Env mode tagOk Map.empty moves Map.empty (const Set.empty) Set.empty Map.empty) start e)
 
 start :: St
-start = St Set.empty Set.empty Set.empty Set.empty
+start = St Set.empty Set.empty Set.empty Set.empty Map.empty
 
 num :: Int -> Text
 num = T.pack . show
@@ -155,7 +160,16 @@ rootOf env i = maybe i (rootOf env) (Map.lookup i (envAlias env))
 readVar :: Env -> St -> Int -> Eval
 readVar env s i = (refRead env s i) {rReads = Set.fromList (i : aliasChain (envAlias env) i), rViol = taken <> rViol (refRead env s i)}
   where
-    taken = ["n" <> num i <> " is read after the payload of n" <> num v <> " was taken" | v <- take 1 [v | v <- i : aliasChain (envAlias env) i, Set.member v (stTaken s)]]
+    chain = i : aliasChain (envAlias env) i
+    taken =
+      take 1 $
+        ["n" <> num i <> " is read after the payload of n" <> num v <> " was taken" | v <- chain, Set.member v (stTaken s)]
+          <> ["n" <> num i <> " is read after a field of n" <> num i <> " was taken" | Map.member i (stFields s)]
+          <> [ "n" <> num i <> " is read after a field of n" <> num v <> " was taken"
+             | (l, v) <- zip chain (drop 1 chain)
+             , Just fs <- [Map.lookup v (stFields s)]
+             , maybe True (`Set.member` fs) (Map.lookup l (envField env))
+             ]
 
 -- | A read that sees only what a reference sees: whether the local, or what
 -- it refers into, was moved.
@@ -216,21 +230,34 @@ bindLet env s i rhs body =
       unaliased = env {envAlias = Map.delete i (envAlias env), envBorrow = Map.delete i (envBorrow env)}
       (b, x) = case (envMode env i rhs, projectionRoot env rhs) of
         (LetTake, Just root) ->
-          let problems =
-                ["the payload of n" <> num root <> " is taken twice" | Set.member root (stTaken t)]
+          let fields = Map.findWithDefault Set.empty root (stFields t)
+              problems =
+                ["the payload of n" <> num root <> " is taken twice" | Set.member root (stTaken t) || maybe False (`Set.member` fields) field]
                   <> ["the payload of n" <> num root <> " is taken after a body that may run later captured it" | Set.member root (stCaptured t)]
-              (b', x') = body unaliased rebound {stTaken = Set.insert root (stTaken rebound)}
+              -- a constructor field leaves the arm's other fields readable (CPP-6)
+              after = case field of
+                Just f -> rebound {stFields = Map.insertWith (<>) root (Set.singleton f) (stFields rebound)}
+                Nothing -> rebound {stTaken = Set.insert root (stTaken rebound)}
+              (b', x') = body unaliased after
            in (b' {rTakes = Set.insert root (rTakes b'), rViol = problems <> rViol b'}, x')
         (LetBorrow, Just root)
           | Just base <- projectionBase rhs ->
-              body env {envAlias = Map.insert i root (envAlias env), envBorrow = Map.insert i base (envBorrow env)} rebound
+              body (fielded env {envAlias = Map.insert i root (envAlias env), envBorrow = Map.insert i base (envBorrow env)}) rebound
         _ | Just j <- movedIn -> case Map.lookup j (envAlias env) of
           Just root -> body unaliased {envAlias = Map.insert i root (envAlias env)} rebound
           Nothing -> body unaliased rebound
-        (_, Just root) -> body env {envAlias = Map.insert i root (envAlias env), envBorrow = Map.delete i (envBorrow env)} rebound
+        (_, Just root) -> body (fielded env {envAlias = Map.insert i root (envAlias env), envBorrow = Map.delete i (envBorrow env)}) rebound
         _ -> body unaliased rebound
    in (rhsR `andThen` const (b {rBound = Set.insert i (rBound b)}), x)
   where
+    -- the constructor field the right-hand side reads of its root, directly
+    field = case rhs of
+      IntrinsicN _ IntrCtorField _ (v : _ : IntN _ f : _) | Just _ <- projectionBase v, isVar v -> Just (fromIntegral f)
+      _ -> Nothing
+    isVar (LetVarN {}) = True
+    isVar (BndVarN {}) = True
+    isVar _ = False
+    fielded e = e {envField = maybe (Map.delete i (envField e)) (\f -> Map.insert i f (envField e)) field}
     rhsR = keepValue env s rhs
     t = (rSt rhsR) {stHeld = stHeld (rSt rhsR) <> Set.fromList [v | j <- Set.toList (heldBy rhs), v <- j : aliasChain (envAlias env) j]}
     -- the local the right-hand side ends in, when it was moved there
@@ -276,6 +303,16 @@ walkN env s e = case e of
     walkN env s c `andThen` \s' -> eitherArm (walkN env s' a) (walkN env s' b)
   IntrinsicN _ IntrTagTest _ (LetVarN _ i _ : rest)
     | envTagAfterTake env -> step s ((\s' -> refRead env s' i) : map (\x s' -> walkN env s' x) rest)
+  -- another field of an arm a field was taken from (CPP-6)
+  IntrinsicN _ IntrCtorField _ (v : _ : IntN _ f : _)
+    | Just i <- varOf v
+    , Just fs <- Map.lookup (rootOf env i) (stFields s)
+    , Set.notMember (fromIntegral f) fs ->
+        refRead env s i
+    where
+      varOf (LetVarN _ j _) = Just j
+      varOf (BndVarN _ j _) = Just j
+      varOf _ = Nothing
   AppExeN _ (RecCallP mid _) args -> step s [arg j a | (j, a) <- indexed args]
     where
       arg j (NativeArgExpr x) | Set.member j (envByValue env mid) = \s' -> keepPart env s' x
@@ -367,7 +404,7 @@ region r =
   let outside = (rTakes r <> rMoves r) `Set.difference` rBound r
       st = rSt r
    in r
-        { rSt = St (stTaken st `Set.difference` rTakes r) (stCaptured st <> (rReads r `Set.difference` rBound r)) (stMoved st `Set.difference` rMoves r) (stHeld st)
+        { rSt = St (stTaken st `Set.difference` rTakes r) (stCaptured st <> (rReads r `Set.difference` rBound r)) (stMoved st `Set.difference` rMoves r) (stHeld st) (Map.withoutKeys (stFields st) (rTakes r))
         , rTakes = Set.empty
         , rMoves = Set.empty
         , rViol = rViol r <> ["n" <> num v <> " is taken or moved in a body that may run more than once" | v <- Set.toList outside]

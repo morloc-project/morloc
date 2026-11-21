@@ -26,9 +26,7 @@ records and user-mapped types copy deeply.
   are all this copy in the caller's reader (`.t.clone()` of a nested
   record, `.p.clone()` of a borrowed record's field), 2026-11-21.
 - **OWN-7's two forms deviate in C++.** [reproduced 2026-11-21, golden
-  own7-matrix-cpp] A `data` part kept on one branch is copied (shapes D
-  part if tmp/last/param, j=1: 1 each, predicted 0); how a part of a `data`
-  arm is taken awaits a ruling (CPP-6). A record kept by a nested
+  own7-matrix-cpp] A record kept by a nested
   conditional, called through `map (f j)`, copies once more than
   predicted (R ret nested pap: 2 at j=1, 1 at j=0); the same shape with
   one conditional does not. A list kept in part by a recursive function

@@ -43,9 +43,9 @@
 --- twoSteps ---
 [200,0]
 --- partsBorrowed ---
-[5050,1]
+[5050,0]
 --- partsFresh ---
-[5055,1]
+[5055,0]
 --- setter ---
 [1002,0]
 --- setterFn ---
@@ -111,7 +111,7 @@
 --- loopLetAlias ---
 [5051,0]
 --- nonTail ---
-[5050,100]
+[5050,0]
 --- guardLoop ---
 [9803,0]
 --- guardKeep ---

@@ -26,7 +26,7 @@ all:
 	./nexus otherArmCpp 5 >> obs.txt 2>> obs.err
 	./nexus loopUnwrapCpp 10 0 >> obs.txt 2>> obs.err
 	grep -cE 'MlcTake::take_with\(|::unfield\(' nexus-build/pools/rust/src/main.rs >> obs.txt
-	grep -c "= mlc::take_field(std::get<" nexus-build/pools/cpp/pool.cpp >> obs.txt
+	grep -cE "= mlc::take_field(_release)?\(std::get<" nexus-build/pools/cpp/pool.cpp >> obs.txt
 
 clean:
 	rm -rf nexus pools __pycache__ *.err

@@ -55,6 +55,9 @@ data OwnCaps = OwnCaps
   , ocLends :: NativeExpr -> Bool
   -- ^ whether a part of a value, as this projection reads it, has a value of
   -- its own type in memory to lend a reference to (OWN-6)
+  , ocSharedTakes :: Bool
+  -- ^ whether a field may be taken out of a `data` arm whatever built it,
+  -- the arm's own count of holders deciding at run time (CPP-6, EVAL-7)
   , ocTakesElems :: Bool
   -- ^ whether an element can be taken out of a list the frame owns while
   -- another part of the list is lent (OWN-5); where it cannot, the element
@@ -74,6 +77,9 @@ data PoolPlan = PoolPlan
   -- ^ per fully applied native manifold, the parameter positions it takes by
   -- value (OWN-7); also a fold's step and combine the fold alone calls
   -- (COPY-7)
+  , ppReleases :: Set.Set (Int, Int)
+  -- ^ the takes of a constructor field after which nothing names the value,
+  -- which release its arm (CPP-6)
   , ppTwoForm :: Map.Map Int (Set.Set Int)
   -- ^ per fully applied native manifold, the positions of the parameters
   -- it keeps, or keeps a part of, on some evaluations but takes by
@@ -82,16 +88,18 @@ data PoolPlan = PoolPlan
   }
 
 emptyPoolPlan :: PoolPlan
-emptyPoolPlan = PoolPlan {ppTakes = Set.empty, ppByValue = Map.empty, ppTwoForm = Map.empty}
+emptyPoolPlan = PoolPlan {ppTakes = Set.empty, ppReleases = Set.empty, ppByValue = Map.empty, ppTwoForm = Map.empty}
 
 planPool :: OwnCaps -> [SerialManifold] -> PoolPlan
 planPool caps sms =
   PoolPlan
-    { ppTakes = consumableProjectionLets (ocTagAfterTake caps) (\m -> Map.findWithDefault Set.empty m byValue <> Map.findWithDefault Set.empty m twoForm) sms
+    { ppTakes = takes
+    , ppReleases = releases
     , ppByValue = byValue
     , ppTwoForm = twoForm
     }
   where
+    (takes, releases) = consumableProjectionLets (ocTagAfterTake caps) (ocSharedTakes caps) (\m -> Map.findWithDefault Set.empty m byValue <> Map.findWithDefault Set.empty m twoForm) sms
     twoForm = settleTwo Map.empty
     settleTwo known =
       let next = twoFormGiven known
@@ -258,6 +266,7 @@ data LetMode = LetCopy | LetBorrow | LetTake
 letMode :: PoolPlan -> Int -> Int -> NativeExpr -> LetMode
 letMode pp root i rhs
   | IntrinsicN _ IntrCtorField _ (LetVarN {} : _) <- rhs, Set.member (root, i) (ppTakes pp) = LetTake
+  | IntrinsicN _ IntrCtorField _ (BndVarN {} : _) <- rhs, Set.member (root, i) (ppTakes pp) = LetTake
   | PatN _ (PatGet _ [] (NativeArgExpr _)) <- rhs, Set.member (root, i) (ppTakes pp) = LetTake
   | IntrinsicN _ IntrListElem _ (_ : _) <- rhs, Set.member (root, i) (ppTakes pp) = LetTake
   | isPlace rhs = LetBorrow
