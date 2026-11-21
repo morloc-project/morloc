@@ -1,5 +1,5 @@
 --- nestedOut ---
-[98,98]
+[98,0]
 --- nestedLoop ---
 [50,0]
 --- tagNested ---
@@ -21,7 +21,7 @@
 --- listPat ---
 [200,0]
 --- listRet ---
-[100,100]
+[100,0]
 --- twiceRead ---
 [200,0]
 --- twiceKeep ---
@@ -85,9 +85,9 @@
 --- twoLets ---
 [202,100]
 --- capStaged ---
-[103,100]
+[103,0]
 --- capStagedKeep ---
-[203,100]
+[203,0]
 --- tryLet ---
 [100,100]
 --- doTwice ---

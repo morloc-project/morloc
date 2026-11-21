@@ -1012,8 +1012,9 @@ thinClosures sinks stageTable heads es =
 -- order. A bound variable is a @&T@ reference only when it is a borrowed
 -- parameter; a shared value is a place (borrowed at reference sinks, cloned at
 -- owned sinks -- never moved); a getter of a borrowed value is a place; a
--- constructor field that is not taken, and a list element of a variable or
--- of such a field, is a reference (OWN-6); everything else is an owned value.
+-- constructor field or list element that is not taken (OWN-5), of a variable
+-- or of such a part, is a reference (OWN-6); everything else is an owned
+-- value.
 ownerPure :: Set.Set TVar -> Set.Set Int -> Set.Set Int -> NativeExpr -> IOwnership
 -- A bound variable and a let variable both render as `n<i>` and share the index
 -- namespace, so both classify the same way ('classifyIndex').
@@ -1037,14 +1038,24 @@ ownerPure h g s (PatN _ (PatGet _ [] recv)) =
 ownerPure h g s (IntrinsicN t IntrCtorField _ (subj : _))
   | not (rustIsCopy t)
   , borrowableRoot subj
-  , not (isLastRead subj && ownerPure h g s subj == Owned) =
+  , not (takenPart h g s subj) =
       BorrowedRef
 ownerPure h g s (IntrinsicN t IntrListElem _ (subj : _))
   | not (rustIsCopy t)
   , borrowableRoot subj
+  , not (takenPart h g s subj)
   , isJust (varIndex subj) || ownerPure h g s subj == BorrowedRef =
       BorrowedRef
 ownerPure _ _ _ _ = Owned
+
+-- | OWN-5: a part of an owned local at its last read is taken, and so is a
+-- part of a part taken that way, a temporary nothing else reads.
+takenPart :: Set.Set TVar -> Set.Set Int -> Set.Set Int -> NativeExpr -> Bool
+takenPart h g s x
+  | isLastRead x = ownerPure h g s x == Owned
+  | IntrinsicN _ IntrCtorField _ (x' : _) <- x = takenPart h g s x'
+  | IntrinsicN _ IntrListElem _ (x' : _) <- x = takenPart h g s x'
+  | otherwise = False
 
 -- | Classify a variable index: a borrowed parameter (in @Gamma@) is a @&T@
 -- reference; a shared value (in @Shared@, used at more than one point) is a place
@@ -3467,10 +3478,12 @@ rustLowerConfig mask makers consumed userArms =
         parens (subj <+> "==" <+> "<" <> ty <> ">::" <> pretty n)
     , lcListLenTest = \subj n -> parens (parens subj <> ".len() ==" <+> pretty n)
     -- Indexing yields a place, not a value: an element read in place is a
-    -- reference into it, and any other is cloned out, as a constructor field
-    -- is.
-    , lcListElem = \inPlace subj i ->
-        if inPlace then rustElemRef subj (fromIntegral i) else parens subj <> "[" <> pretty i <> "].clone()"
+    -- reference into it, one taken (OWN-5) is removed from the list, and any
+    -- other is cloned out, as a constructor field is.
+    , lcListElem = \how subj i -> case how of
+        FieldTake -> "{ let mut __morloc_v = " <> subj <> "; __morloc_v.swap_remove(" <> pretty i <> ") }"
+        FieldBorrow -> rustElemRef subj (fromIntegral i)
+        FieldCopy -> parens subj <> "[" <> pretty i <> "].clone()"
     , lcCoerceOptional = \x -> "Some(" <> x <> ")"
     , lcTypeOf = \t -> Just . toIType <$> rustTypeOf t
     -- The serialize / raw-deserialize types use the WIRE form: a closure nested

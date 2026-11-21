@@ -624,11 +624,10 @@ data LowerConfig m = LowerConfig
   , lcListLenTest :: MDoc -> Int -> MDoc
   -- ^ Test whether a list has exactly this many elements ('IntrListLenTest'):
   -- the subject and the length.
-  , lcListElem :: Bool -> MDoc -> Int -> MDoc
-  -- ^ Read element @i@ of a list; the flag marks an element read in place.
-  -- ^ Read the element at a 0-based index of a list ('IntrListElem'): the
-  -- subject and the index. Only ever emitted under a passing
-  -- 'lcListLenTest', so the index is in range.
+  , lcListElem :: FieldRead -> MDoc -> Int -> MDoc
+  -- ^ Read the element at a 0-based index of a list ('IntrListElem'),
+  -- taken, read in place or copied: the subject and the index. Only ever
+  -- emitted under a passing 'lcListLenTest', so the index is in range.
   , lcCoerceOptional :: MDoc -> MDoc
   -- ^ Widen a value to an optional (@CoerceToOptional@). Default is identity: in
   -- C++/Python/R a @T@ is a valid @?T@ (their serializers are schema-driven). In
@@ -1214,6 +1213,10 @@ lowerSerialExprRaw cfg _ (SerialLetS_ i (Low rhsE e1) (Low _ e2)) = case rhsE of
                 }
         lcMakeLet cfg (helperVar cfg) tmpIdx Nothing Nothing letResult releaseBody
   _ -> lcMakeLet cfg (svar cfg) i Nothing Nothing e1 e2
+lowerSerialExprRaw _ _ (NativeLetS_ i (Low (ManN (NativeManifold _ _ form _)) e1) (Low bodyE e2))
+  | isClosureForm form
+  , not (usesIndex i (RS bodyE))
+  , not (Set.member i (runIdentity (foldSerialExprM serialVarsOf bodyE))) = return (dropClosureLet e1 e2)
 -- As for a native let ('NativeLetN_'): the bound local is owned, so its RHS
 -- is an owned sink.
 lowerSerialExprRaw cfg _ (NativeLetS_ i (Low rhsE e1) (Low _ e2)) = do
@@ -1797,6 +1800,41 @@ lastReadMap v = defaultValue {mapNativeExpr = mark}
     mark (LetVarN t j _) | j == v = LetVarN t j LastRead
     mark (BndVarN t j _) | j == v = BndVarN t j LastRead
     mark e = e
+
+-- | Whether a projection's subject is a value the frame owns and reads for
+-- the last time: an owned local at its last read, or a field taken out of
+-- one, which is a temporary nothing else reads (OWN-5); likewise a list
+-- element.
+takenSubject :: (Monad m) => LowerConfig m -> NativeExpr -> m Bool
+takenSubject cfg e
+  | isLastRead e = (== Owned) <$> lcOwnership cfg e
+  | IntrinsicN _ IntrCtorField _ (s : _) <- e = takenSubject cfg s
+  | IntrinsicN _ IntrListElem _ (s : _) <- e = takenSubject cfg s
+  | otherwise = return False
+
+-- | Whether a node reads local @i@, calls it, or hands it to a manifold it
+-- builds; 'serialVarsOf' covers the context lists of remote calls and
+-- wrapped bodies.
+usesIndex :: Int -> RNode -> Bool
+usesIndex i n = here n || any (usesIndex i) (rnodeChildren n)
+  where
+    here (RN (LetVarN _ j _)) = j == i
+    here (RN (BndVarN _ j _)) = j == i
+    here (RS (LetVarS _ j)) = j == i
+    here (RS (BndVarS _ j)) = j == i
+    here (RN (AppExeN _ exe _)) = calls exe
+    here (RN (ExeN _ exe)) = calls exe
+    here (RNM (NativeManifold _ _ form _)) = any ((== i) . ann) (manifoldContext form)
+    here (RSM (SerialManifold _ _ form _ _)) = any ((== i) . ann) (manifoldContext form)
+    here _ = False
+    calls (LocalCallP j) = j == i
+    calls (PapplyP j) = j == i
+    calls _ = False
+
+-- | A closure a let binds that nothing reads: its manifolds are still
+-- defined, but the value is never built.
+dropClosureLet :: PoolDocs -> PoolDocs -> PoolDocs
+dropClosureLet closure body = body {poolCompleteManifolds = poolCompleteManifolds closure <> poolCompleteManifolds body}
 
 -- | Whether an expression is a read of a native variable marked as its last.
 isLastRead :: NativeExpr -> Bool
@@ -2797,6 +2835,10 @@ lowerNativeExprRaw cfg _ (SerialLetN_ i (Low _ x1) (Low _ x2)) = lcMakeLet cfg (
 -- A native let binds an owned local, so its RHS is an owned sink: adapt the
 -- bound value (Rust clones a borrowed/place RHS -- e.g. a getter through a
 -- borrowed receiver -- to match the owned binding type; other members unchanged).
+lowerNativeExprRaw _ _ (NativeLetN_ i (Low (ManN (NativeManifold _ _ form _)) x1) (Low bodyE x2))
+  | isClosureForm form
+  , not (usesIndex i (RN bodyE))
+  , not (Set.member i (runIdentity (foldNativeExprM serialVarsOf bodyE))) = return (dropClosureLet x1 x2)
 lowerNativeExprRaw cfg _ (NativeLetN_ i (Low rhsE x1) (Low bodyE x2)) = do
   x1' <- loopBorrowOr cfg i rhsE x1 (adaptOwnedElem cfg rhsE x1 >>= keepRhs cfg rhsE >>= lcLetRhs cfg i rhsE)
   r <- lcMakeLet cfg (nvar cfg) i (Just (typeFof rhsE)) (Just rhsE) x1' x2
@@ -3051,10 +3093,10 @@ lowerNativeExprRaw cfg origE (IntrinsicN_ _ IntrCtorField _ [Low subjectE subjec
   case typeFof subjectE of
     t@(VariantF (FV _ cv) _ arms) -> do
       ty <- nominalTypeDoc cfg t cv
-      own <- lcOwnership cfg subjectE
+      taken <- takenSubject cfg subjectE
       self <- lcOwnership cfg origE
       let how
-            | isLastRead subjectE && own == Owned = FieldTake
+            | taken = FieldTake
             | self == BorrowedRef = FieldBorrow
             | otherwise = FieldCopy
       return $ mergePoolDocs
@@ -3067,10 +3109,15 @@ lowerNativeExprRaw cfg _ (IntrinsicN_ _ IntrListLenTest _ [Low _ subjectDocs, Lo
   return $ mergePoolDocs
     (const (lcListLenTest cfg (poolExpr subjectDocs) (fromIntegral n)))
     [subjectDocs]
-lowerNativeExprRaw cfg origE (IntrinsicN_ _ IntrListElem _ [Low _ subjectDocs, Low (IntN _ i) _]) = do
+lowerNativeExprRaw cfg origE (IntrinsicN_ _ IntrListElem _ [Low subjectE subjectDocs, Low (IntN _ i) _]) = do
+  taken <- takenSubject cfg subjectE
   self <- lcOwnership cfg origE
+  let how
+        | taken = FieldTake
+        | self == BorrowedRef = FieldBorrow
+        | otherwise = FieldCopy
   return $ mergePoolDocs
-    (const (lcListElem cfg (self == BorrowedRef) (poolExpr subjectDocs) (fromIntegral i)))
+    (const (lcListElem cfg how (poolExpr subjectDocs) (fromIntegral i)))
     [subjectDocs]
 lowerNativeExprRaw cfg _ (IntrinsicN_ _ IntrFSchema _ [Low _ pathDocs]) =
   return $ pathDocs

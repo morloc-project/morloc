@@ -78,12 +78,13 @@ branch may still read it.
 
 ### OWN-5 Projecting from a moved value moves the field
 Intent: ruled 2026-10-17
-Tests: spec-own-5-1, spec-own-5-2
+Tests: spec-own-5-1, spec-own-5-2, spec-own-5-3
 Code: conforms 2026-10-17
 
 When a constructor field or a record field is read from a value at that
 value's last read, the field is moved out instead of copied, and the rest
-of the value is released. This holds for a native type with its own
+of the value is released. So is a part read from a part moved out this
+way, and in Rust a list element read from a list at its last read. This holds for a native type with its own
 destructor, as EVAL-7 allows: the value's own destructor does not run, and
 each field is released as its own value. A Rust struct mapped to a record
 therefore holds exactly the record's fields; a program whose struct holds

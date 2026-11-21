@@ -54,15 +54,6 @@ same name sees what was taken.
   (2026-10-19) and gains nothing where the let is returned: the return
   then moves instead of eliding; the helper itself would have to be the
   returned variable.
-- **An owned Rust loop local stepped through a `match` copies the rest of
-  its value every step.** [reproduced] Cost; OWN-2 counts the `match`'s tag
-  tests and its field read as reads in one step, so the field is copied
-  rather than taken (OWN-5). A loop whose local is owned (it is replaced by
-  a built value on some iteration) and steps with `tl c`, `tl` a `match`
-  returning a constructor field, copies the tail each iteration: quadratic,
-  and with a recursive `Clone` a deep value overflows the stack. Open
-  question for a ruling: may a conditional's test be sequenced before its
-  arms, so a read in the chosen arm is the last read?
 - **A nested constructor pattern in Rust copies each inner field it tests.**
   [reproduced] Cost; no ownership item covers a projection read only to be
   tested or projected again. `match c | (Link _ (Link _ rest)) = rest`

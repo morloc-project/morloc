@@ -98,13 +98,9 @@ records and user-mapped types copy deeply.
   every unchanged field each iteration, as the carried local is not among
   the lets a setter may take (`setLoop (.(.k = j) r) (j - 1)` emits
   `{n4.xs, n5}`: 100 copies over 100 steps, 2026-10-19).
-- **A Rust staged function passed as a value also builds an unused closure.**
-  [reproduced 2026-10-19] Cost. `capStaged` in copy-census-rust (`f x =
-  let z = chainLen c + x in \y -> z + y`, `f` passed to a function that
-  applies it) emits `let n14 = { let __caps = (n9.clone(),); local1(...) }`
-  that nothing reads, besides the staged value: one full clone of the
-  captured chain (100 of the shape's 100). The per-level `__xj.clone()` of
-  a pap with no stage feeds only `pap(&...)` and could borrow.
+- **A pap with no stage clones each argument it holds per level.** [read]
+  Cost. The per-level `__xj.clone()` of a partial application with no
+  stage feeds only `pap(&...)` and could borrow.
 - **C++ closure forms copy each capture several times.** [read; not
   reproduced 2026-10-19] Per
   capture not moved: a `MorlocClosure` 2 (binder and reify thunk), a pap 6

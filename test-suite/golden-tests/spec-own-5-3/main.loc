@@ -1,0 +1,52 @@
+-- Spec OWN-5: a part read from a part moved out of a value at its last read
+-- is moved too, and in Rust so is a list element read from a list at its
+-- last read. `Chain` is a Rust type whose Clone counts the links it copies;
+-- each export prints its result and the links copied.
+--   nested   the rest under two links of a fresh chain
+--   elem     the first of a fresh list of two chains
+--   elemRest the rest under the first link of the first of two chains
+module main (nested, elem, elemRest)
+
+import root-rust
+
+data Chain = End | Link Int Chain
+data Rust => Chain = "Chain"
+
+record Holder where
+  c :: Chain
+  k :: Int
+record Rust => Holder = "Holder"
+
+source Rust from "chain.rs"
+  ( "clones", "mk_chain" as mkChain, "chain_len" as chainLen
+  , "mk_holder" as mkHolder, "mk_tup" as mkTup )
+
+clones :: Int -> (Int, Int)
+mkChain :: Int -> Chain
+chainLen :: Chain -> Int
+mkHolder :: Int -> Holder
+mkTup :: Int -> (Chain, Int)
+
+second :: Chain -> Int
+second c = match c
+  | (Link _ (Link _ rest)) = chainLen rest
+  | _ = 0
+
+firstOf :: [Chain] -> Chain
+firstOf xs = match xs
+  | [x, _] = x
+  | _ = End
+
+restOfFirst :: [Chain] -> Int
+restOfFirst xs = match xs
+  | [Link _ rest, _] = chainLen rest
+  | _ = 0
+
+nested :: Int -> (Int, Int)
+nested n = clones (second (mkChain n))
+
+elem :: Int -> (Int, Int)
+elem n = clones (chainLen (firstOf [mkChain n, mkChain n]))
+
+elemRest :: Int -> (Int, Int)
+elemRest n = clones (restOfFirst [mkChain n, mkChain n])
