@@ -38,7 +38,7 @@ import Morloc.CodeGenerator.Grammars.Translator.Imperative
   , consumedParams
   , borrowableRoot
   , isBorrowableProjection
-  , loopBorrowLocals
+  , loopBorrowLocalsExcept
   , ownedPartLets
   , usesIndex
   , nativeManifoldsUnder
@@ -300,14 +300,17 @@ letPlan lets =
     }
   where
     reused = Map.keysSet (Map.filter (> (1 :: Int)) (Map.fromListWith (+) [(i, 1) | (i, _, _) <- lets]))
-    baseVar e = case e of
-      NativeLetN _ _ b -> baseVar b
-      LetVarN _ j _ -> Just j
-      BndVarN _ j _ -> Just j
-      IntrinsicN _ IntrCtorField _ (x : _) -> baseVar x
-      IntrinsicN _ IntrListElem _ (x : _) -> baseVar x
-      PatN _ (PatGet _ [] (NativeArgExpr x)) -> baseVar x
-      _ -> Nothing
+
+-- | The variable at the base of a projection a let may refer into.
+baseVar :: NativeExpr -> Maybe Int
+baseVar e = case e of
+  NativeLetN _ _ b -> baseVar b
+  LetVarN _ j _ -> Just j
+  BndVarN _ j _ -> Just j
+  IntrinsicN _ IntrCtorField _ (x : _) -> baseVar x
+  IntrinsicN _ IntrListElem _ (x : _) -> baseVar x
+  PatN _ (PatGet _ [] (NativeArgExpr x)) -> baseVar x
+  _ -> Nothing
 
 -- | Every native let under a manifold, with its right-hand side, nested
 -- manifolds included.
@@ -389,7 +392,18 @@ borrowPlan caps pp borrowed n =
       _ -> Nothing
     universe m = m : concatMap universe (rnodeChildren m)
     start = borrowed <> Map.keysSet owned
-    refs = start <> loopBorrowLocals (lendable caps) start n
+    refs = settleRefs Set.empty
+    settleRefs skip =
+      let rs = start <> loopBorrowLocalsExcept (lendable caps) skip start n
+          -- a take from a reference copies instead
+          late = Set.filter (\d -> any (\t -> any (\j -> Set.notMember j rs && afterTake d j t) (chain d)) takes) (rs `Set.difference` start)
+       in if Set.null late then rs else settleRefs (skip <> late)
+    -- the values a local refers into, through the lets that refer into them
+    chain d = go (Set.singleton d) (Map.lookup d bases)
+      where
+        go seen (Just j) | Set.notMember j seen = j : go (Set.insert j seen) (Map.lookup j bases)
+        go _ _ = []
+    bases = Map.fromList [(i, j) | m <- universe n, Just (i, RN rhs, _) <- [rnodeLet m], Just j <- [baseVar rhs]]
 
 -- | Per-index variable-use counts over a manifold (OWN-2). Every read
 -- counts, borrows included; the two arms of an 'IfN' count as their larger

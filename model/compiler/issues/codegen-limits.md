@@ -108,4 +108,9 @@ Generated code that a language's own tools refuse.
   main.loc with its export list cut to
   `(c000, c288, c056, c348)` fails rustc E0277 "`Pay: ToVoidstar` is not
   satisfied" in the generated `Bx` impls (the whole list builds). Same
-  result before and after the 2026-11-21 Rust marking change.
+  result before and after the 2026-11-21 Rust marking change. Narrower
+  (2026-11-21): the export list `(c558)` alone fails, a one-function
+  `readBox (Bx (mkp n) j)` fails, and `(c546, c558)` builds: with the
+  recursive `c546lp` in the pool the arm's impls call
+  `variant_payload_converted` with `pay_unpack`, without it they call
+  `variant_payload` on the raw `Pay`.

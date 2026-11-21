@@ -88,12 +88,6 @@ same name sees what was taken.
   GoldenMakefileTests.hs sets it, so a user build compiles a C++ pool that
   reads a moved-from value. Rust relies on rustc, whose error does not
   name OWN-1. Cost of enabling it by default is unmeasured.
-- **Do OWN-1..7 bind C++?** [read, 2026-10-21] ownership.md's preamble
-  and codegen-copies.md say C++ copies more than OWN-1..7 allow, yet the
-  items name no language, are marked conforms, and Cpp.hs cites OWN-2/3/5/7.
-  Either each item says it is Rust-only, or C++ is `deviates` against
-  codegen-copies.md.
-
 - **A same-pool serial call's result is never released.** [read, 2026-10-24]
   `isCallResult` (Translator/Imperative.hs) excludes `AppRecS` on the
   premise that a callee may return an argument packet as it is. In C++ and
@@ -114,19 +108,3 @@ same name sees what was taken.
   golden own7-matrix-cpp caught it (15 cases read a moved payload). A check
   that recomputes last reads, or that reads the moves from the rendered
   code, would close the gap.
-- **A call of a local function is not a read in last-read marking.**
-  [reproduced in Rust, read in C++] Code violates OWN-2: `readCounts`
-  (Imperative.hs) counts `LetVarN`/`BndVarN` only, so in `f a` (an
-  `AppExeN` of `LocalCallP f`) `f` is not read, and a value `f` refers
-  into may be marked last before the call. Rust binds no function-typed
-  let as a reference into an owned value (`ownedPartLets` skips them); a
-  version that did failed rustc E0505 in golden
-  variant-closures-crossing-rust (`unboxG`: `f` borrowed from `b`, then
-  `.1 b` took `b`). C++ binds a constructor-field let of function type by
-  reference (`cppLetMode` LetBorrow), so the same shape may read a moved
-  closure there. Probed 2026-11-21 under ASan and payload checks: a closure
-  stored in a tuple and called after, and a function field of a `data`
-  value bound by reference and called beside a move of the value into a
-  list, both give the right value; the generated code calls the function
-  before the move, an order nothing guarantees. `usesIndex` already counts
-  `LocalCallP` and `PapplyP` as uses.

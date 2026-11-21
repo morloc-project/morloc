@@ -63,6 +63,7 @@ import Morloc.CodeGenerator.Grammars.Translator.Imperative
   , RNode (..)
   , rnodeChildren
   , varIndex
+  , rnodeLet
   , expandDeserialize
   , expandSerialize
   , nativeToWire
@@ -563,6 +564,9 @@ data CppTranslatorState = CppTranslatorState
   -- ^ the loop slots that refer to what they start from
   , translatorLentParams :: Set.Set Int
   -- ^ the parameters the segment's manifolds take by reference
+  , translatorScopedTakes :: Set.Set Int
+  -- ^ the projection lets whose subject the manifold they are in owns: a
+  -- let, a loop slot it owns or a parameter it takes by value
   , translatorGenDefs :: Map.Map TVar GenDef
   -- ^ Each generated record's definition from its declaration (GEN-9).
   , translatorExtras :: Extras
@@ -623,6 +627,7 @@ instance Defaultable CppTranslatorState where
       , translatorOwnedVars = Set.empty
       , translatorBorrowedSlots = Set.empty
       , translatorLentParams = Set.empty
+      , translatorScopedTakes = Set.empty
       , translatorGenDefs = Map.empty
       , translatorExtras = noExtras
       , translatorDataDefs = Map.empty
@@ -1075,43 +1080,46 @@ cppLetMode i rhs = do
   handles <- CMS.gets translatorHandles
   defs <- CMS.gets translatorLetDefs
   case letMode pp root i rhs of
-    -- a let bound once naming a reference is a reference too (OWN-2)
+    -- a let bound once naming a reference is a reference too (OWN-2): a
+    -- let bound to one, a borrowed loop slot or a borrowed parameter
     LetCopy
-      | Map.member i defs, LetVarN _ j _ <- letValue rhs, Just jrhs <- Map.lookup j defs -> do
+      | Map.member i defs, Just j <- varIndex (letValue rhs), Just jrhs <- Map.lookup j defs -> do
           jmode <- cppLetMode j jrhs
           return (if jmode == LetBorrow then LetBorrow else LetCopy)
+      | Map.member i defs, Just j <- varIndex (letValue rhs) -> do
+          st <- CMS.get
+          let lent = Set.member j (translatorBorrowedSlots st) || Set.member j (translatorLentParams st)
+          return (if lent then LetBorrow else LetCopy)
       | otherwise -> return LetCopy
     mode -> do
       typestr <- cppTypeOf (typeFof rhs)
       case () of
         _ | isScalarCppType typestr -> return LetCopy
           | LetTake <- mode, PatN _ (PatGet _ [] (NativeArgExpr v)) <- rhs -> do
-              owned <- ownsVar v
+              owned <- ownsVar i v
               -- a handle's fields are behind a shared pointer
               let handle = maybe False (`Map.member` handles) (recordNameOf (typeFof v))
               return (if owned && not handle then LetTake else LetBorrow)
           | LetTake <- mode, IntrinsicN _ IntrListElem _ (v : _) <- rhs -> do
-              owned <- ownsVar v
+              owned <- ownsVar i v
               return (if owned then LetTake else LetBorrow)
           | LetTake <- mode, IntrinsicN _ IntrCtorField _ (v : _) <- rhs -> do
-              owned <- ownsVar v
+              owned <- ownsVar i v
               return (if owned then LetTake else LetBorrow)
           | otherwise -> return mode
   where
     -- A move out of a value the frame does not own would copy it.
-    ownsVar v = case v of
-      LetVarN _ j _ -> owned j
-      BndVarN _ j _ -> owned j
-      _ -> return False
+    -- the subject of let @k@ is owned in the manifold the let is in
+    ownsVar k v = do
+      scoped <- CMS.gets translatorScopedTakes
+      case varIndex v of
+        Just j | Set.member k scoped -> owned j
+        _ -> return False
     owned j = do
-      vars <- CMS.gets translatorOwnedVars
       defs <- CMS.gets translatorLetDefs
-      lent <- CMS.gets translatorLentParams
       case Map.lookup j defs of
-        _ | Set.member j vars -> return True
-          | Set.member j lent -> return False
         Just jrhs -> (/= LetBorrow) <$> cppLetMode j jrhs
-        Nothing -> return False
+        Nothing -> return True
 
 -- | A kept element (OWN-2).
 cppKeepElem :: NativeExpr -> MDoc -> CppTranslatorM MDoc
@@ -1735,7 +1743,27 @@ PROPAGATE_ERROR(errmsg)|]
                 CMS.modify
                   (\s -> s {translatorLocalManifoldSet = Set.insert callIndex (translatorLocalManifoldSet s)})
             returnTypeStr <- returnType manifoldType
-            typedArgs <- mapIndexedM (cppParamOf callIndex) args
+            typedArgs0 <- mapIndexedM (cppParamOf callIndex) args
+            -- The by-value form owns what it is given: each such parameter
+            -- moves into a local the body names, released when the call
+            -- returns whether or not it is kept (OWN-7).
+            owned <-
+              if twin
+                then fmap concat . sequence $
+                  [ do
+                      taken <- cppTwinPosition callIndex j t
+                      if taken
+                        then do
+                          ty <- cppTypeOf t
+                          let v = (nvarNamer cppLocals) i
+                          return [(j, ty <> "&&" <+> v <> "_given", ty <+> v <+> "= std::move(" <> v <> "_given);")]
+                        else return []
+                  | (j, Arg i t) <- indexed args
+                  ]
+                else return []
+            let typedArgs = [maybe a (\(_, d, _) -> d) (lookup j [(k, x) | x@(k, _, _) <- owned]) | (j, a) <- indexed typedArgs0]
+                takeLines = [l | (_, _, l) <- owned]
+                priorLines' = takeLines <> priorLines
             let debugMode = translatorDebugMode state
                 -- Outside --debug a frame is a call of a named function,
                 -- labeled with its definition (DIAG-5); any other manifold
@@ -1759,14 +1787,14 @@ PROPAGATE_ERROR(errmsg)|]
                   Nothing -> []
                 innerBlock
                   -- STATE-6: a failure passes on as it was thrown.
-                  | debugMode = vsep (frameScope : priorLines <> [body])
+                  | debugMode = vsep (frameScope : priorLines' <> [body])
                   | isClosure =
                       vsep
                         [ "size_t _mlc_saved = mlc::frame_enter();"
-                        , block 4 "try" (vsep (framePush <> priorLines <> [body]))
+                        , block 4 "try" (vsep (framePush <> priorLines' <> [body]))
                             <+> block 4 "catch (...)" "_mlc_closure_rethrow(_mlc_saved);"
                         ]
-                  | otherwise = vsep (framePush <> priorLines <> [body])
+                  | otherwise = vsep (framePush <> priorLines' <> [body])
             -- Wrap labeled manifolds with a chrono start/pass/fail shim,
             -- using user-supplied templates (from YAML 'log-template').
             -- Each event has its own pre-rendered template; a 'Nothing'
@@ -2408,6 +2436,35 @@ stageLookupDoc tbl =
     , "}"
     ]
 
+-- | The lets projecting a part of a variable that the manifold the let is
+-- in owns: a let or loop slot of that manifold (but a slot in @lentSlots@),
+-- or a parameter it takes by value (@byValue m form@). A nested manifold
+-- names its caller's variables by the same indices, so ownership is a
+-- question about one manifold, never about an index (OWN-5, OWN-7).
+scopedTakes :: (Int -> ManifoldForm (Or TypeS TypeF) TypeF -> Set.Set Int) -> Set.Set Int -> RNode -> Set.Set Int
+scopedTakes byValue lentSlots = go Set.empty
+  where
+    go own n = case n of
+      RNM (NativeManifold m _ form _) ->
+        Set.unions (map (go (byValue m form)) (rnodeChildren n))
+      RSM _ -> Set.unions (map (go Set.empty) (rnodeChildren n))
+      RN (LoopN _ starts _) ->
+        let own' = own <> (Set.fromList (map fst starts) `Set.difference` lentSlots)
+         in Set.unions (map (go own') (rnodeChildren n))
+      RS (LoopS _ ids _) ->
+        Set.unions (map (go (own <> Set.fromList ids)) (rnodeChildren n))
+      _ -> case rnodeLet n of
+        Just (k, rhs, body) ->
+          let here = [k | Just j <- [subjectOf rhs], Set.member j own]
+           in Set.fromList here <> go own rhs <> go (Set.insert k own) body
+        Nothing -> Set.unions (map (go own) (rnodeChildren n))
+    subjectOf (RN e) = case e of
+      PatN _ (PatGet _ [] (NativeArgExpr v)) -> varIndex v
+      IntrinsicN _ IntrListElem _ (v : _) -> varIndex v
+      IntrinsicN _ IntrCtorField _ (v : _) -> varIndex v
+      _ -> Nothing
+    subjectOf _ = Nothing
+
 -- | The slots of the loops under a node that refer to what they start
 -- from: no continue changes them, and they start from a parameter of the
 -- enclosing manifold that it takes by reference (not in @byValue@), so the
@@ -2503,7 +2560,8 @@ prepareSegment m0@(SerialManifold root _ _ _ _) = do
       params = Set.unions (Map.elems byValue) `Set.difference` loopSlots (RSM m0)
   let borrowed = borrowedSlots params (RSM m0)
       lent = Set.fromList [i | NativeManifold _ _ form _ <- nativeManifoldsUnder (RSM m0), Arg i _ <- typeMofForm form] `Set.difference` params
-  CMS.modify (\st -> st {translatorLentParams = lent, translatorCurrentRoot = root, translatorLetDefs = Map.fromList [d | d@(i, _) <- lets, Set.member i once], translatorOwnedVars = params <> (loopSlots (RSM m0) `Set.difference` borrowed), translatorBorrowedSlots = borrowed})
+  let scoped = scopedTakes (\m form -> byValueIndices pp m form) borrowed (RSM m0)
+  CMS.modify (\st -> st {translatorLentParams = lent, translatorScopedTakes = scoped, translatorCurrentRoot = root, translatorLetDefs = Map.fromList [d | d@(i, _) <- lets, Set.member i once], translatorOwnedVars = params <> (loopSlots (RSM m0) `Set.difference` borrowed), translatorBorrowedSlots = borrowed})
   modes <- mapM (\(i, rhs) -> (\m -> (i, rhs, m)) <$> cppLetMode i rhs) lets
   let plan = letPlan modes
       held = lpHeld plan

@@ -8,6 +8,7 @@ all:
 	./nexus dropsLive 2 >> obs.txt 2>> obs.err
 	./nexus twice 2 >> obs.txt 2>> obs.err
 	./nexus asValue 2 >> obs.txt 2>> obs.err
+	./nexus releases 2 >> obs.txt 2>> obs.err
 
 clean:
 	rm -rf nexus pools __pycache__

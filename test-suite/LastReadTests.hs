@@ -88,6 +88,16 @@ borrowCases =
     , testCase "spec-own-6-16" $
         borrows [(1, par 5)] (cont [IfN ty (NativeLetN 12 (IfN ty (tag 1 "Link") (IntrinsicN ty IntrTagTest Nothing [field 1, StrN fv "Link"]) (LogN fv False)) (rd 12)) (NativeLetN 11 (IntrinsicN ty IntrCtorField Nothing [field 1, StrN fv "Link", IntN fv 1]) (rd 11)) (rd 1)])
           @?= [1, 11]
+    -- a let in a serial body naming part of a borrow is a borrow, and so
+    -- is one naming part of it
+    , testCase "spec-own-6-18" $
+        Set.toList (loopBorrowLocals (const True) (Set.singleton 5) (RS (NativeLetS 10 (field 5) (NativeLetS 11 (field 10) (LetVarS Nothing 3)))))
+          @?= [10, 11]
+    -- a loop's let that refers into a value the frame owns stays a borrow,
+    -- and so does a let naming part of it
+    , testCase "spec-own-6-19" $
+        Set.toList (loopBorrowLocals (const True) (Set.fromList [5, 10]) (RN (LoopN ty [(1, IntN fv 0)] (LoopNLet 10 (tup [rd 1]) (LoopNLet 11 (field 10) (LoopBase (rd 11)))))))
+          @?= [11]
     ]
   where
     par i = BndVarN ty i KeptRead

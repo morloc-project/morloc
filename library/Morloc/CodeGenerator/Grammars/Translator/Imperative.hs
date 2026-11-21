@@ -75,6 +75,7 @@ module Morloc.CodeGenerator.Grammars.Translator.Imperative
   , markLastReadsInNative
   , namedIn
   , loopBorrowLocals
+  , loopBorrowLocalsExcept
   , ownedPartLets
   , usesIndex
   , paramReads
@@ -1374,7 +1375,7 @@ consumableProjectionLets tagAfterMove sharedTakes byValue sms = (fresh <> parts,
     , isJust (moveWalk tagAfterMove (const Set.empty) (Set.singleton subjIdx) Nothing subjIdx letIdx False (RS body))
     ]
   candidates =
-      [ (root, letIdx, field, walk, siblings)
+      [ (root, letIdx, field, walkReleased, siblings)
       | sm@(SerialManifold root _ _ _ body) <- sms
       , let scan = scanSM sm
             projected = Map.fromListWith (+) [(l, 1 :: Int) | (l, _) <- csGetters scan]
@@ -1386,6 +1387,8 @@ consumableProjectionLets tagAfterMove sharedTakes byValue sms = (fresh <> parts,
             siblings = [i | (i, rhs) <- defs, Just f <- [fieldOf rhs], Just f /= field, (varIndex =<< subjectOf rhs) == Just subjIdx]
             names others = refersInto [d | d@(i, _) <- defs, i /= letIdx, i `notElem` others] subjIdx
             walk others = isJust (moveWalk False byValue (names others) (if null others then Nothing else field) subjIdx letIdx False (RS body))
+            -- after a release nothing may read the arm, another field included
+            walkReleased others = isJust (moveWalk False byValue (names others) Nothing subjIdx letIdx False (RS body))
       , sharedTakes || field == Nothing
       , walk siblings
       -- a field read from an arm another value may share is taken only
@@ -2002,17 +2005,26 @@ isLastRead _ = False
 -- own scope, and an index bound more than once under the manifold never
 -- qualifies.
 loopBorrowLocals :: (NativeExpr -> Bool) -> Set.Set Int -> RNode -> Set.Set Int
-loopBorrowLocals mayBorrow g root = go g root
+loopBorrowLocals mayBorrow = loopBorrowLocalsExcept mayBorrow Set.empty
+
+-- | 'loopBorrowLocals' where no let in @skip@ qualifies.
+loopBorrowLocalsExcept :: (NativeExpr -> Bool) -> Set.Set Int -> Set.Set Int -> RNode -> Set.Set Int
+loopBorrowLocalsExcept mayBorrow skip g root = go g root
   where
     go env n = case n of
-      RN (NativeLetN i rhs body)
-        | not (Set.member i reused)
-        , isJust (borrowPartOf mayBorrow (`Set.member` env) rhs) ->
-            Set.insert i (go env (RN rhs) <> go (Set.insert i env) (RN body))
       RN (LoopN _ starts body) ->
-        let b = loopBorrows mayBorrow env reused starts body
+        let b = loopBorrows mayBorrow env (reused <> skip) starts body
          in b <> mconcat (map (go (env <> b)) (filter (not . isManifold) (rnodeChildren n)))
+      _
+        | Just (i, RN rhs, body) <- rnodeLet n
+        , not (isNativeLoopLet n)
+        , not (Set.member i reused || Set.member i skip)
+        , isJust (borrowPartOf mayBorrow (`Set.member` env) rhs) ->
+            Set.insert i (go env (RN rhs) <> go (Set.insert i env) body)
       _ -> mconcat (map (go env) (filter (not . isManifold) (rnodeChildren n)))
+    -- a native loop's lets are found by 'loopBorrows'
+    isNativeLoopLet (RLN _) = True
+    isNativeLoopLet _ = False
     reused = Map.keysSet (Map.filter (> (1 :: Int)) (Map.fromListWith (+) [(i, 1) | i <- bindings root]))
     bindings n = loopIds n <> maybe [] (\(i, _, _) -> [i]) (rnodeLet n) <> concatMap bindings (rnodeChildren n)
     loopIds (RN (LoopN _ starts _)) = map fst starts
@@ -2066,7 +2078,7 @@ ownedPartLets mayBorrow lendElems g root = base <> siblings
     isManifold (RNM _) = True
     isManifold (RSM _) = True
     isManifold _ = False
-    -- a call of a local function is not a read (readCounts)
+    -- a function value is never lent
     isFunction FunF {} = True
     isFunction _ = False
 
@@ -2145,7 +2157,7 @@ loopBorrows mayBorrow g reused starts body = settle (Set.fromList [i | (i, s) <-
        in if b' == b then Set.union b lets else settle b'
     scan env (LoopNLet i rhs k)
       | borrowPart env rhs && not (Set.member i reused) = let (l, bad) = scan (Set.insert i env) k in (Set.insert i l, bad)
-      | otherwise = scan (Set.delete i env) k
+      | otherwise = scan (if Set.member i g then env else Set.delete i env) k
     scan env (LoopSLet _ _ k) = scan env k
     scan env (LoopIf _ t e) = scan env t <> scan env e
     scan _ (LoopBase _) = (Set.empty, Set.empty)

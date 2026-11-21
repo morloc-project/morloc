@@ -11,7 +11,10 @@
 --   twice       one local passed as both arguments: one copy
 --   asValue     a partial application: the reference form, one copy, and
 --               one of the value the closure captures
-module main (temps, lastRead, callerKeeps, mixed, dropsLive, twice, asValue)
+--   releases    the by-value form of a function that is not a loop releases
+--               the argument it drops before it returns: one payload is
+--               alive while its result is read
+module main (temps, lastRead, callerKeeps, mixed, dropsLive, twice, asValue, releases)
 
 import root
 import root-cpp
@@ -22,10 +25,11 @@ type Cpp => Pay = "Pay"
 instance Packable Int Pay where
   source Cpp from "pay.hpp" ("pay_pack" as pack, "pay_unpack" as unpack)
 
-source Cpp from "pay.hpp" ("mkp", "keyp", "census")
+source Cpp from "pay.hpp" ("mkp", "keyp", "livep", "census")
 
 mkp :: Int -> Pay
 keyp :: Pay -> Int
+livep :: Pay -> Int
 census :: Int -> (Int, Int)
 
 pick :: Int -> Pay -> Pay -> Pay
@@ -54,3 +58,15 @@ twice n = census (let a = mkp 7 in keyp (pick n a a))
 
 asValue :: Int -> (Int, Int)
 asValue n = census (sum (map keyp (map (pick n (mkp 7)) [mkp 8])))
+
+chooseNT :: Int -> Pay -> Pay -> Pay
+chooseNT j a b
+  ? j <= 0 = a
+  : ? j == 1 = b
+  : lid (chooseNT (j - 2) a b)
+
+lid :: Pay -> Pay
+lid p = p
+
+releases :: Int -> (Int, Int)
+releases n = census (livep (chooseNT (n - 1) (mkp 7) (mkp 8)))

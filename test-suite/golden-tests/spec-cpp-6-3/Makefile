@@ -4,6 +4,8 @@ all:
 	ASAN_OPTIONS=detect_leaks=0 ./nexus rebuild 10 >> obs.txt 2>> obs.err
 	ASAN_OPTIONS=detect_leaks=0 ./nexus shared 10 >> obs.txt 2>> obs.err
 	ASAN_OPTIONS=detect_leaks=0 ./nexus twoHolders 10 >> obs.txt 2>> obs.err
+	ASAN_OPTIONS=detect_leaks=0 ./nexus lentPart 10 >> obs.txt 2>> obs.err
+	ASAN_OPTIONS=detect_leaks=0 ./nexus threeFields 1 >> obs.txt 2>> obs.err
 
 clean:
 	rm -rf nexus pools __pycache__

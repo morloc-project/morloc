@@ -79,7 +79,10 @@ PAYLOADS = {"P": 1, "R": 1, "T": 1, "L": 2, "D": 0, "N": 1}
 def predict(k, mode, caller, j):
     # A part of a list is one element.
     each = 1 if mode == "part" else PAYLOADS[k]
-    return each * predict_one(caller, j)
+    # A part a function returns (lhead, boxPay) is a copy of it: a function
+    # returns a value, not a reference into its argument (OWN-8).
+    returned = 1 if caller == "aliasAfter" and k in ("L", "D") else 0
+    return each * predict_one(caller, j) + returned
 
 
 def predict_one(caller, j):

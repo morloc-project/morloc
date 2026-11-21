@@ -15,9 +15,8 @@ and a release have no observable effect. EVAL-7 requires exactly that of
 every native type, so any placement that keeps the target affine is correct,
 and the items below choose one that copies less.
 
-The items govern generated Rust and C++. C++ moves at only some keeping
-positions, so it copies more than they allow
-(compiler/issues/codegen-copies.md). Python and R share values by reference,
+The items govern generated Rust and C++. Where either copies more than
+they allow, the copy is recorded in compiler/issues/codegen-copies.md. Python and R share values by reference,
 so a copy there is never made.
 
 ### OWN-1 No path reads a value after it is moved
@@ -94,7 +93,7 @@ for all but one of those reads.
 
 ### OWN-6 A loop that only walks what it was lent borrows it
 Intent: ruled 2026-10-17
-Tests: spec-own-6-1, spec-own-6-2, spec-own-6-3, spec-own-6-4, spec-own-6-5, spec-own-6-6, spec-own-6-7, spec-own-6-8, spec-own-6-9, spec-own-6-10, spec-own-6-11, spec-own-6-12, spec-own-6-13, spec-own-6-14, spec-own-6-15, spec-own-6-16, spec-own-6-17
+Tests: spec-own-6-1, spec-own-6-2, spec-own-6-3, spec-own-6-4, spec-own-6-5, spec-own-6-6, spec-own-6-7, spec-own-6-8, spec-own-6-9, spec-own-6-10, spec-own-6-11, spec-own-6-12, spec-own-6-13, spec-own-6-14, spec-own-6-15, spec-own-6-16, spec-own-6-17, spec-own-6-18, spec-own-6-19
 Code: conforms 2026-10-17
 
 A value a tail loop carries is a borrow, not a copy, when it starts from a
@@ -134,9 +133,14 @@ every such argument, being a temporary or a value it reads for the last
 time (OWN-2, OWN-3), and the first otherwise, so a branch that keeps
 nothing copies nothing, and a copy happens only where the caller still
 needs its value. In C++ the forms are overloads of one name, `const T&` and
-`T&&`, so the call's arguments select the form. A field of a C++ `data`
-arm is taken from a parameter only as CPP-6 allows. A closure keeps taking
-its parameters by reference, since its signature is shared by every caller.
+`T&&`, so the call's arguments select the form; the second moves each such
+parameter into a local when it starts, so what it does not keep is
+released when it returns. A scalar or function-valued parameter has one
+form. A field of a C++ `data` arm is taken only from a value the manifold
+the take is in owns, and only as CPP-6 allows. A closure keeps taking its
+parameters by reference, since its signature is shared by every caller;
+the step of a fold that captures nothing is the exception, taking its
+accumulator by value (COPY-7).
 
 ### OWN-8 A function that returns part of what it borrowed returns a reference
 Intent: open

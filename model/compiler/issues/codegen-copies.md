@@ -1,9 +1,8 @@
 # Copies in generated C++ and Rust
 
 Where an owning backend copies a value that no later read needs. All of
-these are cost, not correctness, and gaps in model/compiler/codegen/ownership.md:
-OWN-1..7 cover Rust tail loops and by-value parameters only, and C++ is held
-to none of them. Python and R share values by reference and copy only at the
+these are cost, not correctness, against the items of
+model/compiler/codegen/ownership.md, which bind generated Rust and C++. Python and R share values by reference and copy only at the
 wire. Reproduced 2026-10-17 at 9f24abe4 by counting copies (a counting Rust
 `Clone`, C++ allocations of a 64 KiB payload); entries already in
 codegen-ownership.md are not repeated.
@@ -21,17 +20,38 @@ records and user-mapped types copy deeply.
   whose arms are fields (`count 0 (match r | Good c = c ...)`), and a
   non-tail recursion that rebuilds a chain (`inc`, quadratic). C++: lets borrow, but a
   tail loop's lets and a list element do not (`auto n = ...`), so a nested
-  pattern in a loop copies each bound field per step. The Rust cases of
-  golden own7-matrix-rust above OWN-7's prediction (column 7 of cases.tsv)
-  are all this copy in the caller's reader (`.t.clone()` of a nested
-  record, `.p.clone()` of a borrowed record's field), 2026-11-21.
-- **OWN-7's two forms deviate in C++.** [reproduced 2026-11-21, golden
-  own7-matrix-cpp] A record kept by a nested
-  conditional, called through `map (f j)`, copies once more than
-  predicted (R ret nested pap: 2 at j=1, 1 at j=0); the same shape with
-  one conditional does not. A list kept in part by a recursive function
-  that a loop calls on its carried list copies the element twice per
-  step (L part rec loop: 6, predicted 3).
+  pattern in a loop copies each bound field per step. A Rust let bound to
+  a part of a part of a value the frame owns is read in place (OWN-2,
+  OWN-6; spec-own-6-18, spec-own-6-19). The cases of goldens
+  own7-matrix-cpp and own7-matrix-rust still above OWN-7's prediction
+  (column 7 of cases.tsv) are kinds L and D with caller aliasAfter, one
+  copy each: the part is taken through a function that returns a value
+  (`lhead`, `boxPay`), which is OWN-8, 2026-11-21.
+- **A move into a call is decided per callee, not per call site (OWN-2,
+  OWN-7).** [read 2026-11-21, Imperative.hs lastBuilds] A call may move a
+  value only when every call of that manifold is the value's last read, so
+  a manifold called at two sites copies at both even where one could move.
+  It feeds cppMovesInto and rustBuildOwnership. Not yet reproduced.
+- **A parameter read under its caller's let index is not found by-value
+  (OWN-7).** [read 2026-11-21, Imperative.hs consumedParams] Only BndVarN
+  reads in loop starts and built values count, so a parameter the callee
+  reads as a LetVarN gets two forms instead of one by-value form, and the
+  mode stops carrying up the chain. Not yet reproduced.
+- **A C++ arm whose fields are kept beside a nested pattern copies them
+  (OWN-5).** [reproduced 2026-11-21] With `data T3 = T3 Pay Pay Bx`,
+  `match t | (T3 a b (Bx q k)) = sum (map keyp (pair a b)) + keyp q + k`
+  on a fresh value copies `a` and `b` (2 copies) where `firstTwo`, with a
+  plain third field, takes both (0).
+- **A C++ function value copies each argument it is called with.**
+  [reproduced 2026-11-21, golden own7-matrix-cpp R ret nested pap] A
+  partial application bound to a let is a `std::function<R(T)>`, whose
+  parameter is by value, so calling it on an lvalue copies the argument
+  even when the function keeps nothing (2 copies at j=1, 1 at j=0; the same
+  partial application passed inline is a binder that forwards a reference,
+  and copies nothing). The copy is in the C++ type of a function value,
+  which user headers receive, not in OWN-7's choice of form; declaring
+  such a let `auto` breaks reified closures, nested binders and returned
+  function values (13 goldens).
 - **A `match` arm that builds a constant makes a walking loop own its
   value.** [reproduced] `tl c = match c | End = End | (Link _ rest) = rest`
   stepped in a Rust tail loop copies the rest of the chain each step
@@ -130,19 +150,6 @@ records and user-mapped types copy deeply.
   with the tagged reader directly; the stream files are identical. A map
   whose function is a representation cast could be the identity on the
   list.
-- **A Rust value kept inside an inlined nested function is cloned there.**
-  [reproduced 2026-10-19] Gap in OWN-7. `both a c = a + count 0 c` called
-  as `both (chainLen c) (prepend 0 c)` (or with the arguments swapped)
-  reads `c` with `chain_len(&c)` first, then passes `&c` to a manifold
-  whose nested manifold builds `Link(0, n6.clone())`: one full clone of the
-  chain (100 for 100 links), though the caller's read is its last. The
-  order of the two reads is already right in and out of loops, in C++ and
-  Rust; the copy is the nested manifold's parameter mode, which stays a
-  borrow although it keeps the value. C++ copies nothing here (`data`
-  arms are shared). A let read once by a constructor copies the same way:
-  `let c = mkChain n in chainLen (Link 1 c)` builds the `Link` in a nested
-  manifold given `&c` (100 clones, reproduced 2026-11-09).
-
 - **Under `--debug` a base case calls its own pool through the socket.**
   [reproduced by review, 2026-10-24] Building golden spec-cost-12-1 with
   `morloc make --debug`, the C++ base case of `loop` (`do b`) becomes a

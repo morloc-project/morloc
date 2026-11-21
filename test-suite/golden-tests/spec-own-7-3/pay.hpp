@@ -85,4 +85,9 @@ inline int pay_unpack(const Pay& p) { return p.key(); }
 inline Pay mkp(int k) { return Pay(k); }
 inline int keyp(const Pay& p) { return p.key(); }
 inline int keyv(Pay p) { return p.key(); }
+inline int livep(const Pay& p) {
+    p.key();
+    std::lock_guard<std::mutex> g(pay_detail::lock());
+    return (int)pay_detail::live().size();
+}
 inline std::tuple<int, int> census(int v) { return std::make_tuple(v, (int)pay_detail::copies.load()); }
