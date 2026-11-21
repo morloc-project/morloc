@@ -59,10 +59,21 @@ Measured: results/2026-10-17-1847-9f24abe4+dirty-copies-baseline: rs k=1000 n=10
 Intent: proposed
 Bench: copies
 Model: net = s * q * u; k steps carrying `(.0 t, k)` (s = k), q = 2
-Measured: results/2026-10-17-1847-9f24abe4+dirty-copies-baseline: k=250000: t 0.632 s, net 0.595 s, per_step 2, u 1190 ns; results/2026-10-18-1437-f2ec7b91+dirty-s5-float: t 0.363 s, net 0.303 s, per_step 1, u 1213 ns
+Measured: results/2026-10-17-1847-9f24abe4+dirty-copies-baseline: k=250000: t 0.632 s, net 0.595 s, per_step 2, u 1190 ns; results/2026-10-18-1437-f2ec7b91+dirty-s5-float: t 0.363 s, net 0.303 s, per_step 1, u 1213 ns; results/2026-11-21-1209-648d2825e+dirty-getter-take: t 0.0673 s, net about 0, per_step 0
 
-The tuple is built from its own projection each step, which a move could
-hand over without copying.
+The tuple is built from its own projection each step; the field is now
+moved out of the slot (OWN-5).
+
+### COPY-8 A loop step reading a field of the value it carries on copies the field
+Intent: proposed
+Bench: copies
+Model: net = s * q * u; k steps of `let u = (.0 t, k) in let ys = .0 u in step (k - 1) u (s + len ys)` (s = k); Rust: a chain of n, q = n; C++: q = 1 before a let naming a reference became one
+Measured: results/2026-11-21-1209-648d2825e+dirty-getter-take: rs k=1000 n=10000: t 0.280 s, net 0.233 s, per_step 10000, u 23.3 ns; cpp k=250000: t 0.0470 s, net about 0, per_step 0
+
+`ys` only reads the field of a value the step passes on. Rust clones it,
+since it binds a let to a reference only when the let's root is borrowed
+(compiler/issues/codegen-copies.md); a loop that grows the value it carries
+is quadratic for it.
 
 ### COPY-6 A C++ loop step that reads a value and builds onto it copies the value
 Intent: proposed

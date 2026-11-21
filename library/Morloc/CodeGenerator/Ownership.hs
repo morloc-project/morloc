@@ -13,6 +13,7 @@ module Morloc.CodeGenerator.Ownership
   , emptyPoolPlan
   , byValueIndices
   , planPool
+  , letValue
   , ManifoldPlan (..)
   , planSerialManifold
   , planNativeManifold
@@ -75,10 +76,11 @@ emptyPoolPlan = PoolPlan {ppTakes = Set.empty, ppByValue = Map.empty}
 planPool :: OwnCaps -> [SerialManifold] -> PoolPlan
 planPool caps sms =
   PoolPlan
-    { ppTakes = consumableProjectionLets (ocTagAfterTake caps) sms
-    , ppByValue = Map.unionWith Set.union (settle Map.empty) foldParams
+    { ppTakes = consumableProjectionLets (ocTagAfterTake caps) (\m -> Map.findWithDefault Set.empty m byValue) sms
+    , ppByValue = byValue
     }
   where
+    byValue = Map.unionWith Set.union (settle Map.empty) foldParams
     -- A fold's step and combine that capture nothing, and occur nowhere
     -- else, are called by the fold alone, which hands over the accumulator
     -- (COPY-7): the step's first parameter and both of combine's.
@@ -126,6 +128,11 @@ planPool caps sms =
     notFull ManifoldFull {} = False
     notFull _ = True
 
+-- | The value a right-hand side ends in, past the lets it binds for itself.
+letValue :: NativeExpr -> NativeExpr
+letValue (NativeLetN _ _ b) = letValue b
+letValue e = e
+
 -- | The parameter indices manifold @m@ takes by value.
 byValueIndices :: PoolPlan -> Int -> ManifoldForm (Or TypeS TypeF) TypeF -> Set.Set Int
 byValueIndices pp m form =
@@ -145,6 +152,7 @@ data LetMode = LetCopy | LetBorrow | LetTake
 letMode :: PoolPlan -> Int -> Int -> NativeExpr -> LetMode
 letMode pp root i rhs
   | IntrinsicN _ IntrCtorField _ (LetVarN {} : _) <- rhs, Set.member (root, i) (ppTakes pp) = LetTake
+  | PatN _ (PatGet _ [] (NativeArgExpr _)) <- rhs, Set.member (root, i) (ppTakes pp) = LetTake
   | isPlace rhs = LetBorrow
   | otherwise = LetCopy
   where
@@ -177,6 +185,7 @@ letPlan lets =
   where
     reused = Map.keysSet (Map.filter (> (1 :: Int)) (Map.fromListWith (+) [(i, 1) | (i, _, _) <- lets]))
     baseVar e = case e of
+      NativeLetN _ _ b -> baseVar b
       LetVarN _ j _ -> Just j
       BndVarN _ j _ -> Just j
       IntrinsicN _ IntrCtorField _ (x : _) -> baseVar x

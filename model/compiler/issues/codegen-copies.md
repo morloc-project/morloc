@@ -23,7 +23,10 @@ records and user-mapped types copy deeply.
   a let to a reference only when its root is borrowed, so a getter on a
   record the function built and reads twice copies the field
   (`let h = {c = mkChain n, k = 3} in .k h + chainLen (.c h)`: 100 clones;
-  golden spec-own-6-14 takenRec). C++: lets borrow, but a
+  golden spec-own-6-14 takenRec). In a loop that grows the value it
+  carries this is quadratic: `let u = (Link k (.0 t), k) in let ys = .0 u
+  in step (k - 1) u (s + chainLen ys)` clones the chain each step (5350
+  links over 100 steps, 2026-11-21); C++ binds `ys` by reference. C++: lets borrow, but a
   tail loop's lets and a list element do not (`auto n = ...`), so a nested
   pattern in a loop copies each bound field per step.
 - **A `match` arm that builds a constant makes a walking loop own its

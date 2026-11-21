@@ -1,6 +1,6 @@
 -- Copy-heavy C++ shapes timed by bench.py; each prints its result and the
 -- payload copies made. The shapes are those of golden copy-census-cpp.
-module main (nestedLoop, tupleStep, listLoop, closure, mixedLoop)
+module main (nestedLoop, tupleStep, listLoop, closure, mixedLoop, letAlias)
 
 import root
 import root-cpp
@@ -73,3 +73,12 @@ eat acc c = match c
 --' A walk whose every step both reads the rest of the chain and builds onto it
 mixedLoop :: Int -> (Int, Int)
 mixedLoop n = census (eat 0 (build n End))
+
+aliasStep :: Int -> ([Int], Int) -> Int -> Int
+aliasStep k t s
+  ? k == 0 = s + keyL (.0 t)
+  : (let u = (.0 t, k) in let ys = .0 u in aliasStep (k - 1) u (s + keyL ys))
+
+--' k steps reading a field of the tuple carried on through a let
+letAlias :: Int -> (Int, Int)
+letAlias k = census (aliasStep k (mkL 3, 0) 0)

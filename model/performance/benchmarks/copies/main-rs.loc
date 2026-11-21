@@ -1,6 +1,6 @@
 -- Copy-heavy Rust shapes timed by bench.py; each prints its result and the
 -- links copied. The shapes are those of golden copy-census-rust.
-module main (nestedLoop, tlLoop, listLoop, closure)
+module main (nestedLoop, tlLoop, listLoop, closure, letAlias)
 
 import root-rust
 
@@ -57,3 +57,12 @@ closure :: Int -> Int -> (Int, Int)
 closure k n = clones (sum (map (\j -> count 0 (prepend j c)) (range 0 k)))
   where
     c = mkChain n
+
+aliasStep :: Int -> (Chain, Int) -> Int -> Int
+aliasStep k t s
+  ? k == 0 = s + chainLen (.0 t)
+  : (let u = (.0 t, k) in let ys = .0 u in aliasStep (k - 1) u (s + chainLen ys))
+
+--' k steps reading a chain of n carried on in a tuple, through a let
+letAlias :: Int -> Int -> (Int, Int)
+letAlias k n = clones (aliasStep k (mkChain n, 0) 0)

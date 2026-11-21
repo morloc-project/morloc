@@ -181,6 +181,9 @@ keepPart env s x = case x of
 -- | The variable at the base of a projection, without following aliases.
 projectionBase :: NativeExpr -> Maybe Int
 projectionBase e = case e of
+  NativeLetN i r b -> case projectionBase b of
+    Just j | j == i -> projectionBase r
+    x -> x
   LetVarN _ i _ -> Just i
   BndVarN _ i _ -> Just i
   IntrinsicN _ IntrCtorField _ (x : _) -> projectionBase x
@@ -191,6 +194,9 @@ projectionBase e = case e of
 -- | The variable a projection reads from, through aliases.
 projectionRoot :: Env -> NativeExpr -> Maybe Int
 projectionRoot env e = case e of
+  NativeLetN i r b -> case projectionBase b of
+    Just j | j == i -> projectionRoot env r
+    _ -> projectionRoot env b
   LetVarN _ i _ -> Just (rootOf env i)
   BndVarN _ i _ -> Just (rootOf env i)
   IntrinsicN _ IntrCtorField _ (x : _) -> projectionRoot env x

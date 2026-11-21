@@ -73,7 +73,7 @@ import qualified Morloc.DataFiles as DF
 import qualified Morloc.LangRegistry as LR
 import Morloc.CodeGenerator.Namespace
 import Morloc.CodeGenerator.Infer (declaredDataNames)
-import Morloc.CodeGenerator.Ownership (LetMode (..), LetPlan (..), OwnCaps (..), PoolPlan (..), byValueIndices, changedSlots, emptyPoolPlan, letMode, letPlan, nativeLets, planPool)
+import Morloc.CodeGenerator.Ownership (LetMode (..), LetPlan (..), OwnCaps (..), PoolPlan (..), byValueIndices, changedSlots, emptyPoolPlan, letMode, letPlan, letValue, nativeLets, planPool)
 import Morloc.CodeGenerator.OwnershipCheck (checkManifold)
 import System.Environment (lookupEnv)
 import Morloc.CodeGenerator.GenDefs (DataDef (..), Disagreement (..), Extras (..), GenDef (..), extraDefs, noExtras, typeNamesIn, carriedTemplateArgs, dataDefs, dataNamesIn, nativeDataParams, RecordUse, disagreements, inPoolSerialASTs, placeTypes, genDefs, nativeParam, nativeParams, recordUses, depNamespaces, nameRoot)
@@ -543,6 +543,10 @@ data CppTranslatorState = CppTranslatorState
   , translatorHandles :: Map.Map TVar [(Key, TypeF)]
   -- ^ The generated records that refer to themselves, each a handle to its
   -- shared fields (GEN-1, CPP-6), with its fields.
+  , translatorLetDefs :: Map.Map Int NativeExpr
+  -- ^ the native lets of the segment being lowered bound only once
+  , translatorOwnedVars :: Set.Set Int
+  -- ^ the segment's by-value parameters and loop slots
   , translatorGenDefs :: Map.Map TVar GenDef
   -- ^ Each generated record's definition from its declaration (GEN-9).
   , translatorExtras :: Extras
@@ -596,6 +600,8 @@ instance Defaultable CppTranslatorState where
       , translatorTypeHomes = Map.empty
       , translatorPublic = Map.empty
       , translatorHandles = Map.empty
+      , translatorLetDefs = Map.empty
+      , translatorOwnedVars = Set.empty
       , translatorGenDefs = Map.empty
       , translatorExtras = noExtras
       , translatorDataDefs = Map.empty
@@ -1033,11 +1039,38 @@ cppLetMode :: Int -> NativeExpr -> CppTranslatorM LetMode
 cppLetMode i rhs = do
   pp <- CMS.gets translatorPool
   root <- CMS.gets translatorCurrentRoot
+  handles <- CMS.gets translatorHandles
+  defs <- CMS.gets translatorLetDefs
   case letMode pp root i rhs of
-    LetCopy -> return LetCopy
+    -- a let bound once naming a reference is a reference too (OWN-2)
+    LetCopy
+      | Map.member i defs, LetVarN _ j _ <- letValue rhs, Just jrhs <- Map.lookup j defs -> do
+          jmode <- cppLetMode j jrhs
+          return (if jmode == LetBorrow then LetBorrow else LetCopy)
+      | otherwise -> return LetCopy
     mode -> do
       typestr <- cppTypeOf (typeFof rhs)
-      return (if isScalarCppType typestr then LetCopy else mode)
+      case () of
+        _ | isScalarCppType typestr -> return LetCopy
+          | LetTake <- mode, PatN _ (PatGet _ [] (NativeArgExpr v)) <- rhs -> do
+              owned <- ownsVar v
+              -- a handle's fields are behind a shared pointer
+              let handle = maybe False (`Map.member` handles) (recordNameOf (typeFof v))
+              return (if owned && not handle then LetTake else LetBorrow)
+          | otherwise -> return mode
+  where
+    -- A move out of a value the frame does not own would copy it.
+    ownsVar v = case v of
+      LetVarN _ j _ -> owned j
+      BndVarN _ j _ -> owned j
+      _ -> return False
+    owned j = do
+      vars <- CMS.gets translatorOwnedVars
+      defs <- CMS.gets translatorLetDefs
+      case Map.lookup j defs of
+        _ | Set.member j vars -> return True
+        Just jrhs -> (/= LetBorrow) <$> cppLetMode j jrhs
+        Nothing -> return False
 
 -- | A kept element (OWN-2).
 cppKeepElem :: NativeExpr -> MDoc -> CppTranslatorM MDoc
@@ -1217,6 +1250,12 @@ cppTakeField (IntrinsicN _ IntrCtorField _ [LetVarN t j _, StrN _ n, IntN _ i])
       "mlc::take_field(std::get<" <> pretty (armIndex n (map fst arms)) <> ">("
         <> (nvarNamer cppLocals) j <> ".v), [](auto& a) -> auto& { return a.f" <> pretty i <> "; })"
 cppTakeField e = error $ "cppTakeField: not a constructor field of a let: " <> show e
+
+-- | The right-hand side of a let that takes its value (OWN-5), given its
+-- rendering: a constructor field leaves its arm, a getter moves the field.
+cppTakeLet :: NativeExpr -> MDoc -> MDoc
+cppTakeLet rhs@(IntrinsicN _ IntrCtorField _ _) _ = cppTakeField rhs
+cppTakeLet _ x = "std::move(" <> x <> ")"
 
 -- | Operands that are all scalars reach only a built-in operator (CPP-1).
 cppConstArg :: Maybe [TypeM] -> TypeM -> MDoc -> MDoc
@@ -1421,7 +1460,7 @@ PROPAGATE_ERROR(errmsg)|]
           Nothing -> return serialType
         binding <- maybe (return LetCopy) (cppLetMode letIndex) mrhs
         let e1' = case (binding, mrhs) of
-              (LetTake, Just rhs) -> e1 {poolExpr = cppTakeField rhs}
+              (LetTake, Just rhs) -> e1 {poolExpr = cppTakeLet rhs (poolExpr e1)}
               _ -> e1
         return $ makeLet namer letIndex typestr (isUnitTypeF mt) binding e1' e2
     , lcReleaseStmt = \v -> "_release_packet(" <> pretty v <> ", true);"
@@ -1451,7 +1490,7 @@ PROPAGATE_ERROR(errmsg)|]
         mode <- cppLetMode i orhs
         return $
           if mode == LetTake
-            then d {poolExpr = cppTakeField orhs}
+            then d {poolExpr = cppTakeLet orhs (poolExpr d)}
             else d
     , lcLetRhs = \_ _ d -> return d
     , lcOwnPacketDecl = \v e -> Just ("mlc::Packet" <+> v <> "(" <> e <> ");", v <> ".get()")
@@ -2308,13 +2347,15 @@ typeMToF Passthrough = error "unreachable: a passthrough value is never a native
 translateSegment :: ClosureGen -> SerialManifold -> CppTranslator MDoc
 translateSegment closureGen m0@(SerialManifold root _ _ _ _) = do
   resetCounter
-  CMS.modify (\st -> st {translatorCurrentRoot = root})
-  modes <- mapM (\(i, rhs) -> (\m -> (i, rhs, m)) <$> cppLetMode i rhs) (nativeLets m0)
+  let lets = nativeLets m0
+      once = Map.keysSet (Map.filter (== (1 :: Int)) (Map.fromListWith (+) [(i, 1) | (i, _) <- lets]))
   pp <- CMS.gets translatorPool
+  let byValue = Map.fromListWith Set.intersection [(m, byValueIndices pp m form) | NativeManifold m _ form _ <- nativeManifoldsUnder (RSM m0), Map.member m (ppByValue pp)]
+      params = Set.unions (Map.elems byValue) `Set.difference` loopSlots (RSM m0)
+  CMS.modify (\st -> st {translatorCurrentRoot = root, translatorLetDefs = Map.fromList [d | d@(i, _) <- lets, Set.member i once], translatorOwnedVars = params <> loopSlots (RSM m0)})
+  modes <- mapM (\(i, rhs) -> (\m -> (i, rhs, m)) <$> cppLetMode i rhs) lets
   let plan = letPlan modes
       held = lpHeld plan
-      byValue = Map.fromListWith Set.intersection [(m, byValueIndices pp m form) | NativeManifold m _ form _ <- nativeManifoldsUnder (RSM m0), Map.member m (ppByValue pp)]
-      params = Set.unions (Map.elems byValue) `Set.difference` loopSlots (RSM m0)
       seeds m = Set.toList (Map.findWithDefault Set.empty m byValue `Set.intersection` params)
       m0' = paramReads seeds m0
       m1 = markLastReadsSeeded (lpAliases plan) held seeds m0'

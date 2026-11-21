@@ -1321,6 +1321,13 @@ borrowableRoot e = isBorrowableProjection e
 --
 -- A member consuming this set must render a bare-throw arm as non-returning,
 -- which is what makes the throw exemption sound.
+--
+-- A getter of a tuple or record field is also taken (OWN-5), on weaker
+-- conditions, since such a value holds its fields itself: its subject is any
+-- variable, and on the path that runs the getter nothing after it names the
+-- subject or a let that refers into or copies it. In a loop body the subject
+-- is bound in that body or is a carried slot. A member renders the take as a
+-- move, which leaves a subject it does not own unchanged.
 -- A let index names one binding within a manifold, not within a pool: two
 -- manifolds routinely bind the same index to different values. So each
 -- top-level manifold -- with every manifold nested in it -- is scanned as one
@@ -1333,8 +1340,8 @@ borrowableRoot e = isBorrowableProjection e
 -- A let index that two projections in one scan share is never a candidate:
 -- the decision is keyed by the index, so it would also reach the projection
 -- the conditions were not checked for.
-consumableProjectionLets :: Bool -> [SerialManifold] -> Set.Set (Int, Int)
-consumableProjectionLets tagAfterMove sms =
+consumableProjectionLets :: Bool -> (Int -> Set.Set Int) -> [SerialManifold] -> Set.Set (Int, Int)
+consumableProjectionLets tagAfterMove byValue sms =
   Set.fromList
     [ (root, letIdx)
     | sm@(SerialManifold root _ _ _ body) <- sms
@@ -1344,8 +1351,34 @@ consumableProjectionLets tagAfterMove sms =
     , Map.lookup letIdx projected == Just 1
     , maybe False buildsFreshValue (Map.lookup subjIdx (csDefs scan))
     , Map.findWithDefault 0 subjIdx (csUses scan) == 1
-    , isJust (moveWalk tagAfterMove subjIdx letIdx False (RS body))
+    , isJust (moveWalk tagAfterMove (const Set.empty) (Set.singleton subjIdx) subjIdx letIdx False (RS body))
     ]
+    <> Set.fromList
+      [ (root, letIdx)
+      | sm@(SerialManifold root _ _ _ body) <- sms
+      , let scan = scanSM sm
+            projected = Map.fromListWith (+) [(l, 1 :: Int) | (l, _) <- csGetters scan <> csProjections scan]
+      , (letIdx, subjIdx) <- csGetters scan
+      , Map.lookup letIdx projected == Just 1
+      , isJust (moveWalk False byValue (refersInto [d | d@(i, _) <- csAllDefs scan, i /= letIdx] subjIdx) subjIdx letIdx False (RS body))
+      ]
+
+-- | A variable and every let that refers into it, directly or through
+-- another such let, or copies it.
+refersInto :: [(Int, NativeExpr)] -> Int -> Set.Set Int
+refersInto defs = grow . Set.singleton
+  where
+    grow s =
+      let s' = s <> Set.fromList [i | (i, rhs) <- defs, Just j <- [base rhs], Set.member j s]
+       in if Set.size s' == Set.size s then s else grow s'
+    base e = case e of
+      LetVarN _ j _ -> Just j
+      BndVarN _ j _ -> Just j
+      IntrinsicN _ IntrCtorField _ (x : _) -> base x
+      IntrinsicN _ IntrListElem _ (x : _) -> base x
+      PatN _ (PatGet _ [] (NativeArgExpr x)) -> base x
+      NativeLetN _ _ x -> base x
+      _ -> Nothing
 
 -- | Every native local named under an expression, the context arguments of
 -- the manifolds under it included.
@@ -1461,12 +1494,12 @@ rnodeBinds i n = maybe False (\(j, _, _) -> i == j) (rnodeLet n) || any (rnodeBi
 -- subject is named after the move, or moved from inside a closure that did
 -- not bind it. With @tagAfterMove@, a tag test may read the subject after
 -- the move.
-moveWalk :: Bool -> Int -> Int -> Bool -> RNode -> Maybe Bool
-moveWalk tagAfterMove subj k moved n = case n of
+moveWalk :: Bool -> (Int -> Set.Set Int) -> Set.Set Int -> Int -> Int -> Bool -> RNode -> Maybe Bool
+moveWalk tagAfterMove byValue names subj k moved n = case n of
   RN (IntrinsicN _ IntrTagTest _ (LetVarN _ j _ : rest))
-    | tagAfterMove && j == subj -> foldM (moveWalk tagAfterMove subj k) moved (map RN rest)
-  RN (LetVarN _ j _) | j == subj -> if moved then Nothing else Just moved
-  RN (BndVarN _ j _) | j == subj -> if moved then Nothing else Just moved
+    | tagAfterMove && j == subj -> foldM (moveWalk tagAfterMove byValue names subj k) moved (map RN rest)
+  RN (LetVarN _ j _) | Set.member j names -> if moved then Nothing else Just moved
+  RN (BndVarN _ j _) | Set.member j names -> if moved then Nothing else Just moved
   RN (IfN _ c t f) -> branch (RN c) (RN t) (RN f)
   RLS (LoopIf c t f) -> branch (RN c) (RLS t) (RLS f)
   RLN (LoopIf c t f) -> branch (RN c) (RLN t) (RLN f)
@@ -1475,20 +1508,32 @@ moveWalk tagAfterMove subj k moved n = case n of
   RSM _ -> closure
   _ -> case rnodeLet n of
     Just (i, rhs, body)
-      | i == k -> moveWalk tagAfterMove subj k moved rhs >> moveWalk tagAfterMove subj k True body
-      | i == subj -> moveWalk tagAfterMove subj k moved rhs >> moveWalk tagAfterMove subj k False body
-      | otherwise -> moveWalk tagAfterMove subj k moved rhs >>= \m -> moveWalk tagAfterMove subj k m body
-    Nothing -> foldM (moveWalk tagAfterMove subj k) moved (rnodeChildren n)
+      | i == k -> moveWalk tagAfterMove byValue names subj k moved rhs >> moveWalk tagAfterMove byValue names subj k True body
+      | i == subj -> moveWalk tagAfterMove byValue names subj k moved rhs >> moveWalk tagAfterMove byValue names subj k False body
+      | otherwise -> moveWalk tagAfterMove byValue names subj k moved rhs >>= \m -> moveWalk tagAfterMove byValue names subj k m body
+    Nothing -> foldM (moveWalk tagAfterMove byValue names subj k) moved (rnodeChildren n)
   where
     branch c t f = do
-      m <- moveWalk tagAfterMove subj k moved c
-      mt <- moveWalk tagAfterMove subj k m t
-      mf <- moveWalk tagAfterMove subj k m f
+      m <- moveWalk tagAfterMove byValue names subj k moved c
+      mt <- moveWalk tagAfterMove byValue names subj k m t
+      mf <- moveWalk tagAfterMove byValue names subj k m f
       return (mt || mf)
     closure
-      | rnodeBinds k n = if rnodeBinds subj n then foldM (moveWalk tagAfterMove subj k) moved (rnodeChildren n) else Nothing
-      | rnodeNames subj n = Nothing
+      | rnodeBinds k n = if introduces byValue subj n then foldM (moveWalk tagAfterMove byValue names subj k) moved (rnodeChildren n) else Nothing
+      | any (`rnodeNames` n) (Set.toList names) = Nothing
       | otherwise = Just moved
+
+-- | Whether a node gives native variable @i@ a value of its own each time it
+-- runs: a let under it, a loop's carried slot, or a parameter a native
+-- manifold takes by value (@byValue m@, its positions; OWN-7).
+introduces :: (Int -> Set.Set Int) -> Int -> RNode -> Bool
+introduces byValue i n = rnodeBinds i n || here n || any (introduces byValue i) (rnodeChildren n)
+  where
+    here m = case m of
+      RN (LoopN _ starts _) -> i `elem` map fst starts
+      RS (LoopS _ carried _) -> i `elem` carried
+      RNM (NativeManifold mid _ form _) -> or [j == i | (pos, Arg j _) <- indexed (typeMofForm form), Set.member pos (byValue mid)]
+      _ -> False
 
 -- | Mark the last reads of the values a native loop owns, carried or bound
 -- in the iteration (OWN-2, OWN-3, OWN-4).
@@ -2005,6 +2050,10 @@ data ConsumeScan = ConsumeScan
   { csDefs :: Map.Map Int NativeExpr
   , csProjections :: [(Int, Int)]
   , csUses :: Map.Map Int Int
+  , csGetters :: [(Int, Int)]
+  -- ^ getter lets of a tuple or record field, with the index read
+  , csAllDefs :: [(Int, NativeExpr)]
+  -- ^ every native let, colliding indices included
   }
 
 instance Semigroup ConsumeScan where
@@ -2016,9 +2065,11 @@ instance Semigroup ConsumeScan where
       (dropColliding (csDefs a) (csDefs b))
       (csProjections a <> csProjections b)
       (Map.unionWith (+) (csUses a) (csUses b))
+      (csGetters a <> csGetters b)
+      (csAllDefs a <> csAllDefs b)
 
 instance Monoid ConsumeScan where
-  mempty = ConsumeScan mempty mempty mempty
+  mempty = ConsumeScan mempty mempty mempty mempty mempty
 
 -- | The union of two definition maps with every key they share removed.
 dropColliding :: Map.Map Int NativeExpr -> Map.Map Int NativeExpr -> Map.Map Int NativeExpr
@@ -2049,10 +2100,25 @@ scanUse :: Int -> ConsumeScan
 scanUse i = mempty {csUses = Map.singleton i 1}
 
 scanDef :: Int -> NativeExpr -> ConsumeScan
-scanDef i rhs = mempty {csDefs = Map.singleton i rhs}
+scanDef i rhs = mempty {csDefs = Map.singleton i rhs, csAllDefs = [(i, rhs)]}
 
 scanLet :: Int -> NativeExpr -> ConsumeScan
-scanLet i rhs = scanDef i rhs <> mempty {csProjections = projectionOf i rhs}
+scanLet i rhs = scanDef i rhs <> mempty {csProjections = projectionOf i rhs, csGetters = getterOf i rhs}
+
+-- | A getter of one tuple or record field of a variable, as @(this let, the
+-- variable)@. Tuples and records hold their fields by value, so a field of
+-- a value the frame owns is unique to it.
+getterOf :: Int -> NativeExpr -> [(Int, Int)]
+getterOf letIdx (PatN _ (PatGet sel [] (NativeArgExpr v)))
+  | not (selectorHasBracket sel)
+  , [_] <- ungroup sel
+  , Just subjIdx <- varIndexOf v =
+      [(letIdx, subjIdx)]
+  where
+    varIndexOf (LetVarN _ j _) = Just j
+    varIndexOf (BndVarN _ j _) = Just j
+    varIndexOf _ = Nothing
+getterOf _ _ = []
 
 scanSM :: SerialManifold -> ConsumeScan
 scanSM (SerialManifold _ _ form _ e) = scanContext form <> scanSE e
@@ -2082,7 +2148,7 @@ scanSE (SerializeS _ e) = scanNE e
 -- on every iteration. They are manifold parameters and so never candidates,
 -- but counting them keeps that a consequence of the scan rather than of where
 -- the parameters happen to come from.
-scanSE (LoopS _ carried body) = mconcat (map scanUse carried) <> scanLoop scanSE body
+scanSE (LoopS _ carried body) = mconcat (map scanUse carried) <> scanLoop carried scanSE body
 
 scanSA :: SerialArg -> ConsumeScan
 scanSA (SerialArgManifold sm) = scanSM sm
@@ -2099,10 +2165,17 @@ scanNA (NativeArgExpr e) = scanNE e
 -- the same loop body: a subject bound before the loop is projected once per
 -- iteration from one syntactic use, and taking its payload would leave the
 -- next iteration an empty value.
-scanLoop :: (b -> ConsumeScan) -> LoopBody NativeExpr SerialExpr b -> ConsumeScan
-scanLoop scanB lbody =
+-- A getter's subject may also be one of the loop's carried slots: every
+-- continue gives each slot a value, and one that names the slot is a read
+-- after the take.
+scanLoop :: [Int] -> (b -> ConsumeScan) -> LoopBody NativeExpr SerialExpr b -> ConsumeScan
+scanLoop slots scanB lbody =
   let inner = go lbody
-   in inner {csProjections = [p | p@(_, subj) <- csProjections inner, Map.member subj (csDefs inner)]}
+      local subj = Map.member subj (csDefs inner)
+   in inner
+        { csProjections = [p | p@(_, subj) <- csProjections inner, local subj]
+        , csGetters = [p | p@(_, subj) <- csGetters inner, local subj || subj `elem` slots]
+        }
   where
     go (LoopIf e t f) = scanNE e <> eitherArm (go t) (go f)
     go (LoopNLet i rhs body) = scanLet i rhs <> scanNE rhs <> go body
@@ -2120,7 +2193,7 @@ scanNE (NativeLetN i rhs body) = scanLet i rhs <> scanNE rhs <> scanNE body
 scanNE (LetVarN _ i _) = scanUse i
 scanNE (BndVarN _ i _) = scanUse i
 scanNE (DeserializeN _ _ e) = scanSE e
-scanNE (LoopN _ starts lbody) = mconcat (map (scanUse . fst) starts) <> mconcat (map (scanNE . snd) starts) <> scanLoop scanNE lbody
+scanNE (LoopN _ starts lbody) = mconcat (map (scanUse . fst) starts) <> mconcat (map (scanNE . snd) starts) <> scanLoop (map fst starts) scanNE lbody
 scanNE (ExeN _ _) = mempty
 scanNE (ListN _ _ es) = mconcat (map scanNE es)
 scanNE (TupleN _ es) = mconcat (map scanNE es)
@@ -2157,6 +2230,8 @@ eitherArm a b =
     (dropColliding (csDefs a) (csDefs b))
     (csProjections a <> csProjections b)
     (Map.unionWith max (csUses a) (csUses b))
+    (csGetters a <> csGetters b)
+    (csAllDefs a <> csAllDefs b)
 
 scanArm :: NativeExpr -> ConsumeScan
 scanArm e
