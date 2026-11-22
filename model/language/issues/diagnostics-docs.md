@@ -156,10 +156,3 @@
   "CallStack (from HasCallStack): error, called at ... Cpp.hs:400:9",
   with no source location. Reached by the nested-Vector source in
   values.md (`makeN :: Int -> Vector n (Vector 2 Real)` from C++).
-- **A desugar error is followed by an unrelated layout-retry message.**
-  [reproduced, 2026-11-15] Gap: no item governs it. `record Cpp => P =
-  structt` (an unknown kind) reports the error, then "Where an indented
-  block ends before a token that cannot continue it, parsing gets further,
-  and fails here:" and the same error again (Frontend/Parser.y, `report`
-  around :1650): the retry with a wrapped layout reaches the same desugar
-  failure at a later position and is shown as if it were a layout problem.

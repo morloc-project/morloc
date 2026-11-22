@@ -13,6 +13,8 @@ Changed
    14% faster
 
 Fixed
+ * a docstring error such as a reserved `@render` long name is reported
+   alone, without a misleading hint about where parsing stopped
  * `.[i]` and `.[i].field` on an IFile compile inside a Rust pool
  * `morloc install` refuses a module that fails to typecheck, naming it,
    instead of installing it with no exports

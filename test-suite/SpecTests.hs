@@ -4659,6 +4659,31 @@ lexTests =
         a :: Int -> (<IO> Int, Int)
         a x = (do bump x, , 1)
         |]
+    , rejectNaming
+        "spec-lex-4-7"
+        ["reserved"]
+        ["further"]
+        [r|
+        module main (f)
+        firstStr :: [Str] -> Str
+        --' Count
+        --'
+        --' @render -r/--raw=firstStr
+        f :: Int -> [Str]
+        f n = []
+        |]
+    , rejectNaming
+        "spec-lex-4-8"
+        ["structt"]
+        ["further"]
+        [r|
+        module main (f)
+        record P where
+          x :: Int
+        record Cpp => P = structt
+        f :: Int -> Int
+        f x = x
+        |]
     , accept
         "spec-src-2-1"
         [r|

@@ -30,7 +30,7 @@ literal words `True False Null Inf NaN` cannot be used as names.
 
 ### LEX-4 Blocks are delimited by indentation or by explicit braces
 Intent: ruled 2026-10-14
-Tests: spec-lex-4-1, spec-lex-4-2, spec-lex-4-3, spec-lex-4-4, spec-lex-4-5, spec-lex-4-6
+Tests: spec-lex-4-1, spec-lex-4-2, spec-lex-4-3, spec-lex-4-4, spec-lex-4-5, spec-lex-4-6, spec-lex-4-7, spec-lex-4-8
 Code: conforms 2026-11-01
 
 The bindings after `where`, `let` and `do` form a block delimited by

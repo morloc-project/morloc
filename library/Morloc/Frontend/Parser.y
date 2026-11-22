@@ -1608,14 +1608,16 @@ readProgram _moduleName modulePath sourceCode pstate dag = do
               finalState = s2 { psExpIndex = i3 + 1 }
               dag'' = Map.insert (MV "main") (modI, []) dag'
           return (dag'', finalState)
-        Left _ -> closingBlocks filename' origErr
+        Left _ -> closingBlocks filename' (parsesAsIs tokens' ps) origErr
 
     -- LEX-4: a block also ends before a token that cannot continue it. Only
     -- a program that no strategy above parses is laid out again, so every
     -- program that parses without closing a block parses as before. A
     -- program that still fails is reported as before, with where parsing
-    -- fails once its blocks end when that is further on.
-    closingBlocks filename' origErr =
+    -- fails once its blocks end when that is further on. An error from
+    -- desugaring a program that parses as written is reported alone, since
+    -- no layout made its parse fail.
+    closingBlocks filename' origParsed origErr =
       case (lexMorlocUnlaid filename' sourceCode, lexMorlocUnlaidFrom (Pos 0 1 filename') filename' ("module main (*)\n" <> sourceCode)) of
         (Right (unlaid, docMap', groupToks'), Right (wunlaid, wdocMap, wgroupToks)) ->
           let ps = pstate { psModulePath = modulePath, psDocMap = docMap', psSourceLines = T.lines sourceCode }
@@ -1641,7 +1643,8 @@ readProgram _moduleName modulePath sourceCode pstate dag = do
         _ -> report origErr
       where
         report err
-          | pePos err > pePos origErr =
+          | not origParsed
+          , pePos err > pePos origErr =
               Left
                 ( pePos origErr
                 , showParseError filename' origErr
@@ -1653,6 +1656,8 @@ readProgram _moduleName modulePath sourceCode pstate dag = do
         onHeaderLine t
           | posLine (locPos t) == 0 = t {locPos = (locPos t) {posLine = 1}}
           | otherwise = t
+
+    parsesAsIs toks ps = either (const False) (const True) (State.runStateT (parseProgram toks) ps)
 
     withModules srcMap laid groupToks' result =
       attachGroupAnnotations laid groupToks' <$> insertModules (maybe "<expr>" id modulePath) srcMap dag result
