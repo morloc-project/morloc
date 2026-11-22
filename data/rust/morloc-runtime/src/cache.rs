@@ -911,7 +911,7 @@ pub(crate) unsafe fn hash_morloc_packet(
     if cmd_type == crate::packet::PACKET_TYPE_CALL {
         let midx = { (*header).command.call.midx };
         *hash_out = crate::utility::mix(seed, midx as u64);
-        for span in crate::packet_ffi::CallArgs::new(packet, header) {
+        for span in crate::packet_ffi::call_args(packet, header) {
             let span = match span {
                 Ok(s) => s,
                 Err(e) => {

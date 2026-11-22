@@ -1156,16 +1156,16 @@ pub fn check_in_place(bytes: &[u8], schema: &Schema, vol_idx_hint: u16, origin: 
     check_window(bytes, schema, -shm::encode_relptr(vol_idx_hint as usize, 0), origin.checked())
 }
 
-/// Check the value of `schema` at the start of `block` as data read from
-/// outside is checked (FMT-10), writing nothing.
+/// Check the value of `schema` at the start of `block` as data of `origin`
+/// is checked (FMT-10), writing nothing.
 ///
 /// # Safety
 /// `block` must be a live shared-memory block holding a value of `schema`.
-pub unsafe fn check_text_in_block(block: AbsPtr, schema: &Schema) -> Result<(), MorlocError> {
+pub unsafe fn check_text_in_block(block: AbsPtr, schema: &Schema, origin: Origin) -> Result<(), MorlocError> {
     let (Some(len), Ok(rel)) = (shm::shm_block_size(block), shm::abs2rel(block)) else {
         return Err(MorlocError::Shm("a value to check is not one shared-memory block".into()));
     };
-    check_window(std::slice::from_raw_parts(block, len), schema, -rel, Some(Origin::Outside))
+    check_window(std::slice::from_raw_parts(block, len), schema, -rel, Some(origin))
 }
 
 /// Whether the value of `schema` at the start of `block` lies wholly inside

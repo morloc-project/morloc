@@ -747,7 +747,9 @@ pub struct RegistrySlot {
     /// empty batch included, so the stream keeps the producer's batch
     /// boundaries. Immutable after publication.
     pub staged:               std::sync::atomic::AtomicU8,                              // off 330
-    _stdio_pad:               [u8; 5],                         // off 331..336
+    // FMT-10: non-zero when the file is the stage's saved output; immutable after publication (SLOT-8).
+    pub program_file:         std::sync::atomic::AtomicU8,                              // off 331
+    _stdio_pad:               [u8; 4],                         // off 332..336
 
     _retired_wb:              [u8; 10],                        // off 336..346
     /// Non-zero once a process died holding `lock`: what it protects may
@@ -784,6 +786,7 @@ const _: () = {
     assert!(std::mem::offset_of!(RegistrySlot, subpacket_entries) == 104);
     assert!(std::mem::offset_of!(RegistrySlot, write_buffer) == 288);
     assert!(std::mem::offset_of!(RegistrySlot, custody) == 352);
+    assert!(std::mem::offset_of!(RegistrySlot, program_file) == 331);
 };
 
 /// Resolve a slot index to a typed reference into the SHM-resident
@@ -931,6 +934,9 @@ pub struct ProcessLocalSlot {
     /// `FORK_EPOCH` when this slot was made. A slot from before a fork that
     /// the child reaches is its parent's: its descriptor was closed.
     pub(crate) fork_epoch: u64,
+
+    // FMT-10
+    pub(crate) origin: crate::origin::Origin,
 }
 
 fn fork_epoch() -> u64 {
@@ -1249,6 +1255,7 @@ fn attach_process_local_slot(
         entries: Vec<morloc_runtime_types::packet::SubpacketEntry>,
         body_start: u64,
         identity: (u64, u64),
+        program_file: u8,
     }
     let view = versioned_read(slot, cached_generation, |s| {
         // SLOT-8: an open OStream's entry array grows under its lock.
@@ -1275,6 +1282,7 @@ fn attach_process_local_slot(
             entries,
             body_start: s.body_start.get(),
             identity: (s.file_dev.get(), s.file_ino.get()),
+            program_file: s.program_file.get(),
         })
     })?
     .ok_or_else(|| MorlocError::Other(format!(
@@ -1391,6 +1399,7 @@ fn attach_process_local_slot(
         subpacket_elem_cum: None,
         is_data_packet,
         fork_epoch: fork_epoch(),
+        origin: if view.program_file != 0 { crate::origin::Origin::Program } else { crate::origin::Origin::Outside },
     })
 }
 
@@ -1778,6 +1787,7 @@ struct SlotInit {
     data_end: u64,
     element_count: u64,
     buffer: (RelPtr, u64),
+    origin: crate::origin::Origin,
 }
 
 impl Default for SlotInit {
@@ -1796,6 +1806,7 @@ impl Default for SlotInit {
             data_end: 0,
             element_count: 0,
             buffer: (null, 0),
+            origin: crate::origin::Origin::Outside,
         }
     }
 }
@@ -1808,6 +1819,7 @@ fn publish_slot(g: &SlotGuard, i: &SlotInit) -> u64 {
     slot.is_stdio.set(i.stdio_kind.is_some() as u8);
     slot.stdio_kind.set(i.stdio_kind.unwrap_or(0));
     slot.staged.set(i.staged as u8);
+    slot.program_file.set((i.origin == crate::origin::Origin::Program) as u8);
     slot.file_dev.set(i.file.0);
     slot.file_ino.set(i.file.1);
     g.set_block(Block::FilePath, i.path.0);
@@ -1849,6 +1861,7 @@ fn clear_slot_fields(g: &SlotGuard) {
     slot.is_stdio.set(0);
     slot.stdio_kind.set(0);
     slot.staged.set(0);
+    slot.program_file.set(0);
     g.set_block(Block::WriteBuffer, shm_types_crate::RELNULL);
     slot.write_buffer_limit.set(0);
     slot.write_buffer_index_cap.set(0);
@@ -2151,6 +2164,7 @@ pub fn shared_open_ifile(path: &str) -> Result<i64, MorlocError> {
     let (map_file, mmap_ptr, mmap_size) = mmap_file_readonly_keep(path)?;
     let mapping = crate::stream_format::Mapping::new(mmap_ptr, mmap_size);
     let (file_dev, file_ino) = file_identity_of(&map_file);
+    let origin = crate::origin::of_file((file_dev, file_ino));
     drop(map_file);
     let parsed = match parse_stream_file(path, mmap_ptr, mmap_size) {
         Ok(p) => p,
@@ -2199,6 +2213,7 @@ pub fn shared_open_ifile(path: &str) -> Result<i64, MorlocError> {
             entries: (pending.own(idx_rel), parsed.subpacket_entries.len() as u64),
             body_start: parsed.body_start,
             element_count: parsed.element_count,
+            origin,
             ..Default::default()
         });
         Ok(new_gen)
@@ -2230,6 +2245,7 @@ pub fn shared_open_ifile(path: &str) -> Result<i64, MorlocError> {
         subpacket_elem_cum: None,
         is_data_packet: parsed.is_data_packet,
         fork_epoch: fork_epoch(),
+        origin,
     };
     let handle = pack_handle(new_gen, slot_idx);
     install_process_local_slot(handle, local);
@@ -2246,6 +2262,7 @@ pub fn shared_open_istream(path: &str) -> Result<i64, MorlocError> {
     let (map_file, mmap_ptr, mmap_size) = mmap_file_readonly_keep(path)?;
     let mapping = crate::stream_format::Mapping::new(mmap_ptr, mmap_size);
     let (file_dev, file_ino) = file_identity_of(&map_file);
+    let origin = crate::origin::of_file((file_dev, file_ino));
     let parsed = match parse_stream_file(path, mmap_ptr, mmap_size) {
         Ok(p) => p,
         Err(e) => {
@@ -2292,6 +2309,7 @@ pub fn shared_open_istream(path: &str) -> Result<i64, MorlocError> {
             cursor: parsed.body_start,
             data_end: parsed.data_end,
             element_count: parsed.element_count,
+            origin,
             ..Default::default()
         });
         Ok(new_gen)
@@ -2320,6 +2338,7 @@ pub fn shared_open_istream(path: &str) -> Result<i64, MorlocError> {
         subpacket_elem_cum: None,
         is_data_packet: parsed.is_data_packet,
         fork_epoch: fork_epoch(),
+        origin,
     };
     let handle = pack_handle(new_gen, slot_idx);
     install_process_local_slot(handle, local);
@@ -2597,6 +2616,7 @@ fn stdio_local(generation: u64, value_schema: Schema, kind: u8) -> ProcessLocalS
         subpacket_elem_cum: None,
         is_data_packet: false,
         fork_epoch: fork_epoch(),
+        origin: crate::origin::Origin::Outside,
     }
 }
 
@@ -5035,7 +5055,7 @@ pub fn shared_next_with(
             &SubpacketSrc::File { payload_base, payload_len, vol_idx_hint, .. } => {
                 // SLOT-25: checked as the copy into shared memory checks it.
                 let bytes = unsafe { std::slice::from_raw_parts(payload_base as *const u8, payload_len as usize) };
-                voidstar::check_in_place(bytes, &array_schema(&local.elem_schema), vol_idx_hint, crate::origin::Origin::Outside)?;
+                voidstar::check_in_place(bytes, &array_schema(&local.elem_schema), vol_idx_hint, local.origin)?;
                 decode(
                     payload_base as *const u8,
                     voidstar::MorlocSpace { base: payload_base as *const u8, len: payload_len as usize },
@@ -5302,6 +5322,7 @@ fn ahead_schedule(local: &mut ProcessLocalSlot, from: u64, end: u64) {
         return;
     }
     let schema = array_schema(&local.elem_schema);
+    let origin = local.origin;
     let lent: Vec<(usize, u64)> = inputs.iter().zip(&picks).filter_map(|(i, p)| i.5.map(|(b, _)| (b, p.2))).collect();
     let shared: std::sync::Arc<std::sync::Mutex<Vec<Option<(usize, bool)>>>> =
         std::sync::Arc::new(std::sync::Mutex::new(inputs.iter().map(|i| i.5.map(|(b, _)| (b, false))).collect()));
@@ -5352,7 +5373,7 @@ fn ahead_schedule(local: &mut ProcessLocalSlot, from: u64, end: u64) {
             for (k, (_, _, _, len, hint, _)) in inputs.iter().enumerate() {
                 if let Some((block, _)) = blocks[k] {
                     // SAFETY: as above; the block now holds its landed bytes.
-                    let ok = unsafe { voidstar::relocate_landed(block as AbsPtr, *len, &schema, *hint, crate::origin::Origin::Outside) }.is_ok();
+                    let ok = unsafe { voidstar::relocate_landed(block as AbsPtr, *len, &schema, *hint, origin) }.is_ok();
                     blocks[k] = Some((block, ok));
                 }
             }
@@ -5511,7 +5532,7 @@ fn materialize_and_finalise_subpacket(
             let bytes = unsafe {
                 std::slice::from_raw_parts(payload_base as *const u8, payload_len as usize)
             };
-            payload_into_shm(bytes, &local.elem_schema, vol_idx_hint, crate::origin::Origin::Outside)
+            payload_into_shm(bytes, &local.elem_schema, vol_idx_hint, local.origin)
         }
         SubpacketSrc::Shm { .. } => Ok(src.into_block()),
     }
@@ -6336,7 +6357,7 @@ fn shared_ifile_general(
             let src = materialize_subpacket(local, 0)?;
             walk_into_fresh(&value_schema, &schema, &src, &steps, args)
         };
-        r.and_then(|p| require_text(p, &schema))
+        r.and_then(|p| require_text(p, &schema, local.origin))
     })
 }
 
@@ -7327,7 +7348,7 @@ fn materialize_subpacket_at_offset(
                 payload_len as usize,
             )
         };
-        let base = payload_into_shm(bytes, &local.elem_schema, vol_idx_hint, crate::origin::Origin::Outside)?;
+        let base = payload_into_shm(bytes, &local.elem_schema, vol_idx_hint, local.origin)?;
         return Ok((SubpacketSrc::Shm { arr_base: base, acquired: false }, on_disk_size));
     }
     if data.compression == PACKET_COMPRESSION_NONE {
@@ -7363,7 +7384,7 @@ fn materialize_subpacket_at_offset(
             (payload_off + payload_len - subpacket_off) as usize,
         )
     };
-    let base = compressed_payload_into_shm(packet, &local.elem_schema, vol_idx_hint, crate::origin::Origin::Outside)?;
+    let base = compressed_payload_into_shm(packet, &local.elem_schema, vol_idx_hint, local.origin)?;
     Ok((SubpacketSrc::Shm { arr_base: base, acquired: false }, on_disk_size))
 }
 
@@ -7638,7 +7659,7 @@ fn ifile_bracket_index_against_slot(
     let src = cache_get_or_materialize(local, sub_k)?;
     let result = ifile_extract_element(&local.elem_schema, &src, local_idx);
     src.release();
-    result.and_then(|p| require_text(p, &local.elem_schema))
+    result.and_then(|p| require_text(p, &local.elem_schema, local.origin))
 }
 
 fn cache_hit(local: &mut ProcessLocalSlot, sub_k: usize) -> Result<Option<SubpacketSrc>, MorlocError> {
@@ -7654,12 +7675,13 @@ fn cache_hit(local: &mut ProcessLocalSlot, sub_k: usize) -> Result<Option<Subpac
 }
 
 // FMT-10
-fn require_text(p: AbsPtr, schema: &Schema) -> Result<AbsPtr, MorlocError> {
+fn require_text(p: AbsPtr, schema: &Schema, origin: crate::origin::Origin) -> Result<AbsPtr, MorlocError> {
+    let Some(origin) = origin.checked() else { return Ok(p) };
     if !voidstar::schema_holds(schema, SerialType::String) {
         return Ok(p);
     }
     // SAFETY: FMT-10: `p` is the live SHM block of `schema` just built.
-    match unsafe { voidstar::check_text_in_block(p, schema) } {
+    match unsafe { voidstar::check_text_in_block(p, schema, origin) } {
         Ok(()) => Ok(p),
         Err(e) => {
             let _ = shm::shfree(p);
@@ -7854,7 +7876,7 @@ fn ifile_bracket_slice_against_slot(
     };
     if let Some(runs) = runs {
         let schema = array_schema(&local.elem_schema);
-        return slice_runs(local, &runs).and_then(|p| require_text(p, &schema));
+        return slice_runs(local, &runs).and_then(|p| require_text(p, &schema, local.origin));
     }
 
     let (proj_offset, proj_schema) = navigate_static_field_offset(&local.elem_schema, tail_steps)?;
@@ -7879,7 +7901,7 @@ fn ifile_bracket_slice_against_slot(
         return slice_strided_flat(local, &runs, &cut, proj_schema.width);
     }
     if proj_schema.serial_type == SerialType::String {
-        return slice_bulk_pack_str(local, &runs, &cut).and_then(|p| require_text(p, &array_schema(&proj_schema)));
+        return slice_bulk_pack_str(local, &runs, &cut).and_then(|p| require_text(p, &array_schema(&proj_schema), local.origin));
     }
     slice_strided_deep(local, &runs, &cut, &proj_schema)
 }
@@ -8061,7 +8083,7 @@ fn slice_strided_deep(
     }
     let out_schema = array_schema(proj_schema);
     // SAFETY: SLOT-38: `parts` lists every block the copies took and the bank they were written into.
-    unsafe { voidstar::consolidate(arr_ptr, &out_schema, &parts) }.and_then(|p| require_text(p, &out_schema))
+    unsafe { voidstar::consolidate(arr_ptr, &out_schema, &parts) }.and_then(|p| require_text(p, &out_schema, local.origin))
 }
 
 #[cfg(test)]
@@ -8140,7 +8162,7 @@ pub fn shared_ifile_slice_with(
                 }
             }
             let src = slice_source(local, sub_k, ends)?;
-            let decoded = slice_piece(&src, &elem_schema, first, count, &mut *decode);
+            let decoded = slice_piece(&src, &elem_schema, local.origin, first, count, &mut *decode);
             release_passed(local, src, i > 0 && i + 1 < runs.len());
             if !decoded? {
                 return Ok(false);
@@ -8154,6 +8176,7 @@ pub fn shared_ifile_slice_with(
 fn slice_piece(
     src: &SubpacketSrc,
     elem_schema: &Schema,
+    origin: crate::origin::Origin,
     first: usize,
     count: usize,
     decode: &mut dyn FnMut(*const u8, voidstar::MorlocSpace) -> bool,
@@ -8165,7 +8188,7 @@ fn slice_piece(
             // SAFETY: SLOT-25: the payload lies in the slot's mapping, and run_records placed the records inside it.
             unsafe {
                 let bytes = std::slice::from_raw_parts(payload_base as *const u8, payload_len);
-                voidstar::check_records_in_place(bytes, records, count, elem_schema, vol_idx_hint, crate::origin::Origin::Outside)?;
+                voidstar::check_records_in_place(bytes, records, count, elem_schema, vol_idx_hint, origin)?;
             }
             let off = records as usize - payload_base as usize;
             (
@@ -9003,6 +9026,7 @@ pub fn shared_open_ifile_recovered(
         subpacket_elem_cum: None,
         is_data_packet: parsed.is_data_packet,
         fork_epoch: fork_epoch(),
+        origin: crate::origin::Origin::Outside,
     };
     let handle = pack_handle(new_gen, _slot_idx);
     install_process_local_slot(handle, local);
@@ -12645,7 +12669,7 @@ mod tests {
             let slice = slice::Slice::new(*cum.last().unwrap_or(&0u64), start, stop, step)?;
             if let (Some((lo, hi)), true) = (slice.unit_range(), tail.is_empty()) {
                 let schema = array_schema(&local.elem_schema);
-                return slice_runs(local, &unit_runs(&cum, lo, hi)).and_then(|p| require_text(p, &schema));
+                return slice_runs(local, &unit_runs(&cum, lo, hi)).and_then(|p| require_text(p, &schema, local.origin));
             }
             let plan: Vec<(usize, u64)> = slice
                 .indices()
@@ -12669,7 +12693,7 @@ mod tests {
                 let r = oracle_bulk_pack_str(local, &plan, &mut materialised, elem_width, proj_offset);
                 materialised.clear();
                 shm::shfree(arr_ptr).unwrap();
-                return r.and_then(|p| require_text(p, &array_schema(&proj_schema)));
+                return r.and_then(|p| require_text(p, &array_schema(&proj_schema), local.origin));
             }
             let out_w = proj_schema.width;
             let buf_ptr = shm::shcalloc(n_out, out_w)?;
@@ -12695,7 +12719,7 @@ mod tests {
             arr.size = n_out;
             arr.data = shm::abs2rel(buf_ptr)?;
             let out_schema = array_schema(&proj_schema);
-            unsafe { voidstar::consolidate(arr_ptr, &out_schema, &parts) }.and_then(|p| require_text(p, &out_schema))
+            unsafe { voidstar::consolidate(arr_ptr, &out_schema, &parts) }.and_then(|p| require_text(p, &out_schema, local.origin))
         })
     }
 
@@ -13843,6 +13867,7 @@ fn channel_local(generation: u64, value_schema: &Schema) -> ProcessLocalSlot {
         subpacket_elem_cum: None,
         is_data_packet: false,
         fork_epoch: fork_epoch(),
+        origin: crate::origin::Origin::Outside,
     }
 }
 

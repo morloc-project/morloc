@@ -189,6 +189,9 @@ pub const METADATA_TYPE_FRAME_INDEX: u8 = 0x04;
 /// cache, or a value one pool hands another), so it is not outside data.
 /// The entry body is empty.
 pub const METADATA_TYPE_PROGRAM_FILE: u8 = 0x09;
+/// A `METADATA_TYPE_PROGRAM_FILE` entry taken back from a packet read from
+/// a file, which readers skip (FMT-10).
+pub const METADATA_TYPE_UNMARKED: u8 = 0x0A;
 
 // ── Stream-footer metadata block types ────────────────────────────────────
 //
@@ -530,6 +533,26 @@ impl PacketHeader {
             },
             0, // metadata size set separately when building full packet
             payload_len,
+        )
+    }
+
+    /// Create a data packet header for a file reference, whose payload is
+    /// the file's path.
+    pub fn data_file(format: u8, metadata_len: u32, path_len: u64) -> Self {
+        Self::new(
+            PacketCommand {
+                data: CommandData {
+                    cmd_type: PACKET_TYPE_DATA,
+                    source: PACKET_SOURCE_FILE,
+                    format,
+                    compression: PACKET_COMPRESSION_NONE,
+                    encryption: PACKET_ENCRYPTION_NONE,
+                    status: PACKET_STATUS_PASS,
+                    generation: [0; 2],
+                },
+            },
+            metadata_len,
+            path_len,
         )
     }
 
@@ -1186,6 +1209,130 @@ pub fn get_error_message(packet: &[u8]) -> Result<Option<String>, MorlocError> {
     Ok(Some(String::from_utf8_lossy(payload).into_owned()))
 }
 
+/// The argument packets of a call packet, as byte ranges within it. Each
+/// argument's header is checked and its extent kept inside the call
+/// packet; one that runs past it ends the walk with an error.
+pub struct CallArgs<'a> {
+    bytes: &'a [u8],
+    pos: usize,
+    index: usize,
+}
+
+impl<'a> CallArgs<'a> {
+    /// The arguments of `call`, whose header is `header`; `call` holds the
+    /// whole packet and nothing after it.
+    pub fn over(call: &'a [u8], header: &PacketHeader) -> Self {
+        CallArgs { bytes: call, pos: 32usize.saturating_add(header.offset as usize), index: 0 }
+    }
+}
+
+impl Iterator for CallArgs<'_> {
+    type Item = Result<std::ops::Range<usize>, MorlocError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let end = self.bytes.len();
+        if self.pos >= end {
+            return None;
+        }
+        let past_end = MorlocError::Packet(format!(
+            "argument #{} of a call packet runs past the packet's end", self.index
+        ));
+        let rest = &self.bytes[self.pos..];
+        let size = if rest.len() < 32 {
+            Err(past_end)
+        } else {
+            PacketHeader::from_prefix(rest).and_then(|arg| {
+                32usize
+                    .checked_add({ arg.offset } as usize)
+                    .and_then(|n| n.checked_add(usize::try_from(arg.length).ok()?))
+                    .filter(|&n| n <= rest.len())
+                    .ok_or(past_end)
+            })
+        };
+        Some(match size {
+            Ok(n) => {
+                let span = self.pos..self.pos + n;
+                self.pos += n;
+                self.index += 1;
+                Ok(span)
+            }
+            Err(e) => {
+                self.pos = end;
+                Err(e)
+            }
+        })
+    }
+}
+
+/// The call packet `call`, read from a file, rewritten so that the pool
+/// reads every argument as data from outside (FMT-10). An inline argument
+/// is handed to `spill`, which writes it to a file of the caller's and
+/// returns its path, and is passed by that name; a file argument loses its
+/// program-file mark; an argument in shared memory is refused. A failed
+/// argument, which carries no value, is passed as it is.
+pub fn call_as_outside(
+    call: &[u8],
+    spill: &mut dyn FnMut(usize, &[u8]) -> Result<String, MorlocError>,
+) -> Result<Vec<u8>, MorlocError> {
+    let header = validate_packet(call)?;
+    if header.command_type() != PACKET_TYPE_CALL {
+        return Err(MorlocError::Packet("a call packet file holds a packet that is not a call".into()));
+    }
+    let mut args: Vec<u8> = Vec::new();
+    for (i, span) in CallArgs::over(call, &header).enumerate() {
+        let arg = &call[span?];
+        let h = PacketHeader::from_prefix(arg)?;
+        if !h.is_data() {
+            return Err(MorlocError::Packet(format!("argument #{i} of a call packet is not a data packet")));
+        }
+        let d = unsafe { h.command.data };
+        let meta_end = 32 + h.offset as usize;
+        if d.status != PACKET_STATUS_PASS {
+            args.extend_from_slice(arg);
+        } else if d.source == PACKET_SOURCE_MESG {
+            let path = spill(i, arg)?;
+            let mut meta: Vec<u8> = Vec::new();
+            for (kind, body) in iter_metadata(&arg[32..meta_end]).filter(|(k, _)| *k == METADATA_TYPE_SCHEMA_STRING) {
+                meta = append_metadata_entry(&meta, kind, body);
+            }
+            let file = PacketHeader::data_file(PACKET_FORMAT_DATA, meta_len_u32(meta.len()), path.len() as u64);
+            args.extend_from_slice(&file.to_bytes());
+            args.extend_from_slice(&meta);
+            args.extend_from_slice(path.as_bytes());
+        } else if d.source == PACKET_SOURCE_FILE {
+            let start = args.len();
+            args.extend_from_slice(arg);
+            unmark(&mut args[start + 32..start + meta_end]);
+        } else {
+            return Err(MorlocError::Packet(format!(
+                "argument #{i} of a call packet names shared memory, which a call read from a file cannot hold"
+            )));
+        }
+    }
+    let mut out = header;
+    out.length = args.len() as u64;
+    let mut bytes = out.to_bytes().to_vec();
+    bytes.extend_from_slice(&call[32..32 + header.offset as usize]);
+    bytes.extend_from_slice(&args);
+    Ok(bytes)
+}
+
+/// Turn every program-file mark in the metadata block `meta` into an entry
+/// readers skip.
+fn unmark(meta: &mut [u8]) {
+    let mut cur = 0usize;
+    while cur + 8 <= meta.len() && meta[cur..cur + 3] == METADATA_HEADER_MAGIC {
+        let size = u32::from_le_bytes([meta[cur + 4], meta[cur + 5], meta[cur + 6], meta[cur + 7]]) as usize;
+        if meta[cur + 3] == METADATA_TYPE_PROGRAM_FILE {
+            meta[cur + 3] = METADATA_TYPE_UNMARKED;
+        }
+        match cur.checked_add(8).and_then(|n| n.checked_add(size)) {
+            Some(next) if next <= meta.len() => cur = next,
+            _ => break,
+        }
+    }
+}
+
 /// Iterator over the entries of a metadata block, yielding
 /// `(metadata_type, data)`. It stops at the first non-`mmh` magic or at an
 /// entry that runs past the block's end.
@@ -1517,6 +1664,57 @@ pub fn forward_scan_subpackets_capped(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn arg(source: u8, payload: &[u8]) -> Vec<u8> {
+        let mut h = PacketHeader::data_mesg(PACKET_FORMAT_MSGPACK, payload.len() as u64);
+        unsafe { h.command.data.source = source };
+        let mut p = h.to_bytes().to_vec();
+        p.extend_from_slice(payload);
+        p
+    }
+
+    fn no_spill(_: usize, _: &[u8]) -> Result<String, MorlocError> {
+        Ok("/spilled".into())
+    }
+
+    #[test]
+    fn a_call_argument_that_runs_past_the_packet_is_refused() {
+        let good = arg(PACKET_SOURCE_MESG, b"\x01");
+        for (what, patch) in [
+            ("length", 24usize..32usize),
+            ("metadata length", 20..24),
+        ] {
+            let mut call = make_local_call_packet(0, &[good.clone(), good.clone()]);
+            let second = 32 + good.len();
+            for b in &mut call[second + patch.start..second + patch.end] {
+                *b = 0xff;
+            }
+            let header = validate_packet(&call).unwrap();
+            let spans: Vec<_> = CallArgs::over(&call, &header).collect();
+            assert!(spans[0].is_ok() && spans[1].is_err() && spans.len() == 2, "{what}: {spans:?}");
+            assert!(call_as_outside(&call, &mut no_spill).is_err(), "{what}");
+        }
+        let mut call = make_local_call_packet(0, &[good.clone()]);
+        call.extend_from_slice(&[0u8; 8]);
+        let n = call.len() - 32;
+        call[24..32].copy_from_slice(&(n as u64).to_le_bytes());
+        assert!(call_as_outside(&call, &mut no_spill).is_err(), "a short tail");
+    }
+
+    #[test]
+    fn a_call_read_from_a_file_refuses_shared_memory_and_spills_inline_values() {
+        let call = make_local_call_packet(0, &[arg(PACKET_SOURCE_RPTR, &[0; 8])]);
+        assert!(call_as_outside(&call, &mut no_spill).is_err());
+        let call = make_local_call_packet(3, &[arg(PACKET_SOURCE_MESG, b"\x01")]);
+        let out = call_as_outside(&call, &mut no_spill).unwrap();
+        let header = validate_packet(&out).unwrap();
+        let spans: Vec<_> = CallArgs::over(&out, &header).map(|s| s.unwrap()).collect();
+        let a = PacketHeader::from_prefix(&out[spans[0].clone()]).unwrap();
+        let d = unsafe { a.command.data };
+        assert_eq!((d.source, d.format), (PACKET_SOURCE_FILE, PACKET_FORMAT_DATA));
+        assert_eq!(&out[spans[0].end - 8..spans[0].end], b"/spilled");
+        assert_eq!(unsafe { header.command.call.midx }, 3);
+    }
 
     #[test]
     fn test_header_size() {

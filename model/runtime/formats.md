@@ -27,8 +27,9 @@ Region zero-padded to a multiple of 32. Kinds 1 schema, 3 volume index,
 4 frame index, 5 subpacket index, 6 stream diag, 7 final footer, 8 footer
 status, 9 program file (empty body: the file a file-reference packet names
 was written by this program, its cache or a value one pool hands another,
-so a reader takes it as a value the program built, PANIC-14). (2 xxhash:
-defined, unused.)
+so a reader takes it as a value the program built, PANIC-14), 10 a program
+file mark taken off an argument of a call packet read from a file (FMT-10;
+readers skip it). (2 xxhash: defined, unused.)
 
 ### FMT-4 A relative pointer is volume index (bits 62-48) and offset (47-0); -1 is null
 Status: draft
@@ -75,7 +76,7 @@ holds itself through a handle has no closed form and is refused at build.
 
 ### FMT-10 A Str is valid UTF-8 on the wire, and no output form drops one
 Status: implemented
-Checked by: the_first_invalid_byte_is_found, a_str_that_is_not_text_fails_every_read_of_a_file, a_str_column_that_is_not_text_is_refused, a_msgpack_str_that_is_not_text_is_refused, raw_output_writes_a_str_that_is_not_text_byte_for_byte, a_debug_build_checks_the_text_of_its_own_raw_output_unless_the_check_is_off, a_stdout_sub_packet_is_materialized_as_the_programs_own_value, a_debug_build_checks_the_text_of_its_own_stdout_unless_the_check_is_off, golden:spec-base-4-1, golden:stdout-raw-bodies, golden:stdout-raw-producers
+Checked by: the_first_invalid_byte_is_found, a_str_that_is_not_text_fails_every_read_of_a_file, a_str_column_that_is_not_text_is_refused, a_msgpack_str_that_is_not_text_is_refused, raw_output_writes_a_str_that_is_not_text_byte_for_byte, a_debug_build_checks_the_text_of_its_own_raw_output_unless_the_check_is_off, a_stdout_sub_packet_is_materialized_as_the_programs_own_value, a_debug_build_checks_the_text_of_its_own_stdout_unless_the_check_is_off, a_stage_file_is_the_programs_own_only_where_the_nexus_puts_it, bytes_are_trusted_by_the_descriptor_they_were_read_from_never_by_their_name, a_call_packet_read_from_a_file_passes_every_argument_as_outside_data, a_call_argument_that_runs_past_the_packet_is_refused, a_call_read_from_a_file_refuses_shared_memory_and_spills_inline_values, golden:spec-base-4-1, golden:stdout-raw-bodies, golden:stdout-raw-producers
 
 A `Str` body is valid UTF-8 text (BASE-5). A binding whose language can
 hold other bytes (C++ `std::string`, an R string built from raw bytes or
@@ -90,7 +91,31 @@ imported. An output form never prints a body it cannot carry as empty: raw
 output writes the bytes, and JSON output fails, naming the byte position.
 `MORLOC_SKIP_UTF8_CHECK=1`, or a program built with `--unsafe-skip-utf8-check`,
 turns off the check of the bodies the program builds, never that of data
-read from outside; a process reads the setting once. The frames of a run's
+read from outside; a process reads the setting once. The output the stage
+of a multi-output run saves is a value the program built, and each replay
+reads it as one, a stream or a value, whether the pools or the nexus read
+it. That is decided from where the file is, never from what it holds, and
+only by the nexus of a replay child, which takes the last input of the
+hidden replay command (not a user interface) as the program's own when it
+is `stream.pkt` or `value.pkt` in a `morloc-stage-XXXXXX` directory of the
+nexus's temporary directory, the directory owned by the user and closed to
+everyone else, the file regular, not a link, with one link, owned by the
+user and writable by no one else. The nexus opens it without following a
+link and keeps it open, and trusts only that inode, in that process and
+the streams it opens for its pools; the origin of bytes is that of the
+descriptor they were read from, never of a name looked up again. Every
+other file, one where a stage saves its output or named by a packet marked
+as the program's included, read as a command argument, from stdin, by a
+call packet or by the daemon, is data from outside. A call packet read
+from a file (call-packet mode) has every argument read as data from
+outside: the nexus writes each inline argument to a new file of its own
+and passes it by name, which a pool reads as data from outside, takes the
+program-file mark off each file argument, and refuses an argument in
+shared memory or one that runs past the packet. Another
+process of the same user is outside this guarantee. The program's own
+values skip only the text, fixed-length and enum checks; every relptr and
+extent check still runs, and in a debug build a stage file that fails a
+check is a defect (PANIC-14). The frames of a run's
 own output streams are values the program built (DIM-3). Raw output
 writes their bodies without scanning them, except in a debug build, which
 checks them as DIM-3 checks the program's values and which the setting

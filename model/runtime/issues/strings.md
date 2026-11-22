@@ -17,6 +17,13 @@ the runtime's rule. What remains:
   A Str that reaches Python unchecked (only with the opt-out) fails with
   "'utf-8' codec can't decode byte 0xff in position 2" from pymorloc.c:2016,
   naming the position but not the language that made it.
+- **MessagePack checks text whatever its origin.** [read, 2026-11-22]
+  `unpack_from` (mpack.rs, the `SerialType::String` arm of the unpack
+  walk) runs `first_invalid` on every msgpack Str, ignoring the origin and
+  the opt-out. So under `MORLOC_SKIP_UTF8_CHECK=1` a Str the program built
+  that crosses as a FILE+MSGPACK argument (the form used when shared
+  memory is off) fails, even locally, while FMT-10 says the opt-out turns
+  off the check of the bodies the program builds.
 - **Perf: the header fast path resolves each Str separately.**
   [read, 2026-11-08] `RebaseWalk::headers` (voidstar.rs) now resolves and
   validates every `Str` body on its own: a `rel2abs` lookup in SHM mode
@@ -34,14 +41,3 @@ the runtime's rule. What remains:
   and write passes of the R encoder each call `r_str_utf8`, so a latin1 or
   native-locale string is converted twice, both copies held until the call
   returns.
-- **A stage's saved stream is read back as data from outside.** [reproduced,
-  2026-11-22] FMT-10 says the opt-out turns off the check of the bodies the
-  program builds. A render action on a command that streams `Str` runs on
-  the stream the stage saved to a file, and the replay reads it with the
-  outside check, so under `MORLOC_SKIP_UTF8_CHECK=1` it fails ("in data
-  read from outside", `_mlc_replay`; golden stdout-raw-producers,
-  `stagedCpp 1 -a`), while the same bytes rendered from a stream of other
-  batches print (stdout-raw-bodies, `bad 1 -t`). Needs a ruling: mark a
-  stage file as the program's own, or say the opt-out stops at a stage. If
-  it is marked, decide it from the path the nexus created for the stage,
-  never from metadata in the file, which anyone can write.

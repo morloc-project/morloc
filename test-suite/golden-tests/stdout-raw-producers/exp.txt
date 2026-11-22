@@ -41,3 +41,23 @@ fwdCpp 0 FAILED
 not valid UTF-8 (byte 1 of 4) in data read from outside
 fwdCpp 1 FAILED
 not valid UTF-8 (byte 1 of 4) in data read from outside
+stagedCpp 1 -a skipped OK
+stagedCpp 1 -a SAME
+stagedCpp 1 -c skipped OK
+stagedCpp 1 -c SAME
+stagedCpp 1 -a -c=skip-cat.out skipped OK
+stagedCpp 1 -a -c=skip-cat.out SAME
+stagedR 1 -a skipped OK
+stagedR 1 -a SAME
+stagedValue 1 -a -b=skip-both.out skipped OK
+stagedValue 1 -a -b=skip-both.out SAME
+cat file SAME
+both file SAME
+fwdArg FAILED
+not valid UTF-8 (byte 1 of 4) in data read from outside
+replay open01 FAILED
+not valid UTF-8 (byte 1 of 4) in data read from outside
+replay link01 FAILED
+not valid UTF-8 (byte 1 of 4) in data read from outside
+replay good01 OK
+replay good01 SAME

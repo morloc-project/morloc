@@ -692,6 +692,16 @@ fn main() {
             } else {
                 apply_value_form(&mut config, &manifest.commands[idx], format_explicit);
             }
+            // FMT-10: the last input of this hidden command, which is not a
+            // user interface, is the output the stage saved, read as the
+            // program's own when it lies where a stage saves it; the
+            // arguments before it stay data from outside.
+            if let Some(Ok(saved)) = inputs.last().map(|p| std::ffi::CString::new(p.as_str())) {
+                extern "C" {
+                    fn mlc_trust_stage_file(path: *const std::ffi::c_char) -> i32;
+                }
+                unsafe { mlc_trust_stage_file(saved.as_ptr()) };
+            }
             // Each input is a file the stage wrote, read as the manifest
             // says its argument is read (see `stageReplayArgs` in the
             // compiler), exactly as a command-line argument would be.
@@ -748,7 +758,7 @@ fn main() {
                 let (fd, schema) = match &parent.stream {
                     Some(stream) => {
                         let path = stage::stream_path(&dir);
-                        let file = std::fs::File::create(&path).unwrap_or_else(|e| {
+                        let file = stage::create_private(&path).unwrap_or_else(|e| {
                             eprintln!("Error: {}: {}", path, e);
                             process::clean_exit(1);
                         });
@@ -1223,23 +1233,35 @@ fn run_call_packet(config: &dispatch::NexusConfig, tmpdir: &str) {
     // Structural check on the bytes we just read from the shared FS. A
     // torn or corrupted call packet would otherwise propagate into the
     // pool dispatch as garbage offsets / lengths and crash the worker.
-    {
+    // FMT-10: the file could have been written by anyone, so every argument
+    // is rewritten to be read as data from outside; an inline one goes by a
+    // file of this process's own.
+    let admitted = {
         let slice = unsafe { std::slice::from_raw_parts(call_packet, packet_size) };
-        if let Err(e) = morloc_runtime_types::packet::validate_packet(slice) {
+        let mut spill = |i: usize, arg: &[u8]| -> Result<String, morloc_runtime_types::error::MorlocError> {
+            use std::io::Write;
+            let path = format!("{}/call-arg-{}.pkt", tmpdir.trim_end_matches('/'), i);
+            stage::create_private(&path)
+                .and_then(|mut f| f.write_all(arg))
+                .map_err(|e| morloc_runtime_types::error::MorlocError::Other(format!("{}: {}", path, e)))?;
+            Ok(path)
+        };
+        let admitted = morloc_runtime_types::packet::call_as_outside(slice, &mut spill);
+        unsafe { libc::free(call_packet as *mut c_void) };
+        admitted.unwrap_or_else(|e| {
             eprintln!(
                 "Error: call packet '{}' is malformed: {}",
                 packet_path, e
             );
-            unsafe { libc::free(call_packet as *mut c_void) };
             process::clean_exit(1);
-        }
-    }
+        })
+    };
 
     // Send to pool and receive response
     let mut result_packet = unsafe {
-        send_and_receive_over_socket(socket_c.as_ptr(), call_packet, &mut errmsg)
+        send_and_receive_over_socket(socket_c.as_ptr(), admitted.as_ptr(), &mut errmsg)
     };
-    unsafe { libc::free(call_packet as *mut c_void) };
+    drop(admitted);
     if result_packet.is_null() || !errmsg.is_null() {
         let msg = if !errmsg.is_null() {
             let s = unsafe { std::ffi::CStr::from_ptr(errmsg) }.to_string_lossy().into_owned();

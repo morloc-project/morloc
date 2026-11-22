@@ -1053,61 +1053,12 @@ pub(crate) unsafe fn make_morloc_remote_call_packet(
 
 // ── Call packet reading ──────────────────────────────────────────────────────
 
-/// The argument packets of a call packet, as byte ranges within it. Each
-/// argument's header is checked and its extent kept inside the call packet's
-/// declared size.
-pub(crate) struct CallArgs<'a> {
-    bytes: &'a [u8],
-    pos: usize,
-    index: usize,
-}
-
-impl<'a> CallArgs<'a> {
-    pub(crate) unsafe fn new(packet: *const u8, header: *const PacketHeader) -> Self {
-        CallArgs {
-            bytes: std::slice::from_raw_parts(packet, morloc_packet_size_from_header(header)),
-            pos: 32 + (*header).offset as usize,
-            index: 0,
-        }
-    }
-}
-
-impl Iterator for CallArgs<'_> {
-    type Item = Result<std::ops::Range<usize>, MorlocError>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        let end = self.bytes.len();
-        if self.pos >= end {
-            return None;
-        }
-        let past_end = MorlocError::Packet(format!(
-            "argument #{} of a call packet runs past the packet's end", self.index
-        ));
-        let rest = &self.bytes[self.pos..];
-        let size = if rest.len() < 32 {
-            Err(past_end)
-        } else {
-            PacketHeader::from_prefix(rest).and_then(|arg| {
-                32usize
-                    .checked_add({ arg.offset } as usize)
-                    .and_then(|n| n.checked_add(usize::try_from(arg.length).ok()?))
-                    .filter(|&n| n <= rest.len())
-                    .ok_or(past_end)
-            })
-        };
-        Some(match size {
-            Ok(n) => {
-                let span = self.pos..self.pos + n;
-                self.pos += n;
-                self.index += 1;
-                Ok(span)
-            }
-            Err(e) => {
-                self.pos = end;
-                Err(e)
-            }
-        })
-    }
+/// The arguments of the call packet at `packet`, whose header is `header`.
+pub(crate) unsafe fn call_args<'a>(packet: *const u8, header: *const PacketHeader) -> morloc_runtime_types::packet::CallArgs<'a> {
+    morloc_runtime_types::packet::CallArgs::over(
+        std::slice::from_raw_parts(packet, morloc_packet_size_from_header(header)),
+        &*header,
+    )
 }
 
 pub(crate) unsafe fn read_morloc_call_packet(
@@ -1138,7 +1089,7 @@ pub(crate) unsafe fn read_morloc_call_packet(
     (*call).args = ptr::null_mut();
     (*call).owns_args = 0; // borrowing pointers into packet
 
-    let nargs = match CallArgs::new(packet, header).try_fold(0usize, |n, a| a.map(|_| n + 1)) {
+    let nargs = match call_args(packet, header).try_fold(0usize, |n, a| a.map(|_| n + 1)) {
         Ok(n) => n,
         Err(e) => {
             set_errmsg(errmsg, &e);
@@ -1154,7 +1105,7 @@ pub(crate) unsafe fn read_morloc_call_packet(
         return ptr::null_mut();
     }
 
-    for (i, span) in CallArgs::new(packet, header).enumerate() {
+    for (i, span) in call_args(packet, header).enumerate() {
         let span = match span {
             Ok(s) => s,
             Err(e) => {

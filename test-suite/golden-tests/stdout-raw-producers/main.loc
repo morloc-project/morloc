@@ -7,10 +7,15 @@
 -- lone surrogate; R as a character vector, a list, a raw vector, a string
 -- marked as bytes, as a copy and crossing to Python; and Python and R
 -- renders. An R string marked latin1 arrives translated to UTF-8. With the
--- encoders' check off a render's bytes are printed as they are. A packet
--- holding such a Str, read from stdin and written to stdout, fails as data
--- read from outside, with the check off too.
-module main (cppBad, cppBlob, pyBad, pyBadArray, pySurrogate, rBadVec, rBadList, rBadRaw, rBytes, rLatin, rToPy, pyRendered, rRendered, stagedCpp, stagedR, fwd, fwdCpp)
+-- encoders' check off a render's bytes are printed as they are, the
+-- renders of a run with two actions included, which read the output the
+-- stage saved as the program's own. A packet holding such a Str, read from
+-- stdin or from a file named as an argument, even one where a stage saves
+-- its output, fails as data read from outside, with the check off too, as
+-- does the saved input of a replay in a directory others may enter or that
+-- is a link; a regular private file where a stage saves it is the
+-- program's own.
+module main (cppBad, cppBlob, pyBad, pyBadArray, pySurrogate, rBadVec, rBadList, rBadRaw, rBytes, rLatin, rToPy, pyRendered, rRendered, stagedCpp, stagedR, stagedValue, fwd, fwdCpp, fwdArg)
 
 import root
 import root-cpp
@@ -121,6 +126,7 @@ fwdCpp = @stdout (\o -> do
 --' A C++ batch whose second Str is not UTF-8, for actions
 --' @render -a/--all=joinStrs @stream
 --' @render -b/--both=joinStrs @stream
+--' @render -c/--cat=joinStrs
 stagedCpp :: Int -> <IO> (Collect Str)
 stagedCpp n = @stdout (\o -> @write 0 o (cBad n))
 
@@ -129,3 +135,15 @@ stagedCpp n = @stdout (\o -> @write 0 o (cBad n))
 --' @render -b/--both=joinStrs @stream
 stagedR :: Int -> <IO> (Collect Str)
 stagedR n = @stdout (\o -> @write 0 o (rbadvec n))
+
+--' A C++ list whose second Str is not UTF-8, for actions
+--' @render -a/--all=joinStrs
+--' @render -b/--both=joinStrs
+stagedValue :: Int -> [Note]
+stagedValue n = cBad n
+
+--' Copy one batch of Strs from a stream file to stdout
+fwdArg :: IStream Note -> <IO> (Collect Note)
+fwdArg s = @stdout (\o -> do
+  Ok xs <- @next s
+  @write 0 o xs)

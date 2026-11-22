@@ -555,6 +555,19 @@ pub(crate) unsafe fn try_load_stream_packet_file(
     let path_str = CStr::from_ptr(path).to_string_lossy().into_owned();
 
     match rs.serial_type {
+        // The saved output of a stage is read here, as the program's own
+        // (FMT-10), since the pool would read the file it names as data
+        // from outside.
+        SerialType::Array if crate::origin::names_stage_file(path) => {
+            let arr = crate::stream::shared_load_stream_file_as_array(&path_str, Some(&rs))?;
+            let mut inner_err: *mut c_char = ptr::null_mut();
+            let pkt = argument_packet(arr as *mut c_void, schema, &mut inner_err);
+            if pkt.is_null() {
+                let _ = shm::shfree(arr);
+                return Err(wrap_errmsg_with(inner_err, &path_str));
+            }
+            Ok(Some(pkt))
+        }
         SerialType::Array => {
             // Small indirection packet: payload = path bytes.
             let pkt = crate::packet_ffi::make_data_indirection_packet(path, schema);
@@ -725,7 +738,8 @@ pub(crate) unsafe fn try_load_voidstar_packet_via_mmap(
     let read = pread_exact(fd, landing.as_mut_ptr(), payload_size, payload_offset);
     libc::close(fd);
     read?;
-    Ok(Some(landing.relocate(&CSchema::to_rust(schema), vol_idx_hint, crate::origin::Origin::Outside)?))
+    let origin = crate::origin::of_stat(&sb);
+    Ok(Some(landing.relocate(&CSchema::to_rust(schema), vol_idx_hint, origin)?))
 }
 
 /// Read exactly `len` bytes of `fd` at `offset` into `dst`.
@@ -917,7 +931,8 @@ pub(crate) unsafe fn try_load_compressed_voidstar_via_shm(
     );
 
     let t_relptr = std::time::Instant::now();
-    let dest = landing.relocate(&CSchema::to_rust(schema), vol_idx_hint, crate::origin::Origin::Outside)?;
+    let origin = crate::origin::of_stat(&sb);
+    let dest = landing.relocate(&CSchema::to_rust(schema), vol_idx_hint, origin)?;
     crate::morloc_trace!("[fastpath] relocation took {:.2?}", t_relptr.elapsed());
     crate::morloc_trace!("[fastpath] total ingest: {:.2?}", t0.elapsed());
 
@@ -934,6 +949,7 @@ unsafe fn try_decompress_voidstar_bytes_to_shm(
     data_size: usize,
     schema: *const CSchema,
     path_hint: &str,
+    origin: crate::origin::Origin,
 ) -> Result<Option<*mut c_void>, MorlocError> {
     if data.is_null() || data_size < 32 {
         return Ok(None);
@@ -982,7 +998,7 @@ unsafe fn try_decompress_voidstar_bytes_to_shm(
         Ok(Some(f)) if !f.is_empty() => f,
         _ => return Ok(None),
     };
-    let landed = crate::voidstar::land_compressed_frames(&frames, compressed, &CSchema::to_rust(schema), hint, crate::origin::Origin::Outside)?;
+    let landed = crate::voidstar::land_compressed_frames(&frames, compressed, &CSchema::to_rust(schema), hint, origin)?;
     Ok(Some(landed as *mut c_void))
 }
 
@@ -1007,9 +1023,21 @@ pub(crate) unsafe fn read_voidstar_binary_with_hint(
     vol_idx_hint: u16,
     errmsg: *mut *mut c_char,
 ) -> *mut c_void {
+    read_voidstar_binary_from(blob, blob_size, schema, vol_idx_hint, crate::origin::Origin::Outside, errmsg)
+}
+
+/// [`read_voidstar_binary_with_hint`] for a payload of `origin`.
+unsafe fn read_voidstar_binary_from(
+    blob: *const u8,
+    blob_size: usize,
+    schema: *const CSchema,
+    vol_idx_hint: u16,
+    origin: crate::origin::Origin,
+    errmsg: *mut *mut c_char,
+) -> *mut c_void {
     clear_errmsg(errmsg);
     let blob = std::slice::from_raw_parts(blob, blob_size);
-    match crate::voidstar::read_binary_with_hint(blob, &CSchema::to_rust(schema), vol_idx_hint, crate::origin::Origin::Outside) {
+    match crate::voidstar::read_binary_with_hint(blob, &CSchema::to_rust(schema), vol_idx_hint, origin) {
         Ok(base) => base as *mut c_void,
         Err(e) => {
             set_errmsg(errmsg, &e);
@@ -2063,12 +2091,25 @@ unsafe fn reason_or_unreadable(err: *mut c_char, path: *const c_char) -> MorlocE
 
 /// Load a morloc data file's bytes as a value of `schema`: a compressed
 /// packet is decompressed, then the format is chosen by extension or
-/// content magic.
+/// content magic. The bytes are data from outside.
 pub(crate) unsafe fn load_morloc_data_file(
+    path: *const c_char,
+    data: *mut u8,
+    data_size: usize,
+    schema: *const CSchema,
+    errmsg: *mut *mut c_char,
+) -> *mut c_void {
+    load_morloc_data_file_from(path, data, data_size, schema, crate::origin::Origin::Outside, errmsg)
+}
+
+/// [`load_morloc_data_file`] for bytes of `origin`, which the caller knows
+/// from the descriptor it read them from (FMT-10); `path` only names them.
+unsafe fn load_morloc_data_file_from(
     path: *const c_char,
     mut data: *mut u8,
     mut data_size: usize,
     schema: *const CSchema,
+    origin: crate::origin::Origin,
     errmsg: *mut *mut c_char,
 ) -> *mut c_void {
     clear_errmsg(errmsg);
@@ -2094,7 +2135,7 @@ pub(crate) unsafe fn load_morloc_data_file(
     };
 
     if !data.is_null() && data_size >= 32 {
-        match try_decompress_voidstar_bytes_to_shm(data, data_size, schema, &path_str) {
+        match try_decompress_voidstar_bytes_to_shm(data, data_size, schema, &path_str, origin) {
             Ok(Some(voidstar)) => {
                 libc::free(data as *mut c_void);
                 return voidstar;
@@ -2403,8 +2444,8 @@ pub(crate) unsafe fn load_morloc_data_file(
                     let packet_slice = std::slice::from_raw_parts(data, data_size);
                     let hint = packet::read_vol_index_from_meta(packet_slice)
                         .ok().flatten().unwrap_or(0);
-                    let result = read_voidstar_binary_with_hint(
-                        payload, length, schema, hint, &mut err,
+                    let result = read_voidstar_binary_from(
+                        payload, length, schema, hint, origin, &mut err,
                     );
                     libc::free(data as *mut c_void);
                     if !err.is_null() { *errmsg = err; return ptr::null_mut(); }
@@ -2631,6 +2672,10 @@ unsafe fn parse_cli_data_argument_classified(
         ArgSource::File => format!("file '{}'", CStr::from_ptr(effective).to_string_lossy()),
         ArgSource::Inline => unreachable!("fd is non-null"),
     };
+    let origin = match classified.kind {
+        ArgSource::File => crate::origin::of_descriptor(libc::fileno(fd)),
+        ArgSource::Stdin | ArgSource::Inline => crate::origin::Origin::Outside,
+    };
     let mut data_size: usize = 0;
     let data = read_binary_fd(fd, &mut data_size, &mut err);
     libc::fclose(fd);
@@ -2642,7 +2687,7 @@ unsafe fn parse_cli_data_argument_classified(
 
     // Every packet format, decompression included, goes through the one
     // file loader; it takes ownership of `data`.
-    dest = load_morloc_data_file(effective, data, data_size, schema, &mut err) as *mut u8;
+    dest = load_morloc_data_file_from(effective, data, data_size, schema, origin, &mut err) as *mut u8;
     if !err.is_null() {
         wrap_and_set_errmsg(err, &source_label, errmsg);
         return ptr::null_mut();
