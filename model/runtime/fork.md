@@ -241,7 +241,7 @@ item. Model: `tla/DispatchFork.tla`.
 
 ### FORK-17 A forked child exits when it leaves the call of user code it was forked inside
 Status: implemented
-Checked by: golden:fork-in-nested-call, golden:spec-strm-8-8, tla:StdioBracket, tla:StdioBracket_no_call_check.bug
+Checked by: golden:fork-in-nested-call, golden:parallel-span-threads, golden:spec-strm-8-8, tla:StdioBracket, tla:StdioBracket_no_call_check.bug
 
 A child forked inside a call of user code exits as soon as it leaves the
 call, by returning or by failing, before

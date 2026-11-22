@@ -12,7 +12,7 @@ Checked by: every_process_wide_value_is_registered, every_registry_row_names_a_v
 
 ### STATE-2 Per-thread state a manifold builds does not outlive its thread
 Status: implemented
-Checked by: golden:threaded-sourced-callbacks, golden:spec-host-7-1, cschema_cache_is_freed_when_its_thread_ends, a_drain_leaves_nothing_behind_on_its_thread, deep_recursive_value_dropped_concurrently
+Checked by: golden:threaded-sourced-callbacks, golden:spec-host-7-1, golden:parallel-span-threads, cschema_cache_is_freed_when_its_thread_ends, a_drain_leaves_nothing_behind_on_its_thread, deep_recursive_value_dropped_concurrently
 
 A manifold may run on a thread a sourced function starts (HOST-7). A
 `thread` row such a call can reach either frees its value when the thread
