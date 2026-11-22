@@ -3,12 +3,14 @@
 -- and one larger than a stream's write buffer -- for text and binary
 -- renders alike, compressed batches included; a reader that closes early
 -- ends the run with status 141. A body that is not UTF-8 is refused by the
--- C++ encoder, and with the encoder check off by the nexus (FMT-10).
-module main (texts, binary, bad)
+-- C++ encoder; with the encoder check off it is written as it is, and JSON
+-- output of such a Str fails without naming it as read from outside
+-- (FMT-10).
+module main (texts, binary, bad, badStrs)
 
 import root-cpp
 
-source Cpp from "impl.hpp" ("mk", "render", "renderBytes", "renderBad")
+source Cpp from "impl.hpp" ("mk", "render", "renderBytes", "renderBad", "badStrsOf")
 
 --' One batch: empty for 0, one element otherwise
 mk :: Int -> [Int]
@@ -18,6 +20,8 @@ render :: [Int] -> Str
 renderBytes :: [Int] -> [U8]
 --' A batch as text that is not UTF-8
 renderBad :: [Int] -> Str
+--' Two Strs, the second not UTF-8
+badStrsOf :: Int -> [Str]
 
 --' Send batches 0 to 3 to a sink
 produce :: ([Int] -> <IO> ()) -> <IO> ()
@@ -41,3 +45,7 @@ binary n = @collect produce
 --' @render -t/--text=renderBad @stream @default
 bad :: Int -> <IO> (Collect Int)
 bad n = @collect produce
+
+--' Stream two Strs, the second not UTF-8, as values
+badStrs :: Int -> <IO> (Collect Str)
+badStrs n = @stdout (\o -> @write 0 o (badStrsOf n))

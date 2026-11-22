@@ -75,7 +75,7 @@ holds itself through a handle has no closed form and is refused at build.
 
 ### FMT-10 A Str is valid UTF-8 on the wire, and no output form drops one
 Status: implemented
-Checked by: the_first_invalid_byte_is_found, a_str_that_is_not_text_fails_every_read_of_a_file, a_str_column_that_is_not_text_is_refused, a_msgpack_str_that_is_not_text_is_refused, golden:spec-base-4-1
+Checked by: the_first_invalid_byte_is_found, a_str_that_is_not_text_fails_every_read_of_a_file, a_str_column_that_is_not_text_is_refused, a_msgpack_str_that_is_not_text_is_refused, raw_output_writes_a_str_that_is_not_text_byte_for_byte, a_debug_build_checks_the_text_of_its_own_raw_output_unless_the_check_is_off, a_stdout_sub_packet_is_materialized_as_the_programs_own_value, a_debug_build_checks_the_text_of_its_own_stdout_unless_the_check_is_off, golden:spec-base-4-1, golden:stdout-raw-bodies, golden:stdout-raw-producers
 
 A `Str` body is valid UTF-8 text (BASE-5). A binding whose language can
 hold other bytes (C++ `std::string`, an R string built from raw bytes or
@@ -89,4 +89,19 @@ included, and every Arrow column holding text is checked as a table is
 imported. An output form never prints a body it cannot carry as empty: raw
 output writes the bytes, and JSON output fails, naming the byte position.
 `MORLOC_SKIP_UTF8_CHECK=1`, or a program built with `--unsafe-skip-utf8-check`,
-turns off the encoders' check only; a process reads the setting once.
+turns off the check of the bodies the program builds, never that of data
+read from outside; a process reads the setting once. The frames of a run's
+own output streams are values the program built (DIM-3). Raw output
+writes their bodies without scanning them, except in a debug build, which
+checks them as DIM-3 checks the program's values and which the setting
+also turns off; every path to them checked each body where it was made:
+C++ in its leaf writer and, for a container standing for a `Str`, after
+writing its bytes, in the in-place and the copy paths alike; Python in its
+write pass, in place and as a copy; R in its size pass, which runs before
+every write of a value (in place, as a copy, and into a new block for a
+call or a crossing), and as each element of a character vector is placed
+in place; and a body read from outside as it was decoded. A Rust `String`
+is text by its own invariant: a sourced function that breaks it (with
+`from_utf8_unchecked`) is undefined behaviour in Rust, outside morloc's
+checks. JSON output of a body that is not text fails without naming it as
+read from outside.

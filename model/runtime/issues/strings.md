@@ -34,3 +34,14 @@ the runtime's rule. What remains:
   and write passes of the R encoder each call `r_str_utf8`, so a latin1 or
   native-locale string is converted twice, both copies held until the call
   returns.
+- **A stage's saved stream is read back as data from outside.** [reproduced,
+  2026-11-22] FMT-10 says the opt-out turns off the check of the bodies the
+  program builds. A render action on a command that streams `Str` runs on
+  the stream the stage saved to a file, and the replay reads it with the
+  outside check, so under `MORLOC_SKIP_UTF8_CHECK=1` it fails ("in data
+  read from outside", `_mlc_replay`; golden stdout-raw-producers,
+  `stagedCpp 1 -a`), while the same bytes rendered from a stream of other
+  batches print (stdout-raw-bodies, `bad 1 -t`). Needs a ruling: mark a
+  stage file as the program's own, or say the opt-out stops at a stage. If
+  it is marked, decide it from the path the nexus created for the stage,
+  never from metadata in the file, which anyone can write.

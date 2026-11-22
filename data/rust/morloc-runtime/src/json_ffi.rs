@@ -6,7 +6,6 @@ use std::ffi::{c_char, c_void, CStr, CString};
 use std::ptr;
 
 use crate::cschema::CSchema;
-use crate::schema::SerialType;
 use crate::error::{clear_errmsg, set_errmsg, MorlocError};
 
 // ── quoted ─────────────────────────────────────────────────────────────────
@@ -191,7 +190,9 @@ pub(crate) unsafe fn write_raw_subpacket(bytes: &[u8], fd: i32) -> Result<i32, M
 
 /// `write_raw_subpacket` of a sub-packet held in two parts: `head`, its
 /// header and metadata, and `payload`, the region the header's length
-/// describes, whole or less its alignment padding.
+/// describes, whole or less its alignment padding. The bodies are written
+/// as they lie: their producers checked them (FMT-10), and only a debug
+/// build checks them again (DIM-3).
 pub(crate) unsafe fn write_raw_parts(head: &[u8], payload: &[u8], fd: i32) -> Result<i32, MorlocError> {
     use crate::json::RawShape;
     use crate::voidstar::{Local, Space};
@@ -227,7 +228,7 @@ pub(crate) unsafe fn write_raw_parts(head: &[u8], payload: &[u8], fd: i32) -> Re
     }
     let space = Local::new(payload.as_ptr(), payload.len());
     let root: Array = std::ptr::read_unaligned(payload.as_ptr() as *const Array);
-    let text = schema.parameters[0].serial_type == SerialType::String;
+    let text = schema.parameters[0].serial_type == crate::schema::SerialType::String;
     let mut bodies: Vec<(*const u8, usize)> = Vec::new();
     let mut push = |p: *const u8, n: usize| match bodies.last_mut() {
         Some((q, m)) if (*q).wrapping_add(*m) == p => *m += n,
@@ -242,7 +243,7 @@ pub(crate) unsafe fn write_raw_parts(head: &[u8], payload: &[u8], fd: i32) -> Re
                 if a.size > 0 {
                     let p = space.resolve(a.data, a.size)? as *const u8;
                     if text {
-                        crate::voidstar::check_outside_text(p, a.size)?;
+                        crate::voidstar::check_program_text(p, a.size)?;
                     }
                     push(p, a.size);
                 }
@@ -542,7 +543,9 @@ mod c_abi {
     }
 
     /// `write_raw_parts` over the C ABI: one of the `RAW_*` codes, with a
-    /// message in `*errmsg` for `RAW_FAILED`.
+    /// message in `*errmsg` for `RAW_FAILED`. The caller vouches that the
+    /// frame is one this run's program built (FMT-10): its text is not
+    /// scanned outside a debug build.
     #[no_mangle]
     pub unsafe extern "C" fn mlc_write_raw_subpacket(
         head: *const u8, head_len: u64, payload: *const u8, payload_len: u64, fd: i32, errmsg: *mut *mut c_char,
@@ -797,6 +800,116 @@ mod raw_write_tests {
             assert_eq!(code, super::RAW_WRITTEN);
             assert!(got == bodies_owned.concat(), "cap {cap}: the bytes written differ from the bodies");
         }
+    }
+
+    const CHILD_ENV: &str = "MORLOC_RAW_WRITE_TEST_CHILD";
+
+    fn status_of_child(name: &str, env: &[(&str, &str)]) -> i32 {
+        let mut cmd = std::process::Command::new(std::env::current_exe().unwrap());
+        cmd.args([&format!("json_ffi::raw_write_tests::{name}"), "--exact", "--ignored", "--test-threads=1"])
+            .env(CHILD_ENV, "1")
+            .env_remove("MORLOC_SKIP_UTF8_CHECK")
+            .env_remove("MORLOC_PROGRAM_SKIPS_UTF8_CHECK")
+            .env_remove(crate::origin::CODE_CHECKS_ENV)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        for (k, v) in env {
+            cmd.env(k, v);
+        }
+        cmd.status().unwrap().code().unwrap_or(-1)
+    }
+
+    fn not_text() -> Vec<u8> {
+        list_payload(&[b"ok\n", b"a\xffb\n", b"\xe2\x82"])
+    }
+
+    // FMT-10
+    #[test]
+    fn raw_output_writes_a_str_that_is_not_text_byte_for_byte() {
+        let packet = subpacket("as", &not_text(), 0);
+        assert_eq!(written(&packet), (super::RAW_WRITTEN, b"ok\na\xffb\n\xe2\x82".to_vec()));
+    }
+
+    // FMT-10, DIM-3
+    #[test]
+    fn a_debug_build_checks_the_text_of_its_own_raw_output_unless_the_check_is_off() {
+        assert_eq!(status_of_child("child_writes_a_str_that_is_not_text", &[(crate::origin::CODE_CHECKS_ENV, "1")]), 0);
+        assert_eq!(
+            status_of_child(
+                "child_writes_a_str_that_is_not_text",
+                &[(crate::origin::CODE_CHECKS_ENV, "1"), ("MORLOC_SKIP_UTF8_CHECK", "1")]
+            ),
+            0
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn child_writes_a_str_that_is_not_text() {
+        if std::env::var_os(CHILD_ENV).is_none() {
+            return;
+        }
+        let packet = subpacket("as", &not_text(), 0);
+        let ok = if morloc_runtime_types::utf8::skip_utf8_check() {
+            written(&packet) == (super::RAW_WRITTEN, b"ok\na\xffb\n\xe2\x82".to_vec())
+        } else {
+            let e = unsafe { super::write_raw_subpacket(&packet, -1) }.unwrap_err().to_string();
+            e.contains("not valid UTF-8 (byte 1 of 4)") && !e.contains("outside")
+        };
+        unsafe { libc::_exit(if ok { 0 } else { 1 }) };
+    }
+
+    // FMT-10, DIM-3
+    #[test]
+    fn a_stdout_sub_packet_is_materialized_as_the_programs_own_value() {
+        let _g = crate::init_test_shm();
+        let elem = crate::schema::parse_schema("s").unwrap();
+        let list = crate::schema::parse_schema("as").unwrap();
+        let packet = subpacket("as", &not_text(), 0);
+        let outside = crate::stream::shared_materialize_subpacket_from_bytes(&packet, &elem, crate::origin::Origin::Outside)
+            .expect_err("text read from outside is checked")
+            .to_string();
+        assert!(outside.contains("read from outside"), "{outside}");
+        let own = crate::stream::shared_materialize_subpacket_from_bytes(&packet, &elem, crate::origin::Origin::Program).unwrap();
+        let json = crate::json::voidstar_to_json_string(own, &list).expect_err("JSON cannot carry a Str that is not text").to_string();
+        crate::shm::shfree(own).unwrap();
+        assert!(json.contains("not valid UTF-8 (byte 1 of 4)") && !json.contains("outside"), "{json}");
+    }
+
+    // FMT-10, DIM-3
+    #[test]
+    fn a_debug_build_checks_the_text_of_its_own_stdout_unless_the_check_is_off() {
+        assert_eq!(status_of_child("child_materializes_a_str_that_is_not_text", &[(crate::origin::CODE_CHECKS_ENV, "1")]), 0);
+        assert_eq!(
+            status_of_child(
+                "child_materializes_a_str_that_is_not_text",
+                &[(crate::origin::CODE_CHECKS_ENV, "1"), ("MORLOC_SKIP_UTF8_CHECK", "1")]
+            ),
+            0
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn child_materializes_a_str_that_is_not_text() {
+        if std::env::var_os(CHILD_ENV).is_none() {
+            return;
+        }
+        let _g = crate::init_test_shm();
+        let elem = crate::schema::parse_schema("s").unwrap();
+        let packet = subpacket("as", &not_text(), 0);
+        let got = crate::stream::shared_materialize_subpacket_from_bytes(&packet, &elem, crate::origin::Origin::Program);
+        let ok = match got {
+            Ok(p) => {
+                let _ = crate::shm::shfree(p);
+                morloc_runtime_types::utf8::skip_utf8_check()
+            }
+            Err(e) => {
+                let e = e.to_string();
+                !morloc_runtime_types::utf8::skip_utf8_check() && e.contains("not valid UTF-8 (byte 1 of 4)") && !e.contains("outside")
+            }
+        };
+        unsafe { libc::_exit(if ok { 0 } else { 1 }) };
     }
 
     #[test]

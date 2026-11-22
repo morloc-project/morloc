@@ -29,3 +29,7 @@ inline std::vector<uint8_t> renderBytes(const std::vector<int>& xs) {
     out.push_back(0);
     return out;
 }
+
+inline std::vector<std::string> badStrsOf(int) {
+    return {std::string("ok"), std::string("a\xff" "b")};
+}

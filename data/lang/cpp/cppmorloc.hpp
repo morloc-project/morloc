@@ -1821,6 +1821,8 @@ struct MlcNode {
                 }
                 if constexpr (mlc_is_leaf_v<ElemT>) {
                     mlc_write_leaves(w, elem, start, data, 0, data.size());
+                    // A container standing for a Str (a newtype's native form) is checked as text too.
+                    mlc_check_str(schema, reinterpret_cast<const uint8_t*>(start), data.size());
                     return;
                 }
             }

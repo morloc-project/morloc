@@ -5414,7 +5414,7 @@ fn materialize_and_finalise_subpacket(
             let bytes = unsafe {
                 std::slice::from_raw_parts(payload_base as *const u8, payload_len as usize)
             };
-            payload_into_shm(bytes, &local.elem_schema, vol_idx_hint)
+            payload_into_shm(bytes, &local.elem_schema, vol_idx_hint, crate::origin::Origin::Outside)
         }
         SubpacketSrc::Shm { .. } => Ok(src.into_block()),
     }
@@ -5431,8 +5431,9 @@ fn payload_into_shm(
     bytes: &[u8],
     elem_schema: &Schema,
     vol_idx_hint: u16,
+    origin: crate::origin::Origin,
 ) -> Result<AbsPtr, MorlocError> {
-    voidstar::read_binary_with_hint(bytes, &array_schema(elem_schema), vol_idx_hint, crate::origin::Origin::Outside)
+    voidstar::read_binary_with_hint(bytes, &array_schema(elem_schema), vol_idx_hint, origin)
 }
 
 /// Allocate and return a SHM `Array` of size 0, the EOF return value
@@ -7229,7 +7230,7 @@ fn materialize_subpacket_at_offset(
                 payload_len as usize,
             )
         };
-        let base = payload_into_shm(bytes, &local.elem_schema, vol_idx_hint)?;
+        let base = payload_into_shm(bytes, &local.elem_schema, vol_idx_hint, crate::origin::Origin::Outside)?;
         return Ok((SubpacketSrc::Shm { arr_base: base, acquired: false }, on_disk_size));
     }
     if data.compression == PACKET_COMPRESSION_NONE {
@@ -7265,7 +7266,7 @@ fn materialize_subpacket_at_offset(
             (payload_off + payload_len - subpacket_off) as usize,
         )
     };
-    let base = compressed_payload_into_shm(packet, &local.elem_schema, vol_idx_hint)?;
+    let base = compressed_payload_into_shm(packet, &local.elem_schema, vol_idx_hint, crate::origin::Origin::Outside)?;
     Ok((SubpacketSrc::Shm { arr_base: base, acquired: false }, on_disk_size))
 }
 
@@ -7278,6 +7279,7 @@ fn compressed_payload_into_shm(
     packet: &[u8],
     elem_schema: &Schema,
     vol_idx_hint: u16,
+    origin: crate::origin::Origin,
 ) -> Result<AbsPtr, MorlocError> {
     let hdr: [u8; 32] = packet
         .get(..32)
@@ -7298,7 +7300,7 @@ fn compressed_payload_into_shm(
         &packet[payload_start..payload_end],
         &array_schema(elem_schema),
         vol_idx_hint,
-        crate::origin::Origin::Outside,
+        origin,
     )
 }
 
@@ -8551,9 +8553,11 @@ pub fn check_handle_type(handle: i64, kind: u8, storage: &str) -> Result<(), Mor
 /// buffered `-d` arm). Mirrors the compressed-path branch of
 /// `materialize_subpacket_at_offset`, but works from a byte slice
 /// instead of a mmap region so it can back a pipe/fd-based reader.
+/// `origin` is `Program` for a frame of this run's own output streams.
 pub fn shared_materialize_subpacket_from_bytes(
     subpacket_bytes: &[u8],
     elem_schema: &morloc_runtime_types::schema::Schema,
+    origin: crate::origin::Origin,
 ) -> Result<AbsPtr, MorlocError> {
     if subpacket_bytes.len() < 32 {
         return Err(MorlocError::Packet(format!(
@@ -8597,10 +8601,10 @@ pub fn shared_materialize_subpacket_from_bytes(
     .unwrap_or(0);
     match data.compression {
         PACKET_COMPRESSION_NONE => {
-            payload_into_shm(&subpacket_bytes[32 + meta_len..total], elem_schema, vol_idx_hint)
+            payload_into_shm(&subpacket_bytes[32 + meta_len..total], elem_schema, vol_idx_hint, origin)
         }
         PACKET_COMPRESSION_ZSTD => {
-            compressed_payload_into_shm(&subpacket_bytes[..total], elem_schema, vol_idx_hint)
+            compressed_payload_into_shm(&subpacket_bytes[..total], elem_schema, vol_idx_hint, origin)
         }
         other => Err(MorlocError::Packet(format!(
             "materialise sub-packet: unknown compression byte {}",
@@ -14622,7 +14626,7 @@ mod write_behind_tests {
             if *x != h || !header.is_data() {
                 continue;
             }
-            let arr = shared_materialize_subpacket_from_bytes(bytes, &elem).unwrap();
+            let arr = shared_materialize_subpacket_from_bytes(bytes, &elem, crate::origin::Origin::Program).unwrap();
             got.extend(serde_json::from_str::<Vec<String>>(&crate::json::voidstar_to_json_string(arr, &list).unwrap()).unwrap());
             shm::shfree(arr).unwrap();
         }
@@ -14717,7 +14721,7 @@ mod write_behind_tests {
                 if *x != h || !header.is_data() {
                     continue;
                 }
-                let arr = shared_materialize_subpacket_from_bytes(bytes, &elem).unwrap();
+                let arr = shared_materialize_subpacket_from_bytes(bytes, &elem, crate::origin::Origin::Program).unwrap();
                 got.extend(serde_json::from_str::<Vec<String>>(&crate::json::voidstar_to_json_string(arr, &list).unwrap()).unwrap());
                 shm::shfree(arr).unwrap();
             }

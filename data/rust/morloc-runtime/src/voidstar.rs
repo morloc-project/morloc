@@ -733,13 +733,18 @@ unsafe fn check_enum_run(s: &Schema, data: *const u8, n: usize, w: usize, o: Ori
     Ok(())
 }
 
-/// A `Str` body read from outside must be text (FMT-10).
+/// A `Str` body must be text (FMT-10). A body the program built is checked
+/// as its encoders check it, so the opt-out turns the check off for it.
 ///
 /// # Safety
 /// `p` addresses `n` readable bytes.
 unsafe fn check_text(p: *const u8, n: usize, origin: Option<Origin>) -> Result<(), MorlocError> {
     let bytes = std::slice::from_raw_parts(p, n);
-    match morloc_runtime_types::utf8::first_invalid(bytes) {
+    let bad = match origin {
+        Some(Origin::Program) => morloc_runtime_types::utf8::checked_first_invalid(bytes),
+        _ => morloc_runtime_types::utf8::first_invalid(bytes),
+    };
+    match bad {
         None => Ok(()),
         Some(i) => {
             let from = if matches!(origin, Some(Origin::Outside)) { " in data read from outside" } else { "" };
@@ -748,9 +753,14 @@ unsafe fn check_text(p: *const u8, n: usize, origin: Option<Origin>) -> Result<(
     }
 }
 
-/// `check_text` of a body read from outside.
-pub(crate) unsafe fn check_outside_text(p: *const u8, n: usize) -> Result<(), MorlocError> {
-    check_text(p, n, Some(Origin::Outside))
+/// `check_text` of a body the program built: it runs only in a debug build
+/// (DIM-3), and the opt-out turns it off.
+pub(crate) unsafe fn check_program_text(p: *const u8, n: usize) -> Result<(), MorlocError> {
+    if crate::packet::code_checks() {
+        check_text(p, n, Some(Origin::Program))
+    } else {
+        Ok(())
+    }
 }
 
 /// The width of the elements of a string or array whose elements hold no

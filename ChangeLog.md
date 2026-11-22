@@ -2,6 +2,9 @@ Unreleased
 ----------
 
 Changed
+ * raw stdout (`-f raw`) writes a program's text without scanning it again;
+   each language checks a Str when it is built, which is where an invalid
+   byte is now reported
  * reading a compressed stream uses about a quarter less CPU: decoding
    ahead of the reader runs on at most two threads instead of every frame
    worker, with the same wall time
@@ -13,6 +16,10 @@ Changed
    14% faster
 
 Fixed
+ * under `MORLOC_SKIP_UTF8_CHECK`, raw stdout writes the exact bytes the
+   program built instead of failing them as "data read from outside"
+ * a C++ Str newtype held as a byte vector is checked for UTF-8 like any
+   other Str
  * a docstring error such as a reserved `@render` long name is reported
    alone, without a misleading hint about where parsing stopped
  * `.[i]` and `.[i].field` on an IFile compile inside a Rust pool

@@ -25,9 +25,10 @@ extern "C" {
     /// Materialise one voidstar `Array<T>` in SHM from a self-contained
     /// `MORLOC_DATA_PACKET` sub-packet's bytes. `elem_schema` is the
     /// element schema `T` (streams are list-shaped, so the sub-packet's
-    /// value is `[T]`). Returns the SHM voidstar, or null on error.
+    /// value is `[T]`), read as a frame of this run's own output.
+    /// Returns the SHM voidstar, or null on error.
     /// Caller owns the voidstar and frees it with `shfree`.
-    fn mlc_materialize_subpacket_from_bytes(
+    fn mlc_materialize_own_subpacket_from_bytes(
         bytes: *const u8,
         n: u64,
         elem_schema: *const CSchema,
@@ -400,7 +401,7 @@ unsafe fn materialize(
 ) -> Result<(ShmVoidstar, *mut CSchema, *mut CSchema), String> {
     let (value_c, elem_c) = build_value_and_elem_cschema(value_schema_str)?;
     let mut err: *mut c_char = std::ptr::null_mut();
-    let vs = mlc_materialize_subpacket_from_bytes(
+    let vs = mlc_materialize_own_subpacket_from_bytes(
         bytes.as_ptr(),
         bytes.len() as u64,
         elem_c,

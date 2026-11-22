@@ -2276,6 +2276,27 @@ pub(crate) unsafe fn mlc_materialize_subpacket_from_bytes(
     elem_schema: *const CSchema,
     errmsg: *mut *mut c_char,
 ) -> *mut c_void {
+    materialize_subpacket_from_bytes(bytes, n, elem_schema, crate::origin::Origin::Outside, errmsg)
+}
+
+/// `mlc_materialize_subpacket_from_bytes` of a frame of this run's own
+/// output streams, a value the program built (DIM-3).
+pub(crate) unsafe fn mlc_materialize_own_subpacket_from_bytes(
+    bytes: *const u8,
+    n: u64,
+    elem_schema: *const CSchema,
+    errmsg: *mut *mut c_char,
+) -> *mut c_void {
+    materialize_subpacket_from_bytes(bytes, n, elem_schema, crate::origin::Origin::Program, errmsg)
+}
+
+unsafe fn materialize_subpacket_from_bytes(
+    bytes: *const u8,
+    n: u64,
+    elem_schema: *const CSchema,
+    origin: crate::origin::Origin,
+    errmsg: *mut *mut c_char,
+) -> *mut c_void {
     const FN: &str = "mlc_materialize_subpacket_from_bytes";
     wrap_c_call(errmsg, ptr::null_mut(), || {
         if bytes.is_null() {
@@ -2286,7 +2307,7 @@ pub(crate) unsafe fn mlc_materialize_subpacket_from_bytes(
         }
         let slice = std::slice::from_raw_parts(bytes, n as usize);
         let rs = crate::packet_ffi::rust_schema(elem_schema);
-        let p = crate::stream::shared_materialize_subpacket_from_bytes(slice, &rs)?;
+        let p = crate::stream::shared_materialize_subpacket_from_bytes(slice, &rs, origin)?;
         Ok(p as *mut c_void)
     })
 }
@@ -2880,6 +2901,11 @@ mod c_abi {
     #[no_mangle]
     pub unsafe extern "C" fn mlc_materialize_subpacket_from_bytes(bytes: *const u8, n: u64, elem_schema: *const CSchema, errmsg: *mut *mut c_char) -> *mut c_void {
         super::mlc_materialize_subpacket_from_bytes(bytes, n, elem_schema, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn mlc_materialize_own_subpacket_from_bytes(bytes: *const u8, n: u64, elem_schema: *const CSchema, errmsg: *mut *mut c_char) -> *mut c_void {
+        super::mlc_materialize_own_subpacket_from_bytes(bytes, n, elem_schema, errmsg)
     }
 }
 
