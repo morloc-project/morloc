@@ -9,6 +9,8 @@ data/lang/cpp/cppmorloc.cpp::-::arm_depth_	thread
 data/lang/cpp/cppmorloc.cpp::-::arm_jobs_	thread		
 data/lang/cpp/cppmorloc.cpp::-::arm_jobs_key_	lazy		
 data/lang/cpp/cppmorloc.cpp::-::arm_jobs_key_once_	lazy		
+data/lang/cpp/cppmorloc.cpp::-::traces_added_	thread		
+data/lang/cpp/cppmorloc.cpp::-::failure_lock	instance		
 data/lang/cpp/cppmorloc.hpp::recur_env::stack	thread		
 data/lang/cpp/cppmorloc.hpp::-::mlc_reading_runtime_value	thread		
 data/lang/cpp/pool.cpp::-::_shm_tracker_store	thread		
@@ -196,6 +198,29 @@ morloc-runtime/pool_ffi.rs::-::SHUTTING_DOWN	counter
 morloc-runtime/pool_ffi.rs::-::WAKE_FD	counter		
 morloc-runtime/pool_ffi.rs::-::JobQueue.state	unreachable		
 morloc-runtime/pool_ffi.rs::-::JobQueue.cond	unreachable		
+morloc-runtime/cpus.rs::-::CPUS	fork-scoped		
+morloc-runtime/cpus.rs::-::CPUS_READ_AT_NS	fork-scoped		
+morloc-runtime/cpus.rs::-::CPUS_GENERATION	fork-scoped		
+morloc-runtime/cpus.rs::-::BACKGROUND_GENERATION	fork-scoped		
+morloc-runtime/cpus.rs::-::CACHE_TESTS	test-only		
+morloc-runtime/par_pool.rs::-::POOL	reset		
+morloc-runtime/par_pool.rs::-::Shared.work	paired		
+morloc-runtime/par_pool.rs::-::Shared.done	paired		
+morloc-runtime/par_pool.rs::-::ENABLED	counter		
+morloc-runtime/par_pool.rs::-::WAKE_AFTER_NS	counter		
+morloc-runtime/par_pool.rs::-::Shared.timer	paired		
+morloc-runtime/par_pool.rs::-::USER_MASK	startup		
+morloc-runtime/par_pool.rs::-::FAIL_SPAWNS	test-only		
+morloc-runtime/par_pool.rs::-::CALLER_WAITS	test-only		
+morloc-runtime/par_pool.rs::-::ONE_AT_A_TIME	test-only		
+morloc-runtime/par_pool.rs::-::Ctx.log	test-only		
+morloc-runtime/par_pool.rs::-::CHILD	test-only		
+morloc-runtime/par_pool.rs::-::HELPER_SIGBLK	test-only		
+morloc-runtime/par_pool.rs::-::KEPT_FD	test-only		
+morloc-runtime/par_pool.rs::-::TIMER_START_FAILS_AFTER_MS	test-only		
+morloc-runtime/par_pool.rs::-::TIMER_LOOKS	test-only		
+morloc-runtime/par_pool.rs::-::Pair.first_end	test-only		
+morloc-runtime/par_pool.rs::-::Pair.helper_start	test-only		
 morloc-runtime/run.rs::-::RUN	lazy		
 morloc-runtime/run.rs::-::TEE_HANDLES	held	15	
 morloc-runtime/run.rs::-::RUN_TEE_HANDLE	held	16	

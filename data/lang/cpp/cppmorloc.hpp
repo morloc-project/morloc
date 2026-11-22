@@ -104,6 +104,18 @@ std::string closure_labels() noexcept;
 std::string failure_trace(size_t saved) noexcept;
 // STATE-6: at the end of a thread's outermost dispatch.
 void closure_traces_drop_thread() noexcept;
+// STATE-8: no release is in progress and none is deferred.
+bool arm_idle() noexcept;
+// WPOOL-3: the pool translation unit's tracker and flags, for the job-end
+// hook of a parallel helper; registered once, at cpp_register.
+struct par_tracker_ops {
+    size_t (*size)();
+    void (*move_to)(std::vector<absptr_t>& out);
+    void (*add)(const std::vector<absptr_t>& in);
+    bool (*reading_runtime_value)();
+    bool (*pipe_closed)();
+};
+void par_register(const par_tracker_ops* ops);
 }
 
 // ============================================================

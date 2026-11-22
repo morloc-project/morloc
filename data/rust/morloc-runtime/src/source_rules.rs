@@ -6,7 +6,7 @@ use syn::visit::Visit;
 const CRATES: &[&str] = &["morloc-runtime", "morloc-runtime-types", "rustmorloc", "morloc-nexus"];
 const PREPARE_HANDLERS: &[&str] = &["prepare_fork_body"];
 const MAX_DEVIATING_ROWS: usize = 2;
-const MAX_ENV_READS: usize = 65;
+const MAX_ENV_READS: usize = 66;
 const PID_READ_SITES: &[&str] = &[
     "morloc-runtime/crash.rs::fatal",
     "morloc-runtime/fork_policy.rs::thread_count",
@@ -860,6 +860,7 @@ const NET_11_READ_SITES: &[(&str, &str)] = &[
     ("morloc-runtime/slurm_bridge.rs::rpc BufReader::new", "one request per connection"),
     ("morloc-runtime/stream.rs::read_schema_from_file .read", "a file's first bytes; the file is opened again to read it"),
     ("morloc-runtime/pool_ffi.rs::serve libc::read", "drains a wake pipe"),
+    ("morloc-runtime/cpus.rs::read_small_file .read", "a small proc or sysfs file, read whole"),
 ];
 
 #[test]

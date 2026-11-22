@@ -2858,6 +2858,12 @@ static PyObject* pybinding__cache_record_store(PyObject* self, PyObject* args) {
 }
 
 
+// WPOOL-11
+static PyObject* pybinding__available_cpus(PyObject* self, PyObject* args) {
+    (void)self; (void)args;
+    return PyLong_FromSize_t(morloc_available_cpus());
+}
+
 static PyObject* pybinding__fork_generation(PyObject* self, PyObject* args) {
     (void)self; (void)args;
     return PyLong_FromUnsignedLongLong((unsigned long long)morloc_fork_generation());
@@ -5991,6 +5997,7 @@ static PyMethodDef Methods[] = {
     {"set_fallback_dir", pybinding__set_fallback_dir, METH_VARARGS, "Set fallback directory for file-backed shared memory"},
     {"shinit", pybinding__shinit, METH_VARARGS, "Open the shared memory pool"},
     {"fork_generation", pybinding__fork_generation, METH_NOARGS, "This process's fork generation"},
+    {"available_cpus", pybinding__available_cpus, METH_NOARGS, "The CPUs this process may run on, read at most once a second"},
     {"read_morloc_call_packet", pybinding__read_morloc_call_packet, METH_VARARGS, "Parse a morloc call packet"},
     {"send_reply", pybinding__send_reply, METH_VARARGS, "Send a dispatch's reply, releasing what the dispatch holds first"},
     // The name pools built by earlier compilers call.

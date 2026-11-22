@@ -20,9 +20,10 @@ ends, or holds nothing once the frame that filled it returns. The schema
 conversion cache is freed by its destructor. The recursive-value drain
 keeps its worklist in the frame of the drop that started it, and a shared
 recursive value is drained by the owner that finds itself unique when it
-drops, on whichever thread that is. A thread that outlives the call (a
-persistent host pool) keeps what a failed call left in its tracker; see
-issues/rust-closures-threads.md.
+drops, on whichever thread that is. The runtime's parallel helpers outlive
+their calls and are emptied at the end of each pick of a job (WPOOL-3);
+threads that user code keeps keep what a failed call left in their tracker
+(see issues/rust-closures-threads.md).
 
 ### STATE-3 A packet a closure captures is only read by the closure's calls
 Status: implemented
@@ -93,9 +94,10 @@ call behind).
 Status: implemented
 Checked by: a_closure_boundary_carries_the_calls_a_panic_unwound_and_restores_the_depth, a_closed_pipe_passes_a_closure_boundary_unchanged_and_restores_the_depth, golden:cpp-closure-exception-type, tla:FrameStack, tla:FrameStack_reset_at_dispatch.bug, tla:FrameStack_no_closure_boundary.bug, tla:FrameStack_pass_keeps_depth.bug, golden:spec-diag-5-1, golden:frame-stack-suspension-boundary
 
-The boundaries are a pool's dispatch, `@try` and every closure: a function
+The boundaries are a pool's dispatch, `@try`, every closure -- a function
 value code outside morloc may call and whose failure it may catch,
-whether a lambda, a partial application or a suspension. The thunk `@try`
+whether a lambda, a partial application or a suspension -- and each span
+of a parallel call (WPOOL-4). The thunk `@try`
 makes of a pure body is run by the `@try` at once and is no boundary. Each
 saves the depth on entry and sets no depth but that one. Left normally,
 it finds the saved depth; dispatch checks this, which covers every

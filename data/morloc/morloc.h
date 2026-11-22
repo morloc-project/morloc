@@ -1260,6 +1260,23 @@ void morloc_exit_if_forked(void);
 // FORK-17
 void mlc_exit_if_forked_since(uint64_t generation);
 void mlc_exit_forked(void);
+
+// -- Parallel helpers (WPOOL, model/runtime/workers.md) -----------------------
+//
+// morloc_par_run runs span(job, i) once for each i in [0, nspans) claimed
+// before a span returns nonzero, on the calling thread and on at most
+// min(workers, nspans) - 1 of the process's helper threads. end(job) runs on
+// a helper after the spans of each pick, before it leaves the job. Returns
+// once no helper is on the job: 0 if every span returned 0, else 1. Neither
+// callback may unwind.
+#define MORLOC_HAS_PAR_POOL 1
+typedef int (*morloc_par_span_fn)(void* job, size_t span);
+typedef void (*morloc_par_end_fn)(void* job);
+int morloc_par_run(size_t nspans, size_t workers, morloc_par_span_fn span, morloc_par_end_fn end, void* job);
+// 0 when MORLOC_PAR_POOL=0 turns the helpers off.
+int morloc_par_pool_enabled(void);
+// WPOOL-11: the CPUs this process may run on, read at most once a second.
+size_t morloc_available_cpus(void);
 size_t total_shm_size(void);
 absptr_t rel2abs(relptr_t ptr, ERRMSG);
 

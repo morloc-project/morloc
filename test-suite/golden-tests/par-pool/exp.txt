@@ -1,0 +1,6 @@
+[0,0,1,5,14,30,55,91,140,204,285,385]
+Error: run failed
+{"Err":["boom on a helper\n  at down [cpp] (main.loc:35:1)\n  at down [cpp] (main.loc:35:1)\n  at down [cpp] (main.loc:35:1)\n  at down [cpp] (main.loc:35:1)"]}
+"child exit 1; raised: helper span failed"
+"helpers have the worker's mask"
+"helpers within the ceiling, and within the CPUs once idle"

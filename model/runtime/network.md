@@ -122,7 +122,9 @@ callee keeps, so an echo of the request never carries the request's bit.
 The callee clears the bit from the request as it reads it and records the
 ask; its reply says kept only when the request asked. Every pool keeps:
 C++ and Rust pools pin a worker to the connection (NET-8), Python and R
-fork workers hold it while idle (NET-9). The connection is owned by the caller's
+fork workers hold it while idle (NET-9). A C++ pool's parallel helpers
+each keep their own connections while they have work and close them before
+they sleep (WPOOL-10). The connection is owned by the caller's
 fork generation: a forked child closes the cached connections it inherited
 and never uses them (FORK-14). A socket is registered for the child's
 close only after it exists, so a fork in between leaves a child a copy it

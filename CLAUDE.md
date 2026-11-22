@@ -110,7 +110,7 @@ In these files the only comments allowed are spec references:
   handle_scan.rs, pins.rs, cache.rs, shm.rs, shm_companion.rs, eval_arena.rs,
   fold.rs, fork_side.rs, crash.rs, daemon_ffi.rs, pool_ffi.rs, ipc_ffi.rs,
   router_ffi.rs, arrow_shm.rs, lifeline.rs, fork_policy.rs, panic_ffi.rs,
-  custody.rs
+  custody.rs, par_pool.rs, cpus.rs
 - morloc-runtime-types/src: recoverable_lock.rs, shm_lock.rs,
   owner_word.rs, stream_handle.rs, dispatch_guard.rs, fd.rs, panic.rs,
   wait_word.rs

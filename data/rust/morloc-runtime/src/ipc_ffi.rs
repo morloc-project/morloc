@@ -1217,6 +1217,24 @@ fn put_cached(path: &[u8], fd: i32) -> bool {
         .is_ok()
 }
 
+// WPOOL-10: NET-7's connections of an idle thread, so it pins no worker of
+// another pool (NET-8, NET-9).
+pub(crate) fn close_kept_connections() {
+    let generation = crate::fork_policy::generation();
+    let kept: Vec<CachedConn> = CONN_CACHE.try_with(|c| c.borrow_mut().0.drain(..).collect()).unwrap_or_default();
+    for c in kept {
+        // FORK-14
+        if c.generation == generation {
+            unsafe { drop_conn(c.fd) };
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn keep_connection_for_test(path: &[u8], fd: i32) -> bool {
+    put_cached(path, fd)
+}
+
 /// How many connections this thread holds open for reuse.
 #[cfg(test)]
 pub(crate) fn cached_connections() -> usize {

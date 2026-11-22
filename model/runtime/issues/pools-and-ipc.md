@@ -131,3 +131,12 @@ Details and evidence: /work/plans/runtime-audit-2026-10-10/C-processes.md.
   the reason from the next macOS CI failure. Separately, an exception
   escaping a user-spawned C++ thread ends the pool by std::terminate; the
   test's producer does not catch, so this is the expected crash shape.
+- **perf: a small parallel map nested inside a running one costs 6-10x
+  a serial inner map.** WPOOL: with every posted job already woken, an
+  inner post takes the pool lock, notifies the timer and wakes helpers at
+  once. Measured (outer x inner trivial elements, us per outer call):
+  12 x 64 is 65 against 6 serial-inner; 64 x 64 is 237 against 36. With
+  5 us elements the pool matches or beats serial. Holding the delay for
+  inner posts gains only 10-15%; the cost is the lock and notify per post,
+  not profiled. A fix needs a protocol step (an inline path for a post
+  made from inside a span) and a model change.

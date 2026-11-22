@@ -154,6 +154,29 @@ impl<T> DerefMut for ResetGuard<'_, T> {
     }
 }
 
+impl<'a, T> ResetGuard<'a, T> {
+    // WPOOL-7: waits on a condition variable of the same instance; the guard
+    // stays counted as held while it waits.
+    pub(crate) fn wait_timeout(self, cv: &std::sync::Condvar, dur: std::time::Duration) -> Self {
+        let me = ManuallyDrop::new(self);
+        // SAFETY: FORK-8: `me` is never dropped, so its guard moves out once.
+        let guard = unsafe { std::ptr::read(&me.guard) };
+        let guard = match cv.wait_timeout(guard, dur) {
+            Ok((g, _)) => g,
+            Err(p) => p.into_inner().0,
+        };
+        ResetGuard { guard }
+    }
+
+    pub(crate) fn wait(self, cv: &std::sync::Condvar) -> Self {
+        let me = ManuallyDrop::new(self);
+        // SAFETY: FORK-8: `me` is never dropped, so its guard moves out once.
+        let guard = unsafe { std::ptr::read(&me.guard) };
+        let guard = cv.wait(guard).unwrap_or_else(|p| p.into_inner());
+        ResetGuard { guard }
+    }
+}
+
 impl<T> Drop for ResetGuard<'_, T> {
     fn drop(&mut self) {
         RESETS_HELD.with(|n| n.set(n.get() - 1));

@@ -50,4 +50,12 @@ timing (from the 2026-11-12 audit of the output-path work).
   The non-temporal zero for node rooms of 8 MiB or more (Z2 in
   /work/plans/mosm-perf/01-output-path.md) is not done; it waits for a bench
   of large node elements that shows a gain.
-
+- **The registry scan misses C++ globals that are not declared `static`
+  or `thread_local`, and a `static std::atomic<...> x{...}`.** STATE-1:
+  scan_c in source_rules.rs reads only column-0 lines starting with
+  `static`, `thread_local` or `__thread`, so in data/lang/cpp/cppmorloc.cpp
+  `fork_count` (`std::atomic<uint64_t>` at namespace scope),
+  `par_failure_probe` (a mutable function pointer a test sets) and
+  `par_ops_` (`static std::atomic<const par_tracker_ops*> par_ops_{nullptr}`)
+  have no registry row and none is asked for. Their classes would be
+  counter, test-only and startup.

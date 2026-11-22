@@ -11,7 +11,9 @@
 #include <exception>
 #include <deque>
 #include <mutex>
+#include <vector>
 
+#include "morloc_pch.hpp"
 #include "cppmorloc.hpp"
 
 // Under --debug, the innermost manifold this thread is executing, for the
@@ -175,6 +177,10 @@ bool arm_defer(void (*free_fn)(void*), void* p) noexcept {
     return true;
 }
 
+bool arm_idle() noexcept {
+    return arm_depth_ == 0 && (arm_jobs_ == nullptr || arm_jobs_->len == 0);
+}
+
 void arm_drain() noexcept {
     arm_jobs* j = arm_jobs_;
     while (j != nullptr && j->len > 0) {
@@ -201,7 +207,12 @@ struct closure_trace {
     std::string labels;
     pthread_t thread;
     size_t depth;
+    // WPOOL-3: kept for a parallel call's caller; no thread's any more.
+    bool detached;
 };
+
+// WPOOL-3: this thread added or took over a trace since its last job-end hook.
+static thread_local constinit bool traces_added_ = false;
 
 // STATE-6, STATE-5
 static std::mutex* closure_traces_lock_ = new std::mutex();
@@ -217,7 +228,7 @@ constexpr size_t closure_traces_cap = 256;
 // thread and nothing has been taken from the stack since, or came from
 // another thread.
 static bool continues(const closure_trace& t, size_t depth) {
-    return !pthread_equal(t.thread, pthread_self()) || t.depth == depth;
+    return t.detached || !pthread_equal(t.thread, pthread_self()) || t.depth == depth;
 }
 
 void closure_trace_add(size_t saved) noexcept {
@@ -234,6 +245,8 @@ void closure_trace_add(size_t saved) noexcept {
                 if (continues(t, depth)) t.labels += labels; else t.labels = std::move(labels);
                 t.thread = pthread_self();
                 t.depth = saved;
+                t.detached = false;
+                traces_added_ = true;
                 return;
             }
         }
@@ -241,7 +254,8 @@ void closure_trace_add(size_t saved) noexcept {
             evicted.push_back(std::move(kept.front()));
             kept.pop_front();
         }
-        kept.push_back(closure_trace{failure, std::move(labels), pthread_self(), saved});
+        kept.push_back(closure_trace{failure, std::move(labels), pthread_self(), saved, false});
+        traces_added_ = true;
     } catch (...) {
         frame_restore(saved);
     }
@@ -286,14 +300,142 @@ void closure_traces_drop_thread() noexcept {
         std::lock_guard<std::mutex> g(*closure_traces_lock_);
         std::deque<closure_trace>& kept = *closure_traces_;
         for (auto it = kept.begin(); it != kept.end();) {
-            if (pthread_equal(it->thread, pthread_self())) {
+            if (!it->detached && pthread_equal(it->thread, pthread_self())) {
                 dropped.push_back(std::move(*it));
                 it = kept.erase(it);
             } else {
                 ++it;
             }
         }
+        traces_added_ = false;
     } catch (...) {
+    }
+}
+
+// WPOOL-3: under the trace lock, the trace of `keep` is detached from this
+// thread and every other trace of this thread is erased.
+static void closure_traces_end_job(const std::exception_ptr& keep) {
+    std::deque<closure_trace> dropped;
+    std::lock_guard<std::mutex> g(*closure_traces_lock_);
+    std::deque<closure_trace>& kept = *closure_traces_;
+    for (auto it = kept.begin(); it != kept.end();) {
+        if (it->detached || !pthread_equal(it->thread, pthread_self())) {
+            ++it;
+        } else if (keep && it->failure == keep) {
+            it->detached = true;
+            ++it;
+        } else {
+            dropped.push_back(std::move(*it));
+            it = kept.erase(it);
+        }
+    }
+    traces_added_ = false;
+}
+
+// WPOOL-4: the trace of the failure a parallel call raises again is this
+// thread's once more, at the depth the call left.
+static void closure_trace_attach(const std::exception_ptr& failure) {
+    std::lock_guard<std::mutex> g(*closure_traces_lock_);
+    for (closure_trace& t : *closure_traces_) {
+        if (t.failure == failure) {
+            t.thread = pthread_self();
+            t.depth = frame_depth();
+            t.detached = false;
+            traces_added_ = true;
+            return;
+        }
+    }
+}
+
+// WPOOL-3
+static std::atomic<const par_tracker_ops*> par_ops_{nullptr};
+
+void par_register(const par_tracker_ops* ops) {
+    const par_tracker_ops* none = nullptr;
+    if (!par_ops_.compare_exchange_strong(none, ops) && none != ops) {
+        mlc_runtime_defect("two C++ pool translation units registered parallel tracker hooks");
+    }
+}
+
+void (*par_failure_probe)() = nullptr;
+
+struct par_job {
+    void (*body)(void*, size_t);
+    void* ctx;
+    uint64_t generation;
+    // WPOOL-1: guards `first` and `handed`; never held across user code.
+    std::mutex failure_lock;
+    std::exception_ptr first;
+    std::vector<absptr_t> handed;
+};
+
+// WPOOL-4: each span is a trace boundary.
+static int par_span(void* p, size_t i) noexcept {
+    par_job* job = static_cast<par_job*>(p);
+    size_t saved = frame_depth();
+    try {
+        saved = frame_enter();
+        job->body(job->ctx, i);
+        return 0;
+    } catch (...) {
+        // WPOOL-5: before the job's lock, which a forked child may find held.
+        mlc_exit_if_forked_since(job->generation);
+        const par_tracker_ops* ops = par_ops_.load(std::memory_order_acquire);
+        if (ops != nullptr && ops->pipe_closed()) {
+            frame_restore(saved);
+        } else {
+            closure_trace_add(saved);
+        }
+        std::lock_guard<std::mutex> g(job->failure_lock);
+        if (void (*probe)() = par_failure_probe) probe();
+        if (!job->first) job->first = std::current_exception();
+        return 1;
+    }
+}
+
+// WPOOL-3: on a helper, after the spans of a pick, before it leaves the job.
+static void par_end_job(par_job* job) {
+    const par_tracker_ops* ops = par_ops_.load(std::memory_order_acquire);
+    bool entries = ops != nullptr && ops->size() > 0;
+    if (entries || traces_added_) {
+        std::lock_guard<std::mutex> g(job->failure_lock);
+        if (entries) ops->move_to(job->handed);
+        if (traces_added_) closure_traces_end_job(job->first);
+    }
+    if (frame_depth() != 0 || !arm_idle() || !recur_env().empty()
+        || (ops != nullptr && ops->reading_runtime_value())) {
+        mlc_runtime_defect("a parallel helper ended a job with runtime state left on its thread");
+    }
+}
+
+static void par_end(void* p) noexcept {
+    try {
+        par_end_job(static_cast<par_job*>(p));
+    } catch (...) {
+        // PANIC-13
+        mlc_runtime_defect("the job-end hook of a parallel helper failed");
+    }
+}
+
+bool par_enabled() noexcept {
+    return morloc_par_pool_enabled() != 0;
+}
+
+void par_run(size_t nspans, size_t workers, void (*body)(void*, size_t), void* ctx) {
+    par_job job;
+    job.body = body;
+    job.ctx = ctx;
+    job.generation = morloc_fork_generation();
+    int rc = morloc_par_run(nspans, workers, par_span, par_end, &job);
+    if (!job.handed.empty()) {
+        const par_tracker_ops* ops = par_ops_.load(std::memory_order_acquire);
+        if (ops == nullptr) mlc_runtime_defect("a parallel helper handed over tracker entries with no tracker registered");
+        ops->add(job.handed);
+    }
+    if (rc != 0) {
+        if (!job.first) mlc_runtime_defect("a parallel call failed without a failure");
+        closure_trace_attach(job.first);
+        std::rethrow_exception(job.first);
     }
 }
 }

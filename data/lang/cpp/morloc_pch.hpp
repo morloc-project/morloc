@@ -48,4 +48,18 @@
 // Morloc runtime
 #include "morloc.h"
 
+// WPOOL-1: the parallel entry, declared ahead of user sources so a
+// sourced header (stdlib parallel-cpp) can call it; defined in libcppmorloc.
+#define MORLOC_PAR_RUN 1
+namespace mlc {
+// False when MORLOC_PAR_POOL=0 turns the runtime's helpers off.
+bool par_enabled() noexcept;
+// Runs body(ctx, i) for each i in [0, nspans) on the calling thread and the
+// runtime's helpers, at most `workers` at once; raises the first failure
+// again once no helper is on the call.
+void par_run(size_t nspans, size_t workers, void (*body)(void*, size_t), void* ctx);
+// Tests only: called while a failing span holds its job's lock.
+extern void (*par_failure_probe)();
+}
+
 #endif

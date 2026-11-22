@@ -144,7 +144,10 @@ The environment is written only while a process has one thread: the
 nexus at startup, a run published by a single-threaded process, and a
 test's forked child through `set_test_env`, which bypasses the lock
 (`the_environment_is_written_only_by_its_checked_writers`), so no child can
-inherit its lock held.
+inherit its lock held. A C++ pool is never single-threaded once it serves
+(its workers, and its parallel helpers, which persist after its first
+parallel call, WPOOL-9), so it writes no environment; reads such as
+`MORLOC_THREADS` on any of its threads race no writer.
 
 Missing: no fork handler holds the standard output or error locks, so a
 child forked while another thread prints inherits them locked. CPython's

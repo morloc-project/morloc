@@ -2132,6 +2132,33 @@ uint8_t* cpp_remote_dispatch(uint32_t mid, const uint8_t** args,
 }
 
 
+// WPOOL-3: what a parallel helper's job-end hook reads of this translation
+// unit's thread-local state.
+static size_t _mlc_par_tracker_size() { return _shm_tracker_live().size(); }
+static void _mlc_par_tracker_move(std::vector<absptr_t>& out) {
+    ShmTracker& t = _shm_tracker_live();
+    for (const ShmEntry& e : t) out.push_back(e.ptr);
+    t.clear();
+}
+static void _mlc_par_tracker_add(const std::vector<absptr_t>& in) {
+    ShmTracker& t = _shm_tracker_live();
+    for (absptr_t p : in) t.push_back({p});
+}
+static bool _mlc_par_reading_runtime_value() { return mlc_reading_runtime_value; }
+static bool _mlc_par_pipe_closed() {
+    try {
+        throw;
+    } catch (const MorlocPipeClosed&) {
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+static const mlc::par_tracker_ops _mlc_par_ops = {
+    _mlc_par_tracker_size, _mlc_par_tracker_move, _mlc_par_tracker_add,
+    _mlc_par_reading_runtime_value, _mlc_par_pipe_closed,
+};
+
 // Registration entry called by the member-agnostic host translation unit.
 // The host owns main() and the pool_main loop; this hook wires the C++
 // member's dispatchers, tmpdir, and schema table into the pool config.
@@ -2142,5 +2169,6 @@ void cpp_register(pool_config_t* config, const char* tmpdir) {
     config->remote_dispatch = cpp_remote_dispatch;
     config->dispatch_ctx = NULL;
     config->release_dispatch = _shm_tracker_flush;
+    mlc::par_register(&_mlc_par_ops);
     _init_schemas();
 }

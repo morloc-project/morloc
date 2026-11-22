@@ -60,6 +60,7 @@ release.
 - `state.md`: fork classes and process-wide mutable values (STATE, INIT)
 - `panic.md`: what a panic does in each process (PANIC)
 - `network.md`: remote listeners and local endpoints (NET)
+- `workers.md`: the C++ pool's parallel helper threads (WPOOL)
 - `registry.tsv`: every process-wide mutable value with its fork class
 - `tla/ShmHandoff.tla`: a block crossing between pools, with death and fork
 - `tla/DaemonRecovery.tla`: pool-crash recovery against running requests
@@ -71,3 +72,4 @@ release.
 - `tla/EndpointClaim.tla`: daemons claiming one socket path
 - `tla/StreamQueue.tla`: writers, the queue and the custodian of a written stream
 - `tla/FrameStack.tla`: a thread's frame stack across failures, catches and nested dispatch
+- `tla/WorkerPool.tla`: parallel helpers serving nested, failing and forking jobs

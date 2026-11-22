@@ -309,7 +309,7 @@ pub(crate) fn worker_idle_timeout() -> std::time::Duration {
 // STATE-7
 const WORKER_STACK_SIZE: usize = 8 << 20;
 
-fn worker_stack_size() -> usize {
+pub(crate) fn worker_stack_size() -> usize {
     let mut lim = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
     // SAFETY: STATE-7: getrlimit only writes the struct it is given.
     let known = unsafe { libc::getrlimit(libc::RLIMIT_STACK, &mut lim) } == 0;
@@ -327,10 +327,10 @@ fn worker_stack_size() -> usize {
 const WORKER_ALTSTACK_SIZE: usize = 256 << 10;
 
 // A worker's alternate signal stack, released when the worker exits.
-struct AltStack { base: *mut c_void }
+pub(crate) struct AltStack { base: *mut c_void }
 
 impl AltStack {
-    unsafe fn install() -> Option<AltStack> {
+    pub(crate) unsafe fn install() -> Option<AltStack> {
         let base = libc::mmap(
             ptr::null_mut(), WORKER_ALTSTACK_SIZE,
             libc::PROT_READ | libc::PROT_WRITE,
@@ -707,6 +707,8 @@ pub(crate) unsafe fn pool_main(
 ) -> i32 {
     crate::panic_ffi::install(None);
     tune_allocator(STREAMING_POOL_HEAP);
+    // WPOOL-8: before any worker exists, the mask the workers get.
+    crate::par_pool::record_user_mask();
     if argc != 4 {
         let prog = if argc > 0 { CStr::from_ptr(*argv).to_string_lossy() } else { "pool".into() };
         eprintln!("Usage: {} <socket_path> <tmpdir> <shm_basename>", prog);
