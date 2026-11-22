@@ -1189,6 +1189,35 @@ fn write_voidstar_raw<W: io::Write>(
     }
 }
 
+/// Write a streamed render's sub-packet, a list of handler results: each
+/// element's `-f raw` bytes in order (CLI-8). A `[U8]` or `Vector U8`
+/// sub-packet is its bytes.
+fn write_voidstar_raw_batches<W: io::Write>(
+    w: &mut W,
+    ptr: AbsPtr,
+    schema: &Schema,
+) -> Result<(), MorlocError> {
+    if raw_shape(schema) == Some(RawShape::Bytes) {
+        return write_raw_body(unsafe { &ShmReader::new(ptr) }, w);
+    }
+    let elem = schema
+        .parameters
+        .first()
+        .filter(|e| schema.serial_type == SerialType::Array && raw_shape(e).is_some())
+        .ok_or_else(|| {
+            err("a streamed render requires a handler returning Str, [Str], Vector U8, or [Vector U8]")
+        })?;
+    let arr = unsafe { ShmReader::new(ptr) }.read_array(0);
+    if arr.size == 0 || arr.data == RELNULL {
+        return Ok(());
+    }
+    let data = shm::rel2abs(arr.data)?;
+    for i in 0..arr.size {
+        write_voidstar_raw(w, unsafe { data.add(i * elem.width) }, elem)?;
+    }
+    Ok(())
+}
+
 /// The shapes `-f raw` writes.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum RawShape {
@@ -1222,6 +1251,13 @@ pub(crate) fn raw_shape(schema: &Schema) -> Option<RawShape> {
 pub fn print_voidstar_raw(ptr: AbsPtr, schema: &Schema) -> Result<(), MorlocError> {
     let mut w = io::BufWriter::with_capacity(BUFWRITER_CAPACITY, io::stdout().lock());
     write_voidstar_raw(&mut w, ptr, schema)?;
+    map_io(w.flush())
+}
+
+/// A streamed render's sub-packet to stdout, as `write_voidstar_raw_batches`.
+pub fn print_voidstar_raw_batches(ptr: AbsPtr, schema: &Schema) -> Result<(), MorlocError> {
+    let mut w = io::BufWriter::with_capacity(BUFWRITER_CAPACITY, io::stdout().lock());
+    write_voidstar_raw_batches(&mut w, ptr, schema)?;
     map_io(w.flush())
 }
 
@@ -1941,6 +1977,39 @@ mod tests {
                 json
             );
         }
+    }
+
+    /// A streamed render sub-packet writes each handler result's raw bytes
+    /// in order, nothing between them; a list of lists is no whole render.
+    #[test]
+    fn streamed_render_batches_concatenate_each_result() {
+        let _shm = setup();
+        let cases: &[(&str, &str, &[u8])] = &[
+            ("as", r#"["a\n","","bc"]"#, b"a\nbc"),
+            ("aas", r#"[["x","","y\n"],[],["z\n"]]"#, b"xy\nz\n"),
+            ("aau1", "[[104,105],[],[10]]", b"hi\n"),
+            ("aaau1", "[[[104],[],[105,10]],[],[[33]]]", b"hi\n!"),
+            ("au1", "[104,105]", b"hi"),
+            ("aas", "[]", b""),
+        ];
+        for (schema_str, json, want) in cases {
+            let schema = parse_schema(schema_str).unwrap();
+            let p = read_json_with_schema(json, &schema).unwrap();
+            let mut got = Vec::new();
+            write_voidstar_raw_batches(&mut got, p, &schema).unwrap();
+            assert_eq!(&got, want, "{schema_str} {json}");
+            crate::shm::shfree(p).unwrap();
+        }
+        for (schema_str, json) in [("ai4", "[1]"), ("aai4", "[[1]]"), ("s", r#""a""#), ("?s", r#""a""#), ("t2ss", r#"["a","b"]"#)] {
+            let schema = parse_schema(schema_str).unwrap();
+            let p = read_json_with_schema(json, &schema).unwrap();
+            assert!(write_voidstar_raw_batches(&mut Vec::new(), p, &schema).is_err(), "{schema_str}");
+            crate::shm::shfree(p).unwrap();
+        }
+        let schema = parse_schema("aas").unwrap();
+        let p = read_json_with_schema(r#"[["a"]]"#, &schema).unwrap();
+        assert!(voidstar_raw_to_bytes(p, &schema).is_err());
+        crate::shm::shfree(p).unwrap();
     }
 
     #[test]

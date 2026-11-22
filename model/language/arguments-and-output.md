@@ -192,11 +192,15 @@ At most one action per command is `@default`; a second is a build error.
 
 ### CLI-8 A `@render` action writes its handler's bytes verbatim
 Intent: proposed
+Tests: spec-cli-8-1
 Code: deviates model/runtime/issues/cli-directives.md (return type unchecked)
 
 The handler returns `Str`, `[Str]`, `Vector U8` or `[Vector U8]`, and its
-bytes are written without quoting or escaping. Any other return type is a
-build error at the directive.
+bytes are written without quoting or escaping; a list's bytes are its
+elements' bytes in order, with nothing between them. Under `@stream` the
+handler applies to each batch and each result's bytes are written in batch
+order, with nothing between batches, so a handler of any of the four return
+types streams. Any other return type is a build error at the directive.
 
 ### CLI-9 `-f` on a run whose stdout is a `@render` action
 Intent: open

@@ -170,7 +170,8 @@ pub(crate) unsafe fn print_voidstar_jsonl(
 
 use morloc_runtime_types::{RAW_FAILED, RAW_NOT_HANDLED, RAW_PIPE_CLOSED, RAW_WRITTEN};
 
-/// Write the bodies of a `[Str]`, `[[U8]]` or `[U8]` stream sub-packet to
+/// Write the bodies of a stream sub-packet of render results (`[Str]`,
+/// `[[U8]]`, `[[Str]]`, `[[[U8]]]`) or of a `[U8]` one to
 /// `fd` from where they lie in `bytes`, with no copy into shared memory.
 /// Returns `RAW_NOT_HANDLED` for any other sub-packet (compressed, another
 /// format or schema), which the caller then writes the general way.
@@ -195,7 +196,7 @@ pub(crate) unsafe fn write_raw_subpacket(bytes: &[u8], fd: i32) -> Result<i32, M
 /// build checks them again (DIM-3).
 pub(crate) unsafe fn write_raw_parts(head: &[u8], payload: &[u8], fd: i32) -> Result<i32, MorlocError> {
     use crate::json::RawShape;
-    use crate::voidstar::{Local, Space};
+    use crate::voidstar::Local;
     use morloc_runtime_types::packet as pk;
     use morloc_runtime_types::shm_types::Array;
     if head.len() < 32 {
@@ -218,41 +219,63 @@ pub(crate) unsafe fn write_raw_parts(head: &[u8], payload: &[u8], fd: i32) -> Re
         return Ok(RAW_NOT_HANDLED);
     };
     let schema = crate::schema::parse_schema(&schema)?;
-    let per_element = match crate::json::raw_shape(&schema) {
-        Some(RawShape::Bodies) => true,
-        Some(RawShape::Bytes) => false,
-        Some(RawShape::Body) | None => return Ok(RAW_NOT_HANDLED),
+    let depth = match crate::json::raw_shape(&schema) {
+        Some(RawShape::Bytes) => 0,
+        _ if schema.serial_type != crate::schema::SerialType::Array => return Ok(RAW_NOT_HANDLED),
+        _ => match schema.parameters.first().and_then(crate::json::raw_shape) {
+            Some(RawShape::Body | RawShape::Bytes) => 1,
+            Some(RawShape::Bodies) => 2,
+            None => return Ok(RAW_NOT_HANDLED),
+        },
     };
     if payload.len() < std::mem::size_of::<Array>() {
         return Err(MorlocError::Packet("a stdout sub-packet is shorter than its root".into()));
     }
     let space = Local::new(payload.as_ptr(), payload.len());
     let root: Array = std::ptr::read_unaligned(payload.as_ptr() as *const Array);
-    let text = schema.parameters[0].serial_type == crate::schema::SerialType::String;
-    let mut bodies: Vec<(*const u8, usize)> = Vec::new();
-    let mut push = |p: *const u8, n: usize| match bodies.last_mut() {
-        Some((q, m)) if (*q).wrapping_add(*m) == p => *m += n,
-        _ => bodies.push((p, n)),
-    };
-    if root.size > 0 {
-        if per_element {
-            let w = std::mem::size_of::<Array>();
-            let elems = space.resolve(root.data, root.size.checked_mul(w).ok_or_else(|| MorlocError::Packet("a stdout sub-packet is too large".into()))?)? as *const u8;
-            for i in 0..root.size {
-                let a: Array = std::ptr::read_unaligned(elems.add(i * w) as *const Array);
-                if a.size > 0 {
-                    let p = space.resolve(a.data, a.size)? as *const u8;
-                    if text {
-                        crate::voidstar::check_program_text(p, a.size)?;
-                    }
-                    push(p, a.size);
-                }
-            }
-        } else {
-            push(space.resolve(root.data, root.size)? as *const u8, root.size);
-        }
+    let mut leaf = &schema;
+    for _ in 0..depth {
+        leaf = &leaf.parameters[0];
     }
+    let text = leaf.serial_type == crate::schema::SerialType::String;
+    let mut bodies: Vec<(*const u8, usize)> = Vec::new();
+    collect_bodies(&space, root, depth, text, &mut bodies)?;
     writev_all(fd, &bodies)
+}
+
+/// Append the bodies under `a`, a list nested `depth` levels above them, to
+/// `bodies`, merging bodies that lie end to end.
+unsafe fn collect_bodies(
+    space: &crate::voidstar::Local,
+    a: morloc_runtime_types::shm_types::Array,
+    depth: usize,
+    text: bool,
+    bodies: &mut Vec<(*const u8, usize)>,
+) -> Result<(), MorlocError> {
+    use crate::voidstar::Space;
+    use morloc_runtime_types::shm_types::Array;
+    if a.size == 0 {
+        return Ok(());
+    }
+    if depth == 0 {
+        let p = space.resolve(a.data, a.size)? as *const u8;
+        if text {
+            crate::voidstar::check_program_text(p, a.size)?;
+        }
+        match bodies.last_mut() {
+            Some((q, m)) if (*q).wrapping_add(*m) == p => *m += a.size,
+            _ => bodies.push((p, a.size)),
+        }
+        return Ok(());
+    }
+    let w = std::mem::size_of::<Array>();
+    let n = a.size.checked_mul(w).ok_or_else(|| MorlocError::Packet("a stdout sub-packet is too large".into()))?;
+    let elems = space.resolve(a.data, n)? as *const u8;
+    for i in 0..a.size {
+        let e: Array = std::ptr::read_unaligned(elems.add(i * w) as *const Array);
+        collect_bodies(space, e, depth - 1, text, bodies)?;
+    }
+    Ok(())
 }
 
 /// Write every body in order, resuming after a short write.
@@ -319,7 +342,8 @@ unsafe fn writev_all_with(
     Ok(RAW_WRITTEN)
 }
 
-/// Emit a `Str`/`[Str]` voidstar as verbatim bytes (the `-f raw` format).
+/// Emit a `Str`, `[Str]`, `Vector U8` or `[Vector U8]` voidstar as verbatim
+/// bytes (the `-f raw` format).
 pub(crate) unsafe fn print_voidstar_raw(
     data: *const c_void,
     schema: *const CSchema,
@@ -328,6 +352,22 @@ pub(crate) unsafe fn print_voidstar_raw(
     clear_errmsg(errmsg);
     let rs = crate::packet_ffi::rust_schema(schema);
     match crate::json::print_voidstar_raw(data as *mut u8, &rs) {
+        Ok(()) => PRINT_RESULT_OK,
+        Err(MorlocError::PipeClosed) => PRINT_RESULT_PIPE_CLOSED,
+        Err(e) => { set_errmsg(errmsg, &e); PRINT_RESULT_ERR }
+    }
+}
+
+/// Emit a streamed render's sub-packet as verbatim bytes: each element's
+/// `-f raw` bytes in order.
+pub(crate) unsafe fn print_voidstar_raw_batches(
+    data: *const c_void,
+    schema: *const CSchema,
+    errmsg: *mut *mut c_char,
+) -> i32 {
+    clear_errmsg(errmsg);
+    let rs = crate::packet_ffi::rust_schema(schema);
+    match crate::json::print_voidstar_raw_batches(data as *mut u8, &rs) {
         Ok(()) => PRINT_RESULT_OK,
         Err(MorlocError::PipeClosed) => PRINT_RESULT_PIPE_CLOSED,
         Err(e) => { set_errmsg(errmsg, &e); PRINT_RESULT_ERR }
@@ -542,6 +582,11 @@ mod c_abi {
         super::print_voidstar_raw(data, schema, errmsg)
     }
 
+    #[no_mangle]
+    pub unsafe extern "C" fn print_voidstar_raw_batches(data: *const c_void, schema: *const CSchema, errmsg: *mut *mut c_char) -> i32 {
+        super::print_voidstar_raw_batches(data, schema, errmsg)
+    }
+
     /// `write_raw_parts` over the C ABI: one of the `RAW_*` codes, with a
     /// message in `*errmsg` for `RAW_FAILED`. The caller vouches that the
     /// frame is one this run's program built (FMT-10): its text is not
@@ -701,10 +746,39 @@ mod raw_write_tests {
         flat.extend_from_slice(b"bytes");
         assert_eq!(written(&subpacket("au1", &flat, 0)), (super::RAW_WRITTEN, b"bytes".to_vec()));
         assert_eq!(written(&subpacket("as", &array(0, 16), 0)), (super::RAW_WRITTEN, Vec::new()));
-        for schema in ["aai8", "aas", "ai8", "s", "a?s"] {
+        for schema in ["aai8", "aaai8", "ai8", "s", "a?s", "aa?s", "?s", "?as", "t2ss", "t2asas", "m21as1bs", "m11aas"] {
             assert_eq!(written(&subpacket(schema, &list, 0)), (super::RAW_NOT_HANDLED, Vec::new()), "{schema}");
         }
         assert_eq!(written(&subpacket("as", &list, pk::PACKET_COMPRESSION_ZSTD)), (super::RAW_NOT_HANDLED, Vec::new()));
+    }
+
+    fn nested_payload(groups: &[&[&[u8]]]) -> Vec<u8> {
+        let n_inner: usize = groups.iter().map(|g| g.len()).sum();
+        let mut p = array(groups.len(), 16).to_vec();
+        let mut inner_at = 16 + 16 * groups.len();
+        for g in groups {
+            p.extend_from_slice(&array(g.len(), inner_at));
+            inner_at += 16 * g.len();
+        }
+        let mut at = 16 + 16 * groups.len() + 16 * n_inner;
+        for b in groups.iter().flat_map(|g| g.iter()) {
+            p.extend_from_slice(&array(b.len(), at));
+            at += b.len();
+        }
+        for b in groups.iter().flat_map(|g| g.iter()) {
+            p.extend_from_slice(b);
+        }
+        p
+    }
+
+    #[test]
+    fn list_results_write_every_piece_of_every_batch_in_order() {
+        let groups: &[&[&[u8]]] = &[&[b"a,", b"", b"b\n"], &[], &[b"c\n"]];
+        let nested = nested_payload(groups);
+        for schema in ["aas", "aaau1"] {
+            assert_eq!(written(&subpacket(schema, &nested, 0)), (super::RAW_WRITTEN, b"a,b\nc\n".to_vec()), "{schema}");
+        }
+        assert_eq!(written(&subpacket("aas", &nested, pk::PACKET_COMPRESSION_ZSTD)), (super::RAW_NOT_HANDLED, Vec::new()));
     }
 
     fn written_parts(head: &[u8], payload: &[u8]) -> (i32, Vec<u8>) {

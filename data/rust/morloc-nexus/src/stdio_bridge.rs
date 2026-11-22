@@ -43,9 +43,9 @@ extern "C" {
         errmsg: *mut *mut c_char,
     ) -> i32;
 
-    /// Emit a `Str`/`[Str]` voidstar as verbatim bytes to fd 1 (the `-f raw`
-    /// format). `schema` is the full `[Str]` value schema.
-    fn print_voidstar_raw(
+    /// Emit a voidstar list of render results as their verbatim bytes to
+    /// fd 1, in order. `schema` is the full list schema.
+    fn print_voidstar_raw_batches(
         data: *const c_void,
         schema: *const CSchema,
         errmsg: *mut *mut c_char,
@@ -451,7 +451,7 @@ pub unsafe fn emit_subpacket_jsonl(bytes: &[u8], value_schema_str: &str) -> Resu
     emit_subpacket_with(bytes, value_schema_str, "jsonl emit", print_voidstar_jsonl)
 }
 
-/// Emit one sub-packet's `[Str]` bodies verbatim to fd 1 (the `-f raw`
+/// Emit one sub-packet of render results verbatim to fd 1 (the `-f raw`
 /// format for `render` handlers). `head_len` is the length of its header
 /// and metadata.
 pub unsafe fn emit_subpacket_raw(frame: Frame<'_>, head_len: usize) -> Result<(), WriteError> {
@@ -481,7 +481,7 @@ pub unsafe fn emit_subpacket_raw(frame: Frame<'_>, head_len: usize) -> Result<()
             drop(out);
             let bytes = frame.joined();
             let schema = subpacket_value_schema_str(&bytes)?;
-            emit_subpacket_with(&bytes, &schema, "raw emit", print_voidstar_raw)
+            emit_subpacket_with(&bytes, &schema, "raw emit", print_voidstar_raw_batches)
         }
         _ => Err(WriteError::Other(format!("raw emit: {}", take_err(err)))),
     }
