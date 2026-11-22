@@ -5209,7 +5209,11 @@ fn ahead_schedule(local: &mut ProcessLocalSlot, from: u64, end: u64) {
     let shared: std::sync::Arc<std::sync::Mutex<Vec<Option<(usize, bool)>>>> =
         std::sync::Arc::new(std::sync::Mutex::new(inputs.iter().map(|i| i.5.map(|(b, _)| (b, false))).collect()));
     let job_blocks = shared.clone();
+    #[cfg(test)]
+    let hook = crate::compression::frame_spawn_hook();
     let spawned = std::thread::Builder::new().name("morloc-decode-ahead".into()).spawn(move || {
+        #[cfg(test)]
+        crate::compression::set_frame_spawn_hook(hook);
         let mut blocks: Vec<Option<(usize, bool)>> = Vec::with_capacity(inputs.len());
         for (k, (_, _, _, len, _, landing)) in inputs.iter().enumerate() {
             let b = match landing {
@@ -5245,7 +5249,7 @@ fn ahead_schedule(local: &mut ProcessLocalSlot, from: u64, end: u64) {
                     })
                 })
                 .collect();
-            crate::compression::parallel_decompress_frame_sets(&mut sets)
+            crate::compression::parallel_decompress_frame_sets(&mut sets, crate::compression::ahead_workers())
         };
         if decoded.is_ok() {
             for (k, (_, _, _, len, hint, _)) in inputs.iter().enumerate() {
@@ -12986,6 +12990,242 @@ mod tests {
         assert_eq!(got, (0..100).collect::<Vec<i64>>());
     }
 
+    /// Read `h` to its end with `@next`, under the frame-decoding test hook.
+    fn read_all_hooked(h: i64, hook: &crate::compression::FrameSpawnHook) -> Vec<i64> {
+        crate::compression::set_frame_spawn_hook(Some(hook.clone()));
+        let mut got = Vec::new();
+        loop {
+            let b = next_ints(h);
+            if b.is_empty() {
+                break;
+            }
+            got.extend(b);
+        }
+        crate::compression::set_frame_spawn_hook(None);
+        got
+    }
+
+    /// ZIP-10: with every frame-decoding thread refused, each `@next`
+    /// decodes its sub-packet of several frames on the calling thread.
+    #[test]
+    fn a_refused_frame_worker_narrows_the_synchronous_decode() {
+        let _shm = crate::own_test_registry();
+        let dir = concat_test_dir("refused_sync");
+        let path = dir.join("r.idx");
+        write_compressed_runs(&path, 3, 300_000);
+        crate::stream::set_test_ifile_cache_bytes(Some(0));
+        let h = open_istream(path.to_str().unwrap()).unwrap();
+        crate::stream::set_test_ifile_cache_bytes(None);
+        let hook = crate::compression::FrameSpawnHook { refuse: true, ..Default::default() };
+        let got = read_all_hooked(h, &hook);
+        shared_close_handle(h).unwrap();
+        assert_eq!(got, (0..900_000).collect::<Vec<i64>>());
+        if crate::compression::frame_workers() >= 2 {
+            assert!(hook.spawns.load(std::sync::atomic::Ordering::Relaxed) >= 3, "the decode asked for no thread");
+        }
+    }
+
+    /// ZIP-10: a claim `@next` decodes itself asks for a thread per frame
+    /// beyond its own, up to the frame workers.
+    #[test]
+    fn a_claim_decoded_on_the_reader_uses_every_frame_worker() {
+        let _shm = crate::own_test_registry();
+        let dir = concat_test_dir("sync_width");
+        let path = dir.join("w.idx");
+        write_compressed_runs(&path, 1, 1_200_000);
+        crate::stream::set_test_ifile_cache_bytes(Some(0));
+        let h = open_istream(path.to_str().unwrap()).unwrap();
+        crate::stream::set_test_ifile_cache_bytes(None);
+        let hook = crate::compression::FrameSpawnHook::default();
+        let got = read_all_hooked(h, &hook);
+        shared_close_handle(h).unwrap();
+        assert_eq!(got, (0..1_200_000).collect::<Vec<i64>>());
+        let frames = 5;
+        let (decodes, spawns) = (hook.decodes.load(std::sync::atomic::Ordering::Relaxed), hook.spawns.load(std::sync::atomic::Ordering::Relaxed));
+        if crate::compression::frame_workers() >= 2 {
+            assert_eq!(decodes, 1);
+            assert_eq!(spawns, crate::compression::frame_workers().min(frames) - 1);
+        }
+    }
+
+    /// ZIP-10, SLOT-27: with every frame-decoding thread refused, a pass
+    /// decoded ahead decodes on its own thread and the stream reads in order.
+    #[test]
+    fn a_refused_frame_worker_narrows_a_pass_decoded_ahead() {
+        let _shm = crate::own_test_registry();
+        let dir = concat_test_dir("refused_ahead");
+        let path = dir.join("r.idx");
+        write_compressed_runs(&path, 40, 100);
+        let h = open_istream(path.to_str().unwrap()).unwrap();
+        let hook = crate::compression::FrameSpawnHook { refuse: true, ..Default::default() };
+        let got = read_all_hooked(h, &hook);
+        shared_close_handle(h).unwrap();
+        assert_eq!(got, (0..4000).collect::<Vec<i64>>());
+        if crate::compression::frame_workers() >= 2 {
+            assert!(hook.spawns.load(std::sync::atomic::Ordering::Relaxed) > 0, "no pass asked for a thread");
+        }
+    }
+
+    /// ZIP-10, SLOT-27: a pass takes sub-packets up to twice as many frames
+    /// as frame workers, and each pass asks for `ahead_workers() - 1`
+    /// threads beside its own.
+    #[test]
+    fn a_pass_holds_twice_the_frame_workers_in_frames_and_decodes_on_two() {
+        let _shm = crate::own_test_registry();
+        let dir = concat_test_dir("ahead_width");
+        let path = dir.join("w.idx");
+        write_compressed_runs(&path, 60, 10);
+        let h = open_istream(path.to_str().unwrap()).unwrap();
+        let first = next_ints(h);
+        let held = with_process_local_slot(h, |local, _| Ok(local.cache.ahead.len() + local.cache.job.as_ref().map_or(0, |j| j.picks.len()))).unwrap();
+        let hook = crate::compression::FrameSpawnHook::default();
+        let rest = read_all_hooked(h, &hook);
+        shared_close_handle(h).unwrap();
+        let fw = crate::compression::frame_workers();
+        assert_eq!(first, (0..10).collect::<Vec<i64>>());
+        assert_eq!(rest, (10..600).collect::<Vec<i64>>());
+        assert_eq!(crate::compression::ahead_workers(), fw.min(2));
+        if fw >= 2 {
+            assert_eq!(held, (2 * fw).min(AHEAD_MAX_SUBPACKETS).min(59));
+            let (decodes, spawns) = (hook.decodes.load(std::sync::atomic::Ordering::Relaxed), hook.spawns.load(std::sync::atomic::Ordering::Relaxed));
+            assert!(decodes > 0, "no pass decoded on more than one thread");
+            assert_eq!(spawns, decodes * (crate::compression::ahead_workers() - 1));
+        }
+    }
+
+    /// ZIP-10, SLOT-26: one process serving requests in turn, as a daemon
+    /// does, each request an arena of its own, reads two compressed streams
+    /// one after the other and then the first again; each reads in order.
+    #[test]
+    fn requests_in_turn_read_two_compressed_streams_in_order() {
+        let _shm = crate::own_test_registry();
+        let dir = concat_test_dir("ahead_in_turn");
+        let (pa, pb) = (dir.join("a.idx"), dir.join("b.idx"));
+        write_compressed_runs(&pa, 30, 40);
+        write_compressed_runs(&pb, 20, 90);
+        let request = |p: &std::path::Path, stop: usize| {
+            let g = crate::eval_arena::enter().unwrap();
+            let h = open_istream(p.to_str().unwrap()).unwrap();
+            let mut got = Vec::new();
+            for _ in 0..stop {
+                let b = next_ints(h);
+                if b.is_empty() {
+                    break;
+                }
+                got.extend(b);
+            }
+            shared_close_handle(h).unwrap();
+            drop(g);
+            got
+        };
+        assert_eq!(request(&pa, usize::MAX), (0..1200).collect::<Vec<i64>>());
+        assert_eq!(request(&pb, 7), (0..630).collect::<Vec<i64>>());
+        assert_eq!(request(&pb, usize::MAX), (0..1800).collect::<Vec<i64>>());
+        assert_eq!(request(&pa, usize::MAX), (0..1200).collect::<Vec<i64>>());
+    }
+
+    /// ZIP-10, SLOT-26: two streams in one process, one read slowly, each
+    /// decode ahead in their own slot and read back in order.
+    #[test]
+    fn two_streams_read_at_different_speeds_each_read_in_order() {
+        let _shm = crate::own_test_registry();
+        let dir = concat_test_dir("ahead_two_speeds");
+        let (pa, pb) = (dir.join("a.idx"), dir.join("b.idx"));
+        write_compressed_runs(&pa, 50, 40);
+        write_compressed_runs(&pb, 30, 70);
+        let ha = open_istream(pa.to_str().unwrap()).unwrap();
+        let hb = open_istream(pb.to_str().unwrap()).unwrap();
+        let read = |h: i64, pause: std::time::Duration| {
+            std::thread::spawn(move || {
+                let mut got = Vec::new();
+                loop {
+                    let b = next_ints(h);
+                    if b.is_empty() {
+                        return got;
+                    }
+                    got.extend(b);
+                    std::thread::sleep(pause);
+                }
+            })
+        };
+        let fast = read(ha, std::time::Duration::ZERO);
+        let slow = read(hb, std::time::Duration::from_millis(3));
+        let (a, b) = (fast.join().unwrap(), slow.join().unwrap());
+        shared_close_handle(ha).unwrap();
+        shared_close_handle(hb).unwrap();
+        assert_eq!(a, (0..2000).collect::<Vec<i64>>());
+        assert_eq!(b, (0..2100).collect::<Vec<i64>>());
+    }
+
+    /// ZIP-10, SLOT-27: resetting the cursor partway through a stream, while
+    /// a pass may run, drops what was decoded ahead and reads it all again.
+    #[test]
+    fn a_cursor_reset_mid_stream_reads_the_stream_again() {
+        let _shm = crate::own_test_registry();
+        let dir = concat_test_dir("ahead_reset_mid");
+        let path = dir.join("m.idx");
+        write_compressed_runs(&path, 40, 50);
+        let h = open_istream(path.to_str().unwrap()).unwrap();
+        let mut first = Vec::new();
+        for _ in 0..17 {
+            first.extend(next_ints(h));
+        }
+        reset_istream_cursor(h).unwrap();
+        let held = with_process_local_slot(h, |local, _| Ok(local.cache.ahead.len() + local.cache.job.as_ref().map_or(0, |j| j.picks.len()))).unwrap();
+        let mut got = Vec::new();
+        loop {
+            let b = next_ints(h);
+            if b.is_empty() {
+                break;
+            }
+            got.extend(b);
+        }
+        shared_close_handle(h).unwrap();
+        assert_eq!(first, (0..850).collect::<Vec<i64>>());
+        assert_eq!(held, 0, "a reset kept what was decoded ahead");
+        assert_eq!(got, (0..2000).collect::<Vec<i64>>());
+    }
+
+    /// ZIP-10: a batch of 8 MiB or more whose walk reads little of it (short
+    /// names beside long byte arrays) is walked on the calling thread after
+    /// its root is rebased, and reads back as written by both `@next` paths.
+    #[test]
+    fn a_large_batch_walked_on_the_calling_thread_reads_back_as_written() {
+        let _shm = crate::own_test_registry();
+        let dir = concat_test_dir("serial_walk");
+        let list = "at2sau1";
+        let schema = parse_schema(list).unwrap();
+        let (n, len) = (1100, 8000);
+        let rows = format!(
+            "[{}]",
+            (0..n)
+                .map(|i| format!("[\"r{i}\",[{}]]", (0..len).map(|j| ((i + j) % 251).to_string()).collect::<Vec<_>>().join(",")))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        let want = crate::json::voidstar_to_json_string(crate::json::read_json_with_schema(&rows, &schema).unwrap(), &schema).unwrap();
+        for level in [0u8, 3] {
+            let p = dir.join(format!("l{level}.idx")).to_str().unwrap().to_string();
+            let w = shared_open_ostream_with_schema(&p, list).unwrap();
+            let v = crate::json::read_json_with_schema(&rows, &schema).unwrap();
+            assert!(crate::voidstar::flatten_to_buffer(v, &schema).unwrap().len() >= 8 << 20);
+            shared_write_subpacket(w, crate::compression::CompressionLevel::from_u8(level).unwrap(), v).unwrap();
+            shm::shfree(v).unwrap();
+            shared_close_handle(w).unwrap();
+            let a = open_istream(&p).unwrap();
+            let c = shared_next_subpacket(a).unwrap();
+            let copied = crate::json::voidstar_to_json_string(c, &schema).unwrap();
+            shm::shfree(c).unwrap();
+            shared_close_handle(a).unwrap();
+            let b = open_istream(&p).unwrap();
+            let mut in_place = String::new();
+            shared_next_with(b, &mut |data, space| in_place = batch_json(data, space, &schema)).unwrap();
+            shared_close_handle(b).unwrap();
+            assert!(copied == want, "level {level}: copied");
+            assert!(in_place == want, "level {level}: in place");
+        }
+    }
+
     /// A batch of strings large enough that relocation and the in-place
     /// check walk it on several threads reads back as written, from a
     /// compressed and an uncompressed file, by both `@next` paths.
@@ -13019,25 +13259,27 @@ mod tests {
         }
     }
 
-    /// The in-place check of a large batch, walked on several threads, still
-    /// rejects one pointer that leaves the payload near its end.
+    /// The in-place check of a large batch, walked on the calling thread and
+    /// on several, still rejects one pointer that leaves the payload near its
+    /// end.
     #[test]
     fn a_parallel_check_rejects_a_pointer_out_of_its_payload() {
         let _shm = crate::own_test_registry();
         let list = "as";
         let schema = parse_schema(list).unwrap();
-        let n = 400_000;
-        let rows = format!("[{}]", (0..n).map(|i| format!("\"{}\"", "y".repeat(1 + i % 5))).collect::<Vec<_>>().join(","));
-        let v = crate::json::read_json_with_schema(&rows, &schema).unwrap();
-        let bytes = crate::voidstar::flatten_to_buffer(v, &schema).unwrap();
-        shm::shfree(v).unwrap();
-        crate::voidstar::check_in_place(&bytes, &schema, 0, crate::origin::Origin::Outside).unwrap();
-        let mut bad = bytes.clone();
-        // the data pointer of element n - 3, a String header after the root
-        let elem = std::mem::size_of::<shm_types_crate::Array>() + (n - 3) * std::mem::size_of::<shm_types_crate::Array>();
-        let at = elem + std::mem::size_of::<usize>();
-        bad[at..at + 8].copy_from_slice(&(bytes.len() as i64 + 64).to_le_bytes());
-        assert!(crate::voidstar::check_in_place(&bad, &schema, 0, crate::origin::Origin::Outside).is_err(), "a pointer past the payload passed the check");
+        for n in [400_000, 500_000] {
+            let rows = format!("[{}]", (0..n).map(|i| format!("\"{}\"", "y".repeat(1 + i % 5))).collect::<Vec<_>>().join(","));
+            let v = crate::json::read_json_with_schema(&rows, &schema).unwrap();
+            let bytes = crate::voidstar::flatten_to_buffer(v, &schema).unwrap();
+            shm::shfree(v).unwrap();
+            crate::voidstar::check_in_place(&bytes, &schema, 0, crate::origin::Origin::Outside).unwrap();
+            let mut bad = bytes.clone();
+            // the data pointer of element n - 3, a String header after the root
+            let elem = std::mem::size_of::<shm_types_crate::Array>() + (n - 3) * std::mem::size_of::<shm_types_crate::Array>();
+            let at = elem + std::mem::size_of::<usize>();
+            bad[at..at + 8].copy_from_slice(&(bytes.len() as i64 + 64).to_le_bytes());
+            assert!(crate::voidstar::check_in_place(&bad, &schema, 0, crate::origin::Origin::Outside).is_err(), "a pointer past the payload passed the check");
+        }
     }
 
     /// DATA_PACKET file: a single voidstar packet (no STREAM header,

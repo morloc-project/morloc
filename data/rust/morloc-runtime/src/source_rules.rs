@@ -240,8 +240,58 @@ fn has_test_attr(attrs: &[syn::Attribute]) -> bool {
     attrs.iter().any(|a| {
         let path = a.path().to_token_stream().to_string();
         let tokens = a.to_token_stream().to_string().replace(' ', "");
-        path == "test" || (path == "cfg" && (tokens.contains("cfg(test)") || tokens.contains("cfg(all(test")))
+        path == "test"
+            || (path == "cfg"
+                && (tokens.contains("cfg(test)")
+                    || tokens.contains("cfg(all(test")
+                    || tokens.contains("cfg(any(test,feature=\"test-hooks\"))")
+                    || tokens.contains("cfg(any(feature=\"test-hooks\",test))")))
     })
+}
+
+/// The `test-hooks` feature of morloc-runtime-types is turned on only by
+/// dev-dependencies, so no build of the runtime itself carries the hooks.
+#[test]
+fn the_test_hooks_feature_is_enabled_only_for_tests() {
+    let mut problems = Vec::new();
+    for c in CRATES.iter().chain(&["morloc-manifest"]) {
+        let manifest = rust_root().join(c).join("Cargo.toml");
+        let text = std::fs::read_to_string(&manifest).unwrap();
+        let mut section = String::new();
+        for (n, line) in text.lines().enumerate() {
+            let t = line.trim();
+            if t.starts_with('[') {
+                section = t.to_string();
+                continue;
+            }
+            if t.starts_with('#') || !t.contains("test-hooks") {
+                continue;
+            }
+            let defines = *c == "morloc-runtime-types" && section == "[features]" && t.replace(' ', "") == "test-hooks=[]";
+            if !(defines || section == "[dev-dependencies]") {
+                problems.push(format!("{c}/Cargo.toml:{}: test-hooks in {section}", n + 1));
+            }
+        }
+    }
+    let root = std::fs::read_to_string(rust_root().join("Cargo.toml")).unwrap();
+    if root.contains("test-hooks") {
+        problems.push("Cargo.toml: test-hooks in the workspace manifest".into());
+    }
+    assert!(problems.is_empty(), "{}", problems.join("\n"));
+}
+
+#[test]
+fn a_test_only_cfg_is_found_in_either_order() {
+    let attrs: Vec<syn::Attribute> = [
+        quote::quote!(#[cfg(any(test, feature = "test-hooks"))]),
+        quote::quote!(#[cfg(any(feature = "test-hooks", test))]),
+    ]
+    .into_iter()
+    .map(|t| syn::parse_quote!(#t))
+    .collect();
+    for a in &attrs {
+        assert!(has_test_attr(std::slice::from_ref(a)), "{}", a.to_token_stream());
+    }
 }
 
 fn reads_pid(text: &str) -> bool {

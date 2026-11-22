@@ -165,10 +165,10 @@ levels 7-9 keep 16 MiB frames, whose long-range window is their point.
 Why: reverses the 2026-09-29 ruling of one 16 MiB frame per sub-packet,
 which left a flushed write at the speed of one zstd thread.
 
-### ZIP-10 Reading a compressed stream decodes beside the reader, on every frame worker
+### ZIP-10 Reading a compressed stream decodes ahead of the reader on at most two frame workers
 Intent: proposed
 Bench: compression
-Model: r_z(m) - r_0(m) = max(0, d_z * m / min(w, k) - c(m)) for a stream read with `@next`, c the reader's own work in the same time, k the frames a pass holds (2w); passes decode on a thread beside the reader (SLOT-26, SLOT-27), so small batches decode as widely as large ones and the reader waits only when decoding is the slower
+Model: r_z(m) - r_0(m) = max(0, d_z * m / min(a, k) - c(m)); cpu_z(m) ~= d_z * m. For a stream read with `@next`: m the bytes decoded, d_z the seconds one thread takes per decoded byte, c the reader's own work in the same time, w the frame workers, a = min(2, w) the threads a pass decodes on, k = 2w the frames a pass holds, cpu_z the CPU-s spent decoding
 Measured: pending
 Limit: fastq.z3.read.batch64k <= 1.2 x
 
@@ -177,10 +177,39 @@ thread; only the frames of one sub-packet ran in parallel, so a stream
 written in batches below the frame size (2 MiB at levels 1-6) decoded on
 one thread whatever the worker count, and no decoding overlapped the
 reader. Relocating a decoded batch, and checking an uncompressed one read
-in place (SLOT-25), walk the elements of a root array of 8 MiB or more on
-the frame workers too: a check always (it writes nothing), a relocation
+in place (SLOT-25), walk the elements of a root array on the frame workers
+too when the walk reads 8 MiB or more (the elements' own bytes, and the
+body of every `Str` and every array of enums when the walk checks values,
+FMT-10; the whole value when an element's pointers lead further than one
+array): a check always (it writes nothing), a relocation
 only when every pointer of an element lies in the element itself, so no
 two threads write one place whatever the input; the calling thread works
 beside them, so a thread the system refuses only narrows the walk. Measured on lib/biolib/bioprojects/overlap (10M intervals,
 314 MB raw, 79 MB at zstd 3, load average 7-9): zstd-3 over raw went from
 +133 to +57 ms on one consumer thread and from +143 to +92 ms on twelve.
+
+Decoding frames works the same way wherever it runs (a pass decoded
+ahead, the claim an `@next` decodes itself, a compressed packet read
+whole): the calling thread decodes beside the threads it asks for, so a
+thread the system refuses only narrows the decode and never fails it.
+
+A pass decodes on a = min(2, w) threads, the pass's own among them, while
+it still holds 2w frames, so small batches take no more passes. A pass
+only has to stay ahead of the reader; a wider one finishes sooner and then
+waits, spending CPU the reader never sees. The decode a claim does itself
+(the first batch of a stream, readers whose claims interleave, a disabled
+cache) and a compressed packet read whole run on all w threads, since the
+caller waits for them. Measured on mosm `stat -t1`, a 100 MB stream of 98
+sub-packets of about 16 MiB at zstd 3, load 2.0-2.7, prototype runtime:
+2.44 -> 1.63 CPU-s at 0.78 -> 0.77 s wall with the walk gate above; wall
+changed by -0.02 to +0.06 s on every workload measured.
+
+Passes decode on a thread beside the reader (SLOT-26, SLOT-27), so small
+batches decode as widely as large ones and the reader waits only when
+decoding is the slower. Decoding spends about d_z * m CPU-s whatever its
+width; every thread beyond what keeps ahead of the reader adds CPU (thread
+start, contention, lower clock) without shortening the reader's wait, so
+cost is counted in CPU-s as well as wall. The compression bench records
+only wall time, so the CPU-s side is checked by interleaved runs that
+record the process tree's user + sys time (`RUSAGE_CHILDREN`) beside wall,
+as for the mosm figures above.

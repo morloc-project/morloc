@@ -503,7 +503,7 @@ read uncompressed sub-packet are dropped from the process's mapping.
 
 ### SLOT-26 A reader decodes ahead of its claim without claiming
 Status: implemented
-Checked by: compressed_sub_packets_decoded_ahead_are_read_in_order, readers_sharing_a_cursor_read_each_sub_packet_once, an_arena_ending_leaves_the_sub_packets_decoded_ahead, a_disabled_cache_decodes_nothing_ahead, a_reset_cursor_reads_the_stream_again
+Checked by: compressed_sub_packets_decoded_ahead_are_read_in_order, readers_sharing_a_cursor_read_each_sub_packet_once, an_arena_ending_leaves_the_sub_packets_decoded_ahead, a_disabled_cache_decodes_nothing_ahead, a_reset_cursor_reads_the_stream_again, two_streams_read_at_different_speeds_each_read_in_order, requests_in_turn_read_two_compressed_streams_in_order
 
 A reader whose previous claim ended where its new one starts (no other
 reader claimed in between, so the sub-packets after are likely its own)
@@ -525,15 +525,15 @@ is simply not kept.
 
 ### SLOT-27 Decoding ahead runs beside the reader and is joined before use
 Status: implemented
-Checked by: compressed_sub_packets_decoded_ahead_are_read_in_order, batches_read_in_place_beside_other_allocations_read_back_as_written, a_reset_cursor_reads_the_stream_again, tla:AheadJob, tla:AheadJob_drop_without_join.bug, tla:AheadJob_serve_before_join.bug
+Checked by: compressed_sub_packets_decoded_ahead_are_read_in_order, batches_read_in_place_beside_other_allocations_read_back_as_written, a_reset_cursor_reads_the_stream_again, a_cursor_reset_mid_stream_reads_the_stream_again, a_pass_holds_twice_the_frame_workers_in_frames_and_decodes_on_two, a_refused_frame_worker_narrows_a_pass_decoded_ahead, tla:AheadJob, tla:AheadJob_drop_without_join.bug, tla:AheadJob_serve_before_join.bug
 
 After a claim, a slot that holds less than a pass of sub-packets decoded
 ahead starts one job on a thread of its own for the next pass. A pass
 takes sub-packets until it holds twice as many frames as frame workers or
 8 MiB, so small sub-packets decode many at once and large ones, whose
 frames already decode in parallel, one at a time beside the reader. The job allocates the pass's blocks (or takes
-blocks the slot handed it), decodes their frames on the frame workers,
-relocates them, and frees nothing; it reads the compressed bytes where the
+blocks the slot handed it), decodes their frames on at most two frame
+workers (ZIP-10), relocates them, and frees nothing; it reads the compressed bytes where the
 slot maps them, past the claim that started it. The slot joins the job
 before it serves, keeps, releases or drops any of its blocks: at its next
 claim, at a cursor reset, and before it unmaps its file. Pages a reader
@@ -551,7 +551,10 @@ reservations settle where they were made. A job that panics leaves the
 blocks it allocated where the slot releases them. Before the stream
 registry is unmapped, the passes of every idle slot are joined and their
 blocks released. Joining waits for one pass at most: dropping or resetting
-a slot, which joins, waits that long. Model: `tla/AheadJob.tla`.
+a slot, which joins, waits that long. A pass decodes on at most two threads, so one that holds a single
+sub-packet of more than 2w frames (w the frame workers; the first pick is
+taken whatever its size) can take up to w/2 times as long as the same
+decode on w threads; a drop or reset waits that long. Model: `tla/AheadJob.tla`.
 
 ### SLOT-32 The streams one process writes share a bound on queued bytes
 Status: implemented

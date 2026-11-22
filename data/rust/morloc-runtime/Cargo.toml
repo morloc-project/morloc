@@ -47,6 +47,7 @@ chrono = "0.4"
 anstream = "1"
 
 [dev-dependencies]
+morloc-runtime-types = { path = "../morloc-runtime-types", features = ["test-hooks"] }
 # Generates prototypes the C-header agreement test compiles against morloc.h.
 cbindgen = "0.28"
 # Parse the workspace's sources for the process-wide state registry test.

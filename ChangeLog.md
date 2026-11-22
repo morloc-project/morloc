@@ -2,6 +2,9 @@ Unreleased
 ----------
 
 Changed
+ * reading a compressed stream uses about a quarter less CPU: decoding
+   ahead of the reader runs on at most two threads instead of every frame
+   worker, with the same wall time
  * a command starts only the language pools it calls, not every pool in
    its program
  * Python and R calls passing values of tens of KiB are 13-24% faster

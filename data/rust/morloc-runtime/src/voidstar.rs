@@ -890,12 +890,74 @@ impl RebaseMode {
 /// Bytes below which a value is walked on the calling thread.
 const PARALLEL_WALK_MIN_BYTES: isize = 8 << 20;
 
-/// Walk a large root array whose elements hold pointers on the frame
-/// workers: its header on the calling thread, as the walk steps it, then
-/// ranges of its elements (single elements when there are few), each
-/// element walked as a record of its own (as `adjust_records_within` walks
-/// records). `None` when the value is not such an array, for the caller to
-/// walk whole.
+/// Where an element's walk reads past its inline slot when it checks values
+/// (FMT-10): every `Str` body, and every array of fixed-width elements
+/// holding an enum. Each entry is (offset of the header in the slot,
+/// element width). Only meaningful when `shallow_array_slots` is `Some`.
+fn checked_bodies(s: &Schema, base: usize, out: &mut Vec<(usize, usize)>) {
+    if s.is_fixed_width() {
+        return;
+    }
+    match s.serial_type {
+        SerialType::String => out.push((base, 1)),
+        SerialType::Array => {
+            if let Some(e) = s.parameters.first().filter(|e| e.is_fixed_width() && holds_enum(e)) {
+                out.push((base, e.width));
+            }
+        }
+        SerialType::Tuple | SerialType::Map => {
+            for (p, &off) in s.parameters.iter().zip(&s.offsets) {
+                checked_bodies(p, base + off, out);
+            }
+        }
+        SerialType::Nil | SerialType::Bool | SerialType::Sint8 | SerialType::Sint16 | SerialType::Sint32
+        | SerialType::Sint64 | SerialType::Uint8 | SerialType::Uint16 | SerialType::Uint32 | SerialType::Uint64
+        | SerialType::Float32 | SerialType::Float64 | SerialType::Optional | SerialType::Int | SerialType::Table
+        | SerialType::Recur | SerialType::IFile | SerialType::OStream | SerialType::IStream | SerialType::Enum
+        | SerialType::Variant => {}
+    }
+}
+
+/// The bytes a walk of the `n` elements of `elem` at `elems` reads, counted
+/// up to `PARALLEL_WALK_MIN_BYTES`: the elements' inline slots and, when
+/// `checked`, the bodies [`checked_bodies`] names. `whole` when an element
+/// holds a pointer that leads further, so the walk may read all of it.
+///
+/// # Safety
+/// `n` elements of `elem` lie at `elems`.
+unsafe fn walk_touches(elem: &Schema, elems: usize, n: usize, checked: bool, whole: usize) -> usize {
+    let min = PARALLEL_WALK_MIN_BYTES as usize;
+    if shallow_array_slots(elem).is_none() {
+        return whole;
+    }
+    let mut touched = n.saturating_mul(elem.width);
+    let mut bodies = Vec::new();
+    if checked {
+        checked_bodies(elem, 0, &mut bodies);
+    }
+    if bodies.is_empty() || touched >= min {
+        return touched;
+    }
+    for i in 0..n {
+        for &(off, w) in &bodies {
+            // SAFETY: the header lies in element i's inline slot.
+            let a = unsafe { std::ptr::read_unaligned((elems + i * elem.width + off) as *const Array) };
+            touched = touched.saturating_add(a.size.saturating_mul(w));
+        }
+        if touched >= min {
+            break;
+        }
+    }
+    touched
+}
+
+/// Walk a large root array whose elements hold pointers: its header on the
+/// calling thread, as the walk steps it, then ranges of its elements
+/// (single elements when there are few), each element walked as a record of
+/// its own (as `adjust_records_within` walks records), on the frame workers
+/// when the walk reads `PARALLEL_WALK_MIN_BYTES` or more ([`walk_touches`])
+/// and on the calling thread otherwise. `None` when the value is not such an
+/// array, for the caller to walk whole.
 ///
 /// # Safety
 /// As for the serial walk in `mode`: `data` holds a value of `schema` whose
@@ -941,7 +1003,11 @@ unsafe fn walk_root_array_parallel(
         Ok(p) => p as usize,
         Err(e) => return Some(Err(e)),
     };
+    let whole = (window.hi - window.lo) as usize;
     // SAFETY: the header check admitted `arr.size` elements at `elems`.
+    let touched = unsafe { walk_touches(elem_schema, elems, arr.size, dims.is_some(), whole) };
+    let workers = if touched >= PARALLEL_WALK_MIN_BYTES as usize { workers } else { 1 };
+    // SAFETY: as above.
     Some(unsafe { walk_elements(mode, window, schema, elem_schema, elems, arr.size, dims, workers) })
 }
 
@@ -1063,7 +1129,9 @@ pub unsafe fn check_records_in_place(
         count
     };
     let share = (payload.len() as u128 * count as u128 / total as u128) as isize;
-    let workers = if count >= 2 && share >= PARALLEL_WALK_MIN_BYTES { crate::compression::frame_workers() } else { 1 };
+    // SAFETY: the caller vouches the records lie in `payload`.
+    let touched = unsafe { walk_touches(elem, records as usize, count, origin.checked().is_some(), share.max(0) as usize) };
+    let workers = if count >= 2 && touched >= PARALLEL_WALK_MIN_BYTES as usize { crate::compression::frame_workers() } else { 1 };
     // SAFETY: the caller vouches the records lie in `payload`.
     unsafe {
         walk_elements(mode, window, &root, &root.parameters[0], records as usize, count, origin.checked(), workers)
@@ -3238,5 +3306,56 @@ mod header_run_tests {
             shm::shfree(pa).unwrap();
             shm::shfree(pb).unwrap();
         }
+    }
+}
+
+#[cfg(test)]
+mod walk_touches_tests {
+    use super::*;
+    use crate::schema::parse_schema;
+
+    /// `n` elements of `elem`, every array header in each sized `size`.
+    fn elements(elem: &Schema, n: usize, size: usize) -> Vec<u8> {
+        let mut out = vec![0u8; n * elem.width];
+        let slots = shallow_array_slots(elem).unwrap();
+        for i in 0..n {
+            for &(off, _) in &slots {
+                let at = i * elem.width + off;
+                out[at..at + 8].copy_from_slice(&size.to_le_bytes());
+            }
+        }
+        out
+    }
+
+    /// ZIP-10: the walk counts the elements' slots, and a `Str` body only
+    /// when it checks text; a byte array's body it never reads.
+    #[test]
+    fn a_walk_counts_the_slots_and_the_text_it_checks() {
+        let elem = parse_schema("t2sau1").unwrap();
+        let n = 1000;
+        let buf = elements(&elem, n, 300);
+        let at = buf.as_ptr() as usize;
+        let whole = usize::MAX;
+        assert_eq!(unsafe { walk_touches(&elem, at, n, false, whole) }, n * elem.width);
+        assert_eq!(unsafe { walk_touches(&elem, at, n, true, whole) }, n * elem.width + n * 300);
+    }
+
+    /// ZIP-10: counting stops at the parallel threshold.
+    #[test]
+    fn a_walk_over_much_text_counts_to_the_threshold() {
+        let elem = parse_schema("s").unwrap();
+        let n = 4096;
+        let buf = elements(&elem, n, 64 << 10);
+        let got = unsafe { walk_touches(&elem, buf.as_ptr() as usize, n, true, usize::MAX) };
+        let min = PARALLEL_WALK_MIN_BYTES as usize;
+        assert!(got >= min && got < min + n * elem.width + (64 << 10), "{got}");
+    }
+
+    /// ZIP-10: an element whose pointers lead further may be read whole.
+    #[test]
+    fn a_walk_into_nested_values_may_read_the_whole_value() {
+        let elem = parse_schema("aas").unwrap().parameters[0].clone();
+        let buf = vec![0u8; 16 * elem.width];
+        assert_eq!(unsafe { walk_touches(&elem, buf.as_ptr() as usize, 16, true, 12345) }, 12345);
     }
 }
