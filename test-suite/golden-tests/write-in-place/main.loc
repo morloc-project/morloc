@@ -2,11 +2,12 @@
 -- languages that hold its type (SLOT-36, SLOT-37) and checked byte for
 -- byte, sub-packet cuts and footer included, apart from the writer's pid
 -- and times (same.py):
---   * against the same language's staged standard output
---     (MORLOC_STDOUT=stage), which takes the voidstar copy: the runtime
---     flattens the language's own voidstar, so this pins placement (cuts,
---     slack, alignment relative to the element's origin) but not the
---     language's encoding choices;
+--   * against the same language's standard output, which is written in
+--     place too, so a stdout stream frames its batches as a file does;
+--   * against the runtime's copy path: `morloc-nexus view -p` reads the
+--     file and writes its values again through the path `mlc_write` takes,
+--     which pins placement (cuts, slack, alignment relative to the
+--     element's origin) but not the language's encoding choices;
 --   * across languages, which pins those choices: C++ against Python for
 --     every type, R against Python for every type (on inputs R can hold:
 --     rsafe.py drops NUL from strings and moves -2^63, bit64's NA), Rust
