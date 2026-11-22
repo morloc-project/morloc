@@ -3655,13 +3655,17 @@ makeWrapperScript mode selfRel manifestPath
       -- Resolve the launcher's own directory and find the manifest relative to
       -- it, so the build tree works wherever it is placed. $0 has a slash when
       -- invoked by a path (the normal case); a bare name is located via PATH.
+      -- The directory is cut from $self in the shell itself, sparing a
+      -- dirname process per run: a $self without a slash (`sh name`, not on
+      -- PATH) is in ".", and one directly under / leaves "", which is "/".
       MT.unlines
         [ "#!/bin/sh"
         , manifestMarker manifestPath
         , "export MORLOC_PROG_NAME=\"$0\""
         , "self=\"$0\""
         , "case \"$self\" in */*) : ;; *) self=$(command -v -- \"$self\") ;; esac"
-        , "d=$(CDPATH= cd -- \"$(dirname -- \"$self\")\" && pwd)"
+        , "case \"$self\" in */*) d=${self%/*} ;; *) d=. ;; esac"
+        , "d=$(CDPATH= cd -- \"${d:-/}\" && pwd)"
         , "exec morloc-nexus " <> modeToken mode
             <> " \"$d/" <> MT.pack (dquoteEsc manifestPath) <> "\" \"$@\""
         ]

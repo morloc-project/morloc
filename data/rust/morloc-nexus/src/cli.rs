@@ -2640,6 +2640,24 @@ mod tests {
              export MORLOC_PROG_NAME=\"$0\"\n\
              self=\"$0\"\n\
              case \"$self\" in */*) : ;; *) self=$(command -v -- \"$self\") ;; esac\n\
+             case \"$self\" in */*) d=${{self%/*}} ;; *) d=. ;; esac\n\
+             d=$(CDPATH= cd -- \"${{d:-/}}\" && pwd)\n\
+             exec morloc-nexus run \"$d/{rel}\" \"$@\"\n",
+            rel = rel_manifest
+        )
+        .into_bytes()
+    }
+
+    /// The self-relative shape as earlier compilers wrote it, computing `$d`
+    /// with `dirname`. Build trees outlive the compiler that wrote them, so
+    /// this must still resolve.
+    fn wrapper_self_relative_dirname(rel_manifest: &str) -> Vec<u8> {
+        format!(
+            "#!/bin/sh\n\
+             # morloc-manifest: {rel}\n\
+             export MORLOC_PROG_NAME=\"$0\"\n\
+             self=\"$0\"\n\
+             case \"$self\" in */*) : ;; *) self=$(command -v -- \"$self\") ;; esac\n\
              d=$(CDPATH= cd -- \"$(dirname -- \"$self\")\" && pwd)\n\
              exec morloc-nexus run \"$d/{rel}\" \"$@\"\n",
             rel = rel_manifest
@@ -2714,6 +2732,17 @@ mod tests {
             "selfrel",
             "nexus",
             &wrapper_self_relative("nexus-build/manifest.json"),
+        );
+        assert_eq!(resolved, tmp.join("nexus-build/manifest.json").to_string_lossy());
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn resolves_a_self_relative_wrapper_written_with_dirname() {
+        let (resolved, tmp) = resolve_launcher(
+            "selfreldirname",
+            "nexus",
+            &wrapper_self_relative_dirname("nexus-build/manifest.json"),
         );
         assert_eq!(resolved, tmp.join("nexus-build/manifest.json").to_string_lossy());
         std::fs::remove_dir_all(&tmp).ok();

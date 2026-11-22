@@ -1,0 +1,9 @@
+-- A launcher finds its build tree however it is invoked: by a relative or
+-- absolute path, through PATH, by `sh name` from its own directory, from a
+-- directory whose name holds a space, and when it sits in `/`.
+module main (inc)
+
+import root-py
+
+inc :: Int -> Int
+inc x = x + 1
