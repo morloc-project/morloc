@@ -1803,20 +1803,23 @@ inline mlc::Unit _mlc_settle(int64_t handle) {
 
 // A closure that can cross, applied to its first arguments one at a time,
 // stays a closure of the same manifold: the arguments join its captured
-// values. `schemas` are the wire schemas of its remaining arguments, used
+// values. `encoders` turn each remaining argument into its packet, used
 // only if it is reified.
 // A closure applied to its first argument `x`: the thunk that reifies it
 // (the argument appended to the captured values) and the schemas of the
 // arguments it still takes.
+typedef std::function<std::vector<uint8_t>(const void*)> mlc_arg_encoder;
+
 template <class X>
-std::pair<std::function<mlc_captured_t()>, std::vector<Schema*>>
-mlc_pap_step(const std::function<mlc_captured_t()>& reify, const std::vector<Schema*>& schemas, const X& x) {
-    Schema* s = schemas.empty() ? nullptr : schemas.front();
-    std::vector<Schema*> rest;
-    if (!schemas.empty()) rest.assign(schemas.begin() + 1, schemas.end());
-    std::function<mlc_captured_t()> reify2 = [reify, x, s]() {
+std::pair<std::function<mlc_captured_t()>, std::vector<mlc_arg_encoder>>
+mlc_pap_step(const std::function<mlc_captured_t()>& reify, const std::vector<mlc_arg_encoder>& encoders, const X& x) {
+    mlc_arg_encoder e = encoders.empty() ? mlc_arg_encoder() : encoders.front();
+    std::vector<mlc_arg_encoder> rest;
+    if (!encoders.empty()) rest.assign(encoders.begin() + 1, encoders.end());
+    std::function<mlc_captured_t()> reify2 = [reify, x, e]() {
+        if (!e) throw MorlocException("cannot reify a closure whose argument has no wire form");
         mlc_captured_t v = reify();
-        v.push_back(_mlc_reify_arg(x, s));
+        v.push_back(e(&x));
         return v;
     };
     return {reify2, rest};
@@ -1826,14 +1829,14 @@ template <class R, class... A> struct mlc_pap;
 template <class R> struct mlc_pap<R> {
     static MorlocClosure<R()> make(std::function<R()> fn, int64_t mid,
                                    std::function<mlc_captured_t()> reify,
-                                   std::string home, std::vector<Schema*>) {
+                                   std::string home, std::vector<mlc_arg_encoder>) {
         return MorlocClosure<R()>{fn, mid, reify, home};
     }
 };
 template <class R, class A1, class... A> struct mlc_pap<R, A1, A...> {
     static MorlocClosure<R(A1, A...)> make(std::function<R(A1, A...)> fn, int64_t mid,
                                            std::function<mlc_captured_t()> reify,
-                                           std::string home, std::vector<Schema*> schemas) {
+                                           std::string home, std::vector<mlc_arg_encoder> schemas) {
         MorlocClosure<R(A1, A...)> c{fn, mid, reify, home};
         c.apply1 = [fn, mid, reify, home, schemas](const A1& x) -> std::function<R(A...)> {
             auto [reify2, rest] = mlc_pap_step(reify, schemas, x);
@@ -1854,7 +1857,7 @@ struct mlc_staged<R, mlc_types<F1, F...>, mlc_types<Rest...>> {
     typedef std::function<std::function<R(Rest...)>(F1, F...)> stage_t;
     static MorlocClosure<R(F1, F..., Rest...)> make(std::function<R(F1, F..., Rest...)> fn, int64_t mid,
                                                     std::function<mlc_captured_t()> reify,
-                                                    std::string home, std::vector<Schema*> schemas,
+                                                    std::string home, std::vector<mlc_arg_encoder> schemas,
                                                     stage_t stage) {
         MorlocClosure<R(F1, F..., Rest...)> c{fn, mid, reify, home};
         c.apply1 = [fn, mid, reify, home, schemas, stage](const F1& x) -> std::function<R(F..., Rest...)> {

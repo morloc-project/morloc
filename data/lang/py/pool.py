@@ -42,6 +42,11 @@ def _mlc_wrong_data_form(type_name, value):
 def mlc_closure_codec(tuple_schema, arg_codecs, res_codec):
     return ("__mlc_closure__", tuple_schema, arg_codecs, res_codec)
 
+# A value whose type has a packer: its schema and the functions that turn a
+# native value into its wire form and back.
+def mlc_wire_codec(schema, to_wire, from_wire):
+    return ("__mlc_wire__", schema, to_wire, from_wire)
+
 # AUTO include preamble start
 # <<<BREAK>>>
 # AUTO include preamble end
@@ -202,20 +207,30 @@ def _mlc_is_closure_codec(codec):
     return isinstance(codec, tuple) and len(codec) == 4 and codec[0] == "__mlc_closure__"
 
 
+def _mlc_is_wire_codec(codec):
+    return isinstance(codec, tuple) and len(codec) == 4 and codec[0] == "__mlc_wire__"
+
+
 def mlc_encode(value, codec, self_contained=False):
-    # Serialize a native value by its codec: a closure is reified first. A
+    # Serialize a native value by its codec: a closure is reified first, and
+    # a value whose type has a packer is converted to its wire form. A
     # self-contained packet embeds the value rather than referencing a
     # shared-memory block, for a value that must outlive this dispatch.
     if _mlc_is_closure_codec(codec):
         return morloc.put_value(mlc_reify(value, MLC_HOME_LANG), codec[1], self_contained)
+    if _mlc_is_wire_codec(codec):
+        return morloc.put_value(codec[2](value), codec[1], self_contained)
     return morloc.put_value(value, codec, self_contained)
 
 
 def mlc_decode(pkt, codec):
     # Deserialize a packet by its codec: a closure is reflected into a
-    # callable that calls back to its home pool.
+    # callable that calls back to its home pool, and a value whose type has a
+    # packer is converted from its wire form.
     if _mlc_is_closure_codec(codec):
         return mlc_reflect_from_tuple(morloc.get_value(pkt, codec[1]), codec[2], codec[3])
+    if _mlc_is_wire_codec(codec):
+        return codec[3](morloc.get_value(pkt, codec[1]))
     return morloc.get_value(pkt, codec)
 
 

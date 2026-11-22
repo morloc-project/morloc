@@ -302,6 +302,12 @@ data LangDescriptor = LangDescriptor
     -- and {{caps}} (list literal of the captured-argument schema strings).
     -- Example Python: @"mlc_closure_table[{{mid}}] = {{caps}}"@; R:
     -- @"mlc_closure_table[[\"{{mid}}\"]] <- {{caps}}"@.
+  , ldWireConverterScope :: !Text
+    -- ^ Statement after the definition of a wire converter (a function a
+    -- closure codec names) that gives it the scope of generated code, where
+    -- the pool's runtime code is defined in a scope of its own.
+    -- Substitution: {{name}}. Example for R:
+    -- @"environment({{name}}) <- globalenv()"@; empty for Python.
   }
   deriving (Eq, Show, Generic)
 
@@ -442,6 +448,7 @@ instance Y.FromJSON LangDescriptor where
             . ins "ldClosureRegisterEntry" (Y.String "")
             . ins "ldClosureTableHeader" (Y.String "")
             . ins "ldClosureTableEntry" (Y.String "")
+            . ins "ldWireConverterScope" (Y.String "")
             $ obj
     d <- Aeson.genericParseJSON Aeson.defaultOptions (Y.Object withDefaults)
     let check = ldForkCheck d
@@ -556,6 +563,7 @@ defaultLangDescriptor name ext =
     , ldClosureRegisterEntry = ""
     , ldClosureTableHeader = ""
     , ldClosureTableEntry = ""
+    , ldWireConverterScope = ""
     }
 
 -- | The identifier and operator patterns a lang.yaml declares

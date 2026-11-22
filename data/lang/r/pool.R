@@ -36,6 +36,13 @@ mlc_closure_codec <- function(tuple_schema, arg_codecs, res_codec) {
             class = "mlc_closure_codec")
 }
 
+# A value whose type has a packer: its schema and the functions that turn a
+# native value into its wire form and back.
+mlc_wire_codec <- function(schema, to_wire, from_wire) {
+  structure(list(schema = schema, to_wire = to_wire, from_wire = from_wire),
+            class = "mlc_wire_codec")
+}
+
 mlc_closure_table <- list()
 
 # A generated manifold's function, by id.
@@ -403,6 +410,8 @@ mlc_is_closure_codec <- function(codec) inherits(codec, "mlc_closure_codec")
 mlc_encode <- function(value, codec, self_contained = FALSE) {
   if (mlc_is_closure_codec(codec)) {
     morloc_put_value(mlc_reify(value, MLC_HOME_LANG), codec$tuple_schema, self_contained)
+  } else if (inherits(codec, "mlc_wire_codec")) {
+    morloc_put_value(codec$to_wire(value), codec$schema, self_contained)
   } else {
     morloc_put_value(value, codec, self_contained)
   }
@@ -413,6 +422,8 @@ mlc_encode <- function(value, codec, self_contained = FALSE) {
 mlc_decode <- function(pkt, codec) {
   if (mlc_is_closure_codec(codec)) {
     mlc_reflect_from_tuple(morloc_get_value(pkt, codec$tuple_schema), codec$arg_codecs, codec$res_codec)
+  } else if (inherits(codec, "mlc_wire_codec")) {
+    codec$from_wire(morloc_get_value(pkt, codec$schema))
   } else {
     morloc_get_value(pkt, codec)
   }

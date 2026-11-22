@@ -50,6 +50,8 @@ import Morloc.CodeGenerator.Grammars.Translator.Imperative
   , defaultDeserialize
   , defaultFoldRules
   , defaultSerialize
+  , nativeToWire
+  , wireToNative
   )
 import Morloc.CodeGenerator.Grammars.Translator.PseudoCode (pseudocodeSerialManifold)
 import Morloc.CodeGenerator.Grammars.Translator.PyClasses (DataShape (..), PyClasses (..), pyCtorRef, pythonClasses)
@@ -68,6 +70,7 @@ import qualified Morloc.DataFiles as DF
 import qualified Morloc.LangRegistry as LR
 import qualified Morloc.Language as ML
 import qualified Morloc.Version as MV
+import qualified Morloc.Data.PoolHash as PH
 import Morloc.Monad (asks, gets, newIndex, runIndex, getSchemaTable, registerSchemaIndex)
 import qualified Morloc.Monad as MM
 import Morloc.Quasi
@@ -164,18 +167,21 @@ translateBuiltin lang desc0 srcs es = do
   debugInfo <- makeManifoldDebugInfoLookup
   traceInfo <- makeTraceLabelLookup
   debugMode <- gets stateDebugTrace
-  let (mDocs, schemas) = runIndex 0 $ do
+  closureAsts <- computeClosureSchemas lang es
+  let wireAsts = wireCodecAsts (concat [caps <> bnds <> [res] | (caps, bnds, res) <- Map.elems closureAsts] <> programSerialAsts es)
+      (mDocs, schemas) = runIndex 0 $ do
         docs <- mapM (translateSegment desc srcNamer debugInfo traceInfo debugMode) es
+        convs <- mapM (wireConverter desc (genericLowerConfig desc srcNamer debugInfo traceInfo debugMode)) wireAsts
         tbl <- getSchemaTable
-        return (docs, tbl)
+        return ((docs, convs), tbl)
   labels <- collectLogLabels <$> gets stateManifoldConfig
   templates <- collectRenderedTemplates lang
-  closureTable <- Map.map (renderClosureCodecs desc) <$> computeClosureSchemas lang es
+  let closureTable = Map.map (renderClosureCodecs desc) closureAsts
   -- Keep the preamble (runtime bootstrap) at module top / parent load, and pass
   -- the user includes separately so interpreted pools can defer them past the
   -- worker fork (macOS fork-safety); see 'ipIncludes'.
   stageTable <- stageTableEntries
-  let program = (buildProgram labels templates preambleDocs includeDocs mDocs es schemas closureTable) {ipStageTable = stageTable}
+  let program = (buildProgram labels templates preambleDocs includeDocs (fst mDocs) es schemas closureTable) {ipStageTable = stageTable, ipWireConverters = map render (snd mDocs)}
 
   let code = printProgram desc program
   let exefile = ML.makeExecutablePoolName lang
@@ -260,17 +266,20 @@ translateExternal cmd lang desc srcs es = do
   debugInfo <- makeManifoldDebugInfoLookup
   traceInfo <- makeTraceLabelLookup
   debugMode <- gets stateDebugTrace
-  let (mDocs, schemas) = runIndex 0 $ do
+  closureAsts <- computeClosureSchemas lang es
+  let wireAsts = wireCodecAsts (concat [caps <> bnds <> [res] | (caps, bnds, res) <- Map.elems closureAsts] <> programSerialAsts es)
+      (mDocs, schemas) = runIndex 0 $ do
         docs <- mapM (translateSegment desc srcNamer debugInfo traceInfo debugMode) es
+        convs <- mapM (wireConverter desc (genericLowerConfig desc srcNamer debugInfo traceInfo debugMode)) wireAsts
         tbl <- getSchemaTable
-        return (docs, tbl)
+        return ((docs, convs), tbl)
   labels <- collectLogLabels <$> gets stateManifoldConfig
   templates <- collectRenderedTemplates lang
-  closureTable <- Map.map (renderClosureCodecs desc) <$> computeClosureSchemas lang es
+  let closureTable = Map.map (renderClosureCodecs desc) closureAsts
   -- Out-of-process codegen path: includes stay at module top (no fork-defer),
   -- so pass them as sources and leave the deferred-includes slot empty.
   stageTable <- stageTableEntries
-  let program = (buildProgram labels templates includeDocs [] mDocs es schemas closureTable) {ipStageTable = stageTable}
+  let program = (buildProgram labels templates includeDocs [] (fst mDocs) es schemas closureTable) {ipStageTable = stageTable, ipWireConverters = map render (snd mDocs)}
 
   -- find the lang.yaml path for the codegen tool
   let langYamlPath = home </> "lang" </> T.unpack (ML.langName lang) </> "lang.yaml"
@@ -1647,7 +1656,7 @@ printProgram desc prog =
     -- interpreted templates place inside a deferred post-fork loader, (3)
     -- manifolds, (4) dispatch.
     sections =
-      [ vsep (map pretty (ipSources prog) ++ [schemaTableInit, closureSchemaInit, closureTableInit, stageTableInit])
+      [ vsep (map pretty (ipSources prog) ++ [schemaTableInit, closureSchemaInit] ++ map pretty (ipWireConverters prog) ++ [closureTableInit, stageTableInit])
       , vsep (map pretty (ipIncludes prog))
       , vsep (map pretty (ipManifolds prog) ++ logRebindings)
       , templateDispatch
@@ -1929,6 +1938,58 @@ walkGenericSelectorBrackets desc =
 -- a value, or a closure codec (the closure tuple's schema, its arguments'
 -- codecs, its result's codec) for a function value, applied recursively so
 -- a function whose result is a suspension is described all the way down.
+-- | Whether a value of this wire form is converted on its way to and from
+-- the wire: it holds a value of a type with a packer.
+needsWireConversion :: SerialAST -> Bool
+needsWireConversion s = case s of
+  SerialClosure _ _ -> False
+  _ -> not (null [() | SerialPack _ _ <- Serial.serialSubtrees s])
+
+-- | The name of the generated function converting a value of this wire form
+-- to (@to@) or from (@from@) the wire.
+wireConverterName :: Text -> SerialAST -> MDoc
+wireConverterName dir s = pretty ("mlc_wire_" <> dir <> "_" <> PH.hashText (MT.pack (show s)))
+
+-- | The wire forms whose codecs convert their values: those a closure
+-- captures, takes or returns, at any depth, that hold a packed value.
+wireCodecAsts :: [SerialAST] -> [SerialAST]
+wireCodecAsts roots = nubOrdOn show (filter needsWireConversion (concatMap codecs roots))
+  where
+    codecs s = s : concat [concatMap codecs (out : ins) | SerialClosure ins out <- Serial.serialSubtrees s]
+
+-- | Every wire form the program's manifolds serialize or deserialize.
+programSerialAsts :: [SerialManifold] -> [SerialAST]
+programSerialAsts = concatMap (MM.runIdentity . foldSerialManifoldM fm)
+  where
+    fm =
+      defaultValue
+        { opSerialExprM = \e -> return $ case e of
+            SerializeS_ s xs -> s : xs
+            _ -> foldlSE (<>) [] e
+        , opNativeExprM = \e -> return $ case e of
+            DeserializeN_ _ s xs -> s : xs
+            WireToNativeN_ _ s _ _ xss -> s : concat xss
+            NativeToWireN_ _ s xs -> s : xs
+            _ -> foldlNE (<>) [] e
+        }
+
+-- | The two functions a wire codec calls: one turns a native value into its
+-- wire form (packers applied, closures reified), the other the reverse.
+wireConverter :: LangDescriptor -> LowerConfig IndexM -> SerialAST -> IndexM MDoc
+wireConverter desc cfg s = do
+  (toStmts, toExpr) <- nativeToWire cfg "v" s
+  (fromExpr, fromStmts) <- wireToNative cfg "w" s
+  return (vsep [def (wireConverterName "to" s) "v" toStmts toExpr, def (wireConverterName "from" s) "w" fromStmts fromExpr])
+  where
+    def name arg stmts e =
+      let header = pretty (substituteT (ldFuncDefHeader desc) [("name", render name), ("args", arg)])
+          body = map (genericPrintStmt desc) stmts <> [pretty (substituteT (ldReturnTemplate desc) [("expr", render (genericPrintExpr desc e))])]
+          scope = substituteT (ldWireConverterScope desc) [("name", render name)]
+          defn = case ldBlockStyle desc of
+            IndentBlock -> nest 4 (vsep (header : body))
+            BraceBlock -> block 4 header (vsep body)
+       in if T.null scope then defn else vsep [defn, pretty scope]
+
 codecDoc :: LangDescriptor -> SerialAST -> MDoc
 codecDoc desc s@(SerialClosure ins out) =
   pool desc "mlc_closure_codec"
@@ -1937,7 +1998,11 @@ codecDoc desc s@(SerialClosure ins out) =
       , codecList desc (map (codecDoc desc) ins)
       , codecDoc desc out
       ]
-codecDoc _ s = dquotes (pretty (render (Serial.serialAstToMsgpackSchema s)))
+codecDoc desc s
+  | needsWireConversion s =
+      pool desc "mlc_wire_codec"
+        <> tupled [dquotes (pretty (render (Serial.serialAstToMsgpackSchema s))), wireConverterName "to" s, wireConverterName "from" s]
+  | otherwise = dquotes (pretty (render (Serial.serialAstToMsgpackSchema s)))
 
 -- | A name the pool runtime defines, as generated code refers to it.
 pool :: LangDescriptor -> Text -> MDoc

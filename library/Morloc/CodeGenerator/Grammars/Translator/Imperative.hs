@@ -397,6 +397,10 @@ data IProgram = IProgram
   , ipStageTable :: Map.Map Int StageEntry
     -- ^ The program's stage table, the same in each pool, read by its
     -- @mlc_papply@.
+  , ipWireConverters :: [Text]
+    -- ^ The functions the closure codecs name, which convert a value whose
+    -- type has a packer to and from its wire form; defined ahead of the
+    -- closure table.
   }
   deriving (Generic)
 
@@ -436,6 +440,7 @@ buildProgram labels templates sources includes manifolds es schemas closureTable
         , ipLogTemplates = templates'
         , ipClosureTable = closureTable
         , ipStageTable = Map.empty
+        , ipWireConverters = []
         }
 
 -- | Build an IProgram monadically (for C++ where translateSegment runs in a monad).

@@ -919,8 +919,13 @@ makeClosureDispatch closureTable es = do
       let call = manNamer i <> tupled getVals
       putRes <- cppEncode call resAst
       reifier <- closureReifyThunk ctxNames capAsts
-      bndSids <- mapM (cppRegisterSchema . render . serialAstToMsgpackSchema) bndAsts
-      let bndSchemas = "std::vector<Schema*>" <> encloseSep "{" "}" ", " ["mlc_schema_table[" <> pretty j <> "]" | j <- bndSids]
+      bndTypes <- mapM cppTypeOf bndTs
+      bndEncs <- mapM
+        (\(t, ast) -> do
+            b <- cppToBytes "__x" ast
+            return ("[](const void* __p) -> std::vector<uint8_t> { const" <+> t <> "& __x = *static_cast<const" <+> t <> "*>(__p); return" <+> b <> "; }"))
+        (zipSame bndTypes bndAsts)
+      let bndSchemas = "std::vector<mlc_arg_encoder>" <> encloseSep "{" "}" ", " bndEncs
       let dispatchDoc =
             [idoc|uint8_t* mlc_closure_dispatch_#{pretty i}(const uint8_t** args) {
     return #{putRes};
@@ -943,20 +948,37 @@ closureReifyThunk names asts
     return { #{cat (punctuate ", " caps)} };
 }|]
   where
-    cap (nm, ast@(SerialClosure _ _)) = do
-      sid <- cppRegisterSchema (render (serialAstToMsgpackSchema ast))
-      return [idoc|_mlc_reify_capture(_mlc_reify(#{nm}), mlc_schema_table[#{pretty sid}])|]
-    cap (nm, ast) = do
-      sid <- cppRegisterSchema (render (serialAstToMsgpackSchema ast))
-      return [idoc|_mlc_reify_capture(#{nm}, mlc_schema_table[#{pretty sid}])|]
+    cap (nm, ast) = cppToBytes nm ast
 
--- | Serialize a native value by its wire form: a closure is reified first.
+-- | A native value as its wire form, closures reified and packers applied
+-- (the conversion every ordinary argument gets): the statements that
+-- compute it and the wire expression.
+cppWireOf :: MDoc -> SerialAST -> CppTranslator ([MDoc], MDoc)
+cppWireOf v ast = do
+  (stmts, e) <- nativeToWire (cppLowerConfig (ClosureGen Map.empty Map.empty Set.empty)) v ast
+  return (map CP.printStmt stmts, CP.printExpr e)
+
+-- | An expression of the wire value of @v@ handed to @k@, with the
+-- statements computing it run first.
+cppWithWire :: MDoc -> SerialAST -> (MDoc -> MDoc) -> CppTranslator MDoc
+cppWithWire v ast k = do
+  (stmts, e) <- cppWireOf v ast
+  return $
+    if null stmts
+      then k e
+      else "[&]() {" <+> hsep stmts <+> "return" <+> k e <> "; }()"
+
+-- | A self-contained packet of a native value, as bytes.
+cppToBytes :: MDoc -> SerialAST -> CppTranslator MDoc
+cppToBytes v ast = do
+  sid <- cppRegisterSchema (render (serialAstToMsgpackSchema ast))
+  cppWithWire v ast (\e -> "_mlc_reify_capture(" <> e <> ", mlc_schema_table[" <> pretty sid <> "])")
+
+-- | Serialize a native value by its wire form.
 cppEncode :: MDoc -> SerialAST -> CppTranslator MDoc
 cppEncode v ast = do
   sid <- cppRegisterSchema (render (serialAstToMsgpackSchema ast))
-  return $ case ast of
-    SerialClosure _ _ -> "_put_value(_mlc_reify(" <> v <> "), mlc_schema_table[" <> pretty sid <> "])"
-    _ -> "_put_value(" <> v <> ", mlc_schema_table[" <> pretty sid <> "])"
+  cppWithWire v ast (\e -> "_put_value(" <> e <> ", mlc_schema_table[" <> pretty sid <> "])")
 
 -- | Deserialize a packet by its wire form into a value of the given C++
 -- type: a closure is reflected into a proxy that calls back to its home.
@@ -969,7 +991,12 @@ cppDecode pkt typeStr ast = do
             "_get_value<" <> pretty cppClosureWireTupleName <> ">(" <> pkt
               <> ", mlc_schema_table[" <> pretty sid <> "])"
       cppClosureProxyLambda cloInit ins out
-    _ -> return $ "_get_value<" <> typeStr <> ">(" <> pkt <> ", mlc_schema_table[" <> pretty sid <> "])"
+    _ -> do
+      (e, stmts) <- deserialize pkt typeStr ast
+      return $
+        if null stmts
+          then e
+          else "[&]() ->" <+> typeStr <+> "{" <+> hsep stmts <+> "return" <+> e <> "; }()"
 
 -- | Collect TVar names of all named (non-anonymous) record types used
 -- in a SerialManifold tree.
@@ -1919,7 +1946,7 @@ PROPAGATE_ERROR(errmsg)|]
             -- values) once and becomes the closure the stage returns.
             (thunk, Just (StageEntry nctx k smid))
               | nctx == length contextArgs ->
-                  let (reifier, schemas) = fromMaybe ("mlc_unreifiable", "std::vector<Schema*>{}") thunk
+                  let (reifier, schemas) = fromMaybe ("mlc_unreifiable", "std::vector<mlc_arg_encoder>{}") thunk
                       stageArgs = cat (punctuate "," (manNamer smid : (ctxNames ++ take k vs')))
                    in return [idoc|mlc_staged_sig<#{pretty k}, #{sig}>::make(std::bind(#{bindArgs}), #{midDoc}, #{reifier}, "cpp", #{schemas}, std::bind(#{stageArgs}))|]
               | otherwise ->
@@ -2323,12 +2350,11 @@ prepareCppCacheArg wrapIdx (j, (a@(Arg _ tm), sa)) = do
   let schemaStr = render (serialAstToMsgpackSchema sa)
   case tm of
     Native _ -> do
-      sid <- cppRegisterSchema schemaStr
       -- The packet exists only to key and store the cache entry, so its
       -- owner releases it when the manifold's scope ends.
+      enc <- cppEncode ((argNamer cppLocals) a) sa
       let argVar = "__morloc_ca_" <> pretty wrapIdx <> "_" <> pretty j
-          decl = "mlc::Packet" <+> argVar <> "_own(_put_value("
-            <> (argNamer cppLocals) a <> ", mlc_schema_table[" <> pretty sid <> "]));"
+          decl = "mlc::Packet" <+> argVar <> "_own(" <> enc <> ");"
             <+> "const uint8_t*" <+> argVar <+> "=" <+> argVar <> "_own.get();"
       return (argVar, schemaStr, [decl])
     _ -> return ((argNamer cppLocals) a, schemaStr, [])
@@ -2378,9 +2404,9 @@ cppClosureWireLeaf = VarF (FV (TV "Closure") (CV cppClosureWireTupleName))
 -- packets, and RPCs back to the home pool via foreign_call on the manifold id.
 cppClosureProxyLambda :: MDoc -> [SerialAST] -> SerialAST -> CppTranslator MDoc
 cppClosureProxyLambda cloInit ins out = do
-  argTypes <- mapM (cppTypeOf . unpackedAsTypeF . serialAstToType) ins
-  resType <- cppTypeOf (unpackedAsTypeF (serialAstToType out))
-  sig <- closureCppSig (map (unpackedAsTypeF . serialAstToType) ins) (unpackedAsTypeF (serialAstToType out))
+  argTypes <- mapM (cppTypeOf . serialAstToNativeType) ins
+  resType <- cppTypeOf (serialAstToNativeType out)
+  sig <- closureCppSig (map serialAstToNativeType ins) (serialAstToNativeType out)
   -- The argument packets and the result packet belong to this application
   -- alone, so each is held by an mlc::Packet and released once the result
   -- has been read, or when a throw unwinds past it. The captured packets
@@ -2391,7 +2417,7 @@ cppClosureProxyLambda cloInit ins out = do
         return ("__owned.emplace_back(" <> enc <> "); __pkts.push_back(__owned.back().get());"))
     (indexed ins)
   resDoc <- cppDecode "__res.get()" resType out
-  let paramDocs = [cppFnParam (unpackedAsTypeF (serialAstToType ast)) t <+> ("__a" <> pretty i) | (i, (ast, t)) <- indexed (zipSame ins argTypes)]
+  let paramDocs = [cppFnParam (serialAstToNativeType ast) t <+> ("__a" <> pretty i) | (i, (ast, t)) <- indexed (zipSame ins argTypes)]
       bodyDocs =
         [ "std::vector<const uint8_t*> __pkts;"
         , "std::vector<mlc::Packet> __owned;"
@@ -2417,16 +2443,16 @@ cppClosureProxyLambda cloInit ins out = do
   apply1 <- case ins of
     [] -> return []
     (a0 : rest) -> do
-      a0Type <- cppTypeOf (unpackedAsTypeF (serialAstToType a0))
-      a0Sid <- cppRegisterSchema (render (serialAstToMsgpackSchema a0))
-      restSig <- closureCppSig (map (unpackedAsTypeF . serialAstToType) rest) (unpackedAsTypeF (serialAstToType out))
+      a0Type <- cppTypeOf (serialAstToNativeType a0)
+      a0Bytes <- cppToBytes "__x" a0
+      restSig <- closureCppSig (map serialAstToNativeType rest) (serialAstToNativeType out)
       restSid <- cppRegisterSchema (render (serialAstToMsgpackSchema (SerialClosure rest out)))
       restProxy <- cppClosureProxyLambda "__o" rest out
       return
         [ "__c.apply1 = [__origin](const" <+> a0Type <> "& __x) -> std::function<" <> pretty restSig <> "> {"
         , indent 4 (vsep
             [ "auto __o = __origin;"
-            , "std::get<2>(__o).push_back(_mlc_reify_arg(__x, mlc_schema_table[" <> pretty a0Sid <> "]));"
+            , "std::get<2>(__o).push_back(" <> a0Bytes <> ");"
             , "size_t __n, __k; int64_t __s;"
             , "if (mlc_stage_lookup(std::get<1>(__o), &__n, &__k, &__s) && std::get<2>(__o).size() == __n + __k) {"
             , indent 4 (vsep

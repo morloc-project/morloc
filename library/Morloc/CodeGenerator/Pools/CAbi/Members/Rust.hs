@@ -927,14 +927,16 @@ prepareRustCacheArg wrapIdx (j, (a@(Arg i tm), sa)) = do
   case tm of
     Native tf -> do
       sid <- rustRegisterSchema schemaStr
+      toWire <- reifyInPlace sa
       -- The cache-key value is only read, through a 'ToVoidstar' (&T)
       -- 'put_value' sink, so a borrowed arg is reborrowed ('rustReadPlace').
       own <- rustOwnership (BndVarN tf i KeptRead)
       -- The packet exists only to key and store the cache entry, so its
       -- owner releases it when the manifold's scope ends.
       let argVar = "__morloc_ca_" <> pretty wrapIdx <> "_" <> pretty j
+          place = rustReadPlace own ((argNamer rustLocals) a)
           decl = "let" <+> argVar <> "_own = ::rustmorloc::Packet::new(" <> RP.putValueFn <> "(&("
-                   <> rustReadPlace own ((argNamer rustLocals) a) <> "), " <> RP.schemaRef sid <> "));"
+                   <> maybe place ($ place) toWire <> "), " <> RP.schemaRef sid <> "));"
                    <+> "let" <+> argVar <> ": *const u8 =" <+> argVar <> "_own.as_ptr();"
       return (argVar, schemaStr, [decl])
     _ -> return ((argNamer rustLocals) a, schemaStr, [])
@@ -2085,10 +2087,11 @@ makeClosureDispatch closureAsts closureTable es = do
           (capAsts, bndAsts, resAst) = closureAsts Map.! i
       argSids <- mapM rustRegisterSchema (capScs <> bndScs)
       resSid <- rustRegisterSchema resSc
-      -- An argument holding a closure at any depth arrives in its WIRE form
-      -- (closure slots are origin tuples) and is reflected in place; a result
-      -- that is a closure is reified into its wire tuple.
+      -- An argument holding a closure or a packed value at any depth arrives
+      -- in its WIRE form and is rebuilt in place; the result is reduced to
+      -- its wire form the same way.
       argReflects <- mapM reflectInPlace (capAsts <> bndAsts)
+      resWire <- reifyInPlace resAst
       argTs <- sequence
         [ if isJust refl
             then rustRawType ast
@@ -2110,10 +2113,7 @@ makeClosureDispatch closureAsts closureTable es = do
                   Nothing -> raw
              in if copy then g else rustRef Owned g
           call = RP.rustManifoldName i <> tupled argExprs
-          result = case resAst of
-            SerialClosure ins _ ->
-              "::rustmorloc::require_origin(::rustmorloc::reify(&(" <> call <> ")))"
-            _ -> call
+          result = maybe call ($ call) resWire
           wrapper =
             vsep
               [ "unsafe fn __morloc_closure_dispatch_" <> pretty i <> "(args: *const *const u8, nargs: usize) -> *mut u8 {"
