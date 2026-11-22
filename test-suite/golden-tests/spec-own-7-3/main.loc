@@ -9,8 +9,9 @@
 --   mixed       one temporary, one live local: the reference form, one copy
 --   dropsLive   the branch keeps the temporary, the live one is dropped
 --   twice       one local passed as both arguments: one copy
---   asValue     a partial application: the reference form, one copy, and
---               one of the value the closure captures
+--   asValue     a partial application: the reference form, applied to a
+--               payload it is lent (CPP-7), and one copy of the value the
+--               closure captures
 --   releases    the by-value form of a function that is not a loop releases
 --               the argument it drops before it returns: one payload is
 --               alive while its result is read

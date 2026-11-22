@@ -1716,7 +1716,7 @@ struct MorlocClosure<R(A...)> {
     std::function<std::vector<std::vector<uint8_t>>()> reify_captured;
     std::string home = "cpp";
     typename mlc_apply1_slot<R, A...>::type apply1{};
-    // Each argument is this call's own copy, so it is handed on, not copied.
+    // Each argument is forwarded as the signature passes it (CPP-7).
     R operator()(A... args) const { return fn(std::forward<A>(args)...); }
 };
 

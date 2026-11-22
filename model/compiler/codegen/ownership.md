@@ -31,7 +31,7 @@ out of scope.
 
 ### OWN-2 A move happens only at a last read
 Intent: ruled 2026-10-17
-Tests: spec-own-2-1, spec-own-2-2, spec-own-2-3, spec-own-2-4, spec-own-2-5, spec-own-2-6, spec-own-2-7, spec-own-2-8, spec-own-2-9, spec-own-2-10, spec-own-2-11, spec-own-2-12, spec-own-2-13, spec-own-2-14, spec-own-2-15, spec-own-2-16, spec-own-2-17, spec-own-2-18
+Tests: spec-own-2-1, spec-own-2-2, spec-own-2-3, spec-own-2-4, spec-own-2-5, spec-own-2-6, spec-own-2-7, spec-own-2-8, spec-own-2-9, spec-own-2-10, spec-own-2-11, spec-own-2-12, spec-own-2-13, spec-own-2-14, spec-own-2-15, spec-own-2-16, spec-own-2-17, spec-own-2-18, spec-own-2-19
 Code: conforms 2026-10-18
 
 A read may move a value it owns only if no later read on its path reads
@@ -45,6 +45,16 @@ value after another, so each is a step of its own. Reads within a step happen in
 (EVAL-2), so a value read twice in one step is moved by neither read. A
 read of a local that refers into a value, directly or through other such
 locals, is also a read of that value.
+
+The parts of one expression -- the arguments of a call, the elements of a
+value it builds -- that are not single locals run as lets of their own,
+in an order the compiler chooses (EVAL-2). A part that keeps a value
+another part only reads runs after it, so the keeping read is the last
+read and may move the value: in `keyp c + .z (holdP c)` the read by `keyp`
+comes first and `holdP` takes `c`. A part that names a local which refers
+into the value counts as reading it, so no reference is read after the
+value moves. Parts that call into another language, or that force a
+suspension, are not reordered. Amended 2026-11-21 (tentative).
 
 ### OWN-3 A read that may run more than once never moves
 Intent: ruled 2026-10-18
@@ -83,7 +93,9 @@ Code: conforms 2026-10-17
 When a constructor field, a record field or a tuple field is read from a
 value at that value's last read, the field is moved out instead of copied,
 and the rest of the value is released. So is a part read from a part moved out this
-way, and in Rust a list element read from a list at its last read. This holds for a native type with its own
+way, and in Rust a list element read from a list at its last read; in C++
+a constructor field of such an element is taken from its arm in place,
+and another field of the value a field was taken from may still be read. This holds for a native type with its own
 destructor, as EVAL-7 allows: the value's own destructor does not run, and
 each field is released as its own value. A Rust struct mapped to a record
 therefore holds exactly the record's fields; a program whose struct holds
@@ -113,7 +125,7 @@ replaces with a value it builds is owned, and starts from a copy.
 Intent: ruled 2026-11-21
 Why: amended from one form, where a parameter kept on one branch stayed a reference
 Tests: spec-own-7-1, spec-own-7-2, spec-own-7-3, spec-own-7-4
-Code: deviates (compiler/issues/codegen-copies.md)
+Code: conforms 2026-11-22
 
 A fully applied manifold takes a parameter by value instead of by
 reference when its body reads that parameter once, on every evaluation, and
@@ -154,9 +166,8 @@ copying the part is deep (a list, string, record, tuple, or a Rust `data`
 type mapped with `Box` arms; a generated `data` value already copies as a
 reference count), where the function is not inlined (a small accessor
 already reads in place once inlined), and where the result is read in a
-loop: the case recorded in compiler/issues/codegen-ownership.md ("A Rust
-loop stepped by a function that returns part of its argument copies the
-part"). It needs lifetime parameters on generated Rust signatures, a check
+loop, as golden own7-matrix's recursive callees that return their
+argument (about 40 copies in each language). It needs lifetime parameters on generated Rust signatures, a check
 that no C++ reference outlives its root (OWN-1), and a parameter mode that
 OWN-7's solve accounts for. Open: which callers may receive a reference,
 and whether a returned reference may cross a loop's continue.
@@ -172,9 +183,47 @@ It pays for persistent structures updated in place -- a chain rebuilt link
 by link, a tree insert, a syntax tree rewrite -- saving an allocation and a
 free per node, and only when the value is unshared at run time; otherwise
 the arm is allocated as today. Lists are not `data` arms and gain nothing.
-It needs OWN-5's run-time sharing test, and it shares the open question of
-compiler/issues/codegen-ownership.md ("A C++ `Try` bound from a suspension's
-result is copied when unwrapped"): writing into an arm is sound only for an
-arm morloc allocated, so either the arms morloc allocates are tagged, or
-sourced code is ruled never to build a const arm nor keep a weak reference
-to one. That one decision settles both.
+It needs OWN-5's run-time sharing test. Writing into an arm is sound only
+for an arm morloc allocated, so either the arms morloc allocates are
+tagged, or sourced code is ruled never to build a const arm nor keep a weak
+reference to one (CPP-6 rules out the weak reference).
+
+### OWN-10 A value a conditional chooses is read where it lies
+Intent: proposed
+Tests: spec-own-10-1
+Code: conforms 2026-11-22
+
+A let bound to a conditional that chooses between a value the frame still
+holds, or a part of one, and another value is not copied for a reader that
+only reads it. The pool tree is rewritten before code generation, in the
+same language as the let and the conditional:
+- a let of a conditional between record or tuple literals, read only one
+  field at a time, binds each field it reads to a conditional of its own
+  (the condition computed once), and no record is built; a field nothing
+  reads is dropped only where both arms hold a value for it;
+- a small reader of the let (at most 48 nodes, no function value or
+  suspension) is copied into each arm, so the arm that names a held value
+  reads it in place; a reader that also names that value runs its one read
+  of the let first (EVAL-2), and is otherwise left as it is;
+- a read of a let that refers into a value, written after a let that keeps
+  the value, runs before that let (OWN-2).
+EVAL-3 holds: each copy of the reader runs on its own path.
+
+## Copies these items leave
+
+A copy remains where two owners of one value are alive at once and no
+order of the pure work separates them, or where a ruling requires it:
+- A value kept while the caller still needs it, by a function that is not
+  inlined and builds a record or list holding it (golden own7-matrix rec
+  ctor/call/list cases), or returns it or a part of it (rec ret/part, until
+  OWN-8).
+- A list built from a held value for a sourced function such as `map`: the
+  list owns its elements, and the compiler may assume no law of a sourced
+  function (`map g [x] = [g x]`).
+- A callback's argument a callback keeps: callbacks take their arguments
+  by reference (HOST-8), and a Rust boxed callback owns what it captures.
+- A value kept twice in one step, or by a closure run more than once
+  (OWN-3): one copy per extra owner.
+- A user-mapped type whose copy is deep: the user chose a representation
+  that is not shared (a generated `data` type shares its arms).
+Every other copy is recorded in compiler/issues/codegen-copies.md.

@@ -7,7 +7,8 @@
 --   letAlias    a let naming a field of a value carried on, read only
 --   lentParam   a field of a value the callee only borrows
 --   readBefore  a field read through a let before it is moved
---   readAfter   a field read through a let after a getter of it: copied
+--   readAfter   a field read through a let after a getter of it: the read runs
+--               first (OWN-2), so the getter moves it
 module main (tupleSlot, recordSlot, letAlias, lentParam, readBefore, readAfter)
 
 import root

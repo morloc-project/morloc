@@ -49,6 +49,7 @@ import Morloc.CodeGenerator.Grammars.Translator.Imperative
   , infixOperator
   , papplySteps
   , containsClosure
+  , IExpr (..)
   , IType (..)
   , IOwnership (..)
   , LowerConfig (..)
@@ -180,6 +181,30 @@ isScalarCppType t = render t `elem`
   , "short", "unsigned short", "char", "signed char", "unsigned char", "size_t"
   , "float", "double", "bool" ]
 
+-- | The parameter list of a function value's C++ type (CPP-7), from each
+-- parameter's type and its rendering.
+cppFnParams :: [(TypeF, MDoc)] -> MDoc
+cppFnParams = tupled . map (uncurry cppFnParam)
+
+-- | A scalar by value, anything else by const reference. A name morloc
+-- does not know to be either, such as a template parameter or a mapped
+-- type, decides in C++, so a template instantiated with a type spells
+-- the parameter as that type's own occurrences do.
+cppFnParam :: TypeF -> MDoc -> MDoc
+cppFnParam tf t = case tf of
+  EnumF {} -> t
+  VarF _
+    | isScalarCppType t -> t
+    | otherwise -> "std::conditional_t<std::is_scalar_v<" <> t <> ">," <+> t <> ", const" <+> t <> "&>"
+  UnkF _ -> "std::conditional_t<std::is_scalar_v<" <> t <> ">," <+> t <> ", const" <+> t <> "&>"
+  _ -> "const" <+> t <> "&"
+
+-- | 'cppFnParam' for a parameter given as a 'TypeM'.
+cppFnParamM :: TypeM -> MDoc -> MDoc
+cppFnParamM (Native tf) t = cppFnParam tf t
+cppFnParamM (Function _ _) t = "const" <+> t <> "&"
+cppFnParamM _ t = t
+
 -- | The capture list of a do-block thunk ('lcMakeDoBlock'). By value: a
 -- thunk may outlive the frame that built it.
 thunkCapture :: Text
@@ -233,7 +258,7 @@ instance HasCppType TypeM where
   cppTypeOf (Function ts t) = do
     t' <- cppTypeOf t
     ts' <- mapM cppTypeOf ts
-    return $ "std::function<" <> t' <> tupled ts' <> ">"
+    return $ "std::function<" <> t' <> tupled (zipWithSame cppFnParamM ts ts') <> ">"
 
   cppArgOf s (Arg i t) = do
     typeStr <- cppTypeOf t
@@ -322,7 +347,7 @@ instance {-# OVERLAPPABLE #-} (HasTypeF e) => HasCppType e where
       f (FunF ts t) = do
         t' <- f t
         ts' <- mapM f ts
-        return $ "std::function<" <> t' <> tupled ts' <> ">"
+        return $ "std::function<" <> t' <> cppFnParams (zipSame ts ts') <> ">"
       -- Leak guard on the parameterized form (mirror of the VarF
       -- guard above). An unmapped recursive alias appears as
       -- @AppF (VarF (FV gv (CV gv))) [...]@ where the head's CV is
@@ -860,7 +885,7 @@ closureCppSig :: [TypeF] -> TypeF -> CppTranslator Text
 closureCppSig ins out = do
   rt <- cppTypeOf out
   ats <- mapM cppTypeOf ins
-  return (render (rt <> tupled ats))
+  return (render (rt <> cppFnParams (zipSame ins ats)))
 
 -- | For each defunctionalized closure manifold, emit a serial dispatch wrapper
 -- so the home pool can apply the closure when a foreign pool calls back on its
@@ -1106,6 +1131,12 @@ cppLetMode i rhs = do
           | LetTake <- mode, IntrinsicN _ IntrCtorField _ (v : _) <- rhs -> do
               owned <- ownsVar i v
               return (if owned then LetTake else LetBorrow)
+          -- a field of an element of a list the frame owns (OWN-5)
+          | LetBorrow <- mode
+          , IntrinsicN _ IntrCtorField _ (IntrinsicN _ IntrListElem _ (v : _) : _) <- rhs
+          , Set.member (root, i) (ppTakes pp) -> do
+              owned <- ownsVar i v
+              return (if owned then LetTake else LetBorrow)
           | otherwise -> return mode
   where
     -- A move out of a value the frame does not own would copy it.
@@ -1302,11 +1333,15 @@ data ClosureGen = ClosureGen (Map.Map Text (MDoc, MDoc)) (Map.Map Int StageEntry
 -- subject's arm (OWN-5, CPP-6).
 cppTakeField :: Bool -> NativeExpr -> MDoc
 cppTakeField release (IntrinsicN _ IntrCtorField _ [v, StrN _ n, IntN _ i])
-  | Just j <- varIndex v
+  | Just subj <- subject v
   , VariantF _ _ arms <- typeFof v =
       (if release then "mlc::take_field_release(std::get<" else "mlc::take_field(std::get<")
         <> pretty (armIndex n (map fst arms)) <> ">("
-        <> (nvarNamer cppLocals) j <> ".v), [](auto& a) -> auto& { return a.f" <> pretty i <> "; })"
+        <> subj <> ".v), [](auto& a) -> auto& { return a.f" <> pretty i <> "; })"
+  where
+    subject x = case x of
+      IntrinsicN _ IntrListElem _ [l, IntN _ k] -> (\d -> parens d <> "[" <> pretty k <> "]") <$> subject l
+      _ -> (nvarNamer cppLocals) <$> varIndex x
 cppTakeField _ e = error $ "cppTakeField: not a constructor field of a variable: " <> show e
 
 -- | The right-hand side of let @i@ that takes its value (OWN-5), given its
@@ -1493,8 +1528,10 @@ cppLowerConfig (ClosureGen reifyThunks stageTable papplyHeads) =
           resT <- cppTypeOf out
           -- each application typed explicitly: the head may be a bind
           -- expression, which deduction cannot see through
-          let step ts acc x = "mlc_apply1<" <> hsep (punctuate "," (resT : ts ++ restTs)) <> ">" <> tupled [acc, x]
-          return (papplySteps step argTs f xs)
+          let argPs = zipWithSame (cppFnParam . typeMToF) argTypes argTs
+              restPs = zipWithSame cppFnParam rins restTs
+              step ts acc x = "mlc_apply1<" <> hsep (punctuate "," (resT : ts ++ restPs)) <> ">" <> tupled [acc, x]
+          return (papplySteps step argPs f xs)
         _ -> return f
     , lcForeignCall = \socketFile mid args ->
         let argList = [dquotes socketFile, pretty mid] <> args <> ["NULL"]
@@ -1752,7 +1789,9 @@ PROPAGATE_ERROR(errmsg)|]
                 then fmap concat . sequence $
                   [ do
                       taken <- cppTwinPosition callIndex j t
-                      if taken
+                      pp <- CMS.gets translatorPool
+                      let always = Set.member j (Map.findWithDefault Set.empty callIndex (ppKeptAlways pp))
+                      if taken && not always
                         then do
                           ty <- cppTypeOf t
                           let v = (nvarNamer cppLocals) i
@@ -1849,7 +1888,7 @@ PROPAGATE_ERROR(errmsg)|]
         Function ins out -> do
           argTypes <- mapM cppTypeOf ins
           resType <- cppTypeOf out
-          return $ resType <> tupled argTypes
+          return $ resType <> tupled (zipWithSame cppFnParamM ins argTypes)
         _ -> return ""
     -- An unapplied manifold is its function, unless it is staged or can
     -- cross, which takes the closure form
@@ -2309,13 +2348,17 @@ cppEscapeString = T.concatMap esc
 deserialize :: MDoc -> MDoc -> SerialAST -> CppTranslator (MDoc, [MDoc])
 deserialize varname0 typestr0 s0 = do
   (expr, stmts) <- expandDeserialize (cppLowerConfig (ClosureGen Map.empty Map.empty Set.empty)) varname0 s0
-  let rendered = CP.printExpr expr
+  -- The statements' result and the local holding it are temporaries that
+  -- only this expression names, so each is moved on.
+  let rendered = case expr of
+        IVar v -> "std::move" <> parens (pretty v)
+        _ -> CP.printExpr expr
   if null stmts
     then return (rendered, [])
     else do
       schemaVar <- (helperNamer cppLocals) <$> getCounter
       let final = [idoc|#{typestr0} #{schemaVar} = #{rendered};|]
-      return (schemaVar, map CP.printStmt stmts ++ [final])
+      return ("std::move" <> parens schemaVar, map CP.printStmt stmts ++ [final])
 
 -- The C++ concrete type of a defunctionalized closure's wire tuple:
 -- @(home_language, manifold_id, captured_packets)@, as in 'Serial.closureWireSchema'.
@@ -2348,7 +2391,7 @@ cppClosureProxyLambda cloInit ins out = do
         return ("__owned.emplace_back(" <> enc <> "); __pkts.push_back(__owned.back().get());"))
     (indexed ins)
   resDoc <- cppDecode "__res.get()" resType out
-  let paramDocs = [t <+> ("__a" <> pretty i) | (i, t) <- indexed argTypes]
+  let paramDocs = [cppFnParam (unpackedAsTypeF (serialAstToType ast)) t <+> ("__a" <> pretty i) | (i, (ast, t)) <- indexed (zipSame ins argTypes)]
       bodyDocs =
         [ "std::vector<const uint8_t*> __pkts;"
         , "std::vector<mlc::Packet> __owned;"
@@ -2461,6 +2504,7 @@ scopedTakes byValue lentSlots = go Set.empty
     subjectOf (RN e) = case e of
       PatN _ (PatGet _ [] (NativeArgExpr v)) -> varIndex v
       IntrinsicN _ IntrListElem _ (v : _) -> varIndex v
+      IntrinsicN _ IntrCtorField _ (IntrinsicN _ IntrListElem _ (v : _) : _) -> varIndex v
       IntrinsicN _ IntrCtorField _ (v : _) -> varIndex v
       _ -> Nothing
     subjectOf _ = Nothing
@@ -3341,7 +3385,7 @@ cppStdHeaderOf =
         , ("optional", ["optional"])
         , ("variant", ["variant", "monostate"])
         , ("memory", ["shared_ptr", "unique_ptr", "make_shared"])
-        , ("type_traits", ["is_same_v"])
+        , ("type_traits", ["is_same_v", "conditional_t", "is_scalar_v"])
         , ("functional", ["function"])
         , ("cstddef", ["size_t", "ptrdiff_t", "nullptr_t", "byte"])
         , ("cstdint", fixedWidth)

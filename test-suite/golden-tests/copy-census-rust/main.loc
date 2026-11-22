@@ -32,6 +32,9 @@
 --   capStaged capStagedKeep    a staged function capturing a chain, passed as a value
 --   tryLet doTwice             a let kept inside a @try body, a do block run twice
 --   letAlias                   loop step reading a field of the tuple it carries on
+--   fieldsKept fieldsNested    two fields of an arm kept, beside a plain and a nested field
+--   stagedLevels stagedPap     a staged function applied one argument at a time
+--   mapUnpack                  a list mapped through a newtype's casts
 module main
   ( nestedOut, nestedLoop, tagNested, tagField
   , fieldArg, fieldSrc, fieldSrcLit, fieldRet, tupleArg, tupleFresh
@@ -43,6 +46,7 @@ module main
   , throughTwo, throughLoop, throughCli, nonTail
   , guardTwice, guardLoop, guardKeep, mixedLoop, matchedTwice, twoLets
   , capStaged, capStagedKeep, tryLet, doTwice, letAlias
+  , fieldsKept, fieldsNested, stagedLevels, stagedPap, mapUnpack
   )
 
 import root-rust
@@ -59,13 +63,14 @@ data Res = Bad Str | Good Chain
 
 source Rust from "chain.rs"
   ( "clones", "mk_chain" as mkChain, "chain_len" as chainLen
-  , "mk_holder" as mkHolder, "mk_tup" as mkTup )
+  , "mk_holder" as mkHolder, "mk_tup" as mkTup, "mk_chains" as mkChains )
 
 clones :: Int -> (Int, Int)
 mkChain :: Int -> Chain
 chainLen :: Chain -> Int
 mkHolder :: Int -> Holder
 mkTup :: Int -> (Chain, Int)
+mkChains :: Int -> [Chain]
 
 count :: Int -> Chain -> Int
 count | acc (Link _ rest) = count (acc + 1) rest
@@ -391,3 +396,51 @@ aliasStep k t s
 
 letAlias :: Int -> (Int, Int)
 letAlias n = clones (aliasStep 10 (mkChain n, 0) 0)
+
+data Nest = Nest Chain Int | NoNest
+data Three = Three Chain Chain Nest
+
+firstTwo :: Three -> Int
+firstTwo t = match t
+  | (Three a b _) = sum (map chainLen [a, b])
+
+fieldsKept :: Int -> (Int, Int)
+fieldsKept n = clones (firstTwo (Three (mkChain n) (mkChain n) (Nest (mkChain n) 1)))
+
+sumThree :: Three -> Int
+sumThree t = match t
+  | (Three a b (Nest q k)) = sum (map chainLen [a, b]) + chainLen q + k
+  | (Three a b NoNest) = sum (map chainLen [a, b])
+
+fieldsNested :: Int -> (Int, Int)
+fieldsNested n = clones (sumThree (Three (mkChain n) (mkChain n) (Nest (mkChain n) 1)))
+
+stg3 :: Chain -> Chain -> Chain -> Int -> Int
+stg3 a b d = let z = chainLen a + chainLen b + chainLen d in \y -> z + y
+
+useOne :: (Chain -> Int -> Int) -> Chain -> Int -> Int
+useOne g c k
+  ? k == 0 = g c 1
+  : useOne g c (k - 1)
+
+useTwo :: (Chain -> Chain -> Int -> Int) -> Chain -> Int -> Int
+useTwo g c k
+  ? k == 0 = useOne (g c) c 0
+  : useTwo g c (k - 1)
+
+useThree :: (Chain -> Chain -> Chain -> Int -> Int) -> Chain -> Int -> Int
+useThree f c k
+  ? k == 0 = useTwo (f c) c 0
+  : useThree f c (k - 1)
+
+stagedLevels :: Int -> (Int, Int)
+stagedLevels n = clones (useThree stg3 (mkChain n) 1)
+
+stagedPap :: Int -> (Int, Int)
+stagedPap n = clones (useTwo (stg3 c) c 1) where
+  c = mkChain n
+
+newtype Wrapped = Chain deriving (Packable)
+
+mapUnpack :: Int -> (Int, Int)
+mapUnpack n = clones (sum (map chainLen (map unpack (map pack (mkChains n) :: [Wrapped]))))

@@ -38,11 +38,16 @@ data St = St
   -- ^ locals moved whole, which only a reference into them still sees
   , stHeld :: Set.Set Int
   -- ^ locals a @do@ block bound by a let reads (OWN-3)
-  , stFields :: Map.Map Int (Set.Set Int)
-  -- ^ roots with constructor fields taken out of their arm, and which
-  -- fields: another field of the arm may still be read (CPP-6)
+  , stFields :: Map.Map Int (Set.Set Part)
+  -- ^ roots with constructor fields taken out of their arm, or fields
+  -- taken out of a tuple or record, and which: another may still be read
+  -- (CPP-6, OWN-5)
   }
   deriving (Eq)
+
+-- | A field a projection reads of its root: a constructor field of an arm,
+-- or the key of a tuple or record getter.
+type Part = Either Int [Either Int Text]
 
 -- | Either of two states, or both.
 joinSt :: St -> St -> St
@@ -82,8 +87,8 @@ data Env = Env
   -- ^ the argument positions a native manifold takes by value (OWN-7)
   , envMovedBuilds :: Set.Set (Int, Int)
   -- ^ the (manifold, local) pairs moved into a manifold as it is built
-  , envField :: Map.Map Int Int
-  -- ^ the locals bound to a constructor field of their root, and which
+  , envField :: Map.Map Int Part
+  -- ^ the locals bound to a field of their root, and which
   }
 
 -- | The violations in a top-level manifold's tree, where the lets and
@@ -250,10 +255,15 @@ bindLet env s i rhs body =
         _ -> body unaliased rebound
    in (rhsR `andThen` const (b {rBound = Set.insert i (rBound b)}), x)
   where
-    -- the constructor field the right-hand side reads of its root, directly
+    -- the field of its root the right-hand side reads, through nested
+    -- constructor fields
     field = case rhs of
-      IntrinsicN _ IntrCtorField _ (v : _ : IntN _ f : _) | Just _ <- projectionBase v, isVar v -> Just (fromIntegral f)
-      _ -> Nothing
+      IntrinsicN _ IntrCtorField _ _ -> Left <$> ctorField rhs
+      _ -> Right <$> getterField rhs
+    ctorField (IntrinsicN _ IntrCtorField _ (v : _ : IntN _ f : _))
+      | isVar v = Just (fromIntegral f)
+      | otherwise = ctorField v
+    ctorField _ = Nothing
     isVar (LetVarN {}) = True
     isVar (BndVarN {}) = True
     isVar _ = False
@@ -289,6 +299,16 @@ keepValue env s e = case e of
   NativeLetN j rhs body -> bindLet_ env s j rhs (\env' s' -> keepValue env' s' body)
   _ -> keepPart env s e
 
+-- | The one field a getter of a variable reads.
+getterField :: NativeExpr -> Maybe [Either Int Text]
+getterField (PatN _ (PatGet sel [] (NativeArgExpr v)))
+  | isVar v, not (selectorHasBracket sel), [k] <- ungroup sel = Just k
+  where
+    isVar (LetVarN {}) = True
+    isVar (BndVarN {}) = True
+    isVar _ = False
+getterField _ = Nothing
+
 -- | 'bindLet' for a body with nothing to report but its result.
 bindLet_ :: Env -> St -> Int -> NativeExpr -> (Env -> St -> Eval) -> Eval
 bindLet_ env s i rhs body = fst (bindLet env s i rhs (\env' s' -> (body env' s', ())))
@@ -307,7 +327,18 @@ walkN env s e = case e of
   IntrinsicN _ IntrCtorField _ (v : _ : IntN _ f : _)
     | Just i <- varOf v
     , Just fs <- Map.lookup (rootOf env i) (stFields s)
-    , Set.notMember (fromIntegral f) fs ->
+    , Set.notMember (Left (fromIntegral f)) fs ->
+        refRead env s i
+    where
+      varOf (LetVarN _ j _) = Just j
+      varOf (BndVarN _ j _) = Just j
+      varOf _ = Nothing
+  -- another field of a tuple or record a field was taken from (OWN-5)
+  PatN _ (PatGet _ [] (NativeArgExpr v))
+    | Just k <- getterField e
+    , Just i <- varOf v
+    , Just fs <- Map.lookup (rootOf env i) (stFields s)
+    , Set.notMember (Right k) fs ->
         refRead env s i
     where
       varOf (LetVarN _ j _) = Just j

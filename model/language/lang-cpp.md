@@ -115,3 +115,20 @@ constructor holds the one default node of its type. A source builds one as
 comes from `mlc::make_arm` wherever `mlc_rec.hpp` can be included.
 
 Why: reversed 2026-11-15 for generated records, whose `?R` was a pointer read as a copy.
+
+### CPP-7 A C++ function value takes a non-scalar parameter by `const A&`
+Intent: ruled 2026-11-21
+Tests: spec-cpp-7-1
+Code: conforms 2026-11-21
+
+A morloc function value in C++ is a `std::function<R(P...)>` whose
+parameter `P` is `A` when `A` is a scalar (`std::is_scalar_v<A>`: an
+integer, floating-point, `bool` or enum type) and `const A&` otherwise,
+wherever morloc spells the type, a template parameter included: a
+let, a parameter or result of a generated function, a field, and what a
+sourced function receives or returns. Applying a function value to a value
+then copies nothing, as applying a Rust function value does (HOST-8); a
+function value that keeps its argument copies it. A
+sourced function written against `std::function<R(A)>` for a non-scalar
+`A` still receives a value it can call, through a conversion, but a
+template that deduces `A` from that spelling does not match.

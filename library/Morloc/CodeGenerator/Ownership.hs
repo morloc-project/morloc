@@ -80,6 +80,10 @@ data PoolPlan = PoolPlan
   , ppReleases :: Set.Set (Int, Int)
   -- ^ the takes of a constructor field after which nothing names the value,
   -- which release its arm (CPP-6)
+  , ppKeptAlways :: Map.Map Int (Set.Set Int)
+  -- ^ per manifold with two forms, the positions of 'ppTwoForm' its body
+  -- keeps whole on every evaluation, so the by-value form drops none of
+  -- them (OWN-7)
   , ppTwoForm :: Map.Map Int (Set.Set Int)
   -- ^ per fully applied native manifold, the positions of the parameters
   -- it keeps, or keeps a part of, on some evaluations but takes by
@@ -88,7 +92,7 @@ data PoolPlan = PoolPlan
   }
 
 emptyPoolPlan :: PoolPlan
-emptyPoolPlan = PoolPlan {ppTakes = Set.empty, ppReleases = Set.empty, ppByValue = Map.empty, ppTwoForm = Map.empty}
+emptyPoolPlan = PoolPlan {ppTakes = Set.empty, ppReleases = Set.empty, ppByValue = Map.empty, ppTwoForm = Map.empty, ppKeptAlways = Map.empty}
 
 planPool :: OwnCaps -> [SerialManifold] -> PoolPlan
 planPool caps sms =
@@ -97,8 +101,18 @@ planPool caps sms =
     , ppReleases = releases
     , ppByValue = byValue
     , ppTwoForm = twoForm
+    , ppKeptAlways = keptAlways
     }
   where
+    keptAlways =
+      Map.filter (not . Set.null) $
+        Map.fromList
+          [ (m, Set.filter (\j -> any (\(k, Arg i _) -> k == j && Set.member i always) (indexed (typeMofForm form))) positions)
+          | NativeManifold m _ form@(ManifoldFull _) body <- natives
+          , Just positions <- [Map.lookup m twoForm]
+          , let keeps c = Map.findWithDefault Set.empty c byValue <> Map.findWithDefault Set.empty c twoForm
+                always = keptOnEveryPath keeps body
+          ]
     (takes, releases) = consumableProjectionLets (ocTagAfterTake caps) (ocSharedTakes caps) (\m -> Map.findWithDefault Set.empty m byValue <> Map.findWithDefault Set.empty m twoForm) sms
     twoForm = settleTwo Map.empty
     settleTwo known =
@@ -214,6 +228,29 @@ keptSomewhere keeps body = ends body <> go (RN body)
     varOf (LetVarN _ p _) = Just p
     varOf (BndVarN _ p _) = Just p
     varOf _ = Nothing
+
+-- | The variables every evaluation of a body keeps whole, by the keeping
+-- reads of 'keptSomewhere'; an arm of a conditional counts only what both
+-- arms keep.
+keptOnEveryPath :: (Int -> Set.Set Int) -> NativeExpr -> Set.Set Int
+keptOnEveryPath keeps = go
+  where
+    go e = case e of
+      NativeLetN _ rhs b -> go rhs <> go b
+      IfN _ _ a b -> Set.intersection (go a) (go b)
+      ReturnN x -> go x
+      CoerceN _ _ x -> go x
+      _ -> keptSomewhere keeps e `Set.intersection` unconditional e
+    -- the variables a node keeps outside any conditional it holds
+    unconditional e = case e of
+      IfN {} -> Set.empty
+      DoBlockN {} -> Set.empty
+      _ -> keptSomewhere keeps e `Set.difference` underIf (RN e)
+    underIf n = case n of
+      RN e@(IfN {}) -> keptSomewhere keeps e
+      RNM _ -> Set.empty
+      RSM _ -> Set.empty
+      _ -> foldMap underIf (rnodeChildren n)
 
 -- | Each native let under a node, with the variables its value may be or
 -- refer into: the variable a projection reads from, or a value its

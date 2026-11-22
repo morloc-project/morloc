@@ -154,3 +154,18 @@
   reference where the code after it only borrows. The last read of a
   subject moves the payload out, or fails the call when it is shared
   (`mlc_copy!`, golden rust-bind-non-clone).
+
+- **A C++ function value with two Packable captures cannot cross to
+  Python.** [reproduced 2026-11-21] Code violates closure crossing
+  (a value of a function type is marshalled with its captures): with
+  `newtype Pay = Int` mapped to a C++ type and packed by `pay_pack`,
+  `pyApply (add2c (mkp n) (mkp n)) 1`, `pyApply2 (addPP (mkp n) (mkp n)) 1`
+  and a lambda capturing two such values all fail at run time with "no
+  marshaller for a value of this C++ type (schema type 18)"
+  (cppmorloc.hpp); one capture works. Reproduction: test-suite/golden-tests/
+  own7-matrix-cpp/pay.hpp for `Pay`, `h.py` holding
+  `def py_apply(f, x): return f(x)`, and
+  `source Py from "h.py" ("py_apply" as pyApply)`,
+  `pyApply :: (Int -> Int) -> Int -> Int`,
+  `add2c :: Pay -> Pay -> Int -> Int`, `add2c q r x = keyp q + keyp r + x`,
+  `pB n = pyApply (add2c (mkp n) (mkp n)) 1`.

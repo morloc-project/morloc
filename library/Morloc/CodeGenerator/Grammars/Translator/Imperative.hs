@@ -77,6 +77,7 @@ module Morloc.CodeGenerator.Grammars.Translator.Imperative
   , loopBorrowLocals
   , loopBorrowLocalsExcept
   , ownedPartLets
+  , keptIn
   , usesIndex
   , paramReads
   , loopSlots
@@ -1383,10 +1384,16 @@ consumableProjectionLets tagAfterMove sharedTakes byValue sms = (fresh <> parts,
       , (letIdx, subjIdx) <- csGetters scan
       , Map.lookup letIdx projected == Just 1
       , let field = fieldOf =<< lookup letIdx defs
-            -- the lets reading another field of the same arm
-            siblings = [i | (i, rhs) <- defs, Just f <- [fieldOf rhs], Just f /= field, (varIndex =<< subjectOf rhs) == Just subjIdx]
+            key = keyOf =<< lookup letIdx defs
+            -- the lets reading another field of the same arm, or, where a
+            -- member's take leaves the other fields readable, of the same
+            -- tuple or record (OWN-5)
+            siblings =
+              [i | (i, rhs) <- defs, i /= letIdx, Just f <- [rootField subjIdx rhs], Just f /= field]
+                <> [i | tagAfterMove, Just _ <- [key], (i, rhs) <- defs, Just g <- [keyOf rhs], Just g /= key, (varIndex =<< getterSubjectOf rhs) == Just subjIdx]
+            part = maybe (GetterPart <$> key) (Just . CtorPart) field
             names others = refersInto [d | d@(i, _) <- defs, i /= letIdx, i `notElem` others] subjIdx
-            walk others = isJust (moveWalk False byValue (names others) (if null others then Nothing else field) subjIdx letIdx False (RS body))
+            walk others = isJust (moveWalk False byValue (names others) (if null others then Nothing else part) subjIdx letIdx False (RS body))
             -- after a release nothing may read the arm, another field included
             walkReleased others = isJust (moveWalk False byValue (names others) Nothing subjIdx letIdx False (RS body))
       , sharedTakes || field == Nothing
@@ -1414,8 +1421,24 @@ consumableProjectionLets tagAfterMove sharedTakes byValue sms = (fresh <> parts,
   isFresh subj scan = maybe False buildsFreshValue (Map.lookup subj (csDefs scan))
   fieldOf (IntrinsicN _ IntrCtorField _ (_ : _ : IntN _ i : _)) = Just (fromIntegral i)
   fieldOf _ = Nothing
-  subjectOf (IntrinsicN _ IntrCtorField _ (v : _)) = Just v
-  subjectOf _ = Nothing
+  -- the field of the subject's arm a projection, however nested, reads
+  rootField subj (IntrinsicN _ IntrCtorField _ (v : _ : IntN _ i : _))
+    | varIndex v == Just subj = Just (fromIntegral i)
+    | otherwise = rootField subj v
+  rootField _ _ = Nothing
+  keyOf rhs = fst <$> getterKey rhs
+  getterSubjectOf rhs = snd <$> getterKey rhs
+
+-- | The part of its subject a projection let takes (OWN-5): a constructor
+-- field of an arm, or one field of a tuple or record.
+data TakenPart = CtorPart Int | GetterPart [Either Int Text]
+  deriving (Eq)
+
+-- | The one field a getter of a single field reads, and its subject.
+getterKey :: NativeExpr -> Maybe ([Either Int Text], NativeExpr)
+getterKey (PatN _ (PatGet sel [] (NativeArgExpr v)))
+  | not (selectorHasBracket sel), [k] <- ungroup sel = Just (k, v)
+getterKey _ = Nothing
 
 -- | Whether local @i@ is read somewhere under a node where its value is
 -- kept: an element of a value being built, a loop's start or next value, a
@@ -1585,12 +1608,14 @@ rnodeBinds i n = maybe False (\(j, _, _) -> i == j) (rnodeLet n) || any (rnodeBi
 -- moved by projection let @k@: the state after it, or Nothing when the
 -- subject is named after the move, or moved from inside a closure that did
 -- not bind it. With @tagAfterMove@, a tag test may read the subject after
--- the move; with @field@ (the constructor field let @k@ takes), so may a
--- projection of another of its arm's fields.
-moveWalk :: Bool -> (Int -> Set.Set Int) -> Set.Set Int -> Maybe Int -> Int -> Int -> Bool -> RNode -> Maybe Bool
+-- the move; with @field@ (the part let @k@ takes), so may a projection of
+-- another of its arm's fields, or a getter of another field.
+moveWalk :: Bool -> (Int -> Set.Set Int) -> Set.Set Int -> Maybe TakenPart -> Int -> Int -> Bool -> RNode -> Maybe Bool
 moveWalk tagAfterMove byValue names field subj k moved n = case n of
   RN (IntrinsicN _ IntrCtorField _ (v : _ : IntN _ i : _))
-    | Just f <- field, fromIntegral i /= f, varIndex v == Just subj -> Just moved
+    | Just (CtorPart f) <- field, fromIntegral i /= f, varIndex v == Just subj -> Just moved
+  RN e
+    | Just (GetterPart g) <- field, Just (g', v) <- getterKey e, g' /= g, varIndex v == Just subj -> Just moved
   RN (IntrinsicN _ IntrTagTest _ (LetVarN _ j _ : rest))
     | tagAfterMove && j == subj -> foldM (moveWalk tagAfterMove byValue names field subj k) moved (map RN rest)
   RN (LetVarN _ j _) | Set.member j names -> if moved then Nothing else Just moved
@@ -1787,8 +1812,7 @@ markSpineN env owned later e = case e of
     let (a', (ma, ca)) = markSpineN env owned later a
         (b', (mb, cb)) = markSpineN env owned later b
         arms = Map.unionWith max ma mb
-        here = stepReads env owned (RN c)
-        (c', cc) = markStep here (arms : later) c
+        (c', (here, cc)) = markSpineN env owned (arms : later) c
      in (IfN t c' a' b', (Map.unionWith (+) here arms, cc <> ca <> cb))
   _ ->
     let here = stepReads env owned (RN e)
@@ -1883,10 +1907,12 @@ markLoopBody env baseNode carried b0 = let (b', (_, caps)) = go (filter (`Set.no
           here = stepReads env owned (RS x)
           (x', cx) = markStep here [after] x
        in (LoopSLet i x' b', (Map.unionWith (+) here after, cx <> cb))
+    -- A guard moves nothing it is given (OWN-4), only the lets it binds.
     go owned (LoopIf g t e) =
       let (t', (mt, ct)) = go owned t
           (e', (me, ce)) = go owned e
-       in (LoopIf g t' e', (Map.unionWith (+) (stepReads env owned (RN g)) (Map.unionWith max mt me), ct <> ce))
+          (g', (_, cg)) = markSpineN env [] [] g
+       in (LoopIf g' t' e', (Map.unionWith (+) (stepReads env owned (RN g)) (Map.unionWith max mt me), cg <> ct <> ce))
 
 -- | How many times native variable @v@ is read under a node, where a read
 -- that may run more than once counts as two.
@@ -2039,15 +2065,23 @@ loopBorrowLocalsExcept mayBorrow skip g root = go g root
 -- reference into it, so the part is not copied, and a read of it (OWN-2,
 -- OWN-6). A part the value's last read could take (OWN-5) is left alone,
 -- unless it is a list element of a value another of these lets refers into
--- and @lendElems@ says a lent list gives up no element.
+-- and still reads after it, and @lendElems@ says a lent list gives up no
+-- element.
 ownedPartLets :: (NativeExpr -> Bool) -> Bool -> Set.Set Int -> RNode -> Map.Map Int Int
 ownedPartLets mayBorrow lendElems g root = base <> siblings
   where
-    base = go (\later _ r -> any (usesIndex r) later) [] root
+    -- a later read of the value, or of a let that refers into it
+    base0 = go (\later _ r -> any (usesIndex r) later) [] root
+    base = go (\later _ r -> any (\i -> any (usesIndex i) later) (r : [i | (i, j) <- Map.toList base0, j == r])) [] root
     lentRoots = Set.fromList (Map.elems base)
     siblings
-      | lendElems = go (\_ part r -> isElem part && Set.member r lentRoots) [] root
+      | lendElems = go (\later part r -> isElem part && Set.member r lentRoots && any (\i -> any (usesIndex i) later) (lentFrom r)) [] root
       | otherwise = Map.empty
+    lentFrom r = [i | i <- Map.keys base, r `elem` baseChain i]
+    baseChain i = follow (Set.singleton i) (Map.lookup i base)
+      where
+        follow seen (Just j) | Set.notMember j seen = j : follow (Set.insert j seen) (Map.lookup j base)
+        follow _ _ = []
     go lends later n = case rnodeLet n of
       Just (i, rhs, body) -> here lends i rhs (body : later) <> go lends (body : later) rhs <> go lends later body
       Nothing -> mconcat (map (go lends later) (filter (not . isManifold) (rnodeChildren n)))
@@ -2305,6 +2339,8 @@ getterOf letIdx (IntrinsicN _ IntrListElem _ (v : _))
     varIndexOf (LetVarN _ j _) = Just j
     varIndexOf (BndVarN _ j _) = Just j
     varIndexOf _ = Nothing
+getterOf letIdx (IntrinsicN _ IntrCtorField _ (IntrinsicN _ IntrListElem _ (v : _) : _))
+  | Just subjIdx <- varIndex v = [(letIdx, subjIdx)]
 getterOf letIdx (IntrinsicN _ IntrCtorField _ (v : _))
   | Just subjIdx <- varIndexOf v = [(letIdx, subjIdx)]
   where

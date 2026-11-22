@@ -123,7 +123,7 @@
 --- twoLets ---
 [200,1]
 --- aliasKeep ---
-[102,1]
+[102,0]
 --- tryLet ---
 [1,0]
 --- tryCapture ---

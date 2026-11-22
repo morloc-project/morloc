@@ -23,6 +23,7 @@ import Morloc.CodeGenerator.Namespace
 import Morloc.Frontend.Namespace (newIndex)
 import qualified Morloc.Monad as MM
 import qualified Data.Map as Map
+import qualified Data.Set as Set
 import Morloc.CodeGenerator.Serial (containsFunT)
 import Morloc.CodeGenerator.Value (etaParts, isValue)
 import Morloc.CodeGenerator.EffectBoundary (declaredFun, declaredSignature)
@@ -135,6 +136,7 @@ applyPoolLambdas :: AnnoS (Indexed Type) One (Indexed Lang) -> MorlocMonad (Anno
 applyPoolLambdas e =
   expandShortCalls fresh e
     >>= applyLambdas False
+    >>= keepInPlace
     >>= splitLongCalls fresh
     >>= groupCallbacks
   where
@@ -824,6 +826,234 @@ bindData y@(AnnoS (Idx gi t) c _)
       name <- freshClosureName (EV "arg")
       refIx <- newIndex gi
       return ([(name, y)], AnnoS (Idx refIx t) c (LetBndS name))
+
+-- | @let v = e1 in e2@, unless @e1@ is a conditional between record or tuple
+-- literals and @e2@ reads @v@ only one field at a time: then each field it
+-- reads is bound to a conditional of its own, between the arms' fields, and
+-- no record is built (scalar replacement). A field nothing reads is dropped
+-- only where both arms hold a value for it. A condition that computes is
+-- bound once, before the fields. Pool path only.
+bindLet ::
+  (EVar -> EVar) -> Indexed Type -> Indexed Lang -> EVar -> AnnoS (Indexed Type) One (Indexed Lang) -> AnnoS (Indexed Type) One (Indexed Lang) ->
+  MorlocMonad (AnnoS (Indexed Type) One (Indexed Lang))
+bindLet resolve g c v e1 e2 = case e1 of
+  AnnoS _ ic (IfS cond th el)
+    | same ic
+    , Just fa <- fieldsOf th
+    , Just fb <- fieldsOf el
+    , Map.keysSet fa == Map.keysSet fb
+    , all (\(AnnoS _ fc _) -> same fc) (Map.elems fa <> Map.elems fb)
+    , not (Map.null fa) -> do
+        names <- mapM (\_ -> freshClosureName v) fa
+        e2' <- projectTo names e2
+        if countRefs v e2' /= 0
+          then plain
+          else do
+            let used = Map.filter (\w -> countRefs w e2' > 0) names
+                dropped = Map.keys (Map.difference names used)
+            if not (all (\k -> maybe False isValue (Map.lookup k fa) && maybe False isValue (Map.lookup k fb)) dropped)
+              then plain
+              else do
+                (condBinds, condRef) <- if isValue cond then return ([], return cond) else do
+                  cv <- freshClosureName v
+                  let AnnoS (Idx ci ct) cc _ = cond
+                  return ([(cv, cond)], (\ri -> AnnoS (Idx ri ct) cc (LetBndS cv)) <$> newIndex ci)
+                fields <- sequence
+                  [ do
+                      cr <- condRef
+                      let AnnoS (Idx ai' at) ac _ = a
+                      ix <- newIndex ai'
+                      return (w, AnnoS (Idx ix at) ac (IfS cr a b))
+                  | (k, w) <- Map.toList used
+                  , Just a <- [Map.lookup k fa]
+                  , Just b <- [Map.lookup k fb]
+                  ]
+                foldM (\body (w, rhs) -> do
+                          ix <- newIndex (let Idx gi _ = g in gi)
+                          bindLet resolve (Idx ix (let Idx _ t = g in t)) c w rhs body)
+                      e2' (reverse fields) >>= wrapLets g c condBinds
+  AnnoS _ ic (IfS cond th el)
+    | same ic
+    , any endsInPart [th, el]
+    , countRefs v e2 > 0
+    , small e2 -> do
+        let roots = Set.fromList (map resolve (concatMap rootsOf [th, el]))
+            clear x = Set.null (Set.intersection roots (Set.fromList (map resolve (rootsOf x))))
+        -- the body may name what the arms refer into only after its reads of
+        -- v, which run first (EVAL-2)
+        body <-
+          if clear e2
+            then return (Just ([], e2))
+            else do
+              h <- hoistReads Set.empty v e2
+              return $ case h of
+                Just (binds, rest) | not (null binds), countRefs v rest == 0 -> Just (binds, rest)
+                _ -> Nothing
+        case body of
+          Nothing -> plain
+          Just (binds, rest) -> do
+            let Idx gi t = g
+            e2' <- wrapLets g c binds rest
+            e2b <- reindexTree e2'
+            ia <- newIndex gi
+            ib <- newIndex gi
+            a <- bindLet resolve (Idx ia t) c v th e2'
+            b <- bindLet resolve (Idx ib t) c v el e2b
+            return (AnnoS g c (IfS cond a b))
+  -- let v = (let y = a in b) in e2 is let y = a in let v = b in e2, where e2
+  -- does not name y
+  AnnoS (Idx yi _) yc (LetS y a b)
+    | same yc
+    , countRefs y e2 == 0
+    , not (Set.member y (binders e2))
+    , v /= y -> do
+        let Idx _ t = g
+        ix <- newIndex yi
+        let resolve' w = case a of
+              AnnoS _ _ (BndS u) | w == y -> resolve u
+              AnnoS _ _ (LetBndS u) | w == y -> resolve u
+              _ -> resolve w
+        inner <- bindLet resolve' (Idx ix t) c v b e2
+        return (AnnoS g c (LetS y a inner))
+  _ -> plain
+  where
+    plain = return (AnnoS g c (LetS v e1 e2))
+    same (Idx _ l) = let Idx _ l0 = c in l == l0
+    binders (AnnoS _ _ x) = case x of
+      LetS w a b -> Set.insert w (binders a <> binders b)
+      LamS ws b -> Set.fromList ws <> binders b
+      _ -> foldExprS binders x
+    -- an arm a reader could read in place: a local, a part of one, or a let
+    -- chain ending in one
+    endsInPart (AnnoS _ _ x) = case x of
+      BndS _ -> True
+      LetBndS _ -> True
+      PatS _ _ _ (PatGet _ [] r) -> endsInPart r
+      IntrinsicS IntrCtorField (r : _) -> endsInPart r
+      IntrinsicS IntrListElem (r : _) -> endsInPart r
+      LetS _ _ b -> endsInPart b
+      IfS _ a b -> endsInPart a || endsInPart b
+      _ -> False
+    -- the locals an arm names: the body may not name them, since a reference
+    -- into one would keep it from moving there
+    rootsOf (AnnoS _ _ x) = case x of
+      BndS w -> [w]
+      LetBndS w -> [w]
+      _ -> foldExprS rootsOf x
+    -- a body small enough to copy into each arm, holding no function value
+    small x = size x <= 48
+    size (AnnoS _ _ x) = case x of
+      LamS _ _ -> 100
+      DoBlockS _ -> 100
+      _ -> 1 + getSum (foldExprS (Sum . size) x)
+    fieldsOf (AnnoS _ _ (NamS rs)) = Just (Map.fromList [(Right (unKey k), x) | (k, x) <- rs])
+    fieldsOf (AnnoS _ _ (TupS xs)) = Just (Map.fromList [(Left i, x) | (i, x) <- zip [0 :: Int ..] xs])
+    fieldsOf _ = Nothing
+    single (SelectorKey (k, SelectorEnd) []) = Just (Right k)
+    single (SelectorIdx (i, SelectorEnd) []) = Just (Left i)
+    single _ = Nothing
+    projectTo names = go
+      where
+        go e0@(AnnoS pg pc (PatS _ _ ev (PatGet sel [] (AnnoS _ _ (LetBndS v')))))
+          | v' == v, Nothing <- patReceiver ev, Just k <- single sel, Just w <- Map.lookup k names = return (AnnoS pg pc (LetBndS w))
+          | otherwise = return e0
+        go e0@(AnnoS _ _ (LamS vs _)) | v `elem` vs = return e0
+        go (AnnoS lg lc (LetS v' x y)) | v == v' = (\x' -> AnnoS lg lc (LetS v' x' y)) <$> go x
+        go (AnnoS lg lc e) = AnnoS lg lc <$> mapExprSM go e
+
+-- | The reads of @v@ in an expression, each the largest part that names @v@
+-- and no local the expression binds, bound to lets of their own, with the
+-- expression reading those lets. Nothing if a read of @v@ is the local
+-- alone, or sits under a lambda, a suspension or a forced effect.
+hoistReads :: Set.Set EVar -> EVar -> AnnoS (Indexed Type) One c -> MorlocMonad (Maybe ([(EVar, AnnoS (Indexed Type) One c)], AnnoS (Indexed Type) One c))
+hoistReads outer v e0 = do
+  found <- MM.liftIO (newIORef [])
+  failed <- MM.liftIO (newIORef False)
+  let names (AnnoS _ _ x) = case x of
+        BndS w -> Set.singleton w
+        LetBndS w -> Set.singleton w
+        _ -> foldExprS names x
+      opaque (AnnoS _ _ x) = case x of
+        LamS _ _ -> True
+        DoBlockS _ -> True
+        EvalS _ -> True
+        _ -> getAny (foldExprS (Any . opaque) x)
+      go bound n@(AnnoS g c x)
+        | countRefs v n == 0 = return n
+        | otherwise = case x of
+            BndS _ -> MM.liftIO (writeIORef failed True) >> return n
+            LetBndS _ -> MM.liftIO (writeIORef failed True) >> return n
+            LamS _ _ -> MM.liftIO (writeIORef failed True) >> return n
+            DoBlockS _ -> MM.liftIO (writeIORef failed True) >> return n
+            LetS w a b -> do
+              a' <- go bound a
+              b' <- go (Set.insert w bound) b
+              return (AnnoS g c (LetS w a' b'))
+            _
+              | Set.null (Set.intersection bound (names n)), not (opaque n) -> do
+                  t <- freshClosureName v
+                  let Idx gi ty = g
+                  ri <- newIndex gi
+                  MM.liftIO (modifyIORef found ((t, n) :))
+                  return (AnnoS (Idx ri ty) c (LetBndS t))
+              | otherwise -> AnnoS g c <$> mapExprSM (go bound) x
+  e' <- go outer e0
+  bad <- MM.liftIO (readIORef failed)
+  binds <- MM.liftIO (readIORef found)
+  -- one read only: two would compute what a single arm computed once
+  return (if bad || length binds > 1 then Nothing else Just (reverse binds, e'))
+
+-- | Rewrite every let of the pool tree with 'bindLet', innermost first, so a
+-- reader reads a value in place rather than a copy of it (OWN-6).
+keepInPlace :: AnnoS (Indexed Type) One (Indexed Lang) -> MorlocMonad (AnnoS (Indexed Type) One (Indexed Lang))
+keepInPlace = go Map.empty Map.empty
+  where
+    -- @aliases@ maps a let bound to another local to the local it names;
+    -- @parts@ maps a let bound to a part of locals to those locals
+    go aliases parts (AnnoS g c (LetS v e1 e2)) = do
+      e1' <- go aliases parts e1
+      let resolve w = Map.findWithDefault w w aliases
+          aliases' = case e1' of
+            AnnoS _ _ (BndS w) -> Map.insert v (resolve w) aliases
+            AnnoS _ _ (LetBndS w) -> Map.insert v (resolve w) aliases
+            _ -> aliases
+          parts'
+            | partOf e1' = Map.insert v (Set.fromList (map resolve (namedIn e1'))) parts
+            | otherwise = parts
+      e2' <- go aliases' parts' e2
+      let resolve' w = Map.findWithDefault w w aliases'
+      -- a read of a part of what e1 names, after it, runs first (OWN-2, EVAL-2)
+      early <- readFirst v resolve' parts' (Set.fromList (map resolve' (namedIn e1'))) e2'
+      case early of
+        Just (binds, rest) -> do
+          inner <- bindLet resolve' g c v e1' rest
+          wrapLets g c binds inner
+        Nothing -> bindLet resolve' g c v e1' e2'
+    go aliases parts (AnnoS g c e) = AnnoS g c <$> mapExprSM (go aliases parts) e
+    namedIn (AnnoS _ _ x) = case x of
+      BndS w -> [w]
+      LetBndS w -> [w]
+      _ -> foldExprS namedIn x
+    partOf (AnnoS _ _ x) = case x of
+      PatS _ _ _ (PatGet _ [] r) -> isLocal r || partOf r
+      IntrinsicS IntrCtorField (r : _) -> isLocal r || partOf r
+      IntrinsicS IntrListElem (r : _) -> isLocal r || partOf r
+      IfS _ a b -> partOf a || partOf b
+      LetS w a (AnnoS _ _ (LetBndS w')) | w == w' -> partOf a
+      LetS _ _ b -> partOf b
+      _ -> False
+    isLocal (AnnoS _ _ x) = case x of
+      BndS _ -> True
+      LetBndS _ -> True
+      _ -> False
+    -- the one part of the body that reads a let referring into what the
+    -- right-hand side names, hoisted, if there is exactly one
+    readFirst v resolve parts named body =
+      case [y | (y, roots) <- Map.toList parts, not (Set.null (Set.intersection roots named)), countRefs y body > 0] of
+        [y] | not (Set.member (resolve y) named) -> hoistReads (Set.singleton v) y body >>= \h -> return $ case h of
+          Just (binds, rest) | not (null binds), countRefs y rest == 0 -> Just (binds, rest)
+          _ -> Nothing
+        _ -> return Nothing
 
 isLam :: AnnoS g f c -> Bool
 isLam (AnnoS _ _ (LamS _ _)) = True

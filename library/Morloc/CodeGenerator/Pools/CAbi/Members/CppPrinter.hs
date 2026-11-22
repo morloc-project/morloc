@@ -292,13 +292,14 @@ printStmt (IIfNotNull resultVar resultType source unwrapVar unwrapType bodyStmts
     ]
   where
     srcVar = unwrapVar <> "_src"
-    srcDecl = [idoc|auto #{pretty srcVar} = #{printExpr source};|]
+    -- The optional and its value are only read here, so both are references.
+    srcDecl = [idoc|auto&& #{pretty srcVar} = #{printExpr source};|]
     resultDecl = case resultType of
       Just t -> [idoc|#{renderIType t} #{pretty resultVar} = std::nullopt;|]
       Nothing -> [idoc|auto #{pretty resultVar} = std::nullopt;|]
     unwrapDecl = case unwrapType of
-      Just t -> [idoc|#{renderIType t} #{pretty unwrapVar} = #{pretty srcVar}.value();|]
-      Nothing -> [idoc|auto #{pretty unwrapVar} = #{pretty srcVar}.value();|]
+      Just t -> [idoc|const #{renderIType t}& #{pretty unwrapVar} = #{pretty srcVar}.value();|]
+      Nothing -> [idoc|const auto& #{pretty unwrapVar} = #{pretty srcVar}.value();|]
 printStmt (IReturn e) = "return(" <> printExpr e <> ");"
 printStmt (IExprStmt e) = printExpr e <> ";"
 printStmt (IFunDef _ _ _ _) = error "IFunDef not yet implemented for C++ printer"

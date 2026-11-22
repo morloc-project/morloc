@@ -60,3 +60,5 @@ pub struct Holder {
 pub fn mk_holder(n: i64) -> Holder { Holder { c: mk_chain(n), k: 1 } }
 
 pub fn mk_tup(n: i64) -> (Chain, i64) { (mk_chain(n), 1) }
+
+pub fn mk_chains(n: i64) -> Vec<Chain> { (0..3).map(|_| mk_chain(n)).collect() }

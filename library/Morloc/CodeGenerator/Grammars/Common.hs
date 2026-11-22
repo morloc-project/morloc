@@ -368,6 +368,74 @@ walkSelectorBrackets keyStep idxStep bracketIndex bracketSlice groupStep = go
 -- Represents the dependency of a on previously bound expressions
 data D a = D a [(Int, Either SerialExpr NativeExpr)]
 
+instance Functor D where
+  fmap f (D a ds) = D (f a) ds
+
+-- | The dependencies of the parts of one expression, in the order they
+-- run. Pure work runs in any order (EVAL-2); a part that keeps a local runs
+-- after the parts that keep none, so a read of the local, or of a local
+-- referring into it, comes first and the keeping read may move it (OWN-2).
+-- A part bound across languages, or one that forces a suspension, leaves the
+-- order as the parts give it. The head of a dependency list runs last.
+orderedDeps :: [D (Maybe NativeExpr)] -> [(Int, Either SerialExpr NativeExpr)]
+orderedDeps parts
+  | any (any isSerial . getDeps) parts || any rkForces sums = concatMap getDeps parts
+  | otherwise = concatMap getDeps (keepers <> rest)
+  where
+    isSerial (_, Left _) = True
+    isSerial _ = False
+    summary (D e ds) = foldMap readsKeeps (maybe id (:) e [ne | (_, Right ne) <- ds])
+    sums = map summary parts
+    tagged = zipSame parts sums
+    flags = [not (Set.null (rkKeeps r)) | r <- sums]
+    keepers = [p | ((p, _), True) <- zipSame tagged flags]
+    rest = [p | ((p, _), False) <- zipSame tagged flags]
+
+argExpr :: NativeArg -> Maybe NativeExpr
+argExpr (NativeArgExpr e) = Just e
+argExpr _ = Nothing
+
+-- | The locals an expression may keep -- one named as an element of a value
+-- it builds, an argument of a call that is not sourced, a conditional's
+-- result, or a capture -- and the local it is, if it is one.
+data ReadsKeeps = ReadsKeeps {rkKeeps :: Set.Set Int, rkVar :: Maybe Int, rkForces :: Bool}
+
+instance Semigroup ReadsKeeps where
+  ReadsKeeps a _ f <> ReadsKeeps b _ g = ReadsKeeps (a <> b) Nothing (f || g)
+
+instance Monoid ReadsKeeps where
+  mempty = ReadsKeeps Set.empty Nothing False
+
+readsKeeps :: NativeExpr -> ReadsKeeps
+readsKeeps = runIdentity . foldNativeExprM ops
+  where
+    ops =
+      FoldManifoldM
+        { opSerialManifoldM = \(SerialManifold_ _ _ form _ _) -> return (captures form)
+        , opNativeManifoldM = \(NativeManifold_ _ _ form _) -> return (captures form)
+        , opSerialExprM = \node -> return (foldlSE (<>) mempty node)
+        , opNativeExprM = \node -> return $ case node of
+            LetVarN_ _ i _ -> ReadsKeeps Set.empty (Just i) False
+            BndVarN_ _ i _ -> ReadsKeeps Set.empty (Just i) False
+            EvalN_ _ x -> x {rkForces = True}
+            AppExeN_ _ (SrcCallP _ _) xs -> mconcat xs
+            ListN_ _ _ xs -> held xs
+            TupleN_ _ xs -> held xs
+            RecordN_ _ _ _ kvs -> held (map snd kvs)
+            VariantN_ _ _ _ xs -> held xs
+            AppExeN_ _ _ xs -> held xs
+            IfN_ _ c a b -> c <> held [a, b]
+            NativeLetN_ _ a b -> (a <> b) {rkVar = rkVar b}
+            CoerceN_ _ _ x -> x
+            _ -> foldlNE (<>) mempty node
+        , opSerialArgM = \node -> return (foldlSA (<>) mempty node)
+        , opNativeArgM = \node -> return $ case node of
+            NativeArgExpr_ ne -> ne
+            NativeArgManifold_ nm -> nm
+        }
+    held xs = let r = mconcat xs in r {rkKeeps = rkKeeps r <> Set.fromList [i | Just i <- map rkVar xs]}
+    captures form = let cs = Set.fromList [i | Arg i _ <- manifoldContext form] in ReadsKeeps cs Nothing False
+
 unD :: D a -> a
 unD (D a _) = a
 
@@ -865,7 +933,7 @@ invertSerialManifold next sm0 =
       Index (D NativeExpr)
     invertNativeExprM (AppExeN_ t exe nativeArgs) = do
       let nativeArgs' = map unD nativeArgs
-          deps = concatMap getDeps nativeArgs
+          deps = orderedDeps (map (fmap argExpr) nativeArgs)
       atomize (AppExeN t exe nativeArgs') deps
     invertNativeExprM (PatN_ t app) = do
       atomize (PatN t (fmap unD app)) (concatMap getDeps app)
@@ -888,16 +956,16 @@ invertSerialManifold next sm0 =
     invertNativeExprM (BndVarN_ t i r) = atomize (BndVarN t i r) []
     invertNativeExprM (DeserializeN_ t s (D se lets)) = atomize (DeserializeN t s se) lets
     invertNativeExprM (ExeN_ t x) = atomize (ExeN t x) []
-    invertNativeExprM (ListN_ v t nes) = atomize (ListN v t (map unD nes)) (concatMap getDeps nes)
-    invertNativeExprM (TupleN_ v xs) = atomize (TupleN v (map unD xs)) (concatMap getDeps xs)
-    invertNativeExprM (RecordN_ o v ps rs) = atomize (RecordN o v ps (map (second unD) rs)) (concatMap (getDeps . snd) rs)
+    invertNativeExprM (ListN_ v t nes) = atomize (ListN v t (map unD nes)) (orderedDeps (map (fmap Just) nes))
+    invertNativeExprM (TupleN_ v xs) = atomize (TupleN v (map unD xs)) (orderedDeps (map (fmap Just) xs))
+    invertNativeExprM (RecordN_ o v ps rs) = atomize (RecordN o v ps (map (second unD) rs)) (orderedDeps (map (fmap Just . snd) rs))
     invertNativeExprM (LogN_ v x) = atomize (LogN v x) []
     invertNativeExprM (RealN_ v x) = atomize (RealN v x) []
     invertNativeExprM (IntN_ v x) = atomize (IntN v x) []
     invertNativeExprM (StrN_ v x) = atomize (StrN v x) []
     invertNativeExprM (EnumN_ v n i) = atomize (EnumN v n i) []
     invertNativeExprM (VariantN_ v n i xs) =
-      atomize (VariantN v n i (map unD xs)) (concatMap getDeps xs)
+      atomize (VariantN v n i (map unD xs)) (orderedDeps (map (fmap Just) xs))
     invertNativeExprM (NullN_ v) = atomize (NullN v) []
     -- keep dependencies inside suspend so thunk body stays lazy
     invertNativeExprM (DoBlockN_ t (D ne lets)) = return $ D (DoBlockN t (weave (D ne lets))) []

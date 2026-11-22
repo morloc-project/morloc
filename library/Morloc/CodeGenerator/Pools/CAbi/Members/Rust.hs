@@ -60,7 +60,12 @@ import Morloc.CodeGenerator.Grammars.Translator.Imperative
   , LowS
   , loopBodyDocs
   , LoopResult (..)
-  , RNode (RSM)
+  , RNode (..)
+  , rnodeChildren
+  , rnodeLet
+  , keptIn
+  , usesIndex
+  , namedIn
   , lastBuilds
   , nativeManifoldsUnder
   , infixOperator
@@ -224,6 +229,11 @@ data RustState = RustState
   , rsPrivateDecls :: [(Text, MDoc)]
   -- ^ The generated records the pool keeps to itself, each with its module
   -- path from the crate root (GEN-10).
+  , rsTakeGroups :: Map.Map Int TakeGroup
+  -- ^ The field lets of the segment being lowered taken out of one arm
+  -- together, by the first of them ('fieldTakeGroups').
+  , rsTakeMembers :: Set.Set Int
+  -- ^ Every let of 'rsTakeGroups'.
   }
 
 instance Defaultable RustState where
@@ -270,6 +280,8 @@ instance Defaultable RustState where
       , rsDepNamespaces = Map.empty
       , rsConvHelpers = []
       , rsPrivateDecls = []
+      , rsTakeGroups = Map.empty
+      , rsTakeMembers = Set.empty
       }
 
 -- | The ownership environment: the borrowed (@&T@) parameter indices of the
@@ -1298,31 +1310,45 @@ rustClosureWrapper mid sig sigType mname ctxArgs boundArgs = do
           stagedArgs = ctorArgsFor heldT
           dynT ts = rustFnValueType ts resT
           capRefS i (Arg _ t) = captureArg t ("__morloc_sc." <> pretty (i :: Int))
+          -- HOST-8: the arguments before the stage point are held in 'Arc's.
           stageCall smid kk =
-            let args = mapIndexed capRefS ctxArgs
-                         <> [rustBridgeArg t ("&__morloc_x" <> pretty j) | (j, Arg _ t) <- indexed (take kk boundArgs)]
+            let held' j = if j + 1 == kk then "__morloc_xr" else "&*__morloc_x" <> pretty j
+                args = mapIndexed capRefS ctxArgs
+                         <> [rustBridgeArg t (held' j) | (j, Arg _ t) <- indexed (take kk boundArgs)]
              in "unsafe {" <+> RP.rustManifoldName smid <> tupled args <+> "}"
           level i fv
             | i >= n = fv
             | otherwise =
                 let bt = bts !! i
-                    clones =
-                      ["let __morloc_sc = __morloc_sc.clone();" | isJust stage]
-                        <> ["let __morloc_x" <> pretty j <> " = __morloc_x" <> pretty j <> ".clone();" | j <- [0 .. i - 1]]
-                    own = "let __morloc_x" <> pretty i <> ":" <+> bt <+> "= __morloc_xr.clone();"
+                    carries = case stage of
+                      Just (kk, _) -> i + 1 < kk
+                      Nothing -> False
+                    holds =
+                      if carries
+                        then
+                          ["let __morloc_sc = __morloc_sc.clone();"]
+                            <> ["let __morloc_x" <> pretty j <> " = __morloc_x" <> pretty j <> ".clone();" | j <- [0 .. i - 1]]
+                            <> ["let __morloc_x" <> pretty i <> ": ::std::sync::Arc<" <> bt <> "> = ::std::sync::Arc::new(__morloc_xr.clone());"]
+                        else []
+                    restTs = drop (i + 1) bts
+                    restArgs = ["__morloc_a" <> pretty j | j <- [i + 1 .. n - 1]]
+                    -- with no wire form, the next level's function applies the held 'Arc'
+                    flat
+                      | carries && isNothing bndWire =
+                          "let __morloc_g:" <+> dynT restTs <+> "= { let __morloc_f = __morloc_fc.clone(); let __morloc_h = __morloc_x" <> pretty i <> ".clone();"
+                            <+> "::std::sync::Arc::new(move |" <> hcat (punctuate ", " [a <> ": &" <> t | (a, t) <- zipSame restArgs restTs]) <> "|"
+                            <+> "__morloc_f" <> tupled ("&*__morloc_h" : restArgs) <> ") };"
+                      | otherwise =
+                          "let __morloc_g = ::rustmorloc::pap" <> pretty (n - i) <> "(&__morloc_fc, __morloc_xr, " <> (wires !! i) <> ");"
                     rest = case stage of
                       Just (kk, smid) | i + 1 == kk -> stageCall smid kk
-                      _ ->
-                        vsep
-                          [ "let __morloc_g = ::rustmorloc::pap" <> pretty (n - i) <> "(&__morloc_fc, &__morloc_x" <> pretty i <> ", " <> (wires !! i) <> ");"
-                          , level (i + 1) "__morloc_g"
-                          ]
+                      _ -> vsep [flat, level (i + 1) "__morloc_g"]
                  in vsep
                       [ "{"
                       , indent 4 $ vsep
                           [ "let __morloc_fc = " <> fv <> ".clone();"
                           , "::rustmorloc::staged" <> pretty (n - i) <> "(__morloc_fc.clone(), ::std::sync::Arc::new(move |__morloc_xr: &" <> bt <> "| -> " <> dynT (drop (i + 1) bts) <> " {"
-                          , indent 4 (vsep (clones <> [own, rest]))
+                          , indent 4 (vsep (holds <> [rest]))
                           , "}))"
                           ]
                       , "}"
@@ -3116,7 +3142,9 @@ rustSurround =
     , surroundNativeManifoldM = \recurse nm -> do
         pp <- CMS.gets rsPool
         cscope <- CMS.gets rsCScope
-        withManifoldScope (planNativeManifold (rustCaps cscope) pp nm) (recurse nm)
+        members <- CMS.gets rsTakeMembers
+        let plan = planNativeManifold (rustCaps cscope) pp nm
+        withManifoldScope plan {mpBorrowed = mpBorrowed plan `Set.difference` members} (recurse nm)
     }
 
 -- | No tag test may follow a take (see the projection-consume golden's
@@ -3180,20 +3208,269 @@ translateSegment m00@(SerialManifold root _ _ _ _) = do
 -- | Mark a segment's last reads under the current pool plan, and record
 -- the builds that are a local's last read (OWN-2, OWN-3).
 prepareSegment :: SerialManifold -> RustM SerialManifold
-prepareSegment m00@(SerialManifold root _ form00 _ _) = do
+prepareSegment = prepareOrdered . orderCallArgs
+
+-- | EVAL-2, OWN-2: in a call whose arguments include several calls that
+-- read one non-Copy local, each such call but the last is bound to a let
+-- ahead of the call, in written order.
+orderCallArgs :: SerialManifold -> SerialManifold
+orderCallArgs sm = mmap (defaultValue {mapNativeManifold = onNM}) sm
+  where
+    g0 = freshIndexAfter (RSM sm)
+    onNM nm@(NativeManifold m l f e) =
+      NativeManifold m l f (CMS.evalState (spine e) (max g0 (freshIndexAfter (RNM nm))))
+    spine :: NativeExpr -> CMS.State Int NativeExpr
+    spine e = case e of
+      NativeLetN i rhs body -> NativeLetN i <$> spine rhs <*> spine body
+      IfN t c a b -> IfN t c <$> spine a <*> spine b
+      ReturnN x -> do
+        (binds, x') <- order x
+        return (foldr (\(k, r) acc -> NativeLetN k r acc) (ReturnN x') binds)
+      _ -> do
+        (binds, e') <- order e
+        return (foldr (\(k, r) acc -> NativeLetN k r acc) e' binds)
+    order :: NativeExpr -> CMS.State Int ([(Int, NativeExpr)], NativeExpr)
+    order e@(AppExeN t exe args) =
+      let argReads = map callReads args
+          hoisted = [pos | (pos, Just vs) <- indexed argReads, any (\v -> any (maybe False (elem v)) (drop (pos + 1) argReads)) vs]
+       in if null hoisted
+            then return ([], e)
+            else do
+              lowered <- mapM (\(pos, a) -> if pos `elem` hoisted then bindArg a else return ([], a)) (indexed args)
+              return (concatMap fst lowered, AppExeN t exe (map snd lowered))
+    order e = return ([], e)
+    callReads (NativeArgManifold (NativeManifold _ _ (ManifoldFull rs) _)) =
+      Just [i | Arg i (Native tf) <- typeMofRs rs, not (rustIsCopy tf), not (isFunctionTypeF tf)]
+    callReads _ = Nothing
+    bindArg :: NativeArg -> CMS.State Int ([(Int, NativeExpr)], NativeArg)
+    bindArg (NativeArgManifold nm) | not (isFunctionTypeF (typeFof nm)) = do
+      k <- CMS.get
+      CMS.put (k + 1)
+      return ([(k, ManN nm)], NativeArgExpr (LetVarN (typeFof nm) k KeptRead))
+    bindArg a = return ([], a)
+
+-- | One more than every variable index under a node.
+freshIndexAfter :: RNode -> Int
+freshIndexAfter n0 = 1 + maximum (0 : concatMap here (nodes n0))
+  where
+    nodes n = n : concatMap nodes (rnodeChildren n)
+    here n = maybe [] (\(i, _, _) -> [i]) (rnodeLet n) <> case n of
+      RN (LetVarN _ i _) -> [i]
+      RN (BndVarN _ i _) -> [i]
+      RN (SerialLetN i _ _) -> [i]
+      RN (LoopN _ starts _) -> map fst starts
+      RS (SerialLetS i _ _) -> [i]
+      RS (LetVarS _ i) -> [i]
+      RS (BndVarS _ i) -> [i]
+      RS (LoopS _ ids _) -> ids
+      RLS (LoopSLet i _ _) -> [i]
+      RLN (LoopSLet i _ _) -> [i]
+      RNM (NativeManifold _ _ f _) -> formIds f
+      RSM (SerialManifold _ _ f _ _) -> formIds f
+      _ -> []
+    formIds f = [i | Arg i _ <- manifoldContext f] <> [i | Arg i _ <- manifoldBound f]
+
+-- | Field lets taken out of one arm of a `data` value together (OWN-5):
+-- the value, its type, the arm, and each let with the field it binds.
+data TakeGroup = TakeGroup
+  { tgSubject :: Int
+  , tgType :: TypeF
+  , tgArm :: Text
+  , tgMembers :: [(Int, Int)]
+  }
+
+-- | OWN-5: a run of consecutive lets binding fields of one arm of a
+-- generated `data` value that @owns@ allows, where nothing after the run
+-- names the value or a let referring into it and each field is kept or of
+-- a Copy or generated `data` type, is one take at its first let; a field a
+-- nested pattern reads gets a let of its own. Returns the segment and the
+-- runs, each under its first let.
+fieldTakeGroups :: (NativeManifold -> Int -> Bool) -> (TypeF -> Bool) -> (Int -> Set.Set Int) -> SerialManifold -> (SerialManifold, Map.Map Int TakeGroup)
+fieldTakeGroups owns generated keeps sm = (sm', groups)
+  where
+    natives = nativeManifoldsUnder (RSM sm)
+    sites = Map.fromListWith (+) [(m, 1 :: Int) | NativeManifold m _ _ _ <- natives]
+    single (NativeManifold m _ _ _) = Map.lookup m sites == Just 1
+    bindCounts = Map.fromListWith (+) [(i, 1 :: Int) | (i, _) <- nativeLets sm]
+    boundOnce i = Map.lookup i bindCounts == Just 1
+    g0 = freshIndexAfter (RSM sm)
+    bases = Map.fromList (zip [m | NativeManifold m _ _ _ <- natives] (scanl (+) g0 [length (nativeLetsUnder (RN e)) | NativeManifold _ _ _ e <- natives]))
+    sm' = mmap (defaultValue {mapNativeManifold = onNM}) sm
+    onNM nm@(NativeManifold m l f e)
+      | single nm = NativeManifold m l f (CMS.evalState (rewrite nm [] e) (Map.findWithDefault g0 m bases))
+      | otherwise = nm
+    groups = Map.fromList [(i, g) | nm@(NativeManifold _ _ _ e) <- nativeManifoldsUnder (RSM sm'), single nm, (i, g) <- found nm [] e]
+
+    rewrite :: NativeManifold -> [RNode] -> NativeExpr -> CMS.State Int NativeExpr
+    rewrite nm later e = case e of
+      NativeLetN i rhs body
+        | Just (t, _, arm, _, _) <- fieldRoot rhs
+        , owns nm t -> do
+            let (run, rest) = runOf t arm e
+            k0 <- CMS.get
+            let (normal, k1) = CMS.runState (normalize run) k0
+            case normal of
+              Just lets
+                | Just _ <- validRun (lets <> filter ((`notElem` map fst lets) . fst) (nativeLetsUnder (RNM nm))) later t arm lets rest -> do
+                    CMS.put k1
+                    rest' <- rewrite nm later rest
+                    return (foldr (\(j, r) acc -> NativeLetN j r acc) rest' lets)
+              _ -> NativeLetN i <$> rewrite nm (RN body : later) rhs <*> rewrite nm later body
+        | otherwise -> NativeLetN i <$> rewrite nm (RN body : later) rhs <*> rewrite nm later body
+      IfN t c a b -> IfN t c <$> rewrite nm later a <*> rewrite nm later b
+      _ -> return e
+
+    found :: NativeManifold -> [RNode] -> NativeExpr -> [(Int, TakeGroup)]
+    found nm later e = case e of
+      NativeLetN i rhs body
+        | Just (t, _, arm, _, _) <- fieldRoot rhs
+        , owns nm t
+        , (run, rest) <- runOf t arm e
+        , Just g <- validRun (nativeLetsUnder (RNM nm)) later t arm run rest ->
+            (i, g) : found nm later rest
+        | otherwise -> found nm (RN body : later) rhs <> found nm later body
+      IfN _ _ a b -> found nm later a <> found nm later b
+      _ -> []
+
+    -- every let of the run binds a field or reads one through a let of
+    -- the run, and the value is not read after it
+    validRun allLets later t arm lets rest = do
+      tf <- case [st | (_, rhs) <- lets, Just (t', st, _, _, _) <- [fieldRoot rhs], t' == t] of
+        (st : _) -> Just st
+        [] -> Nothing
+      let members = [(j, k, ft) | (j, rhs) <- lets, Just (t', arm', k, ft) <- [plainField rhs], t' == t, arm' == arm]
+          memberIds = [j | (j, _, _) <- members]
+          others = [rhs | (j, rhs) <- lets, j `notElem` memberIds]
+          after j = RN (foldr (\(i, r) acc -> NativeLetN i r acc) rest (drop 1 (dropWhile ((/= j) . fst) lets)))
+          refs = aliasesOf (Set.fromList memberIds) t allLets
+          cheap ft = rustIsCopy ft || generated ft
+          accepted (j, _, ft) = cheap ft || any (keptIn keeps j) (after j : later)
+      guard (generated tf)
+      guard (length members >= 2)
+      guard (length (nubOrd [k | (_, k, _) <- members]) == length members)
+      guard (all (\(j, _, _) -> boundOnce j || j >= g0) members)
+      guard (not (any (\o -> any (\x -> usesIndex x (RN o)) (Set.toList refs)) others))
+      guard (not (any (\n -> any (`usesIndex` n) (Set.toList refs)) (RN rest : later)))
+      guard (all accepted members)
+      return (TakeGroup t tf arm [(j, k) | (j, k, _) <- members])
+
+    runOf t arm (NativeLetN i rhs body)
+      | Just (t', _, arm', _, _) <- fieldRoot rhs
+      , t' == t
+      , arm' == arm =
+          let (r, rest) = runOf t arm body in ((i, rhs) : r, rest)
+    runOf _ _ e = ([], e)
+
+    normalize :: [(Int, NativeExpr)] -> CMS.State Int (Maybe [(Int, NativeExpr)])
+    normalize = go Map.empty
+      where
+        go :: Map.Map Int Int -> [(Int, NativeExpr)] -> CMS.State Int (Maybe [(Int, NativeExpr)])
+        go _ [] = return (Just [])
+        go seen ((i, rhs) : rest) = case plainField rhs of
+          Just (_, _, k, _)
+            | Map.member k seen -> return Nothing
+            | otherwise -> fmap ((i, rhs) :) <$> go (Map.insert k i seen) rest
+          Nothing -> case innerField rhs of
+            Nothing -> return Nothing
+            Just inner@(IntrinsicN ft _ _ [_, _, IntN _ k0]) -> do
+              let k = fromIntegral k0
+              case Map.lookup k seen of
+                Just f -> fmap ((i, replaceInner (LetVarN ft f KeptRead) rhs) :) <$> go seen rest
+                Nothing -> do
+                  f <- CMS.get
+                  CMS.put (f + 1)
+                  fmap ([(f, inner), (i, replaceInner (LetVarN ft f KeptRead) rhs)] <>) <$> go (Map.insert k f seen) rest
+            Just _ -> return Nothing
+
+    plainField e = case e of
+      IntrinsicN ft IntrCtorField _ [v, StrN _ arm, IntN _ k] | Just t <- varIndex v -> Just (t, arm, fromIntegral k :: Int, ft)
+      _ -> Nothing
+    innerField e = case e of
+      IntrinsicN _ IntrCtorField _ (x : _) | Just _ <- plainField x -> Just x
+      IntrinsicN _ IntrCtorField _ (x : _) -> innerField x
+      _ -> Nothing
+    replaceInner v e = case e of
+      IntrinsicN ft IntrCtorField s (x : xs)
+        | Just _ <- plainField x -> IntrinsicN ft IntrCtorField s (v : xs)
+        | otherwise -> IntrinsicN ft IntrCtorField s (replaceInner v x : xs)
+      _ -> e
+
+-- | The subject, its type, the arm, the field and the field's type of the
+-- innermost field read of a chain of constructor field reads.
+fieldRoot :: NativeExpr -> Maybe (Int, TypeF, Text, Int, TypeF)
+fieldRoot e = case e of
+  IntrinsicN ft IntrCtorField _ [v, StrN _ arm, IntN _ k] | Just t <- varIndex v -> Just (t, typeFof v, arm, fromIntegral k, ft)
+  IntrinsicN _ IntrCtorField _ (x : _) -> fieldRoot x
+  _ -> Nothing
+
+-- | The types of the values and fields a chain of field reads reads.
+fieldTypes :: NativeExpr -> [TypeF]
+fieldTypes e = case e of
+  IntrinsicN ft IntrCtorField _ (x : _) -> ft : typeFof x : fieldTypes x
+  _ -> []
+
+-- | A value and the lets, other than @skip@, that refer into it.
+aliasesOf :: Set.Set Int -> Int -> [(Int, NativeExpr)] -> Set.Set Int
+aliasesOf skip t lets = grow (Set.singleton t)
+  where
+    grow s =
+      let s' = s <> Set.fromList [i | (i, rhs) <- lets, Set.notMember i skip, Just j <- [baseOf rhs], Set.member j s]
+       in if Set.size s' == Set.size s then s else grow s'
+    baseOf x = case x of
+      LetVarN _ j _ -> Just j
+      BndVarN _ j _ -> Just j
+      IntrinsicN _ IntrCtorField _ (y : _) -> baseOf y
+      IntrinsicN _ IntrListElem _ (y : _) -> baseOf y
+      PatN _ (PatGet _ [] (NativeArgExpr y)) -> baseOf y
+      NativeLetN _ _ y -> baseOf y
+      _ -> Nothing
+
+-- | Every native let under a node, with its right-hand side.
+nativeLetsUnder :: RNode -> [(Int, NativeExpr)]
+nativeLetsUnder n = here <> concatMap nativeLetsUnder (rnodeChildren n)
+  where
+    here = case rnodeLet n of
+      Just (i, RN rhs, _) -> [(i, rhs)]
+      _ -> []
+
+-- | The bodies of the @do@ blocks under a node.
+doBlocksUnder :: RNode -> [NativeExpr]
+doBlocksUnder n = here <> concatMap doBlocksUnder (rnodeChildren n)
+  where
+    here = case n of
+      RN (DoBlockN _ b) -> [b]
+      _ -> []
+
+prepareOrdered :: SerialManifold -> RustM SerialManifold
+prepareOrdered m0x@(SerialManifold root _ form00 _ _) = do
   pp <- CMS.gets rsPool
   cscope <- CMS.gets rsCScope
   noMoves <- CMS.gets rsNoMoves
-  let byValue = Map.fromListWith Set.intersection [(m, byValueIndices pp m form) | NativeManifold m _ form _ <- nativeManifoldsUnder (RSM m00), Map.member m (ppByValue pp)]
-      params = Set.unions (Map.elems byValue) `Set.difference` loopSlots (RSM m00)
+  userArms <- CMS.gets rsUserArms
+  let byValue = Map.fromListWith Set.intersection [(m, byValueIndices pp m form) | NativeManifold m _ form _ <- nativeManifoldsUnder (RSM m0x), Map.member m (ppByValue pp)]
+      params = Set.unions (Map.elems byValue) `Set.difference` loopSlots (RSM m0x)
       seeds m = Set.toList (Map.findWithDefault Set.empty m byValue `Set.intersection` params)
-      m0' = paramReads seeds m00
       caps = rustCaps cscope
-      localRefs plan form = mpBorrowed plan `Set.difference` Set.fromList [i | Arg i _ <- typeMofForm form]
+      variants = Set.fromList [t | (_, rhs) <- nativeLets m0x, t@(VariantF {}) <- fieldTypes rhs]
+  generated <- Set.fromList . map fst . filter snd <$> mapM (\t -> do ty <- rustTypeOf t; return (t, isNothing (Map.lookup (render ty) userArms))) (Set.toList variants)
+  let owns nm@(NativeManifold m _ _ e) t =
+        Set.notMember t (mpBorrowed (planNativeManifold caps pp nm))
+          && (t `elem` seeds m || t `elem` map fst (nativeLetsUnder (RN e)))
+          && Set.notMember t (loopSlots (RSM m0x))
+          && not (any (\b -> Set.member t (namedIn (RN b))) (doBlocksUnder (RN e)))
+      keeps c = Map.findWithDefault Set.empty c (ppByValue pp) <> Map.findWithDefault Set.empty c (ppTwoForm pp)
+      (m00, groups)
+        | noMoves = (m0x, Map.empty)
+        | otherwise = fieldTakeGroups owns (`Set.member` generated) keeps m0x
+      members = Set.fromList [i | g <- Map.elems groups, (i, _) <- tgMembers g]
+  CMS.modify (\st -> st {rsTakeGroups = groups, rsTakeMembers = members})
+  let m0' = paramReads seeds m00
+      localRefs mp form = mpBorrowed mp `Set.difference` Set.fromList [i | Arg i _ <- typeMofForm form]
       refs = Set.unions
         ( localRefs (planSerialManifold caps pp m00) form00
             : [localRefs (planNativeManifold caps pp nm) form | nm@(NativeManifold _ _ form _) <- nativeManifoldsUnder (RSM m00)]
         )
+        `Set.difference` members
       modes = [(i, rhs, rustLetMode i rhs) | (i, rhs) <- nativeLets m00]
       rustLetMode i rhs
         | Set.member i refs = LetBorrow
@@ -3764,7 +4041,32 @@ isFunctionTypeF _ = False
 -- read does ('rustTakeField'). Every other projection borrows the subject and
 -- clones the field.
 rustConsumeLetRhs :: Int -> NativeExpr -> PoolDocs -> RustM PoolDocs
-rustConsumeLetRhs i rhs@(IntrinsicN _ IntrCtorField _ [LetVarN t@(VariantF {}) subj _, StrN _ n, IntN _ k]) d = do
+rustConsumeLetRhs i rhs d0 = do
+  groups <- CMS.gets rsTakeGroups
+  members <- CMS.gets rsTakeMembers
+  case Map.lookup i groups of
+    Just g -> do
+      ty <- rustTypeOf (tgType g)
+      let subj = (nvarNamer rustLocals) (tgSubject g)
+          fields = [k | (_, k) <- tgMembers g]
+          lv k = "__morloc_lv." <> pretty k
+          take' =
+            "let" <+> tupled [takenName j | (j, _) <- tgMembers g] <+> "="
+              <+> "{ let __morloc_ls = ::std::mem::ManuallyDrop::new(" <> subj <> "); match &*__morloc_ls {"
+              <+> RP.typeHead ty <> "::" <> pretty (tgArm g) <> "(__morloc_lb)"
+              <+> "=> ::rustmorloc::MlcTake::take_with(unsafe { ::std::ptr::read(__morloc_lb) }, |__morloc_lv|" <+> tupled (map lv fields)
+              <> ", |__morloc_lv|" <+> tupled ["::rustmorloc::mlc_copy!(" <> lv k <> ")" | k <- fields] <> "),"
+              <+> "#[allow(unreachable_patterns)] _ => unreachable!()"
+              <+> "} };"
+      return d0 {poolPriorLines = poolPriorLines d0 <> [take'], poolExpr = takenName i}
+    Nothing
+      | Set.member i members -> return d0 {poolExpr = takenName i}
+      | otherwise -> rustConsumeLetRhsOne i rhs d0
+  where
+    takenName j = "__morloc_tk" <> pretty j
+
+rustConsumeLetRhsOne :: Int -> NativeExpr -> PoolDocs -> RustM PoolDocs
+rustConsumeLetRhsOne i rhs@(IntrinsicN _ IntrCtorField _ [LetVarN t@(VariantF {}) subj _, StrN _ n, IntN _ k]) d = do
   pp <- CMS.gets rsPool
   root <- CMS.gets rsCurrentRoot
   borrowed <- asks oeCurrent
@@ -3779,7 +4081,7 @@ rustConsumeLetRhs i rhs@(IntrinsicN _ IntrCtorField _ [LetVarN t@(VariantF {}) s
             Nothing -> rustTakeField ty n (fromIntegral k) subj'
         }
     else return d
-rustConsumeLetRhs _ _ d = return d
+rustConsumeLetRhsOne _ _ d = return d
 
 -- | A loop local 'loopBorrowLocals' found is a reference into what the loop
 -- borrowed (OWN-6), so it joins the manifold's borrowed set; its expression
@@ -3788,7 +4090,8 @@ rustLoopBorrow :: Int -> NativeExpr -> RustM (Maybe MDoc)
 rustLoopBorrow i e = do
   borrowed <- asks oeCurrent
   ownedRoot <- Map.lookup i <$> asks oeOwnedParts
-  let var j = (if ownedRoot == Just j then "&" else "") <> (nvarNamer rustLocals) j
+  -- a local that is not itself a reference is lent to the part read from it
+  let var j = (if ownedRoot == Just j || not (Set.member j borrowed) then "&" else "") <> (nvarNamer rustLocals) j
   if not (Set.member i borrowed)
     then return Nothing
     else case borrowPartOf (const True) (const True) e of

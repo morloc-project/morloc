@@ -25,7 +25,7 @@
 --- twiceRead ---
 [200,0]
 --- twiceKeep ---
-[202,200]
+[202,100]
 --- twoSteps ---
 [201,0]
 --- partsBorrowed ---
@@ -94,3 +94,13 @@
 [202,0]
 --- letAlias ---
 [1100,0]
+--- fieldsKept ---
+[200,0]
+--- fieldsNested ---
+[301,0]
+--- stagedLevels ---
+[301,200]
+--- stagedPap ---
+[301,200]
+--- mapUnpack ---
+[300,600]

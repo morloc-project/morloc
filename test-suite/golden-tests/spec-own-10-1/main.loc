@@ -1,0 +1,56 @@
+-- Spec OWN-10: a let bound to a conditional is read in place (OWN-6): a record built
+-- in a conditional and read one field at a time is never built, and a
+-- small reader of a conditional's value is copied into each arm. These
+-- exports pin that the rewrites keep meaning:
+--
+--   fnFields    a record of functions chosen by a conditional, a field applied
+--   pyLet       a C++ conditional whose value a Python function reads
+--   shadowed    a function applied to its own result, binding one name twice
+--   nested      a nested conditional between records, two fields read
+--   unread      a field nothing reads, computed by a call, both arms
+module main (fnFields, pyLet, shadowed, nested, unread)
+
+import root
+import root-cpp
+import root-py
+
+source Py from "helpers.py" ("py_len")
+py_len :: [Int] -> Int
+
+record Ops where
+  f :: Int -> Int
+  g :: Int -> Int
+
+record P where
+  a :: [Int]
+  b :: Int
+
+opsFor :: Int -> Ops
+opsFor j = ? j > 0 = {f = \x -> x + 1, g = \x -> x * 2} : {f = \x -> x - 1, g = \x -> x * 3}
+
+fnFields :: Int -> Int
+fnFields j = (let o = opsFor j in (.f o) 10 + (.g o) 10)
+
+pick :: Int -> [Int] -> [Int]
+pick j xs = ? j > 0 = xs : [0]
+
+pyLet :: Int -> Int
+pyLet j = (let xs = [1, 2, j] in let ys = pick j xs in py_len ys + length xs)
+
+step :: [Int] -> [Int]
+step x = (let t = map (\y -> y + 1) x in map (\y -> y + sum t) t)
+
+shadowed :: Int -> [Int]
+shadowed n = step (step [n, n])
+
+pNested :: Int -> P
+pNested j = ? j > 1 = {a = [1, 2, 3], b = 4} : ? j > 0 = {a = [j], b = 5} : {a = [], b = 6}
+
+nested :: Int -> Int
+nested j = (let p = pNested j in length (.a p) + .b p)
+
+pUnread :: Int -> P
+pUnread j = ? j > 0 = {a = [j, j], b = length [j]} : {a = [], b = length [1, 2]}
+
+unread :: Int -> Int
+unread j = (let p = pUnread j in length (.a p))
