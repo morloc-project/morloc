@@ -1410,6 +1410,11 @@ fn attach_process_local_slot(
 /// cryptographic randomness; the goal is just to spread allocations
 /// across the slot space.
 fn slot_probe_seed() -> usize {
+    // SLOT-10
+    #[cfg(test)]
+    if let Some(i) = PROBE_SLOT.with(|p| p.take()) {
+        return i;
+    }
     use std::sync::atomic::{AtomicUsize, Ordering};
     static SEED: AtomicUsize = AtomicUsize::new(0);
     let prev = SEED.fetch_add(1, Ordering::Relaxed);
@@ -3682,6 +3687,7 @@ thread_local! {
     pub(crate) static FAIL_HAND_ON_AT: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
     pub(crate) static FAIL_COMMIT_PUSH_AT: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
     pub(crate) static FORCE_NO_ROOM: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+    pub(crate) static PROBE_SLOT: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
     pub(crate) static EXIT_BEFORE_INSTALL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
@@ -4788,6 +4794,97 @@ pub fn write_place_run(k: usize, reached: *const u8) -> Result<Option<(*mut u8, 
         t.ints = int.then_some((slots as *const u8, n));
         Ok((slots, n))
     })
+}
+
+// SLOT-36
+pub(crate) struct LeafShape {
+    pub width: usize,
+    pub elem: usize,
+    pub head: usize,
+    pub slack: usize,
+    pub text: bool,
+}
+
+// SLOT-36
+pub(crate) fn leaf_shape(s: &Schema) -> Option<LeafShape> {
+    let w = std::mem::size_of::<shm_types_crate::Array>();
+    if s.width != w {
+        return None;
+    }
+    match s.serial_type {
+        SerialType::String => Some(LeafShape { width: w, elem: 1, head: 0, slack: 0, text: true }),
+        SerialType::Array => {
+            let e = s.parameters.first()?;
+            if !e.is_primitive_numeric() || !s.array_data_is_flat() {
+                return None;
+            }
+            let a = e.array_data_alignment();
+            Some(LeafShape { width: w, elem: e.width, head: shm_types_crate::align_up(w, a) - w, slack: a - 1, text: false })
+        }
+        SerialType::Nil | SerialType::Bool | SerialType::Sint8 | SerialType::Sint16 | SerialType::Sint32 | SerialType::Sint64
+        | SerialType::Uint8 | SerialType::Uint16 | SerialType::Uint32 | SerialType::Uint64 | SerialType::Float32 | SerialType::Float64
+        | SerialType::Tuple | SerialType::Map | SerialType::Optional | SerialType::Int | SerialType::Table | SerialType::Recur
+        | SerialType::IFile | SerialType::OStream | SerialType::IStream | SerialType::Variant | SerialType::Enum => None,
+    }
+}
+
+// SLOT-36
+pub fn write_place_bytes(
+    src: *const u8,
+    n: usize,
+    flags: u32,
+    reached: *const u8,
+    bad: &mut Option<usize>,
+) -> Result<Option<*const u8>, MorlocError> {
+    with_txn(reached, |t| place_bytes(t, src, n, flags, bad))
+}
+
+fn place_bytes(t: &mut Txn, src: *const u8, n: usize, flags: u32, bad: &mut Option<usize>) -> Result<*const u8, MorlocError> {
+    let schema = &t.local.elem_schema;
+    let named = || morloc_runtime_types::schema::schema_to_string(schema);
+    let shape = leaf_shape(schema)
+        .ok_or_else(|| MorlocError::Other(format!("@write: an element of schema '{}' is not a leaf", named())))?;
+    let valid_text = flags & morloc_runtime_types::MLC_PLACE_VALID_TEXT != 0;
+    if flags & !morloc_runtime_types::MLC_PLACE_VALID_TEXT != 0 {
+        return Err(MorlocError::Other(format!("@write: unknown leaf flags {flags:#x} for schema '{}'", named())));
+    }
+    if valid_text && !shape.text {
+        return Err(MorlocError::Other(format!("@write: an element of schema '{}' is not text", named())));
+    }
+    if src.is_null() && n > 0 {
+        return Err(MorlocError::Other(format!("@write: a leaf of schema '{}' has no bytes", named())));
+    }
+    if let Some(&len) = schema.offsets.first().filter(|_| schema.serial_type == SerialType::Array) {
+        if n != len {
+            return Err(MorlocError::Other(format!("@write: a leaf of schema '{}' has length {n}, not {len}", named())));
+        }
+    }
+    let too_big = || MorlocError::Other(format!("@write: a leaf of schema '{}' with {n} elements is too large", named()));
+    let body = n.checked_mul(shape.elem).ok_or_else(too_big)?;
+    let raw = if n == 0 { 0 } else { body.checked_add(shape.slack).ok_or_else(too_big)? };
+    let flat_len = raw.checked_add(shape.width).ok_or_else(too_big)?;
+    let check = shape.text && (!valid_text || crate::packet::code_checks()) && !morloc_runtime_types::utf8::skip_utf8_check();
+    let (g, local, batch, buf_size) = (&t.guard, &mut t.local, &mut t.batch, t.buf_size);
+    let level = batch.level;
+    let (base, slot_at, data_at, var) = match place_one(g, local, batch, flat_len, buf_size)? {
+        Placement::Buffer { slot_at, data_at, var, .. } => (crate::shm::rel2abs(g.slot().write_buffer.get())?, slot_at, data_at, var),
+        Placement::Oversize { len } => (batch.hold_oversize(len)?, 16, 16 + shape.width, len - 16 - shape.width),
+    };
+    let body_at = data_at + if n == 0 { 0 } else { shape.head };
+    let data = if n == 0 { 0 } else { body_at as RelPtr };
+    // SAFETY: SLOT-36: the block holds the slot at `slot_at` and `var` bytes at `data_at`, and `body_at + body <= data_at + var`.
+    unsafe {
+        std::ptr::write_unaligned(base.add(slot_at) as *mut shm_types_crate::Array, shm_types_crate::Array { size: n, data });
+        std::ptr::write_bytes(base.add(data_at), 0, body_at - data_at);
+        if let Err(i) = crate::leaf_copy::copy_leaf(base.add(body_at), src, body, check, level == 0) {
+            *bad = Some(i);
+            return Err(MorlocError::Serialization(format!("a Str that is not valid UTF-8 (byte {i} of {n})")));
+        }
+        std::ptr::write_bytes(base.add(body_at + body), 0, data_at + var - body_at - body);
+        let end = base.add(data_at + var);
+        t.expect = Some((end, end));
+        Ok(end as *const u8)
+    }
 }
 
 // SLOT-37

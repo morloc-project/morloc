@@ -10,3 +10,8 @@ i8_batch <- function(n, bad) {
   if (bad >= 0 && bad < n) xs[[bad + 1L]] <- 300L
   xs
 }
+raw_of <- function(b, n, bad) {
+  xs <- lapply(seq_len(n) - 1L, function(i) charToRaw(paste0(b, "-", i, strrep("x", 40))))
+  if (bad >= 0 && bad < n) xs[[bad + 1L]] <- as.raw(c(0x61, 0xff, 0x62))
+  xs
+}

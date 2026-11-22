@@ -36,3 +36,18 @@ timing (from the 2026-11-12 audit of the output-path work).
   process-wide table in pymorloc.c (now declared through a typedef and
   registered). Same for `static union {` and any declaration whose name
   falls on a later line. Gap in the registry rule of model/runtime/state.md.
+- **SLOT-32's daemon claim is untested.** [read, 2026-11-22] SLOT-32 says
+  a later stream, in a daemon another client's call, never receives an
+  earlier stream's bytes; a_later_stream_on_a_slot_holds_no_byte_of_an_earlier_one
+  checks it for streams of one process on one slot, not for two clients'
+  calls through one daemon.
+- **The Rust binding writes no leaf through the runtime.** [read,
+  2026-11-22] SLOT-36/SLOT-37: rustmorloc still writes a `String` or a
+  `Vec` of numbers by its walk over a zeroed room, not with
+  `mlc_write_place_bytes`; correct, but it keeps the zero and copy passes
+  the leaf path removes, and no Rust leaf test exists.
+- **Large node rooms are zeroed with cached stores.** [read, 2026-11-22]
+  The non-temporal zero for node rooms of 8 MiB or more (Z2 in
+  /work/plans/mosm-perf/01-output-path.md) is not done; it waits for a bench
+  of large node elements that shows a gain.
+

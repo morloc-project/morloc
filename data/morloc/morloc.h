@@ -1906,6 +1906,15 @@ int32_t mlc_write_place(uint64_t size, const uint8_t* reached, mlc_room_t* room,
 int32_t mlc_write_place_run(uint64_t k, const uint8_t* reached, uint8_t** slots, uint64_t* placed, ERRMSG);
 int32_t mlc_write_wait(const uint8_t* reached, ERRMSG);
 int32_t mlc_write_commit(const uint8_t* reached, ERRMSG);
+// SLOT-36, SLOT-37: place one leaf element (a Str, or an array of
+// fixed-width numbers) from the n elements at `src`. `*end` is where the
+// room ends: pass it as `reached`. MLC_PLACE_VALID_TEXT says a Str is known
+// UTF-8. MLC_WRITE_NOT_TEXT, with `*bad` the offset of the first bad byte,
+// means the batch was aborted.
+#define MLC_PLACE_VALID_TEXT 2
+#define MLC_WRITE_NOT_TEXT 5
+int32_t mlc_write_place_bytes(const uint8_t* src, uint64_t n, uint32_t flags, const uint8_t* reached,
+                              const uint8_t** end, int64_t* bad, ERRMSG);
 void mlc_write_abort(void);
 bool mlc_write_open(void);
 int64_t mlc_append(const char* schema_str, const char* path, ERRMSG);

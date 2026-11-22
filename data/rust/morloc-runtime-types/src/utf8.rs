@@ -11,6 +11,19 @@ pub fn first_invalid(bytes: &[u8]) -> Option<usize> {
     simdutf8::compat::from_utf8(bytes).err().map(|e| e.valid_up_to())
 }
 
+/// `Ok` when all of `bytes` is valid UTF-8; otherwise the offset of the
+/// first byte that is not, and whether the input merely ends inside a
+/// sequence (which more bytes could complete).
+pub fn check_part(bytes: &[u8]) -> Result<(), (usize, bool)> {
+    if simdutf8::basic::from_utf8(bytes).is_ok() {
+        return Ok(());
+    }
+    match simdutf8::compat::from_utf8(bytes) {
+        Ok(_) => Ok(()),
+        Err(e) => Err((e.valid_up_to(), e.error_len().is_none())),
+    }
+}
+
 static SKIP: AtomicU8 = AtomicU8::new(0);
 
 /// Whether the check is off: by the user (`MORLOC_SKIP_UTF8_CHECK`) or by

@@ -5,18 +5,23 @@
 -- caller as a Try. A Real given a Python int is written as the nearest
 -- double, and one too large for a double fails its batch. A run of
 -- fixed-width elements that fails after earlier sub-packets of it were
--- placed is absent too.
-module main (run, tally, reals, readReals, i8s, countI8s)
+-- placed is absent too. A batch whose element is Python bytes that are not
+-- UTF-8, given for a Str, is absent the same way, and a batch of I32 arrays
+-- holding a two-dimensional array or a numpy scalar fails as the walk
+-- fails it.
+module main (run, tally, reals, readReals, i8s, countI8s, bytesRun, arrays, arraysWhy, readArrays)
 
 import root
 import root-py
 
-source Py from "batch.py" ("batch_of" as batchOf, "count_tagged" as countTagged, "reals_from_ints" as realsFromInts, "i8_batch" as i8Batch)
+source Py from "batch.py" ("batch_of" as batchOf, "count_tagged" as countTagged, "reals_from_ints" as realsFromInts, "i8_batch" as i8Batch, "bytes_of" as bytesOf, "arrays_of" as arraysOf)
 
 batchOf :: Int -> Int -> Int -> [Str]
 countTagged :: Int -> [Str] -> Int
 realsFromInts :: Bool -> [Real]
 i8Batch :: Int -> Int -> [I8]
+bytesOf :: Int -> Int -> Int -> [Str]
+arraysOf :: Str -> [[I32]]
 
 --' Write five batches, two of which fail; which succeeded
 run :: Str -> <IO> [Bool]
@@ -65,3 +70,42 @@ i8s path = do
 --' The number of I8s in a written file
 countI8s :: [I8] -> Int
 countI8s xs = length xs
+
+--' Write three batches given as bytes, the second with bytes that are not UTF-8
+bytesRun :: Str -> <IO> [Str]
+bytesRun path = do
+  Ok o <- @open path :: <IO> (Try Str (OStream Str))
+  a <- @write 0 o (bytesOf 1 700 (-1))
+  b <- @write 0 o (bytesOf 2 700 650)
+  c <- @write 0 o (bytesOf 3 30 (-1))
+  @close o
+  [why a, why b, why c]
+
+why :: Try Str () -> Str
+why r = match r
+  | (Ok _) = "ok"
+  | (Err e) = e
+
+--' Write I32 array batches, two holding what is not a one-dimensional array; why each failed
+arraysWhy :: Str -> <IO> [Str]
+arraysWhy path = do
+  Ok o <- @open path :: <IO> (Try Str (OStream [I32]))
+  a <- @write 0 o (arraysOf "good")
+  b <- @write 0 o (arraysOf "2d")
+  c <- @write 0 o (arraysOf "scalar")
+  @close o
+  [why a, why b, why c]
+
+--' Write I32 array batches, two holding what is not a one-dimensional array
+arrays :: Str -> <IO> [Bool]
+arrays path = do
+  Ok o <- @open path :: <IO> (Try Str (OStream [I32]))
+  a <- @write 0 o (arraysOf "good")
+  b <- @write 0 o (arraysOf "2d")
+  c <- @write 0 o (arraysOf "scalar")
+  @close o
+  [ok a, ok b, ok c]
+
+--' The arrays in a written file
+readArrays :: [[I32]] -> [[I32]]
+readArrays xs = xs

@@ -5061,6 +5061,97 @@ static ssize_t py_size_element(py_walk_t* w, const Schema* elem, PyObject* obj) 
     }
 }
 
+// Whether a buffer's item format holds the wire number `t` byte for byte:
+// native or little-endian order, the same kind and width.
+static int py_format_holds(const char* format, Py_ssize_t itemsize, morloc_serial_type t) {
+    const char* f = format == NULL ? "B" : format;
+    if (*f == '@' || *f == '=' || *f == '<') f++;
+    if (f[0] == '\0' || f[1] != '\0') return 0;
+    const char c = f[0];
+    const int is_signed = c == 'b' || c == 'h' || c == 'i' || c == 'l' || c == 'q';
+    const int is_unsigned = c == 'B' || c == 'H' || c == 'I' || c == 'L' || c == 'Q';
+    switch (t) {
+        case MORLOC_SINT8: return is_signed && itemsize == 1;
+        case MORLOC_SINT16: return is_signed && itemsize == 2;
+        case MORLOC_SINT32: return is_signed && itemsize == 4;
+        case MORLOC_SINT64: return is_signed && itemsize == 8;
+        case MORLOC_UINT8: return is_unsigned && itemsize == 1;
+        case MORLOC_UINT16: return is_unsigned && itemsize == 2;
+        case MORLOC_UINT32: return is_unsigned && itemsize == 4;
+        case MORLOC_UINT64: return is_unsigned && itemsize == 8;
+        case MORLOC_FLOAT32: return c == 'f' && itemsize == 4;
+        case MORLOC_FLOAT64: return c == 'd' && itemsize == 8;
+        default: return 0;
+    }
+}
+
+// SLOT-36: write `x` as a leaf the runtime writes whole when it is one: a
+// str (known UTF-8) or a bytes or bytearray for a Str, or a bytes,
+// bytearray or one-dimensional C-contiguous ndarray whose items are exactly
+// the element's wire numbers, with the GIL held (SLOT-37). 1 when written,
+// 0 when `x` is not such a leaf, 2 when the placement would wait, -1 with a
+// Python error set (a Str that is not text has aborted the batch).
+static int py_place_leaf(const Schema* elem, PyObject* x, const uint8_t** reached) {
+    const uint8_t* src = NULL;
+    Py_ssize_t n = 0;
+    uint32_t flags = 0;
+    Py_buffer view;
+    int have_view = 0;
+    if (elem->type == MORLOC_STRING) {
+        if (PyUnicode_Check(x)) {
+            src = (const uint8_t*)PyUnicode_AsUTF8AndSize(x, &n);
+            if (src == NULL) {
+                // A lone surrogate: the walk reports it.
+                PyErr_Clear();
+                return 0;
+            }
+            flags = MLC_PLACE_VALID_TEXT;
+        } else if (PyBytes_Check(x) || PyByteArray_Check(x)) {
+            if (PyObject_GetBuffer(x, &view, PyBUF_SIMPLE) != 0) return -1;
+            have_view = 1;
+            src = (const uint8_t*)view.buf;
+            n = view.len;
+        } else {
+            return 0;
+        }
+    } else if (elem->type == MORLOC_ARRAY) {
+        const Schema* p = elem->parameters[0];
+        // Only what the walk takes as a list (py_check_list_value): a bytes,
+        // a bytearray, or a one-dimensional ndarray; anything else the walk
+        // takes or refuses.
+        int nd = PyBytes_Check(x) || PyByteArray_Check(x) ? 1 : py_is_ndarray(x);
+        if (nd < 0) return -1;
+        if (nd != 1) return 0;
+        if (PyObject_GetBuffer(x, &view, PyBUF_C_CONTIGUOUS | PyBUF_FORMAT) != 0) {
+            PyErr_Clear();
+            return 0;
+        }
+        have_view = 1;
+        if (view.ndim != 1 || view.itemsize != (Py_ssize_t)p->width || !py_format_holds(view.format, view.itemsize, p->type)) {
+            PyBuffer_Release(&view);
+            return 0;
+        }
+        src = (const uint8_t*)view.buf;
+        n = view.len / view.itemsize;
+    } else {
+        return 0;
+    }
+    const uint8_t* end = NULL;
+    int64_t bad = -1;
+    char* err = NULL;
+    int32_t rc = mlc_write_place_bytes(src, (uint64_t)n, flags, *reached, &end, &bad, &err);
+    if (have_view) PyBuffer_Release(&view);
+    if (rc == MLC_WRITE_WOULD_BLOCK) return 2;
+    if (rc == MLC_WRITE_NOT_TEXT) {
+        free(err);
+        PyErr_Format(PyExc_RuntimeError, "Python produced a Str that is not valid UTF-8 (byte %lld of %zd)", (long long)bad, n);
+        return -1;
+    }
+    if (py_stream_result(rc, err) != 0) return -1;
+    *reached = end;
+    return 1;
+}
+
 // SLOT-36, SLOT-37: write a list batch in place in an output file's
 // buffer. 1 when written, 0 when the stream takes a voidstar copy, -1 with
 // a Python error set.
@@ -5136,6 +5227,19 @@ static int py_write_in_place(const Schema* schema, long long level, PyObject* li
         if (i >= PyList_GET_SIZE(list)) { py_vanished(); goto error; }
         x = PyList_GET_ITEM(list, i);
         Py_INCREF(x);
+        int leaf = py_place_leaf(elem, x, &reached);
+        if (leaf < 0) goto error;
+        if (leaf == 2) {
+            Py_CLEAR(x);
+            if (py_snapshot(&list, &snapshot) != 0 || py_write_wait(reached) != 0) goto error;
+            stretch_end = i;
+            continue;
+        }
+        if (leaf == 1) {
+            Py_CLEAR(x);
+            i++;
+            continue;
+        }
         ssize_t size = py_size_element(&w, elem, x);
         if (size < 0) goto error;
         mlc_room_t room;

@@ -972,12 +972,19 @@ impl Writer {
             return;
         }
         // SLOT-32: at most one spare, and only within the depth.
-        if item.kind == ENTRY_BUFFER
-            && self.q.spares_held() == 0
-            && self.q.outstanding() <= self.q.depth()
-            && self.q.give_spare(item.block)
-        {
-            return;
+        if item.kind == ENTRY_BUFFER && self.q.spares_held() == 0 && self.q.outstanding() <= self.q.depth() {
+            // SLOT-32: under MORLOC_SHM_POISON a spare is released bytes, filled whole.
+            if crate::shm::poison_on_free() {
+                if let Ok(abs) = crate::shm::rel2abs(item.block) {
+                    // SAFETY: SLOT-32: the custodian owns the written block, `shm_block_size` bytes long.
+                    if let Some(n) = unsafe { crate::shm::shm_block_size(abs) } {
+                        unsafe { std::ptr::write_bytes(abs, crate::shm::POISON_BYTE, n) };
+                    }
+                }
+            }
+            if self.q.give_spare(item.block) {
+                return;
+            }
         }
         if let Ok(abs) = crate::shm::rel2abs(item.block) {
             crate::shm::free_uncounted(abs);

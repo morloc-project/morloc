@@ -1493,6 +1493,41 @@ pub(crate) unsafe fn mlc_write_place(size: u64, reached: *const u8, room: *mut c
     }
 }
 
+/// SLOT-36: place and write one leaf element (`mlc_write_place_bytes` in
+/// morloc.h).
+pub(crate) unsafe fn mlc_write_place_bytes(
+    src: *const u8,
+    n: u64,
+    flags: u32,
+    reached: *const u8,
+    end: *mut *const u8,
+    bad: *mut i64,
+    errmsg: *mut *mut c_char,
+) -> i32 {
+    clear_errmsg(errmsg);
+    let mut first_bad = None;
+    let r = usize::try_from(n)
+        .map_err(|_| MorlocError::Other("@write: a leaf is too large".into()))
+        .and_then(|n| crate::stream::write_place_bytes(src, n, flags, reached, &mut first_bad));
+    match r {
+        Ok(None) => morloc_runtime_types::MLC_WRITE_WOULD_BLOCK,
+        Ok(Some(e)) => {
+            // SAFETY: SLOT-36: the caller passes room for the end pointer.
+            unsafe { *end = e };
+            0
+        }
+        Err(e) => match first_bad {
+            Some(i) => {
+                // SAFETY: SLOT-36: the caller passes room for the offset.
+                unsafe { *bad = i as i64 };
+                set_errmsg(errmsg, &e);
+                morloc_runtime_types::MLC_WRITE_NOT_TEXT
+            }
+            None => write_result(Err(e), errmsg),
+        },
+    }
+}
+
 /// SLOT-36: the slots of up to `k` fixed-width or inline `Int` elements.
 pub(crate) unsafe fn mlc_write_place_run(k: u64, reached: *const u8, slots: *mut *mut u8, placed: *mut u64, errmsg: *mut *mut c_char) -> i32 {
     clear_errmsg(errmsg);
@@ -2776,6 +2811,11 @@ mod c_abi {
     #[no_mangle]
     pub unsafe extern "C" fn mlc_write_begin(level: i64, handle: i64, flags: i32, errmsg: *mut *mut c_char) -> i32 {
         super::mlc_write_begin(level, handle, flags, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn mlc_write_place_bytes(src: *const u8, n: u64, flags: u32, reached: *const u8, end: *mut *const u8, bad: *mut i64, errmsg: *mut *mut c_char) -> i32 {
+        super::mlc_write_place_bytes(src, n, flags, reached, end, bad, errmsg)
     }
 
     #[no_mangle]

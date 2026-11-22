@@ -25,6 +25,8 @@ mod layout_bench;
 #[cfg(test)]
 mod layout_props;
 #[cfg(test)]
+mod leaf_props;
+#[cfg(test)]
 mod pins;
 pub mod packet;
 pub mod shm;
@@ -66,6 +68,7 @@ mod c_abi_prototypes;
 pub mod eval_arena;
 pub mod eval_ffi;
 pub mod stream;
+mod leaf_copy;
 mod stream_walk;
 mod stream_format;
 mod write_behind;

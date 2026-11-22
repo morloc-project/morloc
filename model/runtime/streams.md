@@ -374,7 +374,7 @@ A failure that ends the process (SHM-17) is outside this item.
 
 ### SLOT-36 A batch is encoded in place and committed whole
 Status: implemented
-Checked by: an_in_place_batch_writes_the_bytes_the_copy_path_writes, in_place_runs_read_as_zero_and_mix_with_single_rooms, an_in_place_batch_that_fails_is_absent_or_fails_its_stream, a_thread_encoding_in_place_does_no_other_stream_operation, an_arena_rewound_inside_an_in_place_batch_keeps_its_blocks, an_in_place_element_that_ends_outside_its_room_poisons_the_stream, two_threads_writing_in_place_leave_their_batches_whole, an_in_place_batch_does_not_survive_a_fork_or_its_thread, an_arena_ended_inside_an_in_place_batch_discards_its_streams_after, a_run_of_elements_wider_than_a_sub_packet_is_placed_one_by_one, a_batch_left_open_at_the_end_of_its_call_is_aborted
+Checked by: an_in_place_batch_writes_the_bytes_the_copy_path_writes, in_place_runs_read_as_zero_and_mix_with_single_rooms, an_in_place_batch_that_fails_is_absent_or_fails_its_stream, a_thread_encoding_in_place_does_no_other_stream_operation, an_arena_rewound_inside_an_in_place_batch_keeps_its_blocks, an_in_place_element_that_ends_outside_its_room_poisons_the_stream, two_threads_writing_in_place_leave_their_batches_whole, an_in_place_batch_does_not_survive_a_fork_or_its_thread, an_arena_ended_inside_an_in_place_batch_discards_its_streams_after, a_run_of_elements_wider_than_a_sub_packet_is_placed_one_by_one, a_batch_left_open_at_the_end_of_its_call_is_aborted, a_leaf_batch_writes_the_bytes_the_copy_path_writes, leaf_rooms_on_poisoned_spares_write_the_bytes_the_copy_path_writes, a_leaf_str_that_is_not_text_aborts_its_batch, a_leaf_write_refuses_what_is_not_a_leaf_or_not_its_flags
 
 A language binding may write a `@write` batch to an output stream (a file,
 or an unstaged standard output or error) by
@@ -384,9 +384,17 @@ commits or aborts. Channels, staged streams, and element types that are
 tables or hold stream fields are refused at begin and written as SLOT-35
 says, from the binding's value. An element is placed with exactly its
 portable size and is cut into sub-packets as the copy path cuts it, so the
-file's bytes are those the runtime's own encoding writes. Its room is
-zeroed when it is placed, so a field the encoder leaves alone reads as
-zero. The binding reports where its encoding ended at its next call; an
+file's bytes are those the runtime's own encoding writes. A leaf element
+(a `Str`, or an array of fixed-width numbers that the binding holds in its
+wire form) is placed and written whole by the runtime from the binding's
+bytes, with `mlc_write_place_bytes`: its slot, zero up to where its body
+starts, the body (checked as text when it is a `Str`, FMT-10), and zero
+from the body's end to the end of its rounded room. A leaf `Str` that is
+not text aborts the batch before the call returns, and the binding raises
+its own error, naming its language and the byte. Any other element's room
+is zeroed when it is placed, so a field the encoder leaves alone reads as
+zero. Every byte of a room is therefore its element's or zero, whatever
+the block held before. The binding reports where its encoding ended at its next call; an
 end outside the room is a defect. A room may end past the encoding, by
 the size's alignment slack, and that tail stays zero. An `Int` placed as
 its slot alone, in a run or a room of that size, that is not written
@@ -440,7 +448,13 @@ Rust through a guard, R in one `R_UnwindProtect` around the batch, whose
 cleanup aborts the transaction when an R error unwinds it. R writes a
 batch given as a list or as a character vector of Str in place, sizing
 each element as it places it; a batch given as an atomic vector, factor
-or integer64 vector takes the copy path.
+or integer64 vector takes the copy path. The leaves (SLOT-36) each binding
+hands to the runtime: C++ a `std::string` for a `Str` and a
+`std::vector<T>` whose `T` is exactly the element's wire number; Python a
+`str` (known text), a `bytes` or `bytearray` for a `Str`, and a
+C-contiguous buffer whose items are the wire numbers; R an element of a
+character vector (after its NA check) and a raw vector for a `Str` or a
+`[U8]`, and a double vector for a `[Real]`. Other elements take the room.
 
 A Python writer takes the slot lock with the GIL released, then sizes,
 places and writes each element of a list; a batch given as bytes or a
@@ -558,7 +572,7 @@ decode on w threads; a drop or reset waits that long. Model: `tla/AheadJob.tla`.
 
 ### SLOT-32 The streams one process writes share a bound on queued bytes
 Status: implemented
-Checked by: streams_share_the_queue_bytes_and_keep_no_more_spares_than_their_depth, many_compressed_streams_stay_within_the_queue_bytes
+Checked by: streams_share_the_queue_bytes_and_keep_no_more_spares_than_their_depth, many_compressed_streams_stay_within_the_queue_bytes, a_later_stream_on_a_slot_holds_no_byte_of_an_earlier_one
 
 The process that writes streams (SLOT-10) holds the queue of each stream
 it counts to a depth of at most `L / (n * s)`, never below one, where `L`
@@ -569,7 +583,14 @@ of these; a writer stops being counted before it leaves its queue, so no
 depth is set on a queue after its writer has left it. A producer waiting
 under a lowered depth sees a raised one within its wait slice, and
 batches queued before a depth was lowered stand until written. A stream
-keeps at most one written buffer for reuse. A block larger than `s` (an
+keeps at most one written buffer for reuse. A spare keeps the bytes of
+the batches it last held, and a slot keeps its queue, its spares and its
+buffer from one stream to the next, so a later stream, in a
+daemon another client's call, can fill a block an earlier one wrote. No
+byte a buffer held for one stream reaches another stream's output: every
+room is written whole or zeroed when it is placed (SLOT-36), and a
+sub-packet carries only the rooms placed in it. Under `MORLOC_SHM_POISON=1`
+the custodian fills a block it gives back as a spare with the poison byte. A block larger than `s` (an
 oversize element or a staged batch) is queued only into an empty queue,
 so a stream holds at most two: one queued and one being filled.
 

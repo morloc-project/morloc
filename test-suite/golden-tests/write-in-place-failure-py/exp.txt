@@ -4,3 +4,8 @@
 [1.8446744073709552e+19,3,-1.1805916207174113e+21]
 [true,false,true]
 8000
+["ok","Python produced a Str that is not valid UTF-8 (byte 1 of 3)","ok"]
+[700,0,30,0,0,730]
+[true,false,false]
+[[],[0],[0,1],[0,1,2],[0,1,2,3]]
+["ok","a numpy array passed as a list must be one-dimensional; got 2 dimensions","Expected list, bytes, bytearray, or numpy array for a list, but got numpy.int32"]

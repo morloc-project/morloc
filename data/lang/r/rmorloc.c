@@ -264,6 +264,22 @@ static const char* r_str_value(SEXP chr, size_t* len, bool check) {
     return r_str_utf8(chr, len, check);
 }
 
+// A Str value's UTF-8 bytes, as r_str_value with no check, and whether they
+// are all ASCII, which makes them text with no check.
+static const char* r_str_leaf(SEXP chr, size_t* len, int* ascii) {
+    if (chr == NA_STRING) {
+        MORLOC_ERROR("NA cannot be written as a Str");
+    }
+    const char* s = CHAR(chr);
+    size_t n = (size_t)LENGTH(chr);
+    *ascii = r_bytes_ascii(s, n);
+    if (*ascii) {
+        *len = n;
+        return s;
+    }
+    return r_str_utf8(chr, len, false);
+}
+
 // Reject a voidstar carrying an interior NUL in a Str slot. `guard` is
 // codegen's per-call decision; `cleanup` releases whatever the caller owns
 // before the longjmp out of error(). The path returned by the runtime names
@@ -3211,6 +3227,51 @@ static void r_place_rc(r_place_t* pl, int rc) {
     MORLOC_ERROR("@write: an in-place call failed with code %d", rc);
 }
 
+// SLOT-36: place `n` elements at `src` as a leaf the runtime writes whole,
+// checking a Str's bytes as text. A Str that is not text has aborted the
+// batch when this raises.
+static void r_place_leaf(r_place_t* pl, const char* src, size_t n, uint32_t flags, const uint8_t** reached) {
+    const uint8_t* end = NULL;
+    int64_t bad = -1;
+    char* err = NULL;
+    int32_t rc = mlc_write_place_bytes((const uint8_t*)src, (uint64_t)n, flags, *reached, &end, &bad, &err);
+    if (rc == MLC_WRITE_NOT_TEXT) {
+        free(err);
+        pl->open = 0;
+        MORLOC_ERROR("R produced a Str that is not valid UTF-8 (byte %lld of %zu)", (long long)bad, n);
+    }
+    if (err != NULL) {
+        pl->open = 0;
+        morloc_error_take("", err);
+    }
+    r_place_rc(pl, rc);
+    *reached = end;
+}
+
+// The bytes of `x` when it is a leaf of `elem` held in its wire form: a
+// raw vector for a Str or a [U8], a double vector for a [Real]. Returns 0
+// otherwise.
+static int r_leaf_bytes(const Schema* elem, SEXP x, const char** src, size_t* n) {
+    if (elem->type == MORLOC_STRING && TYPEOF(x) == RAWSXP) {
+        *src = (const char*)RAW(x);
+        *n = (size_t)XLENGTH(x);
+        return 1;
+    }
+    if (elem->type != MORLOC_ARRAY) return 0;
+    const Schema* p = elem->parameters[0];
+    if (p->type == MORLOC_UINT8 && TYPEOF(x) == RAWSXP) {
+        *src = (const char*)RAW(x);
+        *n = (size_t)XLENGTH(x);
+        return 1;
+    }
+    if (p->type == MORLOC_FLOAT64 && p->width == sizeof(double) && TYPEOF(x) == REALSXP && !is_integer64(x)) {
+        *src = (const char*)REAL(x);
+        *n = (size_t)XLENGTH(x);
+        return 1;
+    }
+    return 0;
+}
+
 static SEXP r_place_body(void* data) { MAYFAIL
     r_place_t* pl = (r_place_t*)data;
     const Schema* elem = r_resolve(pl->schema->parameters[0]);
@@ -3249,19 +3310,21 @@ static SEXP r_place_body(void* data) { MAYFAIL
         }
         if (strs) {
             size_t len = 0;
-            const char* str = r_str_value(STRING_ELT(xs, i), &len, true);
-            mlc_room_t room;
-            rc = R_TRY(mlc_write_place, (uint64_t)(width + len), reached, &room);
-            r_place_rc(pl, rc);
-            Array* a = (Array*)room.slot;
-            a->size = len;
-            a->data = len > 0 ? (relptr_t)(room.data - room.base) : 0;
-            memcpy(room.data, str, len);
-            reached = room.data + len;
+            int ascii = 0;
+            // NA is refused here; the runtime checks text that is not ASCII as it copies it.
+            const char* str = r_str_leaf(STRING_ELT(xs, i), &len, &ascii);
+            r_place_leaf(pl, str, len, ascii ? MLC_PLACE_VALID_TEXT : 0, &reached);
             i++;
             continue;
         }
         SEXP x = VECTOR_ELT(xs, i);
+        const char* leaf = NULL;
+        size_t leaf_n = 0;
+        if (r_leaf_bytes(elem, x, &leaf, &leaf_n)) {
+            r_place_leaf(pl, leaf, leaf_n, 0, &reached);
+            i++;
+            continue;
+        }
         size_t size = get_shm_size(elem, x);
         mlc_room_t room;
         rc = R_TRY(mlc_write_place, (uint64_t)size, reached, &room);

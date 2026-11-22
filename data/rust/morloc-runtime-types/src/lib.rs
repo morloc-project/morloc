@@ -108,6 +108,14 @@ pub const MLC_WRITE_NOWAIT: i32 = 1;
 /// places again.
 pub const MLC_WRITE_WOULD_BLOCK: i32 = 4;
 
+/// SLOT-36: the `mlc_write_place_bytes` flag that says a `Str`'s bytes are
+/// known UTF-8, so only a debug build checks them.
+pub const MLC_PLACE_VALID_TEXT: u32 = 2;
+
+/// SLOT-36: `mlc_write_place_bytes` found a `Str` that is not UTF-8 and
+/// aborted the batch.
+pub const MLC_WRITE_NOT_TEXT: i32 = 5;
+
 /// The tag on an error that says this process lost shared memory (SHM-17,
 /// PANIC-14).
 pub const SHARED_MEMORY_LOST: &str = "[SHM-17] shared memory lost: ";

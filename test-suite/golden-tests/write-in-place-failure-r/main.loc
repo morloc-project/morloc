@@ -4,18 +4,20 @@
 -- batches (SLOT-36, SLOT-37); this holds for a batch given as a character
 -- vector and as a list. A run of fixed-width elements that fails after
 -- earlier sub-packets of it were placed is absent too. The error reaches
--- the caller as a Try.
-module main (run, tally, i8s, countI8s)
+-- the caller as a Try. A batch whose Str element is a raw vector that is
+-- not UTF-8 is absent the same way, the error naming R and the byte.
+module main (run, tally, i8s, countI8s, rawRun)
 
 import root
 import root-r
 
-source R from "batch.R" ("batch_of" as batchOf, "batch_list" as batchList, "count_tagged" as countTagged, "i8_batch" as i8Batch)
+source R from "batch.R" ("batch_of" as batchOf, "batch_list" as batchList, "count_tagged" as countTagged, "i8_batch" as i8Batch, "raw_of" as rawOf)
 
 batchOf :: Int -> Int -> Int -> [Str]
 batchList :: Int -> Int -> Int -> [Str]
 countTagged :: Int -> [Str] -> Int
 i8Batch :: Int -> Int -> [I8]
+rawOf :: Int -> Int -> Int -> [Str]
 
 --' Write six batches, three of which fail; which succeeded
 run :: Str -> <IO> [Bool]
@@ -52,3 +54,18 @@ i8s path = do
 --' The number of I8s in a written file
 countI8s :: [I8] -> Int
 countI8s xs = length xs
+
+--' Write three batches of raw vectors for Str, the second not UTF-8; why each failed
+rawRun :: Str -> <IO> [Str]
+rawRun path = do
+  Ok o <- @open path :: <IO> (Try Str (OStream Str))
+  a <- @write 0 o (rawOf 1 700 (-1))
+  b <- @write 0 o (rawOf 2 700 650)
+  c <- @write 0 o (rawOf 3 30 (-1))
+  @close o
+  [why a, why b, why c]
+
+why :: Try Str () -> Str
+why r = match r
+  | (Ok _) = "ok"
+  | (Err e) = e
