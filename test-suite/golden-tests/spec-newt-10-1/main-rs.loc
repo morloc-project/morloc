@@ -1,0 +1,26 @@
+-- Spec NEWT-10: a map of a newtype's representation cast is the cast of
+-- the list. Rust: the chains a list holds are not copied by `map unpack`
+-- or `map pack` (each export prints its value and the chain links cloned).
+--
+--   unpacked   a list packed then unpacked, each through map
+--   packed     a list packed through map and read through unpack
+module main (unpacked, packed)
+
+import root-rust
+
+data Chain = End | Link Int Chain
+data Rust => Chain = "Chain"
+
+source Rust from "chain.rs" ("clones", "chain_len" as chainLen, "mk_chains" as mkChains)
+
+clones :: Int -> (Int, Int)
+chainLen :: Chain -> Int
+mkChains :: Int -> [Chain]
+
+newtype Wrapped = Chain deriving (Packable)
+
+unpacked :: Int -> (Int, Int)
+unpacked n = clones (sum (map chainLen (map unpack (map pack (mkChains n) :: [Wrapped]))))
+
+packed :: Int -> (Int, Int)
+packed n = clones (sum (map (\w -> chainLen (unpack w)) (map pack (mkChains n) :: [Wrapped])))

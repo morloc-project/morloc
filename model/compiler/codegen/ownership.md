@@ -154,23 +154,45 @@ parameters by reference, since its signature is shared by every caller;
 the step of a fold that captures nothing is the exception, taking its
 accumulator by value (COPY-7).
 
-### OWN-8 A function that returns part of what it borrowed returns a reference
+### OWN-8 A function that returns what it was lent returns it lent
 Intent: open
-Code: unaudited
+Code: conforms 2026-11-22
 
-A manifold that takes a value by reference and returns a part of it -- a
-constructor field, a record field, a list element, the tail of a chain --
-returns a reference into its argument instead of an owned copy, when every
-caller reads the result only while the argument lives. It pays only where
-copying the part is deep (a list, string, record, tuple, or a Rust `data`
-type mapped with `Box` arms; a generated `data` value already copies as a
-reference count), where the function is not inlined (a small accessor
-already reads in place once inlined), and where the result is read in a
-loop, as golden own7-matrix's recursive callees that return their
-argument (about 40 copies in each language). It needs lifetime parameters on generated Rust signatures, a check
-that no C++ reference outlives its root (OWN-1), and a parameter mode that
-OWN-7's solve accounts for. Open: which callers may receive a reference,
-and whether a returned reference may cross a loop's continue.
+A fully applied manifold that is never a function value and is not called
+from inside itself except by its own tail loop may return from its
+by-reference form a result lent from parameters it takes by reference and
+may keep (OWN-7), or owned: in Rust a `Cow` whose lifetime is those
+parameters' alone, in C++ an `mlc::lent_or` from both of its forms. Its
+body is one of:
+- that tail loop, some base leaf of which returns one such parameter as
+  the loop was lent it, in a slot no iteration changes, or a part of it the
+  loop reads in place (OWN-6) that is not optional;
+- past the lets it binds, a conditional whose arms are, as for an OWN-10
+  conditional, such conditionals, such parameters, parts of them, or values
+  of their own, nothing in it keeping such a parameter or a part of one.
+Only one parameter of a loop may be returned lent; a conditional's arms
+may lend from several. An arm lends only where the form takes the
+parameter by reference, so the by-value form of C++ returns its arms
+owned. Every other leaf's value is owned, as it was.
+
+A call reads the result where it lies when it is the right-hand side of a
+let bound once, its argument at each such parameter is a named local, and
+the let is only read: by a call that takes it by reference, a test, an
+intrinsic that only reads, or a projection whose value is cheap to copy or
+is bound by reference and only read in turn. The let is never kept (built
+into a value, returned, a loop's start or next value, an argument a
+function takes or may take by value), captured or bound by another let.
+Such a let is a read of every local it may be lent from wherever it is
+read (OWN-2), so no such local moves while the let is read, a part of the
+let is a reference, not a take (OWN-5), and no part of such a local is
+taken in the manifold the let is in. Any other call takes the result
+owned, copying a lent result only, as the by-reference form copied it
+before. MORLOC_NO_MOVES builds without this form.
+
+Open: a non-tail recursion passing a lent result on; a call that passes
+another such function's lent result on; and a sourced reader that takes
+its parameter by value, which copies a result it could have taken when
+the result was owned.
 
 ### OWN-9 A dead `data` arm is reused for a constructor of the same shape
 Intent: open
@@ -190,7 +212,7 @@ reference to one (CPP-6 rules out the weak reference).
 
 ### OWN-10 A value a conditional chooses is read where it lies
 Intent: proposed
-Tests: spec-own-10-1
+Tests: spec-own-10-1, spec-own-10-2
 Code: conforms 2026-11-22
 
 A let bound to a conditional that chooses between a value the frame still
@@ -209,17 +231,70 @@ same language as the let and the conditional:
   the value, runs before that let (OWN-2).
 EVAL-3 holds: each copy of the reader runs on its own path.
 
+### OWN-11 A constructor built only to be matched is never built
+Intent: proposed
+Tests: spec-own-11-1
+Code: conforms 2026-11-22
+
+A constructor literal that a match reads gives no value two owners. The
+pool tree is rewritten before code generation, in the language of the
+literal, the match and the helper:
+- a tag test or field read of a constructor literal, or of a let bound to
+  one (directly or through another let naming it), is the answer it must
+  give, and a conditional on a known answer is the arm it chooses. The
+  fields of a let-bound literal that are not variables or scalar literals
+  are bound to lets of their own where the literal was (EVAL-1, EVAL-3), so
+  each is computed once and a field nothing reads is computed as it was
+  when the literal was built (EVAL-5 is open); the literal's let goes once
+  nothing reads it. A guard of the chosen arm
+  runs; a nested pattern the literal does not settle keeps its tag test;
+  a match on a let read otherwise has only its tag tests answered;
+- a call of a self-recursive helper that passes such a literal at a
+  parameter the helper tag-tests calls a copy of the helper taking the
+  literal's fields in that parameter's place, with the literal reduced in
+  its body as above: one step, since the copy calls the helper. The copy
+  keeps the helper's name and definition in a failure's trace (DIAG-5),
+  and is not made where it would still hold the literal. No copy is made
+  for a labeled call, a helper holding a label, a staged helper, a
+  mutually recursive one, a call in the helper itself, or a helper of
+  more than 64 nodes, and at most 16 per helper.
+Effects are untouched: a suspension is not split and a forced effect is
+never moved.
+
+A let bound once to a conditional these rewrites leave, and only read as
+OWN-8 lists, holds the value the taken arm chose where it lies, or the
+arm's own value: in C++ an `mlc::lent_or`, in Rust a `Cow`. Each arm,
+past the lets it binds, is such a conditional, a part of a local bound
+outside the conditional (a projection that has a value of its own type in
+memory, OWN-6, and is not optional, through lets bound to such parts), a
+local itself, or a value of its own. An arm that is a local itself lends
+it only where the local is named after the let, in the same step, or in a
+body that may run again; elsewhere it owns it, as a move there copies
+nothing. The arms may lend from more than one local. Nothing in the
+conditional keeps such a local or a part of one, no let in it takes a
+payload (OWN-5), and the let's type is not one a copy of costs nothing (a
+C++ scalar, CPP-1), a function or an optional. An arm lends a part only
+where the member binds it as a reference into the local, in C++ through
+`mlc::place`; any other arm is owned. Besides the reads OWN-8 lists, the
+let may be the argument an OWN-8 manifold may lend its result from, when
+every such call is bound by a let that reads the result where it lies.
+The let is a read of every such local wherever it is read (OWN-2), so in
+the manifold the let is in no part of one is taken (OWN-5), as for an
+OWN-8 let, and in Rust a part of one is bound by reference. A let that
+binds such a conditional only to return it is that conditional.
+MORLOC_NO_MOVES builds without this form.
+
 ## Copies these items leave
 
 A copy remains where two owners of one value are alive at once and no
 order of the pure work separates them, or where a ruling requires it:
 - A value kept while the caller still needs it, by a function that is not
   inlined and builds a record or list holding it (golden own7-matrix rec
-  ctor/call/list cases), or returns it or a part of it (rec ret/part, until
-  OWN-8).
+  ctor/call/list cases), or returns it or a part of it where OWN-8 does not
+  apply.
 - A list built from a held value for a sourced function such as `map`: the
-  list owns its elements, and the compiler may assume no law of a sourced
-  function (`map g [x] = [g x]`).
+  list owns its elements, and of a sourced `map` the compiler assumes only
+  `map id == id` (NEWT-10), not `map g [x] == [g x]`.
 - A callback's argument a callback keeps: callbacks take their arguments
   by reference (HOST-8), and a Rust boxed callback owns what it captures.
 - A value kept twice in one step, or by a closure run more than once

@@ -91,6 +91,8 @@ module Morloc.CodeGenerator.Grammars.Translator.Imperative
   , rnodeChildren
   , namesIn
   , rnodeLet
+  , rnodeNames
+  , rnodeBinds
   , aliasChain
   , isLastRead
   , isBorrowableProjection
@@ -707,6 +709,10 @@ data LowerConfig m = LowerConfig
   -- ^ The name of manifold @m@'s by-value form, for a call whose arguments
   -- have these ownerships, when the call uses it (OWN-7); Nothing calls the
   -- manifold by its own name.
+  , lcLentCall :: Int -> Maybe MDoc -> MDoc -> m MDoc
+  -- ^ The value of a call of manifold @m@, given its by-value form's name
+  -- when the call uses it and the call: a member whose by-reference form
+  -- may return a lent result takes it owned here (OWN-8).
   , lcBuildOwnership :: Int -> Int -> IOwnership -> m IOwnership
   -- ^ The ownership of local @i@ as a context argument of a fully applied
   -- call of manifold @m@, given its ownership as a read that is not its
@@ -821,6 +827,15 @@ data LowerConfig m = LowerConfig
   -- ^ origExpr, condDocs, thenDocs, elseDocs -> result PoolDocs
   -- Produces language-specific if/else structure using a temp result variable
   , lcMakeIfLadder :: NativeExpr -> Guards -> m (MDoc, MDoc)
+  , lcLentIf :: NativeExpr -> m Bool
+  -- ^ Whether a conditional's value is a local or a part of one it lends,
+  -- or a value of its own (OWN-10)
+  , lcLentArm :: NativeExpr -> NativeExpr -> PoolDocs -> PoolDocs -> m PoolDocs
+  -- ^ An arm of such a conditional, given the conditional, the arm, its
+  -- docs, and its docs adapted to an owned value
+  , lcLentReturn :: Int -> MDoc -> m MDoc
+  -- ^ The value manifold @m@ returns: a conditional's value lent or owned
+  -- as it is, where the manifold returns its result lent or owned (OWN-8)
   -- ^ A chain of guards of the conditional's type as one flat block
   -- (EMIT-5): each test after the first runs, with its statements, only if
   -- no earlier one held. Gives the result's expression and the block.
@@ -1669,11 +1684,11 @@ markLastReads = markLastReadsWith Map.empty Set.empty
 -- maps such a local to the value it refers into (OWN-2), and no read of a
 -- value in @held@ is marked.
 markLastReadsWith :: (MFunctor a) => Map.Map Int Int -> Set.Set Int -> a -> a
-markLastReadsWith aliases held = markLastReadsSeeded aliases held (const [])
+markLastReadsWith aliases held = markLastReadsSeeded (fmap pure aliases) held (const [])
 
 -- | 'markLastReadsWith' where native manifold @m@ also owns the parameters
 -- @params m@ (OWN-7).
-markLastReadsSeeded :: (MFunctor a) => Map.Map Int Int -> Set.Set Int -> (Int -> [Int]) -> a -> a
+markLastReadsSeeded :: (MFunctor a) => Map.Map Int [Int] -> Set.Set Int -> (Int -> [Int]) -> a -> a
 markLastReadsSeeded aliases held params =
   mmap (defaultValue {mapSerialExpr = onS, mapNativeExpr = onN, mapSerialManifold = onSM, mapNativeManifold = onNM})
   where
@@ -1696,7 +1711,7 @@ data Markers = Markers
   -- ^ a @do@ block's body (OWN-3)
   }
 
-markers :: Map.Map Int Int -> Set.Set Int -> (Int -> [Int]) -> Markers
+markers :: Map.Map Int [Int] -> Set.Set Int -> (Int -> [Int]) -> Markers
 markers aliases held params =
   Markers
     { mkNative = \m e ->
@@ -1715,7 +1730,7 @@ markers aliases held params =
 -- | The (manifold, value) pairs under some segments whose building is the
 -- value's last read at every place the manifold is built (OWN-3), marked as
 -- 'markLastReadsSeeded' marks them.
-lastBuilds :: Map.Map Int Int -> Set.Set Int -> (Int -> [Int]) -> [SerialManifold] -> Set.Set (Int, Int)
+lastBuilds :: Map.Map Int [Int] -> Set.Set Int -> (Int -> [Int]) -> [SerialManifold] -> Set.Set (Int, Int)
 lastBuilds aliases held params sms =
   Set.fromList [mv | (mv, k) <- Map.toList found, Just k == Map.lookup (fst mv) sites]
   where
@@ -1739,7 +1754,7 @@ data MarkEnv = MarkEnv
   , meHeld :: Set.Set Int
   }
 
-markEnv :: (Int -> [Int]) -> Map.Map Int Int -> RNode -> MarkEnv
+markEnv :: (Int -> [Int]) -> Map.Map Int [Int] -> RNode -> MarkEnv
 markEnv names aliases n = MarkEnv names (Set.fromList [t | j <- Set.toList (heldReads n), t <- j : aliasChain aliases j])
 
 -- | The variables read in the @do@ blocks a let binds under a node, a block
@@ -1875,17 +1890,21 @@ builtIn n = case n of
 
 -- | The locals whose reads are reads of a value: the value and every local
 -- whose chain of aliases passes through it. Built once per alias map.
-namesOf :: Map.Map Int Int -> Int -> [Int]
+namesOf :: Map.Map Int [Int] -> Int -> [Int]
 namesOf aliases = \v -> v : Map.findWithDefault [] v referrers
   where
     referrers = Map.fromListWith (<>) [(t, [a]) | a <- Map.keys aliases, t <- aliasChain aliases a]
 
--- | The values a local refers into, nearest first, stopping at a cycle.
-aliasChain :: Map.Map Int Int -> Int -> [Int]
-aliasChain aliases a = follow (Set.singleton a) (Map.lookup a aliases)
+-- | The values a local may refer into, each once, nearest first along each
+-- chain, stopping at a cycle.
+aliasChain :: Map.Map Int [Int] -> Int -> [Int]
+aliasChain aliases a = follow (Set.singleton a) (next a)
   where
-    follow seen (Just t) | not (Set.member t seen) = t : follow (Set.insert t seen) (Map.lookup t aliases)
-    follow _ _ = []
+    next k = Map.findWithDefault [] k aliases
+    follow _ [] = []
+    follow seen (t : ts)
+      | Set.member t seen = follow seen ts
+      | otherwise = t : follow (Set.insert t seen) (next t <> ts)
 
 markLoopBody ::
   (LastReadIn b) =>
@@ -2168,7 +2187,7 @@ consumedParams byValue mayBorrow cands nm@(NativeManifold _ _ _ body) =
       AppExeN _ (RecCallP mid _) args -> Set.fromList [p | (j, NativeArgExpr a) <- indexed args, Just p <- [readOf a], Set.member j (byValue mid)]
       _ -> Set.empty
     here _ = Set.empty
-    vars xs = Set.fromList [p | BndVarN _ p _ <- xs]
+    vars xs = Set.fromList [p | x <- xs, Just p <- [readOf x]]
     -- a nested manifold reads a parameter under its caller's index
     readOf (BndVarN _ p _) = Just p
     readOf (LetVarN _ p _) = Just p
@@ -2825,9 +2844,12 @@ guardChain ::
   LowerConfig m -> NativeExpr -> NativeExpr -> NativeExpr -> NativeExpr -> PoolDocs -> PoolDocs -> PoolDocs -> m PoolDocs
 guardChain cfg origExpr condE thenE elseE condDocs thenDocs elseDocs = do
   let first = (poolExpr condDocs, thenE, thenDocs)
+  -- a chain extends only one whose arms take the same form (OWN-10)
+  sameForm <- (==) <$> lcLentIf cfg origExpr <*> lcLentIf cfg (chainValue elseE)
   case currentChain elseDocs of
     Just cd
-      | GuardChain g <- cdChain cd -> do
+      | sameForm
+      , GuardChain g <- cdChain cd -> do
           let (c, e, t) = guardsFirst g
               chain = Guards first ((cdPre cd, c, e, t) Seq.<| guardsRungs g) (guardsElse g)
           (e', ladder) <- lcMakeIfLadder cfg origExpr chain
@@ -2859,6 +2881,14 @@ guardChain cfg origExpr condE thenE elseE condDocs thenDocs elseDocs = do
                 , cdLineCount = length (poolPriorLines docs)
                 }
         }
+
+-- | The conditional a chain of guards was built from, past the lets that
+-- pass it on ('keepChain').
+chainValue :: NativeExpr -> NativeExpr
+chainValue e = case e of
+  NativeLetN i r (LetVarN _ j _) | i == j -> chainValue r
+  NativeLetN _ _ b -> chainValue b
+  _ -> e
 
 -- | The most operands of one run of a chain (EMIT-4).
 chainRunCap :: Int
@@ -3099,7 +3129,9 @@ lowerNativeExprRaw cfg _ (AppExeN_ _ (RecCallP mid _) xs0) = do
   twin <- lcTwinCall cfg mid owns
   let name = fromMaybe (lcManifoldName cfg mid) twin
       site = maybe ManifoldArg (const TwinArg) twin mid
-  return $ mergePoolDocs (\es -> name <> tupled [lcSourcedArg cfg (site j) own t e | (j, (own, t, e)) <- indexed (zip3Same owns (map laType xs) es)]) (map laDocs xs)
+  let merged = mergePoolDocs (\es -> name <> tupled [lcSourcedArg cfg (site j) own t e | (j, (own, t, e)) <- indexed (zip3Same owns (map laType xs) es)]) (map laDocs xs)
+  v <- lcLentCall cfg mid twin (poolExpr merged)
+  return merged {poolExpr = v}
   where
     keepArg j la@(LowArg (NativeArgExpr e) _ d) = (\v -> la {laDocs = d {poolExpr = v}}) <$> lcKeepCallArg cfg mid j e (poolExpr d)
     keepArg _ la = return la
@@ -3161,16 +3193,26 @@ lowerNativeExprRaw _ _ (NativeLetN_ i (Low (ManN (NativeManifold _ _ form _)) x1
   , not (usesIndex i (RN bodyE))
   , not (Set.member i (runIdentity (foldNativeExprM serialVarsOf bodyE))) = return (dropClosureLet x1 x2)
 lowerNativeExprRaw cfg _ (NativeLetN_ i (Low rhsE x1) (Low bodyE x2)) = do
-  x1' <- loopBorrowOr cfg i rhsE x1 (adaptOwnedElem cfg rhsE x1 >>= keepRhs cfg rhsE >>= lcLetRhs cfg i rhsE)
-  r <- lcMakeLet cfg (nvar cfg) i (Just (typeFof rhsE)) (Just rhsE) x1' x2
-  return $ case bodyE of
-    -- A let that binds a chain of guards only to return it is that chain.
-    LetVarN _ j _
-      | j == i
-      , Just cd <- currentChain x1
-      , GuardChain _ <- cdChain cd ->
-          r {poolChain = Just cd {cdExpr = render (poolExpr r), cdLineCount = length (poolPriorLines r)}}
-    _ -> keepChain i rhsE x2 r
+  -- a let that binds a conditional whose value is lent or owned only to
+  -- return it is that conditional (OWN-10)
+  lentRhs <- case (rhsE, bodyE) of
+    (IfN {}, LetVarN _ j _) | j == i -> lcLentIf cfg rhsE
+    (IfN {}, ReturnN (LetVarN _ j _)) | j == i -> lcLentIf cfg rhsE
+    _ -> return False
+  let isReturn = case bodyE of
+        ReturnN _ -> True
+        _ -> False
+  if lentRhs then return (x1 {poolReturnFlag = poolReturnFlag x1 || isReturn}) else do
+    x1' <- loopBorrowOr cfg i rhsE x1 (adaptOwnedElem cfg rhsE x1 >>= keepRhs cfg rhsE >>= lcLetRhs cfg i rhsE)
+    r <- lcMakeLet cfg (nvar cfg) i (Just (typeFof rhsE)) (Just rhsE) x1' x2
+    return $ case bodyE of
+      -- A let that binds a chain of guards only to return it is that chain.
+      LetVarN _ j _
+        | j == i
+        , Just cd <- currentChain x1
+        , GuardChain _ <- cdChain cd ->
+            r {poolChain = Just cd {cdExpr = render (poolExpr r), cdLineCount = length (poolPriorLines r)}}
+      _ -> keepChain i rhsE x2 r
 lowerNativeExprRaw cfg _ (LetVarN_ _ i _) = return $ defaultValue {poolExpr = (nvar cfg) i}
 lowerNativeExprRaw cfg _ (BndVarN_ _ i _) = return $ defaultValue {poolExpr = (nvar cfg) i}
 lowerNativeExprRaw cfg _ (DeserializeN_ t s (Low _ x)) = do
@@ -3275,13 +3317,17 @@ lowerNativeExprRaw _ _ (CoerceN_ (CoerceNewtype _ _) _ (Low _ x)) = return x
 -- owned value (like every other owned sink); the condition is not a sink.
 lowerNativeExprRaw cfg origExpr (IfN_ _ (Low condE condDocs) (Low thenE thenDocs) (Low elseE elseDocs)) = do
   -- An arm's value is the conditional's value, kept on that arm's path (OWN-2).
-  thenDocs' <- adaptOwnedElem cfg thenE thenDocs >>= keepArm thenE
-  elseDocs' <- adaptOwnedElem cfg elseE elseDocs >>= keepArm elseE
+  lent <- lcLentIf cfg origExpr
+  thenDocs' <- arm lent thenE thenDocs
+  elseDocs' <- arm lent elseE elseDocs
   case shortCircuit cfg condE thenE elseE condDocs thenDocs' elseDocs' of
     Just docs -> docs
     Nothing -> guardChain cfg origExpr condE thenE elseE condDocs thenDocs' elseDocs'
   where
     keepArm e d = (\x -> d {poolExpr = x}) <$> lcKeepElem cfg e (poolExpr d)
+    arm lent e d = do
+      owned <- adaptOwnedElem cfg e d >>= keepArm e
+      if lent then lcLentArm cfg origExpr e d owned else return owned
 lowerNativeExprRaw cfg _ (IntrinsicN_ _ IntrHash (Just schema) [Low dataE dataDocs]) = do
   sid <- lcRegisterSchema cfg schema
   -- The hashed value is only read, through a 'ToVoidstar' (&T) sink; see
@@ -3813,7 +3859,8 @@ lowerManifold cfg m form headForm bodyType bodyPool = do
         isIdentifierText returned
           && returned `notElem` map (render . (argName cfg)) (typeMofForm form)
           && borrowed /= Just returned
-  framed <- lcFrameReturn cfg m bodyType ownedByName bodyExpr
+  returnedExpr <- lcLentReturn cfg m bodyExpr
+  framed <- lcFrameReturn cfg m bodyType ownedByName returnedExpr
   -- Apply the return at the manifold boundary if a nested ReturnS_/ReturnN_
   -- set the return flag. Deferring it to here lets intermediate handlers
   -- (notably the serialize-let-wrap that rebinds the body expression to a
@@ -3821,7 +3868,7 @@ lowerManifold cfg m form headForm bodyType bodyPool = do
   -- than a return statement.
   let body = case (retFlag, framed) of
         (True, Just ret) -> ret
-        (True, Nothing) -> lcReturn cfg bodyExpr
+        (True, Nothing) -> lcReturn cfg returnedExpr
         (False, Nothing) -> bodyExpr
         (False, Just _) -> error $ "EMIT-3: manifold " <> show m <> " records its call but its body has no return"
       args = typeMofForm form
@@ -3857,7 +3904,7 @@ lowerManifold cfg m form headForm bodyType bodyPool = do
                 (typeMofRs rs)
             twin <- lcTwinCall cfg m [own | (own, _, _) <- callArgs]
             let site = maybe ManifoldArg (const TwinArg) twin m
-            return $ fromMaybe mname twin <> tupled [lcSourcedArg cfg (site j) own t x | (j, (own, t, x)) <- indexed callArgs]
+            lcLentCall cfg m twin (fromMaybe mname twin <> tupled [lcSourcedArg cfg (site j) own t x | (j, (own, t, x)) <- indexed callArgs])
         (ManifoldPart rs vs) -> do
           -- The closure's callable signature is result(bound...) -- only the
           -- REMAINING parameters, never the captured context args. Build it

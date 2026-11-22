@@ -1,0 +1,50 @@
+--' Shapes matched by the known-constructor tests
+module kc (*)
+
+import root
+
+data P = P Int Int
+data Chain = End | Link Int Chain
+
+diff :: P -> Int
+diff | (P a b) = a - b
+
+swap :: P -> P
+swap | (P a b) = P b a
+
+dbl :: P -> Int
+dbl | (P a _) = a + a
+
+second :: P -> Int
+second | (P _ b) = b
+
+pick :: P -> Int
+pick | (P a b) ? a > b = a : b
+
+isLink :: Chain -> Int
+isLink | (Link _ _) = 1
+       | _ = 0
+
+second2 :: Chain -> Int
+second2 | (Link _ (Link y _)) = y
+        | _ = 0
+
+build :: Int -> Chain -> Chain
+build k acc
+  ? k == 0 = acc
+  : build (k - 1) (Link k acc)
+
+mk :: Int -> Chain
+mk n = build n End
+
+count :: Int -> Chain -> Int
+count | acc (Link _ rest) = count (acc + 1) rest
+      | acc _ = acc
+
+sumL :: Int -> Chain -> Int
+sumL | acc (Link x rest) = sumL (acc + x) rest
+     | acc _ = acc
+
+tailCount :: Chain -> Int
+tailCount | (Link _ rest) = count 0 rest
+          | End = 0

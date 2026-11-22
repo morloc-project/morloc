@@ -125,6 +125,12 @@ takeCases =
         okMoving (tup [BndVarN ty 2 LastRead])
         badMoving (NativeLetN 3 (tup [BndVarN ty 2 LastRead]) (BndVarN ty 2 KeptRead))
         badMoving (NativeLetN 3 (LoopN ty [(1, BndVarN ty 2 LastRead)] (LoopBase (rd 1))) (BndVarN ty 2 KeptRead))
+    -- a let lent from either of two locals reads both (OWN-10)
+    , testCase "a let lent from two locals" $ do
+        ok (NativeLetN 31 (rd 1) (NativeLetN 10 (field 2) (tup [rd 10, rd 31])))
+        bad (NativeLetN 30 (rd 1) (NativeLetN 10 (field 2) (tup [rd 10, rd 30])))
+        okMoving (NativeLetN 31 (rd 1) (NativeLetN 3 (tup [lastRd 2]) (rd 31)))
+        badMoving (NativeLetN 30 (rd 1) (NativeLetN 3 (tup [lastRd 2]) (rd 30)))
     -- a setter keeps its receiver
     , testCase "spec-own-1-24" $ do
         okMoving (NativeLetN 2 (IntN fv 0) (setK (lastRd 2)))
@@ -139,6 +145,8 @@ takeCases =
     mode i _
       | i == 10 = LetTake
       | i == 11 = LetBorrow
+      | i == 30 = LetLent (Set.fromList [1, 2])
+      | i == 31 = LetLent (Set.singleton 1)
       | otherwise = LetCopy
     fv = FV (TV "a") (CV "a")
     ty = VarF fv

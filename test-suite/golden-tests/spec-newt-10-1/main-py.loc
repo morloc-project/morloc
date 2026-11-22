@@ -1,0 +1,17 @@
+-- Spec NEWT-10 in py: a map of a newtype's representation cast gives the
+-- same values as the cast of each element.
+module main (unpacked, packed, nested)
+
+import root
+import root-py
+
+newtype W = [Int] deriving (Packable)
+
+unpacked :: [[Int]] -> Int
+unpacked xs = sum (map length (map unpack (map pack xs :: [W])))
+
+packed :: [[Int]] -> [Int]
+packed xs = map (\w -> sum (unpack w)) (map pack xs :: [W])
+
+nested :: [[[Int]]] -> Int
+nested xss = sum (map (\xs -> sum (map length (map unpack (map pack xs :: [W])))) xss)

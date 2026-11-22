@@ -1,0 +1,89 @@
+-- Spec OWN-11: a match on a constructor literal reduces to the arm it
+-- chooses, and a recursive helper called on one calls a copy of the helper
+-- that takes the constructor's fields. Each export pins that the rewrites
+-- keep what the program computes:
+--
+--   tDiff tSwap   fields of one type, in order and swapped
+--   tOnce         a field computed by a counted call, read twice: one call
+--   tFail tTry    a failing field the arm never reads still fails
+--   tGuard        a guarded arm still runs its guard
+--   tWild         a wildcard arm chosen for a nullary constructor
+--   tNested       a nested pattern the literal settles only in part
+--   tShadow       a caller binding a name the helper's arm binds
+--   tTwo          two calls in one tree, one helper each
+--   tIO           an effect run by a forced suspension, twice
+--   tTryOk        a call inside @try
+--   tLabel        a labeled call, not rewritten, logged once
+--   tFrame        a failure in the copy is traced as the helper's
+module main
+  ( tDiff, tSwap, tOnce, tFail, tGuard, tWild, tNested, tShadow, tTwo
+  , tIO, tTry, tTryOk, tLabel, tFrame
+  )
+
+import root-rust
+import .kc
+
+source Rust from "tick.rs" ("tick", "boom", "ticks", "bump")
+
+tick :: Int -> Int
+boom :: Int -> Int
+ticks :: Int -> (Int, Int)
+bump :: Int -> <IO> Int
+
+act :: Chain -> <IO> Int
+act | (Link x _) = bump x
+    | End = bump 0
+
+tDiff :: Int -> Int
+tDiff n = diff (P n 1)
+
+tSwap :: Int -> Int
+tSwap n = diff (swap (P n 1))
+
+tOnce :: Int -> (Int, Int)
+tOnce n = ticks (dbl (P (tick n) 0))
+
+tFail :: Int -> Int
+tFail n = second (P (boom n) n)
+
+tGuard :: Int -> Int
+tGuard n = pick (P n 3)
+
+tWild :: Int -> Int
+tWild n = 10 * isLink End + isLink (Link n End)
+
+tNested :: Int -> Int
+tNested n = second2 (Link 1 (mk n))
+
+tShadow :: Int -> Int
+tShadow n = let rest = n * 10 in rest + tailCount (Link 1 (mk n)) + count 0 (Link rest (mk n))
+
+tTwo :: Int -> Int
+tTwo n = let c = mk n in sumL 0 (Link 5 c) + count 0 (Link 2 c)
+
+tIO :: Int -> <IO> (Int, Int)
+tIO n = do
+  let d = act (Link n End)
+  a <- d
+  b <- d
+  ticks (a + b)
+
+tTry :: Int -> Int
+tTry n = match (@try (second (P (boom n) n)))
+  | (Ok v) = v
+  | (Err _) = 0 - 1
+
+tTryOk :: Int -> Int
+tTryOk n = match (@try (count 0 (Link 1 (mk n))))
+  | (Ok v) = v
+  | (Err _) = 0 - 1
+
+tLabel :: Int -> Int
+tLabel n = lg@count 0 (Link 1 (mk n))
+
+failStep :: Int -> Chain -> Int
+failStep | acc (Link x rest) = failStep (boom x) rest
+         | acc _ = acc
+
+tFrame :: Int -> Int
+tFrame n = failStep 0 (Link n End)

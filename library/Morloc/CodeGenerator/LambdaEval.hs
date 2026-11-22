@@ -14,11 +14,14 @@ unapplied lambdas, never @(\\x -> body) arg@.
 -}
 module Morloc.CodeGenerator.LambdaEval
   ( applyPoolLambdas
+  , reducePoolLambdas
+  , finishPoolLambdas
+  , unfoldKnownCalls
   , applyNexusLambdas
   , reindexTree
   ) where
 
-import Morloc.Data.Zip (zip3Same, zipPrefix, zipSame)
+import Morloc.Data.Zip (indexed, zip3Same, zipPrefix, zipSame)
 import Morloc.CodeGenerator.Namespace
 import Morloc.Frontend.Namespace (newIndex)
 import qualified Morloc.Monad as MM
@@ -133,14 +136,23 @@ applyNexusLambdas e = expandShortCalls return e >>= applyLambdas True >>= splitL
 -- | 'applyLambdas' for a tree that becomes a pool: each function passed to a
 -- source is also given the grouping the source calls it with.
 applyPoolLambdas :: AnnoS (Indexed Type) One (Indexed Lang) -> MorlocMonad (AnnoS (Indexed Type) One (Indexed Lang))
-applyPoolLambdas e =
-  expandShortCalls fresh e
-    >>= applyLambdas False
-    >>= keepInPlace
-    >>= splitLongCalls fresh
+applyPoolLambdas e = reducePoolLambdas e >>= finishPoolLambdas
+
+-- | The reducing half of 'applyPoolLambdas': beta reduction and
+-- case-of-known-constructor ('foldKnownCons'). 'unfoldKnownCalls' runs
+-- between the halves, over every pool tree.
+reducePoolLambdas :: AnnoS (Indexed Type) One (Indexed Lang) -> MorlocMonad (AnnoS (Indexed Type) One (Indexed Lang))
+reducePoolLambdas e = expandShortCalls freshPoolAnno e >>= applyLambdas False >>= foldKnownCons
+
+-- | The rest of 'applyPoolLambdas', after 'reducePoolLambdas'.
+finishPoolLambdas :: AnnoS (Indexed Type) One (Indexed Lang) -> MorlocMonad (AnnoS (Indexed Type) One (Indexed Lang))
+finishPoolLambdas e =
+  keepInPlace e
+    >>= splitLongCalls freshPoolAnno
     >>= groupCallbacks
-  where
-    fresh (Idx _ l) = (`Idx` l) <$> MM.getCounter
+
+freshPoolAnno :: Indexed Lang -> MorlocMonad (Indexed Lang)
+freshPoolAnno (Idx _ l) = (`Idx` l) <$> MM.getCounter
 
 -- | APP-1: a call that gives its head fewer arguments than the head takes is
 -- a partial application, written @\vs -> f xs vs@ as the typechecker writes
@@ -941,7 +953,7 @@ bindLet resolve g c v e1 e2 = case e1 of
       LetBndS w -> [w]
       _ -> foldExprS rootsOf x
     -- a body small enough to copy into each arm, holding no function value
-    small x = size x <= 48
+    small x = size x <= 96
     size (AnnoS _ _ x) = case x of
       LamS _ _ -> 100
       DoBlockS _ -> 100
@@ -1029,7 +1041,26 @@ keepInPlace = go Map.empty Map.empty
           inner <- bindLet resolve' g c v e1' rest
           wrapLets g c binds inner
         Nothing -> bindLet resolve' g c v e1' e2'
-    go aliases parts (AnnoS g c e) = AnnoS g c <$> mapExprSM (go aliases parts) e
+    go aliases parts (AnnoS g c e) = do
+      e' <- mapExprSM (go aliases parts) e
+      return $ case e' of
+        -- a map of a representation cast is the container itself: the cast
+        -- runs only where the newtype has no form of its own, so it changes
+        -- no value there, and map id is id (NEWT-10)
+        IntrinsicS IntrMap [f, xs]
+          | Just _ <- castDir f -> let AnnoS _ _ xe = xs in AnnoS g c xe
+        AppS (AnnoS _ _ (ExeS (SrcCall (Idx _ src)))) [f, xs]
+          | srcAlias src == EV "map"
+          , Just _ <- castDir f -> let AnnoS _ _ xe = xs in AnnoS g c xe
+        _ -> AnnoS g c e'
+      where
+        castDir (AnnoS _ fc (LamS [x] (AnnoS _ _ (CoerceS (CoerceNewtype dir _) (AnnoS _ _ body)))))
+          | sameLang fc, isVar x body = Just dir
+        castDir _ = Nothing
+        isVar x (BndS y) = x == y
+        isVar x (LetBndS y) = x == y
+        isVar _ _ = False
+        sameLang (Idx _ l) = let Idx _ l0 = c in l == l0
     namedIn (AnnoS _ _ x) = case x of
       BndS w -> [w]
       LetBndS w -> [w]
@@ -1054,6 +1085,351 @@ keepInPlace = go Map.empty Map.empty
           Just (binds, rest) | not (null binds), countRefs y rest == 0 -> Just (binds, rest)
           _ -> Nothing
         _ -> return Nothing
+
+type PoolTree = AnnoS (Indexed Type) One (Indexed Lang)
+
+-- | A constructor a name is known to hold: its language, name and fields,
+-- or no fields where only its tag may be answered.
+data KnownCon = KnownCon Lang MT.Text (Maybe [PoolTree])
+
+-- | OWN-11: a tag test or field read of a constructor literal, or of a let
+-- bound to one, is the answer it must give, and a conditional on a known
+-- condition is its chosen arm. A let-bound constructor's fields that are
+-- not atoms are bound to lets of their own where the constructor was
+-- (EVAL-1, EVAL-3), and the constructor's let is dropped once nothing
+-- reads it. Pool path only; every read, the constructor and its fields in
+-- one language.
+foldKnownCons :: PoolTree -> MorlocMonad PoolTree
+foldKnownCons = go Map.empty
+  where
+    go env (AnnoS g c e) = case e of
+      LetS v e1 e2 -> do
+        e1' <- go env e1
+        letKnown env g c v e1' e2
+      LamS vs b -> AnnoS g c . LamS vs <$> go (foldr unbind env vs) b
+      IntrinsicS IntrTagTest [s, nm@(AnnoS _ _ (StrS name))] -> do
+        s' <- go env s
+        return $ case known env s' of
+          Just (_, KnownCon l cn _) | l == langOfAnno c -> AnnoS g c (LogS (cn == name))
+          _ -> AnnoS g c (IntrinsicS IntrTagTest [s', nm])
+      IntrinsicS IntrCtorField [s, nm@(AnnoS _ _ (StrS name)), ix@(AnnoS _ _ (IntS _ i))] -> do
+        s' <- go env s
+        case known env s' of
+          Just (shared, KnownCon l cn (Just fs))
+            | l == langOfAnno c
+            , cn == name
+            , (f : _) <- drop (fromInteger i) fs
+            , i >= 0
+            , langOfAnno (annOf f) == l ->
+                if shared then reindexTree f else return f
+          _ -> return (AnnoS g c (IntrinsicS IntrCtorField [s', nm, ix]))
+      IfS cond a b -> do
+        cond' <- go env cond
+        case cond' of
+          AnnoS _ _ (LogS True) -> go env a
+          AnnoS _ _ (LogS False) -> go env b
+          _ -> AnnoS g c <$> (IfS cond' <$> go env a <*> go env b)
+      _ -> AnnoS g c <$> mapExprSM (go env) e
+
+    -- the constructor a subject is known to be, and whether its fields are
+    -- shared by several reads
+    known _ s@(AnnoS _ sc (ConS _ n _ xs))
+      | isValue s = Just (False, KnownCon (langOfAnno sc) n (Just xs))
+    known env (AnnoS _ _ (BndS w)) = (,) True <$> Map.lookup w env
+    known env (AnnoS _ _ (LetBndS w)) = (,) True <$> Map.lookup w env
+    known _ _ = Nothing
+
+    letKnown env g@(Idx gi t) c v e1' e2 = case floatLets e1' of
+      -- let v = (let y = a in b) in e2 is let y = a in let v = b in e2,
+      -- where e2 does not name y
+      (lets@(_ : _), core@(AnnoS _ _ (ConS {})))
+        | all (\(_, _, y, _) -> countRefs y e2 == 0) lets -> do
+            inner <- letKnown (foldr (\(_, _, y, _) -> unbind y) env lets) g c v core e2
+            foldrM (\(_, yc, y, a) body -> do
+                      ix <- newIndex gi
+                      return (AnnoS (Idx ix t) yc (LetS y a body)))
+                   inner lets
+      _ -> case e1' of
+        AnnoS gc cc (ConS tv n k xs)
+          | l <- langOfAnno c
+          , langOfAnno cc == l
+          , all (\x -> langOfAnno (annOf x) == l && not (hasEval x)) xs ->
+              if foldable l v e2
+                then do
+                  pieces <- mapM atomize xs
+                  let atoms = map snd pieces
+                  e2' <- go (Map.insert v (KnownCon l n (Just atoms)) (unbind v env)) e2
+                  let body =
+                        if countRefs v e2' == 0
+                          then e2'
+                          else AnnoS g c (LetS v (AnnoS gc cc (ConS tv n k atoms)) e2')
+                  foldrM (\(w, rhs) b ->
+                            if isValue rhs && countRefs w b == 0
+                              then return b
+                              else do
+                                ix <- newIndex gi
+                                letKnown env (Idx ix t) c w rhs b)
+                         body (concatMap fst pieces)
+                -- other reads remain: only the tag is known
+                else do
+                  e2' <- go (Map.insert v (KnownCon l n Nothing) (unbind v env)) e2
+                  return $
+                    if countRefs v e2' == 0 && isValue e1'
+                      then e2'
+                      else AnnoS g c (LetS v e1' e2')
+        AnnoS _ _ (BndS w) | Just kc <- Map.lookup w env -> alias kc
+        AnnoS _ _ (LetBndS w) | Just kc <- Map.lookup w env -> alias kc
+        _ -> AnnoS g c . LetS v e1' <$> go (unbind v env) e2
+      where
+        alias kc = do
+          e2' <- go (Map.insert v kc (unbind v env)) e2
+          return (if countRefs v e2' == 0 then e2' else AnnoS g c (LetS v e1' e2'))
+
+    floatLets (AnnoS yg yc (LetS y a b)) = let (ls, core) = floatLets b in ((yg, yc, y, a) : ls, core)
+    floatLets x = ([], x)
+
+    -- a field as an atom: itself, or a reference to a let it is bound to
+    atomize x@(AnnoS (Idx xi xt) xc _)
+      | isAtom x = return ([], x)
+      | otherwise = do
+          w <- freshClosureName (EV "field")
+          ri <- newIndex xi
+          return ([(w, x)], AnnoS (Idx ri xt) xc (LetBndS w))
+
+    isAtom (AnnoS _ _ x) = case x of
+      BndS _ -> True
+      LetBndS _ -> True
+      IntS _ _ -> True
+      RealS _ _ -> True
+      LogS _ -> True
+      UniS -> True
+      NullS -> True
+      _ -> False
+
+    hasEval (AnnoS _ _ x) = case x of
+      EvalS _ -> True
+      _ -> getAny (foldExprS (Any . hasEval) x)
+
+    unbind w = Map.filter (\(KnownCon _ _ fs) -> not (any (names w) (concat fs))) . Map.delete w
+    names w (AnnoS _ _ x) = case x of
+      BndS u -> u == w
+      LetBndS u -> u == w
+      _ -> getAny (foldExprS (Any . names w) x)
+
+    -- every reference to v in e is the subject of a tag test or field read
+    -- in language l, or names an alias whose references all are
+    foldable l v e = let n = countRefs v e in n > 0 && n == readsOf l v e
+    readsOf l v (AnnoS _ c x) = case x of
+      IntrinsicS IntrTagTest [s, AnnoS _ _ (StrS _)]
+        | isRef v s, langOfAnno c == l -> 1
+      IntrinsicS IntrCtorField (s : rest@[AnnoS _ _ (StrS _), AnnoS _ _ (IntS _ _)])
+        | isRef v s, langOfAnno c == l -> 1 + sum (map (readsOf l v) rest)
+      LamS vs _ | v `elem` vs -> 0
+      LetS w a b
+        | isRef v a -> (if foldable l w b then 1 else 0) + (if w == v then 0 else readsOf l v b)
+        | w == v -> readsOf l v a
+      _ -> getSum (foldExprS (Sum . readsOf l v) x)
+    isRef v (AnnoS _ _ (BndS w)) = v == w
+    isRef v (AnnoS _ _ (LetBndS w)) = v == w
+    isRef _ _ = False
+
+    annOf (AnnoS _ c _) = c
+
+langOfAnno :: Indexed Lang -> Lang
+langOfAnno (Idx _ l) = l
+
+-- | OWN-11: a call of a self-recursive helper that passes a constructor
+-- literal, or a let bound to one whose fields are atoms, at a parameter the
+-- helper tag-tests, calls a copy of the helper that takes the
+-- constructor's fields in that parameter's place, with the constructor
+-- written into its body and reduced there ('foldKnownCons'). The copy is
+-- one step of the helper: it calls the helper, not itself. It keeps the
+-- helper's name, so a failure in it is traced as one in the helper
+-- (DIAG-5). A copy that still holds the constructor is not made. Declined,
+-- as 'StaticArgs' declines: a labeled call, a helper holding a label, a
+-- staged helper, a mutually recursive one, a call in the helper itself, a
+-- call or helper in another language, and a helper larger than
+-- 'maxUnfoldSize'.
+unfoldKnownCalls :: [PoolTree] -> MorlocMonad [PoolTree]
+unfoldKnownCalls trees = do
+  stateNames <- MM.gets stateName
+  stages <- MM.gets stateRecStages
+  let named = [(v, t) | t@(AnnoS (Idx gi _) _ _) <- trees, Just v <- [Map.lookup gi stateNames]]
+      calls = Map.fromListWith Set.union [(v, Set.fromList (callsOf t)) | (v, t) <- named]
+      callees w = Set.toList (Map.findWithDefault Set.empty w calls)
+      reach seen [] = seen
+      reach seen (w : ws)
+        | Set.member w seen = reach seen ws
+        | otherwise = reach (Set.insert w seen) (callees w <> ws)
+      mutual v = any (\w -> w /= v && Set.member v (reach Set.empty [w])) (callees v)
+      helpers = Map.fromList
+        [ (v, (t, length vs, matched))
+        | (v, t@(AnnoS (Idx _ (FunT ts _)) _ (LamS vs body))) <- named
+        , length ts == length vs
+        , v `elem` callees v
+        , not (Map.member v stages)
+        , not (mutual v)
+        , not (hasLabel body)
+        , treeSize body <= maxUnfoldSize
+        , let matched = [i | (i, p) <- indexed vs, tagTested p body]
+        , not (null matched)
+        ]
+  if Map.null helpers
+    then return trees
+    else do
+      copiesRef <- MM.liftIO (newIORef Map.empty)
+      madeRef <- MM.liftIO (newIORef [])
+      trees' <- mapM (unfoldIn helpers copiesRef madeRef) trees
+      made <- MM.liftIO (readIORef madeRef)
+      return (trees' <> made)
+  where
+    unfoldIn helpers copiesRef madeRef t@(AnnoS (Idx gi _) _ _) = do
+      self <- Map.lookup gi <$> MM.gets stateName
+      changed <- MM.liftIO (newIORef False)
+      let walk known (AnnoS g c e) = case e of
+            -- the call a label wraps is the labeled call
+            LabelS k (AnnoS ag ac (AppS f xs)) ->
+              AnnoS g c . LabelS k . AnnoS ag ac <$> (AppS <$> walk known f <*> mapM (walk known) xs)
+            AppS f@(AnnoS (Idx fi _) fc (CallS h)) xs
+              | Just hp@(AnnoS _ hc _, n, matched) <- Map.lookup h helpers
+              , Just h /= self
+              , length xs == n
+              , langOfAnno fc == langOfAnno c
+              , langOfAnno hc == langOfAnno c -> do
+                  xs' <- mapM (walk known) xs
+                  case [(i, a) | (i, x) <- indexed xs', i `elem` matched, Just a <- [conArg known x]] of
+                    ((i, (lets, shared, tv, cn, k, fields)) : _) -> do
+                      made <- copyFor copiesRef madeRef h hp i tv cn k [ft | AnnoS (Idx _ ft) _ _ <- fields]
+                      case made of
+                        Nothing -> return (AnnoS g c (AppS f xs'))
+                        Just (name, ft) -> do
+                          fields' <- if shared then mapM reindexTree fields else return fields
+                          let (pre, rest) = splitAt i xs'
+                              call = AnnoS g c (AppS (AnnoS (Idx fi ft) fc (CallS name)) (pre <> fields' <> drop 1 rest))
+                              Idx gIdx gT = g
+                          MM.liftIO (writeIORef changed True)
+                          foldrM (\(y, yc, a) body -> do
+                                    ix <- newIndex gIdx
+                                    return (AnnoS (Idx ix gT) yc (LetS y a body)))
+                                 call lets
+                    [] -> return (AnnoS g c (AppS f xs'))
+            LetS v a b -> do
+              a' <- walk known a
+              let known' = case a' of
+                    AnnoS _ _ (ConS tv cn k fs) | all isAtomNode fs -> Map.insert v (tv, cn, k, fs) (forget v known)
+                    _ -> forget v known
+              AnnoS g c . LetS v a' <$> walk known' b
+            LamS vs b -> AnnoS g c . LamS vs <$> walk (foldr forget known vs) b
+            _ -> AnnoS g c <$> mapExprSM (walk known) e
+      t' <- walk Map.empty t
+      done <- MM.liftIO (readIORef changed)
+      if done then foldKnownCons t' else return t'
+
+    -- a name rebound: neither it nor a constructor whose fields name it
+    -- is known below
+    forget w = Map.filter (\(_, _, _, fs) -> not (any (isNamed w) fs)) . Map.delete w
+
+    -- the constructor an argument is: a literal, after the lets that
+    -- compute its fields, or a let bound to one
+    conArg known (AnnoS _ yc x) = case x of
+      ConS tv cn k fs -> Just ([], False, tv, cn, k, fs)
+      LetS y a b -> (\(ls, sh, tv, cn, k, fs) -> ((y, yc, a) : ls, sh, tv, cn, k, fs)) <$> conArg known b
+      BndS w -> fromKnown <$> Map.lookup w known
+      LetBndS w -> fromKnown <$> Map.lookup w known
+      _ -> Nothing
+      where
+        fromKnown (tv, cn, k, fs) = ([], True, tv, cn, k, fs)
+
+    -- the copy of helper h taking constructor cn's fields at parameter i:
+    -- one made before, a new one, or none
+    copyFor copiesRef madeRef h (ht, _, _) i tv cn k fieldTs = do
+      copies <- MM.liftIO (readIORef copiesRef)
+      case Map.lookup (h, i, cn) copies of
+        Just r -> return r
+        Nothing
+          | Map.size (Map.filterWithKey (\(h', _, _) _ -> h' == h) copies) >= maxKnownCopies -> return Nothing
+          | otherwise -> do
+              r <- makeCopy madeRef h ht i tv cn k fieldTs
+              MM.liftIO (modifyIORef copiesRef (Map.insert (h, i, cn) r))
+              return r
+
+    makeCopy madeRef h ht@(AnnoS (Idx source _) _ _) i tv cn k fieldTs = do
+      copy <- reindexTree ht >>= freshBinders
+      case copy of
+        AnnoS (Idx gi (FunT ts r)) hc (LamS vs body)
+          | (preVs, p : postVs) <- splitAt i vs
+          , (preTs, pT : postTs) <- splitAt i ts -> do
+              fs <- mapM (const (freshClosureName (EV "field"))) fieldTs
+              fieldNodes <- sequence [(\ix -> AnnoS (Idx ix ft) hc (BndS f)) <$> newIndex gi | (f, ft) <- zipSame fs fieldTs]
+              conIdx <- newIndex gi
+              letIdx <- newIndex gi
+              body' <- rebindBndToLet p body
+              let AnnoS (Idx _ bodyT) _ _ = body
+              folded <- foldKnownCons (AnnoS (Idx letIdx bodyT) hc (LetS p (AnnoS (Idx conIdx pT) hc (ConS tv cn k fieldNodes)) body'))
+              case folded of
+                AnnoS _ _ (LetS w _ _) | w == p -> return Nothing
+                _ -> do
+                  let ft = FunT (preTs <> fieldTs <> postTs) r
+                      name = EV (unEVar h <> "`known" <> MT.show' gi)
+                  MM.modify' $ \st ->
+                    st { stateName = Map.insert gi name (stateName st)
+                       , stateNameSource = Map.insert gi source (stateNameSource st)
+                       , stateRecursionTargets = Map.insert name gi (stateRecursionTargets st)
+                       }
+                  MM.liftIO (modifyIORef madeRef (<> [AnnoS (Idx gi ft) hc (LamS (preVs <> fs <> postVs) folded)]))
+                  return (Just (name, ft))
+        _ -> return Nothing
+
+    isAtomNode (AnnoS _ _ x) = case x of
+      BndS _ -> True
+      LetBndS _ -> True
+      IntS _ _ -> True
+      RealS _ _ -> True
+      LogS _ -> True
+      UniS -> True
+      NullS -> True
+      _ -> False
+
+    callsOf (AnnoS _ _ e) = case e of
+      CallS w -> [w]
+      _ -> concat (foldExprS (\x -> [callsOf x]) e)
+    hasLabel (AnnoS _ _ e) = case e of
+      LabelS _ _ -> True
+      _ -> getAny (foldExprS (Any . hasLabel) e)
+    treeSize (AnnoS _ _ e) = 1 + getSum (foldExprS (Sum . treeSize) e)
+    -- a tag test of p, or of a let naming p
+    tagTested p (AnnoS _ _ e) = case e of
+      IntrinsicS IntrTagTest (s : _) | isNamed p s -> True
+      LetS w a b | isNamed p a -> tagTested w b || tagTested p b
+      _ -> getAny (foldExprS (Any . tagTested p) e)
+    isNamed p (AnnoS _ _ (BndS w)) = w == p
+    isNamed p (AnnoS _ _ (LetBndS w)) = w == p
+    isNamed _ _ = False
+
+-- | The most copies 'unfoldKnownCalls' makes of one helper.
+maxKnownCopies :: Int
+maxKnownCopies = 16
+
+-- | The largest helper body 'unfoldKnownCalls' copies.
+maxUnfoldSize :: Int
+maxUnfoldSize = 64
+
+-- | A tree with every name it binds renamed fresh, so a copy put inside
+-- another binds no name twice on a path (see 'Realize.renameShadowing').
+freshBinders :: AnnoS g One c -> MorlocMonad (AnnoS g One c)
+freshBinders = go Map.empty
+  where
+    go m (AnnoS g c e) = AnnoS g c <$> case e of
+      BndS v -> return (BndS (Map.findWithDefault v v m))
+      LetBndS v -> return (LetBndS (Map.findWithDefault v v m))
+      LamS vs b -> do
+        vs' <- mapM freshClosureName vs
+        LamS vs' <$> go (foldr (uncurry Map.insert) m (zipSame vs vs')) b
+      LetS v a b -> do
+        a' <- go m a
+        v' <- freshClosureName v
+        LetS v' a' <$> go (Map.insert v v' m) b
+      _ -> mapExprSM (go m) e
 
 isLam :: AnnoS g f c -> Bool
 isLam (AnnoS _ _ (LamS _ _)) = True

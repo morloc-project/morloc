@@ -25,7 +25,7 @@
 --- twiceRead ---
 [200,0]
 --- twiceKeep ---
-[202,100]
+[202,0]
 --- twoSteps ---
 [201,0]
 --- partsBorrowed ---
@@ -47,7 +47,7 @@
 --- closureRead ---
 [306,0]
 --- closureKeep ---
-[303,300]
+[303,0]
 --- papRead ---
 [306,0]
 --- papHof ---
@@ -83,7 +83,7 @@
 --- matchedTwice ---
 [200,0]
 --- twoLets ---
-[202,100]
+[202,0]
 --- capStaged ---
 [103,0]
 --- capStagedKeep ---
@@ -103,4 +103,4 @@
 --- stagedPap ---
 [301,200]
 --- mapUnpack ---
-[300,600]
+[300,0]

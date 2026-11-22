@@ -3453,8 +3453,10 @@ prepareOrdered m0x@(SerialManifold root _ form00 _ _) = do
       caps = rustCaps cscope
       variants = Set.fromList [t | (_, rhs) <- nativeLets m0x, t@(VariantF {}) <- fieldTypes rhs]
   generated <- Set.fromList . map fst . filter snd <$> mapM (\t -> do ty <- rustTypeOf t; return (t, isNothing (Map.lookup (render ty) userArms))) (Set.toList variants)
-  let owns nm@(NativeManifold m _ _ e) t =
+  let condSources = Set.unions [clSources cl | ((r, _), cl) <- Map.toList (ppCondLets pp), r == root]
+      owns nm@(NativeManifold m _ _ e) t =
         Set.notMember t (mpBorrowed (planNativeManifold caps pp nm))
+          && Set.notMember t condSources
           && (t `elem` seeds m || t `elem` map fst (nativeLetsUnder (RN e)))
           && Set.notMember t (loopSlots (RSM m0x))
           && not (any (\b -> Set.member t (namedIn (RN b))) (doBlocksUnder (RN e)))
@@ -3473,6 +3475,7 @@ prepareOrdered m0x@(SerialManifold root _ form00 _ _) = do
         `Set.difference` members
       modes = [(i, rhs, rustLetMode i rhs) | (i, rhs) <- nativeLets m00]
       rustLetMode i rhs
+        | LetLent a <- letMode pp root i rhs = LetLent a
         | Set.member i refs = LetBorrow
         | otherwise = case letMode pp root i rhs of
             LetBorrow -> LetCopy
@@ -3480,6 +3483,149 @@ prepareOrdered m0x@(SerialManifold root _ form00 _ _) = do
       plan = letPlan modes
   CMS.modify (\st -> st {rsBuilds = if noMoves then Set.empty else lastBuilds (lpAliases plan) (lpHeld plan) seeds [m0']})
   return (if noMoves then m0' else markLastReadsSeeded (lpAliases plan) (lpHeld plan) seeds m0')
+
+-- | OWN-8: a result lent from a parameter or owned.
+rustCow :: MDoc -> MDoc
+rustCow t = "::std::borrow::Cow<'a," <+> t <> ">"
+
+-- | OWN-8: the parameter a result may be lent from, bound to the result's
+-- lifetime.
+rustLendParam :: MDoc -> MDoc
+rustLendParam a = case T.breakOn ": &" (render a) of
+  (name, rest) | not (T.null rest) -> pretty name <> ": &'a " <> pretty (T.drop 3 rest)
+  _ -> error ("morloc bug: OWN-8 parameter " <> show (render a) <> " is not a reference")
+
+-- | OWN-8: the manifold whose by-reference form this loop is the body of,
+-- given the loop's carried slots.
+rustLentLoop :: [Int] -> RustM (Maybe LentResult)
+rustLentLoop ids = do
+  pp <- CMS.gets rsPool
+  twin <- CMS.gets rsTwin
+  return $ case [(m, lr) | (m, lr) <- Map.toList (ppLent pp), Set.null (lrIfs lr), lrSlots lr == ids] of
+    ((m, lr) : _) | twin /= Just m -> Just lr
+    _ -> Nothing
+
+-- | OWN-8: the value a loop of a manifold that may lend its result ends
+-- with: lent where the leaf is the parameter's slot, or a part of it, as a
+-- reference; owned otherwise.
+rustKeepSlot :: [Int] -> NativeExpr -> MDoc -> RustM MDoc
+rustKeepSlot ids e x = do
+  lent <- rustLentLoop ids
+  case lent of
+    Nothing -> return x
+    Just lr -> do
+      own <- rustOwnership e
+      return $ case e of
+        LetVarN _ v _ | lends lr v own -> borrowed v
+        BndVarN _ v _ | lends lr v own -> borrowed v
+        _ -> "::std::borrow::Cow::Owned(" <> x <> ")"
+  where
+    lends lr v own = Set.member v (lrLeaves lr) && own == BorrowedRef
+    borrowed v = "::std::borrow::Cow::Borrowed(" <> (nvarNamer rustLocals) v <> ")"
+
+-- | OWN-8: a call of a manifold whose by-reference form may lend its
+-- result, taken owned unless a let reads it in place.
+rustLentCall :: Int -> Maybe MDoc -> MDoc -> RustM MDoc
+rustLentCall m twin x = do
+  pp <- CMS.gets rsPool
+  return (if Map.member m (ppLent pp) && isNothing twin then "::std::borrow::Cow::into_owned(" <> x <> ")" else x)
+
+-- | OWN-8: whether native let @i@ reads a call's result in place, or
+-- OWN-10: a conditional's; and which.
+rustIsLentLet :: Int -> RustM (Maybe Bool)
+rustIsLentLet i = do
+  pp <- CMS.gets rsPool
+  root <- CMS.gets rsCurrentRoot
+  return $ case () of
+    _ | Map.member (root, i) (ppLentLets pp) -> Just False
+      | Map.member (root, i) (ppCondLets pp) -> Just True
+      | otherwise -> Nothing
+
+-- | OWN-10: whether a conditional's value is lent or owned.
+rustLentIf :: NativeExpr -> RustM Bool
+rustLentIf e@IfN {} = do
+  pp <- CMS.gets rsPool
+  root <- CMS.gets rsCurrentRoot
+  lrs <- rustLentIfs (condKey e)
+  let k = condKey e
+  return (any (Set.member k . clIfs) (condLetsIn pp root) || not (null lrs))
+rustLentIf _ = return False
+
+-- | OWN-8: the lent results of the manifolds whose body is the conditional
+-- with key @k@, in the form that returns them lent or owned.
+rustLentIfs :: Set.Set Int -> RustM [(Int, LentResult)]
+rustLentIfs k = do
+  pp <- CMS.gets rsPool
+  twin <- CMS.gets rsTwin
+  return [(m, lr) | (m, lr) <- Map.toList (ppLent pp), Set.member k (lrIfs lr), twin /= Just m]
+
+-- | OWN-8: the value a manifold whose by-reference form returns its result
+-- lent or owned returns: a conditional's value as it is.
+rustLentReturn :: Int -> MDoc -> RustM MDoc
+rustLentReturn m x = do
+  pp <- CMS.gets rsPool
+  twin <- CMS.gets rsTwin
+  return $ case Map.lookup m (ppLent pp) of
+    Just lr
+      | not (Set.null (lrIfs lr))
+      , twin /= Just m
+      , Just inner <- T.stripPrefix "::std::borrow::Cow::into_owned(" (render x) >>= T.stripSuffix ")" ->
+          pretty inner
+    _ -> x
+
+-- | OWN-10: an arm of a conditional whose value is lent or owned: a part
+-- the plan names, bound by reference, borrowed; an inner such conditional
+-- passed on; any other value owned.
+rustLentArm :: NativeExpr -> NativeExpr -> PoolDocs -> PoolDocs -> RustM PoolDocs
+rustLentArm ifE armE raw owned = do
+  pp <- CMS.gets rsPool
+  root <- CMS.gets rsCurrentRoot
+  let k = condKey ifE
+      cls = [cl | cl <- condLetsIn pp root, Set.member k (clIfs cl)]
+      value = armValue armE
+  lrs <- rustLentIfs k
+  let leaves = Set.unions (map clLeaves cls <> map (lrLeaves . snd) lrs)
+  innerLent <- case value of
+    IfN {} -> rustLentIf value
+    _ -> return False
+  own <- rustOwnership value
+  let x = poolExpr raw
+      leaf = maybe False (`Set.member` leaves) (varOf value)
+      whole = any (\cl -> maybe False (\v -> Set.member v (clSources cl) && Set.member v (clLeaves cl)) (varOf value)) cls
+  return $ case () of
+    _ | innerLent, Just h <- T.stripPrefix "::std::borrow::Cow::into_owned(" (render x) >>= T.stripSuffix ")" -> raw {poolExpr = pretty h}
+      | leaf, BorrowedRef <- own -> raw {poolExpr = "::std::borrow::Cow::Borrowed(" <> x <> ")"}
+      | whole, BorrowedPlace <- own -> raw {poolExpr = "::std::borrow::Cow::Borrowed(&" <> x <> ")"}
+      | otherwise -> owned {poolExpr = "::std::borrow::Cow::Owned(" <> poolExpr owned <> ")"}
+  where
+    armValue e = case e of
+      NativeLetN i r@IfN {} (LetVarN _ j _) | i == j -> armValue r
+      NativeLetN _ _ b -> armValue b
+      _ -> e
+    varOf e = case e of
+      LetVarN _ v _ -> Just v
+      BndVarN _ v _ -> Just v
+      _ -> Nothing
+
+-- | OWN-10: a result lent from a local or owned, its lifetime inferred.
+rustCondCow :: MDoc -> MDoc
+rustCondCow t = "::std::borrow::Cow<'_," <+> t <> ">"
+
+-- | OWN-8: a let bound to a call whose result is lent or owned, read where
+-- it lies: the result held whole, and the let a reference into it. OWN-10:
+-- the same for a conditional, held owned where it was rendered owned.
+rustLentLet :: Bool -> MDoc -> MDoc -> MDoc -> [MDoc]
+rustLentLet cond name t x = case T.stripPrefix "::std::borrow::Cow::into_owned(" (render x) >>= T.stripSuffix ")" of
+  Just call ->
+    [ "let" <+> name <> "_lent =" <+> pretty call <> ";"
+    , "let" <+> name <> ": &" <> t <+> "= &*" <> name <> "_lent;"
+    ]
+  Nothing
+    | cond ->
+        [ "let" <+> name <> "_lent:" <+> t <+> "=" <+> x <> ";"
+        , "let" <+> name <> ": &" <> t <+> "= &" <> name <> "_lent;"
+        ]
+  Nothing -> error ("morloc bug: OWN-8 let " <> show (render name) <> " is not bound to a call that lends its result: " <> show (render x))
 
 -- | The by-value form of manifold @m@, for a call that may move every
 -- argument it takes by value only there (OWN-7).
@@ -3885,11 +4031,12 @@ rustLowerConfig mask makers pool userArms =
     , lcKeepContextArg = \_ _ _ _ v -> return v
     , lcKeepCallArg = \_ _ _ v -> return v
     , lcTwinCall = rustTwinCall
+    , lcLentCall = rustLentCall
     , lcBuildOwnership = rustBuildOwnership
     , lcKeepClosureArg = \_ _ -> return Nothing
     , lcKeepSourcedArg = \_ _ -> return Nothing
     , lcMoveWhereAccepted = \_ _ x -> x
-    , lcKeepSlot = \_ _ v -> return v
+    , lcKeepSlot = rustKeepSlot
     , lcKeepElem = \_ v -> return v
     , lcStoreField = \_ v -> return v
     -- Apply a function value with call syntax: a concrete closure inlines, an
@@ -3942,6 +4089,9 @@ rustLowerConfig mask makers pool userArms =
     , lcOwnPacketDecl = \v e -> Just ("let" <+> v <+> "= ::rustmorloc::Packet::new(" <> e <> ");", v <> ".as_ptr()")
     , lcMakeIf = rustMakeIf
     , lcMakeIfLadder = rustMakeIfLadder
+    , lcLentIf = rustLentIf
+    , lcLentArm = rustLentArm
+    , lcLentReturn = rustLentReturn
     , lcShortCircuit = \isAnd a b -> a <+> (if isAnd then "&&" else "||") <+> b
     , lcChainLadder = \isAnd flag first rungs ->
         let undecided = if isAnd then flag else "!" <> flag
@@ -4091,8 +4241,9 @@ rustLoopBorrow i e = do
   borrowed <- asks oeCurrent
   ownedRoot <- Map.lookup i <$> asks oeOwnedParts
   -- a local that is not itself a reference is lent to the part read from it
+  lentLet <- rustIsLentLet i
   let var j = (if ownedRoot == Just j || not (Set.member j borrowed) then "&" else "") <> (nvarNamer rustLocals) j
-  if not (Set.member i borrowed)
+  if not (Set.member i borrowed) || isJust lentLet
     then return Nothing
     else case borrowPartOf (const True) (const True) e of
       Just part -> Just <$> renderPart var part
@@ -4201,9 +4352,13 @@ rustMakeLet namer letIndex mt mrhs p1 p2 = do
   -- A loop-carried local's entry deserialize let is reassigned each iteration by
   -- the loop's continue, so it must bind mutably.
   carried <- asks oeLoopCarried
+  lentLet <- if isJust mrhs then rustIsLentLet letIndex else return Nothing
+  ts <- maybe (return "") rustTypeOf mt
   let letKw = if Set.member letIndex carried then "let mut" else "let"
-      letLine = letKw <+> namer letIndex <> annDoc <+> "=" <+> poolExpr p1 <> ";"
-      rs = poolPriorLines p1 <> [letLine] <> poolPriorLines p2
+      letLines
+        | Just cond <- lentLet = rustLentLet cond (namer letIndex) ts (poolExpr p1)
+        | otherwise = [letKw <+> namer letIndex <> annDoc <+> "=" <+> poolExpr p1 <> ";"]
+      rs = poolPriorLines p1 <> letLines <> poolPriorLines p2
   return $
     PoolDocs
       { poolCompleteManifolds = poolCompleteManifolds p1 <> poolCompleteManifolds p2
@@ -4238,9 +4393,10 @@ rustLetAnnotation letIndex mt native = do
 rustMakeLoop :: LoopResult -> [(Int, Maybe PoolDocs)] -> LoopBody LowN LowS PoolDocs -> RustM PoolDocs
 rustMakeLoop res carried body = do
   resultIdx <- getCounter
+  lent <- rustLentLoop (map fst carried)
   resT <- case res of
     LoopResultSerial -> return "*mut u8"
-    LoopResultNative t -> rustTypeOf t
+    LoopResultNative t -> (if isJust lent then rustCow else id) <$> rustTypeOf t
   let resultVar = (helperNamer rustLocals) resultIdx
   bodyLines <- walk body
   -- A native loop's locals are its own, started from their initializers.
@@ -4270,8 +4426,13 @@ rustMakeLoop res carried body = do
       return $ priors <> tmpAssigns <> reassigns
     walk (LoopNLet i (Low r neDocs) b) = do
       ann <- rustLetAnnotation i (Just (typeFof r)) True
+      lentLet <- rustIsLentLet i
+      ts <- rustTypeOf (typeFof r)
       rest <- walk b
-      return $ poolPriorLines neDocs <> ["let" <+> (nvarNamer rustLocals) i <> ann <+> "=" <+> poolExpr neDocs <> ";"] <> rest
+      let letLines
+            | Just cond <- lentLet = rustLentLet cond ((nvarNamer rustLocals) i) ts (poolExpr neDocs)
+            | otherwise = ["let" <+> (nvarNamer rustLocals) i <> ann <+> "=" <+> poolExpr neDocs <> ";"]
+      return $ poolPriorLines neDocs <> letLines <> rest
     walk (LoopSLet i (Low _ seDocs) b) = do
       rest <- walk b
       return $ poolPriorLines seDocs <> ["let" <+> (svarNamer rustLocals) i <+> "=" <+> poolExpr seDocs <> ";"] <> rest
@@ -4291,14 +4452,15 @@ rustMakeIfLadder origExpr (Guards (c1, _, t1) rungs (_, eD)) = do
   idx <- getCounter
   let v = (helperNamer rustLocals) idx
       label = "'mlc_g" <> pretty idx
-  typeStr <- rustTypeOf (typeFof origExpr)
+  lent <- rustLentIf origExpr
+  typeStr <- (if lent then rustCondCow else id) <$> rustTypeOf (typeFof origExpr)
   let taken c d = vsep ["if" <+> parens c <+> "{", indent 4 (vsep (poolPriorLines d ++ ["break" <+> label <+> poolExpr d <> ";"])), "}"]
       body =
         [taken c1 t1]
           <> concat [pre <> [taken c d] | (pre, c, _, d) <- toList rungs]
           <> poolPriorLines eD
           <> [poolExpr eD]
-  return (v, vsep ["let" <+> v <> ":" <+> typeStr <+> "=" <+> label <> ": {", indent 4 (vsep body), "};"])
+  return (if lent then "::std::borrow::Cow::into_owned(" <> v <> ")" else v, vsep ["let" <+> v <> ":" <+> typeStr <+> "=" <+> label <> ": {", indent 4 (vsep body), "};"])
 
 -- | Native @if@ expression, bound to a fresh temp so it composes as a value.
 -- The arms are already adapted to the owned result type by the shared 'IfN_'
@@ -4314,8 +4476,9 @@ rustMakeIf origExpr condDocs thenDocs elseDocs = do
   -- distinct closure types; one spelling for a function value removed the
   -- reason. Selecting costs one allocation and one indirection less, and
   -- evaluates the condition once.
+  lent <- rustLentIf origExpr
   ifStmt <- do
-      typeStr <- rustTypeOf (typeFof origExpr)
+      typeStr <- (if lent then rustCondCow else id) <$> rustTypeOf (typeFof origExpr)
       return $
         vsep
           [ "let" <+> v <> ":" <+> typeStr <+> "= if" <+> parens (poolExpr condDocs) <+> "{"
@@ -4328,7 +4491,7 @@ rustMakeIf origExpr condDocs thenDocs elseDocs = do
     PoolDocs
       { poolCompleteManifolds =
           poolCompleteManifolds condDocs <> poolCompleteManifolds thenDocs <> poolCompleteManifolds elseDocs
-      , poolExpr = v
+      , poolExpr = if lent then "::std::borrow::Cow::into_owned(" <> v <> ")" else v
       , poolPriorLines = poolPriorLines condDocs <> [ifStmt]
       , poolPriorExprs = poolPriorExprs condDocs <> poolPriorExprs thenDocs <> poolPriorExprs elseDocs
       , poolReturnFlag = poolReturnFlag condDocs || poolReturnFlag thenDocs || poolReturnFlag elseDocs
@@ -4377,15 +4540,24 @@ rustMakeFunction callIndex mname args manifoldType priorLines body headForm isCl
       -- A function value is a trait object in every position, so a returned
       -- closure names no lifetime: it owns what it captures ('capInit')
       -- and a captured function value is an `Arc` clone, not a borrow.
-      retStr <- rustReturnType manifoldType
+      retStr0 <- rustReturnType manifoldType
       kept <- CMS.gets (Map.findWithDefault Set.empty callIndex . ppByValue . rsPool)
-      typedArgs <-
+      typedArgs0 <-
         mapIndexedM
           (\j a@(Arg _ t) -> if Set.member j kept then (\ts -> (argNamer rustLocals) a <> ":" <+> ts) <$> rustArgType t else rustArgOf a)
           args
-      let fullName
+      -- OWN-8: the by-reference form of a manifold that may lend its result
+      -- ties the result to the one parameter it lends from.
+      lentHere <- CMS.gets (Map.lookup callIndex . ppLent . rsPool)
+      let lent = if twin || isRemote then Nothing else lentHere
+          retStr = maybe retStr0 (const (rustCow retStr0)) lent
+          typedArgs = case lent of
+            Nothing -> typedArgs0
+            Just lr -> [if j `elem` map fst (lrParams lr) then rustLendParam a else a | (j, a) <- indexed typedArgs0]
+          fullName
             | twin = mname <> "_v"
             | isRemote = mname <> "_remote"
+            | isJust lent = mname <> "<'a>"
             | otherwise = mname
           decl = "unsafe fn" <+> fullName <> tupled typedArgs <+> "->" <+> retStr
           -- STATE-5: a named function records its call; the pop is in its

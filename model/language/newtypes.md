@@ -100,3 +100,15 @@ no `Packable` instance.
 Why: a wire form fixed at the declaration is the same for every program
 that uses the type; one given only by instances could differ between
 programs that exchange data.
+
+### NEWT-10 A map of a representation cast is a cast
+Intent: ruled 2026-11-22
+Tests: spec-newt-10-1
+Code: conforms 2026-11-22
+
+`map unpack xs` and `map pack xs`, where the cast is the representation
+cast of NEWT-7 or NEWT-8, are the cast of `xs` itself: the cast changes no
+value, and a `map` of a function that changes no value is the identity,
+by the functor law `map id == id`. The compiler assumes this law of every
+`map` an instance provides, sourced ones included, and does not walk the
+container.

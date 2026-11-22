@@ -11,25 +11,24 @@ Generated `data` arms are shared nodes in both languages (a generated Rust
 arm type over `Arc`, C++ `shared_ptr`), so a copy of a `data` value is O(1); lists, strings, tuples,
 records and user-mapped types copy deeply.
 
-- **A part read through an inlined match on a `data` value is copied.**
-  [reproduced 2026-11-22, golden own7-matrix] After the in-place rewrites
-  (OWN-6: a let of a conditional is read in place; OWN-2: reads run before
-  keeps), the inlined cases still copying are `boxPay` (a match on `Bx`
-  returning a field) in a loop or kept twice (c640, c641: 3 and 1), and
-  caller aliasAfter with kinds L and D where the value is also kept by a
-  record, a list or a wrapper call (c454, c475, c496, c558, c580, c601,
-  c622: 1 each). The rewrite that would bind the part in place stops at
-  its size bound (48 nodes, LambdaEval `bindLet`) or does not see a
-  constructor-field arm as a part of the matched value.
-- **A recursive function returns a copy of what it was lent (OWN-8).**
-  [reproduced 2026-11-22, golden own7-matrix rec cases] A callee that is
-  not inlined and returns its argument, or a part of it, on some path
-  copies it in its by-reference form when the caller still needs the
-  argument (46 copies in each language), and one that builds an owned
-  record or list holding it copies it too (80). Removing the first needs
-  OWN-8 (a result that is a reference into the argument; a result slot
-  passed in is the narrow form); removing the second for a caller that
-  only projects the result needs a worker that returns the fields.
+- **A function returns a copy of what it was lent where OWN-8 does not
+  apply.** [read, 2026-11-22] OWN-8 removes the copies of a callee whose
+  body is a tail loop or a conditional returning lent parameters or parts
+  of them (every own7-matrix rec ret/part case). Left, unmeasured: a
+  non-tail recursion, and a call passing another callee's lent result on.
+  A callee that is not inlined and builds an owned record or list holding
+  its argument copies it too (own7-matrix 80); removing that for a caller
+  that only projects the result needs a worker that returns the fields.
+- **A conditional with a take in it is copied.** [read, 2026-11-22] OWN-10
+  does not hold a let of a conditional in place when a let in it takes a
+  part (a part a by-value form moves out, OWN-5), as takes are decided per
+  let, not per form.
+- **A sourced reader taking its parameter by value copies an owned OWN-8
+  result.** [read, 2026-11-22] A let that reads a lent-or-owned result in
+  place is a reference, so a sourced function whose parameter is `T` (C++
+  by value, Rust `T`) is given a copy even when the result was owned and
+  could have moved. No golden measures it (own7-matrix reads with `keyp`,
+  a reference).
 - **A let no spine reaches is never moved.** [read, 2026-11-09; G1 not
   reproduced] Gap in OWN-2. Marking finds owned lets only along a spine
   of let forms starting at a manifold, loop or do-block body (Imperative.hs
@@ -56,16 +55,13 @@ records and user-mapped types copy deeply.
   pass returning both would do. `heldReads` is recomputed per nested
   root and `stepReads` walks the owned list per step (quadratic in a
   spine's lets); not measured against g++/rustc time.
-- **root-cpp takes optionals by value.** [reproduced 2026-11-21] Gap in
-  stdlib root-cpp (not the compiler): `morloc_isNull` and `morloc_require`
-  take `std::optional<A>` by value and `require` returns `x.value()`, so
-  `pOptIn x ? isNull x = 0 : keyp (require x)` makes 3 copies of the
-  payload where 0 are needed (golden cpp-copy-shapes entryOpt). Fix, in
-  root-cpp core.hpp (on master, so left to its maintainer):
-  `bool morloc_isNull(const std::optional<A>&)`, `bool morloc_isNull(const
-  A&)`, `const A& morloc_require(const std::optional<A>& x)` returning
-  `x.value()`, and `A morloc_require(std::optional<A>&& x)` returning
-  `std::move(x).value()`, so a temporary is moved rather than lent.
+- **A C++ optional read with `require` at its last read is copied.**
+  [reproduced 2026-11-22, golden cpp-copy-shapes entryOpt: 1] `keyp
+  (require x)` on an owned optional at its last read binds
+  `Pay n = morloc_require(std::as_const(x))`: the optional is lent, so
+  the value it lends is copied into the owned let. Moving the optional at
+  its last read (root-cpp's `require` takes a temporary by value and moves
+  its content out) would copy nothing.
 - **A gather sink copies its batch into the suspension it returns.**
   [reproduced, stage 6 prototype] A C++ closure takes its parameters by
   reference (OWN-7), so the sink of a whole-list gather copies the batch
@@ -89,18 +85,6 @@ records and user-mapped types copy deeply.
   per application; a closure's non-closure slots are cloned into the wire
   tuple; a variant arm needing wire conversion clones each field, though on
   the deserialize side the raw value is dead.
-- **`map unpack` over a newtype with no native form copies every element.**
-  [reproduced] The cast is erased in native code (NEWT-7), but the `map`
-  around it is not: Rust renders `morloc_map_vec` with an identity
-  function, cloning each element (copy-census-rust mapUnpack: 600 links
-  for 3 chains of 100 and two maps). Writing `map cast xs` as `xs` assumes
-  `map` keeps the identity, a law of the sourced `Functor` instance the
-  compiler is not told; it needs a ruling. biolib stream's `unpackReader` (`mapReader
-  (map unpack)`) pays it on every batch: ingesting a 100 Mb FASTA through
-  bio's `readFasta` takes ~0.70 s and 271 MiB against ~0.67 s and 254 MiB
-  with the tagged reader directly; the stream files are identical. A map
-  whose function is a representation cast could be the identity on the
-  list.
 - **Under `--debug` a base case calls its own pool through the socket.**
   [reproduced by review, 2026-10-24] Building golden spec-cost-12-1 with
   `morloc make --debug`, the C++ base case of `loop` (`do b`) becomes a
@@ -115,9 +99,15 @@ records and user-mapped types copy deeply.
   copying `*p`: the node's other fields are copied, its own cycle field is
   shared. `isNull (.tail x)` then `require (.tail x)` copies the node twice
   per step of a walk; a node holding a large vector copies the vector each
-  time. root-cpp `morloc_isNull` and `morloc_require` take their argument by
-  value and copy it again. A read that only tests for null needs no copy,
-  and a read from an owned receiver could move (`mlc::take_field`, OWN-5).
+  time. A read that only tests for null needs no copy, and a read from an
+  owned receiver could move (`mlc::take_field`, OWN-5).
+- **A lent-or-owned result passed on to another call is copied.**
+  [reproduced 2026-11-22, goldens own7-fuzz-cpp p090, own7-fuzz-rust
+  p058: 1 each] Caller `twice` over a chain `g2 (g1 (g0 x))`: the let bound
+  to one OWN-8 call's result is passed to another OWN-8 call (p058, `g2 =
+  g1` with `g1` a tail loop), or is also an arm of an inlined conditional
+  (p090, `g2 j x = ? j > 1 = g1 (j - 1) x : x`), so it is not only read and
+  takes the result owned, copying a lent one (OWN-8 open).
 
 ## A mapped Rust enum's optional field is always read as a copy [read]
 
@@ -128,3 +118,8 @@ never lends such a field (OWN-6) and reads it as a copy, deep behind a Box.
 A field held as plain `Option<T>` could be lent but is copied too.
 Candidate: a trait the generated code asks for the field's form at build
 time (an associated const) so `Option<T>` fields lend.
+- **A shared handle is copied where a later read could take it.**
+  [reproduced 2026-11-22, golden spec-own-10-2 twoMoves, C++] `holdD b`
+  is given a copy of `b`'s `data` handle (a reference count increment,
+  not a payload copy) rather than a move, as LambdaEval moves a let only
+  one read ahead (`readFirst`).

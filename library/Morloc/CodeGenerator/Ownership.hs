@@ -10,6 +10,10 @@ renders from the plans.
 module Morloc.CodeGenerator.Ownership
   ( OwnCaps (..)
   , PoolPlan (..)
+  , LentResult (..)
+  , CondLet (..)
+  , condKey
+  , condLetsIn
   , emptyPoolPlan
   , byValueIndices
   , planPool
@@ -27,6 +31,7 @@ module Morloc.CodeGenerator.Ownership
   ) where
 
 import Morloc.Data.Zip (indexed)
+import Data.Foldable (asum, toList)
 import Control.Monad.Identity (Identity, runIdentity)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
@@ -34,6 +39,8 @@ import Morloc.CodeGenerator.Grammars.Translator.Imperative
   ( RNode (..)
   , rnodeChildren
   , rnodeLet
+  , rnodeNames
+  , rnodeBinds
   , consumableProjectionLets
   , consumedParams
   , borrowableRoot
@@ -89,10 +96,64 @@ data PoolPlan = PoolPlan
   -- it keeps, or keeps a part of, on some evaluations but takes by
   -- reference: a member may give it a second form taking them by value,
   -- for a call that may move every one of them (OWN-7)
+  , ppLent :: Map.Map Int LentResult
+  -- ^ the manifolds whose by-reference form returns a result lent from a
+  -- parameter or owned (OWN-8)
+  , ppLentLets :: Map.Map (Int, Int) (Int, Set.Set Int)
+  -- ^ (top-level manifold, let index) of the lets bound to a call of such a
+  -- manifold that read the result where it lies, each with the manifold
+  -- called and the caller's locals the result may be lent from (OWN-8)
+  , ppCondLets :: Map.Map (Int, Int) CondLet
+  -- ^ (top-level manifold, let index) of the lets bound to a conditional
+  -- that may choose a part of a live local, read where it lies (OWN-10)
   }
 
+-- | A let bound to a conditional read where it lies (OWN-10): the locals an
+-- arm may lend from, the let's type, the keys ('condKey') of the
+-- conditionals whose value is the let's, the locals an arm may lend, and
+-- the lets of a part an arm lends.
+data CondLet = CondLet
+  { clSources :: Set.Set Int
+  , clType :: TypeF
+  , clIfs :: Set.Set (Set.Set Int)
+  , clLeaves :: Set.Set Int
+  , clParts :: Set.Set Int
+  }
+  deriving (Eq, Show)
+
+-- | The lets a conditional binds, nested manifolds aside: the conditionals
+-- of an 'CondLet' are named by them, since each binds once in its manifold.
+condKey :: NativeExpr -> Set.Set Int
+condKey e = go (RN e)
+  where
+    go n = case n of
+      RNM _ -> Set.empty
+      RSM _ -> Set.empty
+      _ -> maybe Set.empty (\(i, _, _) -> Set.singleton i) (rnodeLet n) <> foldMap go (rnodeChildren n)
+
+-- | The conditional lets of top-level manifold @root@.
+condLetsIn :: PoolPlan -> Int -> [CondLet]
+condLetsIn pp root = [cl | ((r, _), cl) <- Map.toList (ppCondLets pp), r == root]
+
+-- | How a manifold's by-reference form returns a lent result (OWN-8): the
+-- positions and indices of the parameters it may lend from, the result's type,
+-- the carried slots of the loop its body is, and the locals of that loop a
+-- base leaf may return lent ('lentLeaves'). A body that is a conditional
+-- instead has no slots, and the keys ('condKey') of the conditionals whose
+-- value is the result, the locals an arm may return lent, and the lets of a
+-- part an arm lends ('condTree').
+data LentResult = LentResult
+  { lrParams :: [(Int, Int)]
+  , lrType :: TypeF
+  , lrSlots :: [Int]
+  , lrLeaves :: Set.Set Int
+  , lrIfs :: Set.Set (Set.Set Int)
+  , lrParts :: Set.Set Int
+  }
+  deriving (Eq, Show)
+
 emptyPoolPlan :: PoolPlan
-emptyPoolPlan = PoolPlan {ppTakes = Set.empty, ppReleases = Set.empty, ppByValue = Map.empty, ppTwoForm = Map.empty, ppKeptAlways = Map.empty}
+emptyPoolPlan = PoolPlan {ppTakes = Set.empty, ppReleases = Set.empty, ppByValue = Map.empty, ppTwoForm = Map.empty, ppKeptAlways = Map.empty, ppLent = Map.empty, ppLentLets = Map.empty, ppCondLets = Map.empty}
 
 planPool :: OwnCaps -> [SerialManifold] -> PoolPlan
 planPool caps sms =
@@ -102,8 +163,178 @@ planPool caps sms =
     , ppByValue = byValue
     , ppTwoForm = twoForm
     , ppKeptAlways = keptAlways
+    , ppLent = lent
+    , ppLentLets = lentLets
+    , ppCondLets = condLets
     }
   where
+    -- A part of a result read in place is a reference into it, not a take;
+    -- nor is a part of a local a result or a conditional's value may be lent
+    -- from (OWN-8, OWN-10), which the let's reads read.
+    takes = takes0 `Set.difference` (lentParts <> sourceParts)
+    releases = releases0 `Set.difference` (lentParts <> sourceParts)
+    sourceParts =
+      Set.fromList
+        [ (root, z)
+        | sm@(SerialManifold root _ _ _ _) <- sms
+        , scope <- [n | n <- universe (RSM sm), isManifold n]
+        , let lets = [(i, rhs) | n <- within scope, Just (i, RN rhs, _) <- [rnodeLet n]]
+              here = Set.fromList (map fst lets)
+              bases = Map.fromList [(i, b) | (i, rhs) <- lets, Just b <- [baseVar rhs]]
+              up seen i = case Map.lookup i bases of
+                Just j | Set.notMember j seen -> up (Set.insert j seen) j
+                _ -> seen
+              chain i = up (Set.singleton i) i
+              lentFrom = [(y, a) | ((r, y), cl) <- Map.toList condLets, r == root, a <- Set.toList (clSources cl)] <> [(y, a) | ((r, y), (_, as)) <- Map.toList lentLets, r == root, a <- Set.toList as]
+              sources = Set.unions [chain a | (y, a) <- lentFrom, Set.member y here]
+        , not (Set.null sources)
+        , (z, _) <- lets
+        , Set.member (root, z) takes0
+        , not (Set.null (Set.intersection sources (chain z)))
+        ]
+    lentParts =
+      Set.fromList
+        [ (root, z)
+        | sm@(SerialManifold root _ _ _ _) <- sms
+        , let lets = [(i, rhs) | n <- universe (RSM sm), Just (i, RN rhs, _) <- [rnodeLet n]]
+              bases = Map.fromList [(i, b) | (i, rhs) <- lets, Just b <- [baseVar rhs]]
+              lentHere = Set.fromList [y | (r, y) <- Map.keys lentLets <> Map.keys condLets, r == root]
+              reaches seen i =
+                Set.member i lentHere
+                  || (Set.notMember i seen && maybe False (reaches (Set.insert i seen)) (Map.lookup i bases))
+        , (z, _) <- lets
+        , Set.member (root, z) takes0
+        , maybe False (reaches (Set.singleton z)) (Map.lookup z bases)
+        ]
+    -- OWN-8: a fully applied manifold, never a function value, whose body is
+    -- a tail loop with one parameter it may keep (OWN-7) that some base leaf
+    -- returns as it is or a part of, through the loop's unchanged slot.
+    lent = Map.fromList (loopLent <> condLent)
+    -- OWN-8: a body that is a conditional whose arms are parameters it may
+    -- keep, parts of them, or values of their own.
+    condLent =
+      [ (m, LentResult ps rt [] (clLeaves cl) (clIfs cl) (clParts cl))
+      | NativeManifold m _ form@(ManifoldFull _) body <- natives
+      , not (Set.member m asValues)
+      , not (Set.member m selfCalled)
+      , Nothing <- [spineLoop body]
+      , let value = unReturn body
+            rt = typeFof value
+            two = Map.findWithDefault Set.empty m twoForm
+            own = Map.findWithDefault Set.empty m byValue
+            params = [(j', i') | (j', Arg i' (Native _)) <- indexed (typeMofForm form), Set.member j' two, Set.notMember j' own]
+      , not (ocCheap caps rt)
+      , not (isFunT rt)
+      , not (isOptionalT rt)
+      , Just cl <- [condTree caps keepsAll (\v -> v `elem` map snd params) rt value]
+      , not (Set.null (clIfs cl))
+      , all (not . Set.null) (Set.toList (clIfs cl))
+      , let ps = [p | p@(_, i') <- params, Set.member i' (clSources cl)]
+      , length ps == Set.size (clSources cl)
+      ]
+    unReturn e = case e of
+      ReturnN x -> unReturn x
+      NativeLetN i r b -> NativeLetN i r (unReturn b)
+      _ -> e
+    loopLent =
+        [ (m, LentResult [(j, i)] rt (map fst starts) leaves Set.empty Set.empty)
+        | NativeManifold m _ form@(ManifoldFull _) body <- natives
+        , not (Set.member m asValues)
+        , not (Set.member m selfCalled)
+        , Just (rt, starts, lb) <- [spineLoop body]
+        , not (ocCheap caps rt)
+        , not (isFunT rt)
+        , let two = Map.findWithDefault Set.empty m twoForm
+              own = Map.findWithDefault Set.empty m byValue
+              cands =
+                [ (j', i', ls)
+                | (j', Arg i' (Native _)) <- indexed (typeMofForm form)
+                , Set.member j' two
+                , Set.notMember j' own
+                , let ls = lentLeaves caps i' starts lb
+                , not (Set.null ls)
+                ]
+        , [(j, i, leaves)] <- [cands]
+        ]
+    isManifold n = case n of
+      RNM _ -> True
+      RSM _ -> True
+      _ -> False
+    -- the nodes of a manifold's own body, nested manifolds aside
+    within top = top : concatMap go (rnodeChildren top)
+      where
+        go n = case n of
+          RNM _ -> []
+          RSM _ -> []
+          _ -> n : concatMap go (rnodeChildren n)
+    selfCalled = Set.fromList [m | (m, ms) <- recCalls, Set.member m ms]
+    recCalls = [(m, Set.fromList [c | RN (AppExeN _ (RecCallP c _) _) <- universe (RN body)]) | NativeManifold m _ _ body <- natives]
+    -- OWN-8: a let bound to a call of such a manifold, which passes a named
+    -- local where the result may be lent from and reads the result only in
+    -- place.
+    lentLets =
+      Map.fromList
+        [ ((root, y), a)
+        | sm@(SerialManifold root _ _ _ _) <- sms
+        , let ns = universe (RSM sm)
+              bound = Map.fromListWith (+) [(i, 1 :: Int) | n <- ns, Just (i, _, _) <- [rnodeLet n]]
+        , n <- ns
+        , Just (y, RN rhs, body) <- [rnodeLet n]
+        , Map.lookup y bound == Just 1
+        , Just a@(_, vs) <- [lentArg rhs]
+        , Set.notMember y vs
+        , readsInPlace caps keepsAll y body
+        ]
+    keepsAll c = Map.findWithDefault Set.empty c byValue <> Map.findWithDefault Set.empty c twoForm
+    -- OWN-10: a let bound once to a conditional whose every arm is a local,
+    -- a part of one, or a fresh value, read in place.
+    condLets =
+      Map.fromList
+        [ ((root, y), cl)
+        | sm@(SerialManifold root _ _ _ _) <- sms
+        , let ns = universe (RSM sm)
+              bound = Map.fromListWith (+) [(i, 1 :: Int) | n <- ns, Just (i, _, _) <- [rnodeLet n]]
+              once i = Map.findWithDefault 0 i bound <= 1
+              taken = Set.fromList [i | (r, i) <- Set.toList (takes0 <> releases0), r == root]
+        , n <- ns
+        , Just (y, RN rhs@(IfN t _ _ _), body) <- [rnodeLet n]
+        , Map.lookup y bound == Just 1
+        , Map.notMember (root, y) lentLets
+        , not (ocCheap caps t)
+        , not (isFunT t)
+        , not (isOptionalT t)
+        , let inner = condKey rhs
+        , all once (Set.toList inner)
+        , Set.null (Set.intersection inner taken)
+        , Just cl <- [condTree caps keepsAll (\v -> neededAfter v y (RSM sm)) t rhs]
+        , Set.notMember y (clSources cl)
+        , all once (Set.toList (clSources cl))
+        , not (Set.null (clLeaves cl))
+        , all (not . Set.null) (Set.toList (clIfs cl))
+        , readsInPlace caps (keepsLent root y body) y body
+        ]
+    -- A call of an OWN-8 manifold bound by a let that reads its result in
+    -- place takes the argument it may lend from by reference.
+    keepsLent root y body c = case Map.lookup c lent of
+      Just lr
+        | let passes = length [() | RN e <- universe body, Just (c', vs) <- [lentArg e], c' == c, Set.member y vs]
+              bound = Map.size (Map.filterWithKey (\(r, z) (c', vs) -> r == root && c' == c && Set.member y vs && rnodeBinds z body) lentLets)
+        , passes == bound ->
+            keepsAll c `Set.difference` Set.fromList (map fst (lrParams lr))
+      _ -> keepsAll c
+    isOptionalT OptionalF {} = True
+    isOptionalT _ = False
+    lentArg rhs = case rhs of
+      ManN (NativeManifold m _ form@(ManifoldFull _) _)
+        | Just lr <- Map.lookup m lent ->
+            named m lr [Just i | (j, Arg i _) <- indexed (typeMofForm form), j `elem` map fst (lrParams lr)]
+      AppExeN _ (RecCallP m Nothing) args
+        | Just lr <- Map.lookup m lent ->
+            named m lr [varIx v | (j, NativeArgExpr v) <- indexed args, j `elem` map fst (lrParams lr)]
+      _ -> Nothing
+    named m lr vs = case sequence vs of
+      Just xs | length xs == length (lrParams lr) -> Just (m, Set.fromList xs)
+      _ -> Nothing
     keptAlways =
       Map.filter (not . Set.null) $
         Map.fromList
@@ -113,7 +344,7 @@ planPool caps sms =
           , let keeps c = Map.findWithDefault Set.empty c byValue <> Map.findWithDefault Set.empty c twoForm
                 always = keptOnEveryPath keeps body
           ]
-    (takes, releases) = consumableProjectionLets (ocTagAfterTake caps) (ocSharedTakes caps) (\m -> Map.findWithDefault Set.empty m byValue <> Map.findWithDefault Set.empty m twoForm) sms
+    (takes0, releases0) = consumableProjectionLets (ocTagAfterTake caps) (ocSharedTakes caps) (\m -> Map.findWithDefault Set.empty m byValue <> Map.findWithDefault Set.empty m twoForm) sms
     twoForm = settleTwo Map.empty
     settleTwo known =
       let next = twoFormGiven known
@@ -196,7 +427,18 @@ planPool caps sms =
 -- take by value). Nested function values and suspensions are their own
 -- scopes (OWN-3).
 keptSomewhere :: (Int -> Set.Set Int) -> NativeExpr -> Set.Set Int
-keptSomewhere keeps body = ends body <> go (RN body)
+keptSomewhere keeps body = keptUnder varOf varOf keeps (RN body)
+  where
+    varOf (LetVarN _ p _) = Just p
+    varOf (BndVarN _ p _) = Just p
+    varOf _ = Nothing
+
+-- | 'keptSomewhere' under any node, given the variable a kept expression
+-- names and the variable a let's right-hand side names.
+keptUnder :: (NativeExpr -> Maybe Int) -> (NativeExpr -> Maybe Int) -> (Int -> Set.Set Int) -> RNode -> Set.Set Int
+keptUnder varOf letVar keeps top = case top of
+  RN body -> ends varOf body <> go top
+  _ -> go top
   where
     go n = case n of
       RN (DoBlockN _ _) -> Set.empty
@@ -207,7 +449,7 @@ keptSomewhere keeps body = ends body <> go (RN body)
       RN e -> here e <> foldMap go (rnodeChildren n)
       RLN (LoopContinue es) -> vars (map snd es) <> foldMap go (rnodeChildren n)
       RLS (LoopContinue es) -> vars (map snd es) <> foldMap go (rnodeChildren n)
-      RLN (LoopBase e) -> ends e <> foldMap go (rnodeChildren n)
+      RLN (LoopBase e) -> ends varOf e <> foldMap go (rnodeChildren n)
       _ -> foldMap go (rnodeChildren n)
     here e = case e of
       VariantN _ _ _ xs -> vars xs
@@ -216,18 +458,15 @@ keptSomewhere keeps body = ends body <> go (RN body)
       RecordN _ _ _ kvs -> vars (map snd kvs)
       AppExeN _ (RecCallP mid _) args -> Set.fromList [p | (j, NativeArgExpr a) <- indexed args, Just p <- [varOf a], Set.member j (keeps mid)]
       LoopN _ starts _ -> vars (map snd starts)
-      NativeLetN _ rhs _ -> ends rhs
+      NativeLetN _ rhs _ -> ends letVar rhs
       _ -> Set.empty
-    ends e = case e of
-      NativeLetN _ _ b -> ends b
-      IfN _ _ a b -> ends a <> ends b
-      ReturnN x -> ends x
-      CoerceN _ _ x -> ends x
-      _ -> maybe Set.empty Set.singleton (varOf e)
+    ends v e = case e of
+      NativeLetN _ _ b -> ends v b
+      IfN _ _ a b -> ends v a <> ends v b
+      ReturnN x -> ends v x
+      CoerceN _ _ x -> ends v x
+      _ -> maybe Set.empty Set.singleton (v e)
     vars xs = Set.fromList [p | Just p <- map varOf xs]
-    varOf (LetVarN _ p _) = Just p
-    varOf (BndVarN _ p _) = Just p
-    varOf _ = Nothing
 
 -- | The variables every evaluation of a body keeps whole, by the keeping
 -- reads of 'keptSomewhere'; an arm of a conditional counts only what both
@@ -279,6 +518,202 @@ flowsFrom sources = grow . Set.singleton
       let s' = s <> Set.fromList [i | (i, from) <- sources, not (Set.null (Set.intersection from s))]
        in if Set.size s' == Set.size s then s else grow s'
 
+-- | The loop a manifold body is, past the lets it binds first: the loop's
+-- result type, its starts and its body.
+spineLoop :: NativeExpr -> Maybe (TypeF, [(Int, NativeExpr)], LoopBody NativeExpr SerialExpr NativeExpr)
+spineLoop e = case e of
+  NativeLetN _ _ b -> spineLoop b
+  ReturnN x -> spineLoop x
+  LoopN t starts lb -> Just (t, starts, lb)
+  _ -> Nothing
+
+-- | The locals of a loop that hold parameter @p@ as the loop was lent it,
+-- or a part of it (OWN-8), when some base leaf returns one of them, and
+-- none otherwise: a slot that starts from @p@ and no continue changes, and
+-- a let, bound once, to such a local or to a projection of one that has a
+-- value of its own type in memory (OWN-6) and is not optional.
+lentLeaves :: OwnCaps -> Int -> [(Int, NativeExpr)] -> LoopBody NativeExpr SerialExpr NativeExpr -> Set.Set Int
+lentLeaves caps p starts lb = if hit then known else Set.empty
+  where
+    (known, hit) = go (Set.fromList slots) lb
+    slots = [k | (k, s) <- starts, varIx s == Just p, all (maybe True (unchangedSlot k) . lookup k) (continues lb)]
+    bound = Map.fromListWith (+) [(i, 1 :: Int) | i <- letsOf lb]
+    go ks b = case b of
+      LoopIf _ t f -> let (a, x) = go ks t; (c, z) = go ks f in (a <> c, x || z)
+      LoopNLet y rhs r
+        | Map.lookup y bound == Just 1, placeIn ks rhs -> go (Set.insert y ks) r
+        | otherwise -> go ks r
+      LoopSLet _ _ r -> go ks r
+      LoopContinue _ -> (ks, False)
+      LoopBase x -> (ks, maybe False (`Set.member` ks) (varIx x))
+    placeIn ks e =
+      lendable caps e && not (isOptional (typeFof e)) && case e of
+        LetVarN _ v _ -> Set.member v ks
+        BndVarN _ v _ -> Set.member v ks
+        IntrinsicN _ IntrCtorField _ (s : _) -> base ks s
+        IntrinsicN _ IntrListElem _ (s : _) -> base ks s
+        PatN _ (PatGet sel [] (NativeArgExpr s)) ->
+          not (selectorHasBracket sel) && length (ungroup sel) == 1 && base ks s
+        _ -> False
+    base ks s = maybe False (`Set.member` ks) (varIx s) || placeIn ks s
+    isOptional OptionalF {} = True
+    isOptional _ = False
+    continues b = case b of
+      LoopIf _ t f -> continues t <> continues f
+      LoopNLet _ _ r -> continues r
+      LoopSLet _ _ r -> continues r
+      LoopBase _ -> []
+      LoopContinue xs -> [xs]
+    letsOf b = case b of
+      LoopIf _ t f -> letsOf t <> letsOf f
+      LoopNLet y _ r -> y : letsOf r
+      LoopSLet _ _ r -> letsOf r
+      _ -> []
+
+-- | A conditional whose arms, past the lets each binds, are a conditional
+-- of the same kind, a part of a local bound outside it (a projection that
+-- has a value of its own type in memory, OWN-6, through lets bound to such
+-- parts), or a value of their own; when nothing in it keeps a local an
+-- arm may lend from or a part of one. An arm that
+-- is the local itself lends it when @whole@ holds of it, and owns it
+-- otherwise, as a move there copies nothing.
+condTree :: OwnCaps -> (Int -> Set.Set Int) -> (Int -> Bool) -> TypeF -> NativeExpr -> Maybe CondLet
+condTree caps keeps whole t top = do
+  (ifs, leaves, parts, sources) <- arm Map.empty top
+  -- an arm that is a local itself is not a keep of it, any other read is
+  let kept = keptSomewhere keeps (dropWhole (Set.intersection leaves sources) top) `Set.difference` (leaves `Set.difference` sources)
+  if not (Set.null sources) && Set.null (Set.intersection (sources <> parts) kept)
+    then Just (CondLet sources t (Set.fromList (map condKey ifs)) leaves parts)
+    else Nothing
+  where
+    dropWhole ws e = case e of
+      NativeLetN i r@IfN {} b@(LetVarN _ j _) | i == j -> NativeLetN i (dropWhole ws r) b
+      NativeLetN i r b -> NativeLetN i r (dropWhole ws b)
+      IfN ty c a b -> IfN ty c (dropWhole ws a) (dropWhole ws b)
+      _ | Just v <- varIx e, Set.member v ws -> NullN (typeFof e)
+      _ -> e
+    arm env e = case e of
+      NativeLetN i r@IfN {} (LetVarN _ j _) | i == j -> arm env r
+      NativeLetN i r b -> arm (Map.insert i r env) b
+      IfN _ _ a b -> do
+        (i1, l1, p1, s1) <- arm env a
+        (i2, l2, p2, s2) <- arm env b
+        Just (e : i1 <> i2, l1 <> l2, p1 <> p2, s1 <> s2)
+      _ | Just v <- varIx e, Just r <- Map.lookup v env -> case part env r of
+          Just (ls, src) -> Just ([], Set.singleton v, Set.fromList (v : ls), Set.singleton src)
+          Nothing -> fresh
+      _ | Just v <- varIx e, Map.notMember v env, whole v -> Just ([], Set.singleton v, Set.empty, Set.singleton v)
+      _ -> fresh
+    fresh = Just ([], Set.empty, Set.empty, Set.empty)
+    part env e
+      | lendable caps e, not (isOptional (typeFof e)) = case e of
+          IntrinsicN _ IntrCtorField _ (s : _) -> base env s
+          IntrinsicN _ IntrListElem _ (s : _) -> base env s
+          PatN _ (PatGet sel [] (NativeArgExpr s))
+            | not (selectorHasBracket sel), length (ungroup sel) == 1 -> base env s
+          _ -> Nothing
+      | otherwise = Nothing
+    base env s = case varIx s of
+      Just v -> case Map.lookup v env of
+        Nothing -> Just ([], v)
+        Just r -> (\(ls, src) -> (v : ls, src)) <$> part env r
+      Nothing -> part env s
+    isOptional OptionalF {} = True
+    isOptional _ = False
+
+-- | Whether local @x@ is named where it may be read after, or in the same
+-- step as, let @y@ under a node: in the let's body, a later step, a part of
+-- the same step, or a body that may run again. True when @y@ is not found.
+neededAfter :: Int -> Int -> RNode -> Bool
+neededAfter x y top = fromMaybe True (asum (map (go False) (rnodeChildren top)))
+  where
+    names = rnodeNames x
+    go after n = case rnodeLet n of
+      Just (i, rhs, body)
+        | i == y -> Just (after || names body)
+        | otherwise -> go (after || names body) rhs <|> go after body
+      Nothing -> case n of
+        RN (IfN _ c a b) -> branch after (RN c) [RN a, RN b]
+        RLN (LoopIf c a b) -> branch after (RN c) [RLN a, RLN b]
+        RLS (LoopIf c a b) -> branch after (RN c) [RLS a, RLS b]
+        _
+          | repeats n -> asum (map (go (after || names n)) (rnodeChildren n))
+          | otherwise ->
+              let kids = rnodeChildren n
+               in asum [go (after || any names (others k kids)) c | (k, c) <- indexed kids]
+    branch after c arms = go (after || any names arms) c <|> asum (map (go after) arms)
+    others k kids = [c | (k', c) <- indexed kids, k' /= k]
+    repeats n = case n of
+      RN (LoopN {}) -> True
+      RS (LoopS {}) -> True
+      RN (DoBlockN {}) -> True
+      RN (IntrinsicN _ IntrTry _ _) -> True
+      RNM _ -> True
+      RSM _ -> True
+      _ -> False
+
+varIx :: NativeExpr -> Maybe Int
+varIx (LetVarN _ j _) = Just j
+varIx (BndVarN _ j _) = Just j
+varIx _ = Nothing
+
+-- | Whether every read of local @y@ under a node reads it in place (OWN-8):
+-- no read keeps it or a part of it ('keptUnder', @keeps@ as there),
+-- no closure captures it, no let binds it or a part of it, and it is read
+-- only by a call, a projection, a conditional's test, or an intrinsic that
+-- only reads its argument.
+readsInPlace :: OwnCaps -> (Int -> Set.Set Int) -> Int -> RNode -> Bool
+readsInPlace caps keeps y body = Set.notMember y kept && all ok (universe body)
+  where
+    kept = keptUnder deepVar varIx keeps body
+    universe n = n : concatMap universe (rnodeChildren n)
+    names e = deepVar e == Just y
+    ok n = case n of
+      RNM (NativeManifold _ _ form _) -> isFull form || notCaptured form
+      RSM (SerialManifold _ _ form _ _) -> notCaptured form
+      RN (NativeLetN z rhs b) -> not (endsIn rhs) || partLet z rhs (RN b)
+      RLN (LoopNLet z rhs b) -> not (endsIn rhs) || partLet z rhs (RLN b)
+      RN (PatN _ (PatGet sel [] (NativeArgExpr s))) | names s -> not (selectorHasBracket sel) && length (ungroup sel) == 1
+      RN (PatN _ app) -> not (any (\a -> case a of NativeArgExpr x -> names x; _ -> False) (toList app))
+      RN (IntrinsicN _ intr _ xs) | any names xs -> intr `elem` [IntrCtorField, IntrListElem, IntrTagTest, IntrListLenTest, IntrShow, IntrHash, IntrEq, IntrLe, IntrSchema, IntrTypeof]
+      RN (IfN _ _ a b) -> not (endsIn a || endsIn b)
+      RN (AppExeN _ (PapplyP _) args) -> not (any names [x | NativeArgExpr x <- args])
+      RN (CoerceN _ _ x) -> not (names x)
+      RN (MapOptionalN _ _ _ x) -> not (names x)
+      RN (NativeToWireN _ _ x) -> not (names x)
+      RN (DoBlockN _ x) -> not (endsIn x)
+      RN (EvalN _ x) -> not (endsIn x)
+      _ -> True
+    -- a scalar read out of it, or a part of it bound by reference that is
+    -- itself read only in place
+    partLet z rhs b =
+      ocCheap caps (typeFof rhs)
+        || (isPart rhs && readsInPlace caps keeps z b)
+    isPart e = lendable caps e && case e of
+      IntrinsicN _ IntrCtorField _ (s : _) -> names s
+      IntrinsicN _ IntrListElem _ (s : _) -> names s
+      PatN _ (PatGet sel [] (NativeArgExpr s)) -> not (selectorHasBracket sel) && length (ungroup sel) == 1 && names s
+      _ -> False
+    isFull ManifoldFull {} = True
+    isFull _ = False
+    notCaptured form = all (\(Arg j _) -> j /= y) (manifoldContext form)
+    endsIn e = case e of
+      NativeLetN _ _ b -> endsIn b
+      IfN _ _ a b -> endsIn a || endsIn b
+      CoerceN _ _ x -> endsIn x
+      _ -> names e
+
+-- | The variable at the base of a projection, or the variable itself.
+deepVar :: NativeExpr -> Maybe Int
+deepVar e = case e of
+  LetVarN _ j _ -> Just j
+  BndVarN _ j _ -> Just j
+  IntrinsicN _ IntrCtorField _ (x : _) -> deepVar x
+  IntrinsicN _ IntrListElem _ (x : _) -> deepVar x
+  PatN _ (PatGet _ _ (NativeArgExpr x)) -> deepVar x
+  CoerceN _ _ x -> deepVar x
+  _ -> Nothing
+
 -- | The value a right-hand side ends in, past the lets it binds for itself.
 letValue :: NativeExpr -> NativeExpr
 letValue (NativeLetN _ _ b) = letValue b
@@ -292,8 +727,10 @@ byValueIndices pp m form =
     positions = Map.findWithDefault Set.empty m (ppByValue pp)
 
 -- | How a native let binds its right-hand side: a copy, a reference to a
--- projection out of a live value, or the projected payload taken (OWN-5).
-data LetMode = LetCopy | LetBorrow | LetTake
+-- projection out of a live value, the projected payload taken (OWN-5), or
+-- a call's or a conditional's value lent from one of the given locals or
+-- owned (OWN-8, OWN-10).
+data LetMode = LetCopy | LetBorrow | LetTake | LetLent (Set.Set Int)
   deriving (Eq, Show)
 
 -- | The mode of let @i@ in top-level manifold @root@ with right-hand side
@@ -302,6 +739,8 @@ data LetMode = LetCopy | LetBorrow | LetTake
 -- elements.
 letMode :: PoolPlan -> Int -> Int -> NativeExpr -> LetMode
 letMode pp root i rhs
+  | Just (_, as) <- Map.lookup (root, i) (ppLentLets pp) = LetLent as
+  | Just cl <- Map.lookup (root, i) (ppCondLets pp) = LetLent (clSources cl)
   | IntrinsicN _ IntrCtorField _ (LetVarN {} : _) <- rhs, Set.member (root, i) (ppTakes pp) = LetTake
   | IntrinsicN _ IntrCtorField _ (BndVarN {} : _) <- rhs, Set.member (root, i) (ppTakes pp) = LetTake
   | PatN _ (PatGet _ [] (NativeArgExpr _)) <- rhs, Set.member (root, i) (ppTakes pp) = LetTake
@@ -318,12 +757,12 @@ letMode pp root i rhs
 
 -- | What last-read marking and the move check need to know about a
 -- manifold's lets, given how a member binds each one: the references, each
--- mapped to the variable at the base of its projection (OWN-2); the lets
+-- mapped to the variables it may refer into (OWN-2); the lets
 -- that hold a value of their own; and the values that must never move. An
 -- index bound more than once is never moved, and neither is anything one of
 -- its bindings refers into.
 data LetPlan = LetPlan
-  { lpAliases :: Map.Map Int Int
+  { lpAliases :: Map.Map Int [Int]
   , lpOwned :: Set.Set Int
   , lpHeld :: Set.Set Int
   }
@@ -331,12 +770,19 @@ data LetPlan = LetPlan
 letPlan :: [(Int, NativeExpr, LetMode)] -> LetPlan
 letPlan lets =
   LetPlan
-    { lpAliases = Map.fromList [(i, r) | (i, rhs, LetBorrow) <- lets, not (Set.member i reused), Just r <- [baseVar rhs]]
-    , lpOwned = Set.fromList [i | (i, _, mode) <- lets, mode /= LetBorrow, not (Set.member i reused)]
+    { lpAliases =
+        Map.fromList
+          ( [(i, [r]) | (i, rhs, LetBorrow) <- lets, not (Set.member i reused), Just r <- [baseVar rhs]]
+              <> [(i, Set.toList rs) | (i, _, LetLent rs) <- lets, not (Set.member i reused)]
+          )
+    , lpOwned = Set.fromList [i | (i, _, mode) <- lets, owns mode, not (Set.member i reused)]
     , lpHeld = Set.fromList ([i | i <- Set.toList reused] <> [r | (i, rhs, LetBorrow) <- lets, Set.member i reused, Just r <- [baseVar rhs]])
     }
   where
     reused = Map.keysSet (Map.filter (> (1 :: Int)) (Map.fromListWith (+) [(i, 1) | (i, _, _) <- lets]))
+    owns LetBorrow = False
+    owns (LetLent _) = False
+    owns _ = True
 
 -- | The variable at the base of a projection a let may refer into.
 baseVar :: NativeExpr -> Maybe Int
@@ -388,7 +834,7 @@ data ManifoldPlan = ManifoldPlan
 planSerialManifold :: OwnCaps -> PoolPlan -> SerialManifold -> ManifoldPlan
 planSerialManifold caps pp sm@(SerialManifold _ _ form _ e) =
   (borrowPlan caps pp (borrowedIndicesOfForm caps form) (RSM sm))
-    { mpShared = sharedOf (runIdentity (foldSerialExprM varUseCountOps e)) `Set.union` carried
+    { mpShared = sharedOf (runIdentity (foldSerialExprM varUseCountOps e)) `Set.union` carried `Set.union` lentArgsUnder pp (RSM sm)
     , mpCarried = carried
     }
   where
@@ -397,10 +843,18 @@ planSerialManifold caps pp sm@(SerialManifold _ _ form _ e) =
 planNativeManifold :: OwnCaps -> PoolPlan -> NativeManifold -> ManifoldPlan
 planNativeManifold caps pp nm@(NativeManifold m _ form e) =
   (borrowPlan caps pp borrowed (RNM nm))
-    { mpShared = sharedOf (runIdentity (foldNativeExprM varUseCountOps e))
+    { mpShared = sharedOf (runIdentity (foldNativeExprM varUseCountOps e)) `Set.union` lentArgsUnder pp (RNM nm)
     }
   where
     borrowed = borrowedIndicesOfForm caps form `Set.difference` byValueIndices pp m form
+
+-- | The locals a let under a node reads in place a result may be lent
+-- from: each is read again wherever the let is (OWN-2, OWN-8).
+lentArgsUnder :: PoolPlan -> RNode -> Set.Set Int
+lentArgsUnder pp n = Set.unions [a | m <- universe n, Just (i, _, _) <- [rnodeLet m], Just a <- [Map.lookup i byLet]]
+  where
+    byLet = Map.fromList ([(i, as) | ((_, i), (_, as)) <- Map.toList (ppLentLets pp)] <> [(i, clSources cl) | ((_, i), cl) <- Map.toList (ppCondLets pp)])
+    universe x = x : concatMap universe (rnodeChildren x)
 
 -- | The borrows of a manifold given its borrowed parameters: the locals
 -- that borrow from them (OWN-6), the lets that refer into a value the
@@ -428,7 +882,44 @@ borrowPlan caps pp borrowed n =
         _ -> Nothing
       _ -> Nothing
     universe m = m : concatMap universe (rnodeChildren m)
-    start = borrowed <> Map.keysSet owned
+    lentLets = Set.fromList [i | m <- universe n, Just (i, _, _) <- [rnodeLet m], Set.member i lentIds]
+    lentIds = Set.map snd (Map.keysSet (ppLentLets pp) <> Map.keysSet (ppCondLets pp))
+    start = borrowed <> Map.keysSet owned <> lentLets <> condSourceRefs
+    -- OWN-10: a part of a local a conditional's value may be lent from is
+    -- read where it lies, as the local is read wherever that value is
+    condSourceRefs =
+      let own = within n
+          here = Set.fromList [i | m <- own, Just (i, _, _) <- [rnodeLet m]]
+          sources = Set.unions [chainUp (Set.singleton a) a | cl <- Map.elems (Map.filterWithKey (\(_, y) _ -> Set.member y here) (ppCondLets pp)), a <- Set.toList (clSources cl)]
+       in Set.fromList
+            [ i
+            | not (Set.null sources)
+            , m <- own
+            , Just (i, RN rhs, _) <- [rnodeLet m]
+            , Map.findWithDefault (0 :: Int) i ownCounts == 1
+            , lendable caps rhs
+            , isPart rhs
+            , not (Set.null (Set.intersection sources (chainUp (Set.singleton i) i)))
+            ]
+    ownCounts = Map.fromListWith (+) [(i, 1) | m <- universe n, Just (i, _, _) <- [rnodeLet m]]
+    chainUp seen i = case Map.lookup i bases of
+      Just j | Set.notMember j seen -> chainUp (Set.insert j seen) j
+      _ -> seen
+    isPart e = case e of
+      IntrinsicN _ IntrCtorField _ (s : _) -> varOrPart s
+      IntrinsicN _ IntrListElem _ (s : _) -> varOrPart s
+      PatN _ (PatGet sel [] (NativeArgExpr s)) -> not (selectorHasBracket sel) && length (ungroup sel) == 1 && varOrPart s
+      _ -> False
+    varOrPart s = case s of
+      LetVarN {} -> True
+      BndVarN {} -> True
+      _ -> isPart s
+    within top = top : concatMap go (rnodeChildren top)
+      where
+        go m = case m of
+          RNM _ -> []
+          RSM _ -> []
+          _ -> m : concatMap go (rnodeChildren m)
     refs = settleRefs Set.empty
     settleRefs skip =
       let rs = start <> loopBorrowLocalsExcept (lendable caps) skip start n

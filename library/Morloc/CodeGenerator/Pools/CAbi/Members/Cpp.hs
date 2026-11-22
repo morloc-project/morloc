@@ -79,7 +79,7 @@ import qualified Morloc.DataFiles as DF
 import qualified Morloc.LangRegistry as LR
 import Morloc.CodeGenerator.Namespace
 import Morloc.CodeGenerator.Infer (declaredDataNames)
-import Morloc.CodeGenerator.Ownership (LetMode (..), LetPlan (..), OwnCaps (..), PoolPlan (..), byValueIndices, changedSlots, unchangedSlot, emptyPoolPlan, letMode, letPlan, letValue, nativeLets, planPool)
+import Morloc.CodeGenerator.Ownership (CondLet (..), LentResult (..), LetMode (..), condKey, condLetsIn, LetPlan (..), OwnCaps (..), PoolPlan (..), byValueIndices, changedSlots, unchangedSlot, emptyPoolPlan, letMode, letPlan, letValue, nativeLets, planPool)
 import Morloc.CodeGenerator.OwnershipCheck (checkManifold)
 import System.Environment (lookupEnv)
 import Morloc.CodeGenerator.GenDefs (DataDef (..), Disagreement (..), Extras (..), GenDef (..), extraDefs, noExtras, typeNamesIn, carriedTemplateArgs, dataDefs, dataNamesIn, nativeDataParams, RecordUse, disagreements, inPoolSerialASTs, placeTypes, genDefs, nativeParam, nativeParams, recordUses, depNamespaces, nameRoot)
@@ -131,6 +131,13 @@ cppIfArm :: Bool -> MDoc -> Maybe NativeExpr -> PoolDocs -> [MDoc]
 cppIfArm unit v armE d
   | maybe False isNativeThrow armE = poolPriorLines d <> [poolExpr d <> ";"]
   | otherwise = poolPriorLines d <> [v <+> "=" <+> cppMoved unit (maybe False armOwnsResult armE) (poolExpr d) <> ";"]
+
+-- | An arm of a conditional whose value is lent or owned (OWN-10), its
+-- value adapted by 'cppLentArm'.
+cppLentIfArm :: MDoc -> Maybe NativeExpr -> PoolDocs -> [MDoc]
+cppLentIfArm v armE d
+  | maybe False isNativeThrow armE = poolPriorLines d <> [poolExpr d <> ";"]
+  | otherwise = poolPriorLines d <> [v <> ".emplace(" <> poolExpr d <> ");"]
 
 -- | A conditional's value or an arm's, moved when the arm owns it
 -- ('armOwnsResult') and the result is not Unit, which is emitted as a bare
@@ -831,6 +838,18 @@ makeCppCode depGuards labels srcs es univeralScopeMap closureTable0 stageTable n
   CMS.modify $ \st -> st
     { translatorVariantNames = Set.fromList [gv | (FV gv _, _, _) <- collectCppVariants es] }
   headers <- planPublicTypes es
+  -- OWN-8: a scalar is passed and returned by value (CPP-1), so it is
+  -- never lent.
+  pp0 <- CMS.gets translatorPool
+  lentOk <- Map.fromList <$> filterM (\(_, lr) -> not <$> cppNoMove (lrType lr)) (Map.toList (ppLent pp0))
+  condOk <- Map.fromList <$> filterM (\(_, cl) -> not <$> cppNoMove (clType cl)) (Map.toList (ppCondLets pp0))
+  CMS.modify $ \st -> st
+    { translatorPool = pp0
+        { ppLent = lentOk
+        , ppLentLets = Map.filter (\(m, _) -> Map.member m lentOk) (ppLentLets pp0)
+        , ppCondLets = condOk
+        }
+    }
   templates <- CMS.gets translatorLogTemplates
   (srcFwds, srcSerial, srcDeserial) <- generateSourcedSerializers univeralScopeMap es
 
@@ -1081,7 +1100,7 @@ makeSignature nativeEntries = foldWithSerialManifoldM fm
     -- that takes all of its arguments returns a value, not a callable.
     nativeManifold (NativeManifold m _ form body) folded
       | Set.member m nativeEntries = do
-          typestr <- cppTypeOf (typeMof body)
+          typestr <- cppTypeOf (typeMof body) >>= cppResultType m
           own <- manifoldSignature m typestr form
           return (foldlNM (<>) own folded)
       | otherwise = return (foldlNM (<>) [] folded)
@@ -1176,8 +1195,11 @@ cppLetMode i rhs = do
     owned j = do
       defs <- CMS.gets translatorLetDefs
       case Map.lookup j defs of
-        Just jrhs -> (/= LetBorrow) <$> cppLetMode j jrhs
+        Just jrhs -> ownsMode <$> cppLetMode j jrhs
         Nothing -> return True
+    ownsMode LetBorrow = False
+    ownsMode (LetLent _) = False
+    ownsMode _ = True
 
 -- | A kept element (OWN-2).
 cppKeepElem :: NativeExpr -> MDoc -> CppTranslatorM MDoc
@@ -1192,16 +1214,195 @@ cppNoMove t = do
 -- | The value a native loop ends with (OWN-2): one of its carried locals at
 -- its last read is moved.
 cppKeepSlot :: [Int] -> NativeExpr -> MDoc -> CppTranslatorM MDoc
-cppKeepSlot ids e x = case e of
-  LetVarN t j LastRead -> slot t j
-  BndVarN t j LastRead -> slot t j
-  _ -> return x
+cppKeepSlot ids e x = do
+  pp <- CMS.gets translatorPool
+  case [lr | lr <- Map.elems (ppLent pp), Set.null (lrIfs lr), lrSlots lr == ids] of
+    (lr : _) | Just v <- varIx e -> do
+      lends <- cppLendsLeaf lr v
+      if lends then return ("mlc::lent(" <> (nvarNamer cppLocals) v <> ")") else kept
+    _ -> kept
   where
+    varIx (LetVarN _ j _) = Just j
+    varIx (BndVarN _ j _) = Just j
+    varIx _ = Nothing
+    kept = case e of
+      LetVarN t j LastRead -> slot t j
+      BndVarN t j LastRead -> slot t j
+      _ -> return x
     slot t j
       | j `elem` ids && render x == render ((nvarNamer cppLocals) j) = do
           cheap <- cppNoMove t
           return (if cheap then x else "std::move(" <> x <> ")")
       | otherwise = cppKeepElem e x
+
+-- | Whether a base leaf naming local @v@ returns it lent (OWN-8): the plan
+-- names it, and as this form binds it, it is the loop's slot that refers to
+-- the parameter or a reference to a part of it bound in the loop.
+cppLendsLeaf :: LentResult -> Int -> CppTranslatorM Bool
+cppLendsLeaf lr = reaches Set.empty
+  where
+    reaches seen j
+      | Set.notMember j (lrLeaves lr) || Set.member j seen = return False
+      | j `elem` lrSlots lr = Set.member j <$> CMS.gets translatorBorrowedSlots
+      | otherwise = do
+          defs <- CMS.gets translatorLetDefs
+          case Map.lookup j defs of
+            Just rhs -> do
+              mode <- cppLetMode j rhs
+              case (mode, baseOf rhs) of
+                (LetBorrow, Just k) -> reaches (Set.insert j seen) k
+                _ -> return False
+            Nothing -> return False
+    baseOf e = case e of
+      LetVarN _ j _ -> Just j
+      BndVarN _ j _ -> Just j
+      IntrinsicN _ IntrCtorField _ (s : _) -> baseOf s
+      IntrinsicN _ IntrListElem _ (s : _) -> baseOf s
+      PatN _ (PatGet _ [] (NativeArgExpr s)) -> baseOf s
+      _ -> Nothing
+
+-- | Whether loop let @i@ is a part some base leaf returns lent (OWN-8).
+cppLentPart :: Int -> CppTranslatorM Bool
+cppLentPart i = do
+  pp <- CMS.gets translatorPool
+  case [lr | lr <- Map.elems (ppLent pp), Set.null (lrIfs lr), Set.member i (lrLeaves lr), i `notElem` lrSlots lr] of
+    (lr : _) -> cppLendsLeaf lr i
+    [] -> return False
+
+-- | A let bound to a call whose result is lent or owned, read where it lies
+-- (OWN-8): the result held whole, and the let a reference into it.
+cppLentLet :: Bool -> MDoc -> MDoc -> [MDoc]
+cppLentLet cond name x = case T.stripPrefix "mlc::own(" (render x) >>= T.stripSuffix ")" of
+  Just call ->
+    [ "auto" <+> name <> "_lent =" <+> pretty call <> ";"
+    , "const auto&" <+> name <+> "=" <+> name <> "_lent.get();"
+    ]
+  -- a conditional rendered owned (OWN-10)
+  Nothing
+    | cond ->
+        [ "auto" <+> name <> "_lent =" <+> x <> ";"
+        , "const auto&" <+> name <+> "=" <+> name <> "_lent;"
+        ]
+  Nothing -> error ("morloc bug: OWN-8 let " <> show (render name) <> " is not bound to a call that lends its result: " <> show (render x))
+
+-- | Whether let @i@ of the current manifold is bound to a conditional read
+-- where it lies (OWN-10).
+cppIsCondLet :: Int -> CppTranslatorM Bool
+cppIsCondLet i = do
+  pp <- CMS.gets translatorPool
+  root <- CMS.gets translatorCurrentRoot
+  return (Map.member (root, i) (ppCondLets pp))
+
+-- | Whether a conditional's value is lent or owned (OWN-10).
+cppLentIf :: NativeExpr -> CppTranslatorM Bool
+cppLentIf e@IfN {} = do
+  pp <- CMS.gets translatorPool
+  root <- CMS.gets translatorCurrentRoot
+  let k = condKey e
+  return $
+    any (Set.member k . clIfs) (condLetsIn pp root)
+      || any (Set.member k . lrIfs) (Map.elems (ppLent pp))
+cppLentIf _ = return False
+
+-- | An arm of a conditional whose value is lent or owned (OWN-10): a part
+-- the plan names, as this member binds it a reference, lent; an inner such
+-- conditional passed on; any other value owned.
+cppLentArm :: NativeExpr -> NativeExpr -> PoolDocs -> PoolDocs -> CppTranslatorM PoolDocs
+cppLentArm ifE armE raw owned
+  | isNativeThrow armE = return owned
+  | otherwise = do
+      pp <- CMS.gets translatorPool
+      root <- CMS.gets translatorCurrentRoot
+      let k = condKey ifE
+          cls = [cl | cl <- condLetsIn pp root, Set.member k (clIfs cl)]
+          lrs = [lr | lr <- Map.elems (ppLent pp), Set.member k (lrIfs lr)]
+      innerLent <- case armValue armE of
+        v@IfN {} -> cppLentIf v
+        _ -> return False
+      lends <- case armValue armE of
+        LetVarN _ v _ -> (||) <$> lendsVar cls v <*> lendsParam lrs v
+        BndVarN _ v _ -> (||) <$> lendsVar cls v <*> lendsParam lrs v
+        _ -> return False
+      let ownedExpr = cppMoved (cppUnitResult ifE) (armOwnsResult armE) (poolExpr owned)
+      return $ case () of
+        _ | innerLent, Just x <- T.stripPrefix "mlc::own(" (render (poolExpr raw)) >>= T.stripSuffix ")" -> raw {poolExpr = pretty x}
+          | lends -> raw {poolExpr = "mlc::lent(" <> poolExpr raw <> ")"}
+          | otherwise -> owned {poolExpr = ownedExpr}
+  where
+    armValue e = case e of
+      NativeLetN i r@IfN {} (LetVarN _ j _) | i == j -> armValue r
+      NativeLetN _ _ b -> armValue b
+      _ -> e
+    -- OWN-8: the parameter, or a part of it bound by reference, where this
+    -- form takes the parameter by reference
+    lendsParam lrs v = case lrs of
+      (lr : _) | Set.member v (lrLeaves lr) -> do
+        lentParams <- CMS.gets translatorLentParams
+        let params = Set.fromList (map snd (lrParams lr)) `Set.intersection` lentParams
+        if Set.member v params then return True else paramRef lr params v
+      _ -> return False
+    paramRef lr params v = do
+      defs <- CMS.gets translatorLetDefs
+      case Map.lookup v defs of
+        Just rhs -> do
+          mode <- cppLetMode v rhs
+          case (mode, baseOf rhs) of
+            (LetBorrow, Just b)
+              | Set.member b params -> return True
+              | Set.member b (lrParts lr) -> paramRef lr params b
+            _ -> return False
+        Nothing -> return False
+    lendsVar cls v
+      | any (\cl -> Set.member v (clSources cl) && Set.member v (clLeaves cl)) cls = return True
+      | otherwise = case [cl | cl <- cls, Set.member v (clParts cl)] of
+          [] -> return False
+          (cl : _) -> partRef cl v
+    -- a part let bound by reference, through parts bound by reference
+    partRef cl v = do
+      defs <- CMS.gets translatorLetDefs
+      case Map.lookup v defs of
+        Just rhs -> do
+          mode <- cppLetMode v rhs
+          case (mode, baseOf rhs) of
+            (LetBorrow, Just b)
+              | Set.member b (clParts cl) -> partRef cl b
+              | otherwise -> return True
+            _ -> return False
+        Nothing -> return False
+    baseOf e = case e of
+      LetVarN _ j _ -> Just j
+      BndVarN _ j _ -> Just j
+      IntrinsicN _ IntrCtorField _ (x : _) -> baseOf x
+      IntrinsicN _ IntrListElem _ (x : _) -> baseOf x
+      PatN _ (PatGet _ [] (NativeArgExpr x)) -> baseOf x
+      _ -> Nothing
+
+-- | The value a manifold whose result is lent or owned returns (OWN-8): a
+-- conditional's lent-or-owned value as it is.
+cppLentReturn :: Int -> MDoc -> CppTranslatorM MDoc
+cppLentReturn m x = do
+  pp <- CMS.gets translatorPool
+  return $ case Map.lookup m (ppLent pp) of
+    Just lr
+      | not (Set.null (lrIfs lr))
+      , Just inner <- T.stripPrefix "mlc::own(std::move(*" (render x) >>= T.stripSuffix "))" ->
+          "std::move(*" <> pretty inner <> ")"
+    _ -> x
+
+-- | Whether let @i@ is a part a conditional read where it lies may lend
+-- (OWN-10).
+cppCondPart :: Int -> CppTranslatorM Bool
+cppCondPart i = do
+  pp <- CMS.gets translatorPool
+  root <- CMS.gets translatorCurrentRoot
+  return (any (Set.member i . clParts) (condLetsIn pp root) || any (Set.member i . lrParts) (Map.elems (ppLent pp)))
+
+-- | The type a call of manifold @m@ returns, given its value's type: lent
+-- or owned for a manifold that may lend its result (OWN-8).
+cppResultType :: Int -> MDoc -> CppTranslatorM MDoc
+cppResultType m t = do
+  pp <- CMS.gets translatorPool
+  return (if Map.member m (ppLent pp) then "mlc::lent_or<" <> t <> ">" else t)
 
 -- | The move of a kept let (OWN-2), when its lowered form is the let itself.
 cppKeptLet :: NativeExpr -> MDoc -> CppTranslatorM (Maybe MDoc)
@@ -1330,10 +1531,12 @@ cppWalkLoopBody setResult = go
       return $ priors <> tmpAssigns <> reassigns <> moves
     go (LoopNLet i (Low r neDocs) b) = do
       mode <- cppLetMode i r
+      cond <- cppIsCondLet i
       -- A function value keeps its own type; a std::function would allocate.
       typestr <- if isFunctionValue (typeFof r) then return "auto" else cppTypeOf (typeFof r)
       let decl = if mode == LetBorrow then "const" <+> typestr <> "&" else typestr
           letLine
+            | LetLent _ <- mode = cppLentLet cond ((nvarNamer cppLocals) i) (poolExpr neDocs)
             | render typestr == "mlc::Unit" && isIdentifierExpr (poolExpr neDocs) = [typestr <+> (nvarNamer cppLocals) i <> "{};"]
             | render typestr == "mlc::Unit" = [poolExpr neDocs <> ";", typestr <+> (nvarNamer cppLocals) i <> "{};"]
             | otherwise = [decl <+> (nvarNamer cppLocals) i <+> "=" <+> poolExpr neDocs <> ";"]
@@ -1534,6 +1737,11 @@ cppLowerConfig (ClosureGen reifyThunks stageTable papplyHeads) =
           }
     , lcKeepCallArg = cppKeepCallArg
     , lcTwinCall = \_ _ -> return Nothing
+    -- OWN-8: both forms of a manifold that may lend its result return it
+    -- lent or owned; a call that is not a let reading it in place owns it.
+    , lcLentCall = \m _ x -> do
+        pp <- CMS.gets translatorPool
+        return (if Map.member m (ppLent pp) then "mlc::own(" <> x <> ")" else x)
     , lcBuildOwnership = \_ _ own -> return own
     , lcKeepClosureArg = cppKeptLet
     , lcKeepSourcedArg = cppKeptLet
@@ -1595,7 +1803,18 @@ PROPAGATE_ERROR(errmsg)|]
           (LetTake, Just rhs) -> Just <$> cppTakeLet letIndex rhs (poolExpr e1)
           _ -> return Nothing
         let e1' = maybe e1 (\x -> e1 {poolExpr = x}) taken
-        return $ makeLet namer letIndex typestr (isUnitTypeF mt) binding e1' e2
+        cond <- cppIsCondLet letIndex
+        case binding of
+          LetLent _ ->
+            return $
+              e2
+                { poolCompleteManifolds = poolCompleteManifolds e1 <> poolCompleteManifolds e2
+                , poolPriorLines = poolPriorLines e1 <> cppLentLet cond (namer letIndex) (poolExpr e1) <> poolPriorLines e2
+                , poolPriorExprs = poolPriorExprs e1 <> poolPriorExprs e2
+                , poolReturnFlag = poolReturnFlag e1 || poolReturnFlag e2
+                , poolChain = Nothing
+                }
+          _ -> return $ makeLet namer letIndex typestr (isUnitTypeF mt) binding e1' e2
     , lcReleaseStmt = \v -> "_release_packet(" <> pretty v <> ", true);"
     , lcReleaseBorrowedStmt = \v -> "_release_packet(" <> pretty v <> ", false);"
     , lcReturn = \e -> "return(" <> e <> ");"
@@ -1608,7 +1827,7 @@ PROPAGATE_ERROR(errmsg)|]
         case frameLineLit state callIndex of
           Nothing -> return Nothing
           Just _ -> do
-            rt <- returnType manifoldType
+            rt <- returnType manifoldType >>= cppResultType callIndex
             let pop = "mlc::frame_pop();"
             return . Just $ case () of
               _ | render rt == "void" -> vsep [e <> ";", pop, "return;"]
@@ -1621,10 +1840,22 @@ PROPAGATE_ERROR(errmsg)|]
     -- let outside a loop.
     , lcLoopLetRhs = \i orhs d -> do
         mode <- cppLetMode i orhs
-        if mode == LetTake
-          then (\x -> d {poolExpr = x}) <$> cppTakeLet i orhs (poolExpr d)
-          else return d
-    , lcLetRhs = \_ _ d -> return d
+        lentPart <- cppLentPart i
+        case () of
+          _ | mode == LetTake -> (\x -> d {poolExpr = x}) <$> cppTakeLet i orhs (poolExpr d)
+            -- OWN-8: a part a base leaf returns lent must be a place in the
+            -- loop's parameter, so a temporary does not build
+            | lentPart -> return d {poolExpr = "mlc::place(" <> poolExpr d <> ")"}
+            | otherwise -> return d
+    -- OWN-10: a part a conditional may lend must be a place, so a temporary
+    -- does not build
+    , lcLetRhs = \i rhs d -> do
+        part <- cppCondPart i
+        mode <- if part then cppLetMode i rhs else return LetCopy
+        return (if mode == LetBorrow then d {poolExpr = "mlc::place(" <> poolExpr d <> ")"} else d)
+    , lcLentIf = cppLentIf
+    , lcLentArm = cppLentArm
+    , lcLentReturn = cppLentReturn
     , lcOwnPacketDecl = \v e -> Just ("mlc::Packet" <+> v <> "(" <> e <> ");", v <> ".get()")
     , lcMakeLoop = \res carried body -> do
         -- Tail-loop. Walk the 'LoopBody' tree into C++ control flow. The
@@ -1651,7 +1882,9 @@ PROPAGATE_ERROR(errmsg)|]
           LoopResultSerial ->
             return ("uint8_t*" <+> resultVar <+> "= nullptr;", \e -> resultVar <+> "=" <+> e <> ";", resultVar)
           LoopResultNative t -> do
-            tStr <- cppTypeOf t
+            tStr0 <- cppTypeOf t
+            pp <- CMS.gets translatorPool
+            let tStr = if any (\lr -> Set.null (lrIfs lr) && lrSlots lr == ids) (Map.elems (ppLent pp)) then "mlc::lent_or<" <> tStr0 <> ">" else tStr0
             return ( "std::optional<" <> tStr <> ">" <+> resultVar <> ";"
                    , \e -> resultVar <> ".emplace(" <> e <> ");"
                    , "std::move(*" <> resultVar <> ")" )
@@ -1678,17 +1911,23 @@ PROPAGATE_ERROR(errmsg)|]
     -- own exits are written only by the loop walkers, over a 'LoopBody'.
     , lcMakeIfLadder = \origExpr (Guards (c1, e1, t1) rungs (eE, eD)) -> do
         idx <- getCounter
+        lent <- cppLentIf origExpr
         let v = (helperNamer cppLocals) idx
         typeStr <- cppTypeOf origExpr
         let unit = cppUnitResult origExpr
-            taken c armE d = vsep ["if" <+> parens c <+> "{", indent 4 (vsep (cppIfArm unit v (Just armE) d <> ["break;"])), "}"]
+            arm = if lent then cppLentIfArm v else cppIfArm unit v
+            taken c armE d = vsep ["if" <+> parens c <+> "{", indent 4 (vsep (arm (Just armE) d <> ["break;"])), "}"]
             body =
               [taken c1 e1 t1]
                 <> concat [pre <> [taken c armE d] | (pre, c, armE, d) <- toList rungs]
-                <> cppIfArm unit v (Just eE) eD
-        return (cppMoved unit True v, vsep [typeStr <+> v <> ";", "do {", indent 4 (vsep body), "} while (false);"])
+                <> arm (Just eE) eD
+            (decl, result)
+              | lent = ("std::optional<mlc::lent_or<" <> typeStr <> ">>" <+> v <> ";", "mlc::own(std::move(*" <> v <> "))")
+              | otherwise = (typeStr <+> v <> ";", cppMoved unit True v)
+        return (result, vsep [decl, "do {", indent 4 (vsep body), "} while (false);"])
     , lcMakeIf = \origExpr condDocs thenDocs elseDocs -> do
         idx <- getCounter
+        lent <- cppLentIf origExpr
         let v = (helperNamer cppLocals) idx
         typeStr <- cppTypeOf origExpr
         let condE = poolExpr condDocs
@@ -1696,9 +1935,12 @@ PROPAGATE_ERROR(errmsg)|]
               IfN _ _ tn en -> (Just tn, Just en)
               _ -> (Nothing, Nothing)
             unit = cppUnitResult origExpr
-            thenBlock = cppIfArm unit v thenE thenDocs
-            elseBlock = cppIfArm unit v elseE elseDocs
-            decl = typeStr <+> v <> ";"
+            arm = if lent then cppLentIfArm v else cppIfArm unit v
+            thenBlock = arm thenE thenDocs
+            elseBlock = arm elseE elseDocs
+            (decl, result)
+              | lent = ("std::optional<mlc::lent_or<" <> typeStr <> ">>" <+> v <> ";", "mlc::own(std::move(*" <> v <> "))")
+              | otherwise = (typeStr <+> v <> ";", cppMoved unit True v)
             ifStmt = vsep
               [ decl
               , "if" <+> parens condE <+> "{"
@@ -1709,7 +1951,7 @@ PROPAGATE_ERROR(errmsg)|]
               ]
         return $ PoolDocs
           { poolCompleteManifolds = poolCompleteManifolds condDocs <> poolCompleteManifolds thenDocs <> poolCompleteManifolds elseDocs
-          , poolExpr = cppMoved unit True v
+          , poolExpr = result
           , poolPriorLines = poolPriorLines condDocs <> [ifStmt]
           , poolPriorExprs = poolPriorExprs condDocs <> poolPriorExprs thenDocs <> poolPriorExprs elseDocs
           , poolReturnFlag = poolReturnFlag condDocs || poolReturnFlag thenDocs || poolReturnFlag elseDocs
@@ -1806,7 +2048,7 @@ PROPAGATE_ERROR(errmsg)|]
               _ ->
                 CMS.modify
                   (\s -> s {translatorLocalManifoldSet = Set.insert callIndex (translatorLocalManifoldSet s)})
-            returnTypeStr <- returnType manifoldType
+            returnTypeStr <- returnType manifoldType >>= cppResultType callIndex
             typedArgs0 <- mapIndexedM (cppParamOf callIndex) args
             -- The by-value form owns what it is given: each such parameter
             -- moves into a local the body names, released when the call
@@ -2608,7 +2850,7 @@ translateSegment closureGen m0 = do
             (nm : _) -> foldWithNativeManifoldM (defaultFoldRules cfg) nm
             [] -> error "morloc bug: a by-value form whose manifold is not in its segment"
           recordLowered prepared
-          typestr <- cppTypeOf (typeMof body)
+          typestr <- cppTypeOf (typeMof body) >>= cppResultType m
           args <- mapIndexedM (cppParamOf m) (typeMofForm form)
           CMS.modify (\st -> st {translatorPool = pp, translatorTwin = Nothing})
           return ([typestr <+> manNamer m <> tupled args <> ";"], poolCompleteManifolds docs)

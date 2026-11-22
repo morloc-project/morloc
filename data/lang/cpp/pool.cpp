@@ -1930,6 +1930,41 @@ extern "C" void morloc_debug_record_frame(
 
 
 
+#include <variant>
+
+namespace mlc {
+// OWN-8: the result of a manifold that may return what its caller lent it,
+// or a value of its own. Read in place with get(); own() takes it, copying
+// only a lent value.
+template <class T>
+class lent_or {
+  public:
+    template <class U>
+      requires (!std::is_same_v<std::remove_cvref_t<U>, lent_or>) && std::is_constructible_v<T, U&&>
+    lent_or(U&& x) : v_(std::in_place_index<1>, std::forward<U>(x)) {}
+    lent_or(lent_or&&) = default;
+    lent_or& operator=(lent_or&&) = default;
+    lent_or(const lent_or&) = delete;
+    lent_or& operator=(const lent_or&) = delete;
+    static lent_or lend(const T& x) { return lent_or(&x); }
+    static lent_or lend(const T&&) = delete;
+    const T& get() const { return v_.index() == 0 ? *std::get<0>(v_) : std::get<1>(v_); }
+    T take() && {
+        if (v_.index() == 0) return *std::get<0>(v_);
+        return std::move(std::get<1>(v_));
+    }
+  private:
+    explicit lent_or(const T* p) : v_(std::in_place_index<0>, p) {}
+    std::variant<const T*, T> v_;
+};
+
+template <class T> lent_or<T> lent(const T& x) { return lent_or<T>::lend(x); }
+template <class T> lent_or<T> lent(const T&&) = delete;
+template <class T> T own(lent_or<T>&& r) { return std::move(r).take(); }
+template <class T> const T& place(const T& x) { return x; }
+template <class T> const T& place(const T&&) = delete;
+}
+
 // AUTO signatures statements start
 // <<<BREAK>>>
 // AUTO signatures statements end

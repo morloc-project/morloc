@@ -1,0 +1,130 @@
+-- OWN-10: a let bound to an inlined conditional that chooses a part of a
+-- live local or a fresh value, and is only read, holds the part where it
+-- lies instead of a copy. Each export prints its result and the payloads
+-- copied in the run (C++, pay.hpp, which also aborts on a read of a moved
+-- or destroyed payload).
+--
+--   ifPart      an if arm is a field of a record: no copy
+--   freshArm    the same, the fresh arm taken: no copy
+--   matchPart   a match arm is a constructor field: no copy
+--   listPart    a match arm is a list element: no copy
+--   readMoves   the part is read, then the source is kept: no copy
+--   moveReads   the source is kept before the part is read, by a call
+--               that needs both: the value right (a known constructor's
+--               tag is settled, OWN-11, so the part is read in place)
+--   moveReadsMk the same, the source not a constructor literal: one copy
+--   twoSources  the arms are parts of two locals: no copy
+--   twoMoves    the same, both locals kept after the read: no copy
+--   loopRead    a loop reads a part chosen in each iteration: no copy
+--   ladderPart  a chain of three guards, two arms parts: no copy
+--   wholeLive   an arm is a whole local still read after: no copy
+--   wholeDead   the same, the local not read after, so moved: no copy
+module main (ifPart, freshArm, matchPart, listPart, readMoves, moveReads, moveReadsMk, twoSources, twoMoves, loopRead, ladderPart, wholeLive, wholeDead)
+
+import root
+import root-cpp
+
+newtype Pay = Int
+type Cpp => Pay = "Pay"
+
+instance Packable Int Pay where
+  source Cpp from "pay.hpp" ("pay_pack" as pack, "pay_unpack" as unpack)
+
+source Cpp from "pay.hpp" ("mkp", "keyp", "census")
+
+mkp :: Int -> Pay
+keyp :: Pay -> Int
+census :: Int -> (Int, Int)
+
+record R where
+  p :: Pay
+  k :: Int
+
+mkR :: Pay -> Int -> R
+mkR v i = {p = v, k = i}
+
+data Bx = Bx Pay Int | NoBox
+
+readBox :: Bx -> Int
+readBox b = match b
+  | (Bx q k) = keyp q + k
+  | NoBox = 0
+
+boxPay :: Bx -> Pay
+boxPay b = match b
+  | (Bx q _) = q
+  | NoBox = mkp 0
+
+lhead :: [Pay] -> Pay
+lhead xs = match xs
+  | [a, _] = a
+  | _ = mkp 0
+
+record R2 where
+  p :: Pay
+  r :: Pay
+
+mkR2 :: Pay -> Pay -> R2
+mkR2 a b = {p = a, r = b}
+
+record HD where
+  q :: Bx
+  z :: Int
+
+holdD :: Bx -> HD
+holdD v = {q = v, z = 1}
+
+-- reads both its arguments, and is not inlined
+keyBoth :: Int -> Pay -> HD -> Int
+keyBoth j v h = ? j > 0 = keyBoth (j - 1) v h : keyp v + readBox (.q h)
+
+-- a reader too large for OWN-10 to copy into each arm
+spin :: Int -> Int
+spin n = sum (map (\v -> keyp v) [mkp n])
+
+ifPart :: Int -> Int -> (Int, Int)
+ifPart n j = census (let x = mkR (mkp n) 1 in let y = (? j > 0 = .p x : mkp 0) in keyp y + keyp (.p x) + spin 0)
+
+freshArm :: Int -> Int -> (Int, Int)
+freshArm n j = census (let x = mkR (mkp n) 1 in let y = (? j > 0 = mkp 0 : .p x) in keyp y + keyp (.p x) + spin 0)
+
+matchPart :: Int -> (Int, Int)
+matchPart n = census (let x = Bx (mkp n) 1 in let y = boxPay x in keyp y + readBox x + spin 0)
+
+listPart :: Int -> (Int, Int)
+listPart n = census (let x = [mkp n, mkp 1] in let y = lhead x in keyp y + sum (map keyp x) + spin 0)
+
+readMoves :: Int -> (Int, Int)
+readMoves n = census (let x = Bx (mkp n) 1 in let y = boxPay x in keyp y + readBox (.q (holdD x)) + spin 0)
+
+moveReads :: Int -> (Int, Int)
+moveReads n = census (let x = Bx (mkp n) 1 in let y = boxPay x in let h = holdD x in keyBoth 2 y h + spin 0)
+
+mkBx :: Int -> Bx
+mkBx k = ? k > 0 = Bx (mkp k) 1 : NoBox
+
+moveReadsMk :: Int -> (Int, Int)
+moveReadsMk n = census (let x = mkBx n in let y = boxPay x in let h = holdD x in keyBoth 2 y h + spin 0)
+
+twoSources :: Int -> Int -> (Int, Int)
+twoSources n j = census (let a = Bx (mkp n) 1 in let b = Bx (mkp 1) 1 in let y = (? j > 0 = boxPay a : boxPay b) in keyp y + readBox a + readBox b + spin 0)
+
+twoMoves :: Int -> Int -> (Int, Int)
+twoMoves n j = census (let a = Bx (mkp n) 1 in let b = Bx (mkp 1) 1 in let y = (? j > 0 = boxPay a : boxPay b) in keyp y + readBox (.q (holdD a)) + readBox (.q (holdD b)) + spin 0)
+
+ladderPart :: Int -> Int -> (Int, Int)
+ladderPart n j = census (let x = mkR2 (mkp n) (mkp 1) in let y = (? j > 1 = .p x : ? j > 0 = .r x : mkp 0) in keyp y + keyp (.p x) + keyp (.r x) + spin 0)
+
+walk :: Int -> Int -> Bx -> Int -> Int
+walk j k x acc
+  ? k == 0 = acc + readBox x
+  : walk j (k - 1) x (let y = boxPay x in acc + keyp y + readBox x + spin 0)
+
+loopRead :: Int -> (Int, Int)
+loopRead n = census (walk 1 3 (Bx (mkp n) 1) 0)
+
+wholeLive :: Int -> Int -> (Int, Int)
+wholeLive n j = census (let x = mkR (mkp n) 1 in let y = (? j > 0 = x : mkR (mkp 0) 0) in keyp (.p y) + keyp (.p x) + spin 0)
+
+wholeDead :: Int -> Int -> (Int, Int)
+wholeDead n j = census (let x = mkR (mkp n) 1 in let y = (? j > 0 = x : mkR (mkp 0) 0) in keyp (.p y) + spin 0)

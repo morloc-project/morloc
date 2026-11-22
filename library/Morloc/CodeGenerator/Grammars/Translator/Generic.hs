@@ -681,6 +681,7 @@ genericLowerConfig desc srcNamer debugInfo traceInfo debugMode = cfg
         , lcKeepContextArg = \_ _ _ _ v -> return v
         , lcKeepCallArg = \_ _ _ v -> return v
         , lcTwinCall = \_ _ -> return Nothing
+        , lcLentCall = \_ _ x -> return x
         , lcBuildOwnership = \_ _ own -> return own
         , lcKeepClosureArg = \_ _ -> return Nothing
         , lcKeepSourcedArg = \_ _ -> return Nothing
@@ -708,6 +709,9 @@ genericLowerConfig desc srcNamer debugInfo traceInfo debugMode = cfg
         , lcDebugWrap = genericDebugWrap desc cfg debugInfo
         , lcMakeIf = genericMakeIf desc cfg
         , lcMakeIfLadder = genericMakeIfLadder desc cfg
+        , lcLentIf = \_ -> return False
+        , lcLentArm = \_ _ _ d -> return d
+        , lcLentReturn = \_ x -> return x
         , lcShortCircuit = \isAnd a b ->
             a <+> pretty (if isAnd then ldAndOp desc else ldOrOp desc) <+> b
         , lcChainLadder = genericChainLadder desc
