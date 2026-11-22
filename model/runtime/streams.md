@@ -250,7 +250,7 @@ least every 100 ms, as a released slot's word may be reused.
 
 ### SLOT-22 A stream's writer and custodian wake each other only when one sleeps
 Status: implemented
-Checked by: a_full_queue_makes_the_producer_wait_until_the_custodian_takes_one, a_waiter_sees_its_entry_done_and_any_failure, tla:QueueWake, tla:QueueWake_check_before_bump.bug, tla:QueueWake_register_after_compare.bug
+Checked by: a_full_queue_makes_the_producer_wait_until_the_custodian_takes_one, a_waiter_sees_its_entry_done_and_any_failure, stopping_a_writer_that_waits_for_its_closer_returns_at_once, tla:QueueWake, tla:QueueWake_check_before_bump.bug, tla:QueueWake_register_after_compare.bug
 
 The custody queue takes no lock. A side about to sleep on a queue word
 (the push count, for the custodian; the done count, for a writer or a

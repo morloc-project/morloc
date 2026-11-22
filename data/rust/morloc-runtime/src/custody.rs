@@ -39,6 +39,8 @@ const MESSAGE_PENDING: u32 = 1 << 31;
 const ERR_BYTES: usize = 240;
 const WAIT_SLICE: Duration = Duration::from_millis(100);
 const SPIN: Duration = Duration::from_micros(50);
+// SLOT-19: how often a waiting custodian re-checks its closer
+const RELEASE_CHECK: Duration = Duration::from_millis(20);
 
 #[repr(C)]
 pub(crate) struct Entry {
@@ -788,7 +790,8 @@ impl Writer {
                 crate::stream::release_closed_slot(self.slot_idx, self.gen);
                 return;
             }
-            std::thread::sleep(Duration::from_millis(20));
+            // SLOT-22: a stop wakes this wait.
+            wait_word::wait(stop, STOP_NONE, RELEASE_CHECK);
         }
     }
 
@@ -1123,6 +1126,8 @@ pub(crate) fn host_stop(slot_idx: usize, status: u8) {
 fn signal_stop(taken: &[Hosted], status: u8) {
     for h in taken {
         h.stop.store(status as u32, Ordering::Release);
+        // SLOT-22: stopping wakes unconditionally.
+        wait_word::wake_all(&h.stop);
         if !h.share.ended.load(Ordering::Acquire) {
             wait_word::wake_all(&h.queue.tail);
         }

@@ -14827,6 +14827,34 @@ mod write_behind_tests {
         assert_eq!(read_strs(&path), first);
     }
 
+    // SLOT-19, SLOT-22: a stop ends a writer's wait for its living closer to
+    // free the slot at once, and leaves the slot to that closer.
+    #[test]
+    fn stopping_a_writer_that_waits_for_its_closer_returns_at_once() {
+        let _shm = crate::own_test_registry();
+        let dir = test_dir("stop_awaiting_release");
+        let mut fastest = std::time::Duration::MAX;
+        for i in 0..5 {
+            let path = dir.join(format!("{i}.idx"));
+            let h = shared_open_ostream_with_schema(path.to_str().unwrap(), "as").unwrap();
+            let (gen, idx) = unpack_handle(h);
+            let slot = slot_ref(idx).unwrap();
+            let (q, seq) = {
+                let guard = SlotGuard::lock_any(slot).unwrap();
+                let p = guard.custody().unwrap();
+                (p.queue(), p.push_close(0, crate::custody::Closing::Wait).unwrap())
+            };
+            q.wait_done(seq, q.epoch()).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            let began = std::time::Instant::now();
+            crate::custody::host_stop(idx, crate::custody::STATUS_DISCARD as u8);
+            fastest = fastest.min(began.elapsed());
+            assert!(slot_generation_is(slot, gen), "the writer freed a slot its living closer holds");
+            release_closed_slot(idx, gen);
+        }
+        assert!(fastest < std::time::Duration::from_millis(10), "the fastest stop took {fastest:?}");
+    }
+
     // SLOT-32
     #[test]
     fn streams_share_the_queue_bytes_and_keep_no_more_spares_than_their_depth() {

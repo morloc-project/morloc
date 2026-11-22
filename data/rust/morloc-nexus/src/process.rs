@@ -386,8 +386,10 @@ pub fn mcp_recover_pools_after_failure(n_pools: usize) {
 const POOL_END_WAIT: Duration = Duration::from_millis(200);
 
 // LIFE-2: how often a readiness wait looks at the pool's process and at
-// shutdown, and the longest pause between connects while the socket is absent.
+// shutdown.
 const READY_CHECK: Duration = Duration::from_millis(20);
+// LIFE-2: the longest pause between connects while the socket is absent.
+const CONNECT_PAUSE: Duration = Duration::from_millis(2);
 
 // ── Global state for signal handlers ───────────────────────────────────────
 
@@ -1443,7 +1445,7 @@ fn wait_for_daemon(socket: &PoolSocket, pool_index: usize) -> Result<(), String>
                 Ok(s) => break s,
                 Err(_) => {
                     std::thread::sleep(pause);
-                    pause = (pause * 2).min(READY_CHECK);
+                    pause = (pause * 2).min(CONNECT_PAUSE);
                 }
             }
         };
