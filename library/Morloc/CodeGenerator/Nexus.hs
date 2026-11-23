@@ -3654,18 +3654,23 @@ makeWrapperScript mode selfRel manifestPath
   | selfRel =
       -- Resolve the launcher's own directory and find the manifest relative to
       -- it, so the build tree works wherever it is placed. $0 has a slash when
-      -- invoked by a path (the normal case); a bare name is located via PATH.
-      -- The directory is cut from $self in the shell itself, sparing a
-      -- dirname process per run: a $self without a slash (`sh name`, not on
-      -- PATH) is in ".", and one directly under / leaves "", which is "/".
+      -- invoked by a path (the normal case); a bare name is located via PATH,
+      -- and one not on PATH (`sh name`) is in ".". A launcher reached through
+      -- a link is the file the link names, so links are followed one at a
+      -- time with plain readlink (POSIX, and macOS before 12.3 has no -f); a
+      -- relative target is relative to the link's directory, which cd -P
+      -- reads physically, as the kernel does. The directory is cut from
+      -- $self in the shell itself, sparing a dirname process per run: one
+      -- directly under / leaves "", which is "/".
       MT.unlines
         [ "#!/bin/sh"
         , manifestMarker manifestPath
         , "export MORLOC_PROG_NAME=\"$0\""
         , "self=\"$0\""
-        , "case \"$self\" in */*) : ;; *) self=$(command -v -- \"$self\") ;; esac"
+        , "case \"$self\" in */*) : ;; *) self=$(command -v -- \"$0\") || self=./$0 ;; esac"
+        , "while [ -L \"$self\" ]; do l=$(readlink -- \"$self\"); case \"$l\" in /*) self=$l ;; *) self=${self%/*}/$l ;; esac; done"
         , "case \"$self\" in */*) d=${self%/*} ;; *) d=. ;; esac"
-        , "d=$(CDPATH= cd -- \"${d:-/}\" && pwd)"
+        , "d=$(CDPATH= cd -P -- \"${d:-/}\" && pwd)"
         , "exec morloc-nexus " <> modeToken mode
             <> " \"$d/" <> MT.pack (dquoteEsc manifestPath) <> "\" \"$@\""
         ]

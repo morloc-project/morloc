@@ -17,7 +17,7 @@
 //! `morloc-nexus`, and only the manifest knows the user's exported
 //! command surface.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
 
@@ -1055,13 +1055,15 @@ fn manifest_from_marker(content: &str, target: &str) -> Option<String> {
 }
 
 /// Join a launcher-relative path to the launcher's own directory, passing an
-/// absolute path through unchanged.
+/// absolute path through unchanged. A target reached through links is the
+/// launcher they name, so its directory is that file's.
 fn resolve_against_launcher(path: &str, target: &str) -> String {
     let p = Path::new(path);
     if p.is_absolute() {
         return path.to_string();
     }
-    Path::new(target)
+    let launcher = std::fs::canonicalize(target).unwrap_or_else(|_| PathBuf::from(target));
+    launcher
         .parent()
         .unwrap_or_else(|| Path::new(""))
         .join(p)
@@ -2639,9 +2641,10 @@ mod tests {
              # morloc-manifest: {rel}\n\
              export MORLOC_PROG_NAME=\"$0\"\n\
              self=\"$0\"\n\
-             case \"$self\" in */*) : ;; *) self=$(command -v -- \"$self\") ;; esac\n\
+             case \"$self\" in */*) : ;; *) self=$(command -v -- \"$0\") || self=./$0 ;; esac\n\
+             while [ -L \"$self\" ]; do l=$(readlink -- \"$self\"); case \"$l\" in /*) self=$l ;; *) self=${{self%/*}}/$l ;; esac; done\n\
              case \"$self\" in */*) d=${{self%/*}} ;; *) d=. ;; esac\n\
-             d=$(CDPATH= cd -- \"${{d:-/}}\" && pwd)\n\
+             d=$(CDPATH= cd -P -- \"${{d:-/}}\" && pwd)\n\
              exec morloc-nexus run \"$d/{rel}\" \"$@\"\n",
             rel = rel_manifest
         )
@@ -2733,7 +2736,31 @@ mod tests {
             "nexus",
             &wrapper_self_relative("nexus-build/manifest.json"),
         );
-        assert_eq!(resolved, tmp.join("nexus-build/manifest.json").to_string_lossy());
+        assert_eq!(resolved, tmp.canonicalize().unwrap().join("nexus-build/manifest.json").to_string_lossy());
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolves_a_launcher_through_file_links_against_the_launchers_directory() {
+        // A link elsewhere, and a relative chain of two, name the launcher
+        // itself; its manifest is beside the launcher, not beside a link.
+        let (_, tmp) = resolve_launcher(
+            "filelink",
+            "nexus",
+            &wrapper_self_relative("nexus-build/manifest.json"),
+        );
+        let real = tmp.canonicalize().unwrap();
+        let want = real.join("nexus-build/manifest.json").to_string_lossy().into_owned();
+        let other = tmp.join("elsewhere");
+        std::fs::create_dir_all(&other).unwrap();
+        std::os::unix::fs::symlink("../nexus", other.join("one")).unwrap();
+        std::os::unix::fs::symlink("one", other.join("two")).unwrap();
+        std::os::unix::fs::symlink(tmp.join("nexus"), other.join("abs")).unwrap();
+        for link in ["one", "two", "abs"] {
+            let resolved = resolve_manifest_target(&other.join(link).to_string_lossy()).unwrap();
+            assert_eq!(resolved, want, "through link {}", link);
+        }
         std::fs::remove_dir_all(&tmp).ok();
     }
 
@@ -2744,7 +2771,7 @@ mod tests {
             "nexus",
             &wrapper_self_relative_dirname("nexus-build/manifest.json"),
         );
-        assert_eq!(resolved, tmp.join("nexus-build/manifest.json").to_string_lossy());
+        assert_eq!(resolved, tmp.canonicalize().unwrap().join("nexus-build/manifest.json").to_string_lossy());
         std::fs::remove_dir_all(&tmp).ok();
     }
 
@@ -2758,7 +2785,7 @@ mod tests {
             "mydaemon",
             &wrapper_self_relative("nexus-build/manifest.json"),
         );
-        assert_eq!(resolved, tmp.join("nexus-build/manifest.json").to_string_lossy());
+        assert_eq!(resolved, tmp.canonicalize().unwrap().join("nexus-build/manifest.json").to_string_lossy());
         std::fs::remove_dir_all(&tmp).ok();
     }
 
@@ -2777,7 +2804,7 @@ mod tests {
             "nexus",
             &undeclared_wrapper_self_relative("nexus-build/manifest.json"),
         );
-        assert_eq!(resolved, tmp.join("nexus-build/manifest.json").to_string_lossy());
+        assert_eq!(resolved, tmp.canonicalize().unwrap().join("nexus-build/manifest.json").to_string_lossy());
         std::fs::remove_dir_all(&tmp).ok();
     }
 
