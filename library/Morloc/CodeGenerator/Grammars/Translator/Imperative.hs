@@ -147,7 +147,7 @@ import Morloc.CodeGenerator.Grammars.Common
   )
 import Morloc.CodeGenerator.LogTemplate (RenderedTemplate (..))
 import Morloc.CodeGenerator.Namespace
-import Morloc.CodeGenerator.Serial (containsFunF, isSerializable, serialAstHasString, serialAstToMsgpackSchema, serialAstToNativeType)
+import Morloc.CodeGenerator.Serial (isSerializable, serialAstHasString, serialAstToMsgpackSchema, serialAstToNativeType)
 import Morloc.Data.Doc
 import Morloc.Monad (IndexState)
 
@@ -2685,14 +2685,34 @@ lowerNativeExpr ::
   m LowN
 lowerNativeExpr cfg origExpr ne = Low origExpr <$> lowerNativeExprRaw cfg origExpr ne
 
--- | How to finish with a packet, given the type of the value read out of
--- it. A function value keeps the packets of whatever it captured, so its
--- packet's bytes are still in use; anything else has been read into
--- storage of its own.
-releaseStmtFor :: LowerConfig m -> TypeF -> Text -> MDoc
-releaseStmtFor cfg t
-  | containsFunF t = lcReleaseBorrowedStmt cfg
+-- | How to finish with the packet bound to serial variable @i@, given the
+-- expression its scope covers. A closure built there that captures the
+-- packet itself (a context argument it holds in serial form) may be called
+-- after the scope ends, so the packet's bytes stay; any value read out of
+-- the packet, a function value included, is held in storage of its own.
+releaseStmtFor :: LowerConfig m -> Int -> NativeExpr -> Text -> MDoc
+releaseStmtFor cfg i body
+  | Set.member i (runIdentity (foldNativeExprM capturedPackets body)) = lcReleaseBorrowedStmt cfg
   | otherwise = lcReleaseStmt cfg
+
+-- | The serial variables a closure in an expression holds in serial form,
+-- in nested manifolds too.
+capturedPackets :: FoldManifoldM Identity (Set.Set Int) (Set.Set Int) (Set.Set Int) (Set.Set Int) (Set.Set Int) (Set.Set Int)
+capturedPackets =
+  FoldManifoldM
+    { opSerialManifoldM = \m@(SerialManifold_ _ _ form _ _) -> return (held form <> foldlSM Set.union Set.empty m)
+    , opNativeManifoldM = \m@(NativeManifold_ _ _ form _) -> return (held form <> foldlNM Set.union Set.empty m)
+    , opSerialExprM = return . foldlSE Set.union Set.empty
+    , opNativeExprM = return . foldlNE Set.union Set.empty
+    , opSerialArgM = return . foldlSA Set.union Set.empty
+    , opNativeArgM = return . foldlNA Set.union Set.empty
+    }
+  where
+    held form
+      | isClosureForm form = Set.fromList [j | Arg j t <- manifoldContext form, serialForm t]
+      | otherwise = Set.empty
+    serialForm (R _) = False
+    serialForm _ = True
 
 -- | A serial expression whose value is a packet another pool sent back: a
 -- fresh packet carrying a reference of its own. A same-pool serial call
@@ -3157,7 +3177,7 @@ lowerNativeExprRaw cfg _ (SerialLetN_ i (Low (SerializeS _ _) x1) (Low body x2))
     else do
       tmpIdx <- lcNewIndex cfg
       let bodyT = typeFof body
-          releaseLine = releaseStmtFor cfg bodyT (render ((svar cfg) i))
+          releaseLine = releaseStmtFor cfg i body (render ((svar cfg) i))
           releaseBody =
             defaultValue
               { poolExpr = (helperVar cfg) tmpIdx
@@ -3177,7 +3197,7 @@ lowerNativeExprRaw cfg _ (SerialLetN_ i (Low rhs x1) (Low body x2))
   letResult <- lcMakeLet cfg (svar cfg) i Nothing Nothing x1 x2
   tmpIdx <- lcNewIndex cfg
   let bodyT = typeFof body
-      releaseLine = releaseStmtFor cfg bodyT (render ((svar cfg) i))
+      releaseLine = releaseStmtFor cfg i body (render ((svar cfg) i))
       releaseBody =
         defaultValue
           { poolExpr = (helperVar cfg) tmpIdx
