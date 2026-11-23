@@ -605,6 +605,7 @@ fn scan_c_text(text: &str) -> Vec<(String, String, Kind)> {
             && !lock_found
             && !starts(&[
                 "#", "//", "/*", "}", "using ", "typedef ", "extern ", "template ", "template<", "const ", "constexpr ",
+                "inline const ", "inline constexpr ",
                 "namespace ", "friend ", "return ",
             ]);
         let head = trimmed.split(['=', ';', '[', '{']).next().unwrap();
@@ -641,6 +642,8 @@ typedef int other_t;
 extern int declared_elsewhere;
 const int fixed = 1;
 constexpr int also_fixed = 2;
+inline constexpr int inline_fixed = 4;
+inline int inline_global = 5;
 template <typename T> T fn_template(T);
 int a_prototype(int x);
 bool takes_a_callback(void (*callback)(void*), void* p);
@@ -660,6 +663,7 @@ int a_function(int x) {
     found.sort();
     let mut want: Vec<(String, String)> = [
         ("-", "braced_"),
+        ("-", "inline_global"),
         ("-", "plain_count"),
         ("-", "plain_int"),
         ("-", "probe_fn"),
