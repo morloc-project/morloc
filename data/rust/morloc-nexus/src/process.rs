@@ -2053,8 +2053,23 @@ mod tests {
         assert_eq!(unsafe { libc::kill(-pgid, 0) }, -1, "the group outlived its pin");
     }
 
+    const REAP_WAITS_PASSED: i32 = 42;
+
+    fn reap_waits_case() {
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "process::tests::reap_waits_scenario", "--test-threads=1"])
+            .env("MORLOC_REAP_WAITS_SCENARIO", "1")
+            .stdout(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert_eq!(status.code(), Some(REAP_WAITS_PASSED), "{status}");
+    }
+
     #[test]
-    fn a_thread_that_reaps_waits_for_a_reap_in_progress() {
+    fn reap_waits_scenario() {
+        if std::env::var_os("MORLOC_REAP_WAITS_SCENARIO").is_none() {
+            return;
+        }
         while REAPING.swap(true, Ordering::SeqCst) {
             std::thread::yield_now();
         }
@@ -2063,6 +2078,22 @@ mod tests {
         assert!(!reaper.is_finished(), "returned before the reap in progress ended");
         REAPING.store(false, Ordering::SeqCst);
         reaper.join().unwrap();
+        std::process::exit(REAP_WAITS_PASSED);
+    }
+
+    #[test]
+    fn a_thread_that_reaps_waits_for_a_reap_in_progress() {
+        reap_waits_case();
+    }
+
+    #[test]
+    fn the_reaper_test_leaves_the_test_process_children_unreaped() {
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        let rc = unsafe { libc::waitid(libc::P_PID, child.id(), &mut info, libc::WEXITED | libc::WNOWAIT) };
+        assert_eq!(rc, 0);
+        reap_waits_case();
+        assert!(child.try_wait().is_ok(), "the reaper test reaped a child of the test process");
     }
 
     #[test]
