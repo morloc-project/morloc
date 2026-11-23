@@ -14981,6 +14981,61 @@ mod write_behind_tests {
         assert!(fastest < std::time::Duration::from_millis(10), "the fastest stop took {fastest:?}");
     }
 
+    // SLOT-22: a stop sent while an idle writer is between its stop check and
+    // its sleep ends that sleep at once.
+    #[test]
+    fn a_stop_between_an_idle_writers_check_and_its_sleep_ends_it_at_once() {
+        let _shm = crate::own_test_registry();
+        let dir = test_dir("stop_before_sleep");
+        let pause = std::time::Duration::from_millis(30);
+        let mut late = Vec::new();
+        for i in 0..5 {
+            let path = dir.join(format!("{i}.idx"));
+            let (tx, rx) = std::sync::mpsc::channel();
+            *crate::custody::PAUSE_BEFORE_SLEEP.lock().unwrap() = Some((pause, tx));
+            let h = shared_open_ostream_with_schema(path.to_str().unwrap(), "as").unwrap();
+            let (gen, idx) = unpack_handle(h);
+            let paused = rx.recv_timeout(std::time::Duration::from_secs(5)).expect("the writer never went to sleep");
+            let began = std::time::Instant::now();
+            crate::custody::host_stop(idx, crate::custody::STATUS_DISCARD as u8);
+            let ended = std::time::Instant::now();
+            release_closed_slot(idx, gen);
+            if began < paused + pause {
+                late.push(ended.saturating_duration_since(paused + pause));
+            }
+        }
+        assert!(!late.is_empty(), "no stop reached a writer inside its pause");
+        let worst = late.iter().max().unwrap();
+        assert!(*worst < std::time::Duration::from_millis(10), "a stop took {worst:?} past the pause: {late:?}");
+    }
+
+    // SLOT-19: a stop that reaches a writer after its closer died leaves the
+    // slot freed.
+    #[test]
+    fn a_stop_after_the_closer_died_frees_the_slot() {
+        let _shm = crate::own_test_registry();
+        let dir = test_dir("stop_after_closer_died");
+        for i in 0..100 {
+            let path = dir.join(format!("{i}.idx"));
+            let h = shared_open_ostream_with_schema(path.to_str().unwrap(), "as").unwrap();
+            let (gen, idx) = unpack_handle(h);
+            let slot = slot_ref(idx).unwrap();
+            let (q, seq) = {
+                let guard = SlotGuard::lock_any(slot).unwrap();
+                let p = guard.custody().unwrap();
+                (p.queue(), p.push_close(0, crate::custody::Closing::Wait).unwrap())
+            };
+            q.wait_done(seq, q.epoch()).unwrap();
+            q.set_test_closer(std::process::id(), 1);
+            crate::custody::host_stop(idx, crate::custody::STATUS_DISCARD as u8);
+            let freed = !slot_generation_is(slot, gen);
+            if !freed {
+                release_closed_slot(idx, gen);
+            }
+            assert!(freed, "stream {i}: the writer left the slot of a dead closer");
+        }
+    }
+
     // SLOT-32
     #[test]
     fn streams_share_the_queue_bytes_and_keep_no_more_spares_than_their_depth() {

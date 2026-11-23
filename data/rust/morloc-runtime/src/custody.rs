@@ -95,8 +95,9 @@ pub(crate) struct CustodyQueue {
     epoch: AtomicU32,
     closer_pid: AtomicU32,
     closer_start: AtomicU64,
-    // SLOT-22: sleepers on `tail` and on `done`.
-    tail_waiters: AtomicU32,
+    // SLOT-22: the custodian's bell, its sleepers, and sleepers on `done`.
+    bell: AtomicU32,
+    bell_waiters: AtomicU32,
     done_waiters: AtomicU32,
     entries: [Entry; QUEUE_SLOTS],
     spares: [AtomicIsize; QUEUE_SLOTS],
@@ -389,7 +390,7 @@ impl CustodyQueue {
                     self.closed.store(1, Ordering::Release);
                 }
                 self.tail.store(t.wrapping_add(1), Ordering::Release);
-                wake_sleepers(&self.tail, &self.tail_waiters);
+                self.ring();
                 return Ok(Some(t.wrapping_add(1)));
             }
             if !self.host_alive() {
@@ -479,16 +480,36 @@ impl CustodyQueue {
         Some(item)
     }
 
-    pub(crate) fn wait_pushed(&self, timeout: Duration) {
+    // SLOT-22: a push moves the bell after the push count.
+    fn ring(&self) {
+        self.bell.fetch_add(1, Ordering::SeqCst);
+        wake_sleepers(&self.bell, &self.bell_waiters);
+    }
+
+    // SLOT-22: a stop moves the bell after the stop word and wakes unconditionally.
+    fn ring_for_stop(&self) {
+        self.bell.fetch_add(1, Ordering::SeqCst);
+        wait_word::wake_all(&self.bell);
+    }
+
+    // SLOT-22: read before the custodian looks at its stop word and the queue.
+    pub(crate) fn bell(&self) -> u32 {
+        self.bell.load(Ordering::SeqCst)
+    }
+
+    // SLOT-22: sleep while the bell holds `rung`.
+    pub(crate) fn wait_pushed(&self, rung: u32, timeout: Duration) {
         let h = self.head.load(Ordering::Relaxed);
         let spin_until = std::time::Instant::now() + SPIN;
         while std::time::Instant::now() < spin_until {
-            if self.tail.load(Ordering::Acquire) != h {
+            if self.tail.load(Ordering::Acquire) != h || self.bell.load(Ordering::Acquire) != rung {
                 return;
             }
             std::hint::spin_loop();
         }
-        sleep_on(&self.tail, &self.tail_waiters, h, timeout);
+        #[cfg(test)]
+        pause_before_sleep();
+        sleep_on(&self.bell, &self.bell_waiters, rung, timeout);
     }
 
     pub(crate) fn finish(&self, n: u32) {
@@ -615,6 +636,28 @@ pub(crate) const STOP_NONE: u32 = u32::MAX;
 #[cfg(test)]
 pub(crate) static SYNCED: std::sync::Mutex<Vec<i64>> = std::sync::Mutex::new(Vec::new());
 
+// SLOT-22: the next custodian about to sleep reports when, then waits `pause`.
+#[cfg(test)]
+pub(crate) static PAUSE_BEFORE_SLEEP: std::sync::Mutex<Option<(Duration, std::sync::mpsc::Sender<std::time::Instant>)>> =
+    std::sync::Mutex::new(None);
+
+#[cfg(test)]
+fn pause_before_sleep() {
+    let armed = PAUSE_BEFORE_SLEEP.lock().unwrap_or_else(|e| e.into_inner()).take();
+    if let Some((pause, tx)) = armed {
+        let _ = tx.send(std::time::Instant::now());
+        std::thread::sleep(pause);
+    }
+}
+
+#[cfg(test)]
+impl CustodyQueue {
+    pub(crate) fn set_test_closer(&self, pid: u32, start: u64) {
+        self.closer_start.store(start, Ordering::Relaxed);
+        self.closer_pid.store(pid, Ordering::Release);
+    }
+}
+
 pub(crate) struct Writer {
     q: &'static CustodyQueue,
     slot: &'static crate::stream::RegistrySlot,
@@ -691,6 +734,7 @@ impl Writer {
 
     fn serve_queue(&mut self, stop: &AtomicU32) {
         loop {
+            let rung = self.q.bell();
             let status = stop.load(Ordering::Acquire);
             if status != STOP_NONE {
                 self.commit_all();
@@ -712,7 +756,7 @@ impl Writer {
                     }
                 }
                 None if !self.inflight.is_empty() => self.commit_front(),
-                None => self.q.wait_pushed(WAIT_SLICE),
+                None => self.q.wait_pushed(rung, WAIT_SLICE),
             }
         }
     }
@@ -783,11 +827,16 @@ impl Writer {
     // SLOT-13, SLOT-19
     fn await_release(&self, stop: &AtomicU32) {
         loop {
-            if !crate::stream::slot_generation_is_pub(self.slot, self.gen) || stop.load(Ordering::Acquire) != STOP_NONE {
+            if !crate::stream::slot_generation_is_pub(self.slot, self.gen) {
                 return;
             }
+            // SLOT-19: the stop is read before the closer, so a closer gone before the stop is seen.
+            let stopped = stop.load(Ordering::Acquire) != STOP_NONE;
             if self.q.closer_gone() {
                 crate::stream::release_closed_slot(self.slot_idx, self.gen);
+                return;
+            }
+            if stopped {
                 return;
             }
             // SLOT-22: a stop wakes this wait.
@@ -1136,7 +1185,7 @@ fn signal_stop(taken: &[Hosted], status: u8) {
         // SLOT-22: stopping wakes unconditionally.
         wait_word::wake_all(&h.stop);
         if !h.share.ended.load(Ordering::Acquire) {
-            wait_word::wake_all(&h.queue.tail);
+            h.queue.ring_for_stop();
         }
     }
 }

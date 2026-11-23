@@ -128,8 +128,12 @@ here touch locks and ownership: model first.
   the depth caps of SLOT-32 and calls `wake_all(&done)` without moving
   `done`, so a producer that compared under the old cap and is about to
   sleep misses the wake and waits up to `WAIT_SLICE` (100 ms). Speed only.
-  A fix moves a word the producer sleeps on: a per-queue room word bumped
-  by both `finish` and `set_cap`, which changes the QueueWake model.
+  [read 2026-11-22] `CustodyQueue::stop` and `fail` wake `done` the same
+  way, so a producer in `wait_room_for` or `push_with` that checked before
+  the stop or failure sleeps out its slice too. A fix moves a word the
+  producer sleeps on: a per-queue room word bumped by `finish`, `set_cap`,
+  `stop` and `fail`, as the custodian's bell is (SLOT-22), which changes
+  the QueueWake model.
 - **The stream queue bound has no setting.** [read] Open ruling, SLOT-32.
   `write_behind::queue_bytes` is a fixed 1 GiB. A setting would be one more
   environment read, and source_rules.rs caps those (`MAX_ENV_READS`, 65)
@@ -251,6 +255,14 @@ here touch locks and ownership: model first.
   (iii) allow typed `@stderr` only with a guarantee no text reaches fd 2.
   The user leans to (i) but deferred it 2026-11-19: it needs a model
   first. The second-`@stderr` entry above belongs with it.
+- **A closer that dies after its custodian saw a stop leaves the slot
+  until unmap.** [read 2026-11-23] Gap in SLOT-19. A custodian waiting for
+  a living closer leaves on a stop; if that closer then dies, nothing
+  frees the slot until the segment is unmapped. SlotRelease's
+  `AQueuedCloseFreesTheSlot` therefore excuses a run that was stopped
+  while the closer lived. Every Rust stop path found (`stop_before_unmap`,
+  test `host_stop`) unmaps or releases afterwards; the C callers of
+  `morloc_custody_stop_all` are not traced.
 - **A `-f json` stdout stream left open at the end of a run exits 0.**
   [read 2026-11-20, code review] SLOT-40 covers only packet output:
   `end_stdout` (morloc-nexus stdio_server.rs) checks for an unfinished
@@ -259,21 +271,3 @@ here touch locks and ownership: model first.
   still set) leaves `[1,2` on stdout and the run exits 0, where the packet
   run fails. Test `a_stdout_stream_still_open_at_the_end_is_failed` uses
   packet output only.
-- **A stop can miss an idle writer's sleep and wait out its 100 ms slice.**
-  [read 2026-11-22] Deviates from SLOT-22 ("Stopping ... wake
-  unconditionally"). `signal_stop` (custody.rs) wakes the push count, but
-  the sleeper's futex in `wait_pushed` compares the push count, which a
-  stop does not move, so a wake sent between the writer's stop check and
-  its futex call is lost; the writer sleeps up to `WAIT_SLICE` (100 ms)
-  before `host_stop_all` can join it. Only latency at teardown; no test or
-  model covers the window. A fix makes the writer sleep on a word the
-  stopper moves (a stop/fail epoch bumped with the push count): a
-  QueueWake protocol change, so model first.
-- **A stop that arrives after a closer died leaves the slot until unmap.**
-  [read 2026-11-22] In `await_release`, if the closer has died and a stop
-  is seen before the next `closer_gone` check, the writer returns without
-  releasing the slot, and nothing frees it until the segment is unmapped.
-  Every Rust stop path found (`stop_before_unmap`, test `host_stop`)
-  unmaps or releases afterwards; the C callers of
-  `morloc_custody_stop_all` are not traced. SlotRelease.tla has no stop
-  action, so the model does not cover this.

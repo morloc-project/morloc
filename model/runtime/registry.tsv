@@ -417,6 +417,7 @@ data/lang/r/rmorloc.c::-::reading_runtime_value	thread
 rustmorloc/fv.rs::-::REGISTRY	exec-only		
 rustmorloc/fv.rs::-::STAGED_LIVE	exec-only		
 morloc-runtime/custody.rs::-::SYNCED	test-only		
+morloc-runtime/custody.rs::-::PAUSE_BEFORE_SLEEP	test-only		
 morloc-runtime/null_check.rs::-::VISITS	test-only		
 library/Morloc/CodeGenerator/Pools/CAbi/Members/CppPrinter.hs::-::converts	startup		
 library/Morloc/CodeGenerator/Pools/CAbi/Members/CppPrinter.hs::-::index	startup		

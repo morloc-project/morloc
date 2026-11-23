@@ -211,15 +211,18 @@ once, never while the slot uses it, and never leaked.
 
 ### SLOT-19 A queued close frees its slot once, after the footer
 Status: implemented
-Checked by: only_a_detached_or_dead_closer_leaves_the_slot_to_the_custodian, a_call_sweep_pauses_the_calls_streams_and_their_writer_frees_the_slots, tla:SlotRelease, tla:SlotRelease_detached_releases.bug, tla:SlotRelease_detached_waits.bug
+Checked by: only_a_detached_or_dead_closer_leaves_the_slot_to_the_custodian, a_call_sweep_pauses_the_calls_streams_and_their_writer_frees_the_slots, a_stop_after_the_closer_died_frees_the_slot, tla:SlotRelease, tla:SlotRelease_detached_releases.bug, tla:SlotRelease_detached_waits.bug, tla:SlotRelease_stop_first.bug, tla:SlotRelease_closer_then_stop.bug
 
 A close names its closer on the queue. A waiting closer (`@close`, a
 flush-and-close at the end of a run) frees the slot once the custodian has
 written the footer (SLOT-15). The sweep that ends a nexus-evaluated
 daemon call closes each stream the call left open detached: it queues the
 close and returns, and the custodian frees the slot after writing the
-footer, as it does for a waiting closer that died. Every free checks under
-the slot lock that the slot still holds the stream being closed.
+footer, as it does for a waiting closer that died. A stop ends the
+custodian's wait for its closer, after it frees the slot of a closer
+already gone: it reads its stop word before it looks at the closer, so a
+closer gone before the stop is seen. Every free checks under the slot lock that the slot still
+holds the stream being closed.
 
 ### SLOT-20 A write buffer grows to its stream's sub-packet size
 Status: implemented
@@ -250,16 +253,23 @@ least every 100 ms, as a released slot's word may be reused.
 
 ### SLOT-22 A stream's writer and custodian wake each other only when one sleeps
 Status: implemented
-Checked by: a_full_queue_makes_the_producer_wait_until_the_custodian_takes_one, a_waiter_sees_its_entry_done_and_any_failure, stopping_a_writer_that_waits_for_its_closer_returns_at_once, tla:QueueWake, tla:QueueWake_check_before_bump.bug, tla:QueueWake_register_after_compare.bug
+Checked by: a_full_queue_makes_the_producer_wait_until_the_custodian_takes_one, a_waiter_sees_its_entry_done_and_any_failure, stopping_a_writer_that_waits_for_its_closer_returns_at_once, a_stop_between_an_idle_writers_check_and_its_sleep_ends_it_at_once, tla:QueueWake, tla:QueueWake_check_before_bump.bug, tla:QueueWake_register_after_compare.bug, tla:QueueWake_tail_only.bug
 
 The custody queue takes no lock. A side about to sleep on a queue word
-(the push count, for the custodian; the done count, for a writer or a
+(the queue's bell, for the custodian; the done count, for a writer or a
 closer) reads the word, registers on its waiter count, and sleeps only
 while the word still holds what it read. A side that moves a word moves it
 first and then wakes its sleepers only when the count is non-zero; both
 orders are sequentially consistent, so either the mover sees the
-registration or the sleeper sees the moved word. Stopping and failing a
-stream wake unconditionally.
+registration or the sleeper sees the moved word. A push moves the bell
+after the push count, and a stop after the custodian's stop word; the
+custodian reads the bell before it looks at its stop word and the queue,
+so a stop or push after that look ends its sleep. Stopping and failing a
+stream wake unconditionally; a writer asleep on the done count when the
+custodian stops sees it only at the end of its slice (QueueWake allows
+this and does not time it). The bell is part of the queue's layout in
+shared memory, which the processes of a run share only with processes of
+their own build (LIFE-6).
 
 ### SLOT-23 Threads reading one file share its slots and its cache bound
 Status: implemented

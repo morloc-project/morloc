@@ -21,6 +21,20 @@
   (morloc-test) has a 1 s timeout; under `-j 6` it hit TIMEOUT at 1.05 s,
   while alone it takes 0.07 s (3 runs). A wall-clock bound in a parallel
   suite measures the machine; counting steps would test linearity.
+- **The helper ceiling test fails on a loaded machine.** [reproduced
+  2026-11-23, 4 of 4 runs at load average 18 on 12 cores; passed in a
+  workspace run earlier that day] `par_pool::tests::the_helpers_stay_under_the_ceiling`
+  (morloc-runtime/src/par_pool.rs:963) asserts that the pool reaches half
+  of MAX_HELPERS (127) helper threads within one 400-span run; under load it
+  reached 88 to 112. The bound measures how fast the machine starts
+  threads, not the ceiling rule.
+- **A test process aborts on a thread-local destructor.** [reproduced
+  2026-11-22 and 2026-11-23, both `cargo test --workspace` runs] Against
+  PANIC-1. The morloc-runtime lib run prints `fatal runtime error: thread
+  local panicked on drop, aborting` right after the `lifeline::tests`
+  lines; no test fails, so the process is likely a forked or re-executed
+  child. Which test, and which thread-local, is unknown; a run with
+  `--test-threads=1` would place it.
 - **The integration suite deletes every morloc run's resources on the
   machine.** [reproduced 2026-10-14] Gap: no item says what a test may
   remove. `cleanupMorlocResources`
