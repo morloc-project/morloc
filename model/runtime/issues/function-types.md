@@ -18,3 +18,12 @@ How a function type's arrows group. APP-1 rules that `a -> (b -> c)` and
   or result, so a callback held in a tuple loses its grouping [read]. Spec gap: model/language
   host-calls.md says grouping is declared at the source, but the compiler
   reads it from the instantiated type's shape.
+- **A lambda passed back into a C++ higher-order call from a mixed
+  py/cpp expression is a compiler error.** [reproduced, 2026-11-23]
+  `viaCall k = cwith (\f -> capply (f k) 1) (\x -> padd2 (readings x))`,
+  with `readings` and `padd2` sourced from Python and `capply`/`cwith`
+  from C++, fails `morloc make` with "Compiler bug at Express.hs:1491: a
+  lambda value is realized in py inside an expression realized in cpp".
+  Reproduction: /work/plans/mosm-perf/artifacts/round2/ice (ice.loc,
+  cap2.py, cap2.hpp). Spec gap or realizer bug: placement should either
+  realize the inner lambda in cpp or refuse the program with a user error.

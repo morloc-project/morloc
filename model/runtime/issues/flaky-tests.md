@@ -110,3 +110,8 @@
   (1.03 s); alone it takes 0.14 s, three runs of three. A wall-clock bound
   in a suite that runs beside builds measures load as much as growth; a
   step count, or a ratio between two sizes, would not.
+- **Complexity timing tests time out under load.** [reproduced,
+  2026-11-23] At `-j 6` under load 15, three wall-clock tests in the
+  Complexity group timed out (1 s and 10 s budgets, and the deep
+  singly-used-parameter chain at k=4000, then at 20 s). Each passes alone.
+  Same cause as the entry above: a wall-clock bound measures load.

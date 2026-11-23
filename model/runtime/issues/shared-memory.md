@@ -162,3 +162,12 @@ Changes here touch locks and ownership: model first.
   right for a namespace a recovery discarded (SHM-10) and wrong for a
   corrupt reference, which should end the process as SHM-19 does; the two
   are not told apart.
+- **A borrowed packet release still returns the packet's SHM block.**
+  [read, 2026-11-23] The borrowed form keeps a packet's malloc'd bytes for
+  a closure that captured the packet, but still gives back the shared
+  memory block it points into (data/lang/cpp/pool.cpp:266-271, rustmorloc
+  lib.rs:926-931), so the closure would read a freed block. STATE-3 gives
+  such a packet the enclosing call's lifetime: keep the bytes and the
+  tracker entry until the dispatch-end flush. Reachable only when a closure
+  manifold captures a let-bound packet in serial form (Imperative.hs
+  capturedPackets); no program reaching that was found (8 shapes tried).
