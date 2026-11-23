@@ -566,38 +566,112 @@ fn other_found(file: &Path, scope: &str, name: String, kind: Kind) -> Found {
 }
 
 fn scan_c(out: &mut Vec<Found>) {
-    let locks = ["std::mutex", "std::once_flag", "pthread_mutex_t", "pthread_once_t", "std::condition_variable"];
     for f in walk(&repo_root().join("data/lang"), &["c", "cpp", "hpp", "h"], &["nanoarrow"]) {
-        let text = std::fs::read_to_string(&f).unwrap();
-        let mut scope = "-".to_string();
-        for line in text.lines() {
-            let at_col0 = !line.starts_with(char::is_whitespace);
-            let trimmed = line.trim();
-            if at_col0 && line.contains('(') && !trimmed.ends_with(';') && !trimmed.starts_with('#') {
-                if let Some(name) = last_ident(line.split('(').next().unwrap()) {
-                    scope = name;
-                }
-            }
-            if at_col0 && trimmed == "}" {
-                scope = "-".to_string();
-            }
-            for lock in locks {
-                if let Some(name) = trimmed.split(lock).nth(1).and_then(first_ident) {
-                    out.push(other_found(&f, &scope, name, Kind::Lock));
-                }
-            }
-            let decl = ["static ", "thread_local ", "__thread "].iter().any(|k| trimmed.starts_with(k));
-            let constant = ["static const ", "static constexpr ", "static inline "].iter().any(|k| trimmed.starts_with(k));
-            let head = trimmed.split(['=', ';', '[']).next().unwrap();
-            if decl && !constant && !head.contains('(') {
-                if let Some(name) = last_ident(head) {
-                    let local = if at_col0 { "-".to_string() } else { scope.clone() };
-                    let per_thread = trimmed.contains("__thread") || trimmed.contains("thread_local");
-                    out.push(other_found(&f, &local, name, if per_thread { Kind::ThreadLocal } else { Kind::Cell }));
-                }
-            }
+        for (scope, name, kind) in scan_c_text(&std::fs::read_to_string(&f).unwrap()) {
+            out.push(other_found(&f, &scope, name, kind));
         }
     }
+}
+
+/// The process-wide values a C or C++ source declares, as (scope, name, kind).
+fn scan_c_text(text: &str) -> Vec<(String, String, Kind)> {
+    let locks = ["std::mutex", "std::once_flag", "pthread_mutex_t", "pthread_once_t", "std::condition_variable"];
+    let mut out = Vec::new();
+    let mut scope = "-".to_string();
+    for line in text.lines() {
+        let at_col0 = !line.starts_with(char::is_whitespace);
+        let trimmed = line.trim();
+        if at_col0 && line.contains('(') && !trimmed.ends_with(';') && !trimmed.starts_with('#') {
+            if let Some(name) = last_ident(line.split('(').next().unwrap()) {
+                scope = name;
+            }
+        }
+        if at_col0 && trimmed == "}" {
+            scope = "-".to_string();
+        }
+        let mut lock_found = false;
+        for lock in locks {
+            if let Some(name) = trimmed.split(lock).nth(1).and_then(first_ident) {
+                out.push((scope.clone(), name, Kind::Lock));
+                lock_found = true;
+            }
+        }
+        let starts = |ks: &[&str]| ks.iter().any(|k| trimmed.starts_with(k));
+        let keyword = starts(&["static ", "thread_local ", "__thread "]);
+        let constant = starts(&["static const ", "static constexpr ", "static inline "]);
+        let namespace_scope = at_col0
+            && scope == "-"
+            && trimmed.ends_with(';')
+            && !lock_found
+            && !starts(&[
+                "#", "//", "/*", "}", "using ", "typedef ", "extern ", "template ", "template<", "const ", "constexpr ",
+                "namespace ", "friend ", "return ",
+            ]);
+        let head = trimmed.split(['=', ';', '[', '{']).next().unwrap();
+        let name = match head.find('(') {
+            Some(at) if head[at..].starts_with("(*") => first_ident(&head[at + 2..]).filter(|_| head[at + 2..].contains(')')),
+            Some(_) => None,
+            None => {
+                let tagged = ["struct", "class", "enum", "union"].contains(&head.split_whitespace().next().unwrap_or(""));
+                let words = head.split_whitespace().count();
+                last_ident(head).filter(|_| if tagged { words >= 3 && type_colon(head).is_none() } else { words >= 2 })
+            }
+        };
+        if let Some(name) = name.filter(|_| (keyword && !constant) || (!keyword && namespace_scope)) {
+            let local = if at_col0 { "-".to_string() } else { scope.clone() };
+            let per_thread = trimmed.contains("__thread") || trimmed.contains("thread_local");
+            out.push((local, name, if per_thread { Kind::ThreadLocal } else { Kind::Cell }));
+        }
+    }
+    out
+}
+
+#[test]
+fn the_c_scan_finds_namespace_scope_globals() {
+    let fixture = "\
+#include <atomic>
+namespace mlc {
+std::atomic<uint64_t> plain_count{0};
+int plain_int = 3;
+static std::atomic<const ops*> braced_{nullptr};
+void (*probe_fn)() = nullptr;
+static void (*static_probe)(int);
+using alias_t = int;
+typedef int other_t;
+extern int declared_elsewhere;
+const int fixed = 1;
+constexpr int also_fixed = 2;
+template <typename T> T fn_template(T);
+int a_prototype(int x);
+bool takes_a_callback(void (*callback)(void*), void* p);
+struct forward_decl;
+struct stat tagged_global;
+enum class opaque_enum : int;
+class derived_decl;
+static const int fork_hook_ = register_hook(nullptr, [] { plain_count++; });
+int a_function(int x) {
+    static int local_count = 0;
+    int not_global = 1;
+    return x + not_global + local_count;
+}
+}
+";
+    let mut found: Vec<(String, String)> = scan_c_text(fixture).into_iter().map(|(s, n, _)| (s, n)).collect();
+    found.sort();
+    let mut want: Vec<(String, String)> = [
+        ("-", "braced_"),
+        ("-", "plain_count"),
+        ("-", "plain_int"),
+        ("-", "probe_fn"),
+        ("-", "tagged_global"),
+        ("-", "static_probe"),
+        ("a_function", "local_count"),
+    ]
+    .iter()
+    .map(|(s, n)| (s.to_string(), n.to_string()))
+    .collect();
+    want.sort();
+    assert_eq!(found, want);
 }
 
 fn scan_py(out: &mut Vec<Found>) {
