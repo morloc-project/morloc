@@ -1943,6 +1943,16 @@ int32_t mlc_write_commit(const uint8_t* reached, ERRMSG);
 #define MLC_WRITE_NOT_TEXT 5
 int32_t mlc_write_place_bytes(const uint8_t* src, uint64_t n, uint32_t flags, const uint8_t* reached,
                               const uint8_t** end, int64_t* bad, ERRMSG);
+// SLOT-36: place one element that is a list of k leaves, each written from
+// its n elements at `data`, as mlc_write_place_bytes writes one leaf. On
+// MLC_WRITE_NOT_TEXT, `*bad_piece` is the leaf and `*bad` the offset of its
+// first bad byte, and the batch was aborted.
+typedef struct mlc_piece_s {
+    const uint8_t* data;
+    uint64_t n;
+} mlc_piece_t;
+int32_t mlc_write_place_pieces(const mlc_piece_t* pieces, uint64_t k, uint32_t flags, const uint8_t* reached,
+                               const uint8_t** end, int64_t* bad_piece, int64_t* bad, ERRMSG);
 void mlc_write_abort(void);
 bool mlc_write_open(void);
 int64_t mlc_append(const char* schema_str, const char* path, ERRMSG);

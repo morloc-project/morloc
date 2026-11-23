@@ -1,16 +1,22 @@
 -- A C++ batch whose encoding fails partway (an element that is not UTF-8,
 -- BASE-5) is absent from the file, whether it failed in its first
 -- sub-packet or after filling several, and the stream takes later batches
--- (SLOT-36, SLOT-37). The error reaches the caller as a Try.
-module main (run, tally)
+-- (SLOT-36, SLOT-37). The error reaches the caller as a Try. The same holds
+-- for batches of lists of Str (runPieces), which C++ hands to the runtime
+-- leaf by leaf: a bad leaf in the first list, in a list past several
+-- sub-packets, or near the end of a leaf larger than a sub-packet.
+module main (run, tally, runPieces, tallyPieces)
 
 import root
 import root-cpp
 
-source Cpp from "batch.hpp" ("batchOf", "countTagged")
+source Cpp from "batch.hpp" ("batchOf", "countTagged", "piecesOf", "bigOf", "countPieces")
 
 batchOf :: Int -> Int -> Int -> [Str]
 countTagged :: Int -> [Str] -> Int
+piecesOf :: Int -> Int -> Int -> Int -> [[Str]]
+bigOf :: Int -> Int -> Int -> [[Str]]
+countPieces :: Int -> [[Str]] -> Int
 
 --' Write five batches, two of which fail; report the failures
 run :: Str -> <IO> [Bool]
@@ -32,3 +38,27 @@ ok r = match r
 --' Count the elements of each batch in a written file
 tally :: [Str] -> [Int]
 tally xs = [countTagged 1 xs, countTagged 2 xs, countTagged 3 xs, countTagged 4 xs, countTagged 5 xs, length xs]
+
+--' Write six batches of lists of Str, three of which fail; report each
+runPieces :: Str -> <IO> [Str]
+runPieces path = do
+  Ok o <- @open path :: <IO> (Try Str (OStream [Str]))
+  a <- @write 0 o (piecesOf 1 700 (-1) 0)
+  b <- @write 0 o (piecesOf 2 700 650 3)
+  c <- @write 0 o (piecesOf 3 30 (-1) 0)
+  d <- @write 0 o (piecesOf 4 700 1 1)
+  e <- @write 0 o (bigOf 5 3 1)
+  f <- @write 0 o (piecesOf 6 700 (-1) 0)
+  @close o
+  [said a, said b, said c, said d, said e, said f]
+
+said :: Try Str () -> Str
+said r = match r
+  | (Ok _) = "ok"
+  | (Err e) = e
+
+--' Count the lists of each batch in a written file
+tallyPieces :: [[Str]] -> [Int]
+tallyPieces xss =
+  [ countPieces 1 xss, countPieces 2 xss, countPieces 3 xss
+  , countPieces 4 xss, countPieces 5 xss, countPieces 6 xss, length xss ]

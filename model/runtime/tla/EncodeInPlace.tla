@@ -15,12 +15,16 @@
 (* outside a batch; a seal waits for queue room before taking a block, so *)
 (* the custodian's spare is usually there to take.                        *)
 (* An element is a leaf (a Str, [U8] or array of fixed-width primitives, *)
-(* whose room the runtime writes whole: the body copied, the alignment    *)
-(* tail zeroed) or a node, whose room is zeroed when it is placed and then *)
+(* or a list of such leaves, whose room the runtime writes whole: the      *)
+(* headers and bodies copied, the pads and the tail zeroed) or a node, whose *)
+(* room is zeroed when it is placed and then                               *)
 (* written by the binding, which may leave bytes alone. Neither abort nor *)
 (* the custodian zeroes anything, so every room's bytes are its own or    *)
-(* zero, whatever an earlier batch or stream left in a reused block. The  *)
-(* custodian writes queued sub-packets                                    *)
+(* zero, whatever an earlier batch or stream left in a reused block. A   *)
+(* list of leaves may be refused part way through its room (a leaf that  *)
+(* is not text), which aborts the batch; the bytes written stay in the    *)
+(* block, where a later room is written whole or zeroed. The custodian    *)
+(* writes queued sub-packets                                              *)
 (* to the file and gives each block back as a spare; it is the spare        *)
 (* ring's only producer. With Py, the writers are Python threads of   *)
 (* one process sharing a GIL with a third thread that mutates their         *)
@@ -47,6 +51,10 @@ CONSTANTS Variant, Py, Death, CustFail, Cap, Depth, NB, K
 \* "place_no_zero": a node's room is placed on as it is, not zeroed first.
 \* "leaf_tail": the runtime's leaf write copies the body but leaves the
 \*   room's tail as it was.
+\* "pieces_pad": the runtime's write of a list of leaves copies the headers
+\*   and bodies but leaves the pads between them as they were.
+\* "pieces_partial_kept": a list of leaves whose k-th leaf is refused (not
+\*   text) keeps its partly written room and the batch goes on.
 \* "gil_held_blocking": one Python writer waits for the slot lock holding
 \*   the GIL.
 \* "gil_released_between_size_and_write": a Python writer releases the GIL
@@ -142,7 +150,7 @@ fair process Wr \in W
 variables wbuf = <<>>, wblk = 0, pend = <<>>, sealed = FALSE, i = 1,
     start = <<>>, startBlk = 0, startCap = 1, sz = 0, grown = FALSE, roomed = FALSE,
     nb = 0, out = <<>>, pt = 0, pushed = FALSE, firstBlk = 0,
-    handed = FALSE, leaf = FALSE;
+    handed = FALSE, leaf = FALSE, pieces = FALSE;
 begin
   GilFirst:
     if Py /\ Variant = "gil_held_blocking" /\ self = "w2" then
@@ -185,7 +193,10 @@ begin
             end if;
         end either;
       Kind:
-        either leaf := TRUE; or leaf := FALSE; end either;
+        either leaf := TRUE; pieces := FALSE;
+        or leaf := TRUE; pieces := TRUE;
+        or leaf := FALSE; pieces := FALSE;
+        end either;
       Size:
         sz := obj[self];
         if Py /\ Variant = "gil_released_between_size_and_write" then
@@ -289,9 +300,22 @@ begin
         end if;
       Write:
         die();
+      Piece:
+        if pieces then
+            either skip;
+            or
+                if Variant = "pieces_partial_kept" then
+                    if Len(wbuf) \in dirty[wblk] then badTail := TRUE; end if;
+                else
+                    dirty[wblk] := dirty[wblk] \cup {Len(wbuf)};
+                    goto Abort;
+                end if;
+            end either;
+        end if;
       Write2:
         if ~leaf /\ Len(wbuf) \in dirty[wblk] then badPlace := TRUE; end if;
-        if leaf /\ Variant = "leaf_tail" /\ Len(wbuf) \in dirty[wblk] then badTail := TRUE; end if;
+        if leaf /\ (Variant = "leaf_tail" \/ (pieces /\ Variant = "pieces_pad"))
+            /\ Len(wbuf) \in dirty[wblk] then badTail := TRUE; end if;
         if obj[self] /= sz then sizeMismatch := TRUE; end if;
         dirty[wblk] := dirty[wblk] \cup {Len(wbuf)};
         wbuf := Append(wbuf, <<self, i>>);
@@ -464,13 +488,14 @@ LayoutAgrees == slotCap = slotLayout
 RingFits == rtail <= K
 
 VARIABLES wbuf, wblk, pend, sealed, i, start, startBlk, startCap, sz, grown, 
-          roomed, nb, out, pt, pushed, firstBlk, handed, leaf, cb, ct
+          roomed, nb, out, pt, pushed, firstBlk, handed, leaf, pieces, cb, ct
 
 vars == << lock, failed, qfailed, slotBlk, slotBuf, kept, slotCap, slotLayout, 
            used, dirty, queue, file, lost, refused, rslot, rhead, rtail, done, 
            committing, gil, obj, badPlace, badTail, sizeMismatch, pc, wbuf, 
            wblk, pend, sealed, i, start, startBlk, startCap, sz, grown, 
-           roomed, nb, out, pt, pushed, firstBlk, handed, leaf, cb, ct >>
+           roomed, nb, out, pt, pushed, firstBlk, handed, leaf, pieces, cb, 
+           ct >>
 
 ProcSet == (W) \cup {MUT} \cup {"closer"} \cup {"cust"}
 
@@ -518,6 +543,7 @@ Init == (* Global variables *)
         /\ firstBlk = [self \in W |-> 0]
         /\ handed = [self \in W |-> FALSE]
         /\ leaf = [self \in W |-> FALSE]
+        /\ pieces = [self \in W |-> FALSE]
         (* Process Cust *)
         /\ cb = 0
         /\ ct = 0
@@ -540,7 +566,7 @@ GilFirst(self) == /\ pc[self] = "GilFirst"
                                   badTail, sizeMismatch, wbuf, wblk, pend, 
                                   sealed, i, start, startBlk, startCap, sz, 
                                   grown, roomed, nb, out, pt, pushed, firstBlk, 
-                                  handed, leaf, cb, ct >>
+                                  handed, leaf, pieces, cb, ct >>
 
 Lock(self) == /\ pc[self] = "Lock"
               /\ lock = NONE
@@ -562,7 +588,7 @@ Lock(self) == /\ pc[self] = "Lock"
                               refused, rslot, rhead, rtail, done, committing, 
                               obj, badPlace, badTail, sizeMismatch, pend, 
                               sealed, i, sz, grown, roomed, nb, out, pt, 
-                              pushed, firstBlk, handed, leaf, cb, ct >>
+                              pushed, firstBlk, handed, leaf, pieces, cb, ct >>
 
 Gil(self) == /\ pc[self] = "Gil"
              /\ IF Py /\ gil /= self
@@ -577,7 +603,7 @@ Gil(self) == /\ pc[self] = "Gil"
                              committing, obj, badPlace, badTail, sizeMismatch, 
                              wbuf, wblk, pend, sealed, i, start, startBlk, 
                              startCap, sz, grown, roomed, nb, out, pt, pushed, 
-                             firstBlk, handed, leaf, cb, ct >>
+                             firstBlk, handed, leaf, pieces, cb, ct >>
 
 Place(self) == /\ pc[self] = "Place"
                /\ IF i[self] <= BL[self]
@@ -589,8 +615,8 @@ Place(self) == /\ pc[self] = "Place"
                                committing, gil, obj, badPlace, badTail, 
                                sizeMismatch, wbuf, wblk, pend, sealed, i, 
                                start, startBlk, startCap, sz, grown, roomed, 
-                               nb, out, pt, pushed, firstBlk, handed, leaf, cb, 
-                               ct >>
+                               nb, out, pt, pushed, firstBlk, handed, leaf, 
+                               pieces, cb, ct >>
 
 Choose(self) == /\ pc[self] = "Choose"
                 /\ IF Death
@@ -608,7 +634,7 @@ Choose(self) == /\ pc[self] = "Choose"
                                 gil, obj, badPlace, badTail, sizeMismatch, 
                                 wbuf, wblk, pend, sealed, i, start, startBlk, 
                                 startCap, sz, grown, roomed, nb, out, pt, 
-                                pushed, firstBlk, handed, leaf, cb, ct >>
+                                pushed, firstBlk, handed, leaf, pieces, cb, ct >>
 
 Choose2(self) == /\ pc[self] = "Choose2"
                  /\ \/ /\ pc' = [pc EXCEPT ![self] = "Abort"]
@@ -628,11 +654,15 @@ Choose2(self) == /\ pc[self] = "Choose2"
                                  obj, badPlace, badTail, sizeMismatch, wbuf, 
                                  wblk, pend, sealed, i, start, startBlk, 
                                  startCap, sz, roomed, nb, out, pt, pushed, 
-                                 firstBlk, handed, leaf, cb, ct >>
+                                 firstBlk, handed, leaf, pieces, cb, ct >>
 
 Kind(self) == /\ pc[self] = "Kind"
               /\ \/ /\ leaf' = [leaf EXCEPT ![self] = TRUE]
+                    /\ pieces' = [pieces EXCEPT ![self] = FALSE]
+                 \/ /\ leaf' = [leaf EXCEPT ![self] = TRUE]
+                    /\ pieces' = [pieces EXCEPT ![self] = TRUE]
                  \/ /\ leaf' = [leaf EXCEPT ![self] = FALSE]
+                    /\ pieces' = [pieces EXCEPT ![self] = FALSE]
               /\ pc' = [pc EXCEPT ![self] = "Size"]
               /\ UNCHANGED << lock, failed, qfailed, slotBlk, slotBuf, kept, 
                               slotCap, slotLayout, used, dirty, queue, file, 
@@ -655,7 +685,7 @@ Size(self) == /\ pc[self] = "Size"
                               committing, obj, badPlace, badTail, sizeMismatch, 
                               wbuf, wblk, pend, sealed, i, start, startBlk, 
                               startCap, grown, roomed, nb, out, pt, pushed, 
-                              firstBlk, handed, leaf, cb, ct >>
+                              firstBlk, handed, leaf, pieces, cb, ct >>
 
 Regain(self) == /\ pc[self] = "Regain"
                 /\ IF Py /\ Variant = "gil_released_between_size_and_write"
@@ -671,7 +701,7 @@ Regain(self) == /\ pc[self] = "Regain"
                                 sizeMismatch, wbuf, wblk, pend, sealed, i, 
                                 start, startBlk, startCap, sz, grown, roomed, 
                                 nb, out, pt, pushed, firstBlk, handed, leaf, 
-                                cb, ct >>
+                                pieces, cb, ct >>
 
 Seal(self) == /\ pc[self] = "Seal"
               /\ IF Death
@@ -689,7 +719,7 @@ Seal(self) == /\ pc[self] = "Seal"
                               gil, obj, badPlace, badTail, sizeMismatch, wbuf, 
                               wblk, pend, sealed, i, start, startBlk, startCap, 
                               sz, grown, roomed, nb, out, pt, pushed, firstBlk, 
-                              handed, leaf, cb, ct >>
+                              handed, leaf, pieces, cb, ct >>
 
 RoomWait(self) == /\ pc[self] = "RoomWait"
                   /\ IF Py /\ Variant /= "room_wait_holds_gil" /\ Len(wbuf[self]) = Cap
@@ -705,7 +735,7 @@ RoomWait(self) == /\ pc[self] = "RoomWait"
                                   badTail, sizeMismatch, wbuf, wblk, pend, 
                                   sealed, i, start, startBlk, startCap, sz, 
                                   grown, roomed, nb, out, pt, pushed, firstBlk, 
-                                  handed, leaf, cb, ct >>
+                                  handed, leaf, pieces, cb, ct >>
 
 RoomWait2(self) == /\ pc[self] = "RoomWait2"
                    /\ Len(queue) < Depth \/ qfailed
@@ -717,7 +747,7 @@ RoomWait2(self) == /\ pc[self] = "RoomWait2"
                                    badTail, sizeMismatch, wbuf, wblk, pend, 
                                    sealed, i, start, startBlk, startCap, sz, 
                                    grown, roomed, nb, out, pt, pushed, 
-                                   firstBlk, handed, leaf, cb, ct >>
+                                   firstBlk, handed, leaf, pieces, cb, ct >>
 
 RoomWait3(self) == /\ pc[self] = "RoomWait3"
                    /\ gil = NONE
@@ -732,7 +762,7 @@ RoomWait3(self) == /\ pc[self] = "RoomWait3"
                                    badTail, sizeMismatch, wbuf, wblk, pend, 
                                    sealed, i, start, startBlk, startCap, sz, 
                                    grown, roomed, nb, out, pt, pushed, 
-                                   firstBlk, handed, leaf, cb, ct >>
+                                   firstBlk, handed, leaf, pieces, cb, ct >>
 
 Seal2(self) == /\ pc[self] = "Seal2"
                /\ IF Len(wbuf[self]) = Cap
@@ -798,7 +828,7 @@ Seal2(self) == /\ pc[self] = "Seal2"
                                rtail, done, committing, gil, obj, badPlace, 
                                badTail, sizeMismatch, wbuf, wblk, i, startBlk, 
                                startCap, sz, grown, roomed, out, pt, pushed, 
-                               leaf, cb, ct >>
+                               leaf, pieces, cb, ct >>
 
 Alloc(self) == /\ pc[self] = "Alloc"
                /\ IF Len(wbuf[self]) = Cap
@@ -820,7 +850,7 @@ Alloc(self) == /\ pc[self] = "Alloc"
                                obj, badPlace, badTail, sizeMismatch, wblk, 
                                pend, sealed, i, start, startBlk, startCap, sz, 
                                grown, roomed, out, pt, pushed, firstBlk, 
-                               handed, leaf, cb, ct >>
+                               handed, leaf, pieces, cb, ct >>
 
 NewBlock(self) == /\ pc[self] = "NewBlock"
                   /\ IF nb[self] /= 0
@@ -845,7 +875,7 @@ NewBlock(self) == /\ pc[self] = "NewBlock"
                                   done, committing, gil, obj, badPlace, 
                                   badTail, sizeMismatch, wbuf, pend, sealed, i, 
                                   start, startCap, sz, grown, roomed, out, pt, 
-                                  pushed, firstBlk, leaf, cb, ct >>
+                                  pushed, firstBlk, leaf, pieces, cb, ct >>
 
 Room(self) == /\ pc[self] = "Room"
               /\ \/ /\ TRUE
@@ -867,7 +897,8 @@ Room(self) == /\ pc[self] = "Room"
                               rhead, rtail, done, committing, gil, obj, 
                               badPlace, badTail, sizeMismatch, wbuf, pend, 
                               sealed, i, start, startCap, sz, grown, nb, out, 
-                              pt, pushed, firstBlk, handed, leaf, cb, ct >>
+                              pt, pushed, firstBlk, handed, leaf, pieces, cb, 
+                              ct >>
 
 Zero(self) == /\ pc[self] = "Zero"
               /\ IF ~leaf[self] /\ Variant /= "place_no_zero"
@@ -881,17 +912,17 @@ Zero(self) == /\ pc[self] = "Zero"
                               gil, obj, badPlace, badTail, sizeMismatch, wbuf, 
                               wblk, pend, sealed, i, start, startBlk, startCap, 
                               sz, grown, roomed, nb, out, pt, pushed, firstBlk, 
-                              handed, leaf, cb, ct >>
+                              handed, leaf, pieces, cb, ct >>
 
 Write(self) == /\ pc[self] = "Write"
                /\ IF Death
                      THEN /\ \/ /\ TRUE
-                                /\ pc' = [pc EXCEPT ![self] = "Write2"]
+                                /\ pc' = [pc EXCEPT ![self] = "Piece"]
                                 /\ UNCHANGED <<lock, failed>>
                              \/ /\ failed' = TRUE
                                 /\ lock' = NONE
                                 /\ pc' = [pc EXCEPT ![self] = "Done"]
-                     ELSE /\ pc' = [pc EXCEPT ![self] = "Write2"]
+                     ELSE /\ pc' = [pc EXCEPT ![self] = "Piece"]
                           /\ UNCHANGED << lock, failed >>
                /\ UNCHANGED << qfailed, slotBlk, slotBuf, kept, slotCap, 
                                slotLayout, used, dirty, queue, file, lost, 
@@ -899,14 +930,40 @@ Write(self) == /\ pc[self] = "Write"
                                gil, obj, badPlace, badTail, sizeMismatch, wbuf, 
                                wblk, pend, sealed, i, start, startBlk, 
                                startCap, sz, grown, roomed, nb, out, pt, 
-                               pushed, firstBlk, handed, leaf, cb, ct >>
+                               pushed, firstBlk, handed, leaf, pieces, cb, ct >>
+
+Piece(self) == /\ pc[self] = "Piece"
+               /\ IF pieces[self]
+                     THEN /\ \/ /\ TRUE
+                                /\ pc' = [pc EXCEPT ![self] = "Write2"]
+                                /\ UNCHANGED <<dirty, badTail>>
+                             \/ /\ IF Variant = "pieces_partial_kept"
+                                      THEN /\ IF Len(wbuf[self]) \in dirty[wblk[self]]
+                                                 THEN /\ badTail' = TRUE
+                                                 ELSE /\ TRUE
+                                                      /\ UNCHANGED badTail
+                                           /\ pc' = [pc EXCEPT ![self] = "Write2"]
+                                           /\ dirty' = dirty
+                                      ELSE /\ dirty' = [dirty EXCEPT ![wblk[self]] = dirty[wblk[self]] \cup {Len(wbuf[self])}]
+                                           /\ pc' = [pc EXCEPT ![self] = "Abort"]
+                                           /\ UNCHANGED badTail
+                     ELSE /\ pc' = [pc EXCEPT ![self] = "Write2"]
+                          /\ UNCHANGED << dirty, badTail >>
+               /\ UNCHANGED << lock, failed, qfailed, slotBlk, slotBuf, kept, 
+                               slotCap, slotLayout, used, queue, file, lost, 
+                               refused, rslot, rhead, rtail, done, committing, 
+                               gil, obj, badPlace, sizeMismatch, wbuf, wblk, 
+                               pend, sealed, i, start, startBlk, startCap, sz, 
+                               grown, roomed, nb, out, pt, pushed, firstBlk, 
+                               handed, leaf, pieces, cb, ct >>
 
 Write2(self) == /\ pc[self] = "Write2"
                 /\ IF ~leaf[self] /\ Len(wbuf[self]) \in dirty[wblk[self]]
                       THEN /\ badPlace' = TRUE
                       ELSE /\ TRUE
                            /\ UNCHANGED badPlace
-                /\ IF leaf[self] /\ Variant = "leaf_tail" /\ Len(wbuf[self]) \in dirty[wblk[self]]
+                /\ IF leaf[self] /\ (Variant = "leaf_tail" \/ (pieces[self] /\ Variant = "pieces_pad"))
+                       /\ Len(wbuf[self]) \in dirty[wblk[self]]
                       THEN /\ badTail' = TRUE
                       ELSE /\ TRUE
                            /\ UNCHANGED badTail
@@ -927,7 +984,7 @@ Write2(self) == /\ pc[self] = "Write2"
                                 rslot, rhead, rtail, done, committing, gil, 
                                 obj, wblk, pend, sealed, start, startBlk, 
                                 startCap, sz, grown, roomed, nb, out, pt, 
-                                pushed, firstBlk, handed, leaf, cb, ct >>
+                                pushed, firstBlk, handed, leaf, pieces, cb, ct >>
 
 Commit(self) == /\ pc[self] = "Commit"
                 /\ committing' = self
@@ -939,7 +996,7 @@ Commit(self) == /\ pc[self] = "Commit"
                                 badPlace, badTail, sizeMismatch, wbuf, wblk, 
                                 pend, sealed, i, start, startBlk, startCap, sz, 
                                 grown, roomed, nb, out, pt, pushed, firstBlk, 
-                                handed, leaf, cb, ct >>
+                                handed, leaf, pieces, cb, ct >>
 
 Queue(self) == /\ pc[self] = "Queue"
                /\ IF pend[self] /= <<>>
@@ -960,7 +1017,7 @@ Queue(self) == /\ pc[self] = "Queue"
                                gil, obj, badPlace, badTail, sizeMismatch, wbuf, 
                                wblk, pend, sealed, i, start, startBlk, 
                                startCap, sz, grown, roomed, nb, out, pt, 
-                               pushed, firstBlk, handed, leaf, cb, ct >>
+                               pushed, firstBlk, handed, leaf, pieces, cb, ct >>
 
 Queue2(self) == /\ pc[self] = "Queue2"
                 /\ Len(queue) < Depth \/ qfailed
@@ -991,7 +1048,7 @@ Queue2(self) == /\ pc[self] = "Queue2"
                                 rtail, done, committing, gil, obj, badPlace, 
                                 badTail, sizeMismatch, wbuf, sealed, i, start, 
                                 startBlk, startCap, sz, grown, roomed, nb, pt, 
-                                handed, leaf, cb, ct >>
+                                handed, leaf, pieces, cb, ct >>
 
 Install(self) == /\ pc[self] = "Install"
                  /\ slotBlk' = wblk[self]
@@ -1007,7 +1064,7 @@ Install(self) == /\ pc[self] = "Install"
                                  badTail, sizeMismatch, wbuf, pend, sealed, i, 
                                  start, startBlk, startCap, sz, grown, roomed, 
                                  nb, out, pt, pushed, firstBlk, handed, leaf, 
-                                 cb, ct >>
+                                 pieces, cb, ct >>
 
 Refused(self) == /\ pc[self] = "Refused"
                  /\ refused' = self
@@ -1018,7 +1075,8 @@ Refused(self) == /\ pc[self] = "Refused"
                                  gil, obj, badPlace, badTail, sizeMismatch, 
                                  wbuf, wblk, pend, sealed, i, start, startBlk, 
                                  startCap, sz, grown, roomed, nb, out, pt, 
-                                 pushed, firstBlk, handed, leaf, cb, ct >>
+                                 pushed, firstBlk, handed, leaf, pieces, cb, 
+                                 ct >>
 
 Free(self) == /\ pc[self] = "Free"
               /\ IF out[self] /= <<>>
@@ -1034,7 +1092,7 @@ Free(self) == /\ pc[self] = "Free"
                               badPlace, badTail, sizeMismatch, wbuf, wblk, 
                               pend, sealed, i, start, startBlk, startCap, sz, 
                               grown, roomed, nb, pt, pushed, firstBlk, handed, 
-                              leaf, cb, ct >>
+                              leaf, pieces, cb, ct >>
 
 Unlock(self) == /\ pc[self] = "Unlock"
                 /\ committing' = NONE
@@ -1046,7 +1104,7 @@ Unlock(self) == /\ pc[self] = "Unlock"
                                 obj, badPlace, badTail, sizeMismatch, wbuf, 
                                 wblk, pend, sealed, i, start, startBlk, 
                                 startCap, sz, grown, roomed, nb, out, pt, 
-                                pushed, firstBlk, handed, leaf, cb, ct >>
+                                pushed, firstBlk, handed, leaf, pieces, cb, ct >>
 
 Abort(self) == /\ pc[self] = "Abort"
                /\ out' = [out EXCEPT ![self] =    SelectSeq(
@@ -1062,7 +1120,7 @@ Abort(self) == /\ pc[self] = "Abort"
                                gil, obj, badPlace, badTail, sizeMismatch, wbuf, 
                                sealed, i, start, startBlk, startCap, sz, grown, 
                                roomed, nb, pt, pushed, firstBlk, handed, leaf, 
-                               cb, ct >>
+                               pieces, cb, ct >>
 
 Drop(self) == /\ pc[self] = "Drop"
               /\ IF out[self] /= <<>>
@@ -1083,7 +1141,7 @@ Drop(self) == /\ pc[self] = "Drop"
                               badPlace, badTail, sizeMismatch, wbuf, wblk, 
                               pend, sealed, i, start, startBlk, startCap, sz, 
                               grown, roomed, nb, pushed, firstBlk, handed, 
-                              leaf, cb, ct >>
+                              leaf, pieces, cb, ct >>
 
 Push(self) == /\ pc[self] = "Push"
               /\ rslot' = [rslot EXCEPT ![pt[self] + 1] = Head(out[self])]
@@ -1096,7 +1154,7 @@ Push(self) == /\ pc[self] = "Push"
                               badPlace, badTail, sizeMismatch, wbuf, wblk, 
                               pend, sealed, i, start, startBlk, startCap, sz, 
                               grown, roomed, nb, pt, pushed, firstBlk, handed, 
-                              leaf, cb, ct >>
+                              leaf, pieces, cb, ct >>
 
 Restore(self) == /\ pc[self] = "Restore"
                  /\ slotBuf' = start[self]
@@ -1115,17 +1173,19 @@ Restore(self) == /\ pc[self] = "Restore"
                                  rhead, rtail, done, obj, badPlace, badTail, 
                                  sizeMismatch, wbuf, wblk, pend, sealed, i, 
                                  start, startBlk, startCap, sz, grown, roomed, 
-                                 nb, out, pt, pushed, handed, leaf, cb, ct >>
+                                 nb, out, pt, pushed, handed, leaf, pieces, cb, 
+                                 ct >>
 
 Wr(self) == GilFirst(self) \/ Lock(self) \/ Gil(self) \/ Place(self)
                \/ Choose(self) \/ Choose2(self) \/ Kind(self) \/ Size(self)
                \/ Regain(self) \/ Seal(self) \/ RoomWait(self)
                \/ RoomWait2(self) \/ RoomWait3(self) \/ Seal2(self)
                \/ Alloc(self) \/ NewBlock(self) \/ Room(self) \/ Zero(self)
-               \/ Write(self) \/ Write2(self) \/ Commit(self)
-               \/ Queue(self) \/ Queue2(self) \/ Install(self)
-               \/ Refused(self) \/ Free(self) \/ Unlock(self)
-               \/ Abort(self) \/ Drop(self) \/ Push(self) \/ Restore(self)
+               \/ Write(self) \/ Piece(self) \/ Write2(self)
+               \/ Commit(self) \/ Queue(self) \/ Queue2(self)
+               \/ Install(self) \/ Refused(self) \/ Free(self)
+               \/ Unlock(self) \/ Abort(self) \/ Drop(self) \/ Push(self)
+               \/ Restore(self)
 
 M1 == /\ pc[MUT] = "M1"
       /\ IF Py
@@ -1139,7 +1199,7 @@ M1 == /\ pc[MUT] = "M1"
                       rslot, rhead, rtail, done, committing, obj, badPlace, 
                       badTail, sizeMismatch, wbuf, wblk, pend, sealed, i, 
                       start, startBlk, startCap, sz, grown, roomed, nb, out, 
-                      pt, pushed, firstBlk, handed, leaf, cb, ct >>
+                      pt, pushed, firstBlk, handed, leaf, pieces, cb, ct >>
 
 M2 == /\ pc[MUT] = "M2"
       /\ \E w \in W:
@@ -1150,7 +1210,7 @@ M2 == /\ pc[MUT] = "M2"
                       rslot, rhead, rtail, done, committing, gil, badPlace, 
                       badTail, sizeMismatch, wbuf, wblk, pend, sealed, i, 
                       start, startBlk, startCap, sz, grown, roomed, nb, out, 
-                      pt, pushed, firstBlk, handed, leaf, cb, ct >>
+                      pt, pushed, firstBlk, handed, leaf, pieces, cb, ct >>
 
 M3 == /\ pc[MUT] = "M3"
       /\ IF Variant = "lock_wait_holds_gil"
@@ -1163,7 +1223,7 @@ M3 == /\ pc[MUT] = "M3"
                       rslot, rhead, rtail, done, committing, obj, badPlace, 
                       badTail, sizeMismatch, wbuf, wblk, pend, sealed, i, 
                       start, startBlk, startCap, sz, grown, roomed, nb, out, 
-                      pt, pushed, firstBlk, handed, leaf, cb, ct >>
+                      pt, pushed, firstBlk, handed, leaf, pieces, cb, ct >>
 
 M4 == /\ pc[MUT] = "M4"
       /\ lock = NONE
@@ -1173,7 +1233,8 @@ M4 == /\ pc[MUT] = "M4"
                       rslot, rhead, rtail, done, committing, gil, obj, 
                       badPlace, badTail, sizeMismatch, wbuf, wblk, pend, 
                       sealed, i, start, startBlk, startCap, sz, grown, roomed, 
-                      nb, out, pt, pushed, firstBlk, handed, leaf, cb, ct >>
+                      nb, out, pt, pushed, firstBlk, handed, leaf, pieces, cb, 
+                      ct >>
 
 Mut == M1 \/ M2 \/ M3 \/ M4
 
@@ -1192,7 +1253,7 @@ C1 == /\ pc["closer"] = "C1"
                       committing, gil, obj, badPlace, badTail, sizeMismatch, 
                       wbuf, wblk, pend, sealed, i, start, startBlk, startCap, 
                       sz, grown, roomed, nb, out, pt, pushed, firstBlk, handed, 
-                      leaf, cb, ct >>
+                      leaf, pieces, cb, ct >>
 
 Closer == C1
 
@@ -1219,7 +1280,7 @@ Pop == /\ pc["cust"] = "Pop"
                        done, committing, gil, obj, badPlace, badTail, 
                        sizeMismatch, wbuf, wblk, pend, sealed, i, start, 
                        startBlk, startCap, sz, grown, roomed, nb, out, pt, 
-                       pushed, firstBlk, handed, leaf, ct >>
+                       pushed, firstBlk, handed, leaf, pieces, ct >>
 
 Ring == /\ pc["cust"] = "Ring"
         /\ ct' = rtail
@@ -1230,7 +1291,7 @@ Ring == /\ pc["cust"] = "Ring"
                         badPlace, badTail, sizeMismatch, wbuf, wblk, pend, 
                         sealed, i, start, startBlk, startCap, sz, grown, 
                         roomed, nb, out, pt, pushed, firstBlk, handed, leaf, 
-                        cb >>
+                        pieces, cb >>
 
 Give == /\ pc["cust"] = "Give"
         /\ rslot' = [rslot EXCEPT ![ct + 1] = cb]
@@ -1242,7 +1303,7 @@ Give == /\ pc["cust"] = "Give"
                         rhead, done, committing, gil, obj, badPlace, badTail, 
                         sizeMismatch, wbuf, wblk, pend, sealed, i, start, 
                         startBlk, startCap, sz, grown, roomed, nb, out, pt, 
-                        pushed, firstBlk, handed, leaf, ct >>
+                        pushed, firstBlk, handed, leaf, pieces, ct >>
 
 Cust == Pop \/ Ring \/ Give
 

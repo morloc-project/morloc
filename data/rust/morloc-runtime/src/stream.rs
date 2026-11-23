@@ -4907,6 +4907,111 @@ fn place_bytes(t: &mut Txn, src: *const u8, n: usize, flags: u32, bad: &mut Opti
     }
 }
 
+// SLOT-36
+pub fn write_place_pieces(
+    pieces: &[(*const u8, usize)],
+    flags: u32,
+    reached: *const u8,
+    bad: &mut Option<(usize, usize)>,
+) -> Result<Option<*const u8>, MorlocError> {
+    with_txn(reached, |t| place_pieces(t, pieces, flags, bad))
+}
+
+// SLOT-36
+pub(crate) fn pieces_shape(s: &Schema) -> Option<(LeafShape, usize)> {
+    if s.serial_type != SerialType::Array || s.width != std::mem::size_of::<shm_types_crate::Array>() || s.array_data_is_flat() {
+        return None;
+    }
+    let inner = s.parameters.first()?;
+    Some((leaf_shape(inner)?, inner.array_data_alignment()))
+}
+
+fn fixed_len(s: &Schema) -> Option<usize> {
+    s.offsets.first().copied().filter(|_| s.serial_type == SerialType::Array)
+}
+
+fn place_pieces(
+    t: &mut Txn,
+    pieces: &[(*const u8, usize)],
+    flags: u32,
+    bad: &mut Option<(usize, usize)>,
+) -> Result<*const u8, MorlocError> {
+    let schema = &t.local.elem_schema;
+    let named = || morloc_runtime_types::schema::schema_to_string(schema);
+    let (shape, head_align) = pieces_shape(schema)
+        .ok_or_else(|| MorlocError::Other(format!("@write: an element of schema '{}' is not a list of leaves", named())))?;
+    let valid_text = flags & morloc_runtime_types::MLC_PLACE_VALID_TEXT != 0;
+    if flags & !morloc_runtime_types::MLC_PLACE_VALID_TEXT != 0 {
+        return Err(MorlocError::Other(format!("@write: unknown leaf flags {flags:#x} for schema '{}'", named())));
+    }
+    if valid_text && !shape.text {
+        return Err(MorlocError::Other(format!("@write: an element of schema '{}' is not text", named())));
+    }
+    let k = pieces.len();
+    if let Some(len) = fixed_len(schema) {
+        if k != len {
+            return Err(MorlocError::Other(format!("@write: a list of schema '{}' has length {k}, not {len}", named())));
+        }
+    }
+    let inner_len = fixed_len(&schema.parameters[0]);
+    let head = std::mem::size_of::<shm_types_crate::Array>();
+    let too_big = || MorlocError::Other(format!("@write: a list of schema '{}' with {k} leaves is too large", named()));
+    let mut raw = if k == 0 { 0 } else { k.checked_mul(head).and_then(|h| h.checked_add(head_align - 1)).ok_or_else(too_big)? };
+    for (j, &(src, n)) in pieces.iter().enumerate() {
+        if src.is_null() && n > 0 {
+            return Err(MorlocError::Other(format!("@write: leaf {j} has no bytes in a list of schema '{}'", named())));
+        }
+        if let Some(len) = inner_len.filter(|&len| len != n) {
+            return Err(MorlocError::Other(format!("@write: leaf {j} has length {n}, not {len}, in a list of schema '{}'", named())));
+        }
+        if n > 0 {
+            let body = n.checked_mul(shape.elem).and_then(|b| b.checked_add(shape.slack)).ok_or_else(too_big)?;
+            raw = raw.checked_add(body).ok_or_else(too_big)?;
+        }
+    }
+    let flat_len = raw.checked_add(shape.width).ok_or_else(too_big)?;
+    let check = shape.text && (!valid_text || crate::packet::code_checks()) && !morloc_runtime_types::utf8::skip_utf8_check();
+    let (g, local, batch, buf_size) = (&t.guard, &mut t.local, &mut t.batch, t.buf_size);
+    let level = batch.level;
+    let (base, slot_at, data_at, var) = match place_one(g, local, batch, flat_len, buf_size)? {
+        Placement::Buffer { slot_at, data_at, var, .. } => (crate::shm::rel2abs(g.slot().write_buffer.get())?, slot_at, data_at, var),
+        Placement::Oversize { len } => (batch.hold_oversize(len)?, 16, 16 + shape.width, len - 16 - shape.width),
+    };
+    let origin = data_at - shape.width;
+    let end = data_at + var;
+    let aligned = |at: usize, a: usize| origin + shm_types_crate::align_up(at - origin, a);
+    let heads = if k == 0 { data_at } else { aligned(data_at, head_align) };
+    // SAFETY: SLOT-36: the block holds the slot at `slot_at` and `var` bytes at `data_at`; the
+    // headers, pads and bodies laid out below end within `raw <= var` bytes of `data_at`.
+    unsafe {
+        let slot = shm_types_crate::Array { size: k, data: if k == 0 { 0 } else { heads as RelPtr } };
+        std::ptr::write_unaligned(base.add(slot_at) as *mut shm_types_crate::Array, slot);
+        std::ptr::write_bytes(base.add(data_at), 0, heads - data_at);
+        let mut at = heads + k * head;
+        for (j, &(src, n)) in pieces.iter().enumerate() {
+            let h = base.add(heads + j * head) as *mut shm_types_crate::Array;
+            if n == 0 {
+                std::ptr::write_unaligned(h, shm_types_crate::Array { size: 0, data: 0 });
+                continue;
+            }
+            let body_at = aligned(at, shape.slack + 1);
+            std::ptr::write_bytes(base.add(at), 0, body_at - at);
+            let body = n * shape.elem;
+            if let Err(i) = crate::leaf_copy::copy_leaf(base.add(body_at), src, body, check, level == 0) {
+                *bad = Some((j, i));
+                return Err(MorlocError::Serialization(format!("a Str that is not valid UTF-8 (byte {i} of {n}, in leaf {j})")));
+            }
+            std::ptr::write_unaligned(h, shm_types_crate::Array { size: n, data: body_at as RelPtr });
+            at = body_at + body;
+        }
+        debug_assert!(at <= end);
+        std::ptr::write_bytes(base.add(at), 0, end - at);
+        let e = base.add(end);
+        t.expect = Some((e, e));
+        Ok(e as *const u8)
+    }
+}
+
 // SLOT-37
 pub fn write_wait(reached: *const u8) -> Result<(), MorlocError> {
     with_txn(reached, |t| {

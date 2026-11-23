@@ -1528,6 +1528,60 @@ pub(crate) unsafe fn mlc_write_place_bytes(
     }
 }
 
+/// SLOT-36: one leaf of a list of leaves (`mlc_piece_t` in morloc.h).
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct MlcPiece {
+    pub data: *const u8,
+    pub n: u64,
+}
+
+/// SLOT-36: place and write one list-of-leaves element (`mlc_write_place_pieces`
+/// in morloc.h).
+#[allow(clippy::too_many_arguments)]
+pub(crate) unsafe fn mlc_write_place_pieces(
+    pieces: *const MlcPiece,
+    k: u64,
+    flags: u32,
+    reached: *const u8,
+    end: *mut *const u8,
+    bad_piece: *mut i64,
+    bad: *mut i64,
+    errmsg: *mut *mut c_char,
+) -> i32 {
+    clear_errmsg(errmsg);
+    let mut first_bad = None;
+    let too_large = || MorlocError::Other("@write: a list of leaves is too large".into());
+    let r = usize::try_from(k).map_err(|_| too_large()).and_then(|k| {
+        let given: &[MlcPiece] = if k == 0 { &[] } else { std::slice::from_raw_parts(pieces, k) };
+        let pieces = given
+            .iter()
+            .map(|p| usize::try_from(p.n).map(|n| (p.data, n)).map_err(|_| too_large()))
+            .collect::<Result<Vec<_>, _>>()?;
+        crate::stream::write_place_pieces(&pieces, flags, reached, &mut first_bad)
+    });
+    match r {
+        Ok(None) => morloc_runtime_types::MLC_WRITE_WOULD_BLOCK,
+        Ok(Some(e)) => {
+            // SAFETY: SLOT-36: the caller passes room for the end pointer.
+            unsafe { *end = e };
+            0
+        }
+        Err(e) => match first_bad {
+            Some((j, i)) => {
+                // SAFETY: SLOT-36: the caller passes room for the two offsets.
+                unsafe {
+                    *bad_piece = j as i64;
+                    *bad = i as i64;
+                }
+                set_errmsg(errmsg, &e);
+                morloc_runtime_types::MLC_WRITE_NOT_TEXT
+            }
+            None => write_result(Err(e), errmsg),
+        },
+    }
+}
+
 /// SLOT-36: the slots of up to `k` fixed-width or inline `Int` elements.
 pub(crate) unsafe fn mlc_write_place_run(k: u64, reached: *const u8, slots: *mut *mut u8, placed: *mut u64, errmsg: *mut *mut c_char) -> i32 {
     clear_errmsg(errmsg);
@@ -2816,6 +2870,12 @@ mod c_abi {
     #[no_mangle]
     pub unsafe extern "C" fn mlc_write_place_bytes(src: *const u8, n: u64, flags: u32, reached: *const u8, end: *mut *const u8, bad: *mut i64, errmsg: *mut *mut c_char) -> i32 {
         super::mlc_write_place_bytes(src, n, flags, reached, end, bad, errmsg)
+    }
+
+    #[no_mangle]
+    #[allow(clippy::too_many_arguments)]
+    pub unsafe extern "C" fn mlc_write_place_pieces(pieces: *const super::MlcPiece, k: u64, flags: u32, reached: *const u8, end: *mut *const u8, bad_piece: *mut i64, bad: *mut i64, errmsg: *mut *mut c_char) -> i32 {
+        super::mlc_write_place_pieces(pieces, k, flags, reached, end, bad_piece, bad, errmsg)
     }
 
     #[no_mangle]

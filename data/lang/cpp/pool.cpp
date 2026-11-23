@@ -1118,6 +1118,20 @@ constexpr int mlc_wire_type() {
     else return -1;
 }
 
+// Whether a C++ type can be a leaf: a std::string, or a vector of a type
+// some morloc number holds byte for byte (not std::vector<bool>, whose bits
+// have no data()).
+template <typename E>
+constexpr bool mlc_leaf_type() {
+    if constexpr (std::is_same_v<E, std::string>) {
+        return true;
+    } else if constexpr (is_std_vector<E>::value) {
+        return mlc_wire_type<typename E::value_type>() >= 0;
+    } else {
+        return false;
+    }
+}
+
 // Whether a batch element of type E is a leaf the runtime writes whole from
 // its bytes (SLOT-36): a std::string for a Str, or a vector of numbers whose
 // type is exactly the element's wire type.
@@ -1138,9 +1152,22 @@ inline bool mlc_leaf_elem(const Schema* elem) {
     }
 }
 
+// Whether a batch element of type E is a list of leaves the runtime writes
+// whole from its leaves' bytes (SLOT-36).
+template <typename E>
+inline bool mlc_leaf_list_elem(const Schema* elem) {
+    if constexpr (is_std_vector<E>::value) {
+        using L = typename E::value_type;
+        if constexpr (mlc_leaf_type<L>()) {
+            return elem->type == MORLOC_ARRAY && mlc_leaf_elem<L>(resolve_recur(elem->parameters[0]));
+        }
+    }
+    return false;
+}
+
 // Write the batch `xs` in place (SLOT-36), or from a voidstar copy when
 // the stream refuses. Each element is sized before the batch opens, except
-// leaves, which the runtime sizes and writes.
+// leaves and lists of leaves, which the runtime sizes and writes.
 template <typename E>
 inline void _mlc_write_batch(Schema* schema, int64_t level, const std::vector<E>& xs, int64_t handle) {
     const Schema* elem = resolve_recur(schema->parameters[0]);
@@ -1148,8 +1175,9 @@ inline void _mlc_write_batch(Schema* schema, int64_t level, const std::vector<E>
     const size_t w = elem->width;
     const bool run = (elem->fixed_width || elem->type == MORLOC_INT) && w > 0;
     const bool leaf = !run && mlc_leaf_elem<E>(elem);
+    const bool pieces = !run && !leaf && mlc_leaf_list_elem<E>(elem);
     // A table element has no voidstar size; the stream refuses it in place.
-    const bool sized = !run && !leaf && elem->type != MORLOC_TABLE;
+    const bool sized = !run && !leaf && !pieces && elem->type != MORLOC_TABLE;
     std::vector<size_t> sizes;
     MlcConverted converted;
     if (sized) {
@@ -1176,7 +1204,7 @@ inline void _mlc_write_batch(Schema* schema, int64_t level, const std::vector<E>
         return;
     }
     MLC_WRITE_RESULT(rc, errmsg, "mlc_write_begin");
-    if (!run && !sized && !leaf) mlc_runtime_defect("@write: a table batch was opened in place");
+    if (!run && !sized && !leaf && !pieces) mlc_runtime_defect("@write: a table batch was opened in place");
     MlcWriteTxn txn;
     const uint8_t* reached = nullptr;
     MlcWriteWalk ww(elem, nullptr, &converted);
@@ -1200,7 +1228,7 @@ inline void _mlc_write_batch(Schema* schema, int64_t level, const std::vector<E>
             i += k;
         }
     } else if (leaf) {
-        if constexpr (std::is_same_v<E, std::string> || is_std_vector<E>::value) {
+        if constexpr (mlc_leaf_type<E>()) {
             for (size_t i = 0; i < n; i++) {
                 const E& x = xs[i];
                 const uint8_t* end = nullptr;
@@ -1216,6 +1244,34 @@ inline void _mlc_write_batch(Schema* schema, int64_t level, const std::vector<E>
                 }
                 MLC_WRITE_RESULT(rc, errmsg, "mlc_write_place_bytes");
                 reached = end;
+            }
+        }
+    } else if (pieces) {
+        if constexpr (is_std_vector<E>::value) {
+            using L = typename E::value_type;
+            if constexpr (mlc_leaf_type<L>()) {
+                std::vector<mlc_piece_t> ps;
+                for (size_t i = 0; i < n; i++) {
+                    const E& x = xs[i];
+                    ps.resize(x.size());
+                    for (size_t j = 0; j < x.size(); j++) {
+                        ps[j] = mlc_piece_t{reinterpret_cast<const uint8_t*>(x[j].data()), static_cast<uint64_t>(x[j].size())};
+                    }
+                    const uint8_t* end = nullptr;
+                    int64_t bad_piece = -1;
+                    int64_t bad = -1;
+                    rc = mlc_write_place_pieces(ps.data(), ps.size(), 0, reached, &end, &bad_piece, &bad, &errmsg);
+                    if (rc == MLC_WRITE_NOT_TEXT) {
+                        // SLOT-36
+                        free(errmsg);
+                        txn.open = false;
+                        std::ostringstream oss;
+                        oss << "C++ produced a Str that is not valid UTF-8 (byte " << bad << " of " << x[static_cast<size_t>(bad_piece)].size() << ")";
+                        throw std::runtime_error(oss.str());
+                    }
+                    MLC_WRITE_RESULT(rc, errmsg, "mlc_write_place_pieces");
+                    reached = end;
+                }
             }
         }
     } else {

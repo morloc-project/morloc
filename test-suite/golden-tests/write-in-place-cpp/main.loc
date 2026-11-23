@@ -5,7 +5,8 @@
 -- The types cover alignment relative to the element's origin, empty arrays
 -- and strings, size slack, records and data arms with deep fields before
 -- fields with tails (Tree, Chain: laid out in field order), and a rose
--- tree 10000 deep. The 4096-byte buffer cuts most batches.
+-- tree 10000 deep, and lists of leaves (Strs, U8ss, Realss), which C++
+-- hands to the runtime leaf by leaf, and lists of Bool, which are not leaves. The 4096-byte buffer cuts most batches.
 module main
   ( wcReal, wpReal
   , wcI8, wpI8
@@ -18,6 +19,11 @@ module main
   , wcI8s, wpI8s
   , wcU8s, wpU8s
   , wcStrs3, wpStrs3
+  , wcStrs, wpStrs
+  , wcU8ss, wpU8ss
+  , wcRealss, wpRealss
+  , wcBools, wpBools
+  , wcBoolss, wpBoolss
   , wcOptStr, wpOptStr
   , wcOptReals, wpOptReals
   , wcOptI16s, wpOptI16s
@@ -188,6 +194,66 @@ wcU8s z path xss = do
 wpU8s :: Int -> Str -> [[[U8]]] -> <IO> ()
 wpU8s z path xss = do
   Ok o <- @open path :: <IO> (Try Str (OStream [U8]))
+  drainP z o xss
+  @close o
+
+wcStrs :: Int -> Str -> [[[Str]]] -> <IO> ()
+wcStrs z path xss = do
+  Ok o <- @open path :: <IO> (Try Str (OStream [Str]))
+  drainC z o xss
+  @close o
+
+wpStrs :: Int -> Str -> [[[Str]]] -> <IO> ()
+wpStrs z path xss = do
+  Ok o <- @open path :: <IO> (Try Str (OStream [Str]))
+  drainP z o xss
+  @close o
+
+wcU8ss :: Int -> Str -> [[[[U8]]]] -> <IO> ()
+wcU8ss z path xss = do
+  Ok o <- @open path :: <IO> (Try Str (OStream [[U8]]))
+  drainC z o xss
+  @close o
+
+wpU8ss :: Int -> Str -> [[[[U8]]]] -> <IO> ()
+wpU8ss z path xss = do
+  Ok o <- @open path :: <IO> (Try Str (OStream [[U8]]))
+  drainP z o xss
+  @close o
+
+wcRealss :: Int -> Str -> [[[[Real]]]] -> <IO> ()
+wcRealss z path xss = do
+  Ok o <- @open path :: <IO> (Try Str (OStream [[Real]]))
+  drainC z o xss
+  @close o
+
+wpRealss :: Int -> Str -> [[[[Real]]]] -> <IO> ()
+wpRealss z path xss = do
+  Ok o <- @open path :: <IO> (Try Str (OStream [[Real]]))
+  drainP z o xss
+  @close o
+
+wcBools :: Int -> Str -> [[[Bool]]] -> <IO> ()
+wcBools z path xss = do
+  Ok o <- @open path :: <IO> (Try Str (OStream [Bool]))
+  drainC z o xss
+  @close o
+
+wpBools :: Int -> Str -> [[[Bool]]] -> <IO> ()
+wpBools z path xss = do
+  Ok o <- @open path :: <IO> (Try Str (OStream [Bool]))
+  drainP z o xss
+  @close o
+
+wcBoolss :: Int -> Str -> [[[[Bool]]]] -> <IO> ()
+wcBoolss z path xss = do
+  Ok o <- @open path :: <IO> (Try Str (OStream [[Bool]]))
+  drainC z o xss
+  @close o
+
+wpBoolss :: Int -> Str -> [[[[Bool]]]] -> <IO> ()
+wpBoolss z path xss = do
+  Ok o <- @open path :: <IO> (Try Str (OStream [[Bool]]))
   drainP z o xss
   @close o
 

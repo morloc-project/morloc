@@ -384,7 +384,7 @@ A failure that ends the process (SHM-17) is outside this item.
 
 ### SLOT-36 A batch is encoded in place and committed whole
 Status: implemented
-Checked by: an_in_place_batch_writes_the_bytes_the_copy_path_writes, in_place_runs_read_as_zero_and_mix_with_single_rooms, an_in_place_batch_that_fails_is_absent_or_fails_its_stream, a_thread_encoding_in_place_does_no_other_stream_operation, an_arena_rewound_inside_an_in_place_batch_keeps_its_blocks, an_in_place_element_that_ends_outside_its_room_poisons_the_stream, two_threads_writing_in_place_leave_their_batches_whole, an_in_place_batch_does_not_survive_a_fork_or_its_thread, an_arena_ended_inside_an_in_place_batch_discards_its_streams_after, a_run_of_elements_wider_than_a_sub_packet_is_placed_one_by_one, a_batch_left_open_at_the_end_of_its_call_is_aborted, a_leaf_batch_writes_the_bytes_the_copy_path_writes, leaf_rooms_on_poisoned_spares_write_the_bytes_the_copy_path_writes, a_leaf_str_that_is_not_text_aborts_its_batch, a_leaf_write_refuses_what_is_not_a_leaf_or_not_its_flags
+Checked by: an_in_place_batch_writes_the_bytes_the_copy_path_writes, in_place_runs_read_as_zero_and_mix_with_single_rooms, an_in_place_batch_that_fails_is_absent_or_fails_its_stream, a_thread_encoding_in_place_does_no_other_stream_operation, an_arena_rewound_inside_an_in_place_batch_keeps_its_blocks, an_in_place_element_that_ends_outside_its_room_poisons_the_stream, two_threads_writing_in_place_leave_their_batches_whole, an_in_place_batch_does_not_survive_a_fork_or_its_thread, an_arena_ended_inside_an_in_place_batch_discards_its_streams_after, a_run_of_elements_wider_than_a_sub_packet_is_placed_one_by_one, a_batch_left_open_at_the_end_of_its_call_is_aborted, a_leaf_batch_writes_the_bytes_the_copy_path_writes, leaf_rooms_on_poisoned_spares_write_the_bytes_the_copy_path_writes, a_leaf_str_that_is_not_text_aborts_its_batch, a_leaf_write_refuses_what_is_not_a_leaf_or_not_its_flags, a_list_of_leaves_batch_writes_the_bytes_the_copy_path_writes, list_of_leaves_rooms_on_poisoned_spares_write_the_bytes_the_copy_path_writes, a_list_of_leaves_with_a_leaf_that_is_not_text_aborts_its_batch, a_list_of_leaves_write_refuses_what_is_not_one, a_later_stream_on_a_slot_holds_no_byte_of_an_earlier_one
 
 A language binding may write a `@write` batch to an output stream (a file,
 or an unstaged standard output or error) by
@@ -401,7 +401,13 @@ bytes, with `mlc_write_place_bytes`: its slot, zero up to where its body
 starts, the body (checked as text when it is a `Str`, FMT-10), and zero
 from the body's end to the end of its rounded room. A leaf `Str` that is
 not text aborts the batch before the call returns, and the binding raises
-its own error, naming its language and the byte. Any other element's room
+its own error, naming its language and the byte. A list of such leaves
+(a `[Str]`, or a list of such arrays) is placed and written whole the
+same way, with `mlc_write_place_pieces` from each leaf's bytes: its slot,
+zero up to its leaves' headers, the headers, each body with zero before it
+up to its alignment, and zero from the last body to the end of the room.
+A leaf in it that is not text aborts the batch after part of the room was
+written, and the binding's error names the byte as for one leaf. Any other element's room
 is zeroed when it is placed, so a field the encoder leaves alone reads as
 zero. Every byte of a room is therefore its element's or zero, whatever
 the block held before. The binding reports where its encoding ended at its next call; an
@@ -460,7 +466,8 @@ batch given as a list or as a character vector of Str in place, sizing
 each element as it places it; a batch given as an atomic vector, factor
 or integer64 vector takes the copy path. The leaves (SLOT-36) each binding
 hands to the runtime: C++ a `std::string` for a `Str` and a
-`std::vector<T>` whose `T` is exactly the element's wire number; Python a
+`std::vector<T>` whose `T` is exactly the element's wire number, and a
+`std::vector` of either for a list of them; Python a
 `str` (known text), a `bytes` or `bytearray` for a `Str`, and a
 C-contiguous buffer whose items are the wire numbers; R an element of a
 character vector (after its NA check) and a raw vector for a `Str` or a

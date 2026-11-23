@@ -9,6 +9,11 @@ Reals
 I8s
 U8s
 Strs3
+Strs
+U8ss
+Realss
+Bools
+Boolss
 OptStr
 OptReals
 OptI16s

@@ -21,6 +21,16 @@ U8s 0 same
 U8s 3 same
 Strs3 0 same
 Strs3 3 same
+Strs 0 same
+Strs 3 same
+U8ss 0 same
+U8ss 3 same
+Realss 0 same
+Realss 3 same
+Bools 0 same
+Bools 3 same
+Boolss 0 same
+Boolss 3 same
 OptStr 0 same
 OptStr 3 same
 OptReals 0 same
