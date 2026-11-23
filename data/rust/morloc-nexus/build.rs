@@ -1,4 +1,8 @@
 fn main() {
+    println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-env-changed=MORLOC_HOME");
+    println!("cargo:rerun-if-env-changed=HOME");
+
     // Use MORLOC_HOME at build time if set, else fall back to $HOME default.
     // This is only for the compile-time link search path.
     let morloc_lib = std::env::var("MORLOC_HOME")
