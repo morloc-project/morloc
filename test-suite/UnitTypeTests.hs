@@ -5282,6 +5282,12 @@ complexityRegressionTests =
         localOption (mkTimeout 20000000) $
           testCase "deep singly-used-parameter chain moves instead of cloning"
             (assertGenerates (singleUseChain 2000))
+      , -- The lets each level floats out of its argument move up as one
+        -- piece, so twice the depth costs about twice the time; a quadratic
+        -- float spends far longer than this budget on it.
+        localOption (mkTimeout 30000000) $
+          testCase "a singly-used-parameter chain twice as deep stays linear"
+            (assertGenerates (singleUseChain 4000))
       , -- The realizer's work is linear in a nest of higher-order calls: each
         -- argument is scored once, and a lambda parameter bound to a
         -- function value refers to that score.

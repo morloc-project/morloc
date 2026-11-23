@@ -27,6 +27,8 @@ import Morloc.Frontend.Namespace (newIndex)
 import qualified Morloc.Monad as MM
 import qualified Data.Map as Map
 import qualified Data.Set as Set
+import qualified Data.Sequence as Seq
+import Data.Foldable (toList)
 import Morloc.CodeGenerator.Serial (containsFunT)
 import Morloc.CodeGenerator.Value (etaParts, isValue)
 import Morloc.CodeGenerator.EffectBoundary (declaredFun, declaredSignature)
@@ -917,7 +919,7 @@ bindLet resolve g c v e1 e2 = case e1 of
   AnnoS (Idx yi _) yc (LetS y a b)
     | same yc
     , countRefs y e2 == 0
-    , not (Set.member y (binders e2))
+    , not (Set.member y (boundIn e2))
     , v /= y -> do
         let Idx _ t = g
         ix <- newIndex yi
@@ -931,10 +933,6 @@ bindLet resolve g c v e1 e2 = case e1 of
   where
     plain = return (AnnoS g c (LetS v e1 e2))
     same (Idx _ l) = let Idx _ l0 = c in l == l0
-    binders (AnnoS _ _ x) = case x of
-      LetS w a b -> Set.insert w (binders a <> binders b)
-      LamS ws b -> Set.fromList ws <> binders b
-      _ -> foldExprS binders x
     -- an arm a reader could read in place: a local, a part of one, or a let
     -- chain ending in one
     endsInPart (AnnoS _ _ x) = case x of
@@ -1017,32 +1015,75 @@ hoistReads outer v e0 = do
 
 -- | Rewrite every let of the pool tree with 'bindLet', innermost first, so a
 -- reader reads a value in place rather than a copy of it (OWN-6).
+--
+-- A let whose right-hand side is itself a let is floated out of it, as
+-- 'bindLet' does. Each level is returned as a 'Spine', so that the lets
+-- already floated out of a right-hand side move again as one piece, not one
+-- let at a time, and a deep chain is rewritten in linear time.
 keepInPlace :: AnnoS (Indexed Type) One (Indexed Lang) -> MorlocMonad (AnnoS (Indexed Type) One (Indexed Lang))
-keepInPlace = go Map.empty Map.empty
+keepInPlace e0 = spineTree <$> go Map.empty Map.empty e0
   where
     -- @aliases@ maps a let bound to another local to the local it names;
     -- @parts@ maps a let bound to a part of locals to those locals
     go aliases parts (AnnoS g c (LetS v e1 e2)) = do
-      e1' <- go aliases parts e1
+      r1 <- go aliases parts e1
       let resolve w = Map.findWithDefault w w aliases
-          aliases' = case e1' of
-            AnnoS _ _ (BndS w) -> Map.insert v (resolve w) aliases
-            AnnoS _ _ (LetBndS w) -> Map.insert v (resolve w) aliases
+          named1 = spineNamed r1
+          aliases' = case spineTop r1 of
+            Just (AnnoS _ _ (BndS w)) -> Map.insert v (resolve w) aliases
+            Just (AnnoS _ _ (LetBndS w)) -> Map.insert v (resolve w) aliases
             _ -> aliases
           parts'
-            | partOf e1' = Map.insert v (Set.fromList (map resolve (namedIn e1'))) parts
+            | spinePartOf r1 = Map.insert v (Set.fromList (map resolve named1)) parts
             | otherwise = parts
-      e2' <- go aliases' parts' e2
+      e2' <- spineTree <$> go aliases' parts' e2
       let resolve' w = Map.findWithDefault w w aliases'
       -- a read of a part of what e1 names, after it, runs first (OWN-2, EVAL-2)
-      early <- readFirst v resolve' parts' (Set.fromList (map resolve' (namedIn e1'))) e2'
+      early <- readFirst v resolve' parts' (Set.fromList (map resolve' named1)) e2'
       case early of
         Just (binds, rest) -> do
-          inner <- bindLet resolve' g c v e1' rest
-          wrapLets g c binds inner
-        Nothing -> bindLet resolve' g c v e1' e2'
-    go aliases parts (AnnoS g c e) = do
-      e' <- mapExprSM (go aliases parts) e
+          inner <- floatLet resolve' g c v r1 rest
+          leafSpine <$> wrapLets g c binds (spineTree inner)
+        Nothing -> floatLet resolve' g c v r1 e2'
+    go aliases parts (AnnoS g c e) = leafSpine <$> goOther aliases parts g c e
+
+    -- the lets of @r1@ that may leave the right-hand side of @v@, which
+    -- @body@ follows, are floated out of it, and 'bindLet' gives @v@ what is
+    -- left; the same conditions as the float of 'bindLet'
+    floatLet resolve g@(Idx gi t) c v r1 body
+      | not (Seq.null (spNodes r1))
+      , not (Set.null (Set.intersection (spVars r1) blocked)) || any (/= lang) (spLangs r1) =
+          leafSpine <$> bindLet resolve g c v (spineTree r1) body
+      | otherwise = do
+          let (tailNodes, core) = floatable Seq.empty (spCore r1)
+              r = foldl spineSnoc r1 tailNodes
+          case Seq.viewr (spIdx r) of
+            Seq.EmptyR -> leafSpine <$> bindLet resolve g c v core body
+            idxs Seq.:> lastIx -> do
+              let resolve'' w = resolve (Map.findWithDefault w w (spAliases r))
+              x <- bindLet resolve'' (Idx lastIx t) c v core body
+              return r {spIdx = gi Seq.<| idxs, spLang = Just c, spCore = x}
+      where
+        Idx _ lang = c
+        bodyBinders = boundIn body
+        blocked = Set.insert v (Set.fromList (namedIn body) <> bodyBinders)
+        floatable acc (AnnoS (Idx yi _) yc@(Idx _ yl) (LetS y a b))
+          | yl == lang
+          , countRefs y body == 0
+          , not (Set.member y bodyBinders)
+          , v /= y = floatable (acc Seq.|> (yi, yc, y, a)) b
+        floatable acc x = (acc, x)
+
+    spineTop r
+      | Seq.null (spNodes r) = Just (spCore r)
+      | otherwise = Nothing
+    spineNamed r = concatMap (\(_, _, a) -> namedIn a) (toList (spNodes r)) <> namedIn (spCore r)
+    spinePartOf r = case (Seq.viewr (spNodes r), spCore r) of
+      (_ Seq.:> (_, w, a), AnnoS _ _ (LetBndS w')) | w == w' -> partOf a
+      _ -> partOf (spCore r)
+
+    goOther aliases parts g c e = do
+      e' <- mapExprSM (fmap spineTree . go aliases parts) e
       return $ case e' of
         -- a map of a representation cast is the container itself: the cast
         -- runs only where the newtype has no form of its own, so it changes
@@ -1087,6 +1128,51 @@ keepInPlace = go Map.empty Map.empty
         _ -> return Nothing
 
 type PoolTree = AnnoS (Indexed Type) One (Indexed Lang)
+
+-- | A tree as the lets on its spine and the expression below them. Node
+-- @j@ of the spine is the let at index @j@ of 'spIdx', and every let has
+-- the type of the expression below them all and, once floated, the
+-- language annotation of the let it was floated out of ('spLang'). 'spVars', 'spLangs' and
+-- 'spAliases' summarize the lets: their names, their languages, and for a
+-- let bound to another local, the local it names, followed through the lets
+-- before it.
+data Spine = Spine
+  { spNodes :: Seq.Seq (Indexed Lang, EVar, PoolTree)
+  , spIdx :: Seq.Seq Int
+  , spLang :: Maybe (Indexed Lang)
+  , spCore :: PoolTree
+  , spVars :: Set.Set EVar
+  , spLangs :: Set.Set Lang
+  , spAliases :: Map.Map EVar EVar
+  }
+
+leafSpine :: PoolTree -> Spine
+leafSpine x = Spine Seq.empty Seq.empty Nothing x Set.empty Set.empty Map.empty
+
+spineSnoc :: Spine -> (Int, Indexed Lang, EVar, PoolTree) -> Spine
+spineSnoc r (i, yc@(Idx _ l), y, a) =
+  r
+    { spNodes = spNodes r Seq.|> (yc, y, a)
+    , spIdx = spIdx r Seq.|> i
+    , spVars = Set.insert y (spVars r)
+    , spLangs = Set.insert l (spLangs r)
+    , spAliases = case a of
+        AnnoS _ _ (BndS u) -> Map.insert y (Map.findWithDefault u u (spAliases r)) (spAliases r)
+        AnnoS _ _ (LetBndS u) -> Map.insert y (Map.findWithDefault u u (spAliases r)) (spAliases r)
+        _ -> spAliases r
+    }
+
+spineTree :: Spine -> PoolTree
+spineTree (Spine nodes idxs lang core _ _ _) =
+  let AnnoS (Idx _ t) _ _ = core
+   in foldr (\(i, (yc, y, a)) b -> AnnoS (Idx i t) (fromMaybe yc lang) (LetS y a b)) core (Seq.zip idxs nodes)
+
+-- | The names an expression binds, by a let or a lambda.
+boundIn :: AnnoS g One c -> Set.Set EVar
+boundIn (AnnoS _ _ x) = case x of
+  LetS w a b -> Set.insert w (boundIn a <> boundIn b)
+  LamS ws b -> Set.fromList ws <> boundIn b
+  _ -> foldExprS boundIn x
 
 -- | A constructor a name is known to hold: its language, name and fields,
 -- or no fields where only its tag may be answered.
