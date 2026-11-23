@@ -341,6 +341,14 @@ fn check_and_recover(n_pools: usize) {
                 generation
             );
         }
+        Err(_) if a_pool_refused_the_build() => {
+            // LIFE-6: respawning cannot succeed until the daemon restarts.
+            eprintln!(
+                "morloc daemon: recovery failed (generation {}): morloc was upgraded; restart the daemon",
+                generation
+            );
+            exit_leaving_threads(morloc_runtime_types::EXIT_BUILD_SKEW);
+        }
         Err(msg) => {
             eprintln!(
                 "morloc daemon: recovery failed (generation {}): {}",
@@ -1553,6 +1561,25 @@ pub fn pool_is_alive(pool_index: usize) -> bool {
     unsafe { libc::kill(pid, 0) == 0 }
 }
 
+// LIFE-6
+fn a_pool_refused_the_build() -> bool {
+    (0..MAX_DAEMONS).any(|i| {
+        let st = EXIT_STATUSES[i].load(Ordering::Relaxed);
+        PIDS[i].load(Ordering::Relaxed) == -1
+            && libc::WIFEXITED(st)
+            && libc::WEXITSTATUS(st) == morloc_runtime_types::EXIT_BUILD_SKEW
+    })
+}
+
+// LIFE-6
+pub fn exit_after_start_failure(e: &str) -> ! {
+    if a_pool_refused_the_build() {
+        clean_exit(morloc_runtime_types::EXIT_BUILD_SKEW);
+    }
+    eprintln!("Error: {}", e);
+    clean_exit(1)
+}
+
 /// Get the exit status of a reaped pool, returning signal/exit info.
 pub fn pool_death_info(pool_index: usize) -> Option<String> {
     if PIDS[pool_index].load(Ordering::Relaxed) != -1 {
@@ -1566,6 +1593,8 @@ pub fn pool_death_info(pool_index: usize) -> Option<String> {
         let code = libc::WEXITSTATUS(st);
         if code == morloc_runtime_types::EXIT_SHARED_MEMORY_LOST {
             Some(format!("Pool process lost its shared memory (status {code})"))
+        } else if code == morloc_runtime_types::EXIT_BUILD_SKEW {
+            Some(format!("Pool process refused another build of morloc (status {code})"))
         } else {
             Some(format!("Pool process exited with status {code}"))
         }

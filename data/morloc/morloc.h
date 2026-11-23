@@ -373,6 +373,17 @@ int64_t morloc_shm_live_bytes(void);
 // binary is refused rather than run.
 uint32_t morloc_abi_version(void);
 
+// LIFE-6: the build id of this libmorloc, a hash of the runtime source.
+uint64_t morloc_build_id(void);
+
+// LIFE-6: called by every pool before anything else reaches libmorloc. An
+// installed binding passes the build id it was compiled against
+// (MORLOC_BINDING_BUILD_ID); code compiled into the program passes 0. On a
+// mismatch with this libmorloc, or between this libmorloc and the nexus's
+// MORLOC_BUILD_ID, the process prints one line and exits 75. Its signature
+// never changes.
+void morloc_require_build(uint64_t binding);
+
 // ========================================================================
 // Log emission for `log: true` labeled manifolds
 // ========================================================================

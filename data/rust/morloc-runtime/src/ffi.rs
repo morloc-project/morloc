@@ -19,6 +19,26 @@ pub(crate) fn morloc_abi_version() -> u32 {
     morloc_runtime_types::MORLOC_ABI_VERSION
 }
 
+/// LIFE-6: the build id of this libmorloc.
+pub(crate) fn morloc_build_id() -> u64 {
+    morloc_runtime_types::BUILD_ID
+}
+
+/// LIFE-6: end this process with EXIT_BUILD_SKEW when the nexus that started
+/// it, or the installed binding that calls this (`binding`, 0 for code
+/// compiled into the program), belongs to another build.
+pub(crate) fn morloc_require_build(binding: u64) {
+    let nexus = std::env::var(morloc_runtime_types::BUILD_ID_ENV).ok();
+    let binding = (binding != 0).then_some(binding);
+    if let Some(why) = morloc_runtime_types::build_skew(morloc_build_id(), binding, nexus.as_deref()) {
+        let line = format!("Error: {why}\n");
+        unsafe {
+            libc::write(2, line.as_ptr() as *const c_void, line.len());
+            libc::_exit(morloc_runtime_types::EXIT_BUILD_SKEW);
+        }
+    }
+}
+
 // ── Macro for ERRMSG-pattern FFI wrappers ──────────────────────────────────
 
 /// Wrap a Rust Result-returning expression into the C ERRMSG convention.
@@ -629,6 +649,16 @@ mod c_abi {
     }
 
     #[no_mangle]
+    pub extern "C" fn morloc_build_id() -> u64 {
+        super::morloc_build_id()
+    }
+
+    #[no_mangle]
+    pub extern "C" fn morloc_require_build(binding: u64) {
+        super::morloc_require_build(binding)
+    }
+
+    #[no_mangle]
     pub unsafe extern "C" fn shinit(shm_basename: *const c_char, shm_size: usize, errmsg: *mut *mut c_char) -> *mut ShmHeader {
         super::shinit(shm_basename, shm_size, errmsg)
     }
@@ -756,4 +786,66 @@ mod c_abi {
         super::unpack_with_schema(mpk, mpk_size, schema, mlcptr, errmsg)
     }
 
+}
+
+#[cfg(test)]
+mod build_id_tests {
+    const PROBE: &str = "MORLOC_TEST_BUILD_PROBE";
+
+    fn probe(how: &str, nexus: Option<String>) -> std::process::Output {
+        let mut cmd = std::process::Command::new(std::env::current_exe().unwrap());
+        cmd.args(["--exact", "ffi::build_id_tests::a_pool_refuses_another_build", "--nocapture", "--test-threads=1"])
+            .env(PROBE, how)
+            .env_remove(morloc_runtime_types::BUILD_ID_ENV);
+        if let Some(n) = nexus {
+            cmd.env(morloc_runtime_types::BUILD_ID_ENV, n);
+        }
+        cmd.output().unwrap()
+    }
+
+    #[test]
+    fn a_pool_refuses_another_build() {
+        if let Ok(how) = std::env::var(PROBE) {
+            let id = super::morloc_build_id();
+            super::morloc_require_build(match how.as_str() {
+                "binding" => id ^ 1,
+                "compiled" => 0,
+                _ => id,
+            });
+            std::process::exit(0);
+        }
+        let id = super::morloc_build_id();
+        assert_eq!(id, morloc_runtime_types::BUILD_ID);
+        for ok in [probe("same", Some(format!("{id:016x}"))), probe("same", None), probe("compiled", Some(format!("{id:016x}")))] {
+            assert_eq!(ok.status.code(), Some(0), "{ok:?}");
+        }
+        let other = format!("{:016x}", id ^ 1);
+        for out in [probe("binding", None), probe("same", Some(other.clone())), probe("compiled", Some(other))] {
+            assert_eq!(out.status.code(), Some(morloc_runtime_types::EXIT_BUILD_SKEW), "{out:?}");
+            let err = String::from_utf8_lossy(&out.stderr);
+            assert_eq!(err.lines().filter(|l| l.starts_with("Error: ")).count(), 1, "{err}");
+        }
+    }
+
+    #[test]
+    fn every_binding_checks_the_build_it_was_made_with() {
+        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+        let read = |p: &str| std::fs::read_to_string(repo.join(p)).unwrap();
+        for (path, call) in [
+            ("data/lang/cpp/cppmorloc.cpp", "morloc_require_build(0)"),
+            ("data/lang/py/pymorloc.c", "morloc_require_build(MORLOC_BINDING_BUILD_ID)"),
+            ("data/lang/r/rmorloc.c", "morloc_require_build(MORLOC_BINDING_BUILD_ID)"),
+            ("data/lang/rust/pool.rs", "::rustmorloc::require_build();"),
+        ] {
+            assert!(read(path).contains(call), "LIFE-6: {path} must call {call}");
+        }
+        assert!(!read("data/lang/cpp/init.sh").contains("BUILD_ID"), "LIFE-6: a compiled-in binding records no build id");
+        for path in ["data/lang/py/init.sh", "data/lang/r/init.sh"] {
+            let text = read(path);
+            assert!(
+                text.contains("--build-id") && text.contains("-DMORLOC_BINDING_BUILD_ID=0x${BUILD_ID}ULL"),
+                "LIFE-6: {path} must build its binding with the installed build id"
+            );
+        }
+    }
 }

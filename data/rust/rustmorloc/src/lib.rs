@@ -1263,6 +1263,15 @@ pub fn install_panic_hook() {
     }));
 }
 
+/// LIFE-6: a Rust pool refuses a libmorloc of another build than its
+/// nexus's; its own compiled-in code records no build id.
+pub fn require_build() {
+    extern "C" {
+        fn morloc_require_build(binding: u64);
+    }
+    unsafe { morloc_require_build(0) };
+}
+
 pub fn install_crash_handler() {
     extern "C" {
         fn morloc_install_crash_handler(

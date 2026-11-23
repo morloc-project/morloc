@@ -90,6 +90,25 @@ pub(crate) fn custody_stop(status: u8) {
     unsafe { morloc_custody_stop_all(status) };
 }
 
+// LIFE-6: before anything else reaches libmorloc, refuse one of another build
+// than this nexus; then `--build-id` prints its id, which the installed
+// bindings record at init, and the pools are told it, replacing any inherited.
+fn require_build() {
+    extern "C" {
+        fn morloc_build_id() -> u64;
+    }
+    let loaded = unsafe { morloc_build_id() };
+    if let Some(why) = morloc_runtime_types::build_skew(loaded, Some(morloc_runtime_types::BUILD_ID), None) {
+        eprintln!("Error: {why}");
+        std::process::exit(morloc_runtime_types::EXIT_BUILD_SKEW);
+    }
+    if std::env::args().nth(1).as_deref() == Some("--build-id") {
+        println!("{loaded:016x}");
+        std::process::exit(0);
+    }
+    crate::process::set_startup_env(morloc_runtime_types::BUILD_ID_ENV, format!("{loaded:016x}"));
+}
+
 fn main() {
     // Ignore SIGPIPE process-wide so a reader that closes early (e.g.
     // `morloc view | head`, `... | less` quit before EOF) surfaces as an EPIPE
@@ -124,6 +143,7 @@ fn main() {
         println!("morloc-nexus {}", env!("CARGO_PKG_VERSION"));
         std::process::exit(0);
     }
+    require_build();
 
     // A nexus started by another nexus (a multi-output child, a served
     // daemon) ends when that nexus ends. Its own children get its own
@@ -583,8 +603,7 @@ fn main() {
     if config.mcp_flag {
         let all_indices: Vec<usize> = (0..manifest.pools.len()).collect();
         if let Err(e) = process::start_daemons(&mut sockets, &all_indices) {
-            eprintln!("Error: {}", e);
-            process::clean_exit(1);
+            process::exit_after_start_failure(&e);
         }
         process::install_recovery_context(
             sockets.clone(),
@@ -654,8 +673,7 @@ fn main() {
         }
         let all_indices: Vec<usize> = (0..manifest.pools.len()).collect();
         if let Err(e) = process::start_daemons(&mut sockets, &all_indices) {
-            eprintln!("Error: {}", e);
-            process::clean_exit(1);
+            process::exit_after_start_failure(&e);
         }
 
         // Install the recovery context so the pool_check_fn callback can
@@ -819,8 +837,7 @@ fn main() {
         let to_start: Vec<usize> = (0..manifest.pools.len()).collect();
         if !to_start.is_empty() {
             if let Err(e) = process::start_daemons(&mut sockets, &to_start) {
-                eprintln!("Error: failed to start pools for call-packet dispatch: {}", e);
-                process::clean_exit(1);
+                process::exit_after_start_failure(&format!("failed to start pools for call-packet dispatch: {e}"));
             }
         }
         run_call_packet(&config, &tmpdir);

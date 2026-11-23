@@ -6,7 +6,7 @@ use syn::visit::Visit;
 const CRATES: &[&str] = &["morloc-runtime", "morloc-runtime-types", "rustmorloc", "morloc-nexus"];
 const PREPARE_HANDLERS: &[&str] = &["prepare_fork_body"];
 const MAX_DEVIATING_ROWS: usize = 2;
-const MAX_ENV_READS: usize = 66;
+const MAX_ENV_READS: usize = 67;
 const PID_READ_SITES: &[&str] = &[
     "morloc-runtime/crash.rs::fatal",
     "morloc-runtime/fork_policy.rs::thread_count",

@@ -68,6 +68,7 @@ fn main() {
         return;
     }
 
+    ::rustmorloc::require_build();
     ::rustmorloc::install_crash_handler();
     ::rustmorloc::install_fork_count();
     ::rustmorloc::install_panic_hook();

@@ -4862,7 +4862,11 @@ static void __attribute__((unused)) _r_init_impl(DllInfo *info);
 void R_init_librmorloc(DllInfo *info) { _r_init_impl(info); }
 void R_init_rmorloc(DllInfo *info) { _r_init_impl(info); }
 
+#ifndef MORLOC_BINDING_BUILD_ID
+#error "MORLOC_BINDING_BUILD_ID is set by morloc init (LIFE-6)"
+#endif
 static void _r_init_impl(DllInfo *info) {
+    morloc_require_build(MORLOC_BINDING_BUILD_ID);
     morloc_install_panic_hook(NULL);
     R_CallMethodDef callMethods[] = {
         {"morloc_foreign_call", (DL_FUNC) &morloc_foreign_call, 3},

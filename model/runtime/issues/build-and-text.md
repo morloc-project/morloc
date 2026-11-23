@@ -48,8 +48,18 @@
   built before `morloc init` installs a newer runtime keeps its generated
   pool code against the new libraries: after 7205b50c an older R pool fails
   every call with `could not find function ".mlc_entry"`, which the new
-  librmorloc dispatch calls. Nothing marks a built program with the runtime
-  it was built for.
+  librmorloc dispatch calls. LIFE-6 covers only skew within a run (nexus,
+  libmorloc, pymorloc, rmorloc); a built program against a newer runtime is
+  left to the ABI version, which nothing gates.
+- **Init still has windows a concurrent build can see.** [read
+  2026-11-22] Gap beside LIFE-6. `morloc init -f` removes the init-owned
+  lib and include files (SystemConfig.hs, the force clean) before the
+  language init scripts write them again, so a `morloc make` or a Python
+  or R pool started meanwhile finds them missing (a clean failure, not a
+  crash). morloc.h is written in place (`TIO.writeFile`), so a compile
+  during init can read it partly written. Each header is renamed into
+  place, but a C++ build during init can still take some headers old and
+  some new; LIFE-6 checks neither the archive nor the headers.
 - **Crate versions claim a lockstep they lack.** [read]
   morloc-runtime-types (0.87.0) and rustmorloc (0.95.0) say "Version
   locked with morloc-runtime" (0.112.0); scripts/bump-version.sh:36 bumps
@@ -153,6 +163,11 @@
   current compiler. Repro attempt: the #179 program under
   /work/plans/issues-2026-10-05/r5-rust-loop-clone/mapped, built in a new
   directory right after a compiler reinstall.
+- **A killed init leaves hidden staging files.** [read 2026-11-23] Gap
+  beside ART-2. The init scripts stage into `.<name>.tmp.<pid>` beside each
+  header, archive and library, and pymorloc into
+  `opt/.pymorloc-build.<pid>/`, removing them on exit through a trap; a
+  SIGKILL skips the trap, and nothing sweeps them later.
 - **A refused rebuild leaves its staging tree.** [reproduced, 2026-10-21]
   Against ART-2/ART-3. With a plain `q-build/` (no marker) or a symlink
   `r-build`, `morloc make -o q main.loc` fails "Refusing to overwrite

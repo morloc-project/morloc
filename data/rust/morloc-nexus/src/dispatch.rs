@@ -300,8 +300,7 @@ pub fn dispatch_command_parsed(
 
     if !cmd.is_pure() {
         if let Err(e) = process::start_daemons(sockets, &cmd.needed_pools) {
-            eprintln!("Error: {}", e);
-            process::clean_exit(1);
+            process::exit_after_start_failure(&e);
         }
     }
 

@@ -16,6 +16,12 @@
 #include "morloc_pch.hpp"
 #include "cppmorloc.hpp"
 
+// LIFE-6: the pool's libmorloc against the nexus's, when the pool loads;
+// compiled-in code records no build id.
+__attribute__((constructor)) static void mlc_require_build() {
+    morloc_require_build(0);
+}
+
 // Under --debug, the innermost manifold this thread is executing, for the
 // crash handler's report. The slot lives in the pool binary, so a handler on
 // the faulting thread reads it from the static thread-local block without

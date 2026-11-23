@@ -423,6 +423,15 @@ provisionRustRuntime verbose config homeDir soPath nexusBinPath = do
         P.Darwin -> Nothing
         _ -> hasStrip
   stageInstall verbose nexusStrip nexusBinPath $ \tmp -> copyFile rustNexus tmp
+  -- LIFE-6: the nexus and libmorloc come from two cargo builds, so a change
+  -- to the runtime source between them leaves a nexus that refuses every run.
+  -- The nexus's own check, run here, fails init instead.
+  (idCode, _, idErr) <- readProcessWithExitCode nexusBinPath ["--build-id"] ""
+  case idCode of
+    ExitSuccess -> return ()
+    ExitFailure _ -> ioError . userError $
+      "the installed morloc-nexus and libmorloc were built from different runtime sources"
+        <> " (the Rust source changed during init); run `morloc init -f` again: " <> idErr
 
   -- Persist the Rust workspace SOURCE at $MORLOC_HOME/rust and warm the shared
   -- pool build cache. A Rust pool is now a real Cargo project (Members/Rust.hs)

@@ -6083,7 +6083,11 @@ static struct PyModuleDef pymorloc = {
     Methods
 };
 
+#ifndef MORLOC_BINDING_BUILD_ID
+#error "MORLOC_BINDING_BUILD_ID is set by morloc init (LIFE-6)"
+#endif
 PyMODINIT_FUNC PyInit_pymorloc(void) {
+    morloc_require_build(MORLOC_BINDING_BUILD_ID);
     morloc_install_panic_hook(NULL);
     PyObject* m = PyModule_Create(&pymorloc);
     if (m == NULL) return NULL;
