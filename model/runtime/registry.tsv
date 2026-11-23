@@ -214,11 +214,13 @@ morloc-runtime/par_pool.rs::-::FAIL_SPAWNS	test-only
 morloc-runtime/par_pool.rs::-::CALLER_WAITS	test-only		
 morloc-runtime/par_pool.rs::-::ONE_AT_A_TIME	test-only		
 morloc-runtime/par_pool.rs::-::Ctx.log	test-only		
+morloc-runtime/par_pool.rs::-::Ctx.helper_ids	test-only		
 morloc-runtime/par_pool.rs::-::CHILD	test-only		
 morloc-runtime/par_pool.rs::-::HELPER_SIGBLK	test-only		
 morloc-runtime/par_pool.rs::-::KEPT_FD	test-only		
 morloc-runtime/par_pool.rs::-::TIMER_START_FAILS_AFTER_MS	test-only		
 morloc-runtime/par_pool.rs::-::TIMER_LOOKS	test-only		
+morloc-runtime/par_pool.rs::-::NOT_DUE_ON_SIGHT	test-only		
 morloc-runtime/par_pool.rs::-::Pair.first_end	test-only		
 morloc-runtime/par_pool.rs::-::Pair.helper_start	test-only		
 morloc-runtime/run.rs::-::RUN	lazy		

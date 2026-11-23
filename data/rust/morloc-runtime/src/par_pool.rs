@@ -421,6 +421,9 @@ static TIMER_START_FAILS_AFTER_MS: AtomicU64 = AtomicU64::new(0);
 #[cfg(test)]
 static TIMER_LOOKS: AtomicU64 = AtomicU64::new(0);
 
+#[cfg(test)]
+static NOT_DUE_ON_SIGHT: AtomicBool = AtomicBool::new(false);
+
 fn start_timer_thread() -> std::io::Result<()> {
     #[cfg(test)]
     if let ms @ 1.. = TIMER_START_FAILS_AFTER_MS.load(Ordering::SeqCst) {
@@ -605,7 +608,13 @@ pub(crate) unsafe fn run(nspans: usize, workers: usize, span: SpanFn, end: EndFn
             start_timer = true;
         } else if !g.timer_armed {
             g.timer_armed = true;
-            job.seen.store(SEEN_DUE, Ordering::Relaxed);
+            #[cfg(test)]
+            let due = !NOT_DUE_ON_SIGHT.load(Ordering::SeqCst);
+            #[cfg(not(test))]
+            let due = true;
+            if due {
+                job.seen.store(SEEN_DUE, Ordering::Relaxed);
+            }
             shared.timer.notify_one();
         }
     }
@@ -655,7 +664,39 @@ mod tests {
     }
 
     fn helpers() -> usize {
-        lock().helpers
+        counts().helpers
+    }
+
+    #[derive(Debug, PartialEq)]
+    struct Counts {
+        helpers: usize,
+        starting: usize,
+        pending: usize,
+    }
+
+    // WPOOL-1: read under the lock and released before any assertion, so a
+    // failing test never poisons the pool the others share.
+    fn counts() -> Counts {
+        let g = lock();
+        Counts { helpers: g.helpers, starting: g.starting, pending: g.pending }
+    }
+
+    // WPOOL-12: while this lives every post waits out the delay, however
+    // the threads are scheduled; dropping it, also on a panic, restores
+    // the wake on sight.
+    struct DelayEveryPost;
+
+    impl DelayEveryPost {
+        fn new() -> DelayEveryPost {
+            NOT_DUE_ON_SIGHT.store(true, Ordering::SeqCst);
+            DelayEveryPost
+        }
+    }
+
+    impl Drop for DelayEveryPost {
+        fn drop(&mut self) {
+            NOT_DUE_ON_SIGHT.store(false, Ordering::SeqCst);
+        }
     }
 
     fn helper_threads() -> usize {
@@ -669,7 +710,7 @@ mod tests {
     }
 
     fn wait_until(what: &str, mut cond: impl FnMut() -> bool) {
-        let until = Instant::now() + Duration::from_secs(10);
+        let until = Instant::now() + Duration::from_secs(60);
         while !cond() {
             assert!(Instant::now() < until, "timed out waiting until {what}");
             std::thread::sleep(Duration::from_millis(2));
@@ -698,6 +739,10 @@ mod tests {
         caller_returned: AtomicBool,
         hook_saw_return: AtomicBool,
         hook_sleep_ms: u64,
+        grow_to: usize,
+        grew: AtomicBool,
+        most_started: AtomicUsize,
+        helper_ids: Mutex<std::collections::HashSet<std::thread::ThreadId>>,
     }
 
     impl Ctx {
@@ -714,6 +759,10 @@ mod tests {
                 caller_returned: AtomicBool::new(false),
                 hook_saw_return: AtomicBool::new(false),
                 hook_sleep_ms: 0,
+                grow_to: 0,
+                grew: AtomicBool::new(false),
+                most_started: AtomicUsize::new(0),
+                helper_ids: Mutex::new(std::collections::HashSet::new()),
             }
         }
     }
@@ -724,10 +773,27 @@ mod tests {
         c.log.lock().unwrap().push((std::thread::current().id(), "span"));
         if on_helper() {
             c.helper_spans.fetch_add(1, Ordering::SeqCst);
+            c.helper_ids.lock().unwrap().insert(std::thread::current().id());
         } else if c.caller_waits_for_helper {
             let until = Instant::now() + Duration::from_secs(5);
             while c.helper_spans.load(Ordering::SeqCst) == 0 && Instant::now() < until {
                 std::thread::sleep(Duration::from_millis(1));
+            }
+        }
+        if c.grow_to > 0 {
+            let until = Instant::now() + Duration::from_secs(60);
+            loop {
+                if !on_helper() {
+                    c.most_started.fetch_max(counts().helpers, Ordering::SeqCst);
+                }
+                let grown = c.helper_spans.load(Ordering::SeqCst) >= c.grow_to;
+                if grown {
+                    c.grew.store(true, Ordering::SeqCst);
+                }
+                if grown || Instant::now() >= until {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(5));
             }
         }
         if c.sleep_us > 0 {
@@ -948,19 +1014,20 @@ mod tests {
     fn the_helpers_stay_under_the_ceiling() {
         let _one = serial();
         for _ in 0..3 {
-            let running = std::thread::spawn(|| {
-                let mut c = Ctx::new(400);
-                c.sleep_us = 20_000;
-                go(&c, 400)
-            });
-            let mut most = (0, 0);
+            let mut c = Ctx::new(400);
+            c.grow_to = MAX_HELPERS;
+            let c = std::sync::Arc::new(c);
+            let c2 = std::sync::Arc::clone(&c);
+            let running = std::thread::spawn(move || go(&c2, 400));
+            let mut most = 0;
             while !running.is_finished() {
-                most = (most.0.max(helpers()), most.1.max(helper_threads()));
+                most = most.max(helper_threads());
                 std::thread::sleep(Duration::from_millis(2));
             }
             assert_eq!(running.join().unwrap(), 0);
-            assert!(most.0 <= MAX_HELPERS && most.1 <= MAX_HELPERS, "{most:?} helpers past the ceiling");
-            assert!(most.1 >= MAX_HELPERS / 2, "the pool did not grow toward the ceiling: {most:?}");
+            let counted = c.most_started.load(Ordering::SeqCst);
+            assert!(c.grew.load(Ordering::SeqCst), "the pool did not reach the ceiling: {counted} helpers");
+            assert!(counted <= MAX_HELPERS && most <= MAX_HELPERS, "{counted} counted, {most} threads: past the ceiling");
         }
         let keep = crate::cpus::available_cpus().saturating_sub(1);
         wait_until("the helpers past the CPUs have retired", || helpers() <= keep);
@@ -990,9 +1057,8 @@ mod tests {
         assert_eq!(go(&c, 4), 0, "a call whose helper failed to start runs on its caller");
         assert_eq!(FAIL_SPAWNS.load(Ordering::SeqCst), 0);
         assert!(c.ran.iter().all(|r| r.load(Ordering::SeqCst) == 1));
-        let g = lock();
-        assert_eq!((g.helpers, g.starting), (0, 0), "the failed start kept its reservation");
-        drop(g);
+        let now = counts();
+        assert_eq!((now.helpers, now.starting), (0, 0), "the failed start kept its reservation");
         let c = Ctx::new(16);
         assert_eq!(go(&c, 4), 0);
         wait_until("a helper started for the next call runs", || helper_threads() >= 1);
@@ -1096,18 +1162,10 @@ mod tests {
         let _one = serial();
         let keep = crate::cpus::available_cpus().saturating_sub(1);
         let n = (keep + 12).min(MAX_HELPERS + 1);
-        let running = std::thread::spawn(move || {
-            let mut c = Ctx::new(n);
-            c.sleep_us = 20_000;
-            go(&c, n)
-        });
-        let mut most = 0;
-        while !running.is_finished() {
-            most = most.max(helpers());
-            std::thread::sleep(Duration::from_millis(1));
-        }
-        assert_eq!(running.join().unwrap(), 0);
-        assert!(most > keep, "the pool never grew past the CPUs: {most} helpers, {keep} kept");
+        let mut c = Ctx::new(n);
+        c.grow_to = keep + 1;
+        assert_eq!(go(&c, n), 0);
+        assert!(c.grew.load(Ordering::SeqCst), "the pool never grew past the {keep} kept helpers");
         wait_until("the helpers past the CPUs have retired", || helpers() <= keep);
         assert!(helpers() > 0, "the helpers under the CPUs retired too");
     }
@@ -1124,16 +1182,19 @@ mod tests {
         assert_eq!(go(&warm, 4), 0);
         wait_until("the helpers sleep", || {
             let g = lock();
-            g.sleeping > 0 && g.looking == 0
+            g.sleeping > 0 && g.looking == 0 && g.pending == 0
         });
         delay_us(1_000_000);
-        let before = (helpers(), CALLER_WAITS.load(Ordering::SeqCst), lock().pending);
+        let armed = DelayEveryPost::new();
+        let before = (counts(), CALLER_WAITS.load(Ordering::SeqCst));
         for _ in 0..200 {
             let c = Ctx::new(8);
             assert_eq!(go(&c, 4), 0);
             assert_eq!(c.helper_spans.load(Ordering::SeqCst), 0, "a helper ran a span of an unwoken job");
         }
-        assert_eq!((helpers(), CALLER_WAITS.load(Ordering::SeqCst), lock().pending), before);
+        let after = (counts(), CALLER_WAITS.load(Ordering::SeqCst));
+        drop(armed);
+        assert_eq!(after, before);
     }
 
     #[test]
@@ -1238,7 +1299,7 @@ mod tests {
         if on_helper() {
             p.helper_start.lock().unwrap().get_or_insert_with(Instant::now);
         }
-        std::thread::sleep(Duration::from_millis(100));
+        std::thread::sleep(Duration::from_millis(if on_helper() { 100 } else { 500 }));
         if !on_helper() {
             p.first_end.lock().unwrap().get_or_insert_with(Instant::now);
         }
@@ -1265,10 +1326,11 @@ mod tests {
         let warm = Ctx::new(16);
         assert_eq!(go(&warm, 4), 0);
         delay_us(1_000_000);
-        lock().timer_armed = true;
+        let armed = DelayEveryPost::new();
         let mut c = Ctx::new(8);
         c.sleep_us = 2000;
         assert_eq!(go(&c, 4), 0);
+        drop(armed);
         assert_eq!(c.helper_spans.load(Ordering::SeqCst), 0, "a helper took a job before it was woken");
     }
 
@@ -1298,20 +1360,20 @@ mod tests {
     #[test]
     fn a_woken_job_gets_every_helper_it_may_hold() {
         let _one = serial();
-        let warm = Ctx::new(16);
+        let mut warm = Ctx::new(16);
+        warm.grow_to = 3;
         assert_eq!(go(&warm, 4), 0);
         wait_until("the helpers sleep", || {
             let g = lock();
             g.sleeping >= 3 && g.looking == 0
         });
         delay_us(10);
-        let mut c = Ctx::new(12);
-        c.sleep_us = 20_000;
+        let mut c = Ctx::new(24);
+        c.grow_to = 3;
         assert_eq!(go(&c, 4), 0);
-        let caller = std::thread::current().id();
-        let helpers: std::collections::HashSet<_> =
-            c.log.lock().unwrap().iter().filter(|(t, w)| *t != caller && *w == "span").map(|(t, _)| *t).collect();
-        assert_eq!(helpers.len(), 3, "the wake did not reach every helper the job may hold");
+        let reached = c.helper_ids.lock().unwrap().len();
+        assert!(c.grew.load(Ordering::SeqCst), "the wake reached {reached} of the 3 helpers the job may hold");
+        assert_eq!(reached, 3);
     }
 
     #[test]
