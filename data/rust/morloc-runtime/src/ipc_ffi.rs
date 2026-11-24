@@ -161,7 +161,7 @@ pub(crate) unsafe fn send_parts(fd: i32, parts: &mut [libc::iovec]) -> Result<()
         if e == libc::EINTR {
             continue;
         }
-        if e == libc::EPIPE || e == libc::ECONNRESET {
+        if e == libc::EPIPE || e == libc::ECONNRESET || e == libc::ENOTCONN {
             return Err(SendFail::PeerClosed(os_reason(e)));
         }
         if e == libc::EAGAIN || e == libc::EWOULDBLOCK {
@@ -2387,6 +2387,18 @@ mod dispatch_fork_tests {
         }
         let want = std::io::Error::from_raw_os_error(libc::ENOTSOCK).to_string();
         assert_eq!(got, Err(SendFail::Other(want)));
+    }
+
+    #[test]
+    fn a_send_on_a_socket_with_no_peer_is_peer_closed() {
+        let fd = unsafe { morloc_runtime_types::fd::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
+        assert!(fd >= 0);
+        let mut byte = 0u8;
+        let mut parts = [libc::iovec { iov_base: &mut byte as *mut u8 as *mut c_void, iov_len: 1 }];
+        let got = unsafe { send_parts(fd, &mut parts) };
+        unsafe { libc::close(fd) };
+        let want = std::io::Error::from_raw_os_error(libc::ENOTCONN).to_string();
+        assert_eq!(got, Err(SendFail::PeerClosed(want)));
     }
 
     fn drain(fd: i32) -> Vec<u8> {
