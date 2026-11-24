@@ -4,7 +4,7 @@ all:
 	./nexus mk 5 > obs.txt 2>> obs.err
 	./nexus mkP 1 >> obs.txt 2>> obs.err
 	./nexus mkPR 1 >> obs.txt 2>> obs.err
-	sort calls.log | uniq -c >> obs.txt
+	LC_ALL=C sort calls.log | uniq -c | awk '{print $$1, $$2}' >> obs.txt
 
 clean:
 	rm -rf nexus pools *.err calls.log
