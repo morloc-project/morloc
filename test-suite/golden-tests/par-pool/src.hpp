@@ -10,6 +10,11 @@
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
+#include <mutex>
+#include <vector>
+#ifdef __APPLE__
+#include <mach/mach.h>
+#endif
 
 inline bool onHelper() {
     char name[16] = {0};
@@ -39,6 +44,36 @@ inline std::string readStatus(const std::string& path, const std::string& key) {
     return out;
 }
 
+inline std::string maskOf(const sigset_t& m) {
+    std::string out;
+    for (int s = 1; s < NSIG; ++s) out += sigismember(&m, s) ? '1' : '0';
+    return out;
+}
+
+inline std::string myMask() {
+    sigset_t m;
+    pthread_sigmask(SIG_BLOCK, nullptr, &m);
+    return maskOf(m);
+}
+
+#ifdef __APPLE__
+// The morloc-par threads of this process; macOS cannot read another
+// thread's mask, so a helper records its own as it runs (noteMask).
+inline std::vector<std::string> helperMasks() {
+    std::vector<std::string> out;
+    thread_act_array_t threads;
+    mach_msg_type_number_t n = 0;
+    if (task_threads(mach_task_self(), &threads, &n) != KERN_SUCCESS) return out;
+    for (mach_msg_type_number_t i = 0; i < n; ++i) {
+        char name[64] = {0};
+        pthread_t t = pthread_from_mach_thread_np(threads[i]);
+        if (t && pthread_getname_np(t, name, sizeof(name)) == 0 && std::string(name) == "morloc-par") out.push_back("");
+        mach_port_deallocate(mach_task_self(), threads[i]);
+    }
+    vm_deallocate(mach_task_self(), (vm_address_t)threads, n * sizeof(thread_act_t));
+    return out;
+}
+#else
 // The morloc-par threads of this process, and their SigBlk masks.
 inline std::vector<std::string> helperMasks() {
     std::vector<std::string> out;
@@ -52,6 +87,7 @@ inline std::vector<std::string> helperMasks() {
     closedir(d);
     return out;
 }
+#endif
 
 struct ForkFailCtx {
     pthread_t caller;
@@ -109,10 +145,23 @@ inline std::string forkFailUnderLock(int64_t) {
     return c.seen + "; raised: " + raised;
 }
 
-inline void noteMask(void*, size_t) { usleep(20000); }
+inline std::mutex seenMasksLock;
+inline std::vector<std::string> seenMasks;
+
+inline void noteMask(void*, size_t) {
+    if (onHelper()) {
+        std::lock_guard<std::mutex> g(seenMasksLock);
+        seenMasks.push_back(myMask());
+    }
+    usleep(20000);
+}
 
 inline std::string helperMask(int64_t) {
+#ifdef __APPLE__
+    std::string mine = myMask();
+#else
     std::string mine = readStatus("/proc/thread-self/status", "SigBlk:");
+#endif
     sigset_t extra, old;
     sigemptyset(&extra);
     sigaddset(&extra, SIGUSR1);
@@ -120,7 +169,11 @@ inline std::string helperMask(int64_t) {
     pthread_sigmask(SIG_BLOCK, &extra, &old);
     mlc::par_run(8, 4, noteMask, nullptr);
     pthread_sigmask(SIG_SETMASK, &old, nullptr);
+#ifdef __APPLE__
+    std::vector<std::string> masks = seenMasks;
+#else
     std::vector<std::string> masks = helperMasks();
+#endif
     if (masks.empty()) return "no helpers";
     for (const std::string& m : masks) {
         if (m != mine) return "helper mask " + m + " differs from the worker's " + mine;
