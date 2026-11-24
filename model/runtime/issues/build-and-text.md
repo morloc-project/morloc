@@ -196,15 +196,41 @@
 - **Dead C++ search paths.** [read 2026-11-04, from mim's list]
   CodeGenerator/Pools/CAbi/Members/Cpp.hs:2876 and :2890-2891 search
   `STATE/src/<base>/...`, which nothing writes.
-- **The shared Rust target dir grows without bound.** [measured
-  2026-11-15] `makeTheMaker` (CodeGenerator/Pools/CAbi/Members/Rust.hs)
-  builds every pool into `STATE/cache/rust-build` under a crate named for
-  its build dir, then `cp`s the binary out; nothing ever removes the
-  crate's outputs. Each new build dir (every golden run, every temp dir)
-  adds about 24 MB: 2192 pools, 63 GB of 75 GB in the dev env. `mim clean`
-  (mim ENV-12) removes them after the fact; the fix is to delete the pool's
-  own outputs (`release/pool_X`, `deps/pool_X-*`, `build/pool_X-*`,
-  `.fingerprint/pool_X-*`) after the copy.
+- **The shared Rust target dir grows without bound: pool outputs.**
+  [measured 2026-11-15, again 2026-11-23] Spec gap: model/runtime/artifacts.md
+  says nothing about `STATE/cache/rust-build`, its lifetime or its bound.
+  `makeTheMaker` (CodeGenerator/Pools/CAbi/Members/Rust.hs, target dir
+  ~3830) builds every pool into that one target dir under a crate named
+  `pool_<hash>`, then `cp`s the binary out; nothing ever removes the
+  crate's outputs (`release/pool_X`, `deps/pool_X-*`, `build/pool_X-*`,
+  `.fingerprint/pool_X-*`). Each new build dir (every golden run, every
+  temp dir) adds one crate, median 24 MB, max 352 MB. In the dev env on
+  2026-11-23 the dir was 128 GB: 92 GB of pool binaries in `deps/`
+  (5247, of which 1685 were stale rebuilds of a name, no longer linked
+  from `release/`), 19 GB of `build/pool_*` build-script dirs (4.4 MB
+  each). The top-level `release/pool_*` files are hardlinks into `deps/`,
+  so removing only them frees nothing. `mim clean` (mim ENV-12) removes
+  pool outputs after the fact.
+- **The shared Rust target dir grows without bound: dependency copies.**
+  [measured 2026-11-23] Same spec gap. Libraries took about 22 GB of
+  `deps/` (rlib 16.2, rmeta 3.7, proc-macro .so 2.2), with many builds of
+  each crate: zerocopy 0.8.47 built 26 times with identical features,
+  cf1_rs 36 x ~380 MB, piscem_rs 45, arrow_array 54, morloc_nexus 19.
+  Cargo's per-unit hash covers rustc, profile and the hashes of all
+  dependencies, so a difference anywhere below a crate forks it. Observed
+  sources of difference:
+  - the release profile: `lto` is `thin` by default and `off` in test
+    runs (`rust:lto=off`), and every change to the profile `makeCargoDocs`
+    writes (Rust.hs ~3761: debug, rustflags) starts a new set; zerocopy
+    has 10 rustc/profile combinations dated 09-14 to 11-21;
+  - the rustc version (one upgrade, to 1.99.1, around 11-01);
+  - per-pool resolution: each pool is its own Cargo project with its own
+    Cargo.lock and feature unification, so syn appears with 6 feature
+    sets and 6 versions (1.0.109, 2.0.117, 3.0.5/6/9/10); same-profile
+    zerocopy builds differ only in their zerocopy-derive, which differ
+    only in their syn.
+  Superseded builds are never removed, so this part grows too, slower
+  than pool outputs.
 - **`morloc eval` leaves empty work dirs.** [observed 2026-11-15, cause
   not found] `MORLOC_HOME/tmp` holds 342 empty `morloc-eval-*` dirs dated
   2026-10-01 to now, though Subcommands.hs:557 removes the dir in a
