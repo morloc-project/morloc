@@ -728,7 +728,7 @@ mod tests {
                 let port = *threads.add(i);
                 let t = libc::pthread_from_mach_thread_np(port);
                 let mut name = [0 as libc::c_char; 64];
-                if !t.is_null()
+                if t != 0
                     && libc::pthread_getname_np(t, name.as_mut_ptr(), name.len()) == 0
                     && std::ffi::CStr::from_ptr(name.as_ptr()).to_bytes() == b"morloc-par"
                 {
