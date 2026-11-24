@@ -18,7 +18,13 @@ value as its parameter's type asks (RUST-5), so a parameter of type
 `&mut T` does not build. A parameter whose type in
 the morloc signature is a type variable, or an optional or tuple holding
 one, is `&T` at every instantiation, since generic host code cannot depend
-on whether its instantiation is `Copy`. A type with interior
+on whether its instantiation is `Copy`. For the source of a class method
+that signature is the method's in its class, so a parameter of a class
+variable is `&T` in every instance, `Copy` or not: in `class Show a where
+show :: a -> Str`, the source of `instance Show U64` takes `&u64`. One
+generic source can then implement the method for many instances. HOST-10,
+which calls the source at the instance's types, fixes the arguments it is
+given, not how each is passed. A type with interior
 mutability (`Cell`, `RefCell`, `Mutex`, atomics) is not changed through an
 argument either; rustc does not detect that, and it is the program's error.
 This is EVAL-7's rule that sourced code never changes an argument, and it
