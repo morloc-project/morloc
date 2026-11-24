@@ -762,7 +762,7 @@ checksum = "f8ca58f447f06ed17d5fc4043ce1b10dd205e060fb3ce5b979b8ed8e59ff3f79"
 
 [[package]]
 name = "morloc-manifest"
-version = "0.112.0"
+version = "0.113.0"
 dependencies = [
  "morloc-runtime-types",
  "serde",
@@ -771,7 +771,7 @@ dependencies = [
 
 [[package]]
 name = "morloc-nexus"
-version = "0.112.0"
+version = "0.113.0"
 dependencies = [
  "base64",
  "chrono",
@@ -789,7 +789,7 @@ dependencies = [
 
 [[package]]
 name = "morloc-runtime"
-version = "0.112.0"
+version = "0.113.0"
 dependencies = [
  "anstream",
  "arrow-array",

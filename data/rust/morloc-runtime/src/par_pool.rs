@@ -1400,7 +1400,7 @@ mod tests {
         assert!(held >= 2, "a wake of every helper needs at least 3 CPUs, so 2 helpers stay when idle");
         let mut warm = Ctx::new(16);
         warm.grow_to = held;
-        assert_eq!(go(&warm, 4), 0);
+        assert_eq!(go(&warm, held + 1), 0);
         wait_until("the helpers sleep", || {
             let g = lock();
             g.sleeping >= held && g.looking == 0
@@ -1408,7 +1408,7 @@ mod tests {
         delay_us(10);
         let mut c = Ctx::new(24);
         c.grow_to = held;
-        assert_eq!(go(&c, 4), 0);
+        assert_eq!(go(&c, held + 1), 0);
         let reached = c.helper_ids.lock().unwrap().len();
         assert!(c.grew.load(Ordering::SeqCst), "the wake reached {reached} of the {held} helpers the job may hold");
         assert_eq!(reached, held);
