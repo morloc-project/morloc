@@ -636,7 +636,8 @@ pub(crate) const STOP_NONE: u32 = u32::MAX;
 #[cfg(test)]
 pub(crate) static SYNCED: std::sync::Mutex<Vec<i64>> = std::sync::Mutex::new(Vec::new());
 
-// SLOT-22: the next custodian about to sleep reports when, then waits `pause`.
+// SLOT-22: the next custodian about to sleep reports when, waits `pause`,
+// then reports when the pause ended.
 #[cfg(test)]
 pub(crate) static PAUSE_BEFORE_SLEEP: std::sync::Mutex<Option<(Duration, std::sync::mpsc::Sender<std::time::Instant>)>> =
     std::sync::Mutex::new(None);
@@ -647,6 +648,7 @@ fn pause_before_sleep() {
     if let Some((pause, tx)) = armed {
         let _ = tx.send(std::time::Instant::now());
         std::thread::sleep(pause);
+        let _ = tx.send(std::time::Instant::now());
     }
 }
 

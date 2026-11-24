@@ -15100,13 +15100,14 @@ mod write_behind_tests {
             *crate::custody::PAUSE_BEFORE_SLEEP.lock().unwrap() = Some((pause, tx));
             let h = shared_open_ostream_with_schema(path.to_str().unwrap(), "as").unwrap();
             let (gen, idx) = unpack_handle(h);
-            let paused = rx.recv_timeout(std::time::Duration::from_secs(5)).expect("the writer never went to sleep");
+            rx.recv_timeout(std::time::Duration::from_secs(5)).expect("the writer never went to sleep");
             let began = std::time::Instant::now();
             crate::custody::host_stop(idx, crate::custody::STATUS_DISCARD as u8);
             let ended = std::time::Instant::now();
             release_closed_slot(idx, gen);
-            if began < paused + pause {
-                late.push(ended.saturating_duration_since(paused + pause));
+            let resumed = rx.recv_timeout(std::time::Duration::from_secs(5)).expect("the writer's pause never ended");
+            if began < resumed {
+                late.push(ended.saturating_duration_since(resumed));
             }
         }
         assert!(!late.is_empty(), "no stop reached a writer inside its pause");
