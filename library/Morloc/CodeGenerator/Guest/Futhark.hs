@@ -251,7 +251,7 @@ futharkBuild srcs opts = do
       { bpObjects = os
       , bpHeaders = hs
       , bpIncludeDirs = [outDir]
-      , bpLinkFlags = backendLinkFlags backend
+      , bpLinkFlags = backendLinkFlags P.hostPlatform backend
       , bpManifests = jsons
       , bpDevice = boDevice opts
       }
@@ -282,15 +282,15 @@ buildOne backend outDir gs = do
 -- exact libraries and their locations vary by CUDA/ROCm install layout and
 -- Futhark version, so a user targeting an unusual layout supplements these via
 -- @-X cpp:flags=-L/path@ etc.
-backendLinkFlags :: Text -> [Text]
-backendLinkFlags "multicore" = ["-lpthread", "-lm"]
-backendLinkFlags "opencl" = case P.hostPlatform of
+backendLinkFlags :: P.Platform -> Text -> [Text]
+backendLinkFlags _ "multicore" = ["-lpthread", "-lm"]
+backendLinkFlags platform "opencl" = case platform of
   -- macOS ships OpenCL only as a framework.
   P.Darwin -> ["-framework", "OpenCL", "-lm"]
-  _ -> ["-lOpenCL", "-lm"]
-backendLinkFlags "cuda" = ["-lcuda", "-lnvrtc", "-lm"]
-backendLinkFlags "hip" = ["-lamdhip64", "-lhiprtc", "-lm"]
-backendLinkFlags _ = ["-lm"]
+  P.Linux -> ["-lOpenCL", "-lm"]
+backendLinkFlags _ "cuda" = ["-lcuda", "-lnvrtc", "-lm"]
+backendLinkFlags _ "hip" = ["-lamdhip64", "-lhiprtc", "-lm"]
+backendLinkFlags _ _ = ["-lm"]
 
 -- | The Futhark compiler backends morloc knows how to build and link.
 futharkBackends :: [Text]

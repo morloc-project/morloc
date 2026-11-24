@@ -117,14 +117,12 @@ linkFlagTests :: TestTree
 linkFlagTests =
   testGroup
     "backendLinkFlags"
-    [ testCase "c" $ backendLinkFlags "c" @?= ["-lm"]
-    , testCase "multicore" $ backendLinkFlags "multicore" @?= ["-lpthread", "-lm"]
-    , testCase "opencl" $
-        backendLinkFlags "opencl" @?= case P.hostPlatform of
-          P.Darwin -> ["-framework OpenCL", "-lm"]
-          P.Linux -> ["-lOpenCL", "-lm"]
-    , testCase "cuda" $ backendLinkFlags "cuda" @?= ["-lcuda", "-lnvrtc", "-lm"]
-    , testCase "hip" $ backendLinkFlags "hip" @?= ["-lamdhip64", "-lhiprtc", "-lm"]
+    [ testCase "c" $ backendLinkFlags P.Linux "c" @?= ["-lm"]
+    , testCase "multicore" $ backendLinkFlags P.Linux "multicore" @?= ["-lpthread", "-lm"]
+    , testCase "opencl on Linux" $ backendLinkFlags P.Linux "opencl" @?= ["-lOpenCL", "-lm"]
+    , testCase "opencl on macOS" $ backendLinkFlags P.Darwin "opencl" @?= ["-framework", "OpenCL", "-lm"]
+    , testCase "cuda" $ backendLinkFlags P.Linux "cuda" @?= ["-lcuda", "-lnvrtc", "-lm"]
+    , testCase "hip" $ backendLinkFlags P.Linux "hip" @?= ["-lamdhip64", "-lhiprtc", "-lm"]
     ]
 
 -- P1: a build-parameter change must change the cache-key salt, otherwise a pool
