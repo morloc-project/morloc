@@ -699,6 +699,7 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "linux")]
     fn helper_threads() -> usize {
         std::fs::read_dir("/proc/self/task")
             .map(|d| {
@@ -707,6 +708,41 @@ mod tests {
                     .count()
             })
             .unwrap_or(0)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn helper_threads() -> usize {
+        extern "C" {
+            fn mach_port_deallocate(task: libc::mach_port_t, name: libc::mach_port_t) -> libc::kern_return_t;
+        }
+        unsafe {
+            #[allow(deprecated)]
+            let task = libc::mach_task_self();
+            let mut threads: libc::thread_act_array_t = std::ptr::null_mut();
+            let mut n: libc::mach_msg_type_number_t = 0;
+            if libc::task_threads(task, &mut threads, &mut n) != libc::KERN_SUCCESS {
+                return 0;
+            }
+            let mut count = 0;
+            for i in 0..n as usize {
+                let port = *threads.add(i);
+                let t = libc::pthread_from_mach_thread_np(port);
+                let mut name = [0 as libc::c_char; 64];
+                if !t.is_null()
+                    && libc::pthread_getname_np(t, name.as_mut_ptr(), name.len()) == 0
+                    && std::ffi::CStr::from_ptr(name.as_ptr()).to_bytes() == b"morloc-par"
+                {
+                    count += 1;
+                }
+                mach_port_deallocate(task, port);
+            }
+            libc::vm_deallocate(
+                task,
+                threads as libc::vm_address_t,
+                n as libc::vm_size_t * std::mem::size_of::<libc::thread_act_t>() as libc::vm_size_t,
+            );
+            count
+        }
     }
 
     fn wait_until(what: &str, mut cond: impl FnMut() -> bool) {
@@ -1085,11 +1121,11 @@ mod tests {
     }
 
     fn sigblk_of_this_thread() -> String {
-        std::fs::read_to_string("/proc/thread-self/status")
-            .unwrap()
-            .lines()
-            .find_map(|l| l.strip_prefix("SigBlk:").map(|v| v.trim().to_string()))
-            .unwrap()
+        unsafe {
+            let mut m: libc::sigset_t = std::mem::zeroed();
+            assert_eq!(libc::pthread_sigmask(libc::SIG_BLOCK, std::ptr::null(), &mut m), 0);
+            (1..32).map(|s| if libc::sigismember(&m, s) == 1 { '1' } else { '0' }).collect()
+        }
     }
 
     static HELPER_SIGBLK: Mutex<Option<String>> = Mutex::new(None);
@@ -1360,20 +1396,22 @@ mod tests {
     #[test]
     fn a_woken_job_gets_every_helper_it_may_hold() {
         let _one = serial();
+        let held = crate::cpus::available_cpus().saturating_sub(1).min(3);
+        assert!(held >= 2, "a wake of every helper needs at least 3 CPUs, so 2 helpers stay when idle");
         let mut warm = Ctx::new(16);
-        warm.grow_to = 3;
+        warm.grow_to = held;
         assert_eq!(go(&warm, 4), 0);
         wait_until("the helpers sleep", || {
             let g = lock();
-            g.sleeping >= 3 && g.looking == 0
+            g.sleeping >= held && g.looking == 0
         });
         delay_us(10);
         let mut c = Ctx::new(24);
-        c.grow_to = 3;
+        c.grow_to = held;
         assert_eq!(go(&c, 4), 0);
         let reached = c.helper_ids.lock().unwrap().len();
-        assert!(c.grew.load(Ordering::SeqCst), "the wake reached {reached} of the 3 helpers the job may hold");
-        assert_eq!(reached, 3);
+        assert!(c.grew.load(Ordering::SeqCst), "the wake reached {reached} of the {held} helpers the job may hold");
+        assert_eq!(reached, held);
     }
 
     #[test]
