@@ -6660,24 +6660,31 @@ mod tests {
 
     #[test]
     fn a_value_made_where_a_registered_one_was_has_no_entry() {
-        let f = crossing1((1u64,), |c: &(u64,), a: &i64| *a + c.0 as i64, |_| origin_of(2));
-        let key = Arc::as_ptr(&f) as *const () as usize;
-        drop(f);
-        // A local closure over one u64 is the size of a crossing one (a guard
-        // pointer), so the allocator hands back the freed block.
-        let mut reused = 0;
-        let mut held = Vec::new();
-        for _ in 0..1000 {
-            let g = local1((1u64,), |c: &(u64,), a: &i64| *a + c.0 as i64);
-            if Arc::as_ptr(&g) as *const () as usize == key {
-                reused += 1;
-                assert!(reify(&g).is_none(), "a stale entry answered for a new value");
+        // A fresh thread starts with an empty glibc tcache, so its freed block
+        // comes back to it and not to another thread's arena bins.
+        let t = std::thread::spawn(|| {
+            let f = crossing1((1u64,), |c: &(u64,), a: &i64| *a + c.0 as i64, |_| origin_of(2));
+            let key = Arc::as_ptr(&f) as *const () as usize;
+            drop(f);
+            // A local closure over one u64 is the size of a crossing one (a guard
+            // pointer), so the allocator hands back the freed block.
+            let mut reused = 0;
+            let mut held = Vec::new();
+            for _ in 0..1000 {
+                let g = local1((1u64,), |c: &(u64,), a: &i64| *a + c.0 as i64);
+                if Arc::as_ptr(&g) as *const () as usize == key {
+                    reused += 1;
+                    assert!(reify(&g).is_none(), "a stale entry answered for a new value");
+                }
+                held.push(g);
             }
-            held.push(g);
-        }
-        // glibc hands a thread its own freed block back; other allocators may not.
-        if cfg!(target_os = "linux") {
-            assert!(reused > 0, "the freed address was never reused, so nothing was checked");
+            // glibc hands a thread its own freed block back; other allocators may not.
+            if cfg!(target_os = "linux") {
+                assert!(reused > 0, "the freed address was never reused, so nothing was checked");
+            }
+        });
+        if let Err(e) = t.join() {
+            std::panic::resume_unwind(e);
         }
     }
 
