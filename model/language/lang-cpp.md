@@ -11,7 +11,7 @@ division), OWN (how generated C++ borrows, copies and moves).
 ### CPP-1 A sourced C++ function takes each argument by value or by `const T&`
 Intent: ruled 2026-10-18
 Tests: spec-cpp-1-1
-Code: conforms 2026-10-19
+Code: conforms 2026-11-23
 
 A parameter of a sourced C++ function is `T`, `const T&`, or a template
 parameter that deduces one of these. A parameter of type `T&` is rejected at
@@ -20,6 +20,16 @@ changes its own copy. C++ code that calls a function morloc passed to it
 calls it the same way, never with a non-const reference. This is EVAL-7's
 rule that sourced code never changes an argument, and it holds until morloc
 has a way to say where a value may be changed.
+
+Amended 2026-11-23 (ruled 2026-11-24): a `const T&` parameter may be overloaded with
+a `T&&` one. Both compute the same result (EVAL-7); the `T&&` one may take
+its argument's contents. A `T` parameter next to either is ambiguous in C++.
+Morloc passes an rvalue only at a last read of a value it owns (OWN-2,
+OWN-3, OWN-7), so the `T&&` overload runs exactly where the value is not
+needed again. Sourced code that calls a function value with an rvalue, or
+through `mlc::give(f, std::move(x)...)`, gives the value away and does not
+read it again; `mlc::give` takes rvalues only, and `MLC_GIVE` is defined
+wherever it is available, so a header can still build alone.
 
 ### CPP-2 A sourced C++ function returns a value that owns its data
 Intent: ruled 2026-10-18
@@ -131,4 +141,33 @@ then copies nothing, as applying a Rust function value does (HOST-8); a
 function value that keeps its argument copies it. A
 sourced function written against `std::function<R(A)>` for a non-scalar
 `A` still receives a value it can call, through a conversion, but a
-template that deduces `A` from that spelling does not match.
+template that deduces `A` from that spelling does not match. A function value
+with a by-value form (OWN-7) held by a let is a `std::function` whose target
+is an `mlc::owning<R(P...)>`; `mlc::give` calls that form, and any other
+call lends as above (amended 2026-11-23, ruled 2026-11-24).
+
+### CPP-8 The C++ binding's user API is the one set of runtime calls sourced code may make
+Intent: ruled 2026-11-24
+Tests: spec-cpp-8-1
+Code: conforms 2026-11-24
+
+Sourced C++ normally calls nothing of morloc's: it is plain C++ over plain
+values (CPP-1, CPP-3). Where low-level code can do better with the
+runtime's help, the help is a function in the binding's user API, the
+`User API` section of the header `cppmorloc_api.hpp`, which every C++ pool
+includes before the sourced headers. Each function there is optional:
+code that does not call it builds and computes the same result, only
+slower. Each is listed here with its contract, and each has a feature
+macro, so a header that uses one can still build on its own. Anything
+else in the binding, that header's other names included, is used by
+generated code and is not a contract.
+
+- `mlc::give(f, std::move(x)...)` (`MLC_GIVE`) calls the function value `f`,
+  handing it ownership of its arguments, which the caller does not read
+  again. Where `f` has a by-value form (OWN-7) the arguments move into it;
+  otherwise `f` is called as usual and lends them (CPP-1, CPP-7).
+
+The other bindings follow the same rule: a user-facing call lives in the
+binding module that every pool of that language already loads, in a
+section marked as its user API, and is listed in that language's spec
+file.

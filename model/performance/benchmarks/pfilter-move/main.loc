@@ -1,0 +1,40 @@
+-- A stream of records filtered batch by batch with pfilterWith, timed by
+-- bench.py. Each filter export prints the records kept and the allocations
+-- made inside the batch function.
+module main (gen, filt, filtLive)
+
+import root-cpp
+import parallel-cpp
+
+source Cpp from "pfmove.hpp" ("genBatches", "batchEach", "keepRec", "firstOf")
+
+type Rec = (Str, [U8])
+
+genBatches :: Int -> Int -> ([Rec] -> <IO> ()) -> <IO> ()
+batchEach :: ([Rec] -> [Rec]) -> <IO> [Rec] -> <IO> (Int, Int)
+keepRec :: Int -> Rec -> Bool
+firstOf :: [Rec] -> Int -> [Rec]
+
+opts :: Int -> ParOpts
+opts n = .(.workers = n) defaultParOpts
+
+pull :: IStream a -> <IO> [a]
+pull s = do
+  Ok xs <- @next s
+  xs
+
+--' Write n records of len bytes as a stream
+gen :: Int -> Int -> <IO> (Collect Rec)
+gen n len = @collect (genBatches n len)
+
+--' Filter a stream, the batch moved into pfilterWith
+filt :: Int -> Int -> Str -> <IO> (Int, Int)
+filt t pct file = do
+  Ok fi <- @open file :: <IO> (Try Str (IStream Rec))
+  batchEach (pfilterWith (opts t) (keepRec pct)) (pull fi)
+
+--' Filter a stream, the batch read again after pfilterWith
+filtLive :: Int -> Int -> Str -> <IO> (Int, Int)
+filtLive t pct file = do
+  Ok fi <- @open file :: <IO> (Try Str (IStream Rec))
+  batchEach (\b -> let r = pfilterWith (opts t) (keepRec pct) b in firstOf r (length b)) (pull fi)

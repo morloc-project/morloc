@@ -1,0 +1,5 @@
+benchmark-template:
+  summary: "BENCH {group} {name}"
+
+labeled-groups:
+  lab: { benchmark: true }

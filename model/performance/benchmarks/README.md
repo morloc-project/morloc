@@ -53,5 +53,6 @@ from different hosts compares the hosts; each run's header names its CPU.
 | build | BUILD-1 |
 | recursion-depth | DEPTH-1..3 |
 | copies | COPY-1..6 |
+| pfilter-move | COPY-9 |
 | chains | CHAIN-1..4 |
 | serve-json | SERVE-1..3 |

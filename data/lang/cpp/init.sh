@@ -38,6 +38,7 @@ install_file() {
 
 # Install headers
 install_file "$BUILD_DIR/cppmorloc.hpp" "$INCLUDE_DIR/cppmorloc.hpp"
+install_file "$BUILD_DIR/cppmorloc_api.hpp" "$INCLUDE_DIR/cppmorloc_api.hpp"
 install_file "$BUILD_DIR/mlc_arrow.hpp" "$INCLUDE_DIR/mlc_arrow.hpp"
 install_file "$BUILD_DIR/mlc_rec.hpp" "$INCLUDE_DIR/mlc_rec.hpp"
 

@@ -248,7 +248,7 @@ renderTemplatedType name argDocs
 -- | No type is cheap enough to copy rather than reference; a tag test may
 -- read a value a field was taken from, since the payload stays in its arm.
 cppCaps :: OwnCaps
-cppCaps = OwnCaps {ocCheap = const False, ocTagAfterTake = True, ocLends = const True, ocSharedTakes = True, ocTakesElems = True}
+cppCaps = OwnCaps {ocCheap = const False, ocTagAfterTake = True, ocLends = const True, ocSharedTakes = True, ocTakesElems = True, ocGivesToSources = True}
 
 chooseCallSemantics :: TypeM -> CallSemantics
 chooseCallSemantics Passthrough = ConstPtr -- const uint8_t* packet
@@ -558,6 +558,9 @@ data CppTranslatorState = CppTranslatorState
   -- ^ the manifold whose by-value form is being lowered (OWN-7)
   , translatorTwinDone :: Set.Set Int
   -- ^ the manifolds whose by-value form is emitted
+  , translatorOwningSigs :: Map.Map Int MDoc
+  -- ^ the call signatures of the closures with a by-value form, which a
+  -- let holding one as a std::function wraps in mlc::owning (CPP-7)
   -- ^ MORLOC_NO_MOVES: no read is marked as a last read, the oracle the
   -- copy and move tests compare against
   -- ^ The pool's ownership decisions; its takes are keyed by the top-level
@@ -644,6 +647,7 @@ instance Defaultable CppTranslatorState where
       , translatorNoMoves = False
       , translatorTwin = Nothing
       , translatorTwinDone = Set.empty
+      , translatorOwningSigs = Map.empty
       , translatorCurrentRoot = 0
       , translatorMoves = Set.empty
       , translatorParamMoves = Set.empty
@@ -1852,7 +1856,16 @@ PROPAGATE_ERROR(errmsg)|]
     , lcLetRhs = \i rhs d -> do
         part <- cppCondPart i
         mode <- if part then cppLetMode i rhs else return LetCopy
-        return (if mode == LetBorrow then d {poolExpr = "mlc::place(" <> poolExpr d <> ")"} else d)
+        owning <- case rhs of
+          ManN (NativeManifold m _ form _) | isClosureForm form -> Map.lookup m <$> CMS.gets translatorOwningSigs
+          _ -> return Nothing
+        return $ case owning of
+          -- CPP-7: a let holds a function value as a std::function, whose
+          -- target mlc::give finds to reach the by-value form (OWN-7).
+          Just sig -> d {poolExpr = "mlc::owning<" <> sig <> ">(" <> poolExpr d <> ")"}
+          Nothing
+            | mode == LetBorrow -> d {poolExpr = "mlc::place(" <> poolExpr d <> ")"}
+            | otherwise -> d
     , lcLentIf = cppLentIf
     , lcLentArm = cppLentArm
     , lcLentReturn = cppLentReturn
@@ -2165,7 +2178,10 @@ PROPAGATE_ERROR(errmsg)|]
     , lcMakePass = \_ sig _ mname args ->
         if isJust (stageOf mname) || Map.member (render mname) reifyThunks
           then makeLambda sig mname [] args
-          else return mname
+          else do
+            twin <- hasTwin mname args
+            when twin (noteOwning mname sig)
+            return (if twin then dispatcher mname else mname)
     , lcMakeLambda = \_ sig _ -> makeLambda sig
     , lcRegisterSchema = cppRegisterSchema
     , lcTableImportFn = Nothing
@@ -2173,16 +2189,39 @@ PROPAGATE_ERROR(errmsg)|]
   where
     stageOf mname = manifoldIdOf mname >>= (`Map.lookup` stageTable)
 
+    -- Whether the manifold named has a by-value form (OWN-7): its two
+    -- forms are an overload set, which std::bind cannot name.
+    hasTwin :: MDoc -> [Arg TypeM] -> CppTranslatorM Bool
+    hasTwin mname args = case manifoldIdOf mname of
+      Just m -> do
+        pp <- CMS.gets translatorPool
+        if Map.member m (ppTwoForm pp)
+          then or <$> mapM (\(j, Arg _ t) -> cppTwinPosition m j t) (indexed args)
+          else return False
+      Nothing -> return False
+
+    noteOwning :: MDoc -> MDoc -> CppTranslatorM ()
+    noteOwning mname sig = case manifoldIdOf mname of
+      Just m -> CMS.modify (\st -> st {translatorOwningSigs = Map.insert m sig (translatorOwningSigs st)})
+      Nothing -> return ()
+
+    dispatcher :: MDoc -> MDoc
+    dispatcher mname =
+      "[](auto&&... mlcA) -> decltype(" <> mname <> "(std::forward<decltype(mlcA)>(mlcA)...)) { return "
+        <> mname <> "(std::forward<decltype(mlcA)>(mlcA)...); }"
+
     makeLambda :: MDoc -> MDoc -> [Arg TypeM] -> [Arg TypeM] -> CppTranslatorM MDoc
-    makeLambda sig mname contextArgs boundArgs =
-      let ctxNames = map (argNamer cppLocals) contextArgs
-          vs' = take (length boundArgs) (map (\j -> "std::placeholders::_" <> viaShow j) ([1 ..] :: [Int]))
-          bindArgs = cat (punctuate "," (mname : (ctxNames ++ vs')))
-          -- manNamer is "m<mid>"; the closure's home-pool dispatch mid is the
-          -- name minus its leading "m".
-          midDoc = pretty (MT.drop 1 (render mname))
-          stage = stageOf mname
-       in case (Map.lookup (render mname) reifyThunks, stage) of
+    makeLambda sig mname contextArgs boundArgs = do
+     twin <- hasTwin mname (contextArgs ++ boundArgs)
+     let callee = if twin then dispatcher mname else mname
+         ctxNames = map (argNamer cppLocals) contextArgs
+         vs' = take (length boundArgs) (map (\j -> "std::placeholders::_" <> viaShow j) ([1 ..] :: [Int]))
+         bindArgs = cat (punctuate "," (callee : (ctxNames ++ vs')))
+         -- manNamer is "m<mid>"; the closure's home-pool dispatch mid is the
+         -- name minus its leading "m".
+         midDoc = pretty (MT.drop 1 (render mname))
+         stage = stageOf mname
+     case (Map.lookup (render mname) reifyThunks, stage) of
             -- A staged closure: applied to the arguments before its stage
             -- point, it runs its stage entry (bound to the same captured
             -- values) once and becomes the closure the stage returns.
@@ -2208,7 +2247,10 @@ PROPAGATE_ERROR(errmsg)|]
             -- other forms name their captures twice.
             (Nothing, Nothing) -> do
               ctxDocs <- mapM capture contextArgs
-              return [idoc|std::bind(#{cat (punctuate "," (mname : (ctxDocs ++ vs')))})|]
+              -- A crossing, pap or staged closure is not wrapped: reify
+              -- finds it by its own target type.
+              when twin (noteOwning mname sig)
+              return [idoc|std::bind(#{cat (punctuate "," (callee : (ctxDocs ++ vs')))})|]
       where
         capture a@(Arg i (Native tf))
           | Just m <- readMay (T.unpack (MT.drop 1 (render mname))), not (isFunctionValue tf) = do
@@ -2826,7 +2868,7 @@ translateSegment closureGen m0 = do
         Map.elems $
           Map.fromList
             [ (m, nm)
-            | nm@(NativeManifold m _ (ManifoldFull _) _) <- nativeManifoldsUnder (RSM m0)
+            | nm@(NativeManifold m _ _ _) <- nativeManifoldsUnder (RSM m0)
             , Set.member m defined
             , Map.member m (ppTwoForm pp)
             ]
@@ -2846,7 +2888,7 @@ translateSegment closureGen m0 = do
           let pp' = pp {ppByValue = Map.insertWith Set.union m (Set.fromList (map fst positions)) (ppByValue pp)}
           CMS.modify (\st -> st {translatorPool = pp', translatorTwin = Just m})
           prepared <- prepareSegment m0
-          docs <- case [nm | nm@(NativeManifold m' _ (ManifoldFull _) _) <- nativeManifoldsUnder (RSM (preparedBody prepared)), m' == m] of
+          docs <- case [nm | nm@(NativeManifold m' _ _ _) <- nativeManifoldsUnder (RSM (preparedBody prepared)), m' == m] of
             (nm : _) -> foldWithNativeManifoldM (defaultFoldRules cfg) nm
             [] -> error "morloc bug: a by-value form whose manifold is not in its segment"
           recordLowered prepared

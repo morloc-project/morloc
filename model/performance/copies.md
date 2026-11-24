@@ -107,3 +107,15 @@ accumulator by reference (HOST-8), so a step there that grows the
 accumulator copies it every batch; that cost is accepted (ruled
 2026-11-21), and a fold that must move its accumulator is written with
 `@fold`.
+
+### COPY-9 A filter given a batch it may keep moves its survivors
+Intent: ruled 2026-11-24
+Bench: pfilter-move
+Model: allocs = k * q + c; n = 100000 records (a 24-byte name and a 4000-byte body) streamed in batches of 10000, each batch given (`mlc::give`) to `pfilterWith (opts 1) (keepRec pct)`; k the records kept (pct 100: all, pct 1: 1%), q the allocations per kept record inside the batch function, c the rest. `ctl` reads the batch again after the call (`let r = pfilterWith .. b in firstOf r (length b)`), so it must copy (q = 2: the name and the body).
+Measured: 2026-11-23, load 10-16 (not citable; runs c5-base/c5-new and c5-final-base/c5-final-new): before: hi.move.allocs_per_kept 2.005, hi.move.wall 0.41-0.51 s, hi.move.cpu 0.39-0.47 s; after: hi.move.allocs_per_kept 0.0018, hi.move.wall 0.29-0.38 s, hi.move.cpu 0.28-0.33 s, hi.saved.cpu 0.11-0.12 s; lo unchanged
+Goal: hi.move.allocs_per_kept <= 0.05
+
+The batch reaches the filter through a function value held as a
+`std::function` and a do block's manifold parameter, as a stream stage's
+does; the closure's by-value form (OWN-7) passes it to the `&&` overload of
+`pfilterWith` (CPP-1), which compacts it in place.

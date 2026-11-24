@@ -44,6 +44,12 @@ char* g_tmpdir;
 uint8_t* foreign_call(const char* socket_filename, size_t mid, ...) __attribute__((sentinel));
 uint8_t* foreign_call_v(const char* socket_filename, size_t mid, const uint8_t** args_array, size_t nargs);
 
+#include <memory>
+#include <type_traits>
+
+// CPP-8: the user-facing API, before the sourced headers.
+#include "cppmorloc_api.hpp"
+
 // AUTO include statements start
 // <<<BREAK>>>
 // AUTO include statements end

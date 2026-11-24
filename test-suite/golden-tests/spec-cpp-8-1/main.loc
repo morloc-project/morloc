@@ -1,0 +1,18 @@
+-- Spec CPP-8: mlc::give, the C++ binding's user API, hands a function value
+-- ownership of its argument. `which` reports the overload that ran ("rv" or
+-- "lv") and the sum of the list it was given.
+--   given      a function value with a by-value form: rv
+-- The Makefile also builds give.hpp on its own, without the user API
+-- header, since a header using the API must still build alone.
+module main (given)
+
+import root
+import root-cpp
+
+source Cpp from "give.hpp" ("which", "giveTo")
+
+which :: [Int] -> (Str, Int)
+giveTo :: ([Int] -> a) -> Int -> a
+
+given :: Int -> (Str, Int)
+given n = giveTo (\b -> which b) n

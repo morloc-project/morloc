@@ -69,6 +69,11 @@ data OwnCaps = OwnCaps
   -- ^ whether an element can be taken out of a list the frame owns while
   -- another part of the list is lent (OWN-5); where it cannot, the element
   -- is lent too
+  , ocGivesToSources :: Bool
+  -- ^ whether a sourced function may take an argument it is given whole,
+  -- and a closure may be given its argument, so that a parameter passed
+  -- whole to a sourced call, and a closure's bound parameter, have a
+  -- by-value form (OWN-7, CPP-1)
   }
 
 -- | Whether a projection may be borrowed rather than copied (OWN-6).
@@ -92,10 +97,10 @@ data PoolPlan = PoolPlan
   -- keeps whole on every evaluation, so the by-value form drops none of
   -- them (OWN-7)
   , ppTwoForm :: Map.Map Int (Set.Set Int)
-  -- ^ per fully applied native manifold, the positions of the parameters
-  -- it keeps, or keeps a part of, on some evaluations but takes by
-  -- reference: a member may give it a second form taking them by value,
-  -- for a call that may move every one of them (OWN-7)
+  -- ^ per native manifold, the positions of the parameters it keeps, or
+  -- keeps a part of, on some evaluations but takes by reference: a member
+  -- may give it a second form taking them by value, for a call that may
+  -- move every one of them (OWN-7); of a closure, only bound parameters
   , ppLent :: Map.Map Int LentResult
   -- ^ the manifolds whose by-reference form returns a result lent from a
   -- parameter or owned (OWN-8)
@@ -220,7 +225,7 @@ planPool caps sms =
       , Nothing <- [spineLoop body]
       , let value = unReturn body
             rt = typeFof value
-            two = Map.findWithDefault Set.empty m twoForm
+            two = Map.findWithDefault Set.empty m twoCore
             own = Map.findWithDefault Set.empty m byValue
             params = [(j', i') | (j', Arg i' (Native _)) <- indexed (typeMofForm form), Set.member j' two, Set.notMember j' own]
       , not (ocCheap caps rt)
@@ -244,7 +249,7 @@ planPool caps sms =
         , Just (rt, starts, lb) <- [spineLoop body]
         , not (ocCheap caps rt)
         , not (isFunT rt)
-        , let two = Map.findWithDefault Set.empty m twoForm
+        , let two = Map.findWithDefault Set.empty m twoCore
               own = Map.findWithDefault Set.empty m byValue
               cands =
                 [ (j', i', ls)
@@ -285,7 +290,7 @@ planPool caps sms =
         , Set.notMember y vs
         , readsInPlace caps keepsAll y body
         ]
-    keepsAll c = Map.findWithDefault Set.empty c byValue <> Map.findWithDefault Set.empty c twoForm
+    keepsAll c = Map.findWithDefault Set.empty c byValue <> Map.findWithDefault Set.empty c twoCore
     -- OWN-10: a let bound once to a conditional whose every arm is a local,
     -- a part of one, or a fresh value, read in place.
     condLets =
@@ -341,23 +346,64 @@ planPool caps sms =
           [ (m, Set.filter (\j -> any (\(k, Arg i _) -> k == j && Set.member i always) (indexed (typeMofForm form))) positions)
           | NativeManifold m _ form@(ManifoldFull _) body <- natives
           , Just positions <- [Map.lookup m twoForm]
-          , let keeps c = Map.findWithDefault Set.empty c byValue <> Map.findWithDefault Set.empty c twoForm
+          , let keeps c = Map.findWithDefault Set.empty c byValue <> Map.findWithDefault Set.empty c twoCore
                 always = keptOnEveryPath keeps body
           ]
-    (takes0, releases0) = consumableProjectionLets (ocTagAfterTake caps) (ocSharedTakes caps) (\m -> Map.findWithDefault Set.empty m byValue <> Map.findWithDefault Set.empty m twoForm) sms
-    twoForm = settleTwo Map.empty
-    settleTwo known =
-      let next = twoFormGiven known
-       in if next == known then known else settleTwo next
-    twoFormGiven known =
+    (takes0, releases0) = consumableProjectionLets (ocTagAfterTake caps) (ocSharedTakes caps) (\m -> Map.findWithDefault Set.empty m byValue <> Map.findWithDefault Set.empty m twoCore) sms
+    -- The second forms the lent, conditional and take analyses see; the
+    -- forms a sourced call or a closure's bound parameter adds (OWN-7,
+    -- CPP-1) are only emitted and selected by calls.
+    twoCore = settleTwo False Set.empty Map.empty
+    twoForm = if ocGivesToSources caps then unblocked Set.empty else twoCore
+    settleTwo given blocked known =
+      let next = twoFormGiven given blocked known
+       in if next == known then known else settleTwo given blocked next
+    -- A call selects a second form only when it may move every argument
+    -- the form takes by value (OWN-7), so a position no call can give is
+    -- dropped, and the forms are solved again without it.
+    unblocked blocked =
+      let two = settleTwo True blocked Map.empty
+          blocked' = blocked <> Set.fromList [(m, j) | (m, js) <- Map.toList two, j <- Set.toList js, neverGiven two m j]
+       in if blocked' == blocked then two else unblocked blocked'
+    neverGiven two m j =
+      let args = [a | (m', j', a) <- occurrences, m' == m, j' == j]
+       in not (null args) && all (cannotGive two) args
+    -- A local a call passes cannot be moved when it is a parameter of the
+    -- calling manifold that it takes by reference in every form: a
+    -- closure's captured value, or a parameter neither kept nor in a second
+    -- form. A let or a top-level manifold's argument may be moved.
+    cannotGive two (Just (NativeManifold c _ form _), i) =
+      case [(k, isFull form || Set.member i free) | (k, Arg i' _) <- indexed (typeMofForm form), i' == i] of
+        [(k, bound)] -> not bound || not (Set.member k (Map.findWithDefault Set.empty c byValue <> Map.findWithDefault Set.empty c two))
+        _ -> False
+      where
+        free = Set.fromList [v | Arg v _ <- manifoldBound form]
+    cannotGive _ (Nothing, _) = False
+    -- Each call of a fully applied manifold with the manifold it is in and
+    -- the local it passes at each position.
+    occurrences = concat [callsIn Nothing (RSM sm) | sm <- sms]
+    callsIn caller n = case n of
+      RNM nm@(NativeManifold m _ form body) ->
+        here caller (m, form) <> callsIn' (Just nm) (RN body)
+      _ -> here' caller n <> concatMap (callsIn caller) (rnodeChildren n)
+    callsIn' caller n = here' caller n <> concatMap (callsIn caller) (rnodeChildren n)
+    here caller (m, ManifoldFull as) = [(m, j, (caller, i)) | (j, Arg i _) <- indexed as]
+    here _ _ = []
+    here' caller n = case n of
+      RN (AppExeN _ (RecCallP m _) as) -> [(m, j, (caller, i)) | (j, NativeArgExpr v) <- indexed as, Just i <- [varIx v]]
+      _ -> []
+    twoFormGiven given blocked known =
       Map.filter (not . Set.null) . Map.fromListWith Set.intersection $
         [ (m, positions)
-        | NativeManifold m _ form@(ManifoldFull _) body <- natives
-        , not (Set.member m asValues)
+        | NativeManifold m _ form body <- natives
+        , case form of
+            ManifoldFull _ -> not (Set.member m asValues)
+            _ -> given && Set.notMember m fullOccurs
         , let args = typeMofForm form
+              free = Set.fromList [i | Arg i _ <- manifoldBound form]
               own = Map.findWithDefault Set.empty m byValue
               keeps c = Map.findWithDefault Set.empty c byValue <> Map.findWithDefault Set.empty c known
-              kept = keptSomewhere keeps body
+              kept = keptSomewhere keeps body <> (if given then givenToSources body else Set.empty)
               sources = letSources (RN body)
               positions =
                 Set.fromList
@@ -366,9 +412,14 @@ planPool caps sms =
                   , not (ocCheap caps tf)
                   , not (isFunT tf)
                   , Set.notMember j own
+                  , Set.notMember (m, j) blocked
+                  , isFull form || Set.member i free
                   , not (Set.null (Set.intersection kept (flowsFrom sources i)))
                   ]
         ]
+    isFull ManifoldFull {} = True
+    isFull _ = False
+    fullOccurs = Set.fromList [m | NativeManifold m _ ManifoldFull {} _ <- natives]
     isFunT FunF {} = True
     isFunT _ = False
     byValue = Map.unionWith Set.union (settle Map.empty) foldParams
@@ -418,6 +469,24 @@ planPool caps sms =
         here _ = Set.empty
     notFull ManifoldFull {} = False
     notFull _ = True
+
+-- | The variables a native expression passes whole to a sourced call that
+-- is not an operator, nested function values, suspensions and do blocks
+-- aside (OWN-3): a sourced function may take such an argument (CPP-1).
+givenToSources :: NativeExpr -> Set.Set Int
+givenToSources body = go (RN body)
+  where
+    go n = case n of
+      RN (DoBlockN _ _) -> Set.empty
+      RNM _ -> Set.empty
+      RSM _ -> Set.empty
+      RN (AppExeN _ (SrcCallP _ src) args)
+        | not (srcOperator src) ->
+            Set.fromList [p | NativeArgExpr a <- args, Just p <- [varOf a]] <> foldMap go (rnodeChildren n)
+      _ -> foldMap go (rnodeChildren n)
+    varOf (LetVarN _ p _) = Just p
+    varOf (BndVarN _ p _) = Just p
+    varOf _ = Nothing
 
 -- | The variables a native expression's reads keep anywhere in it: an
 -- element of a constructor, list, tuple or record; a value it or a let's

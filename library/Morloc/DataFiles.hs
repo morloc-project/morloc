@@ -87,6 +87,7 @@ cppSetup =
     , EmbededFile "morloc_pch.hpp" (decodeUtf8 $ $(embedFileRelative "data/lang/cpp/morloc_pch.hpp"))
     , EmbededFile "mlc_arrow.hpp" (decodeUtf8 $ $(embedFileRelative "data/lang/cpp/mlc_arrow.hpp"))
     , EmbededFile "mlc_rec.hpp" (decodeUtf8 $ $(embedFileRelative "data/lang/cpp/mlc_rec.hpp"))
+    , EmbededFile "cppmorloc_api.hpp" (decodeUtf8 $ $(embedFileRelative "data/lang/cpp/cppmorloc_api.hpp"))
     , EmbededFile "nanoarrow.h" (decodeUtf8 $ $(embedFileRelative "data/lang/cpp/nanoarrow/nanoarrow.h"))
     , EmbededFile "nanoarrow.c" (decodeUtf8 $ $(embedFileRelative "data/lang/cpp/nanoarrow/nanoarrow.c"))
     ]

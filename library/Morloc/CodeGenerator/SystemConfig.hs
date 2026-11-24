@@ -633,7 +633,9 @@ initOwnedIncludePaths :: [FilePath]
 initOwnedIncludePaths =
   [ "morloc.h"
   , "cppmorloc.hpp"
+  , "cppmorloc_api.hpp"
   , "mlc_arrow.hpp"
+  , "mlc_rec.hpp"
   , "morloc_pch.hpp"
   , "morloc_pch.hpp.gch"
   , "nanoarrow"

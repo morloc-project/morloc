@@ -1,0 +1,90 @@
+-- Spec OWN-7, CPP-1: a C++ function value whose body passes its parameter
+-- at its last read to a sourced function has a by-value form, which a
+-- caller handing it an rvalue selects; the sourced function's `&&`
+-- overload then runs. `which` reports the overload that ran ("rv" or "lv")
+-- and the sum of the list it was given, so a list moved too early shows up
+-- as a wrong sum.
+--   ownedLet     an owned let at its last read: rv
+--   lambda       a lambda handed an owned batch: rv
+--   partial      a partial application of a source handed an owned batch: rv
+--   labeled      the same through a labeled partial application: rv
+--   named        a named function passed as a value: rv
+--   chain        a lambda calling a function that passes it on: rv
+--   given        given through mlc::give to a std::function: rv
+--   givenLabeled the same through a labeled call, whose manifold takes the
+--                function value as a std::function parameter: rv
+--   lent         the batch is lent and read again by the caller: lv
+--   stdFunction  through a std::function parameter: lv
+--   readLater    the lambda reads the batch after the call: lv, both sums
+--   sameStep     the batch is also read by another argument, which runs
+--                first (OWN-2): rv, sum 100
+--   captured     a nested lambda run twice reads the batch: lv twice
+--   loop         a recursive helper reads the batch each iteration: lv
+module main (ownedLet, lambda, partial, labeled, chain, named, given, givenLabeled, lent, stdFunction, readLater, sameStep, captured, loop)
+
+import root
+import root-cpp
+
+source Cpp from "ov.hpp" ("mk", "total", "which", "whichWith", "handOver", "giveTo", "lendThenRead", "viaStdFunction")
+
+mk :: Int -> [Int]
+total :: [Int] -> Int
+which :: [Int] -> (Str, Int)
+whichWith :: Int -> [Int] -> (Str, Int)
+handOver :: ([Int] -> a) -> Int -> a
+giveTo :: ([Int] -> a) -> Int -> a
+lendThenRead :: ([Int] -> (Str, Int)) -> Int -> ((Str, Int), Int)
+viaStdFunction :: ([Int] -> (Str, Int)) -> Int -> (Str, Int)
+
+ownedLet :: Int -> (Str, Int)
+ownedLet n = let b = mk n in which b
+
+lambda :: Int -> (Str, Int)
+lambda n = handOver (\b -> which b) n
+
+partial :: Int -> (Str, Int)
+partial n = handOver (whichWith 2) n
+
+labeled :: Int -> (Str, Int)
+labeled n = handOver (lab@whichWith 3) n
+
+passOn :: Int -> [Int] -> (Str, Int)
+passOn k xs = whichWith k xs
+
+named :: Int -> (Str, Int)
+named n = handOver passOnNamed n
+
+passOnNamed :: [Int] -> (Str, Int)
+passOnNamed xs = which xs
+
+chain :: Int -> (Str, Int)
+chain n = handOver (\b -> passOn 4 b) n
+
+given :: Int -> (Str, Int)
+given n = giveTo (\b -> which b) n
+
+givenLabeled :: Int -> (Str, Int)
+givenLabeled n = lab@giveTo (lab@whichWith 5) n
+
+lent :: Int -> ((Str, Int), Int)
+lent n = lendThenRead (\b -> which b) n
+
+stdFunction :: Int -> (Str, Int)
+stdFunction n = viaStdFunction (\b -> which b) n
+
+readLater :: Int -> ((Str, Int), Int)
+readLater n = handOver (\b -> let r = which b in (r, total b)) n
+
+sameStep :: Int -> (Str, Int)
+sameStep n = handOver (\b -> whichWith (total b) b) n
+
+captured :: Int -> [(Str, Int)]
+captured n = handOver (\b -> map (\k -> whichWith k b) [1, 2]) n
+
+rep :: Int -> [Int] -> Int -> Int
+rep k xs acc
+  ? k == 0 = acc
+  : rep (k - 1) xs (acc + .1 (which xs))
+
+loop :: Int -> (Str, Int)
+loop n = handOver (\b -> ("loop", rep 3 b 0)) n

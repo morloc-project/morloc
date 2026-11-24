@@ -123,3 +123,19 @@ time (an associated const) so `Option<T>` fields lend.
   is given a copy of `b`'s `data` handle (a reference count increment,
   not a payload copy) rather than a move, as LambdaEval moves a let only
   one read ahead (`readFirst`).
+- **A closure given only through a `std::function` it was not let-bound
+  as is lent.** [read, 2026-11-23] OWN-7's closure by-value form is
+  reached by a raw call with an rvalue, or by `mlc::give` through a
+  `std::function` whose target is the `mlc::owning` a let wraps the closure
+  in (CPP-7). A closure converted to `std::function` elsewhere (passed
+  straight to a manifold parameter, stored in a field or list) keeps the
+  bind as its target, so `give` lends and the callee copies what it keeps.
+  A caller that gives one argument and lends another through a
+  `std::function` is lent too (`give` gives every argument). Rust is not
+  covered: HOST-8 lends every argument of a function value and RUST-1 lends
+  a generic one, so parallel-rust's `pfilterWith` copies its survivors.
+- **A parameter passed whole to a sourced call has a by-value form even
+  where no caller gives it.** [measured, 2026-11-23] OWN-7's sourced-sink
+  forms are emitted for every such manifold; mosm's pool.cpp grows from
+  343 KB to 426 KB (48 forms). Cost, not copies; a demand signal (a source
+  marked as taking its argument) would prune them and needs a ruling.

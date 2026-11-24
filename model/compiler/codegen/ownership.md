@@ -72,7 +72,10 @@ for as long as it lives: a `do` block bound by a let may hold a reference
 to what it reads for as long as the let lives, so no read of a value such a
 block reads moves, later ones included. A value a `do` block binds is
 a new value each time the block runs; its reads within the block may move
-under OWN-2 and this item as any value's may. In linear logic this is the
+under OWN-2 and this item as any value's may. So is a closure's own
+bound parameter in the closure's by-value form (OWN-7): each call is
+given a new one. A wrapper lambda a generated function runs once (a fork
+guard, a log template's timing) is not a repeated read. In linear logic this is the
 promotion rule: a term that may be duplicated captures only unrestricted
 values.
 
@@ -124,8 +127,8 @@ replaces with a value it builds is owned, and starts from a copy.
 ### OWN-7 A function that keeps an argument takes it from its caller
 Intent: ruled 2026-11-21
 Why: amended from one form, where a parameter kept on one branch stayed a reference
-Tests: spec-own-7-1, spec-own-7-2, spec-own-7-3, spec-own-7-4
-Code: conforms 2026-11-22
+Tests: spec-own-7-1, spec-own-7-2, spec-own-7-3, spec-own-7-4, spec-own-7-5
+Code: conforms 2026-11-23
 
 A fully applied manifold takes a parameter by value instead of by
 reference when its body reads that parameter once, on every evaluation, and
@@ -149,10 +152,25 @@ needs its value. In C++ the forms are overloads of one name, `const T&` and
 parameter into a local when it starts, so what it does not keep is
 released when it returns. A scalar or function-valued parameter has one
 form. A field of a C++ `data` arm is taken only from a value the manifold
-the take is in owns, and only as CPP-6 allows. A closure keeps taking its
-parameters by reference, since its signature is shared by every caller;
+the take is in owns, and only as CPP-6 allows. A closure's first form takes
+its parameters by reference, since its signature is shared by every caller;
 the step of a fold that captures nothing is the exception, taking its
 accumulator by value (COPY-7).
+
+In C++ (amended 2026-11-23, ruled 2026-11-24), passing a parameter whole to a
+sourced call that is not an operator also keeps it, for the second form
+only: a caller that lends it still calls the first form and copies
+nothing, and the second gives it to the sourced function, whose `T&&`
+overload may take it (CPP-1). A closure has a second form too, at the bound
+parameters it keeps, never at the values it captures. Its callable forwards
+what it is called with, so a call with an rvalue selects the second form; a
+let holding it as a `std::function` holds it as an `mlc::owning`, which
+`mlc::give` reaches through any copy (CPP-7). Since a call selects the
+second form only when it may move every argument the form takes by value,
+a position at which every call passes a parameter its caller takes by
+reference in every form (a captured value, or one it neither keeps nor
+gives on) is not one of the form's. The analyses of OWN-5, OWN-8 and OWN-10
+see only the second forms of the paragraphs above.
 
 ### OWN-8 A function that returns what it was lent returns it lent
 Intent: open
