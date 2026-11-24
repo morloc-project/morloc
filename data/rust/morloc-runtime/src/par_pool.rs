@@ -1410,7 +1410,7 @@ mod tests {
     fn an_idle_helper_closes_its_kept_connections() {
         let _one = serial();
         let mut fds = [-1i32; 2];
-        assert_eq!(unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0, fds.as_mut_ptr()) }, 0);
+        assert_eq!(unsafe { morloc_runtime_types::fd::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()) }, 0);
         KEPT_FD.store(fds[0] as i64, Ordering::SeqCst);
         let c = Ctx::new(4);
         assert_eq!(unsafe { run(4, 2, keeps_a_connection, end, &c as *const Ctx as *mut c_void) }, 0);

@@ -1666,8 +1666,21 @@ mod tests {
     use super::*;
 
     fn arg(source: u8, payload: &[u8]) -> Vec<u8> {
-        let mut h = PacketHeader::data_mesg(PACKET_FORMAT_MSGPACK, payload.len() as u64);
-        unsafe { h.command.data.source = source };
+        let h = PacketHeader::new(
+            PacketCommand {
+                data: CommandData {
+                    cmd_type: PACKET_TYPE_DATA,
+                    source,
+                    format: PACKET_FORMAT_MSGPACK,
+                    compression: PACKET_COMPRESSION_NONE,
+                    encryption: PACKET_ENCRYPTION_NONE,
+                    status: PACKET_STATUS_PASS,
+                    generation: [0; 2],
+                },
+            },
+            0,
+            payload.len() as u64,
+        );
         let mut p = h.to_bytes().to_vec();
         p.extend_from_slice(payload);
         p
