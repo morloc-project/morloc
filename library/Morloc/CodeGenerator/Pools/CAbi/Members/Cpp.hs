@@ -2226,10 +2226,12 @@ PROPAGATE_ERROR(errmsg)|]
             -- point, it runs its stage entry (bound to the same captured
             -- values) once and becomes the closure the stage returns.
             (thunk, Just (StageEntry nctx k smid))
-              | nctx == length contextArgs ->
+              | nctx == length contextArgs -> do
+                  stageTwin <- hasTwin (manNamer smid) (contextArgs ++ take k boundArgs)
                   let (reifier, schemas) = fromMaybe ("mlc_unreifiable", "std::vector<mlc_arg_encoder>{}") thunk
-                      stageArgs = cat (punctuate "," (manNamer smid : (ctxNames ++ take k vs')))
-                   in return [idoc|mlc_staged_sig<#{pretty k}, #{sig}>::make(std::bind(#{bindArgs}), #{midDoc}, #{reifier}, "cpp", #{schemas}, std::bind(#{stageArgs}))|]
+                      stageCallee = if stageTwin then dispatcher (manNamer smid) else manNamer smid
+                      stageArgs = cat (punctuate "," (stageCallee : (ctxNames ++ take k vs')))
+                  return [idoc|mlc_staged_sig<#{pretty k}, #{sig}>::make(std::bind(#{bindArgs}), #{midDoc}, #{reifier}, "cpp", #{schemas}, std::bind(#{stageArgs}))|]
               | otherwise ->
                   error $ "C++: staged closure " <> show (render midDoc) <> " captures " <> show (length contextArgs)
                     <> " values but its stage entry takes " <> show nctx
